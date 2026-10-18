@@ -44,12 +44,35 @@ static TEST_LINKS: std::sync::LazyLock<
 
 /// Remote TCP keeps the existing mux; native QUIC fans raw streams into bounded actor delivery.
 enum LinkTransport {
+    #[cfg(feature = "ssh")]
+    Ssh {
+        channel: infraternal_plugin_ssh::duplex::Duplex,
+        _session: Arc<dyn infraternal_plugin_ssh::transport::SshSession>,
+        prefix: Mutex<Option<Bytes>>,
+    },
     Tcp {
         channel: TcpTls,
         receive: Mutex<Receive>,
         prefix: Mutex<Option<Bytes>>,
     },
     Quic(QuicLink),
+}
+
+/// Drain the authenticated SSH greeting prefix before reading later channel bytes.
+#[cfg(feature = "ssh")]
+async fn read_ssh_transport(
+    channel: &infraternal_plugin_ssh::duplex::Duplex,
+    prefix: &Mutex<Option<Bytes>>,
+    target: &mut BytesMut,
+    scratch: &mut [u8],
+) -> io::Result<usize> {
+    if let Some(prefix) = prefix.lock().await.take() {
+        target.extend_from_slice(&prefix);
+        return Ok(prefix.len());
+    }
+    let count = channel.read(scratch).await?;
+    target.extend_from_slice(&scratch[..count]);
+    Ok(count)
 }
 
 /// Authority is attached only after durable mTLS admission and guards both
@@ -357,11 +380,13 @@ impl Drop for QuicLink {
 }
 
 impl RemoteLink {
-    /// The admitted logical QUIC tuple; TCP cannot move below its transport.
+    /// The admitted logical QUIC tuple; TCP and SSH channels cannot move below their transport.
     pub(crate) fn peer_address(&self) -> Option<std::net::SocketAddr> {
         match &self.transport {
             LinkTransport::Quic(link) => Some(link.connection.remote_address()),
             LinkTransport::Tcp { .. } => None,
+            #[cfg(feature = "ssh")]
+            LinkTransport::Ssh { .. } => None,
         }
     }
     /// Capacity refusals precede terminal route mutation. Pending plugin opens
@@ -507,6 +532,11 @@ impl RemoteLink {
         );
         Ok(lane)
     }
+
+    #[cfg(feature = "ssh")]
+    pub(crate) fn ssh_backed(&self) -> bool {
+        matches!(&self.transport, LinkTransport::Ssh { .. })
+    }
     pub(crate) fn authorize(mut self, authority: crate::remote_guard::AuthorityGuard) -> Self {
         self.authority = Some(authority);
         self
@@ -519,6 +549,8 @@ impl RemoteLink {
     }
     pub(crate) fn retire(&self) {
         match &self.transport {
+            #[cfg(feature = "ssh")]
+            LinkTransport::Ssh { .. } => {}
             LinkTransport::Tcp { channel, .. } => channel.retire(),
             LinkTransport::Quic(link) => link.retire(),
         }
@@ -566,6 +598,68 @@ impl RemoteLink {
             },
             result = self.write_transport(stream, frame, muxed) => result,
         }
+    }
+
+    #[cfg(feature = "ssh")]
+    pub(crate) async fn ssh(
+        channel: infraternal_plugin_ssh::duplex::Duplex,
+        session: Arc<dyn infraternal_plugin_ssh::transport::SshSession>,
+    ) -> io::Result<Self> {
+        // Publication already carries Hello behind the session receipt in one
+        // write. Read that same flight before admitting capabilities, retaining
+        // every coalesced byte for the actor's ordinary greeting and replay.
+        let mut prefix = BytesMut::with_capacity(256);
+        let peer_caps = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut scratch = [0; 1024];
+            loop {
+                match infraternal_protocol::decode_muxed_frame(&prefix) {
+                    Ok(decoded) => {
+                        if decoded.stream_id != 0 {
+                            return Err(io::ErrorKind::InvalidData.into());
+                        }
+                        let Frame::Hello {
+                            version: 1, caps, ..
+                        } = decoded.frame
+                        else {
+                            return Err(io::ErrorKind::InvalidData.into());
+                        };
+                        return Ok::<_, io::Error>(caps);
+                    }
+                    Err(infraternal_protocol::DecodeError::Incomplete) => {}
+                    Err(_) => return Err(io::ErrorKind::InvalidData.into()),
+                }
+                // Two canonical u32 varints add at most ten prefix bytes; keep
+                // the wire's existing frame bound, including long client info.
+                let remaining =
+                    (infraternal_protocol::MAX_FRAME_LEN + 10).saturating_sub(prefix.len());
+                if remaining == 0 {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                let limit = remaining.min(scratch.len());
+                let count = channel.read(&mut scratch[..limit]).await?;
+                if count == 0 {
+                    return Err(io::ErrorKind::UnexpectedEof.into());
+                }
+                prefix.extend_from_slice(&scratch[..count]);
+            }
+        })
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+        Ok(Self {
+            path_proof: None,
+            #[cfg(all(test, feature = "mesh-transport-proof"))]
+            diagnostic_peer: None,
+            transport: LinkTransport::Ssh {
+                channel,
+                _session: session,
+                prefix: Mutex::new(Some(prefix.freeze())),
+            },
+            authority: None,
+            renewal: std::sync::atomic::AtomicBool::new(false),
+            peer_caps: peer_caps.into(),
+            greeting_sent: false,
+            priming: Arc::new(std::sync::Mutex::new(None)),
+        })
     }
 
     #[cfg(test)]
@@ -705,9 +799,13 @@ impl RemoteLink {
     async fn read_transport(
         &self,
         target: &mut BytesMut,
-        _scratch: &mut [u8],
+        #[allow(unused_variables)] scratch: &mut [u8],
     ) -> io::Result<usize> {
         match &self.transport {
+            #[cfg(feature = "ssh")]
+            LinkTransport::Ssh {
+                channel, prefix, ..
+            } => read_ssh_transport(channel, prefix, target, scratch).await,
             LinkTransport::Tcp {
                 channel,
                 receive,
@@ -829,6 +927,8 @@ impl RemoteLink {
         match &self.transport {
             LinkTransport::Quic(link) => !link.incoming.lock().await.control.is_empty(),
             LinkTransport::Tcp { .. } => false,
+            #[cfg(feature = "ssh")]
+            LinkTransport::Ssh { .. } => false,
         }
     }
     /// Observe bounded native ownership without waiting on an actor-held lock.
@@ -891,6 +991,8 @@ impl RemoteLink {
         match &self.transport {
             LinkTransport::Quic(link) => Some(link.connection.remote_address()),
             LinkTransport::Tcp { .. } => None,
+            #[cfg(feature = "ssh")]
+            LinkTransport::Ssh { .. } => None,
         }
     }
 
@@ -900,6 +1002,8 @@ impl RemoteLink {
         match &self.transport {
             LinkTransport::Quic(link) => Some(link.connection.stats().frame_rx.stop_sending),
             LinkTransport::Tcp { .. } => None,
+            #[cfg(feature = "ssh")]
+            LinkTransport::Ssh { .. } => None,
         }
     }
 
@@ -916,6 +1020,8 @@ impl RemoteLink {
             connection: match &self.transport {
                 LinkTransport::Quic(link) => Some(link.connection.clone()),
                 LinkTransport::Tcp { .. } => None,
+                #[cfg(feature = "ssh")]
+                LinkTransport::Ssh { .. } => None,
             },
             admitted: false,
         }
@@ -1064,6 +1170,8 @@ impl RemoteLink {
             return Ok(());
         }
         match &self.transport {
+            #[cfg(feature = "ssh")]
+            LinkTransport::Ssh { channel, .. } => channel.write(muxed).await,
             LinkTransport::Tcp { channel, .. } => channel.write(muxed).await,
             LinkTransport::Quic(link) => {
                 let terminal_close = stream != 0 && matches!(frame, Frame::Close { .. });
@@ -1371,3 +1479,24 @@ async fn pump(
 #[cfg(all(test, feature = "desktop"))]
 #[path = "remote_wire_tests.rs"]
 mod wire_tests;
+
+#[cfg(test)]
+impl RemoteLink {
+    /// Observe the actual authenticated connection close in measurement fixtures.
+    #[cfg(test)]
+    pub(crate) fn test_connection_for_peer(
+        peer: std::net::SocketAddr,
+    ) -> Option<quinn::Connection> {
+        let link = TEST_LINKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&peer)
+            .and_then(std::sync::Weak::upgrade)?;
+        match &link.transport {
+            LinkTransport::Quic(native) => Some(native.connection.clone()),
+            LinkTransport::Tcp { .. } => None,
+            #[cfg(feature = "ssh")]
+            LinkTransport::Ssh { .. } => None,
+        }
+    }
+}

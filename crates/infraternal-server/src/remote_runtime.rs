@@ -99,6 +99,7 @@ struct Host {
     actor: EmbeddedAgent,
     accepts: mpsc::Sender<RemoteLink>,
     generation: Uuid,
+    changed: tokio::sync::watch::Sender<Uuid>,
     retirement: Retirement,
 }
 
@@ -207,6 +208,64 @@ impl RemoteHosts {
             .filter(|host| host.authority.permits())
             .map(|host| host.actor.clone())
     }
+    #[cfg(feature = "ssh")]
+    pub(crate) async fn cancelled(&self, id: Uuid) {
+        let Some(mut changed) = self
+            .0
+            .lock()
+            .await
+            .get(&id)
+            .map(|host| host.changed.subscribe())
+        else {
+            return;
+        };
+        loop {
+            let Some(authority) = self
+                .0
+                .lock()
+                .await
+                .get(&id)
+                .map(|host| host.authority.clone())
+            else {
+                return;
+            };
+            if !authority.permits() {
+                return;
+            }
+            tokio::select! {
+                () = authority.cancelled() => {},
+                result = changed.changed() => { if result.is_err() { return; } },
+            }
+        }
+    }
+    #[cfg(feature = "ssh")]
+    pub(crate) async fn stop_provisioning(&self) -> io::Result<()> {
+        let actors = {
+            let mut hosts = self.0.lock().await;
+            hosts.retain(|_, host| host.authority.installed());
+            hosts
+                .values()
+                .map(|host| host.actor.clone())
+                .collect::<Vec<_>>()
+        };
+        // Installed admission can coexist briefly with an unacknowledged SSH
+        // fallback. Retire that fallback without stopping its installed role.
+        for actor in actors {
+            actor
+                .retire_ssh()
+                .await
+                .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+        }
+        Ok(())
+    }
+    #[cfg(feature = "ssh")]
+    pub(crate) async fn installed(&self, id: Uuid) -> bool {
+        self.0
+            .lock()
+            .await
+            .get(&id)
+            .is_some_and(|host| host.authority.permits() && host.authority.installed())
+    }
     #[cfg(test)]
     pub(crate) async fn admission_for_test(&self, id: Uuid) -> Option<AuthorityGuard> {
         self.0
@@ -262,11 +321,14 @@ impl RemoteHosts {
         Ok(())
     }
 
+    /// Admit a link and update its source only when this transport exposes one.
+    /// SSH pipes have no observed socket IP; preserve an existing value or use
+    /// the unspecified address until the enrolled network link is admitted.
     pub(crate) async fn admit_observed(
         &self,
         authority: AuthorityGuard,
         mut link: RemoteLink,
-        ip: std::net::IpAddr,
+        observed_ip: Option<std::net::IpAddr>,
     ) -> io::Result<()> {
         if link.primed() {
             return self.admit_primed(authority, link).await;
@@ -309,11 +371,12 @@ impl RemoteHosts {
             host.authority = authority;
             // Tunnel source addresses are not underlay discovery. Preserve the
             // existing address, including its canonical IPv4 representation.
-            host.ip = if self.4 {
-                host.ip.to_canonical()
-            } else {
-                ip.to_canonical()
-            };
+            if !self.4
+                && let Some(ip) = observed_ip
+            {
+                host.ip = ip.to_canonical();
+            }
+            host.changed.send_replace(generation);
         } else {
             self.prove_paths(&mut link)?;
             let (actor, accepts) = EmbeddedAgent::remote(uid);
@@ -328,7 +391,10 @@ impl RemoteHosts {
                     ip: if self.4 {
                         std::net::Ipv4Addr::UNSPECIFIED.into()
                     } else {
-                        ip.to_canonical()
+                        observed_ip.map_or_else(
+                            || std::net::Ipv4Addr::UNSPECIFIED.into(),
+                            |ip| ip.to_canonical(),
+                        )
                     },
                     channel: None,
                     uid,
@@ -339,6 +405,7 @@ impl RemoteHosts {
                     actor,
                     accepts,
                     generation,
+                    changed: tokio::sync::watch::channel(generation).0,
                     retirement,
                 },
             );
@@ -426,7 +493,7 @@ impl RemoteHosts {
         Retirement(tokio::spawn(async move {
             // Healthy idle has only its certificate expiry deadline, never a
             // heartbeat. Ordinary socket loss keeps the actor for offset resume.
-            if let Some(source) = source {
+            if let Some(source) = source.filter(|_| authority.installed()) {
                 tokio::select! {
                     biased;
                     () = authority.cancelled() => {},

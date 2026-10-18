@@ -44,7 +44,8 @@ pub(crate) async fn run_authenticated_with_plugins(
     renewal: Option<&RenewalIdentity>,
     registry: crate::plugin_control::Registry,
 ) -> io::Result<()> {
-    let wire_caps = registry.wire_capabilities(channel);
+    let wire_caps = infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
+        | registry.wire_capabilities(channel);
     if execution_uid != nix::unistd::Uid::effective().as_raw() {
         return Err(io::ErrorKind::PermissionDenied.into());
     }

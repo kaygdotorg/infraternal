@@ -550,8 +550,8 @@ async fn recovery_subscription_updates_every_signed_in_socket() {
 #[allow(clippy::too_many_lines)] // Keep one real socket's handshake, snapshot, edits, and invalidations ordered.
 async fn mesh_calls_and_subscriptions_deliver_scoped_live_inventory() {
     let _guard = SERIAL.lock().await;
-    // This case checks ordered inventory behavior. Hold runtime time across
-    // real I/O; separate deadline cases still advance it and verify refusal.
+    // Inventory ordering does not test a deadline. Hold runtime time across
+    // real I/O; dedicated expiry cases advance it and verify refusal (#118, #173).
     let clock = FrozenSocketTime::new().await;
     let (f, address, server) = socket_fixture().await;
     let cookie = format!("__Host-infraternal={}", f.session);
@@ -896,12 +896,24 @@ mod terminal_exit;
 #[path = "socket_tests/session_gone.rs"]
 mod session_gone;
 
+#[path = "socket_tests/authority_stall_soak.rs"]
+mod authority_stall_soak;
 #[cfg(feature = "desktop")]
 #[path = "socket_tests/native_plugin.rs"]
 mod native_plugin;
 #[path = "socket_tests/restart_open_liveness_review.rs"]
 mod restart_open_liveness_review;
+#[path = "socket_tests/review_authority_retry.rs"]
+mod review_authority_retry;
 #[path = "socket_tests/review_input_credit.rs"]
 mod review_input_credit;
 #[path = "socket_tests/transient_authority_stall.rs"]
 mod transient_authority_stall;
+
+#[cfg(feature = "remote")]
+#[path = "socket_tests/close_logging.rs"]
+mod close_logging;
+
+#[cfg(feature = "remote")]
+#[path = "socket_tests/review_close_log.rs"]
+mod review_close_log;

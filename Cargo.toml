@@ -10,6 +10,7 @@ members = [
     "crates/infraternal-server",
     "crates/infraternal-agent",
     "crates/infraternal-shim",
+    "crates/infraternal-session",
     "crates/plugins/ssh",
     "crates/plugins/relay",
     "crates/plugins/backup",
@@ -42,7 +43,8 @@ sha2 = "0.10"
 zeroize = { version = "1.9", features = ["serde"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "signal", "time", "process", "io-util"] }
+# Each role enables its required scheduler; private session images use only the current-thread runtime.
+tokio = { version = "1", features = ["rt", "macros", "sync", "net", "signal", "time", "process", "io-util"] }
 tower-http = { version = "0.6", features = ["fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -120,3 +122,9 @@ opt-level = "s"
 # crates retain their speed optimization [5,243].
 [profile.release.package.infraternal-agent]
 opt-level = "s"
+
+# SSH installation is management orchestration, outside terminal and mesh data
+# paths; it is bounded by the external transport [243,255]. Lifetime-safe retry
+# recovery fits its measured size only at z (#230).
+[profile.release.package.infraternal-plugin-ssh]
+opt-level = "z"

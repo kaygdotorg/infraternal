@@ -41,6 +41,7 @@ async fn actual_ssh_authentication_check_and_strict_host_key_rejection() {
         ssh_keyscan: "/usr/bin/ssh-keyscan".into(),
         ssh_keygen: "/usr/bin/ssh-keygen".into(),
         askpass_binary: std::env::current_exe().unwrap(),
+        tcp_connector: None,
         scratch: fixture.clone(),
         command_timeout: Duration::from_secs(30),
     };

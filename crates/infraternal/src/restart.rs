@@ -356,7 +356,7 @@ pub(crate) fn run(
     options: &Options,
     json: bool,
 ) -> std::process::ExitCode {
-    match runtime.block_on(async {
+    match crate::block_on(runtime, async {
         tokio::time::timeout(
             Duration::from_secs(5),
             request(data, options.binary.as_deref()),

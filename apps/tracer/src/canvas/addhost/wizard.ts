@@ -567,6 +567,7 @@ export class Wizard {
   }
 
   private openRun(credential?: string): ProvisioningRun {
+    this.deps.sink.prepareTerminal?.();
     const run: ProvisioningRun = this.deps.service.open({
       onEvent: (event) => this.onEvent(run, event),
       onError: (error) => this.onCommandError(run, error.message),
@@ -597,7 +598,7 @@ export class Wizard {
     this.paint(job);
     this.summarise();
     if (job.view.state === "done" && was !== "done") {
-      this.deps.sink.enrolled([this.enrolledOf(job)]);
+      this.deps.sink.enrolled([this.enrolledOf(job)], this.current?.querySelector(`[data-job="${CSS.escape(job.target)}"] .ah-mark`) ?? undefined);
       // A new host window takes the camera; the wizard stays where the person is looking while it still has work to show.
       if (this.jobs.some((item) => item.view.state === "pending" || item.view.state === "running" || item.view.state === "failed")) this.surface.reveal?.();
     }
@@ -634,7 +635,7 @@ export class Wizard {
   }
 
   private enrolledOf(job: Job): EnrolledHost {
-    return { id: job.entry.id, ...(job.view.hostId ? { hostId: job.view.hostId } : {}), address: this.addressText(job.entry), name: job.entry.label, user: job.entry.user, os: job.entry.os, mode: job.root ? "root" : "rootless" };
+    return { id: job.entry.id, ...(job.view.hostId ? { hostId: job.view.hostId } : {}), ...(job.view.sessionId ? { sessionId: job.view.sessionId } : {}), address: this.addressText(job.entry), name: job.entry.label, user: job.entry.user, os: job.entry.os, mode: job.root ? "root" : "rootless" };
   }
 
   /** Runs one attempt for a failed host again: on its open run, or on a fresh run when that ended. */
@@ -781,20 +782,29 @@ export class Wizard {
   private detailsOf(job: Job): string {
     const failure = job.view.failure;
     const lines = [...(job.view.leftovers?.findings ?? []), failure?.failed_step ? `Failed step: ${FAILED_STEP_LABELS[failure.failed_step]}` : "", ...failureDiagnostics(failure, guideFor(job.entry.label, failure)).map((line) => line === failure?.message ? `The server said: ${line}` : line)].filter(Boolean);
-    return lines.join("\n") || "No additional diagnostic details were reported.";
+    return lines.join("\n");
+  }
+
+  /** The Details disclosure, or nothing when there is nothing to disclose (TASTE: no empty sections). */
+  private detailsBlock(job: Job): string {
+    const text = this.detailsOf(job);
+    return text ? `
+      <details class="ah-details"><summary>${svg(ICON.caret)}<span>Details</span></summary><pre>${escapeHtml(text)}</pre></details>` : "";
   }
 
   private renderFailure(page: HTMLElement): void {
     const job = this.fixing!;
-    const guide: Guide = guideFor(job.entry.label, job.view.failure);
+    const hostId = job.view.failure?.already_added ? job.view.failure.host_id : undefined;
+    const openId = hostId && this.deps.sink.hasHost?.(hostId) !== false ? hostId : undefined;
+    const guide: Guide = guideFor(job.entry.label, job.view.failure, openId !== undefined);
     // Leftovers and a running setup are news to act on, not errors: a neutral icon, no red.
-    const icon = guide.fix === "start-fresh" ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? ICON.pending : ICON.warning;
+    const icon = guide.fix === "start-fresh" || (guide.fix === "none" && guide.tone === "info") ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? ICON.pending : ICON.warning;
     page.innerHTML = `${this.hero(icon, guide.tone === "danger" ? "danger" : "")}<h1 class="ah-title">${escapeHtml(guide.title)}</h1>
       <p class="ah-lede">${escapeHtml(guide.happened)}</p>${guide.next ? `
-      <p class="ah-text">${escapeHtml(guide.next)}</p>` : ""}
-      <details class="ah-details"><summary>${svg(ICON.caret)}<span>Details</span></summary><pre>${escapeHtml(this.detailsOf(job))}</pre></details>`;
+      <p class="ah-text">${escapeHtml(guide.next)}</p>` : ""}${this.detailsBlock(job)}`;
+    const open = openId ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="open-terminal" data-host-id="${escapeHtml(openId)}">${svg(ICON.terminal)}<span>Open a terminal</span></button>` : "";
     const install = guide.fix === "install-command" ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="install">Install from the host</button>` : "";
-    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${guide.fix === "none" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
+    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${open}${guide.fix === "none" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
   }
 
   private renderHostKey(page: HTMLElement): void {
@@ -805,8 +815,7 @@ export class Wizard {
     page.innerHTML = `${this.hero(ICON.fingerprint)}<h1 class="ah-title">Check ${escapeHtml(job.entry.label)}'s key</h1>
       <p class="ah-lede">${changed ? "Warning: this host’s trusted key changed. Replace it only after you verify the new fingerprint on the host." : "Compare this fingerprint with the one on the host before trusting it."}</p>
       <div class="ah-keyblock" data-kv></div>
-      <p class="ah-text">${key.command ? `On the host, run <span class="ah-code">${escapeHtml(key.command)}</span> and compare.` : "Ask the host’s owner to verify this fingerprint through a trusted connection."}</p>
-      <details class="ah-details"><summary>${svg(ICON.caret)}<span>Details</span></summary><pre>${escapeHtml(this.detailsOf(job))}</pre></details>`;
+      <p class="ah-text">${key.command ? `On the host, run <span class="ah-code">${escapeHtml(key.command)}</span> and compare.` : "Ask the host’s owner to verify this fingerprint through a trusted connection."}</p>${this.detailsBlock(job)}`;
     const list = createKeyValueList("Host key fingerprint");
     list.set(print ? [{ key: "Host key", value: `${key.label} · ${print}` }] : []);
     page.querySelector<HTMLElement>("[data-kv]")!.append(list.root);
@@ -979,6 +988,8 @@ export class Wizard {
     if (running) return;
     this.dismiss(() => {
       if (!done.length) return;
+      // A host whose setup continues in its machine pill carries its own news there (D255): no "ready" toast on top of it.
+      if (this.deps.sink.setupInPill && done.length === this.jobs.length) return;
       const failed = this.jobs.length - done.length;
       this.deps.toast.show({
         ...(failed ? { tone: "error" as const } : {}),
@@ -1057,6 +1068,7 @@ export class Wizard {
     else if (action === "back") this.go("discovery", -1);
     else if (action === "back-progress") { this.fixing = undefined; this.go("progress", -1); }
     else if (action === "finish") this.finish();
+    else if (action === "open-terminal") { const id = target.dataset.hostId; if (id) this.dismiss(() => this.deps.sink.openHost?.(id)); }
     else if (action === "keep") this.footForProgress();
     else if (action === "cancel-install") this.dismiss();
     else if (action === "reload") void this.loadDiscovery();

@@ -384,6 +384,9 @@ async fn claude_review_idle_anonymous_sockets_cannot_starve_host_handshakes() {
 
 #[path = "remote_probe_tests.rs"]
 mod candidate_proofs;
+#[cfg(feature = "ssh")]
+#[path = "remote_ssh_tests.rs"]
+pub(crate) mod ssh_bridge;
 
 #[path = "remote_standby_tests.rs"]
 mod standby;
@@ -826,3 +829,6 @@ async fn late_native_detach_after_peer_stop_keeps_the_control_connection() {
     ));
     assert!(peer.close_reason().is_none());
 }
+
+#[path = "remote_ping_flood_tests.rs"]
+mod ping_flood;

@@ -149,8 +149,14 @@ async fn run_inner(
     // its sole owner and local listener across watchdog resets; only a closed
     // receiver proves the worker has ended and can safely be replaced.
     let service = Mutex::new(None::<crate::plugin_control::Service>);
+    // Keep lifetime ownership even when a failed worker is being replaced or
+    // credentials temporarily prevent another connection attempt.
+    #[cfg(target_os = "linux")]
+    let lifetime = Mutex::new(None::<std::sync::Arc<std::fs::File>>);
     supervisor::run(|connected| {
         let service = &service;
+        #[cfg(target_os = "linux")]
+        let lifetime = &lifetime;
         let state = state.clone();
         #[cfg(any(test, feature = "native-streams"))]
         let supplied = supplied.clone();
@@ -163,7 +169,7 @@ async fn run_inner(
                 crate::remote_renewal::require_current(&identity.identity)?;
             }
             #[cfg(target_os = "linux")]
-            let state = crate::sessions::state(state.clone())?;
+            let state = crate::sessions::state_path(state.clone())?;
             #[cfg(not(target_os = "linux"))]
             let state = crate::control::runtime_state(state)?;
             let mut local = service.lock().await;
@@ -180,16 +186,24 @@ async fn run_inner(
                 };
                 #[cfg(not(any(test, feature = "native-streams")))]
                 let supplied_service = None;
-                *local = Some(match supplied_service {
-                    Some(service) => service,
-                    None => {
-                        crate::plugin_control::Service::start(
-                            &state,
-                            crate::plugins::ExecutionMode::Remote,
-                            installation,
-                        )
-                        .await?
-                    }
+                *local = Some(if let Some(service) = supplied_service {
+                    service
+                } else {
+                    #[cfg(target_os = "linux")]
+                    let service = crate::plugin_control::Service::start_retained(
+                        &state,
+                        installation,
+                        &mut *lifetime.lock().await,
+                    )
+                    .await?;
+                    #[cfg(not(target_os = "linux"))]
+                    let service = crate::plugin_control::Service::start(
+                        &state,
+                        crate::plugins::ExecutionMode::Remote,
+                        installation,
+                    )
+                    .await?;
+                    service
                 });
             }
             let plugins = local

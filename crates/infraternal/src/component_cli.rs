@@ -49,10 +49,14 @@ pub(crate) fn run_action(
         let state = infraternal_agent::sessions::state_path(
             arguments.get_one::<String>("state").map(PathBuf::from),
         )?;
-        tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
-            .build()?
-            .block_on(execute(&state, &registry, action.id, input, json_output))
+            .build()?;
+        // Share the startup reactor instead of generating another poll loop [243].
+        infraternal_agent::block_on_io(
+            &runtime,
+            Box::pin(execute(&state, &registry, action.id, input, json_output)),
+        )
     })();
     match result {
         Ok(()) => ExitCode::SUCCESS,

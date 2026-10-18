@@ -41,7 +41,63 @@ pub enum Credentials {
 }
 
 /// Command input is private stdin; neither binary bytes nor secrets enter argv.
+/// A public payload source has a known frame length before private invitation input.
+pub enum PayloadInput<'a> {
+    Bytes(&'a [u8]),
+    File { path: &'a Path, size: u64 },
+}
+
+/// Public transfer choices never convey authority or diagnostic text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferChoice {
+    Raw,
+    Gzip,
+    Zstd,
+    Reuse,
+}
+impl TransferChoice {
+    #[must_use]
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        match bytes {
+            b"TRANSFER raw\n" => Some(Self::Raw),
+            b"TRANSFER gzip\n" => Some(Self::Gzip),
+            b"TRANSFER zstd\n" => Some(Self::Zstd),
+            b"TRANSFER reuse\n" => Some(Self::Reuse),
+            _ => None,
+        }
+    }
+    /// The fixed word the staging program prints and selects on.
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Gzip => "gzip",
+            Self::Zstd => "zstd",
+            Self::Reuse => "reuse",
+        }
+    }
+}
+
 pub enum Input<'a> {
+    /// A fixed public receipt selects a source before any invitation byte is sent.
+    Negotiated {
+        raw: PayloadInput<'a>,
+        gzip: Option<&'a [u8]>,
+        zstd: Option<&'a [u8]>,
+        invitation: &'a [u8],
+        /// Wait for verified staging before exposing private stdin to its reader.
+        payload_ack: bool,
+        /// An optional check-time encoding hint; private stdin still requires
+        /// verified staging. None retains remote transfer selection.
+        declared: Option<TransferChoice>,
+    },
+    /// Public payload first, then private invitation; never concatenate/copy secrets.
+    PayloadAndInvitation {
+        payload: PayloadInput<'a>,
+        invitation: &'a [u8],
+    },
+    /// Release a fixed commit command only after authenticated terminal proof.
+    Signal(tokio::sync::oneshot::Receiver<()>),
     Empty,
     Bytes(&'a [u8]),
     File(&'a Path),
@@ -83,6 +139,34 @@ pub trait SshTransport: Send + Sync {
 
 /// A session owns ephemeral credentials and cleans them when its final owner drops it.
 pub trait SshSession: Send + Sync {
+    /// True only after this adapter can bridge an authenticated session.
+    fn session_bridge(&self) -> bool {
+        false
+    }
+    /// Open a duplex command on this connection, never authenticate a new one.
+    fn stream<'a>(&'a self, _: &'a str) -> Operation<'a, crate::duplex::Duplex> {
+        Box::pin(async {
+            Err(Failure::unsupported(
+                "The SSH terminal bridge is unavailable.",
+            ))
+        })
+    }
+    /// Authenticate only a fixed read-only check, optionally retaining its
+    /// duplex channel for later public setup. Private input is never replayed.
+    fn check_stream<'a>(
+        &'a self,
+        script: &'a str,
+    ) -> Operation<'a, (CommandOutput, Option<crate::install::Checked>)> {
+        Box::pin(async move {
+            self.run(script, Input::Empty)
+                .await
+                .map(|output| (output, None))
+        })
+    }
+    /// Opt into fixed setup-step receipts; older adapters retain separate steps.
+    fn setup_steps(&self) -> bool {
+        false
+    }
     /// Exact public host lookup used by this authenticated connection, when app-managed.
     fn trust_lookup(&self) -> Option<String> {
         None
@@ -97,7 +181,20 @@ pub trait SshSession: Send + Sync {
 /// Shell quote trusted generated values; destinations are passed as SSH arguments separately.
 #[must_use]
 pub fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
+    // The supported login shells interpret backslashes differently inside
+    // single quotes. Isolate both special characters in double-quoted segments
+    // so each nesting level preserves the exact script bytes and no expansion.
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for character in value.chars() {
+        match character {
+            '\'' => quoted.push_str("'\"'\"'"),
+            '\\' => quoted.push_str("'\"\\\\\"'"),
+            _ => quoted.push(character),
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 // Input-only private material decoding; no Debug/Display or output serialization.

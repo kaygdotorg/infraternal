@@ -11,7 +11,11 @@ mod host_remove;
 #[cfg(feature = "release")]
 mod release_cli;
 
-#[cfg(any(feature = "remote", all(feature = "plugin-agent", target_os = "linux")))]
+#[cfg(any(
+    feature = "remote",
+    feature = "session-payload",
+    all(feature = "plugin-agent", target_os = "linux")
+))]
 mod output;
 #[cfg(feature = "remote")]
 mod remote;
@@ -19,14 +23,17 @@ mod remote;
 mod remote_server;
 #[cfg(feature = "remote")]
 mod remote_service;
-#[cfg(feature = "remote")]
+#[cfg(all(feature = "remote", feature = "plugin-server"))]
 mod restart;
-#[cfg(feature = "remote")]
+#[cfg(all(feature = "remote", feature = "plugin-server"))]
 mod restart_binary;
-#[cfg(feature = "remote")]
+#[cfg(all(feature = "remote", feature = "plugin-server"))]
 mod restart_image;
+mod shim_cli;
 #[cfg(feature = "ssh")]
 mod ssh_askpass;
+#[cfg(feature = "ssh")]
+mod ssh_internal;
 
 #[cfg(feature = "plugin-server")]
 mod install;
@@ -89,12 +96,28 @@ fn run_invocation() -> ExitCode {
         return ExitCode::FAILURE;
     }
     #[cfg(feature = "remote")]
+    if let Some(result) =
+        infraternal_plugin_remote::runtime_lock::command(&mut std::env::args_os().skip(1))
+    {
+        return ExitCode::from(result);
+    }
+    #[cfg(feature = "remote")]
     if let Some(result) = remote::uninstall_if_requested() {
         return result;
     }
     #[cfg(feature = "plugin-agent")]
-    if let Some(result) = embedded_cli::run_if_requested() {
+    if !shim_cli::PAYLOAD_ONLY
+        && let Some(result) = embedded_cli::run_if_requested()
+    {
         return result;
+    }
+    #[cfg(feature = "ssh")]
+    if let Some(result) = ssh_internal::run_if_requested() {
+        return result;
+    }
+    #[cfg(feature = "session-payload")]
+    if shim_cli::PAYLOAD_ONLY {
+        return shim_cli::payload_entry();
     }
     // Global JSON is a flag; plugin ownership selects lazy metadata, while
     // root help and core discovery need all compiled definitions. Parsing and
@@ -255,6 +278,16 @@ fn dispatch_action(
             }
         }
         CliHandler::SessionShim => run_shim_command(matches),
+        CliHandler::SshSession => {
+            #[cfg(all(feature = "ssh", feature = "remote"))]
+            {
+                run_ssh_session(matches)
+            }
+            #[cfg(not(all(feature = "ssh", feature = "remote")))]
+            {
+                run_unavailable(action, json_output)
+            }
+        }
         CliHandler::KeyMemoryCheck => {
             #[cfg(feature = "remote")]
             {
@@ -269,6 +302,27 @@ fn dispatch_action(
         | CliHandler::ServerRestart
         | CliHandler::RemoveHost
         | CliHandler::SshAskpass => run_operator_action(action, matches, json_output),
+    }
+}
+
+#[cfg(all(feature = "ssh", feature = "remote"))]
+fn run_ssh_session(matches: &ArgMatches) -> ExitCode {
+    let (Some(state), session) = (
+        matches.get_one::<String>("state"),
+        matches
+            .get_one::<String>("session")
+            .map(|value| uuid::Uuid::parse_str(value))
+            .transpose(),
+    ) else {
+        return ExitCode::FAILURE;
+    };
+    let Ok(session) = session else {
+        return ExitCode::FAILURE;
+    };
+    if infraternal_plugin_ssh::session_bridge::run(PathBuf::from(state), session).is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 
@@ -885,7 +939,7 @@ fn run_setup_token(matches: &ArgMatches, json_output: bool) -> ExitCode {
             json_output,
         );
     };
-    match runtime.block_on(read_setup_token(&data_dir)) {
+    match block_on(&runtime, read_setup_token(&data_dir)) {
         Ok(token) => {
             let result = CommandResult::new(
                 "server setup-token",
@@ -916,6 +970,35 @@ fn run_setup_token(matches: &ArgMatches, json_output: bool) -> ExitCode {
     }
 }
 
+/// Share cold command startup through the existing reactor regardless of result type [243].
+/// The result slot outlives its adapter future, which stores the result before
+/// completing. Panics propagate to the caller's existing recovery boundary.
+#[cfg(any(feature = "plugin-server", feature = "remote"))]
+fn block_on<T>(
+    runtime: &tokio::runtime::Runtime,
+    operation: impl std::future::Future<Output = T>,
+) -> T {
+    #[cfg(feature = "plugin-agent")]
+    {
+        let mut outcome = None;
+        // One allocation per command keeps its typed result out of another
+        // reactor instantiation; terminal frames never cross this adapter.
+        let _completion = infraternal_agent::block_on_io(
+            runtime,
+            Box::pin(async {
+                outcome = Some(operation.await);
+                Ok(())
+            }),
+        );
+        match outcome {
+            Some(value) => value,
+            None => unreachable!("a completed startup operation stores its result"),
+        }
+    }
+    #[cfg(not(feature = "plugin-agent"))]
+    runtime.block_on(operation)
+}
+
 #[cfg(feature = "plugin-server")]
 fn run_server_foreground(
     mut args: ServerArgs,
@@ -941,7 +1024,7 @@ fn run_server_foreground(
         "public_origin": config.public_origin,
     });
     infraternal_server::configure_logging(json_output);
-    match runtime.block_on(remote_server::serve(config, options)) {
+    match block_on(&runtime, remote_server::serve(config, options)) {
         #[cfg(feature = "remote")]
         Ok(remote_server::Outcome::Restart(replacement)) => {
             // Same-PID exec consumes the runtime after cancelling server tasks.
@@ -1015,42 +1098,35 @@ fn run_embedded_agent(matches: &ArgMatches, json_output: bool) -> ExitCode {
 }
 
 fn run_shim_command(matches: &ArgMatches) -> ExitCode {
-    let session = matches
-        .get_one::<String>("session")
-        .map_or("", String::as_str);
-    let parsed: Result<(u32, u16, u16, usize), String> = (|| {
-        Ok((
-            shim_integer(matches, "uid", None)?,
-            shim_integer(matches, "cols", Some(80))?,
-            shim_integer(matches, "rows", Some(24))?,
-            shim_integer(matches, "ring_capacity", Some(8 * 1024 * 1024))?,
-        ))
+    let options: Result<shim_cli::Options, String> = (|| {
+        Ok(shim_cli::Options {
+            session: matches
+                .get_one::<String>("session")
+                .cloned()
+                .unwrap_or_default(),
+            uid: shim_integer(matches, "uid", None)?,
+            cols: shim_integer(matches, "cols", Some(80))?,
+            rows: shim_integer(matches, "rows", Some(24))?,
+            state: matches.get_one::<String>("state").map(PathBuf::from),
+            detach: matches.get_flag("detach"),
+            ring_capacity: shim_integer(matches, "ring_capacity", Some(8 * 1024 * 1024))?,
+            exit_retention_ms: matches
+                .get_one::<i64>("exit_retention_ms")
+                .copied()
+                .unwrap_or(600_000)
+                .try_into()
+                .unwrap_or(600_000),
+            readiness: matches.get_flag("readiness"),
+        })
     })();
-    let (uid, cols, rows, ring_capacity) = match parsed {
-        Ok(values) => values,
+    let options = match options {
+        Ok(options) => options,
         Err(error) => {
             eprintln!("shim startup/session failed: {error}");
             return ExitCode::from(2);
         }
     };
-    let state = matches.get_one::<String>("state").map(PathBuf::from);
-    let detach = matches.get_flag("detach");
-    match run_shim(
-        session,
-        uid,
-        cols,
-        rows,
-        state,
-        detach,
-        ring_capacity,
-        matches
-            .get_one::<i64>("exit_retention_ms")
-            .copied()
-            .unwrap_or(600_000)
-            .try_into()
-            .unwrap_or(600_000),
-        matches.get_flag("readiness"),
-    ) {
+    match options.run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("shim startup/session failed: {error}");
@@ -1309,48 +1385,6 @@ mod setup_token_tests {
     }
 }
 
-/// Validate the session identifier before any fork or filesystem operation.
-/// Validate identifiers before forking; clamp exited-screen retention inside the shim.
-#[allow(clippy::too_many_arguments)]
-fn run_shim(
-    session: &str,
-    uid: u32,
-    cols: u16,
-    rows: u16,
-    state: Option<std::path::PathBuf>,
-    detach: bool,
-    ring_capacity: usize,
-    exit_retention_ms: u64,
-    readiness: bool,
-) -> std::io::Result<()> {
-    if session.len() != 32 || !session.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "session must be 32 hexadecimal characters",
-        ));
-    }
-    let mut id = [0; 16];
-    for (i, value) in id.iter_mut().enumerate() {
-        *value =
-            u8::from_str_radix(&session[i * 2..i * 2 + 2], 16).map_err(std::io::Error::other)?;
-    }
-    if detach && !infraternal_shim::detach()? {
-        return Ok(());
-    }
-    infraternal_shim::run_with_retention(
-        infraternal_shim::Config {
-            session: id,
-            uid,
-            cols,
-            rows,
-            state,
-            ring_capacity,
-            readiness,
-        },
-        std::time::Duration::from_millis(exit_retention_ms),
-    )
-}
-
 #[cfg(test)]
 mod dispatch_tests {
     //! Ensures internal CLI actions resolve and execute through their registered handler.
@@ -1387,7 +1421,7 @@ mod startup_tests;
 /// First userspace entry protection applies equally to server and child modes.
 fn harden_startup() -> Result<(), nix::errno::Errno> {
     nix::sys::prctl::set_dumpable(false)?;
-    #[cfg(feature = "remote")]
+    #[cfg(all(feature = "remote", feature = "plugin-server"))]
     if std::env::args_os()
         .skip(1)
         .find(|argument| argument != "--json")
@@ -1451,7 +1485,10 @@ fn run_remote_agent(
         if let AgentAction::Join { url, .. } = action {
             let mut invitation = Vec::with_capacity(8192);
             std::io::stdin().take(8193).read_to_end(&mut invitation)?;
-            runtime.block_on(remote::join(&url, &data, &invitation))?;
+            infraternal_agent::block_on_io(
+                &runtime,
+                Box::pin(remote::join(&url, &data, &invitation)),
+            )?;
             // SSH publishes staged state only after enrollment returns. Running
             // here would hold its transaction until the service was cancelled.
             if enroll_only {
@@ -1544,6 +1581,7 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
             };
             return run_remote_agent(mode, fd, state, data, json);
         }
+        #[cfg(feature = "plugin-server")]
         if action.cli_handler == CliHandler::ServerRestart {
             let data = matches
                 .get_one::<String>("data")

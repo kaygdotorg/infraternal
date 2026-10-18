@@ -52,5 +52,5 @@ nix = { workspace = true, features = ["time"] }
 # Frozen extension vectors remain covered without adding them to shipping terminals.
 infraternal-protocol = { workspace = true, features = ["desktop"] }
 # Paused test time controls frame-expiry ordering without changing runtime timers.
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", default-features = false, features = ["test-support"] }

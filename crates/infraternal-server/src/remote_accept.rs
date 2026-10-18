@@ -132,7 +132,7 @@ pub(crate) async fn quic(
                     );
                 }
                 hosts
-                    .admit_observed(admission.authority, link, address)
+                    .admit_observed(admission.authority, link, Some(address))
                     .await?;
                 remember(&known, address);
                 Ok::<(), io::Error>(())
@@ -246,7 +246,7 @@ pub(crate) async fn tcp(
                 link.with_diagnostic_peer(diagnostic_peer)
             };
             if hosts
-                .admit_observed(admission.authority, link, address)
+                .admit_observed(admission.authority, link, Some(address))
                 .await
                 .is_ok()
             {

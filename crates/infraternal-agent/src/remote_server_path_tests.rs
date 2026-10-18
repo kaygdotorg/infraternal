@@ -372,8 +372,13 @@ impl Drop for Server {
 struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {
-        let parent = PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(".cache/codex-scratch/mesh-agent-transport-round2");
+        let parent = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
+            || {
+                PathBuf::from(std::env::var_os("HOME").unwrap())
+                    .join(".cache/codex-scratch/mesh-agent-transport-round2")
+            },
+            PathBuf::from,
+        );
         std::fs::create_dir_all(&parent).unwrap();
         let path = parent.join(format!(
             "p{}",

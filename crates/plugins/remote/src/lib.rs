@@ -12,6 +12,8 @@ use infraternal_plugin_api::{
     RoleDef, SchemaRef, SettingDefault, Target,
 };
 #[cfg(feature = "transport")]
+pub mod enrollment;
+#[cfg(feature = "transport")]
 pub mod remote_bindings;
 #[cfg(feature = "transport")]
 pub mod remote_native;
@@ -67,6 +69,8 @@ pub const UNINSTALL: ActionDef = ActionDef {
     dry_run: DryRun::Required,
     opens: None,
 };
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub mod runtime_lock;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod uninstall;
 

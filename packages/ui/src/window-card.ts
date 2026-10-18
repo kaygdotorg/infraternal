@@ -170,7 +170,13 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
     root.dataset.status = next;
     label();
   };
-  const setIcon = (svg: string): void => { mark.innerHTML = svg; mark.hidden = !svg; };
+  const setIcon = (svg: string): void => {
+    // A setup ring over the mark (setup-ring.ts) outlives a change of icon: the host's system may be learned mid-setup.
+    const ring = mark.querySelector(":scope > .ui-setup-ring");
+    mark.innerHTML = svg;
+    if (ring) mark.append(ring);
+    mark.hidden = !svg;
+  };
 
   setTitle(title);
   setStatus(status);

@@ -52,6 +52,10 @@ type BootstrapFactory = crate::bootstrap_runtime::BootstrapFactory;
 #[cfg(not(feature = "ssh"))]
 type BootstrapFactory = ();
 #[cfg(feature = "ssh")]
+type PayloadWarmup = infraternal_plugin_ssh::bootstrap::Bootstrap;
+#[cfg(not(feature = "ssh"))]
+type PayloadWarmup = ();
+#[cfg(feature = "ssh")]
 type KeyInitialization = crate::bootstrap_runtime::KeyInitialization;
 #[cfg(not(feature = "ssh"))]
 type KeyInitialization = ();
@@ -279,7 +283,7 @@ async fn serve_inner(
     configure_logging(false);
     #[cfg(feature = "remote")]
     crate::ca_memory::initialize_private_key_memory()?;
-    let (app, setup_token, _listeners) = build_router_core(
+    let (app, setup_token, _listeners, warmup) = build_router_core(
         config.clone(),
         None,
         enrollment,
@@ -302,7 +306,13 @@ async fn serve_inner(
     if let Some(tls) = config.tls {
         let tls_config = OpenSSLConfig::from_pem_file(tls.certificate, tls.private_key)
             .map_err(|_| ServerError::TlsConfiguration)?;
-        axum_server::Server::bind(config.listen)
+        let listener = std::net::TcpListener::bind(config.listen).map_err(ServerError::Listener)?;
+        listener
+            .set_nonblocking(true)
+            .map_err(ServerError::Listener)?;
+        warm_payloads(warmup);
+        axum_server::from_tcp(listener)
+            .map_err(ServerError::Listener)?
             .acceptor(crate::server_tls::acceptor(tls_config))
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await
@@ -319,6 +329,7 @@ async fn serve_inner(
                     tracing::warn!("could not set TCP_NODELAY on accepted server socket");
                 }
             });
+        warm_payloads(warmup);
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -326,6 +337,17 @@ async fn serve_inner(
         .await
         .map_err(ServerError::Listener)
     }
+}
+
+// Binding the public listener precedes optional codec work. Tests composing a
+// router alone deliberately do not launch background payload preparation.
+fn warm_payloads(warmup: Option<PayloadWarmup>) {
+    #[cfg(feature = "ssh")]
+    if let Some(bootstrap) = warmup {
+        bootstrap.warm_payloads();
+    }
+    #[cfg(not(feature = "ssh"))]
+    let _ = warmup;
 }
 
 #[cfg(test)]
@@ -353,7 +375,7 @@ async fn build_router_with_enrollment(
     supplied_agent: Option<EmbeddedAgent>,
     enrollment: Option<EnrollmentService>,
 ) -> Result<(Router, Option<String>), ServerError> {
-    let (app, setup, _) =
+    let (app, setup, _, _) =
         build_router_core(config, supplied_agent, enrollment, None, None, None, None).await?;
     Ok((app, setup))
 }
@@ -478,7 +500,7 @@ async fn build_router_with_key_setup(
     factory: Option<BootstrapFactory>,
     key_setup: Option<KeyInitialization>,
 ) -> Result<(Router, Option<String>), ServerError> {
-    let (app, setup, _) =
+    let (app, setup, _, _) =
         build_router_core(config, supplied_agent, None, None, factory, key_setup, None).await?;
     Ok((app, setup))
 }
@@ -494,7 +516,15 @@ async fn build_router_core(
     factory: Option<BootstrapFactory>,
     key_setup: Option<KeyInitialization>,
     catalog: Option<&'static [&'static PluginDescriptor]>,
-) -> Result<(Router, Option<String>, Option<RemoteListeners>), ServerError> {
+) -> Result<
+    (
+        Router,
+        Option<String>,
+        Option<RemoteListeners>,
+        Option<PayloadWarmup>,
+    ),
+    ServerError,
+> {
     #[cfg(not(feature = "remote"))]
     let _ = (enrollment, remote);
     #[cfg(not(feature = "ssh"))]
@@ -597,6 +627,8 @@ async fn build_router_core(
     let ws_state = ws_state.with_remote_hosts(hosts.clone());
     #[cfg(feature = "remote")]
     enrollment_store.bind_plugins(&ws_state.plugins);
+    #[cfg(feature = "ssh")]
+    bootstrap.session_notifications(ws_state.session_notifications());
     #[cfg(not(feature = "remote"))]
     let listeners = None;
     if owns_node_workers {
@@ -632,6 +664,10 @@ async fn build_router_core(
     #[cfg(feature = "remote")]
     let app = app.merge(remote_api);
     #[cfg(feature = "ssh")]
+    let warmup = Some(bootstrap.clone());
+    #[cfg(not(feature = "ssh"))]
+    let warmup = None;
+    #[cfg(feature = "ssh")]
     let app = app.merge(crate::bootstrap_api::router_with_ssh_key(
         auth, bootstrap, ssh_key,
     ));
@@ -649,6 +685,7 @@ async fn build_router_core(
         app.layer(from_fn_with_state(admission, source_admission)),
         setup_token,
         listeners,
+        warmup,
     ))
 }
 
@@ -1570,4 +1607,12 @@ mod temporal_admission_tests {
             std::fs::read_to_string("/proc/loadavg").unwrap().trim()
         );
     }
+}
+
+/// Share the live runtime pool with verification so connection replacement keeps authority.
+#[cfg(all(test, feature = "remote", feature = "ssh"))]
+pub(crate) async fn test_open_database(
+    data_dir: &std::path::Path,
+) -> Result<SqlitePool, ServerError> {
+    open_database(data_dir).await
 }

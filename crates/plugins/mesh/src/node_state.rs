@@ -30,6 +30,10 @@ impl Default for State {
 pub struct Store {
     path: PathBuf,
     route_path: PathBuf,
+    // The key of the interface this installation created (#235). It lives in
+    // its own file so the accepted snapshot keeps the format older binaries
+    // read; a rollback never meets an unknown field.
+    interface_path: PathBuf,
     // Canonical public bytes avoid repeated journal fsyncs on endpoint updates
     // without retaining a second per-peer tree. No private material is cached.
     route_body: Mutex<Vec<u8>>,
@@ -48,6 +52,7 @@ impl Store {
         }
         let path = parent.join("mesh-public.json");
         let route_path = parent.join("mesh-routes.json");
+        let interface_path = parent.join("mesh-interface.json");
         let state = read_public(&path)?.unwrap_or_default();
         let routes: BTreeSet<IpAddr> = read_public(&route_path)?.unwrap_or_default();
         let route_body = serde_json::to_vec(&routes).map_err(io::Error::other)?;
@@ -55,6 +60,7 @@ impl Store {
             Self {
                 path,
                 route_path,
+                interface_path,
                 route_body: Mutex::new(route_body),
             },
             state,
@@ -66,6 +72,27 @@ impl Store {
     pub fn route_inventory(&self) -> io::Result<BTreeSet<IpAddr>> {
         let body = self.route_body.lock().map_err(|_| io::ErrorKind::Other)?;
         serde_json::from_slice(&body).map_err(io::Error::other)
+    }
+    /// Record the public key of the interface this installation is about to create.
+    ///
+    /// Written before the kernel object exists, so every interface this
+    /// installation made is named here. The fixed interface name and the
+    /// component marker are shared by every infraternal agent on a machine
+    /// (the server's embedded one joins the same mesh); only this random key
+    /// tells this installation's interface apart (#235).
+    /// # Errors
+    /// Uses the same private-file checks and atomic durable writer as `save`.
+    pub fn record_interface(&self, key: &crate::policy::model::PublicKey) -> io::Result<()> {
+        write_public(
+            &self.interface_path,
+            &serde_json::to_vec(key).map_err(io::Error::other)?,
+        )
+    }
+    /// The key of the interface this installation last created, if any.
+    /// # Errors
+    /// Refuses an unsafe or malformed record.
+    pub fn recorded_interface(&self) -> io::Result<Option<crate::policy::model::PublicKey>> {
+        read_public(&self.interface_path)
     }
     /// Persist route ownership separately from accepting an in-flight config.
     /// # Errors

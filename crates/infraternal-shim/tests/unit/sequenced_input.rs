@@ -258,6 +258,87 @@ fn new_frames_roundtrip_and_refuse_noncanonical_payloads() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn coalesced_probe_and_input_preserve_the_written_ack_in_both_orders() {
+    struct Child(Pty);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.child.kill();
+            let _ = self.0.child.wait();
+        }
+    }
+    for probe_first in [true, false] {
+        let mut pty = Child(Pty::spawn(Uid::effective().as_raw(), 80, 24).unwrap());
+        let (stream, _remote) = UnixStream::pair().unwrap();
+        let mut peer = Peer {
+            stream,
+            decoder: Decoder::default(),
+            trailing: Vec::new(),
+            deferred: None,
+            attached: true,
+            caps: SEQUENCED_INPUT | MULTI_WRITER,
+            input_reply: None,
+            writer: Some(7),
+            shared_writer: false,
+            ack_queued: 30,
+            size: (80, 24, 0, 0),
+            cursor: None,
+            pending: Vec::new(),
+            written: 0,
+            exited_sent: false,
+            request: None,
+        };
+        let mut cursors = Inputs::with_geometry(peer.size);
+        cursors.select(7, peer.size).unwrap();
+        cursors.active_writer = Some(7);
+        let mut input = VecDeque::new();
+        cursors.accept(7, 0, &[b'a'; 30], &mut input).unwrap();
+        input.clear();
+        cursors.advance(30).unwrap();
+        let mut terminal = Terminal::new(80, 24).unwrap();
+        let ring = Ring::new(8192);
+        let mut config = Config::new([0; 16], Uid::effective().as_raw());
+        let mut payload = vec![b'x'; 29];
+        payload[..3].copy_from_slice(b"\0\xff\x1b");
+        let probe = Frame::InputStateRequest.encode().unwrap();
+        let typed = Frame::SequencedInput(30, payload).encode().unwrap();
+        let batch = if probe_first {
+            [probe, typed].concat()
+        } else {
+            [typed, probe].concat()
+        };
+        let mut ticket = 0;
+        let (exited, consumed) = consume_peer(
+            &batch,
+            &mut peer,
+            &mut pty.0,
+            &mut terminal,
+            &ring,
+            &mut config,
+            &mut input,
+            &mut cursors,
+            false,
+            false,
+            &mut ticket,
+        )
+        .unwrap();
+        assert!(!exited);
+        assert_eq!(consumed, batch.len());
+        assert!(
+            input.is_empty(),
+            "the real PTY must accept the whole suffix"
+        );
+        let state = cursors.get(peer.writer).unwrap();
+        assert_eq!((state.written, state.accepted), (59, 59));
+        // The state reply subsumes the standalone Ack in either frame order.
+        // Adapters must forward its written cursor as well as probe liveness.
+        assert!(matches!(peer.input_reply, Some(InputReply::State)));
+        assert_eq!(peer.pending, [] as [u8; 0]);
+        assert_eq!(peer.ack_queued, 30);
+    }
+}
+
+#[test]
 fn coalesced_ack_never_overwrites_a_partial_output_and_cursors_survive_peer_loss() {
     let (stream, _remote) = UnixStream::pair().unwrap();
     let mut peer = Peer {

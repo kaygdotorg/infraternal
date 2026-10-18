@@ -21,6 +21,8 @@ pub struct OpenSsh {
     pub ssh_keyscan: PathBuf,
     pub ssh_keygen: PathBuf,
     pub askpass_binary: PathBuf,
+    /// Trusted optional binary implementing only the private socket handoff.
+    pub tcp_connector: Option<PathBuf>,
     pub scratch: PathBuf,
     pub command_timeout: Duration,
 }
@@ -76,6 +78,7 @@ impl OpenSsh {
                     credentials,
                     mesh,
                     timeout: self.command_timeout,
+                    tcp_connector: self.tcp_connector.clone(),
                     master: None,
                 };
                 let socket = session.credentials.control_socket()?;
@@ -113,6 +116,7 @@ struct Session {
     credentials: CredentialSession,
     mesh: MeshEvidence,
     timeout: Duration,
+    tcp_connector: Option<PathBuf>,
     master: Option<Master>,
 }
 
@@ -160,6 +164,23 @@ impl Session {
         // Method-specific authentication precedes retained public preferences;
         // OpenSSH singleton command-line options keep their first value.
         self.credentials.configure(&mut command);
+        if let Some(connector) = &self.tcp_connector
+            && self.configuration.permits_connector()
+        {
+            let destination = &self.configuration.destination;
+            let dial = format!(
+                "{} __ssh-connect {} {}",
+                shell_quote(&connector.to_string_lossy()),
+                shell_quote(destination.host()),
+                destination.port().unwrap_or(22),
+            );
+            // This local helper receives no credential and passes a socket,
+            // not a proxy stream. Public config was already checked for hops;
+            // all host-key/authentication checks remain in the same SSH child.
+            command
+                .args(["-o", "ProxyUseFdpass=yes", "-o"])
+                .arg(format!("ProxyCommand={dial}"));
+        }
         self.configuration.configure(&mut command);
         // Command-line precedence forces these over config: host keys cannot be accepted or rewritten;
         // forwarding/control sockets from server config must not outlive bootstrap.
@@ -195,6 +216,8 @@ impl Session {
             "NumberOfPasswordPrompts=1",
             "-o",
             "LogLevel=ERROR",
+            "-o",
+            "LogVerbose=sshconnect2.c:ssh_userauth2():*",
         ]);
         let destination = &self.configuration.destination;
         command.args(["-M", "-N", "-S"]).arg(socket);
@@ -276,7 +299,100 @@ pub fn scan_destination(original: &Destination, bytes: &[u8]) -> Option<Destinat
     Destination::parse(&format!("{}@{host}:{}", original.user(), port?)).ok()
 }
 
+impl Session {
+    fn channel_command(&self, script: &str) -> Result<Command, Failure> {
+        let master = self.master.as_ref().ok_or_else(|| {
+            Failure::new(FailureKind::Unreachable, "The SSH connection has closed.")
+        })?;
+        if !master.alive()? {
+            return Err(Failure::new(
+                FailureKind::Unreachable,
+                "The SSH connection has closed.",
+            ));
+        }
+        let mut command = Command::new(&self.ssh);
+        command
+            .env_remove("SSH_AUTH_SOCK")
+            .env_remove("SSH_ASKPASS")
+            .env("SSH_ASKPASS_REQUIRE", "never")
+            .env("LC_ALL", "C");
+        // A missing/stale master must fail locally, never create another
+        // connection or reuse the browser's now-erased credential.
+        command
+            .args(["-F", "/dev/null", "-T", "-S"])
+            .arg(master.socket())
+            .args([
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                "ControlPersist=no",
+                "-o",
+                "ProxyJump=none",
+                "-o",
+                "ProxyCommand=/bin/sh -c 'exit 1'",
+                "-o",
+                "ForkAfterAuthentication=no",
+                "-o",
+                "IdentityFile=none",
+                "-o",
+                "CertificateFile=none",
+                "-o",
+                "IdentityAgent=none",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "PubkeyAuthentication=no",
+                "-o",
+                "PasswordAuthentication=no",
+                "-o",
+                "KbdInteractiveAuthentication=no",
+                "-o",
+                "GSSAPIAuthentication=no",
+            ]);
+        let destination = &self.configuration.destination;
+        command
+            .arg("-l")
+            .arg(destination.user())
+            .arg("-p")
+            .arg(destination.port().unwrap_or(22).to_string())
+            .arg("--")
+            .arg(destination.host());
+        command.arg(format!("sh -c {}", shell_quote(script)));
+        Ok(command)
+    }
+}
+
 impl SshSession for Session {
+    fn session_bridge(&self) -> bool {
+        true
+    }
+
+    fn stream<'a>(&'a self, script: &'a str) -> Operation<'a, crate::duplex::Duplex> {
+        Box::pin(async move { crate::duplex::Duplex::spawn(&mut self.channel_command(script)?) })
+    }
+
+    fn check_stream<'a>(
+        &'a self,
+        script: &'a str,
+    ) -> Operation<'a, (CommandOutput, Option<crate::install::Checked>)> {
+        Box::pin(async move {
+            crate::install::Installation::check_channel(self, script)
+                .await
+                .map(|(output, channel)| (output, Some(channel)))
+        })
+    }
+    fn setup_steps(&self) -> bool {
+        true
+    }
+    fn authentication(&self) -> Option<crate::auth_order::Authentication> {
+        self.master
+            .as_ref()
+            .filter(|master| master.network_authenticated())
+            .map(|_| crate::auth_order::Authentication {
+                method: crate::auth_order::AuthMethod::Network,
+                network: None,
+            })
+    }
     fn trust_lookup(&self) -> Option<String> {
         self.configuration
             .trust_policy()
@@ -284,78 +400,30 @@ impl SshSession for Session {
     }
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
-            async {
-                let master = self.master.as_ref().ok_or_else(|| {
-                    Failure::new(FailureKind::Unreachable, "The SSH connection has closed.")
-                })?;
-                if !master.alive()? {
-                    return Err(Failure::new(
-                        FailureKind::Unreachable,
-                        "The SSH connection has closed.",
-                    ));
-                }
-                let mut command = Command::new(&self.ssh);
-                command
-                    .env_remove("SSH_AUTH_SOCK")
-                    .env_remove("SSH_ASKPASS")
-                    .env("SSH_ASKPASS_REQUIRE", "never")
-                    .env("LC_ALL", "C");
-                // A missing/stale master must fail locally, never create another
-                // connection or reuse the browser's now-erased credential.
-                command
-                    .args(["-F", "/dev/null", "-T", "-S"])
-                    .arg(master.socket())
-                    .args([
-                        "-o",
-                        "ControlMaster=no",
-                        "-o",
-                        "ControlPersist=no",
-                        "-o",
-                        "ProxyJump=none",
-                        "-o",
-                        "ProxyCommand=/bin/sh -c 'exit 1'",
-                        "-o",
-                        "ForkAfterAuthentication=no",
-                        "-o",
-                        "IdentityFile=none",
-                        "-o",
-                        "CertificateFile=none",
-                        "-o",
-                        "IdentityAgent=none",
-                        "-o",
-                        "BatchMode=yes",
-                        "-o",
-                        "PubkeyAuthentication=no",
-                        "-o",
-                        "PasswordAuthentication=no",
-                        "-o",
-                        "KbdInteractiveAuthentication=no",
-                        "-o",
-                        "GSSAPIAuthentication=no",
-                    ]);
-                let destination = &self.configuration.destination;
-                command
-                    .arg("-l")
-                    .arg(destination.user())
-                    .arg("-p")
-                    .arg(destination.port().unwrap_or(22).to_string())
-                    .arg("--")
-                    .arg(destination.host());
-                command.arg(format!("sh -c {}", shell_quote(script)));
-                let result = execute(&mut command, input, self.timeout).await?;
-                if result.success {
-                    return Ok(CommandOutput {
-                        stdout: result.stdout,
-                    });
-                }
-                // Authentication already succeeded. Never treat remote stderr or
-                // a command's exit 255 as permission to try a different credential.
-                let mut failure = classify(&result.stderr, false, MeshEvidence::default());
-                failure.exit_status = result.exit_status;
-                Err(failure)
+            let mut command = self.channel_command(script)?;
+            let result = execute(&mut command, input, self.timeout).await?;
+            if result.success {
+                return Ok(CommandOutput {
+                    stdout: result.stdout,
+                });
             }
-            .await
-            .map_err(|error: Failure| error.at_ssh_boundary(true))
+            // Authentication already succeeded. Never treat remote stderr or
+            // a command's exit 255 as permission to try a different credential.
+            if script.starts_with("# INFRATERNAL_TRANSFER_SETUP_V1\n")
+                && let Err(error) = crate::install::parse_transfer_setup(&result.stdout)
+                && error.exit_status.is_some()
+                && error.exit_status == result.exit_status
+            {
+                return Err(error);
+            }
+            let mut failure = classify(&result.stderr, false, MeshEvidence::default());
+            failure.exit_status = result.exit_status;
+            if script.starts_with("# INFRATERNAL_SETUP_STEPS_V1\n") {
+                failure.failed_step = crate::install::interrupted_setup_step(&result.stdout);
+            } else if script.starts_with("# INFRATERNAL_TRANSFER_SETUP_V1\n") {
+                failure.failed_step = crate::install::interrupted_transfer_step(&result.stdout);
+            }
+            Err(failure).map_err(|error: Failure| error.at_ssh_boundary(true))
         })
     }
 }

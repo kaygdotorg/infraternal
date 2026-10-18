@@ -1,7 +1,7 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
 import { terminalRefusal } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
-import { plainCloseReason } from "./close-reasons";
+import { reattachReason, recoveringReason } from "./close-reasons";
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
 import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../packages/ui/src/terminal-cursor-layer";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
@@ -19,6 +19,8 @@ const INPUT_RESUME_GUARD = 16 * 1024;
 const INPUT_FRAME_LIMIT = 16 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RENDER_IDLE_MS = 700;
+/** Shown while the host link is doubted but kept (`terminal.link_doubt`, D300); recovery clears only this text. */
+const LINK_DOUBT_STATUS = "Reconnecting…";
 const TERMINAL_FONT_SIZE_DESKTOP = 14;
 const TERMINAL_FONT_SIZE_TOUCH = 13;
 /** The font sizes a keyboard step or a pinch may reach (terminal-touch.ts uses the same range). */
@@ -65,6 +67,12 @@ export interface TerminalHooks {
   onSessionCreated?: (sessionId: string) => void;
   onAttached?: (resumed: boolean, terminal: TerminalClient) => void;
   onDisconnected?: (forced: boolean) => void;
+  /**
+   * The host link missed a reply but is kept (`terminal.link_doubt`, D300, #234), or answered again
+   * (`terminal.link_recovered`). A product surface shows its connection indicator in the reconnecting
+   * state meanwhile; the terminal's own status text is not shown on the canvas.
+   */
+  onLinkDoubt?: (doubted: boolean) => void;
   /** Final output has painted; clean exits may close their window. */
   onExited?: (status: number) => void;
   /**
@@ -222,6 +230,8 @@ class ByteQueue {
 
 /** The sole terminal session in the tracer; all network and renderer buffers are bounded. */
 export class TerminalClient {
+  private static rendererPreparation: Promise<void> | undefined;
+  private static readonly rendererWarmups = new Map<string, Promise<void>>();
   private readonly terminal: Terminal;
   private readonly ghostty: GhosttyActivityControls;
   private readonly inputQueue = new ByteQueue(INPUT_QUEUE_LIMIT);
@@ -429,9 +439,23 @@ export class TerminalClient {
    */
   static async open(config: TerminalConfig): Promise<TerminalClient> {
     const font = config.font ?? fontById(DEFAULT_FONT_ID)!;
-    await loadFont(font);
-    await init();
-    const terminal = new Terminal({
+    await TerminalClient.prepareResources(font);
+    const terminal = TerminalClient.createRenderer(font, config);
+    const client = new TerminalClient(config, terminal, font);
+    // Weights go in before the first measurement so the grid is measured from the face it draws.
+    client.installFontWeights();
+    client.remeasureFont();
+    client.keepLigaturesOff();
+    client.installCursorLayerHook();
+    client.loadStyledFaces();
+    // An already opened terminal has paid the same first-renderer cost. Also
+    // supersede an optional warm-up still waiting for resources on this font.
+    TerminalClient.rendererWarmups.set(font.id, Promise.resolve());
+    return client;
+  }
+
+  private static createRenderer(font: MonoFont, config: Pick<TerminalConfig, "scrollbackLimit" | "theme">): Terminal {
+    return new Terminal({
       fontFamily: fontStack(font),
       fontSize: matchMedia("(pointer: coarse)").matches ? TERMINAL_FONT_SIZE_TOUCH : TERMINAL_FONT_SIZE_DESKTOP,
       cursorBlink: false,
@@ -445,14 +469,49 @@ export class TerminalClient {
         selectionBackground: "#44485c",
       },
     });
-    const client = new TerminalClient(config, terminal, font);
-    // Weights go in before the first measurement so the grid is measured from the face it draws.
-    client.installFontWeights();
-    client.remeasureFont();
-    client.keepLigaturesOff();
-    client.installCursorLayerHook();
-    client.loadStyledFaces();
-    return client;
+  }
+
+  /** Warm font, parser and canvas setup during sign-in; no session or socket is opened. */
+  static async prepare(font: MonoFont = fontById(DEFAULT_FONT_ID)!): Promise<void> {
+    let warmup = TerminalClient.rendererWarmups.get(font.id);
+    if (!warmup) {
+      warmup = TerminalClient.prepareResources(font).then(() => {
+        if (TerminalClient.rendererWarmups.get(font.id) !== warmup) return;
+        // First canvas/font setup can block long enough to expire a healthy
+        // socket. Exercise it before publication, with no input or live loop
+        // left behind. Inert, hidden content cannot steal sign-in focus.
+        const host = document.createElement("div");
+        host.inert = true;
+        host.style.cssText = "position:fixed;left:-10000px;top:0;width:800px;height:480px;visibility:hidden;pointer-events:none";
+        const renderer = TerminalClient.createRenderer(font, {});
+        try {
+          document.body.append(host);
+          renderer.open(host);
+        } finally {
+          try { renderer.dispose(); } finally { host.remove(); }
+        }
+      });
+      TerminalClient.rendererWarmups.set(font.id, warmup);
+      const pending = warmup;
+      void warmup.catch(() => {
+        if (TerminalClient.rendererWarmups.get(font.id) === pending) TerminalClient.rendererWarmups.delete(font.id);
+      });
+    }
+    await warmup;
+  }
+
+  private static async prepareResources(font: MonoFont): Promise<void> {
+    let renderer = TerminalClient.rendererPreparation;
+    if (!renderer) {
+      renderer = init();
+      TerminalClient.rendererPreparation = renderer;
+      // Concurrent opens/preparation must share one instance. A failed optional
+      // warm-up must not poison the later session's ordinary initialization.
+      void renderer.catch(() => {
+        if (TerminalClient.rendererPreparation === renderer) TerminalClient.rendererPreparation = undefined;
+      });
+    }
+    await Promise.all([loadFont(font), renderer]);
   }
 
   get isConnected(): boolean { return this.attachmentConfirmed; }
@@ -871,7 +930,17 @@ export class TerminalClient {
             this.connectionIsResume = true;
             this.replayResponseFence = undefined;
             this.suppressReplayResponses = true;
-            this.setStatus("Catching up…");
+            this.setStatus(recoveringReason(typeof notice.reason === "string" ? notice.reason : undefined));
+          } else if (notice.type === "terminal.link_doubt") {
+            // The host link missed one reply but is kept: this is live output,
+            // not replay. Only say so; replies to the program and typing go on.
+            const shown = this.config.status.textContent ?? "";
+            if (shown === "" || shown === LINK_DOUBT_STATUS) this.setStatus(LINK_DOUBT_STATUS);
+            this.config.hooks?.onLinkDoubt?.(true);
+          } else if (notice.type === "terminal.link_recovered") {
+            // Clears only its own indicator; it is never a replay fence.
+            if (this.config.status.textContent === LINK_DOUBT_STATUS) this.setStatus("");
+            this.config.hooks?.onLinkDoubt?.(false);
           } else if (notice.type === "terminal.snapshot" && notice.approximate === true) {
             this.setStatus("Reconnected. The screen may be slightly out of date.");
           } else if (notice.type === "terminal.snapshot_unavailable") {
@@ -897,9 +966,8 @@ export class TerminalClient {
             if (this.pendingExit && (this.pendingExit.status !== status || this.pendingExit.finalSeq !== finalSeq || (this.pendingExit.retired === true) !== retired)) throw new Error("changed exit");
             this.pendingExit = { status, finalSeq, retired };
             this.finishExit();
-          } else {
-            throw new Error("unknown terminal notice");
           }
+          // Any other notice type comes from a newer server: it is additive, so ignore it.
         } catch {
           this.protocolFailure("invalid terminal notice");
         }
@@ -913,8 +981,9 @@ export class TerminalClient {
         return;
       case "Close":
         if (frame.code === CLOSE_SESSION_GONE) { this.endSession(); return; }
-        this.setStatus(plainCloseReason(frame.reason));
-        if (this.ownsConnection) this.conn.forceClose();
+        // Every other stream close reattaches by itself, so its status never reads as an ending.
+        this.setStatus(reattachReason(frame.reason));
+        if (this.ownsConnection) this.conn.forceClose(frame.code, frame.reason);
         else this.retryStream();
         return;
       default:

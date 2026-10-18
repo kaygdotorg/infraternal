@@ -4,6 +4,9 @@ use crate::auth_order::Authentication;
 use serde::{Deserialize, Serialize};
 use std::net::Ipv6Addr;
 
+pub(crate) const SOCKET_PROBE_UNAVAILABLE: &str = "Finishing earlier setup needs the matching infraternal binary on this host. Its files were kept.";
+pub(crate) const SOCKET_PROBE_UNCERTAIN: &str = "Setup could not determine whether the infraternal agent is still running. Its files were kept; check host permissions and retry.";
+
 /// A validated destination; fields are private to prevent bypassing shell/option safety.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Destination {
@@ -218,36 +221,85 @@ pub struct MissingBinary {
 }
 
 /// Human diagnostics are trusted static text; fingerprints are independently validated.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 pub struct Failure {
     pub kind: FailureKind,
     pub message: &'static str,
     pub log_tail: Vec<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_step: Option<InstallStep>,
     /// Public process status only; command output is never serialized.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_status: Option<u8>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub already_added: bool,
     /// Trusted server payload coordinates; never fields echoed from SSH stderr.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub missing_binary: Option<Box<MissingBinary>>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fingerprints: Vec<String>,
     /// Exact public key family selected for this confirmation and subsequent negotiation.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub host_key_type: Option<String>,
     /// An existing application pin differs; replacement requires this explicit confirmation.
-    #[serde(skip_serializing_if = "is_false")]
     pub host_key_changed: bool,
     /// Only exhausted D183 authentication permits the UI to request another method.
-    #[serde(skip_serializing_if = "is_false")]
     pub choose_method: bool,
-    /// Public first-contact handle; never admission by possession alone.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub host_key_challenge: Option<uuid::Uuid>,
+    /// The two rarely-set uuids, boxed so every `Result<_, Failure>` stays small (`clippy::result_large_err`).
+    ids: Option<Box<FailureIds>>,
 }
+
+/// Each uuid keeps its own field, so one can never be read or sent as the other.
+#[derive(Clone, Debug, Default)]
+struct FailureIds {
+    /// Binds a host-key confirmation to the observation that produced it.
+    host_key_challenge: Option<uuid::Uuid>,
+    /// The owner's existing host that makes this an already-added failure.
+    existing_host_id: Option<uuid::Uuid>,
+}
+
+/// Serialize the failure's wire fields; each UUID has its own key and its own field.
+impl Serialize for Failure {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct("Failure", 12)?;
+        state.serialize_field("kind", &self.kind)?;
+        state.serialize_field("message", &self.message)?;
+        state.serialize_field("log_tail", &self.log_tail)?;
+        if let Some(failed_step) = self.failed_step {
+            state.serialize_field("failed_step", &failed_step)?;
+        }
+        if let Some(exit_status) = self.exit_status {
+            state.serialize_field("exit_status", &exit_status)?;
+        }
+        if self.already_added {
+            state.serialize_field("already_added", &self.already_added)?;
+        }
+        if let Some(missing_binary) = &self.missing_binary {
+            state.serialize_field("missing_binary", missing_binary)?;
+        }
+        if !self.fingerprints.is_empty() {
+            state.serialize_field("fingerprints", &self.fingerprints)?;
+        }
+        if let Some(host_key_type) = &self.host_key_type {
+            state.serialize_field("host_key_type", host_key_type)?;
+        }
+        if self.host_key_changed {
+            state.serialize_field("host_key_changed", &self.host_key_changed)?;
+        }
+        if self.choose_method {
+            state.serialize_field("choose_method", &self.choose_method)?;
+        }
+        if let Some(uuid) = self.ids.as_deref().and_then(|ids| ids.host_key_challenge) {
+            state.serialize_field("host_key_challenge", &uuid)?;
+        }
+        if let Some(uuid) = self.ids.as_deref().and_then(|ids| ids.existing_host_id)
+            && self.already_added
+        {
+            state.serialize_field("host_id", &uuid)?;
+        }
+        state.end()
+    }
+}
+
 impl Failure {
     #[must_use]
     pub fn new(kind: FailureKind, message: &'static str) -> Self {
@@ -263,8 +315,32 @@ impl Failure {
             host_key_type: None,
             host_key_changed: false,
             choose_method: false,
-            host_key_challenge: None,
+            ids: None,
         }
+    }
+    /// Return the public challenge only while this error represents a host-key refusal.
+    #[must_use]
+    pub fn host_key_challenge(&self) -> Option<uuid::Uuid> {
+        if self.already_added {
+            None
+        } else {
+            self.ids.as_deref().and_then(|ids| ids.host_key_challenge)
+        }
+    }
+
+    /// Record the challenge used to bind host-key confirmation to this observation.
+    pub fn set_host_key_challenge(&mut self, challenge: Option<uuid::Uuid>) {
+        if challenge.is_some() || self.ids.is_some() {
+            self.ids.get_or_insert_with(Box::default).host_key_challenge = challenge;
+        }
+    }
+
+    /// Attach the owner's existing host id to the already-added failure.
+    #[must_use]
+    pub fn with_existing_host_id(mut self, host_id: uuid::Uuid) -> Self {
+        self.already_added = true;
+        self.ids.get_or_insert_with(Box::default).existing_host_id = Some(host_id);
+        self
     }
     /// Bounded diagnosis for server logs; authentication and trust always retain their categories.
     #[must_use]
@@ -281,10 +357,20 @@ impl Failure {
 
     /// Attach a fixed local boundary: channel execution when true, connection setup otherwise.
     #[must_use]
+    // Failure-only rewrites stay out of x86_64 async callers under the measured
+    // size budget; ARM retains its existing code generation [243], #230.
+    #[cfg_attr(target_arch = "x86_64", cold)]
+    #[cfg_attr(target_arch = "x86_64", inline(never))]
     pub fn at_ssh_boundary(mut self, channel: bool) -> Self {
         // Reuse bounded, static diagnostics rather than growing every retained
         // Failure/event with a field solely for server instrumentation.
-        let boundary = if channel {
+        let boundary = if channel && self.exit_status.is_some() {
+            // Authentication completed and the command returned a status. Its
+            // refusal is setup evidence, not a broken SSH command channel.
+            self.log_tail
+                .retain(|line| *line != "The SSH command channel failed.");
+            "The remote setup command returned a failure status."
+        } else if channel {
             "The SSH command channel failed."
         } else {
             "The SSH connection setup failed."
@@ -297,6 +383,8 @@ impl Failure {
 
     /// Attach the command boundary without changing authentication/trust classification.
     #[must_use]
+    #[cfg_attr(target_arch = "x86_64", cold)]
+    #[cfg_attr(target_arch = "x86_64", inline(never))]
     pub fn at(mut self, step: InstallStep) -> Self {
         self.failed_step = Some(step);
         if self.kind == FailureKind::Install
@@ -331,26 +419,30 @@ impl Failure {
     /// Classify fixed installer exit codes using the approved path. Join also
     /// executes the uploaded payload, whose status is not an ownership receipt.
     #[must_use]
+    #[cfg_attr(target_arch = "x86_64", cold)]
+    #[cfg_attr(target_arch = "x86_64", inline(never))]
     pub fn in_mode(mut self, mode: InstallMode) -> Self {
         if self.kind != FailureKind::Install {
             return self;
         }
         match (self.exit_status, mode) {
-            (Some(71..=73), _) if matches!(self.failed_step, Some(InstallStep::Join)) => {}
+            (Some(71..=77), _) if matches!(self.failed_step, Some(InstallStep::Join)) => {}
             (Some(71), InstallMode::Rootless) => {
-                self.message = "An existing folder ~/.local/share/infraternal on this host wasn't created by infraternal setup or isn't private. Move it aside, then try again.";
+                self.message = "Setup could not verify ownership or permissions of its files on this host. Check ~/.local/share/infraternal, its parent folders and the infraternal service files, then try again.";
             }
             (Some(71), InstallMode::Root) => {
-                self.message = "An existing folder /var/lib/infraternal on this host wasn't created by infraternal setup or isn't private. Move it aside with administrator access, then try again.";
+                self.message = "Setup could not verify ownership or permissions of its files on this host. Check /var/lib/infraternal, its parent folders and the infraternal service files with administrator access, then try again.";
             }
             (Some(72), _) => {
-                self.message = "Host provisioning found another setup attempt. Retry the host check to continue.";
+                self.message = "An earlier setup on this host did not finish. Retry the host check to finish its cleanup before continuing.";
             }
             (Some(73), _) => {
                 self.kind = FailureKind::SetupRunning;
                 self.message =
                     "Setup is already running on this host. Wait for it to finish, then try again.";
             }
+            (Some(76), _) => self.message = SOCKET_PROBE_UNAVAILABLE,
+            (Some(77), _) => self.message = SOCKET_PROBE_UNCERTAIN,
             _ => {}
         }
         if self.exit_status.is_some() {
@@ -368,14 +460,6 @@ impl Failure {
         Self::new(FailureKind::Install, message)
     }
 }
-#[allow(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "Serde skip predicates receive a reference."
-)]
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.failed_step {
@@ -420,11 +504,62 @@ pub struct Event {
     /// Present after the fixed authenticated check; never inferred from banners.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authentication: Option<Authentication>,
-    /// Bound invitation identity; only done proves this host is ready.
+    /// Host-bound invitation identity; done publishes an attachable terminal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_id: Option<uuid::Uuid>,
+    /// The existing shim session to attach, present on early terminal publication.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<uuid::Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<Failure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub leftovers: Option<Box<Leftovers>>,
+}
+
+#[cfg(test)]
+mod failure_serialization_tests {
+    //! Preserve the public UUID key while sharing one compact failure reference slot.
+    use super::{Failure, FailureKind};
+
+    #[test]
+    fn uuid_reference_uses_the_outcome_specific_wire_key() {
+        let id = uuid::Uuid::from_u128(42);
+        let mut challenge = Failure::new(FailureKind::HostKey, "Confirm this host key.");
+        challenge.set_host_key_challenge(Some(id));
+        let challenge = serde_json::to_value(challenge).unwrap();
+        assert_eq!(challenge["host_key_challenge"], id.to_string());
+        assert!(challenge.get("host_id").is_none());
+
+        let duplicate = Failure::install("This host is already added.").with_existing_host_id(id);
+        let duplicate = serde_json::to_value(duplicate).unwrap();
+        assert_eq!(duplicate["host_id"], id.to_string());
+        assert_eq!(duplicate["already_added"].as_bool(), Some(true));
+        assert!(duplicate.get("host_key_challenge").is_none());
+    }
+
+    /// The exact JSON of both uuid-bearing shapes, and a size bound so `Result<_, Failure>` stays below the lint limit.
+    #[test]
+    fn wire_format_is_exact_and_failure_stays_small() {
+        let id = uuid::Uuid::from_u128(42);
+        let mut challenge = Failure::new(FailureKind::HostKey, "Confirm this host key.");
+        challenge.set_host_key_challenge(Some(id));
+        assert_eq!(
+            serde_json::to_string(&challenge).unwrap(),
+            format!(
+                r#"{{"kind":"host-key","message":"Confirm this host key.","log_tail":[],"host_key_challenge":"{id}"}}"#
+            )
+        );
+        let duplicate = Failure::install("Already added.").with_existing_host_id(id);
+        assert_eq!(
+            serde_json::to_string(&duplicate).unwrap(),
+            format!(
+                r#"{{"kind":"install","message":"Already added.","log_tail":[],"already_added":true,"host_id":"{id}"}}"#
+            )
+        );
+        assert!(
+            std::mem::size_of::<Failure>() <= 128,
+            "{}",
+            std::mem::size_of::<Failure>()
+        );
+    }
 }

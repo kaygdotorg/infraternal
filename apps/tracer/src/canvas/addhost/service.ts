@@ -94,6 +94,8 @@ export interface ProvisioningService {
 export interface EnrolledHost {
   /** The admitted remote host UUID returned by the server. */
   hostId?: string;
+  /** An already-running shim session; opening the canvas must attach to it. */
+  sessionId?: string;
   address?: string;
   /** Stable key in the wizard: the discovered id or the typed host. */
   id: string;
@@ -104,6 +106,18 @@ export interface EnrolledHost {
 }
 
 export interface AddHostSink {
-  /** Called once per batch result with the hosts that are ready, in the order they finished. */
-  enrolled(hosts: EnrolledHost[]): void;
+  /** Start optional local renderer preparation alongside sign-in. */
+  prepareTerminal?(): void;
+  /**
+   * Called once per batch result with the hosts that are ready, in the order they finished. `status` is the wizard's
+   * glyph for the host just handed over (D255): the canvas moves the setup that goes on behind the shell from there into
+   * the new window's machine pill, so it must read the glyph's box before returning.
+   */
+  enrolled(hosts: EnrolledHost[], status?: Element): void;
+  /** True when the canvas shows each host's remaining setup in its machine pill: the wizard then skips its "ready" toast. */
+  readonly setupInPill?: boolean;
+  /** Opens a new terminal on a host that is already added (the failure named it); the canvas focuses it. */
+  openHost?(hostId: string): void;
+  /** Whether this page lists the host. An id the page does not know would open a window titled with a raw UUID. */
+  hasHost?(hostId: string): boolean;
 }

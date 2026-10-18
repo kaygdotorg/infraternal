@@ -68,6 +68,8 @@ export interface WinRec {
    * the frame for a window it can resize on its own; returns whether the frame changed.
    */
   shape?: (inner: HTMLElement, aspect: number) => boolean;
+  /** Retained host setup status shown in the machine pill (addhost/setup-pill.on-demand.ts, D255). */
+  setup?: { handlePill(source: "pointer" | "keyboard"): boolean; isPending(): boolean; dispose(): void };
 }
 
 /** One view on the canvas: the elements that draw it, its position springs and its windows. */

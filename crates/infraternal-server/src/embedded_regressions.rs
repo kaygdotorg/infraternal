@@ -369,6 +369,96 @@ async fn healthy_streams_progress_at_user_attachment_capacity() {
     );
 }
 
+/// A resumed browser can reclaim a writer before its previous handle drops.
+#[tokio::test]
+async fn resumed_writer_closes_previous_route_before_shared_stream_reuse() {
+    let (mut link, mut peer) = connection();
+    let (old_output, _old_receiver) = mpsc::channel(4);
+    let mut attachments = HashMap::from([(1, attachment(old_output))]);
+    let mut routes = HashMap::from([(2, 1)]);
+    let (output, _receiver) = mpsc::channel(4);
+    let (reply, result) = oneshot::channel();
+    assert!(
+        process_command(
+            Command::Attach {
+                id: 2,
+                session_id: [1; 16],
+                stream_id: 2,
+                last_out_seq: 11,
+                last_in_seq: 7,
+                output,
+                input_credit: watch::channel(7).0,
+                monitored: false,
+                reply,
+            },
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut HashMap::new(),
+        )
+        .await
+    );
+    assert_eq!(result.await.unwrap().unwrap(), (2, 2));
+    assert!(!attachments.contains_key(&1));
+    assert_eq!(routes.get(&2), Some(&2));
+    let mut bytes = [0; 256];
+    let count = peer.read(&mut bytes).await.unwrap();
+    let closed = decode_muxed_frame(&bytes[..count]).unwrap();
+    assert_eq!(closed.stream_id, 2);
+    assert!(
+        matches!(closed.frame, Frame::Close { .. }),
+        "reclaiming a live shared writer must retire its previous remote route"
+    );
+    let attached = decode_muxed_frame(&bytes[closed.wire_len..count]).unwrap();
+    assert_eq!(attached.stream_id, 2);
+    assert!(matches!(
+        attached.frame,
+        Frame::AttachTerm { session_id, last_out_seq: 11, last_in_seq: 7 } if session_id == &[1; 16]
+    ));
+}
+
+/// Writer reuse cannot retire a different session's existing attachment.
+#[tokio::test]
+async fn resumed_writer_for_other_session_preserves_live_route() {
+    let (mut link, peer) = connection();
+    let (old_output, _old_receiver) = mpsc::channel(4);
+    let mut attachments = HashMap::from([(1, attachment(old_output))]);
+    let mut routes = HashMap::from([(2, 1)]);
+    let (output, _receiver) = mpsc::channel(4);
+    let (reply, result) = oneshot::channel();
+    assert!(
+        process_command(
+            Command::Attach {
+                id: 2,
+                session_id: [2; 16],
+                stream_id: 2,
+                last_out_seq: 0,
+                last_in_seq: 0,
+                output,
+                input_credit: watch::channel(0).0,
+                monitored: false,
+                reply,
+            },
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut HashMap::new(),
+        )
+        .await
+    );
+    assert!(matches!(result.await.unwrap(), Err(AgentError::Protocol)));
+    assert!(attachments.contains_key(&1));
+    assert_eq!(routes.get(&2), Some(&1));
+    let mut peer = peer.into_std().unwrap();
+    assert_eq!(
+        std::io::Read::read(&mut peer, &mut [0; 1])
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::WouldBlock,
+        "a rejected session cannot send a Close for the live writer"
+    );
+}
+
 #[tokio::test]
 async fn reattach_must_restore_output_credit() {
     let (mut old, mut old_peer) = connection();
@@ -465,7 +555,8 @@ async fn stream_close_must_not_restart_all_sessions() {
         process_incoming(
             Incoming::Close {
                 stream_id: 2,
-                code: 1000
+                code: 1000,
+                reason: "detached",
             },
             &mut link,
             &mut attachments,
@@ -1215,6 +1306,9 @@ async fn greeted_links_that_die_young_escalate_the_actor_retry_delay() {
 #[path = "embedded_path_tests.rs"]
 mod path_tests;
 
+#[path = "liveness_doubt_breakit_tests.rs"]
+mod liveness_doubt_breakit_tests;
+
 #[path = "embedded_credit_tests.rs"]
 mod credit_tests;
 #[tokio::test]
@@ -1362,3 +1456,71 @@ async fn recovered_route_ignores_stale_browser_rebind() {
             .is_err()
     );
 }
+
+/// Control replies may be skipped when the bounded FIFO is full; the peer's
+/// correlated reply deadline, rather than local admission, decides liveness.
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn saturated_control_pong_does_not_retire_connection() {
+    let (mut link, _peer) = connection();
+    let (sender, mut receiver) = mpsc::channel(1);
+    sender.try_send(Bytes::from_static(b"queued")).unwrap();
+    link.owned_control = Some(sender);
+    assert!(
+        process_incoming(
+            Incoming::Ping {
+                nonce: 7,
+                sent_us: 9
+            },
+            &mut link,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .await,
+        "Pong admission must not retire the primary"
+    );
+    assert_eq!(
+        receiver.recv().await.unwrap(),
+        Bytes::from_static(b"queued")
+    );
+    assert!(
+        process_incoming(
+            Incoming::Ping {
+                nonce: 8,
+                sent_us: 10
+            },
+            &mut link,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .await
+    );
+    let encoded = receiver.recv().await.unwrap();
+    assert_eq!(
+        infraternal_protocol::decode_frame(&encoded).unwrap().frame,
+        Frame::Pong {
+            nonce: 8,
+            sent_us: 10
+        }
+    );
+    drop(receiver);
+    assert!(
+        !process_incoming(
+            Incoming::Ping {
+                nonce: 9,
+                sent_us: 11
+            },
+            &mut link,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .await,
+        "a closed writer remains a connection failure"
+    );
+}
+
+#[path = "liveness_doubt_breakit_r2_tests.rs"]
+mod liveness_doubt_breakit_r2_tests;

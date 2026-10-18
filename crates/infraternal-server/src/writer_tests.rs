@@ -1,6 +1,9 @@
 //! Durable per-device input authority; a second writer never inherits another device's Ack.
 use super::*;
 
+#[path = "websocket_authority_tests.rs"]
+mod authority_watchdog;
+
 async fn database() -> (SqlitePool, String, [u8; 16]) {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)

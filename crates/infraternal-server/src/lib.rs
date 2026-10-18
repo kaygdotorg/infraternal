@@ -81,6 +81,7 @@ mod runtime;
 mod server_tls;
 #[cfg(any(test, feature = "native-streams"))]
 mod socket_authority;
+mod stream_close;
 mod terminal_exit;
 mod web_assets;
 mod websocket;

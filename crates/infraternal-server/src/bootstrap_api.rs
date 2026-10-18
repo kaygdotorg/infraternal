@@ -27,11 +27,17 @@ use std::{
 };
 use tokio::sync::Semaphore;
 
+#[cfg(feature = "remote")]
+#[path = "bootstrap_setup_api.rs"]
+mod setup_api;
+
 /// The existing authenticator is reused; runtime must provide an authorized #78 backend.
 struct Api {
     auth: Auth,
     runner: Bootstrap,
     sockets: Arc<Semaphore>,
+    #[cfg(feature = "remote")]
+    setup_sockets: Arc<Semaphore>,
     ssh_key: Arc<dyn SshKeySource>,
 }
 
@@ -46,18 +52,22 @@ pub fn router_with_ssh_key(
     runner: Bootstrap,
     ssh_key: Arc<dyn SshKeySource>,
 ) -> Router {
-    Router::new()
-        .route("/v1/bootstrap/ws", get(upgrade))
-        .route(
-            "/v1/bootstrap/ssh-key",
-            get(public_ssh_key).post(public_ssh_key),
-        )
-        .with_state(Arc::new(Api {
-            auth,
-            runner,
-            ssh_key,
-            sockets: Arc::new(Semaphore::new(16)),
-        }))
+    let router = Router::new().route("/v1/bootstrap/ws", get(upgrade)).route(
+        "/v1/bootstrap/ssh-key",
+        get(public_ssh_key).post(public_ssh_key),
+    );
+    #[cfg(feature = "remote")]
+    let router = router.route("/v1/bootstrap/setup/ws", get(setup_api::upgrade));
+    router.with_state(Arc::new(Api {
+        auth,
+        runner,
+        ssh_key,
+        sockets: Arc::new(Semaphore::new(16)),
+        #[cfg(feature = "remote")]
+        setup_sockets: Arc::new(Semaphore::new(
+            infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS,
+        )),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -138,14 +148,49 @@ async fn upgrade(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let token = Secret::new(token.as_bytes().to_vec());
-    ws.max_message_size(32 * 1024)
-        .max_frame_size(32 * 1024)
-        .on_upgrade(move |socket| async move {
-            // Retire stream and admission before publishing this lifetime inactive.
-            let _activity = activity;
-            let _permit = permit;
-            run(socket, api, owner, token).await;
-        })
+    upgrade_admitted(
+        ws.max_message_size(32 * 1024).max_frame_size(32 * 1024),
+        api,
+        owner,
+        token,
+        activity,
+        permit,
+        SocketMode::Bootstrap,
+    )
+}
+
+/// Both socket kinds share one upgrade task type; limits and authority remain
+/// with each caller. Sharing the cold upgrade avoids duplicating its task and
+/// cancellation machinery for retained setup subscriptions (D243, D255).
+#[derive(Clone, Copy)]
+enum SocketMode {
+    Bootstrap,
+    #[cfg(feature = "remote")]
+    Setup,
+}
+
+#[inline(never)]
+fn upgrade_admitted(
+    ws: WebSocketUpgrade,
+    api: Arc<Api>,
+    owner: String,
+    token: Secret,
+    activity: infraternal_plugin_ssh::bootstrap::Activity,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    mode: SocketMode,
+) -> Response {
+    ws.on_upgrade(move |socket| async move {
+        // Retire stream and admission before publishing this lifetime inactive.
+        let _activity = activity;
+        let _permit = permit;
+        match mode {
+            SocketMode::Bootstrap => run(socket, api, owner, token).await,
+            #[cfg(feature = "remote")]
+            SocketMode::Setup => {
+                let _ = setup_api::run(socket, api, owner, token).await;
+            }
+        }
+    })
 }
 
 /// Both Settings and WebSocket admission require the exact pinned browser Origin

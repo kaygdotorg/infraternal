@@ -156,39 +156,27 @@ impl Removal {
         {
             return Err(crate::auth::Error::Denied);
         }
-        let lookup: Option<String> =
+        // A coordinates row means infraternal setup installed this host; only
+        // then does a known installation exist to remove by hand (#235).
+        let bootstrap: Option<Option<String>> =
             sqlx::query_scalar("SELECT trust_lookup FROM remote_host_bootstrap WHERE host_id=?")
                 .bind(entry.host.as_bytes().as_slice())
                 .fetch_optional(&mut *tx)
-                .await?
-                .flatten();
+                .await?;
+        let installed_by_setup = bootstrap.is_some();
+        let lookup = bootstrap.flatten();
+        let (mode, name): (String, String) = sqlx::query_as("SELECT h.mode,COALESCE(b.address,lower(hex(h.id))) FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.id=?")
+            .bind(entry.host.as_bytes().as_slice())
+            .fetch_one(&mut *tx)
+            .await?;
         // Record the authorized request before the node effect; the same writer
         // transaction publishes its outcome together with the denial tombstone.
         sqlx::query("INSERT INTO remote_host_removals(host_id,owner_id,requested_at,uninstall,host_cleanup) VALUES(?,?,?,?,'pending')")
             .bind(entry.host.as_bytes().as_slice()).bind(&entry.user).bind(live).bind(entry.uninstall).execute(&mut *tx).await?;
-        let cleanup = if entry.uninstall {
-            if let Some(actor) = self.hosts.actor(entry.host).await {
-                let input = serde_json::to_vec(
-                    &json!({"host":entry.host.simple().to_string(),"dry_run":false}),
-                )
-                .map_err(|_| crate::auth::Error::Json)?;
-                match actor
-                    .control_call(infraternal_plugin_remote::UNINSTALL.id, input)
-                    .await
-                {
-                    Ok(bytes)
-                        if serde_json::from_slice::<Value>(&bytes)
-                            .is_ok_and(|reply| reply["state"] == "accepted") =>
-                    {
-                        "requested"
-                    }
-                    _ => "unreachable",
-                }
-            } else {
-                "unreachable"
-            }
+        let (cleanup, left) = if entry.uninstall {
+            request_uninstall(&self.hosts, entry.host).await
         } else {
-            "retained"
+            ("retained", Vec::new())
         };
         sqlx::query(
             "UPDATE remote_host_removals SET host_cleanup=?,completed_at=? WHERE host_id=?",
@@ -231,13 +219,136 @@ impl Removal {
             .commit_revocation(tx, entry.host)
             .await
             .map_err(|_| crate::auth::Error::Denied)?;
-        let message = match cleanup {
-            "requested" => "Host removed. Uninstall was requested on the host.",
-            "retained" => "Host removed. The infraternal agent remains installed on the host.",
-            _ => {
-                "Host removed. The host could not confirm uninstall; its service, binary and data may remain. Remove them on the host when it is reachable."
-            }
-        };
-        Ok(json!({"host_id":entry.host,"state":"removed","host_cleanup":cleanup,"message":message}))
+        let installation = installed_by_setup.then(|| entry.host.simple().to_string());
+        let (message, manual) = outcome(
+            cleanup,
+            &mode,
+            display_name(&name),
+            &left,
+            installation.as_deref(),
+        );
+        Ok(
+            json!({"host_id":entry.host,"state":"removed","host_cleanup":cleanup,"message":message,"manual":manual}),
+        )
     }
 }
+/// What removal tells the person, and the commands for a leftover install.
+///
+/// `installation` is the host id when infraternal setup installed the host:
+/// only then are there commands, because only then is there an installation
+/// whose ownership the host can check.
+fn outcome(
+    cleanup: &str,
+    mode: &str,
+    name: &str,
+    left: &[&str],
+    installation: Option<&str>,
+) -> (String, Option<String>) {
+    match cleanup {
+        "requested" => {
+            let mut message =
+                format!("{name} was removed. Its infraternal agent is uninstalling itself.");
+            // Kernel objects with our name that the host's installation did
+            // not create stay; say which, so nobody removes them by hand (#235).
+            for object in left {
+                message.push(' ');
+                message.push_str(&infraternal_plugin_remote::uninstall::left_line(object));
+            }
+            (message, None)
+        }
+        "retained" => (
+            format!("{name} was removed here. Its infraternal agent stays installed on it."),
+            None,
+        ),
+        _ if installation.is_none() => (
+            format!(
+                "{name} was removed here. infraternal setup didn't install its infraternal agent, so remove that agent on {name} the way it was installed."
+            ),
+            None,
+        ),
+        // Say plainly that the machine still runs it, and how to remove it
+        // there; the record is gone, so nothing here can retry (#235).
+        _ => {
+            let commands = manual_uninstall(mode, installation.unwrap_or_default());
+            let account = if mode == "rootful" {
+                "as root"
+            } else {
+                "as the account it was added with"
+            };
+            (
+                format!(
+                    "{name} was removed here, but infraternal is still installed on it. Remove it there {account} with: {commands}"
+                ),
+                Some(commands),
+            )
+        }
+    }
+}
+/// Ask a connected host's infraternal agent to uninstall itself (D273).
+///
+/// `requested` only when the host accepted the exact action; any refusal, error
+/// or absent connection is `unreachable`, which the caller reports as a leftover
+/// installation. The real-binary removal check calls this same path (#235).
+///
+/// With `requested` come the kernel objects the host will leave because its
+/// installation did not create them. Only names this server knows are kept:
+/// a host never puts its own text into the owner's message.
+pub(crate) async fn request_uninstall(
+    hosts: &RemoteHosts,
+    host: Uuid,
+) -> (&'static str, Vec<&'static str>) {
+    const KNOWN: [&str; 3] = [
+        "infraternal0",
+        "infraternal_mesh",
+        "the IFM_* iptables chains",
+    ];
+    let Some(actor) = hosts.actor(host).await else {
+        return ("unreachable", Vec::new());
+    };
+    let Ok(input) = serde_json::to_vec(&json!({"host":host.simple().to_string(),"dry_run":false}))
+    else {
+        return ("unreachable", Vec::new());
+    };
+    let reply = actor
+        .control_call(infraternal_plugin_remote::UNINSTALL.id, input)
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    match reply {
+        Some(reply) if reply["state"] == "accepted" => {
+            let left = reply["left"].as_array().map_or_else(Vec::new, |left| {
+                KNOWN
+                    .into_iter()
+                    .filter(|known| left.iter().any(|name| name == known))
+                    .collect()
+            });
+            ("requested", left)
+        }
+        _ => ("unreachable", Vec::new()),
+    }
+}
+/// The machine part of a stored `account@machine` address, as people name the host.
+fn display_name(address: &str) -> &str {
+    address
+        .rsplit_once('@')
+        .map_or(address, |(_, machine)| machine)
+}
+/// The command that removes a leftover installation of `mode` on its machine.
+///
+/// It runs the installed binary's own uninstall, the same ownership-checked
+/// cleanup the host runs when asked (#235): nothing is removed unless that
+/// account's `.bootstrap-owner` names `host`; only that installation's shells
+/// are retired; the mesh interface and packet filter go only when that
+/// installation recorded them, in either packet-filter frontend; the server's
+/// CA and a joined node's data stay. It stops at its first failure. No
+/// names are deleted directly.
+fn manual_uninstall(mode: &str, host: &str) -> String {
+    if mode == "rootful" {
+        format!("/usr/local/bin/infraternal --bootstrap-uninstall {host}")
+    } else {
+        format!("~/.local/bin/infraternal --bootstrap-uninstall {host}")
+    }
+}
+#[cfg(test)]
+#[path = "remote_removal_review_tests.rs"]
+mod review_tests;

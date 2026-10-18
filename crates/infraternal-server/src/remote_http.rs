@@ -15,7 +15,7 @@ use axum::{
     routing::post,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sqlx::SqlitePool;
 use std::{
     sync::Arc,
@@ -24,31 +24,7 @@ use std::{
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
-/// Public transport coordinates are selected by the server, never by a joining host.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct JoinInvitation {
-    /// Bound host authority.
-    pub host_id: Uuid,
-    /// Immutable privilege mode.
-    pub mode: Mode,
-    /// Bound execution uid from the trusted bootstrap probe.
-    pub execution_uid: u32,
-    /// One-time capability: pass privately through stdin, never print or log it.
-    pub token: String,
-    /// Base64url DER public CA pin for authenticated enrollment and leg B.
-    pub ca_der: String,
-    /// Optional independently pinned enrollment HTTPS certificate; legacy uses `ca_der`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub https_der: Option<String>,
-    /// Reverse-proxy HTTPS uses ordinary verified system roots instead of the internal CA.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub https_system_roots: bool,
-    /// Dial-out UDP/TCP address (same port).
-    pub endpoint: std::net::SocketAddr,
-    /// TLS name verified against the configured server certificate.
-    pub server_name: String,
-}
+pub use infraternal_plugin_remote::enrollment::{JoinInvitation, JoinRequest, JoinResponse};
 
 /// Server-owned public transport metadata, independent of the signer lock.
 #[derive(Clone)]
@@ -121,6 +97,14 @@ impl InvitationIssuer {
     ) -> Result<JoinInvitation, StatusCode> {
         issue_invitation(self.0.clone(), cookie, request, Some((address, lookup))).await
     }
+    /// Same authority path as initial issue, retaining existing destination metadata.
+    pub(crate) async fn reissue(
+        &self,
+        cookie: &str,
+        request: InvitationRequest,
+    ) -> Result<JoinInvitation, StatusCode> {
+        issue_invitation(self.0.clone(), cookie, request, None).await
+    }
     pub(crate) fn ready(&self) -> bool {
         self.0.source.load().is_ok()
     }
@@ -136,30 +120,6 @@ impl InvitationIssuer {
 #[serde(deny_unknown_fields)]
 struct RevocationRequest {
     host_id: Uuid,
-}
-
-/// Canonical bounded enrollment body; adapter never forwards requested identity extensions.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct JoinRequest {
-    /// Host bound by the invitation.
-    pub host_id: Uuid,
-    /// Mode bound by the invitation.
-    pub mode: Mode,
-    /// Canonical 256-bit capability, not a URL parameter.
-    pub token: String,
-    /// Canonical base64url PKCS10 DER, at most 4096 decoded bytes.
-    pub csr_der: String,
-}
-
-/// Committed public identity; the private host key never leaves its process.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct JoinResponse {
-    /// Base64url DER seven-day client certificate.
-    pub certificate_der: String,
-    /// Host's trusted enrolled uid.
-    pub execution_uid: u32,
 }
 
 /// Build enrollment routes around the migrated runtime database and a D168 signer.

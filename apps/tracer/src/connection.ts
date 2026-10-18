@@ -20,7 +20,7 @@
  * closing the socket: an intermediary may never deliver its close event. Streams retain unacknowledged input.
  */
 import { noteWsMessage } from "./perf-activity";
-import { plainCloseReason } from "./close-reasons";
+import { CloseNotes, plainCloseReason } from "./close-reasons";
 import {
   WebSocketFrameDecoder,
   encodeMuxedFrameInto,
@@ -68,6 +68,10 @@ const LIVENESS_TICK_MS = 25;
 const IDLE_PROBE_PAUSE_MS = 10;
 const MAX_SOCKETS = 12;
 const VERSION = 1;
+/** Hello caps bit 0: a Resume follows this Hello. */
+const RESUME_NEXT = 1n;
+/** Hello caps bit 1: this viewer understands the kept-link doubt notices (contracts/wire.md, D300). */
+const LINK_DOUBT_NOTICES = 2n;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RECOVERY_SUBSCRIPTION = 45;
@@ -155,6 +159,9 @@ export class MuxConnection {
   private lastPingAt = -Infinity;
   private retryTimer = 0;
   private retryAttempt = 0;
+  private readonly closeNotes = new CloseNotes();
+  /** The console summary's timer. It runs on the global timer, apart from the reconnect schedule on `window`. */
+  private closeNoteTimer: ReturnType<typeof setTimeout> | undefined;
   /** A confirmed terminal gets one quick retry; repeated short-lived resumes retain backoff [D259]. */
   private fastRecovery = false;
   /** When the current socket was welcomed (`performance.now()`), for the backoff's reset. */
@@ -373,9 +380,11 @@ export class MuxConnection {
   }
 
   /** Closes the socket so the connection restarts (every stream re-attaches on the next welcome). */
-  forceClose(): void {
+  /** Closes the socket for a close the server named; `code` and `reason` are that close, for the console line. */
+  forceClose(code?: number, reason?: string): void {
     const socket = this.socket;
     if (!socket) return;
+    this.noteClose(code, reason, "the server");
     this.disconnect(socket);
     socket.close();
   }
@@ -383,7 +392,10 @@ export class MuxConnection {
   /** Reports a violation of the wire contract and closes the socket (the browser rejects 1002 from script, so 4002). */
   fail(message: string): void {
     const socket = this.socket;
-    if (socket) this.disconnect(socket);
+    if (socket) {
+      this.noteClose(4002, "", "this page");
+      this.disconnect(socket);
+    }
     this.status("The connection sent something unexpected and was closed. Reconnecting…");
     try { socket?.close(4002, "invalid tracer frame"); } catch { socket?.close(); }
   }
@@ -393,6 +405,8 @@ export class MuxConnection {
     this.closed = true;
     this.capListeners.clear();
     this.clearRetryTimer();
+    globalThis.clearTimeout(this.closeNoteTimer);
+    this.closeNoteTimer = undefined;
     this.stopRetryHintListeners();
     this.resetPings();
     for (const call of this.calls.values()) call.reject(new Error("connection closed"));
@@ -429,7 +443,7 @@ export class MuxConnection {
       this.resumeSent = resumable;
       // RESUME_NEXT tells the server to wait for the adjacent Resume before issuing Welcome.
       const wantsDesktop = this.config.desktop?.() === true;
-      const hello: WireFrame = { type: "Hello", version: VERSION, caps: (resumable ? 1n : 0n) | (wantsDesktop ? DESKTOP_VIDEO_CAP : 0n), clientInfo: "infraternal-tracer/0.1" };
+      const hello: WireFrame = { type: "Hello", version: VERSION, caps: (resumable ? RESUME_NEXT : 0n) | LINK_DOUBT_NOTICES | (wantsDesktop ? DESKTOP_VIDEO_CAP : 0n), clientInfo: "infraternal-tracer/0.1" };
       let length = encodeMuxedFrameInto(CONTROL_STREAM, hello, this.sendScratch);
       if (resumable && credentials) {
         length += encodeMuxedFrameInto(CONTROL_STREAM, { type: "Resume", connectionId: credentials.connectionId, resumeToken: credentials.resumeToken }, this.sendScratch, length);
@@ -454,15 +468,36 @@ export class MuxConnection {
     };
     socket.onerror = () => {
       if (this.socket !== socket || this.closed) return;
+      // A browser reports a socket that failed at the network as `error` and then `close` 1006 with no reason. Retiring
+      // the socket here makes the later close event ignored, so the console line must be written now (#227).
+      this.noteClose(1006, "");
       this.disconnect(socket);
       socket.close();
     };
     socket.onclose = (event) => {
       if (this.socket !== socket || this.closed) return;
       const internalRotation = event?.code === 4001 && event.reason === "tracer connection rotation";
+      if (!internalRotation) this.noteClose(event?.code, event?.reason);
       this.disconnect(socket);
       if (!internalRotation) this.status(plainCloseReason(event?.reason || "connection ended"));
     };
+  }
+
+  /**
+   * One rate-limited console line per socket close, including a failed reconnect (#227). Call it before disconnect(),
+   * which resets the welcome state and attempt count the line reports. Every path that retires a socket for a close
+   * calls it: once the socket is retired, its later close event is ignored.
+   */
+  private noteClose(code: number | undefined, reason: string | undefined, by?: string): void {
+    const line = this.closeNotes.note(Date.now(), code, reason, this.retryAttempt, this.welcomed, by);
+    if (line) console.warn(line);
+    const due = this.closeNotes.summaryDue();
+    if (due === undefined || this.closeNoteTimer !== undefined) return;
+    this.closeNoteTimer = globalThis.setTimeout(() => {
+      this.closeNoteTimer = undefined;
+      const summary = this.closeNotes.flush(Date.now());
+      if (summary) console.warn(summary);
+    }, Math.max(0, due - Date.now()));
   }
 
   /** Retire the route synchronously; closing a half-open socket need not produce an event. */
@@ -540,6 +575,7 @@ export class MuxConnection {
   private retireUnresponsiveSocket(): void {
     const socket = this.socket;
     if (!socket) return;
+    this.noteClose(4000, "connection unresponsive", "this page");
     this.disconnect(socket);
     this.status(plainCloseReason("connection unresponsive"));
     socket.close(4000, "connection unresponsive");
@@ -630,7 +666,7 @@ export class MuxConnection {
         this.acceptPong(frame.nonce, frame.sentUs);
         return;
       case "Close":
-        this.forceClose();
+        this.forceClose(frame.code, frame.reason);
         this.status(plainCloseReason(frame.reason, "The server closed the connection."));
         return;
       default:

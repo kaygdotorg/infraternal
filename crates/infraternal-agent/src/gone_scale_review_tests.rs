@@ -25,7 +25,15 @@ async fn two_hundred_vanished_sessions_preserve_the_same_channel() {
             None,
         )
         .await?;
-        run_channel(&socket, path, None, None, service.registry.clone()).await
+        run_channel::<false>(
+            &socket,
+            path,
+            None,
+            None,
+            Some(service.registry.clone()),
+            None,
+        )
+        .await
     });
     let mut peer = tokio::net::UnixStream::from_std(server).unwrap();
     let mut buffer = Vec::new();

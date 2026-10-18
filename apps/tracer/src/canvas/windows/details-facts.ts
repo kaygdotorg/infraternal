@@ -16,7 +16,7 @@ const ICON_SESSION = '<rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path
 export interface DetailsInput {
   host: { name: string; user?: string; os?: HostPlatform; address?: string; reach?: string; facts?: HostFactsSnapshot };
   connection: { state: "connected" | "connecting" | "offline"; delayMs?: number; encrypted?: boolean };
-  /** Extended machine info (Settings): every fact, in titled sections. Off shows only the essentials. */
+  /** Extended machine info (Settings): adds the technical facts (init, virtualization, shell, locale, how it is reached). */
   extended?: boolean;
   session?: { name?: string; lastCommand?: string; size?: string; sizedBy?: string; lastUsed?: string; started?: string };
 }
@@ -59,32 +59,32 @@ export function detailsFacts(input: DetailsInput): DetailsFacts {
   const platform = facts ? hostPlatformFromOs(facts.os) : host.os;
   const os = platform && platform !== "unknown" ? platform : undefined;
   const osName = (platform ? OS_NAME[platform] : "") || (facts ? facts.os : "");
-  // Core rows are the essentials; every other row shows only with extended info, and then all rows sit under titles.
+  // D126: the default facts always show, under titled sections (no "More" control, TASTE). The rest are cheap but
+  // technical, so only the device-local extended switch adds them (D156: opt-in for the noisier facts). A fact the
+  // host did not report has an empty value and the popover omits the row.
   const row = (group: string, core: boolean, key: string, value: string) => ({ key, value, group, core });
   const allHostRows = [
     row("System", true, "Name", host.name),
     row("System", true, "System", facts ? `${facts.os}${facts.version ? ` ${facts.version}` : ""}` : osName),
-    row("System", false, "Kernel", facts?.kernel ?? ""),
-    row("System", false, "Architecture", facts?.architecture ?? ""),
-    row("System", false, "Model", facts?.model ?? ""),
+    row("System", true, "Kernel", facts?.kernel ?? ""),
+    row("System", true, "Architecture", facts?.architecture ?? ""),
+    row("System", true, "Model", facts?.model ?? ""),
     row("System", false, "Init", facts?.init ?? ""),
     row("System", false, "Virtualization", facts?.virtualization ?? ""),
-    row("Resources", false, "CPU", facts ? `${facts.logicalCpus} logical ${facts.logicalCpus === 1 ? "core" : "cores"}${facts.cpuModel ? ` · ${facts.cpuModel}` : ""}` : ""),
-    row("Resources", false, "Memory", capacity(facts?.memory)),
-    row("Resources", false, "Disk used on /", capacity(facts?.rootDisk)),
+    row("Resources", true, "CPU", facts ? `${facts.logicalCpus} logical ${facts.logicalCpus === 1 ? "core" : "cores"}${facts.cpuModel ? ` · ${facts.cpuModel}` : ""}` : ""),
+    row("Resources", true, "Memory", capacity(facts?.memory)),
+    row("Resources", true, "Disk used on /", capacity(facts?.rootDisk)),
     row("Resources", true, "Uptime", uptime(facts?.uptimeSeconds)),
-    row("Resources", false, "Load average", facts?.loadAverage?.map((value) => value.toFixed(2)).join(", ") ?? ""),
-    row("Access", false, "Infraternal agent", facts ? `${facts.mode === "embedded" ? "Embedded" : "Remote"} · ${facts.executionUid === 0 ? "root" : "user"}` : ""),
-    row("Access", false, "Engines", facts ? facts.engines.length ? facts.engines.join(", ") : "None detected" : ""),
+    row("Resources", true, "Load average", facts?.loadAverage?.map((value) => value.toFixed(2)).join(", ") ?? ""),
+    row("Access", true, "Infraternal agent", facts ? `${facts.mode === "embedded" ? "Embedded" : "Remote"} · ${facts.executionUid === 0 ? "root" : "user"}` : ""),
+    row("Access", true, "Engines", facts ? facts.engines.length ? facts.engines.join(", ") : "None detected" : ""),
     row("Access", true, "Login", host.user ?? ""),
     row("Access", true, "Address", host.address ?? ""),
     row("Access", false, "How it is reached", host.reach ?? ""),
     row("Access", false, "Shell", facts?.shell ?? ""),
     row("Access", false, "Locale", facts?.locale ?? ""),
   ];
-  const hostRows = input.extended
-    ? allHostRows.map(({ key, value, group }) => ({ key, value, group }))
-    : allHostRows.filter((r) => r.core).map(({ key, value }) => ({ key, value }));
+  const hostRows = allHostRows.filter((r) => r.core || input.extended).map(({ key, value, group }) => ({ key, value, group }));
   const section = (id: string, label: string, icon: string, rows: DetailsFacts["sections"][number]["rows"]) => ({ id, label, icon, rows });
   return {
     ...(os ? { os } : {}),

@@ -18,7 +18,7 @@ use super::{
     Connected, RemoteIdentity, dial_preferred,
     dial_runtime::DialRuntime,
     quic_session_on,
-    supervisor::{MAX_BACKOFF, retry_delay},
+    supervisor::{LinkNotes, MAX_BACKOFF, retry_delay},
 };
 use crate::{channel::Channel, daemon, remote_quic, remote_tls};
 use infraternal_plugin_api::server_path::{ServerLink, ServerLinkKind, ServerLinkReason};
@@ -751,6 +751,8 @@ pub(super) async fn run_observed(
     let mut reason = ServerLinkReason::MeshUnavailable;
     let mut backoff = Duration::from_millis(200);
     let mut cooling = false;
+    // One line per minute at most, so a flapping link cannot flood the agent log.
+    let notes = LinkNotes::new();
     loop {
         let attempt_started = tokio::time::Instant::now();
         // Reconnection itself never waits for a failed mesh probe. Once the
@@ -775,11 +777,13 @@ pub(super) async fn run_observed(
                         continue;
                     }
                     current_credentials(identity, renewal)?;
-                    if backoff == Duration::from_millis(200) {
-                        eprintln!(
-                            "Infraternal agent server unavailable ({:?}); retrying with bounded backoff",
+                    if let Some(line) = notes.note(attempt_started, || {
+                        format!(
+                            "Infraternal agent server link refused or unreachable (closed by: server or network, error {:?}, path reason {reason:?}); retrying with bounded backoff",
                             error.kind()
-                        );
+                        )
+                    }) {
+                        eprintln!("{line}");
                     }
                     report(&registry, None, reason);
                     tokio::time::sleep(retry_delay(backoff, attempt_started.elapsed())).await;
@@ -842,7 +846,16 @@ pub(super) async fn run_observed(
             Steered::Ended => {
                 // A transport close can race a component down; the current
                 // applied preference owns the reason.
+                let lasted = started.elapsed();
                 reason = interruption_reason(&registry, was, reason);
+                if let Some(line) = notes.note(tokio::time::Instant::now(), || {
+                    format!(
+                        "Infraternal agent server link closed (closed by: server or network, link {was:?}, path reason {reason:?}, lasted {} ms); reconnecting",
+                        lasted.as_millis()
+                    )
+                }) {
+                    eprintln!("{line}");
+                }
                 cooling = reason == ServerLinkReason::MeshInterrupted;
                 force_fallback = cooling;
                 report(&registry, None, reason);

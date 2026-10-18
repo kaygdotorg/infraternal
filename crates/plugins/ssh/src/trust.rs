@@ -359,11 +359,11 @@ impl SshTransport for TrustedOpenSsh {
                     if failure.kind == FailureKind::HostKey
                         && let Some(policy) = policy
                     {
-                        failure.host_key_challenge = self.observe(destination, policy).await?;
+                        failure.set_host_key_challenge(self.observe(destination, policy).await?);
                         // The shown fingerprint and type come from the same observation
                         // consumed by confirmation, rather than a second scanner's order.
                         failure.fingerprints.clear();
-                        if let Some(challenge) = failure.host_key_challenge
+                        if let Some(challenge) = failure.host_key_challenge()
                             && let Some(observation) = lock(&self.pending).get(&challenge)
                             && let Some((fingerprint, record)) = observation.keys.first()
                         {

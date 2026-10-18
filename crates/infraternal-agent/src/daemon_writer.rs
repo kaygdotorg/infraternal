@@ -77,11 +77,12 @@ pub(crate) async fn writer(
                 caps: crate::daemon::hello_capabilities(
                     socket.native_stream_id().is_some(),
                     renewal,
-                ) | if socket.native_stream_id().is_some() {
-                    wire_caps
-                } else {
-                    0
-                },
+                ) & !infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
+                    | if socket.native_stream_id().is_some() {
+                        wire_caps
+                    } else {
+                        wire_caps & infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
+                    },
                 client_info: "infraternal agent",
             },
         )

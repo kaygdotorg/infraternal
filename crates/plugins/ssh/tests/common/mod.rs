@@ -45,3 +45,20 @@ while True:
     .expect("write public-policy master fixture");
     path
 }
+
+/// The example compiles the shipping runtime guard, without a duplicate probe.
+#[allow(dead_code, clippy::unwrap_used)]
+pub fn runtime_helper() -> PathBuf {
+    std::env::var_os("INFRATERNAL_TEST_RUNTIME_HELPER").map_or_else(
+        || {
+            std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples/recovery-helper")
+        },
+        PathBuf::from,
+    )
+}

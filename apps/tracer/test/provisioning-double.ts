@@ -24,15 +24,17 @@
  * - `stale*`: an earlier setup left leftovers: the attempt pauses on a `check` event carrying
  *   `failure.kind: "stale_previous_attempt"` and `leftovers` (challenge, mode, findings); `start-fresh` with that challenge
  *   continues the same attempt to done. Closing the socket cancels the pause (contracts/ssh-bootstrap.md, #169)
+ * - `added*`: the host is already added: an `install` failure with `already_added` and the existing `host_id`, no details
  * - `running*`: `setup_running` once; the retry succeeds
  * - `unsupported*`: reported after sign-in, never succeeds; `broken*`: install fails, the retry works
  * HTTP side (`handleBootstrapHttp`): the proposed endpoints of #87 (ssh-key, discovery, credential, host-key,
  * install-command) plus `/__mock/bootstrap/*` switches the specs use to reach empty and error states.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { WebSocket } from "ws";
 import type { AddHostFixture } from "../src/add-host-contract";
+import { publishSetup, runSetup } from "./setup-double";
 import { addHostFixtures } from "./prototype-fixtures";
 
 const MAX_COMMAND_BYTES = 32 * 1024;
@@ -59,13 +61,16 @@ interface BootstrapEvent {
   message: string;
   elapsed_ms: number;
   log_tail: string[];
+  host_id?: string;
+  session_id?: string;
   leftovers?: { challenge: string; mode: "rootless" | "root"; findings: string[] };
-  failure?: { failed_step?: "connect" | "start"; kind: FailureKind; message: string; log_tail: string[]; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean };
+  failure?: { failed_step?: "connect" | "start"; kind: FailureKind; message: string; log_tail: string[]; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string };
   authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
 }
 
 interface Target {
   id: string;
+  publication?: { host_id: string; session_id: string };
   /** The host name the scripted patterns match: the fixture id or the typed host. */
   name: string;
   /** Kind of the one-connection credential this target was started with. */
@@ -118,7 +123,10 @@ function fixtureFor(address: { kind: string; value: string }): AddHostFixture | 
   return known;
 }
 
-interface Failure { failed_step?: "connect" | "start"; phase: number; beforeLogin: boolean; kind: FailureKind; message: string; evidence: string; choose?: boolean; fingerprints?: string[] }
+interface Failure { failed_step?: "connect" | "start"; phase: number; beforeLogin: boolean; kind: FailureKind; message: string; evidence: string; choose?: boolean; fingerprints?: string[]; alreadyAdded?: boolean }
+
+/** The existing host a duplicate (`added*`) names; the mock world maps it to a host it already has. */
+const ADDED_HOST_ID = "6f1d0a52-7c3e-4b8a-9d21-0a5e4c7b1f30";
 
 /** Host keys the person trusted on the same bootstrap socket, until `reset`. */
 const trusted = new Set<string>();
@@ -154,6 +162,7 @@ function failureOf(target: Target): Failure | undefined {
   }
   if (/^refused/.test(name)) return { phase: 0, beforeLogin: true, kind: "auth", message: "The host refused the server key.", evidence: "The host answered on port 22 and refused the SSH identity." };
   if (/^running/.test(name)) return { phase: 0, beforeLogin: false, kind: "setup_running", message: "Another setup is still running on this host.", evidence: "A setup holds the lock on this host." };
+  if (/^added/.test(name)) return { phase: 0, beforeLogin: true, kind: "install", message: "This host is already added. Open its terminal from Console.", evidence: "", alreadyAdded: true };
   if (/^nodetail/.test(name)) return { phase: 0, beforeLogin: true, kind: "install", message: "Setup stopped before this host was ready.", evidence: "Setup stopped before this host was ready." };
   if (/^connectfail/.test(name)) return { failed_step: "connect", phase: 0, beforeLogin: true, kind: "install", message: "Connecting to the host failed. Check SSH access and the host service, then try again.", evidence: "The SSH connection setup failed." };
   if (/^broken/.test(name)) return { failed_step: "start", phase: 1, beforeLogin: false, kind: "install", message: "The installation did not finish and was rolled back.", evidence: "Uploaded the binary.\nThe unit failed to start." };
@@ -169,7 +178,7 @@ function authOf(target: Target): NonNullable<BootstrapEvent["authentication"]> {
   return network ? { method: "network", network } : { method: "server-key" };
 }
 
-export function serveProvisioning(socket: WebSocket, _request: IncomingMessage): void {
+export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, publishTerminal?: (hostId: string) => string): void {
   const targets = new Map<string, Target>();
   const events: BootstrapEvent[] = [];
   let sequence = 0;
@@ -185,6 +194,7 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
       sequence: ++sequence, target: target.id, attempt: target.attempt, step, message,
       elapsed_ms: Date.now() - target.enteredAt, log_tail: [...target.breadcrumbs],
     };
+    if (step === "done" && target.publication) Object.assign(event, target.publication);
     if (failure) event.failure = failure;
     if (authentication) event.authentication = authentication;
     if (leftovers) event.leftovers = leftovers;
@@ -218,7 +228,8 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
     const fail = (): void => {
       if (!failure) return;
       emit(target, "failed", failure.message, {
-        ...(failure.failed_step ? { failed_step: failure.failed_step } : {}), kind: failure.kind, message: failure.message, log_tail: [failure.evidence],
+        ...(failure.failed_step ? { failed_step: failure.failed_step } : {}), kind: failure.kind, message: failure.message, log_tail: failure.evidence ? [failure.evidence] : [],
+        ...(failure.alreadyAdded ? { already_added: true, host_id: ADDED_HOST_ID } : {}),
         ...(failure.fingerprints ? { fingerprints: failure.fingerprints, host_key_challenge: target.id, host_key_type: "ssh-ed25519" } : {}), ...(failure.choose ? { choose_method: true } : {}),
       });
       target.state = "failed";
@@ -226,6 +237,16 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
       release();
     };
     const walk = (phase: number): void => {
+      if (phase === 1 && /^instant/.test(target.name) && publishTerminal) {
+        const host = randomUUID();
+        const session = publishTerminal(host);
+        target.publication = { host_id: host, session_id: session };
+        publishSetup(host, session);
+        emit(target, "done", "The terminal is ready; setup steps continue.");
+        target.state = "done";
+        runSetup(host, target.name.includes("fail") ? "join" : undefined, release);
+        return;
+      }
       if (phase >= PHASES.length) {
         emit(target, "done", target.mode === "root" ? "Ready · root" : "Ready");
         target.state = "done";

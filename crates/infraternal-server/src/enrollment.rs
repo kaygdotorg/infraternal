@@ -18,24 +18,7 @@ pub(crate) mod authority;
 mod bootstrap_retirement;
 pub use authority::HostAuthority;
 
-/// A host's immutable execution mode, bound into its invitation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    /// Runs as the enrolled non-root user.
-    Rootless,
-    /// Runs as uid zero after explicit owner consent.
-    Rootful,
-}
-
-impl Mode {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Rootless => "rootless",
-            Self::Rootful => "rootful",
-        }
-    }
-}
+pub use infraternal_plugin_remote::enrollment::Mode;
 
 /// Public identity produced by the trusted CSR signer, never supplied by a client.
 pub struct CertificateRecord {

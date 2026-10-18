@@ -1,21 +1,197 @@
 //! Tests browser control and content-free proof authority while input or SQL is blocked [128,215,265], #199.
 use super::*;
+use std::{
+    io::Write,
+    sync::{Arc, Mutex as StdMutex},
+};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[derive(Clone, Default)]
+struct Capture(Arc<StdMutex<Vec<u8>>>);
+
+impl Write for Capture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
+}
+
+impl Capture {
+    fn start() -> (Self, tracing::subscriber::DefaultGuard) {
+        let capture = Self::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .without_time()
+            .with_writer(capture.clone())
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        (capture, guard)
+    }
+
+    fn events(&self, name: &str) -> Vec<serde_json::Value> {
+        crate::stream_close::settled();
+        String::from_utf8(self.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|event: &serde_json::Value| event["fields"]["event"] == name)
+            .collect()
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn review_full_input_writer_preserves_browser_control_progress() {
     browser_credit_case(false).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 async fn browser_input_overload_retires_only_the_terminal_stream() {
     browser_credit_case(true).await;
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep the socket exchange and log assertions in one integration case.
+async fn browser_output_credit_refusal_logs_the_stream_reason() {
+    let _serial = SERIAL.lock().await;
+    let (capture, _subscriber) = Capture::start();
+    let f = fixture().await;
+    let session = [72_u8; 16];
+    sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen) VALUES(?,?,unixepoch(),unixepoch())")
+        .bind(session.as_slice())
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let (socket, peer) = UnixStream::pair().unwrap();
+    let (address, server) = credit_server(&f, socket).await;
+    let (observed, _inputs) = tokio::sync::mpsc::channel(4);
+    let backend = tokio::spawn(input_backend(peer, observed));
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut browser, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .unwrap();
+    assert_server_hello(&mut browser).await;
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "output-credit-close-log",
+        },
+    )
+    .await;
+    let initial_wire = read_client_frame(&mut browser).await;
+    let initial = decode_muxed_frame(&initial_wire).unwrap();
+    let refusal_code = match &initial.frame {
+        Frame::Close { code, .. } => Some(*code),
+        _ => None,
+    };
+    assert!(
+        matches!(initial.frame, Frame::Welcome { .. }),
+        "server did not send Welcome; control close code={refusal_code:?}"
+    );
+    client_ws_send(
+        &mut browser,
+        1,
+        &Frame::AttachTerm {
+            session_id: &session,
+            last_out_seq: 0,
+            last_in_seq: 0,
+        },
+    )
+    .await;
+    assert!(matches!(
+        decode_muxed_frame(&read_client_frame(&mut browser).await)
+            .unwrap()
+            .frame,
+        Frame::Ack { in_seq_acked: 0 }
+    ));
+    client_ws_send(
+        &mut browser,
+        1,
+        &Frame::Credit {
+            bytes: 8 * 1024 * 1024 + 1,
+        },
+    )
+    .await;
+    let close = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let wire = read_client_frame(&mut browser).await;
+            if matches!(
+                decode_muxed_frame(&wire).unwrap().frame,
+                Frame::Close { .. }
+            ) {
+                break wire;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        decode_muxed_frame(&close).unwrap(),
+        infraternal_protocol::DecodedMuxedFrame {
+            stream_id: 1,
+            frame: Frame::Close {
+                code: 1013,
+                reason: "terminal output credit exceeded its limit"
+            },
+            ..
+        }
+    ));
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Ping {
+            nonce: 228,
+            sent_us: 0,
+        },
+    )
+    .await;
+    assert!(matches!(
+        decode_muxed_frame(&read_client_frame(&mut browser).await)
+            .unwrap()
+            .frame,
+        Frame::Pong { nonce: 228, .. }
+    ));
+    let events = capture.events("terminal_stream_closed");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["fields"]["who"], "server");
+    assert_eq!(
+        events[0]["fields"]["reason_category"],
+        "flow_control_refusal"
+    );
+    assert_eq!(events[0]["fields"]["reason"], "credit_exceeded");
+    assert_eq!(
+        events[0]["fields"]["session_id"],
+        Uuid::from_bytes(session).to_string()
+    );
+    server.abort();
+    backend.abort();
 }
 
 /// Share the actual full-window setup between progress and stream-overload checks.
 async fn browser_credit_case(overload: bool) {
     let _guard = SERIAL.lock().await;
+    // These assert frame ordering under backpressure, not the host's ability
+    // to schedule SQLite and multi-megabyte writes inside a learned lease.
+    // Keep production deadlines stationary across the real I/O, as in the
+    // other socket ordering fixtures; unexpected reconnects still fail.
+    let _clock = FrozenSocketTime::new().await;
+    let (capture, _subscriber) = Capture::start();
     let f = fixture().await;
     let session = [71_u8; 16];
     sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen) VALUES(?,?,unixepoch(),unixepoch())")
@@ -95,6 +271,14 @@ async fn browser_credit_case(overload: bool) {
     );
     if overload {
         assert_overload_isolation(&mut browser).await;
+        let events = capture.events("terminal_stream_closed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["fields"]["who"], "server");
+        assert_eq!(
+            events[0]["fields"]["reason_category"],
+            "flow_control_refusal"
+        );
+        assert_eq!(events[0]["fields"]["reason"], "input_queue_full");
     } else {
         assert_credit_and_order(&mut browser, &mut inputs).await;
     }
@@ -123,6 +307,16 @@ async fn input_backend(mut peer: UnixStream, observed: tokio::sync::mpsc::Sender
     while let Some(wire) = read_leg_b_frame(&mut peer, &mut receive).await {
         let decoded = decode_muxed_frame(&wire).unwrap();
         match decoded.frame {
+            // Withhold only durable input acknowledgment. Transport liveness
+            // remains responsive while that input window is intentionally full.
+            Frame::Ping { nonce, sent_us } => {
+                leg_b_send(
+                    &mut peer,
+                    decoded.stream_id,
+                    &Frame::Pong { nonce, sent_us },
+                )
+                .await;
+            }
             Frame::AttachTerm { .. } => {
                 leg_b_send(
                     &mut peer,
@@ -521,13 +715,13 @@ async fn idle_probe_authority_refreshes_expiry_after_authorized_activity() {
     let mut authority = crate::websocket::probe_authority::Lease::new(&state, &f.user, &f.session)
         .await
         .unwrap();
-    assert!(
-        f.auth
-            .socket_activity(&f.session, &f.user, now)
-            .await
-            .unwrap()
-            > now + 5
-    );
+    f.auth.renewal(&f.session, &f.user, ()).await;
+    let renewed: i64 = sqlx::query_scalar("SELECT expires FROM sessions WHERE token_hash=?")
+        .bind(hash(&f.session))
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert!(renewed > now + 5);
     tokio::time::advance(Duration::from_secs(6)).await;
     authority
         .run(&state, &f.user, &f.session, async { Ok::<(), ()>(()) })

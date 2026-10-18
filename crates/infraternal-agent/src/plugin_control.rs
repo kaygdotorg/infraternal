@@ -14,6 +14,11 @@ use tokio::{
 /// One dedicated sleeping worker owns synchronous plugin calls; terminal dispatch never enters kernel work.
 #[derive(Clone)]
 pub(crate) struct Registry {
+    // Dynamic fixture identity is explicit, never inferred from worker failure.
+    #[cfg(test)]
+    empty: bool,
+    #[cfg(feature = "remote")]
+    lifetime: Option<std::sync::Arc<std::fs::File>>,
     sender: mpsc::Sender<Job>,
     #[cfg(any(test, feature = "native-streams"))]
     capabilities: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -180,12 +185,12 @@ impl Registry {
     }
     #[cfg(test)]
     pub(crate) fn new(registry: PluginRegistry) -> Self {
-        Self::from_factory(Box::new(move || Ok(registry)))
+        Self::from_factory(Some(Box::new(move || Ok(registry))))
     }
     /// Exercise startup failure through the real lazy worker/channel lifecycle.
     #[cfg(all(test, feature = "remote"))]
     pub(crate) fn unavailable() -> Self {
-        Self::from_factory(Box::new(|| Err(PluginError::Rejected)))
+        Self::from_factory(Some(Box::new(|| Err(PluginError::Rejected))))
     }
     fn for_mode(
         state: PathBuf,
@@ -194,11 +199,17 @@ impl Registry {
     ) -> Self {
         #[cfg(test)]
         if let Ok(factory) = TEST_FACTORY.try_with(std::sync::Arc::clone) {
-            return Self::from_factory(Box::new(move || factory()));
+            return Self::from_factory(Some(Box::new(move || factory())));
         }
-        let registry = Self::from_factory(Box::new(move || {
-            crate::plugins::registry_at(mode, Some(&state), installation.as_ref())
-        }));
+        // The compiled catalog is constant. An absent provider needs no erased
+        // factory or retained state; dynamic test fixtures still supply a factory.
+        let registry = Self::from_factory(if crate::plugins::descriptors().is_empty() {
+            None
+        } else {
+            Some(Box::new(move || {
+                crate::plugins::registry_at(mode, Some(&state), installation.as_ref())
+            }))
+        });
         if matches!(mode, crate::plugins::ExecutionMode::Embedded) {
             registry.set_server_link(infraternal_plugin_api::server_path::ServerLink {
                 kind: infraternal_plugin_api::server_path::ServerLinkKind::Local,
@@ -210,11 +221,13 @@ impl Registry {
         registry
     }
     fn from_factory(
-        factory: Box<dyn FnOnce() -> Result<PluginRegistry, PluginError> + Send>,
+        factory: Option<Box<dyn FnOnce() -> Result<PluginRegistry, PluginError> + Send>>,
     ) -> Self {
         #[cfg(any(test, feature = "native-streams"))]
-        let factory: Factory = Box::new(move || {
-            factory().map(|registry| std::sync::Arc::new(std::sync::Mutex::new(registry)))
+        let factory: Option<Factory> = factory.map(|factory| {
+            Box::new(move || {
+                factory().map(|registry| std::sync::Arc::new(std::sync::Mutex::new(registry)))
+            }) as Factory
         });
         // Terminal builds keep sole ownership in the sleeping worker. A shared
         // mutable registry is needed only for native provider injection.
@@ -224,15 +237,21 @@ impl Registry {
     pub(crate) fn from_shared(registry: crate::plugins::SharedRegistry) -> Self {
         #[cfg(any(test, feature = "native-streams"))]
         let shared = registry.clone();
-        let instance = Self::from_shared_factory(Box::new(move || Ok(registry)));
+        let instance = Self::from_shared_factory(Some(Box::new(move || Ok(registry))));
         #[cfg(any(test, feature = "native-streams"))]
         let _ = instance.shared.set(shared);
         instance
     }
-    fn from_shared_factory(factory: Factory) -> Self {
+    fn from_shared_factory(factory: Option<Factory>) -> Self {
+        #[cfg(test)]
+        let empty = factory.is_none();
         let (sender, incoming) = mpsc::channel::<Job>(8);
         let (events, _) = tokio::sync::broadcast::channel(8);
         Self {
+            #[cfg(test)]
+            empty,
+            #[cfg(feature = "remote")]
+            lifetime: None,
             sender,
             #[cfg(any(test, feature = "native-streams"))]
             capabilities: std::sync::Arc::default(),
@@ -243,10 +262,22 @@ impl Registry {
             events,
             paths: tokio::sync::watch::channel(None).0,
             link: std::sync::Arc::default(),
-            pending: std::sync::Arc::new(std::sync::Mutex::new(Some(PendingWorker {
-                factory,
-                incoming,
-            }))),
+            pending: std::sync::Arc::new(std::sync::Mutex::new(
+                factory.map(|factory| PendingWorker { factory, incoming }),
+            )),
+        }
+    }
+    // Production identity is the compiled catalog constant. Test registries
+    // may contain dynamic providers even when that catalog is empty.
+    #[cfg_attr(not(test), allow(clippy::unused_self))]
+    const fn is_empty(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.empty
+        }
+        #[cfg(not(test))]
+        {
+            crate::plugins::descriptors().is_empty()
         }
     }
     /// Receiver closure fences replacement: no old callback can still execute.
@@ -255,6 +286,9 @@ impl Registry {
         self.sender.is_closed()
     }
     fn start(&self) -> Result<(), PluginError> {
+        if self.is_empty() {
+            return Ok(());
+        }
         // An inactive control surface needs no thread or its resident startup
         // code. Serialize the first call so concurrent local/server callers
         // share exactly one sleeping worker for the process lifetime.
@@ -271,9 +305,13 @@ impl Registry {
             let capabilities = self.capabilities.clone();
             #[cfg(any(test, feature = "native-streams"))]
             let shared = self.shared.clone();
+            #[cfg(feature = "remote")]
+            let lifetime = self.lifetime.clone();
             std::thread::Builder::new()
                 .name("node-plugins".into())
                 .spawn(move || {
+                    #[cfg(feature = "remote")]
+                    let _lifetime = lifetime;
                     let Ok(owner) = factory() else {
                         return;
                     };
@@ -348,6 +386,10 @@ impl Registry {
         context: infraternal_plugin_api::admission::NodeContext,
     ) -> Result<(), infraternal_plugin_api::admission::OpenRefusal> {
         use infraternal_plugin_api::admission::OpenRefusal;
+        if self.is_empty() {
+            // Equivalent to admission through an empty PluginRegistry.
+            return Ok(());
+        }
         self.start().map_err(|_| OpenRefusal::ResourceUnavailable)?;
         let (result, receive) = tokio::sync::oneshot::channel();
         self.sender
@@ -365,6 +407,9 @@ impl Registry {
     /// Resolve retained component intent before dialing, without inventing a plugin action.
     #[cfg(any(test, feature = "remote"))]
     pub(crate) async fn initialize_paths(&self) -> Result<(), PluginError> {
+        if self.is_empty() {
+            return Ok(());
+        }
         self.start()?;
         let (result, receive) = tokio::sync::oneshot::channel();
         self.sender
@@ -411,6 +456,9 @@ impl Registry {
         if input.len() > MAX_ACTION_BYTES || action.len() > 128 {
             return Err(PluginError::MessageTooLarge);
         }
+        if self.is_empty() {
+            return Err(PluginError::UnknownAction);
+        }
         self.start()?;
         let (result, receive) = tokio::sync::oneshot::channel();
         self.sender
@@ -444,21 +492,103 @@ impl Service {
         mode: crate::plugins::ExecutionMode,
         installation: Option<&crate::plugins::Installation>,
     ) -> io::Result<Self> {
-        // Compiled metadata is validated by registry tests; construct its
-        // process-owned instances only when a caller needs an action.
-        #[cfg(feature = "remote")]
-        let installation = installation.cloned();
-        #[cfg(not(feature = "remote"))]
-        let installation = installation.copied();
-        let registry = Registry::for_mode(state.to_owned(), mode, installation);
-        Self::with_registry(state, registry).await
+        Self::start_inner(
+            state,
+            mode,
+            installation,
+            #[cfg(all(feature = "remote", target_os = "linux"))]
+            None,
+            #[cfg(any(test, feature = "native-streams"))]
+            None,
+        )
+        .await
     }
-    pub(crate) async fn with_registry(state: &Path, registry: Registry) -> io::Result<Self> {
-        let local = Local::bind(state, registry.clone()).await?;
-        Ok(Self {
-            registry,
-            _local: local,
+    #[cfg(all(feature = "remote", target_os = "linux"))]
+    pub(crate) async fn start_retained(
+        state: &Path,
+        installation: Option<&crate::plugins::Installation>,
+        lifetime: &mut Option<std::sync::Arc<std::fs::File>>,
+    ) -> io::Result<Self> {
+        let service = Self::start_inner(
+            state,
+            crate::plugins::ExecutionMode::Remote,
+            installation,
+            lifetime.clone(),
+            #[cfg(any(test, feature = "native-streams"))]
+            None,
+        )
+        .await?;
+        lifetime.clone_from(&service.registry.lifetime);
+        Ok(service)
+    }
+    fn start_inner<'a>(
+        state: &'a Path,
+        mode: crate::plugins::ExecutionMode,
+        installation: Option<&'a crate::plugins::Installation>,
+        #[cfg(all(feature = "remote", target_os = "linux"))] lifetime: Option<
+            std::sync::Arc<std::fs::File>,
+        >,
+        #[cfg(any(test, feature = "native-streams"))] supplied: Option<Registry>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<Self>> + Send + 'a>> {
+        // Startup has one temporary allocation rather than repeating its state
+        // machine in embedded and remote dispatch. It is released after startup [243].
+        Box::pin(async move {
+            #[cfg(all(feature = "remote", target_os = "linux"))]
+            let lifetime = if matches!(mode, crate::plugins::ExecutionMode::Remote) {
+                let guard = if let Some(guard) = lifetime {
+                    infraternal_plugin_remote::runtime_lock::validate(&guard, state)?;
+                    guard
+                } else {
+                    std::sync::Arc::new(if let Some(context) = installation {
+                        infraternal_plugin_remote::runtime_lock::acquire_owned(
+                            state,
+                            &context.host,
+                        )?
+                    } else {
+                        infraternal_plugin_remote::runtime_lock::acquire(state)?
+                    })
+                };
+                crate::sessions::state(Some(state.to_owned()))?;
+                Some(guard)
+            } else {
+                None
+            };
+            // Compiled metadata is validated by registry tests; construct its
+            // process-owned instances only when a caller needs an action.
+            #[cfg(all(feature = "remote", target_os = "linux"))]
+            let installation = installation.cloned();
+            #[cfg(not(feature = "remote"))]
+            let installation = installation.copied();
+            #[cfg(any(test, feature = "native-streams"))]
+            let registry = supplied
+                .unwrap_or_else(|| Registry::for_mode(state.to_owned(), mode, installation));
+            #[cfg(not(any(test, feature = "native-streams")))]
+            let registry = Registry::for_mode(state.to_owned(), mode, installation);
+            // Listener tasks and synchronous workers retain the same ownership even
+            // when cancellation has been requested but their work has not stopped.
+            #[cfg(all(feature = "remote", target_os = "linux"))]
+            let registry = Registry {
+                lifetime,
+                ..registry
+            };
+            let local = Local::bind(state, registry.clone()).await?;
+            Ok(Self {
+                registry,
+                _local: local,
+            })
         })
+    }
+    #[cfg(any(test, feature = "native-streams"))]
+    pub(crate) async fn with_registry(state: &Path, registry: Registry) -> io::Result<Self> {
+        Self::start_inner(
+            state,
+            crate::plugins::ExecutionMode::Remote,
+            None,
+            #[cfg(all(feature = "remote", target_os = "linux"))]
+            None,
+            Some(registry),
+        )
+        .await
     }
 }
 /// The dispatcher queues a byte-bound action, never waits for kernel work or the CLI.
@@ -1154,6 +1284,89 @@ mod tests {
         paths.changed().await.unwrap();
         assert!(paths.borrow_and_update().is_none());
     }
+    /// Compile-out builds admit terminals without creating a worker for an empty catalog.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn empty_catalog_preserves_control_contract_without_an_os_worker() {
+        // This case belongs to the no-default-features build; populated catalogs
+        // retain the generic policy worker and its independent fixture coverage.
+        if !crate::plugins::descriptors().is_empty() {
+            return;
+        }
+        let worker_threads = || {
+            std::fs::read_dir("/proc/self/task")
+                .unwrap()
+                .filter_map(|entry| {
+                    let entry = entry.unwrap();
+                    match std::fs::read_to_string(entry.path().join("comm")) {
+                        Ok(name) if name.trim() == "node-plugins" => Some(entry.file_name()),
+                        Ok(_) => None,
+                        // A previously dropped fixture worker may finish while
+                        // enumerating. Its disappearance cannot create a new id.
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                        Err(error) => panic!("could not observe plugin worker ownership: {error}"),
+                    }
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let before = worker_threads();
+        let registry = Registry::for_mode(
+            PathBuf::from("unused-empty-catalog-state"),
+            crate::plugins::ExecutionMode::Remote,
+            None,
+        );
+        let mut events = registry.subscribe();
+        assert_eq!(
+            registry
+                .admit(
+                    "terminal.open",
+                    infraternal_plugin_api::admission::NodeContext::default(),
+                )
+                .await,
+            Ok(())
+        );
+        for public in [false, true] {
+            assert!(matches!(
+                registry
+                    .execute(public, "unknown.read".into(), b"{}".to_vec(), None)
+                    .await,
+                Err(PluginError::UnknownAction)
+            ));
+        }
+        assert!(matches!(
+            registry
+                .execute(
+                    false,
+                    "unknown.read".into(),
+                    vec![0; MAX_ACTION_BYTES + 1],
+                    None
+                )
+                .await,
+            Err(PluginError::MessageTooLarge)
+        ));
+        assert!(matches!(
+            registry
+                .execute(false, "x".repeat(129), b"{}".to_vec(), None)
+                .await,
+            Err(PluginError::MessageTooLarge)
+        ));
+        registry.initialize_paths().await.unwrap();
+        assert!(registry.server_paths().borrow().is_none());
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "an empty catalog retains an open, silent event channel"
+        );
+        let after = worker_threads();
+        assert!(
+            after.is_subset(&before),
+            "an empty catalog started a node-plugins OS worker: {:?}",
+            after.difference(&before).collect::<Vec<_>>()
+        );
+    }
+
     struct Directory(PathBuf);
     impl Directory {
         fn new() -> Self {
@@ -1177,6 +1390,49 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.0).unwrap();
         }
+    }
+    #[cfg(feature = "remote")]
+    #[tokio::test]
+    #[allow(
+        clippy::used_underscore_binding,
+        reason = "Await the endpoint owner's actual cancellation in this lifecycle test."
+    )]
+    async fn retained_runtime_registry_keeps_lifetime_ownership_after_listener_abort() {
+        let directory = Directory::new();
+        let service = Service::start(&directory.0, crate::plugins::ExecutionMode::Remote, None)
+            .await
+            .unwrap();
+        let retained = service.registry.clone();
+        let stopped = service._local.task.abort_handle();
+        let probe = std::fs::File::open(
+            directory
+                .0
+                .join(infraternal_plugin_remote::runtime_lock::LOCK),
+        )
+        .unwrap();
+        drop(service);
+        tokio::task::yield_now().await;
+        assert!(
+            probe.try_lock().is_err(),
+            "retained runtime work lost its lifetime lock"
+        );
+        drop(retained);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !stopped.is_finished() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // Listener cancellation joins only its async owner. The synchronous
+        // worker also retains ownership until its receiver and registry retire.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while probe.try_lock().is_err() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
     #[tokio::test]
     async fn synchronous_plugin_work_does_not_park_the_current_thread_reactor() {

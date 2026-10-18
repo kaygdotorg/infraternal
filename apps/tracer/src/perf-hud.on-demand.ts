@@ -25,6 +25,7 @@
  * Loaded by main.ts after the first idle, only in preview builds (the module is left out of production builds) and
  * not when the address has `?fps=0`.
  */
+import { randomUuid } from "./identifiers";
 import { buildVersion } from "./build-version";
 import { readLocal, writeLocal } from "../../../packages/ui/src/local-pref";
 import { activityIn, readPerfProbe, wsBetween } from "./perf-activity";
@@ -101,7 +102,7 @@ const pathOf = (url: string): string => { try { const u = new URL(url, location.
 
 export function mountPerfHud(options: { bench?: boolean } = {}): { dispose(): void } {
   const det = new FrameDetector();
-  const sid = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36);
+  const sid = randomUuid();
   const startedAt = Date.now() - performance.now();
   const stage = document.querySelector<HTMLElement>(".terminal-screen") ?? document.body;
 

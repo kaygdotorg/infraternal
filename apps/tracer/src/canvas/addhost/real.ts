@@ -4,6 +4,7 @@
  * Local references live for at most a minute, are bound to a target, and are consumed before sending.
  * Discovery, public SSH keys and install commands use their existing same-origin endpoints.
  */
+import { randomUuid } from "../../identifiers";
 import { onDemand } from "../../on-demand";
 import type { HostSource } from "../../../../../packages/ui/src/source-icons";
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
@@ -135,7 +136,7 @@ export function createRealProvisioning(): ProvisioningService {
         || (secret.kind === "password" ? !prompt(secret.text) : !secret.text || bytes.encode(secret.text).length > 24576 || secret.text.includes("\0") || secret.passphrase !== undefined && !prompt(secret.passphrase))) {
         throw new ServiceError("The sign-in input is invalid or too large. Enter it again.");
       }
-      const reference = crypto.randomUUID();
+      const reference = randomUuid();
       const auth = secret.kind === "password" ? { password: secret.text } : { key: secret.text, ...(secret.passphrase ? { passphrase: secret.passphrase } : {}) };
       secrets.set(reference, { target, address, auth, expires: Date.now() + 60000 });
       return reference;

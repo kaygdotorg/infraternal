@@ -123,7 +123,7 @@ impl SshTransport for PublicChallenge {
                 infraternal_plugin_ssh::model::FailureKind::HostKey,
                 "The fixture host key needs confirmation.",
             );
-            failure.host_key_challenge = Some(self.0);
+            failure.set_host_key_challenge(Some(self.0));
             failure
                 .fingerprints
                 .push(format!("SHA256:{}", "a".repeat(43)));
@@ -161,6 +161,8 @@ async fn confirmation_interrupt(component_off: bool) {
                 aarch64: "unused".into(),
             },
         ),
+        #[cfg(feature = "remote")]
+        setup_sockets: Arc::new(Semaphore::new(128)),
         sockets: Arc::new(Semaphore::new(16)),
         ssh_key: Arc::new(UnavailableSshKey),
     });
@@ -245,6 +247,8 @@ async fn a_client_request_during_a_pending_confirmation_keeps_the_batch() {
                 aarch64: "unused".into(),
             },
         ),
+        #[cfg(feature = "remote")]
+        setup_sockets: Arc::new(Semaphore::new(128)),
         sockets: Arc::new(Semaphore::new(16)),
         ssh_key: Arc::new(UnavailableSshKey),
     });
@@ -389,11 +393,14 @@ async fn fixture(
         auth: auth.clone(),
         runner,
         ssh_key: Arc::new(UnavailableSshKey),
+        #[cfg(feature = "remote")]
+        setup_sockets: Arc::new(Semaphore::new(128)),
         sockets: Arc::new(Semaphore::new(16)),
     });
-    let app = Router::new()
-        .route("/v1/bootstrap/ws", get(upgrade))
-        .with_state(api.clone());
+    let app = Router::new().route("/v1/bootstrap/ws", get(upgrade));
+    #[cfg(feature = "remote")]
+    let app = app.route("/v1/bootstrap/setup/ws", get(setup_api::upgrade));
+    let app = app.with_state(api.clone());
     let serving = tokio::spawn(async move {
         use axum::serve::ListenerExt;
         let listener = listener.tap_io(|socket| {
@@ -916,3 +923,7 @@ fn start_fresh_request_is_bound_to_a_target_and_public_challenge() {
         assert!(serde_json::from_value::<Request>(value).is_err());
     }
 }
+
+#[cfg(feature = "remote")]
+#[path = "bootstrap_setup_api_tests.rs"]
+mod setup_status_tests;

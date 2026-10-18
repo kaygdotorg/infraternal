@@ -29,17 +29,17 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
         } else {
             json!({"host_id":host,"uninstall":!retain})
         };
-        tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
-            .build()?
-            .block_on(async {
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(20),
-                    request(server, &input.session, finish, body),
-                )
-                .await
-                .map_err(|_| denied())?
-            })
+            .build()?;
+        crate::block_on(&runtime, async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                request(server, &input.session, finish, body),
+            )
+            .await
+            .map_err(|_| denied())?
+        })
     };
     match operation() {
         Ok(value) if machine => {

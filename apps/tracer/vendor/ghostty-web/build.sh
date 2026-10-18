@@ -65,12 +65,20 @@ git -C "$source_dir" apply "$vendor_dir/local-theme-api.patch"
 git -C "$source_dir" apply "$vendor_dir/cell-metrics.patch"
 # Link underlines use the active accent and render only while revealed.
 git -C "$source_dir" apply "$vendor_dir/link-underline.patch"
+# Dispose global input listeners even when opening failed or the renderer was hidden.
+git -C "$source_dir" apply "$vendor_dir/renderer-disposal.patch"
 
 git -C "$source_dir" submodule update --quiet --init --recursive --depth=1
 if [[ "$(git -C "$source_dir/ghostty" rev-parse HEAD)" != "$ghostty_commit" ]]; then
     printf 'Ghostty submodule does not match its pinned commit\n' >&2
     exit 1
 fi
+
+# Ghostty zeroes page memory only in safe builds and trusts the OS otherwise. The
+# browser build is freestanding and pools pages inside one shared WebAssembly
+# instance, so a new terminal would inherit an earlier terminal's screen. This
+# patch is inside the submodule, so it applies after the submodule update.
+git -C "$source_dir/ghostty" apply "$vendor_dir/zero-pages.patch"
 
 zig_path="$(command -v "$zig_bin")"
 export PATH="$(dirname -- "$zig_path"):$PATH"

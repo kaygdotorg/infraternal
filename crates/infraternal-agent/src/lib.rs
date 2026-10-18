@@ -46,7 +46,20 @@ pub fn run_embedded(fd: i32, state: Option<std::path::PathBuf>) -> std::io::Resu
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(daemon::run(fd, state))
+    block_on_io(&runtime, Box::pin(daemon::run(fd, state)))
+}
+
+/// Share the reactor poll loop across process entrypoints (D243, #189).
+/// Type erasure allocates once per reactor, never per terminal frame; the
+/// configured runtime retains its existing scheduling and unwind behavior.
+/// # Errors
+/// Returns the operation's IO error unchanged.
+#[inline(never)]
+pub fn block_on_io(
+    runtime: &tokio::runtime::Runtime,
+    operation: std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + '_>>,
+) -> std::io::Result<()> {
+    runtime.block_on(operation)
 }
 
 #[cfg(all(test, feature = "remote", target_os = "linux"))]

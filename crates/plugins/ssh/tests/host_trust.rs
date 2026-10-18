@@ -36,7 +36,7 @@ async fn observe(ssh: &TrustedOpenSsh, destination: &Destination) -> Failure {
         .err()
         .expect("unknown trust must refuse before authentication");
     assert_eq!(failure.kind, FailureKind::HostKey);
-    assert!(failure.host_key_challenge.is_some());
+    assert!(failure.host_key_challenge().is_some());
     assert_ne!(failure.fingerprints.len(), 0);
     failure
 }
@@ -75,6 +75,7 @@ async fn first_contact_needs_fresh_authority_and_never_replaces_existing_trust()
             ssh_keyscan: "/usr/bin/ssh-keyscan".into(),
             ssh_keygen: "/usr/bin/ssh-keygen".into(),
             askpass_binary: std::env::current_exe().unwrap(),
+            tcp_connector: None,
             scratch: fixture.clone(),
             command_timeout: Duration::from_secs(15),
         },
@@ -84,7 +85,7 @@ async fn first_contact_needs_fresh_authority_and_never_replaces_existing_trust()
     assert!(
         ssh.confirm_host_key(
             destination.clone(),
-            &rejected.host_key_challenge.unwrap().to_string(),
+            &rejected.host_key_challenge().unwrap().to_string(),
             &rejected.fingerprints[0],
             &Authority(false)
         )
@@ -97,7 +98,7 @@ async fn first_contact_needs_fresh_authority_and_never_replaces_existing_trust()
     assert!(
         ssh.confirm_host_key(
             other,
-            &foreign.host_key_challenge.unwrap().to_string(),
+            &foreign.host_key_challenge().unwrap().to_string(),
             &foreign.fingerprints[0],
             &Authority(true)
         )
@@ -115,7 +116,7 @@ async fn first_contact_needs_fresh_authority_and_never_replaces_existing_trust()
         assert!(
             ssh.confirm_host_key(
                 destination.clone(),
-                &pending.host_key_challenge.unwrap().to_string(),
+                &pending.host_key_challenge().unwrap().to_string(),
                 &pending.fingerprints[0],
                 &Authority(true)
             )
@@ -150,7 +151,7 @@ async fn first_contact_needs_fresh_authority_and_never_replaces_existing_trust()
             .unwrap();
         assert_eq!(alias_refused.kind, FailureKind::HostKey);
         assert!(
-            alias_refused.host_key_challenge.is_none(),
+            alias_refused.host_key_challenge().is_none(),
             "an existing revoked alias cannot get a first-contact challenge: {alias}"
         );
         assert_eq!(std::fs::read_dir(&pins).unwrap().count(), 0);
@@ -158,7 +159,7 @@ async fn first_contact_needs_fresh_authority_and_never_replaces_existing_trust()
     std::fs::write(&configuration, base_configuration).unwrap();
     std::fs::write(&known, "").unwrap();
     let confirmed = observe(&ssh, &destination).await;
-    let challenge = confirmed.host_key_challenge.unwrap().to_string();
+    let challenge = confirmed.host_key_challenge().unwrap().to_string();
     ssh.confirm_host_key(
         destination.clone(),
         &challenge,
@@ -216,7 +217,7 @@ async fn first_contact_needs_fresh_authority_and_never_replaces_existing_trust()
         .err()
         .unwrap();
     assert_eq!(refused.kind, FailureKind::HostKey);
-    assert!(refused.host_key_challenge.is_none());
+    assert!(refused.host_key_challenge().is_none());
     assert_eq!(std::fs::read(pin).unwrap(), before);
     println!(
         "METRIC first_contact fresh_authority=true foreign_target_refused=true existing_ca_revoked_refused=true confirmed_command=true pin_immutable=true"
@@ -278,6 +279,7 @@ async fn configured_known_hosts_command_revocation_cannot_offer_first_contact() 
             ssh_keyscan: "/usr/bin/ssh-keyscan".into(),
             ssh_keygen: "/usr/bin/ssh-keygen".into(),
             askpass_binary: std::env::current_exe().unwrap(),
+            tcp_connector: None,
             scratch: fixture.clone(),
             command_timeout: Duration::from_secs(5),
         },
@@ -289,7 +291,7 @@ async fn configured_known_hosts_command_revocation_cannot_offer_first_contact() 
         .err()
         .unwrap();
     assert!(
-        failure.host_key_challenge.is_none(),
+        failure.host_key_challenge().is_none(),
         "configured revoked key received a first-contact challenge"
     );
 }

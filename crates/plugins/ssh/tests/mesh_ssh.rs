@@ -71,6 +71,7 @@ async fn network_identity_connect_check_and_changed_key_refusal() {
         ssh_keyscan: "/usr/bin/ssh-keyscan".into(),
         ssh_keygen: "/usr/bin/ssh-keygen".into(),
         askpass_binary: std::env::current_exe().unwrap(),
+        tcp_connector: None,
         scratch: root.clone(),
         command_timeout: Duration::from_secs(10),
     };

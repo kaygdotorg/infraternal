@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+/** Tests the real provisioning adapters against server-shaped responses and local sockets. */
 import { afterEach, describe, expect, test } from "bun:test";
 import { createRealProvisioning, parseDiscovered, parseInstallCommand, parseServerKey } from "./real";
-import { ProvisioningRun } from "../../provisioning-client";
+import { ProvisioningRun, type FailureDetail } from "../../provisioning-client";
 import { ServiceError } from "./service";
 
 const realFetch = globalThis.fetch;
@@ -102,6 +103,55 @@ describe("a server that lacks an endpoint", () => {
     Socket.last.message({ host_key_confirmed: { target: "one", fingerprint: "SHA256:fixture" } });
     await promise;
     expect(confirmed).toBe(true);
+    run.close();
+  });
+});
+
+describe("bootstrap failure parsing", () => {
+  test("an already-added failure keeps its existing host id", () => {
+    let failure: FailureDetail | undefined;
+    const run = new ProvisioningRun({ onEvent(event) { failure = event.failure; } }, { url: "ws://fixture.invalid" });
+    Socket.last.message({
+      sequence: 1,
+      target: "one",
+      attempt: 1,
+      step: "failed",
+      message: "This host is already added.",
+      elapsed_ms: 1,
+      log_tail: [],
+      failure: {
+        kind: "install",
+        message: "This host is already added.",
+        log_tail: [],
+        already_added: true,
+        host_id: "00000000-0000-0000-0000-00000000002a",
+      },
+    });
+    expect(failure?.host_id).toBe("00000000-0000-0000-0000-00000000002a");
+    run.close();
+  });
+
+  test("host ids are ignored on other failures and when malformed", () => {
+    const failures: (FailureDetail | undefined)[] = [];
+    const run = new ProvisioningRun({ onEvent(event) { failures.push(event.failure); } }, { url: "ws://fixture.invalid" });
+    for (const [sequence, failure] of [
+      [1, { kind: "auth", message: "Sign in again.", log_tail: [], host_id: "00000000-0000-0000-0000-00000000002a" }],
+      [2, { kind: "install", message: "This host is already added.", log_tail: [], already_added: true, host_id: "not-a-host-id" }],
+    ] as const) {
+      Socket.last.message({
+        sequence,
+        target: "one",
+        attempt: 1,
+        step: "failed",
+        message: failure.message,
+        elapsed_ms: sequence,
+        log_tail: [],
+        failure,
+      });
+    }
+    expect(failures).toHaveLength(2);
+    expect(failures[0]?.host_id).toBeUndefined();
+    expect(failures[1]?.host_id).toBeUndefined();
     run.close();
   });
 });

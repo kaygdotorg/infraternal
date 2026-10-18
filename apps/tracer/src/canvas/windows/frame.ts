@@ -77,6 +77,7 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
  * is its machine's pill: it opens the machine's list of windows to add (D208 A1), narrowed to that machine, from the pill.
  */
 function pillPress(cx: Ctx, rec: WinRec, how: "pointer" | "keyboard"): void {
+  if (rec.setup?.handlePill(how)) return;
   if ((rec.model.kind === "app" || rec.model.kind === "screen") && cx.appWindows?.active) { cx.appWindows.togglePicker(rec.card.pill, how, rec.model.host); return; }
   cx.details?.toggle(rec, how);
 }
@@ -140,6 +141,7 @@ function wireWindow(cx: Ctx, rec: WinRec): void {
     window.clearTimeout(press.timer);
     press = undefined;
     if (e.type === "pointerup") pillPress(cx, rec, "pointer");
+    // A failed setup explains itself in the pill first; the details are one press further.
   };
   pill.addEventListener("pointerup", release, { signal });
   pill.addEventListener("pointercancel", release, { signal });

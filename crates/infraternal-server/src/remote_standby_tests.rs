@@ -3,7 +3,7 @@ use super::*;
 use bytes::Bytes;
 use infraternal_agent::remote_native::NativeChannel;
 
-async fn connect_control(
+pub(super) async fn connect_control(
     address: SocketAddr,
     identity: &Identity,
     root: &X509,
@@ -752,3 +752,6 @@ mod control_queue;
 
 #[path = "remote_control_pause_tests.rs"]
 mod control_pause;
+
+#[path = "remote_liveness_doubt_tests.rs"]
+mod liveness_doubt;

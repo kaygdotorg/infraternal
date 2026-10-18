@@ -1415,6 +1415,7 @@ dependencies = [
  "infraternal-plugin-host-facts",
  "infraternal-plugin-mesh",
  "infraternal-plugin-release",
+ "infraternal-plugin-remote",
  "infraternal-plugin-ssh",
  "infraternal-protocol",
  "infraternal-server",
@@ -1541,6 +1542,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-openssl",
+ "uuid",
  "zeroize",
 ]
 
@@ -1549,7 +1551,9 @@ name = "infraternal-plugin-ssh"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "infraternal-agent",
  "infraternal-plugin-api",
+ "infraternal-plugin-remote",
  "infraternal-shim",
  "nix",
  "serde",
@@ -1619,10 +1623,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "infraternal-session"
+version = "0.1.0"
+dependencies = [
+ "infraternal-plugin-ssh",
+ "infraternal-shim",
+ "nix",
+]
+
+[[package]]
 name = "infraternal-shim"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "clap",
  "libghostty-vt",
  "nix",
  "openssl",

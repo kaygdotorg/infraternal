@@ -1,6 +1,10 @@
 //! Bounds bootstrap child input/output, deadlines and cancellation; arbitrary helper bytes never become diagnostics.
 
-use crate::{model::Failure, prompt::PromptParent, transport::Input};
+use crate::{
+    model::Failure,
+    prompt::PromptParent,
+    transport::{Input, PayloadInput, TransferChoice},
+};
 use nix::{
     sys::{
         signal::{Signal, killpg},
@@ -106,32 +110,30 @@ async fn execute_inner(
         .stderr
         .take()
         .ok_or_else(|| Failure::install("The SSH diagnostic pipe is unavailable."))?;
+    let (negotiated, payload_ack, declared) = transfer_options(&input);
+    let (choice, selected) = tokio::sync::oneshot::channel();
+    let (ready, received) = tokio::sync::oneshot::channel();
     let operation = async {
-        let write = async {
-            let mut stdin = stdin;
-            match input {
-                Input::Empty => {}
-                Input::Bytes(bytes) => stdin
-                    .write_all(bytes)
-                    .await
-                    .map_err(|_| Failure::install("The SSH upload was interrupted."))?,
-                Input::File(path) => {
-                    let mut file = tokio::fs::File::open(path).await.map_err(|_| {
-                        Failure::install("The matching infraternal binary is unavailable.")
-                    })?;
-                    tokio::io::copy(&mut file, &mut stdin)
-                        .await
-                        .map_err(|_| Failure::install("The SSH upload was interrupted."))?;
-                }
-            }
-            // Broken pipe is expected on pre-command authentication/host-key refusal;
-            // retain the child's bounded diagnostics to classify the real failure.
-            let _ = stdin.shutdown().await;
-            Ok::<(), Failure>(())
-        };
+        let write = write_input(stdin, input, selected, received);
         let read = async {
-            let (stdout, stderr) =
-                tokio::try_join!(bounded(stdout, stdout_limit), bounded(stderr, 8192))?;
+            let (stdout, stderr) = tokio::try_join!(
+                async {
+                    if negotiated {
+                        negotiated_output(
+                            stdout,
+                            stdout_limit,
+                            choice,
+                            ready,
+                            payload_ack,
+                            declared,
+                        )
+                        .await
+                    } else {
+                        bounded(stdout, stdout_limit).await
+                    }
+                },
+                bounded(stderr, 8192)
+            )?;
             Ok::<_, Failure>((stdout, stderr))
         };
         // Retain the unreaped leader identity while inherited pipes are pending.
@@ -147,7 +149,13 @@ async fn execute_inner(
         let status =
             status.map_err(|_| Failure::install("The SSH helper did not exit cleanly."))?;
         let (stdout, stderr) = read?;
-        if status.success() {
+        // A negotiated setup may refuse a stage without consuming invitation
+        // stdin. Keep only a complete canonical refusal for the caller's typed
+        // decoder; successful or malformed receipts still require input delivery.
+        let refused = negotiated
+            && crate::install::parse_transfer_setup(&stdout)
+                .is_err_and(|failure| failure.exit_status.is_some());
+        if status.success() && !refused {
             write?;
         }
         Ok(Output {
@@ -244,4 +252,222 @@ async fn bounded(
         ));
     }
     Ok(bytes)
+}
+
+/// Declared public sources always require verified staging before private
+/// stdin, even if a caller omitted the older optional acknowledgment flag.
+fn transfer_options(input: &Input<'_>) -> (bool, bool, Option<TransferChoice>) {
+    match input {
+        Input::Negotiated {
+            payload_ack,
+            declared,
+            ..
+        } => (true, *payload_ack || declared.is_some(), *declared),
+        _ => (false, false, None),
+    }
+}
+
+/// Keep commit release and ordinary input under the same bounded child lifecycle.
+async fn write_input(
+    mut stdin: tokio::process::ChildStdin,
+    input: Input<'_>,
+    selected: tokio::sync::oneshot::Receiver<Option<TransferChoice>>,
+    received: tokio::sync::oneshot::Receiver<()>,
+) -> Result<(), Failure> {
+    match input {
+        Input::Negotiated {
+            raw,
+            gzip,
+            zstd,
+            invitation,
+            payload_ack,
+            declared,
+        } => {
+            // Only public content can flow before the fixed selection receipt.
+            // The reader independently checks that it names this exact source.
+            let selection = if declared.is_some() {
+                declared
+            } else {
+                selected.await.ok().flatten()
+            };
+            let payload = match selection {
+                Some(TransferChoice::Raw) => Some(raw),
+                Some(TransferChoice::Gzip) => Some(PayloadInput::Bytes(gzip.ok_or_else(|| {
+                    Failure::install("The requested payload encoding is unavailable.")
+                })?)),
+                Some(TransferChoice::Zstd) => Some(PayloadInput::Bytes(zstd.ok_or_else(|| {
+                    Failure::install("The requested payload encoding is unavailable.")
+                })?)),
+                Some(TransferChoice::Reuse) => None,
+                None => return Ok(()), // Early fixed refusal retains its numeric command status.
+            };
+            if let Some(payload) = payload {
+                write_payload(&mut stdin, payload).await?;
+            }
+            // A stdio-based bounded reader can discard bytes beyond the payload.
+            // Its verified receipt proves that reader exited before private input.
+            if (payload_ack || declared.is_some()) && received.await.is_err() {
+                return Ok(());
+            }
+            stdin
+                .write_all(invitation)
+                .await
+                .map_err(|_| Failure::install("The SSH input pipe closed."))?;
+        }
+        Input::PayloadAndInvitation {
+            payload,
+            invitation,
+        } => {
+            write_payload(&mut stdin, payload).await?;
+            stdin
+                .write_all(invitation)
+                .await
+                .map_err(|_| Failure::install("The SSH input pipe closed."))?;
+        }
+        Input::Signal(release) => {
+            release.await.map_err(|_| {
+                Failure::install("Host provisioning stopped before terminal proof.")
+            })?;
+            stdin
+                .write_all(b"\n")
+                .await
+                .map_err(|_| Failure::install("The SSH input pipe closed."))?;
+        }
+        Input::Empty => {}
+        Input::Bytes(bytes) => stdin
+            .write_all(bytes)
+            .await
+            .map_err(|_| Failure::install("The SSH upload was interrupted."))?,
+        Input::File(path) => {
+            let mut file = tokio::fs::File::open(path)
+                .await
+                .map_err(|_| Failure::install("The matching infraternal binary is unavailable."))?;
+            tokio::io::copy(&mut file, &mut stdin)
+                .await
+                .map_err(|_| Failure::install("The SSH upload was interrupted."))?;
+        }
+    }
+    // Broken pipe is expected on pre-command authentication/host-key refusal;
+    // retain the child's bounded diagnostics to classify the real failure.
+    let _ = stdin.shutdown().await;
+    Ok::<(), Failure>(())
+}
+
+/// Decode exactly two bounded public lines; retain all other bytes for failure classification.
+async fn negotiated_output(
+    mut stdout: tokio::process::ChildStdout,
+    limit: usize,
+    choice: tokio::sync::oneshot::Sender<Option<TransferChoice>>,
+    ready: tokio::sync::oneshot::Sender<()>,
+    payload_ack: bool,
+    declared: Option<TransferChoice>,
+) -> Result<Vec<u8>, Failure> {
+    let mut prefix = Vec::new();
+    let mut lines = 0;
+    for _ in 0..limit.min(64) {
+        let mut byte = [0_u8; 1];
+        if stdout
+            .read(&mut byte)
+            .await
+            .map_err(|_| Failure::install("The SSH output pipe closed."))?
+            == 0
+        {
+            break;
+        }
+        prefix.push(byte[0]);
+        lines += usize::from(byte[0] == b'\n');
+        if lines == 2 {
+            break;
+        }
+    }
+    let selected = prefix
+        .strip_prefix(b"STEP upload\n")
+        .and_then(TransferChoice::parse);
+    if let (Some(expected), Some(selected)) = (declared, selected)
+        && expected.word() != selected.word()
+    {
+        // Dropping readiness closes the private-input barrier. A remote's
+        // different encoder cannot reinterpret bytes already sent publicly.
+        return Err(Failure::install(
+            "The payload transfer selection was invalid.",
+        ));
+    }
+    let _ = choice.send(selected);
+    if payload_ack && selected.is_some() {
+        // Read only the public readiness receipt; leave final setup output in
+        // its existing canonical shape for the shared refusal decoder.
+        let mut line = Vec::new();
+        loop {
+            let mut byte = [0];
+            if prefix.len() + line.len() >= limit
+                || stdout
+                    .read(&mut byte)
+                    .await
+                    .map_err(|_| Failure::install("The SSH output pipe closed."))?
+                    == 0
+            {
+                break;
+            }
+            line.push(byte[0]);
+            if byte[0] == b'\n' {
+                if line == b"PAYLOAD ready\n" {
+                    line.clear();
+                    let _ = ready.send(());
+                    break;
+                }
+                prefix.append(&mut line);
+            }
+        }
+        prefix.append(&mut line);
+    }
+    let mut rest = bounded(stdout, limit.saturating_sub(prefix.len())).await?;
+    prefix.append(&mut rest);
+    Ok(prefix)
+}
+
+/// Public file framing is shared by both fixed and negotiated input paths.
+async fn write_payload(
+    stdin: &mut tokio::process::ChildStdin,
+    payload: PayloadInput<'_>,
+) -> Result<(), Failure> {
+    match payload {
+        PayloadInput::Bytes(bytes) => stdin
+            .write_all(bytes)
+            .await
+            .map_err(|_| Failure::install("The SSH upload was interrupted."))?,
+        PayloadInput::File { path, size } => {
+            let file = tokio::fs::File::open(path)
+                .await
+                .map_err(|_| Failure::install("The matching infraternal binary is unavailable."))?;
+            if file
+                .metadata()
+                .await
+                .map_err(|_| Failure::install("The payload metadata is unavailable."))?
+                .len()
+                != size
+            {
+                return Err(Failure::install(
+                    "The static payload changed before transfer.",
+                ));
+            }
+            let mut frame = file.take(size);
+            let copied = tokio::io::copy(&mut frame, &mut *stdin)
+                .await
+                .map_err(|_| Failure::install("The SSH upload was interrupted."))?;
+            if copied != size
+                || frame
+                    .get_ref()
+                    .metadata()
+                    .await
+                    .map_err(|_| Failure::install("The payload metadata is unavailable."))?
+                    .len()
+                    != size
+            {
+                return Err(Failure::install(
+                    "The static payload changed during transfer.",
+                ));
+            }
+        }
+    }
+    Ok(())
 }

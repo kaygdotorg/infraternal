@@ -29,6 +29,8 @@ import { createOverlayFlowHost } from "../addhost/flow-host";
 import { createWindowFlowHost } from "../addhost/window-host";
 import type { EnrolledHost } from "../addhost/service";
 import { createMockProvisioning } from "./addhost-service";
+import { attachSetup, warmSetup } from "../addhost/setup-attach";
+import { createSetupDemo, failStageFrom, runAutopilot } from "./addhost-setup-demo";
 import { createMockMesh } from "./mesh";
 import { createMockSessions } from "./sessions";
 import { onDemand } from "../../on-demand";
@@ -57,7 +59,12 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
 
   // The add-host wizard runs on the real adapter against the test double. A host that finishes enrolling gets a
   // shell window in Console, which is also how the sidebar inventory learns of it (the tree lists windows).
-  const provisioning = createMockProvisioning({ savedKey: new URLSearchParams(location.search).get("savedkey") === "1", authority: new URLSearchParams(location.search).get("ca") ?? "ready" });
+  const query = new URLSearchParams(location.search);
+  // `addhost-demo=pill` (#189, D255): every host added in this tab follows a script that opens its shell at once and
+  // finishes setting up in the machine pill; `fail=install|join|start|ready` makes that stage fail the first time.
+  const setupDemo = query.get("addhost-demo") === "pill" ? createSetupDemo(failStageFrom(query.get("fail")), Math.max(1, Number(query.get("slow")) || 1)) : undefined;
+  const base = createMockProvisioning({ savedKey: query.get("savedkey") === "1", authority: query.get("ca") ?? "ready" });
+  const provisioning = setupDemo ? setupDemo.wrap(base) : base;
   // The lock on host connections: administrators (the operator role) can unlock it, anyone else only sees the state.
   const authority = createAuthorityControl(core, { service: async () => provisioning, canUnlock: () => world.role === "operator" });
   // `?inbox=3` adds two more kinds of waiting item, to see the card with several lines (test double only).
@@ -65,15 +72,27 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   const addHost = createAddHost(core, {
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
     service: provisioning,
-    sink: { enrolled: (hosts) => enrol(hosts) },
+    sink: {
+      enrolled: (hosts, status) => enrol(hosts, status),
+      setupInPill: true,
+      // The test double names an existing host by UUID; the mock world knows hosts by name.
+      openHost: (id) => canvas.cx.win.open(MOCK_HOST_BY_ID[id] ?? id),
+    },
   });
-  function enrol(hosts: EnrolledHost[]): void {
+  const MOCK_HOST_BY_ID: Record<string, string> = { "6f1d0a52-7c3e-4b8a-9d21-0a5e4c7b1f30": "build-01" };
+  function openAddHost(): void { warmSetup(); addHost.open(); }
+  function enrol(hosts: EnrolledHost[], status?: Element): void {
     for (const host of hosts) {
       if (!world.screens.has(host.name)) world.screens.set(host.name, { os: host.os, user: host.user ?? "kayg", screen: [`${host.user ?? "kayg"}@${host.name}:~$ `] });
       // Production lists sessions from inventory, including newly enrolled hosts.
       sessions.enroll(host.name);
       if (!inventory.list(host.name).length) inventory.create?.(host.name);
-      canvas.cx.win.open(host.name);
+      const rec = canvas.cx.win.open(host.name);
+      // The wizard's glyph is read now (its box is the flight's start); the pill's code is already loaded.
+      // Without the demo's script the host's own stream (the test double's) feeds the pill, as in production.
+      if (rec && host.hostId && (host.sessionId || setupDemo)) {
+        void attachSetup(rec, { host: host.name, hostId: host.hostId, status, ...(setupDemo ? { source: setupDemo.source } : {}), ...(query.get("tickhold") ? { tickHold: Number(query.get("tickhold")) } : {}) });
+      }
     }
   }
 
@@ -84,7 +103,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       teach: (hint) => teachOnce("mock", hint),
       sessions, inventory, details: () => onDemand(() => import("./details.on-demand")).then((m) => m.createMockDetails(world, inventory)), mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
       containers: { host: "build-01", rows: () => (world.role === "operator" ? CONTAINERS : []) },
-      addHost: () => addHost.open(),
+      addHost: openAddHost,
       authority,
     },
   });
@@ -226,8 +245,10 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   }, 100);
 
   // ---- start ----------------------------------------------------------------------------------------
-  const startScene = Math.min(scenes.length - 1, Math.max(0, ((options.scene ?? 1) | 0) - 1));
+  // The pill demo starts where a terminal window is on screen (scene 3: Console), so the new window opens beside it.
+  const startScene = Math.min(scenes.length - 1, Math.max(0, ((options.scene ?? (setupDemo ? 3 : 1)) | 0) - 1));
   goScene(startScene);
+  if (setupDemo && query.get("autopilot") !== "0") window.setTimeout(() => { void runAutopilot(openAddHost); }, 500);
   const sessionsScene = Number(new URLSearchParams(location.search).get("sessions")) || 0;
   if (sessionsScene) window.setTimeout(() => { void sessionScenes.run(sessionsScene); }, 400);
 
@@ -238,6 +259,8 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     setCamera: (cx_: number, cy: number, z: number) => { cx.nav.applyCanvasLock(false); camera.set({ cx: cx_, cy, z }); },
     flyCamera: (cx_: number, cy: number, z: number) => { cx.nav.applyCanvasLock(false); camera.flyTo(() => ({ cx: cx_, cy, z })); },
     views: () => [...cx.views.values()].map((c) => ({ id: c.view.id, name: c.view.name, team: Boolean(c.view.team), x: c.x, y: c.y, w: boxOf(c.view, state.metrics).w, h: boxOf(c.view, state.metrics).h, windows: [...c.wins.keys()] })),
+    /** The focused window's id (specs check where a flow handed the keys). */
+    activeWindow: (): string | undefined => state.activeWin?.model.id,
     /** A new session on the host in its own window (the inventory creates it, as a split does). */
     newShell: (host: string): string | undefined => {
       const rec = inventory.create?.(host);
@@ -281,6 +304,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   return {
     dispose() {
       authority.dispose();
+      setupDemo?.dispose();
       events.abort();
       window.clearInterval(streamTimer);
       window.clearInterval(seedTimer);

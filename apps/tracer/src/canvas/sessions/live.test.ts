@@ -39,6 +39,16 @@ test("an enrolled host opens by UUID and splits keep that authority", () => {
   expect(sessions.open("worker", { session: "session" }).hostId).toBe(id);
   sessions.dispose();
 });
+test("an authoritative snapshot keeps an unjoined host visible while setup continues", () => {
+  const sessions = service();
+  sessions.registerHost({ id, name: "worker", user: "operator" });
+  expect(sessions.replaceHosts([], [id])).toEqual([]);
+  expect(sessions.hosts().find((host) => host.id === id)).toEqual({ id, name: "worker", user: "operator" });
+  expect(sessions.open(id).hostId).toBe(id);
+  expect(sessions.replaceHosts([])).toEqual([id]);
+  expect(sessions.hosts().some((host) => host.id === id)).toBe(false);
+  sessions.dispose();
+});
 test("unknown and ambiguous labels never open an embedded shell", () => {
   const sessions = service();
   expect(sessions.open("missing").noAccess).toBe(true);

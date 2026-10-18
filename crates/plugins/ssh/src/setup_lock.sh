@@ -1,46 +1,75 @@
-# Serialize host provisioning shell commands without creating an unowned lock file.
-setup_guard() {
-    [ "${setup_guarded:-no}" != yes ] || return 0
-    parent=$(dirname "$base")
-    if [ -e "$parent" ] || [ -L "$parent" ]; then
-        [ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || exit 71
-        permissions=$(stat -c '%a' "$parent")
-        [ "$((0$permissions & 022))" = 0 ] || exit 71
-        # Every new installer command takes this same directory lock. It leaves
-        # no lock file and serializes admission, recovery and journal mutation.
-        exec 9< "$parent"
-        flock -n 9 || exit 73
-        setup_guarded=yes
-    fi
+# Manage the bounded setup lease while the shared guard protects journal mutation.
+# Proof notes are beside Installation::script in install.rs [17][243].
+lease_birth_field() {
+ # The comm field may contain spaces and parentheses; field 22 is the twentieth suffix field.
+ lease_suffix=${1##*) }
+ [ "$lease_suffix" != "$1" ] || return 1
+ case "$lease_suffix" in *[!a-zA-Z0-9\ -]*) return 1;; esac
+ set -- $lease_suffix
+ lease_actual_birth=${20-}
+ case "$lease_actual_birth" in ''|*[!0-9]*) return 1;; esac
 }
-# A bounded lease holds the transaction directory across SSH command gaps. Its
-# public PID/start-time receipt is not authority by itself: retirement also
-# requires the process's inherited descriptor to refer to this exact directory.
+read_lease_birth() {
+ IFS= read -r lease_stat < "/proc/$1/stat" || return 1
+ lease_birth_field "$lease_stat"
+}
 start_setup_lease() {
-    exec 7< "$stage"
-    flock -n 7 || exit 73
-    (exec 9<&-; exec sleep 180) >/dev/null 2>&1 &
-    lease_pid=$!
-    lease_birth=$(awk '{print $22}' "/proc/$lease_pid/stat")
-    printf '%s %s\n' "$lease_pid" "$lease_birth" > "$stage/lease"
-    exec 7<&-
+ exec 7< "$stage"
+ flock -n 7 || exit 73
+ (exec 9<&-; if [ "${lease_runtime:-no}" != yes ]; then exec 6<&-; fi; exec sleep 180) >/dev/null 2>&1 &
+ lease_pid=$!
+ read_lease_birth "$lease_pid" || exit 73
+ lease_birth=$lease_actual_birth
+ printf '%s %s\n' "$lease_pid" "$lease_birth" > "$stage/lease"
+ # Fork publication can precede the child's descriptor teardown (#189, #190).
+ # Wait until it has dropped the parent guard and, unless it keeps the
+ # runtime lock, that lock too; then require the exact transaction lock.
+ lease_checks=0
+ while [ -L "/proc/$lease_pid/fd/9" ] || { [ "${lease_runtime:-no}" != yes ] && [ -L "/proc/$lease_pid/fd/6" ]; }; do
+  lease_checks=$((lease_checks + 1))
+  [ "$lease_checks" -le 1000 ] || exit 73
+  sleep 0.001
+ done
+ [ ! -L "$stage" ] && [ "$stage" -ef "/proc/$lease_pid/fd/7" ] || exit 73
+ exec 7<&-
 }
 retire_setup_lease() {
-    if [ -e "$stage/lease" ] || [ -L "$stage/lease" ]; then
-        [ -f "$stage/lease" ] && [ ! -L "$stage/lease" ] && [ -O "$stage/lease" ] && [ "$(stat -c '%a:%h' "$stage/lease")" = 600:1 ] || exit 71
-        [ "$(stat -c '%s' "$stage/lease")" -le 64 ] || exit 71
-        read -r lease_pid lease_birth extra < "$stage/lease"
-        [ -z "$extra" ] || exit 71
-        case "$lease_pid:$lease_birth" in *[!0-9:]*|:*|*:) exit 71;; esac
-        if [ -r "/proc/$lease_pid/stat" ] && [ "$(awk '{print $22}' "/proc/$lease_pid/stat")" = "$lease_birth" ]; then
-            [ "$(readlink "/proc/$lease_pid/fd/7" 2>/dev/null || :)" = "$stage" ] || exit 73
-            kill "$lease_pid" || exit 73
-        fi
-    fi
-    # Also detect a holder whose creation was interrupted before PID journaling.
-    # Such an unrecorded lease expires at the same bounded setup deadline.
-    if [ -d "$stage" ] && [ ! -L "$stage" ]; then
-        exec 7< "$stage"
-        flock -w 2 7 || exit 73
-    fi
+ if [ -e "$stage/lease" ] || [ -L "$stage/lease" ]; then
+  [ -f "$stage/lease" ] && [ ! -L "$stage/lease" ] && [ -O "$stage/lease" ] || exit 71
+  case "$(stat -c '%a:%h:%s' "$stage/lease")" in
+   600:1:[0-9]|600:1:[1-5][0-9]|600:1:6[0-4]) :;;
+   *) exit 71;;
+  esac
+  read -r lease_pid lease_birth extra < "$stage/lease"
+  [ -z "$extra" ] || exit 71
+  case "$lease_pid:$lease_birth" in *[!0-9:]*|:*|*:) exit 71;; esac
+  if [ -r "/proc/$lease_pid/stat" ] && read_lease_birth "$lease_pid" && [ "$lease_actual_birth" = "$lease_birth" ]; then
+   [ ! -L "$stage" ] && [ "$stage" -ef "/proc/$lease_pid/fd/7" ] || exit 73
+   kill "$lease_pid" || exit 73
+  fi
+ fi
+ if [ -d "$stage" ] && [ ! -L "$stage" ]; then
+  exec 7< "$stage"
+  flock -w 2 7 || exit 73
+ fi
+}
+
+# Change lease ownership only under the parent setup guard and exact transaction.
+handoff_setup_lease() {
+ retire_setup_lease
+ rm -f "$stage/lease"
+ runtime="$base/sessions"
+ if [ ! -e "$runtime" ] && [ ! -L "$runtime" ]; then mkdir "$runtime"; fi
+ [ -d "$runtime" ] && [ ! -L "$runtime" ] && [ -O "$runtime" ] && [ "$(stat -c '%a' "$runtime")" = 700 ] || exit 71
+ lifetime="$runtime/.lifetime-lock"
+ identity=$(stat -c '%d:%i' "$base")
+ if [ ! -e "$lifetime" ] && [ ! -L "$lifetime" ]; then
+  "$1" --bootstrap-runtime "$base" "$identity" inspect </dev/null
+  : > "$lifetime"
+ fi
+ [ -f "$lifetime" ] && [ ! -L "$lifetime" ] && [ -O "$lifetime" ] && [ "$(stat -c '%a:%h' "$lifetime")" = 600:1 ] || exit 71
+ exec 6< "$lifetime"
+ "$1" --bootstrap-runtime "$base" "$identity" inspect <&6
+ lease_runtime=$2
+ start_setup_lease
 }

@@ -8,7 +8,9 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-INSPECT = (ROOT / 'src/setup_lock.sh').read_text() + (ROOT / 'src/previous_attempt.sh').read_text()
+# Confirmation programs: the shared guard, the lease (rollback retires it),
+# runtime cleanup and the inspector, in the order install.rs sends them.
+INSPECT = ''.join((ROOT / f'src/{name}').read_text() for name in ('setup_guard.sh', 'setup_lock.sh', 'runtime_cleanup.sh', 'previous_attempt.sh'))
 SOURCE = (ROOT / 'src/install.rs').read_text()
 CONSTANTS = dict(re.findall(r'(?:pub\(crate\) )?const (\w+): &str = r#"(.*?)"#;', SOURCE, re.S))
 HOST, TRANSACTION = '1' * 32, '2' * 32
@@ -20,6 +22,12 @@ class EarlierSetup(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(dir=scratch)
         self.base = Path(self.temp.name) / 'infraternal'
         self.base.mkdir(mode=0o700)
+        helper = Path(os.environ['INFRATERNAL_TEST_RUNTIME_HELPER'])
+        cache = Path(str(self.base) + '.bootstrap-cache')
+        cache.mkdir(mode=0o700)
+        import shutil
+        shutil.copyfile(helper, cache / 'payload')
+        (cache / 'payload').chmod(0o700)
         self.owner = self.base / '.bootstrap-owner'
         self.owner.write_text(HOST + '\n')
         self.owner.chmod(0o600)
@@ -55,6 +63,24 @@ class EarlierSetup(unittest.TestCase):
         body += CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION']
         return self.run_shell(body)
 
+    def test_retired_owner_with_nonempty_root_is_refused(self):
+        self.listener.close()
+        self.owner.unlink()
+        result = self.run_shell('\ninspect_previous')
+        self.assertEqual(result.returncode, 71)
+        self.assertTrue(self.socket.exists())
+        self.assertTrue(self.receipt.exists())
+
+    def test_retired_base_receipt_never_owns_replacement_directory(self):
+        self.listener.close()
+        retained = self.base.with_name('retained')
+        self.base.rename(retained)
+        self.base.mkdir(mode=0o700)
+        result = self.run_shell('\ninspect_previous')
+        self.assertEqual(result.returncode, 75)
+        self.assertTrue(self.receipt.exists())
+        self.assertTrue(retained.exists())
+
     def test_stale_socket_is_removed(self):
         self.listener.close()
         result = self.run_shell('\ninspect_previous')
@@ -63,6 +89,185 @@ class EarlierSetup(unittest.TestCase):
         self.assertEqual(self.recover().returncode, 0)
         self.assertFalse(self.base.exists())
         self.assertFalse(self.receipt.exists())
+
+    def test_stale_control_socket_is_recoverable(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        self.socket.rename(control)
+        control.chmod(0o755)
+        result = self.run_shell('\ninspect_previous')
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.recover().returncode, 0)
+        self.assertFalse(control.exists())
+        self.assertFalse(self.receipt.exists())
+
+    def test_original_rollback_finishes_after_service_stop(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        self.socket.rename(control)
+        result = self.run_shell(CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION'])
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(self.base.exists())
+        self.assertFalse(self.receipt.exists())
+
+    def test_control_socket_in_another_root_does_not_block_cleanup(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        self.socket.rename(control)
+        other = Path(self.temp.name) / 'other'
+        other.mkdir(mode=0o700)
+        unrelated = other / 'plugins.sock'
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(unrelated))
+            unrelated.chmod(0o600)
+            listener.listen()
+            self.assertEqual(self.run_shell('\ninspect_previous').returncode, 0)
+            self.assertEqual(self.recover().returncode, 0)
+            self.assertTrue(unrelated.exists())
+        self.assertFalse(self.base.exists())
+
+    def test_live_control_socket_preserves_original_receipt(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        self.listener = socket.socket(socket.AF_UNIX)
+        self.listener.bind(str(control))
+        control.chmod(0o600)
+        self.listener.listen()
+        result = self.run_shell(CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION'])
+        self.assertEqual(result.returncode, 73)
+        self.assertTrue(control.exists())
+        self.assertTrue(self.receipt.exists())
+
+    def test_control_socket_symlink_is_never_followed(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        control.symlink_to(self.socket)
+        result = self.run_shell(CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION'])
+        self.assertEqual(result.returncode, 71)
+        self.assertTrue(self.socket.exists())
+        self.assertTrue(control.is_symlink())
+
+    def test_live_relative_control_socket_after_cwd_change_is_retained(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        previous = Path.cwd()
+        try:
+            os.chdir(self.base)
+            self.listener = socket.socket(socket.AF_UNIX)
+            self.listener.bind('sessions/plugins.sock')
+            self.listener.listen()
+        finally:
+            os.chdir(previous)
+        for body in ['\ninspect_previous', CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION']]:
+            self.assertEqual(self.run_shell(body).returncode, 73)
+            self.assertTrue(control.exists())
+            self.assertTrue(self.receipt.exists())
+
+    def test_live_renamed_control_socket_is_retained(self):
+        # The filesystem inode remains live even when the kernel's saved name
+        # no longer resolves. A pathname-only guard cannot prove this stale.
+        control = self.sessions.parent / 'plugins.sock'
+        self.socket.rename(control)
+        self.listener.listen()
+        for body in ['\ninspect_previous', CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION']]:
+            self.assertEqual(self.run_shell(body).returncode, 73)
+            self.assertTrue(control.exists())
+            self.assertTrue(self.receipt.exists())
+
+    def test_live_control_socket_with_high_inode_bits_is_retained(self):
+        # Unix diagnostics expose the low 32 bits of the filesystem inode.
+        # Model wide inode values without requiring a separate mounted fixture.
+        control = self.sessions.parent / 'plugins.sock'
+        self.socket.rename(control)
+        self.listener.listen()
+        metadata = control.stat()
+        for upper in [1 << 32, 1 << 63, ((1 << 64) - 1) ^ ((1 << 32) - 1)]:
+            inode = upper | (metadata.st_ino & ((1 << 32) - 1))
+            prefix = f"""stat() {{
+    if [ \"$#\" = 3 ] && [ \"$1\" = -c ] && [ \"$2\" = '%d:%i' ] && [ \"$3\" = \"$base/sessions/plugins.sock\" ]; then
+        printf '%s\\n' '{metadata.st_dev}:{inode}'
+    else
+        command stat \"$@\"
+    fi
+}}
+"""
+            for body in ['\ninspect_previous', CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION']]:
+                self.assertEqual(self.run_shell(prefix + body).returncode, 73, inode)
+                self.assertTrue(control.exists())
+                self.assertTrue(self.receipt.exists())
+        self.listener.close()
+        self.assertEqual(self.run_shell(prefix + CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION']).returncode, 0)
+        self.assertFalse(control.exists())
+        self.assertFalse(self.receipt.exists())
+
+    def test_missing_socket_diagnostics_does_not_replace_direct_probe(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        self.socket.rename(control)
+        result = self.run_shell('ss() { return 1; }\n' + CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION'])
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(control.exists())
+        self.assertFalse(self.receipt.exists())
+
+    def test_full_control_socket_backlog_preserves_receipt_as_uncertain(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        with socket.socket(socket.AF_UNIX) as listener, socket.socket(socket.AF_UNIX) as queued:
+            listener.bind(str(control))
+            listener.listen(0)
+            queued.connect(str(control))
+            result = self.run_shell(CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION'])
+        self.assertEqual(result.returncode, 77)
+        self.assertTrue(control.exists())
+        self.assertTrue(self.receipt.exists())
+
+    def test_unavailable_control_probe_preserves_receipt(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        self.socket.rename(control)
+        Path(str(self.base) + '.bootstrap-cache/payload').unlink()
+        result = self.run_shell(CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION'])
+        self.assertEqual(result.returncode, 76)
+        self.assertTrue(control.exists())
+        self.assertTrue(self.receipt.exists())
+
+    def test_partial_stage_retirement_never_adopts_another_transaction(self):
+        self.listener.close()
+        stage = self.base / '.bootstrap-lock'
+        stage.mkdir(mode=0o700)
+        marker = stage / 'transaction'
+        marker.write_text('4' * 32 + '\n')
+        marker.chmod(0o600)
+        self.assertEqual(self.run_shell('\ninspect_previous').returncode, 75)
+        self.assertTrue(marker.exists())
+        self.assertTrue(self.receipt.exists())
+
+    def test_partial_stage_retirement_keeps_unknown_files(self):
+        self.listener.close()
+        stage = self.base / '.bootstrap-lock'
+        stage.mkdir(mode=0o700)
+        unknown = stage / 'retained'
+        unknown.write_text('retained data')
+        unknown.chmod(0o600)
+        self.assertEqual(self.recover().returncode, 75)
+        self.assertTrue(unknown.exists())
+        self.assertTrue(self.socket.exists())
+        self.assertTrue(self.receipt.exists())
+
+    def test_partial_stage_retirement_never_follows_a_nested_link(self):
+        self.listener.close()
+        stage = self.base / '.bootstrap-lock'
+        state = stage / 'state'
+        stage.mkdir(mode=0o700)
+        state.mkdir(mode=0o700)
+        retained = self.base.parent / 'retained'
+        retained.write_text('retained data')
+        retained.chmod(0o600)
+        (state / 'link').symlink_to(retained)
+        self.assertEqual(self.recover().returncode, 71)
+        self.assertTrue((state / 'link').is_symlink())
+        self.assertTrue(retained.exists())
+        self.assertTrue(self.receipt.exists())
 
     def test_live_listener_is_refused(self):
         self.listener.listen()
@@ -207,6 +412,35 @@ class EarlierSetup(unittest.TestCase):
         self.assertEqual(result.returncode, 71, 'a symlink ancestor must be refused')
         self.assertTrue(outside.exists(), 'host provisioning removed the redirected directory')
         self.assertTrue(receipt.exists(), 'the refused journal must survive')
+
+class LeaseBirthFields(unittest.TestCase):
+    def decode(self, records):
+        script = 'set -eu\n' + INSPECT + '''
+while IFS= read -r record; do
+  if lease_birth_field "$record"; then printf '%s\\n' "$lease_actual_birth"
+  else printf 'refused\\n'; fi
+done
+'''
+        result = subprocess.run(['/bin/sh', '-c', script], input=('\n'.join(records) + '\n').encode(), capture_output=True, check=True)
+        return result.stdout.decode().splitlines()
+
+    def test_kernel_start_time_corpus_preserves_comm_boundaries(self):
+        records, expected = [], []
+        for name in ['sh', 'sleep', 'two words', 'inner) name', '(name)', ') )', '* [name]', 'tést\tname']:
+            for value in range(64):
+                fields = ['S'] + ['0'] * 49
+                fields[19] = str(100000 + value)
+                records.append(f'123 ({name}) ' + ' '.join(fields))
+                expected.append(fields[19])
+        self.assertEqual(self.decode(records), expected)
+
+    def test_uncertain_start_time_records_are_refused(self):
+        records = ['', 'no delimiter', '123 (sleep) S 1']
+        for value in ['invalid', '-1', '*', '[0]', '0;1']:
+            fields = ['S'] + ['0'] * 49
+            fields[19] = value
+            records.append('123 (sleep) ' + ' '.join(fields))
+        self.assertEqual(self.decode(records), ['refused'] * len(records))
 
 if __name__ == '__main__':
     unittest.main()

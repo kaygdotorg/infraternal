@@ -15,7 +15,7 @@ enum ClockMessage {
 }
 
 /// Keep production deadlines intact while the test controls when they expire.
-pub(super) struct FrozenSocketTime {
+pub(crate) struct FrozenSocketTime {
     release: mpsc::Sender<ClockMessage>,
     timed_out: Arc<AtomicBool>,
 }
@@ -23,7 +23,7 @@ pub(super) struct FrozenSocketTime {
 impl FrozenSocketTime {
     // Call from a start_paused test: the runtime's timer epoch and clock then
     // share an exact origin, without sub-millisecond rounding at boundaries.
-    pub(super) async fn new() -> Self {
+    pub(crate) async fn new() -> Self {
         let (release, wait) = mpsc::channel::<ClockMessage>();
         let (started, ready) = tokio::sync::oneshot::channel();
         let timed_out = Arc::new(AtomicBool::new(false));

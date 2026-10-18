@@ -5,6 +5,7 @@ use crate::remote_link::RemoteLink;
 #[cfg(not(feature = "remote"))]
 type RemoteLink = ();
 use crate::liveness::{Liveness, TICK};
+use crate::stream_close::{CloseWho, safe_agent_close_reason};
 use bytes::{Buf, Bytes, BytesMut};
 use infraternal_protocol::{
     DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
@@ -92,10 +93,21 @@ pub(crate) enum TerminalOutput {
     Ack { in_seq_acked: u64 },
     /// The shared host link is rebinding; keep this stream and its input writer.
     Reconnecting,
+    /// The shared host link missed one reply but is kept: show that it may be
+    /// reconnecting while live output, terminal replies and input keep flowing.
+    /// Unlike `Reconnecting`, nothing is replaced and nothing is replayed [D300].
+    LinkDoubt,
+    /// The doubted host link answered again: clear only the `LinkDoubt`
+    /// indicator. It never confirms a replay; replays own their fences [D300].
+    Recovered,
     /// A route expired; only an authenticated browser consumer may request rebind.
     RouteExpired,
-    /// The agent retired one terminal stream.
-    Closed { code: u16 },
+    /// The server or infraternal agent retired one terminal stream with a safe reason.
+    Closed {
+        who: CloseWho,
+        code: u16,
+        reason: &'static str,
+    },
 }
 
 /// A single client attachment to a terminal session owned by its host infraternal agent.
@@ -265,6 +277,16 @@ impl EmbeddedAgent {
         )
     }
 
+    /// Observe the currently greeted route without opening or replaying any remote work.
+    #[cfg(all(feature = "remote", feature = "ssh"))]
+    pub(crate) async fn installed_route(&self) -> Result<bool, AgentError> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(Command::InstalledRoute(reply))
+            .await
+            .map_err(|_| AgentError::Unavailable)?;
+        result.await.map_err(|_| AgentError::Unavailable)
+    }
     /// The secondary joins this actor only after enrolled identity admission.
     #[cfg(feature = "remote")]
     pub(crate) async fn prime(&self, link: RemoteLink) -> Result<(), AgentError> {
@@ -282,6 +304,21 @@ impl EmbeddedAgent {
             .map_err(|_| AgentError::Unavailable)?;
         admission.admitted = result.is_ok();
         result
+    }
+
+    /// Component shutdown retires SSH fallback without ending installed transports.
+    #[cfg(all(feature = "remote", feature = "ssh"))]
+    pub(crate) async fn retire_ssh(&self) -> Result<(), AgentError> {
+        let (reply, retired) = oneshot::channel();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            self.commands
+                .send(Command::RetireSsh(reply))
+                .await
+                .map_err(|_| AgentError::Unavailable)?;
+            retired.await.map_err(|_| AgentError::Unavailable)
+        })
+        .await
+        .map_err(|_| AgentError::Unavailable)?
     }
 
     /// A bounded control call shares the existing id allocator and reply dispatcher.
@@ -487,6 +524,10 @@ impl EmbeddedAgent {
 }
 
 enum Command {
+    #[cfg(all(feature = "remote", feature = "ssh"))]
+    InstalledRoute(oneshot::Sender<bool>),
+    #[cfg(all(feature = "remote", feature = "ssh"))]
+    RetireSsh(oneshot::Sender<()>),
     #[cfg(feature = "remote")]
     Prime {
         link: Box<RemoteLink>,
@@ -810,6 +851,7 @@ enum Incoming {
     Close {
         stream_id: u32,
         code: u16,
+        reason: &'static str,
     },
     Ping {
         nonce: u64,
@@ -874,7 +916,7 @@ async fn forward_inputs(
 
 #[allow(
     clippy::too_many_lines,
-    reason = "Keep link loss, capability invalidation and census publication in the same actor lifetime."
+    reason = "Keep link loss, capability invalidation, census publication, fallback retirement, and route ownership ordered in the same actor turn."
 )]
 async fn run_actor(
     mut source: Source,
@@ -886,6 +928,9 @@ async fn run_actor(
     let mut routes = HashMap::<u32, u64>::new();
     let mut pending = HashMap::<u32, PendingCall>::new();
     let mut connection: Option<AgentConnection> = None;
+    // Keep the old SSH channel until the new transport proves writer replay.
+    // A failed replacement can still reattach the same shim through SSH.
+    let mut fallback: Option<AgentConnection> = None;
     let mut backoff = RECONNECT_FLOOR;
     let mut connected_at = std::time::Instant::now();
     let mut first_attempt = true;
@@ -898,11 +943,20 @@ async fn run_actor(
     #[cfg(not(feature = "remote"))]
     let mut writes = ();
     let mut probe_queue = std::collections::VecDeque::new();
-    let mut liveness = Liveness::new();
+    let mut liveness = Liveness::host_link();
+    // Windows told about the current doubt episode on the current link; only
+    // they get its recovery. Every lease reset and every lost link clears it.
+    let mut doubted = Vec::new();
     let mut ticks = tokio::time::interval(TICK);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
+        // A doubt belongs to the link it was raised on. Once that link is gone,
+        // its windows were told Reconnecting and only the replacement's own
+        // replay fence may confirm them [D300, #234].
+        if connection.is_none() {
+            doubted.clear();
+        }
         #[cfg(feature = "remote")]
         hot.observe(&attachments);
         #[cfg(feature = "remote")]
@@ -926,7 +980,7 @@ async fn run_actor(
                     if matches!(event, priming::Event::Incoming(Some(Incoming::Activate))) {
                         writes.stop().await;
                         // The promoted connection has not answered this route's probes yet.
-                        liveness = Liveness::new();
+                        fresh_host_lease(&mut liveness, &mut doubted);
                     }
                     process_priming(event, &mut hot, &mut connection, &mut attachments, &mut routes, &mut pending, &changes, &mut writes).await;
                 },
@@ -950,17 +1004,14 @@ async fn run_actor(
                 tokio::time::sleep(backoff).await;
             }
             first_attempt = false;
-            if let Ok(mut fresh) = source.connect().await {
-                if !reattach_all(&mut fresh, &mut attachments, &mut routes).await {
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
-                    routes.clear();
-                    cleanup_connection(fresh).await;
-                    continue;
-                }
+            if let Some(fresh) =
+                connect_with_fallback(&mut source, &mut attachments, &mut routes, &mut fallback)
+                    .await
+            {
                 connection = Some(fresh);
                 connected_at = std::time::Instant::now();
                 changes.send_replace(());
-                liveness = Liveness::new();
+                fresh_host_lease(&mut liveness, &mut doubted);
             } else {
                 tracing::warn!("infraternal agent connection failed; awaiting reconnect");
                 backoff = (backoff * 2).min(Duration::from_secs(30));
@@ -975,7 +1026,7 @@ async fn run_actor(
         };
         // Nothing probes an unused host link. A later attachment gets a fresh lease.
         if attachments.is_empty() {
-            liveness = Liveness::new();
+            fresh_host_lease(&mut liveness, &mut doubted);
         }
         #[cfg(feature = "remote")]
         let control_ready = writes.can_admit();
@@ -1015,7 +1066,7 @@ async fn run_actor(
                 if matches!(event, priming::Event::Incoming(Some(Incoming::Activate))) {
                     writes.stop().await;
                     // The promoted connection has not answered this route's probes yet.
-                    liveness = Liveness::new();
+                    fresh_host_lease(&mut liveness, &mut doubted);
                 }
                 #[cfg(feature = "remote")]
                 process_priming(event, &mut hot, &mut connection, &mut attachments, &mut routes, &mut pending, &changes, &mut writes).await;
@@ -1023,9 +1074,17 @@ async fn run_actor(
                 match event {}
             }
             _ = ticks.tick(), if !attachments.is_empty() => {
-                let (nonce, sent_us) = liveness.ping();
+                // Local FIFO pressure says nothing about peer health. A skipped
+                // probe starts no reply lease; outstanding leases still expire.
+                let probe_ok = !control_ready || {
+                    let (nonce, sent_us) = liveness.ping();
+                    write_frame(link, 0, &Frame::Ping { nonce, sent_us }).await
+                };
                 let available = matches!(*session_inventory.borrow(), SessionInventoryState::Available(_));
-                if (liveness.expired() || !write_frame(link, 0, &Frame::Ping { nonce, sent_us }).await
+                // One miss may be a single lost packet held behind retransmission:
+                // the windows show reconnecting and the link stays [D300].
+                report_doubt(&mut liveness, &mut doubted, &attachments);
+                if (liveness.retired() || !probe_ok
                     || !route_proofs::tick(link, &mut attachments, &mut routes, &mut pending, available, &mut probe_queue).await)
                     && let Some(old) = connection.take() {
                         #[cfg(feature = "remote")]
@@ -1047,7 +1106,7 @@ async fn run_actor(
                 #[cfg(feature = "remote")]
                 if let Source::Remote { pending,.. } = &mut source { *pending = Some(Box::new(replacement)); }
                 if let Some(old) = connection.take() {
-                    connection_lost(old, &mut attachments, &mut routes, &mut pending);
+                    retain_fallback(old, &mut fallback, &mut routes, &mut pending).await;
                     session_inventory.send_replace(SessionInventoryState::Unavailable);
                 }
             }
@@ -1056,6 +1115,22 @@ async fn run_actor(
                 #[cfg(feature = "remote")]
                 if let Command::Prime { link: secondary, reply } = command {
                     hot.start(*secondary, link.execution_uid, &attachments, reply);
+                    continue;
+                }
+                #[cfg(all(feature = "remote", feature = "ssh"))]
+                if let Command::RetireSsh(reply) = command {
+                    if fallback.as_ref().is_some_and(ssh_backed)
+                        && let Some(old) = fallback.take()
+                    {
+                        cleanup_connection(old).await;
+                    }
+                    if connection.as_ref().is_some_and(ssh_backed)
+                        && let Some(old) = connection.take()
+                    {
+                        connection_lost(old, &mut attachments, &mut routes, &mut pending);
+                        session_inventory.send_replace(SessionInventoryState::Unavailable);
+                    }
+                    let _ = reply.send(());
                     continue;
                 }
                 #[cfg(feature = "remote")]
@@ -1121,12 +1196,17 @@ async fn run_actor(
                     changes.send_replace(());continue;
                 }
                 if let Incoming::Pong { stream_id: 0, nonce, sent_us } = incoming {
-                    liveness.pong(nonce, sent_us);
+                    // The reply that clears doubt confirms the same windows on the same link.
+                    let doubtful = liveness.doubtful();
+                    if liveness.pong(nonce, sent_us) && doubtful {
+                        notify_doubt(true, &mut doubted, &attachments);
+                    }
                     continue;
                 }
                 if let Incoming::SessionInventory(ids) = incoming {
                     session_inventory
                         .send_replace(SessionInventoryState::Available(Arc::from(ids)));
+                    retire_fallback(&attachments, &mut fallback).await;
                     continue;
                 }
                 if !process_incoming(incoming, link, &mut attachments, &mut routes, &mut pending).await {
@@ -1140,8 +1220,78 @@ async fn run_actor(
                         first_attempt = attachments.values().any(|a| !a.awaiting_ack);
                     }
                 }
+                retire_fallback(&attachments, &mut fallback).await;
             }
         }
+    }
+}
+
+#[cfg(all(feature = "remote", feature = "ssh"))]
+fn ssh_backed(connection: &AgentConnection) -> bool {
+    matches!(&connection.peer, Peer::Remote(link) if link.ssh_backed())
+}
+
+async fn connect_with_fallback(
+    source: &mut Source,
+    attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+    fallback: &mut Option<AgentConnection>,
+) -> Option<AgentConnection> {
+    // A replacement that dies before its first writer Ack has consumed its
+    // admission. Restore SSH before waiting for an unrelated future admission.
+    #[cfg(feature = "remote")]
+    if fallback.is_some() && matches!(source, Source::Remote { pending: None, .. }) {
+        return restore_fallback(fallback, attachments, routes).await;
+    }
+    if let Ok(mut fresh) = source.connect().await {
+        if reattach_all(&mut fresh, attachments, routes).await {
+            return Some(fresh);
+        }
+        routes.clear();
+        cleanup_connection(fresh).await;
+    }
+    restore_fallback(fallback, attachments, routes).await
+}
+
+async fn retain_fallback(
+    old: AgentConnection,
+    fallback: &mut Option<AgentConnection>,
+    routes: &mut HashMap<u32, u64>,
+    pending: &mut HashMap<u32, PendingCall>,
+) {
+    routes.clear();
+    for (_, call) in pending.drain() {
+        call.refuse(AgentError::Unavailable);
+    }
+    if let Some(previous) = fallback.replace(old) {
+        cleanup_connection(previous).await;
+    }
+}
+
+async fn restore_fallback(
+    fallback: &mut Option<AgentConnection>,
+    attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+) -> Option<AgentConnection> {
+    let mut old = fallback.take()?;
+    if reattach_all(&mut old, attachments, routes).await {
+        Some(old)
+    } else {
+        cleanup_connection(old).await;
+        None
+    }
+}
+
+async fn retire_fallback(
+    attachments: &HashMap<u64, AttachmentState>,
+    fallback: &mut Option<AgentConnection>,
+) {
+    if attachments
+        .values()
+        .all(|attachment| !attachment.awaiting_ack)
+        && let Some(old) = fallback.take()
+    {
+        cleanup_connection(old).await;
     }
 }
 
@@ -1465,7 +1615,11 @@ fn retain_owned_input(
         let extra = &bytes[skip..];
         if a.unacknowledged.len().saturating_add(extra.len()) > MAX_FRAME_LEN {
             let stream = a.stream_id;
-            let _ = a.output.try_send(TerminalOutput::Closed { code: 1013 });
+            let _ = a.output.try_send(TerminalOutput::Closed {
+                who: CloseWho::Server,
+                code: 1013,
+                reason: "terminal command queue full; reattach and replay unacknowledged input",
+            });
             attachments.remove(attachment_id);
             routes.remove(&stream);
             return Some(true);
@@ -1486,6 +1640,17 @@ async fn process_command(
     pending: &mut HashMap<u32, PendingCall>,
 ) -> bool {
     match command {
+        // The actor consumes this command before entering ordinary dispatch.
+        #[cfg(all(feature = "remote", feature = "ssh"))]
+        Command::RetireSsh(_) => false,
+        #[cfg(all(feature = "remote", feature = "ssh"))]
+        Command::InstalledRoute(reply) => {
+            // Commands run only after greeting. Registry queue admission can
+            // precede replacement, so it cannot stand in for this local fence.
+            let _ =
+                reply.send(matches!(&connection.peer, Peer::Remote(link) if !link.ssh_backed()));
+            true
+        }
         #[cfg(feature = "remote")]
         Command::Prime { reply, .. } => {
             let _ = reply.send(Err(AgentError::Unavailable));
@@ -1677,8 +1842,22 @@ async fn process_command(
                     let _ = reply.send(Err(AgentError::Protocol));
                     return true;
                 }
-                // A resumed browser may reclaim its writer even if a full command
-                // queue prevented the old handle's best-effort Detach notification.
+                // A resumed browser may reclaim its writer before the old
+                // handle's best-effort Detach arrives. Retire the remote route
+                // too: shared dispatch rejects Attach on an already-open stream.
+                if !write_frame(
+                    connection,
+                    stream_id,
+                    &Frame::Close {
+                        code: 1000,
+                        reason: "writer reattached",
+                    },
+                )
+                .await
+                {
+                    let _ = reply.send(Err(AgentError::Unavailable));
+                    return false;
+                }
                 attachments.remove(&previous);
                 routes.remove(&stream_id);
             }
@@ -2279,7 +2458,11 @@ async fn process_incoming(
             }
             true
         }
-        Incoming::Close { stream_id, code } => {
+        Incoming::Close {
+            stream_id,
+            code,
+            reason,
+        } => {
             let Some(attachment_id) = routes.remove(&stream_id) else {
                 return true;
             };
@@ -2287,7 +2470,11 @@ async fn process_incoming(
                 return false;
             };
             // Retirement is local even when the consumer has already dropped or filled its queue.
-            let _ = attachment.output.try_send(TerminalOutput::Closed { code });
+            let _ = attachment.output.try_send(TerminalOutput::Closed {
+                who: CloseWho::InfraternalAgent,
+                code,
+                reason,
+            });
             true
         }
         Incoming::Ping { nonce, sent_us } => {
@@ -2461,7 +2648,11 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
                         in_seq_acked,
                     },
                     Frame::Close { .. } if stream_id == CONTROL_STREAM => Incoming::Disconnected,
-                    Frame::Close { code, .. } => Incoming::Close { stream_id, code },
+                    Frame::Close { code, reason } => Incoming::Close {
+                        stream_id,
+                        code,
+                        reason: safe_agent_close_reason(reason),
+                    },
                     Frame::Pong { nonce, sent_us } if stream_id % 2 == 0 => Incoming::Pong {
                         stream_id,
                         nonce,
@@ -2539,8 +2730,14 @@ async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &F
         {
             return false;
         }
-        // Admission is guarded by queue readiness in the single actor turn.
-        return sender.try_send(Bytes::from(encoded)).is_ok();
+        // Reliable control admission is guarded by readiness in the single
+        // actor turn. A best-effort Pong may lose that slot to queued work;
+        // let the peer's reply deadline decide health instead of retiring here.
+        return match sender.try_send(Bytes::from(encoded)) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => matches!(frame, Frame::Pong { .. }),
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        };
     }
     let (peer, encode) = (&mut connection.peer, &mut connection.encode);
     if encode_muxed_frame_into(stream_id, frame, encode).is_err() {
@@ -2559,6 +2756,7 @@ async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &F
     )
 }
 
+#[cfg_attr(test, track_caller)]
 fn connection_lost(
     mut connection: AgentConnection,
     attachments: &mut HashMap<u64, AttachmentState>,
@@ -2566,6 +2764,12 @@ fn connection_lost(
     pending: &mut HashMap<u32, PendingCall>,
 ) {
     connection.interrupt();
+    // Measurement fixtures name the actor branch that retired a primary.
+    #[cfg(test)]
+    TEST_CLOSE_LINES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(std::panic::Location::caller().line());
     routes.clear();
     notify_reconnecting(attachments);
     for (_, call) in pending.drain() {
@@ -2574,6 +2778,58 @@ fn connection_lost(
     // An old child gets bounded TERM/KILL cleanup independently of recovery.
     // Accepted shim input and surviving session processes remain authoritative.
     tokio::spawn(cleanup_connection(connection));
+}
+
+/// A new or promoted host link starts a fresh lease with no doubt episode: a
+/// doubt raised on an earlier link never confirms windows on this one [#234].
+fn fresh_host_lease(liveness: &mut Liveness, doubted: &mut Vec<u64>) {
+    *liveness = Liveness::host_link();
+    doubted.clear();
+}
+
+/// One tick of doubt reporting for the primary host link [D300]. Every tick of
+/// a doubt episode offers the notice again, so a window whose queue was full
+/// when the episode began is told once it has room (it is skipped while it is
+/// already in `doubted`). The recovery side retries the same way [#234].
+fn report_doubt(
+    liveness: &mut Liveness,
+    doubted: &mut Vec<u64>,
+    attachments: &HashMap<u64, AttachmentState>,
+) {
+    if liveness.doubt_started() || liveness.doubtful() {
+        notify_doubt(false, doubted, attachments);
+    } else if !doubted.is_empty() {
+        notify_doubt(true, doubted, attachments);
+    }
+}
+
+/// Tells settled windows that the shared host link is doubtful, or that it
+/// answered again [D300]. Doubt never changes the link, and recovery confirms
+/// only the windows that doubt reached; replays and rebinds own their fences.
+/// A window whose queue is full keeps its place: it is told on a later tick,
+/// so none waits for a confirmation it never receives and none is retired.
+fn notify_doubt(
+    recovered: bool,
+    doubted: &mut Vec<u64>,
+    attachments: &HashMap<u64, AttachmentState>,
+) {
+    let settled = |a: &AttachmentState| !a.awaiting_ack && !a.proof_rebind_pending;
+    if recovered {
+        doubted.retain(|id| {
+            attachments.get(id).is_some_and(|a| {
+                settled(a) && a.output.try_send(TerminalOutput::Recovered).is_err()
+            })
+        });
+    } else {
+        for (&id, a) in attachments {
+            if settled(a)
+                && !doubted.contains(&id)
+                && a.output.try_send(TerminalOutput::LinkDoubt).is_ok()
+            {
+                doubted.push(id);
+            }
+        }
+    }
 }
 
 /// A stalled host does not retire its surviving PTYs. A full consumer still
@@ -2751,6 +3007,10 @@ async fn next_writes(writes: &mut writes::State) -> (u32, bool) {
 async fn next_writes(_state: &mut ()) -> (u32, bool) {
     std::future::pending().await
 }
+
+/// Source lines of every `connection_lost` call, in order, for diagnostics.
+#[cfg(test)]
+pub(crate) static TEST_CLOSE_LINES: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
 
 #[cfg(all(test, feature = "remote"))]
 pub(crate) fn test_control_queue_state(peer: std::net::SocketAddr) -> Option<(bool, usize)> {

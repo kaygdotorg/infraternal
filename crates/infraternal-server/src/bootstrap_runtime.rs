@@ -142,6 +142,7 @@ pub(crate) fn default_runner(
             issuer,
             hosts,
             attempts: std::sync::Mutex::default(),
+            sessions_changed: std::sync::Mutex::default(),
         })
     } else {
         Arc::new(base)
@@ -177,6 +178,7 @@ pub(crate) fn default_runner(
                 ssh_keyscan: "ssh-keyscan".into(),
                 ssh_keygen: "ssh-keygen".into(),
                 askpass_binary: "/proc/self/exe".into(),
+                tcp_connector: Some(executable.clone()),
                 scratch: infraternal_plugin_ssh::credentials::runtime_root(),
                 command_timeout: Duration::from_secs(30),
             },

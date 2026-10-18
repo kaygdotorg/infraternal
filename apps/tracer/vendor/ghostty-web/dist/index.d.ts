@@ -1498,6 +1498,7 @@ export declare class SelectionManager {
     private boundContextMenuHandler;
     private boundClickHandler;
     private boundDocumentMouseMoveHandler;
+    private boundDocumentMouseDownHandler;
     private autoScrollInterval;
     private autoScrollDirection;
     private static readonly AUTO_SCROLL_EDGE_SIZE;
