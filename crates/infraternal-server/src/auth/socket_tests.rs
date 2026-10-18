@@ -914,3 +914,6 @@ mod close_logging;
 #[cfg(feature = "remote")]
 #[path = "socket_tests/review_close_log.rs"]
 mod review_close_log;
+
+#[path = "socket_tests/review_mobile_visibility.rs"]
+mod review_mobile_visibility;
