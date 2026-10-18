@@ -13,6 +13,14 @@ use uuid::Uuid;
 #[error("remote enrollment refused")]
 pub struct RemoteEnrollmentError;
 
+// Keep the network error opaque. Local debug tracing distinguishes only fixed
+// refusal stages, never capabilities, request bytes or cryptographic diagnostics.
+#[cold]
+fn refused(stage: &'static str) -> RemoteEnrollmentError {
+    tracing::debug!(stage, "remote enrollment refused");
+    RemoteEnrollmentError
+}
+
 /// One live unlock source and SQLite authority; constructing the adapter never unlocks the CA.
 pub struct RemoteEnrollment<S: CaKeySource + ?Sized> {
     source: Arc<S>,
@@ -45,16 +53,17 @@ impl<S: CaKeySource + ?Sized + 'static> RemoteEnrollment<S> {
         self.store
             .preflight(token, host, mode, now)
             .await
-            .map_err(|_| RemoteEnrollmentError)?;
-        let csr = ValidatedCsr::parse(csr_der).map_err(|_| RemoteEnrollmentError)?;
+            .map_err(|_| refused("preflight"))?;
+        let csr = ValidatedCsr::parse(csr_der).map_err(|_| refused("csr"))?;
         let certificate = self
-            .signer()?
+            .signer()
+            .map_err(|_| refused("signer"))?
             .sign_host(host, &csr, now)
-            .map_err(|_| RemoteEnrollmentError)?;
+            .map_err(|_| refused("certificate"))?;
         self.store
             .redeem(token, host, mode, now, &certificate.record)
             .await
-            .map_err(|_| RemoteEnrollmentError)?;
+            .map_err(|_| refused("redeem"))?;
         Ok(certificate)
     }
 
