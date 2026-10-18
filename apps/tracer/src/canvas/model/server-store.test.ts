@@ -123,7 +123,7 @@ test("ready edits share one network round trip with a bounded in-flight window",
 
 test("the optimistic semantic projection paints before any server receipt", async () => {
   const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
-  const paints: CanvasDocument[] = []; store.subscribe((document) => paints.push(document));
+  const paints: CanvasDocument[] = []; store.subscribe(() => paints.push(store.current()));
   const next = document(); reduce(next, opened); await store.save(next);
   expect(paints).toHaveLength(1); expect(paints[0]!.views[0]!.layout).toEqual(next.views[0]!.layout);
   const call = transport.calls[0]!;
@@ -136,3 +136,4 @@ test("a no-op drawing capture does not trigger another paint", async () => {
   let paints = 0; store.subscribe(() => { paints++; }); await store.save(document());
   expect(paints).toBe(0); expect(transport.calls).toHaveLength(0); store.dispose();
 });
+

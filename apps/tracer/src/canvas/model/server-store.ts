@@ -1,9 +1,9 @@
 /** Account layout subscription, durable retry journal and drawing cache (D178, D183, D245, D248). */
-import { randomUuid } from "../../identifiers";
-import { canvasKey, readStoredJson, writeStoredJson } from "../../account-storage";
-import { documentWindows as windows, parseDocument, type CanvasDocument } from "./schema";
-import { edits, reduce, type Intent, type LayoutEdit } from "./operations";
-import { readLayoutCache, type Pending, type Migration } from "./cache";
+import { canvasKey, readStoredJson, createStoredJsonCache } from "../../account-storage";
+import type { CanvasDocument } from "./schema";
+import type { LayoutEdit } from "./operations";
+import { layoutCacheValue, readLayoutCache } from "./cache";
+import { LayoutJournal } from "./journal";
 import type { CanvasStore } from "./store";
 
 export interface LayoutTransport {
@@ -11,149 +11,66 @@ export interface LayoutTransport {
   call(action: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
   subscribe(filter: { topic: string }, event: (event: Record<string, unknown>) => void, open?: () => void): () => void;
 }
-const empty = (): CanvasDocument => ({ format: "infraternal.canvas", version: 1, revision: 0, views: [] });
-
 export class ServerCanvasStore implements CanvasStore {
   readonly acceptsPendingReferences = true;
-  #unresolved = new Set<string>();
-  #canonical = empty();
-  #pending: Pending[] = [];
-  #migration: Migration | undefined;
+  readonly #journal: LayoutJournal;
   #cached = false;
-  #initialized = false;
-  #ready = false;
   #disposed = false;
-  readonly #inflight = new Set<string>();
-  #epoch = 0;
-  #timer: ReturnType<typeof setTimeout> | undefined;
-  readonly #listeners = new Set<(doc: CanvasDocument) => void>();
-  readonly #key: string;
+  readonly #cache: ReturnType<typeof createStoredJsonCache>;
   readonly #off: () => void;
   #loaded: (() => void) | undefined;
   readonly #first: Promise<void>;
 
   constructor(private readonly transport: LayoutTransport, account: string, private readonly refused: () => void = () => {}) {
-    this.#key = canvasKey(account);
+    const key = canvasKey(account);
     this.#first = new Promise((resolve) => { this.#loaded = resolve; });
-    const cache = readLayoutCache(readStoredJson(this.#key));
-    if (cache) {
-      this.#canonical = cache.canonical; this.#pending = cache.pending; this.#unresolved = cache.unresolved;
-      this.#migration = cache.migration; this.#cached = true; this.#initialized = cache.canonical.revision > 0;
-    }
+    const cache = readLayoutCache(readStoredJson(key));
+    this.#journal = new LayoutJournal(cache); this.#cached = cache !== undefined;
+    this.#cache = createStoredJsonCache(key, () => layoutCacheValue(this.#journal));
     this.#off = transport.subscribe({ topic: "canvas.layout" }, (event) => this.#event(event), () => {
-      this.#ready = false; this.#inflight.clear(); this.#epoch++;
+      this.#journal.restart();
     });
   }
   async load(): Promise<CanvasDocument | undefined> {
     if (!this.#cached) await this.#first;
-    return this.#cached || this.#initialized || this.current().views.length ? this.current() : undefined;
+    return this.#cached || this.#journal.initialized || this.current().views.length ? this.current() : undefined;
   }
-  /** Record each completed edit immediately; only cache serialization is coalesced. */
-  unresolvedWindow(id: string): boolean { return this.#unresolved.has(id); }
+  /** A placeholder drawing ID must never be used to attach a terminal. */
+  unresolvedWindow(id: string): boolean { return this.#journal.unresolved.has(id); }
+  /** Capture synchronously; network receipts never gate input. */
   async save(doc: CanvasDocument, hints?: ReadonlyMap<string, LayoutEdit>, before?: CanvasDocument, unresolved: ReadonlySet<string> = new Set()): Promise<void> {
     if (this.#disposed) return;
-    const previous = structuredClone(before ?? this.current());
-    let patched = false;
-    const live = new Map(windows(doc).map((w) => [w.id, w]));
-    // Unsatisfied references belong only to the local journal. Complete an unsent birth in place;
-    // a sent request is immutable because its operation ID must always identify the same input.
-    for (const id of this.#unresolved) {
-      if (unresolved.has(id)) continue;
-      const window = live.get(id);
-      if (window) for (const p of this.#pending) {
-        if (!p.sent && (p.intent.type === "open" || p.intent.type === "split") && p.intent.window.id === id) {
-          p.intent.window.target = structuredClone(window.target); patched = true;
-          for (const old of windows(previous)) if (old.id === id) old.target = structuredClone(window.target);
-        }
-      }
-    }
-    const cancelled = this.#pending.some((p) => !p.sent && (p.intent.type === "open" || p.intent.type === "split") && this.#unresolved.has(p.intent.window.id) && !live.has(p.intent.window.id));
-    this.#unresolved = new Set(unresolved);
-    let baseline = previous;
-    if (cancelled) {
-      // Removing an uncreated shell also removes its dependency. Rebuild only the unsent suffix,
-      // so surviving children become independent opens and no placeholder can reach the server.
-      this.#pending = this.#pending.filter((p) => p.sent);
-      baseline = this.current();
-    }
-    const intents = edits(baseline, doc, cancelled ? undefined : hints);
-    for (const intent of intents) this.#pending.push({ op_id: randomUuid(), base_revision: this.#canonical.revision, intent });
-    if (patched || cancelled || intents.length) this.#publish(); else this.#checkpoint();
+    if (this.#journal.capture(doc, hints, before, unresolved)) this.#publish(); else this.#cache.schedule();
     this.#pump();
   }
-  current(): CanvasDocument {
-    const doc = structuredClone(this.#migration && (!this.#initialized || this.#migration.revision !== undefined && this.#canonical.revision < this.#migration.revision) ? this.#migration.document : this.#canonical);
-    for (const p of this.#pending) reduce(doc, p.intent);
-    return doc;
-  }
-  subscribe(listener: (doc: CanvasDocument) => void): () => void { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
+  current(): CanvasDocument { return this.#journal.current(); }
+  subscribe(listener: () => void): () => void { return this.#cache.subscribe(listener); }
   #event(event: Record<string, unknown>): void {
-    if (this.#disposed || !Number.isSafeInteger(event.revision) || (event.type !== "canvas.layout.snapshot" || this.#ready) && Number(event.revision) < this.#canonical.revision) return;
-    if (event.type === "canvas.layout.snapshot") {
-      const document = parseDocument(event.document);
-      if (!document || document.revision !== event.revision) return;
-      this.#canonical = document; this.#initialized = event.initialized === true; this.#ready = true;
-    } else if (event.type === "canvas.layout.operation") {
-      if (event.revision === this.#canonical.revision) return;
-      // Never apply a partial history. A fresh subscription obtains an atomic snapshot on reconnect.
-      if (event.revision !== this.#canonical.revision + 1 || !event.intent || typeof event.intent !== "object") return;
-      if (!event.noop) reduce(this.#canonical, event.intent as Intent);
-      this.#canonical.revision = Number(event.revision);
-      this.#pending = this.#pending.filter((p) => p.op_id !== event.op_id);
-    } else return;
-    this.#pending = this.#pending.filter((p) => p.revision === undefined || p.revision > this.#canonical.revision);
-    if (this.#migration?.revision !== undefined && this.#migration.revision <= this.#canonical.revision) this.#migration = undefined;
+    if (this.#disposed || !this.#journal.accept(event)) return;
     this.#publish(); this.#loaded?.(); this.#loaded = undefined; this.#pump();
   }
-  #publish(): void {
-    const document = this.current();
-    this.#checkpoint();
-    for (const listener of this.#listeners) listener(structuredClone(document));
-  }
+  #publish(): void { this.#cache.changed(); }
   #pump(): void {
-    if (this.#disposed || !this.#ready || this.#inflight.size >= 4 || this.transport.isWelcomed === false) return;
-    if (this.#migration?.revision !== undefined) return;
-    const migration = this.#migration;
-    const operation = this.#pending.find((p) => p.revision === undefined && !this.#inflight.has(p.op_id));
-    if (!migration && !operation) return;
-    if (!migration && operation && (operation.intent.type === "open" || operation.intent.type === "split") && this.#unresolved.has(operation.intent.window.id)) return;
-    if (operation && !migration) operation.sent = true;
-    const id = migration?.op_id ?? operation!.op_id;
-    if (this.#inflight.has(id)) return;
-    this.#inflight.add(id);
-    const epoch = this.#epoch;
+    if (this.#disposed || this.transport.isWelcomed === false) return;
+    const entry = this.#journal.next(); if (!entry) return;
+    const migration = "document" in entry;
+    const epoch = this.#journal.epoch;
     const action = migration ? "canvas.layout.initialize" : "canvas.layout.apply";
-    const input = migration ? { ...migration } : { op_id: operation!.op_id, base_revision: operation!.base_revision, intent: operation!.intent };
+    const input = "document" in entry ? { op_id: entry.op_id, document: entry.document } : { op_id: entry.op_id, base_revision: entry.base_revision, intent: entry.intent };
     void this.transport.call(action, input).then((result) => {
-      if (this.#disposed || epoch !== this.#epoch) return;
-      this.#inflight.delete(id);
-      if (!Number.isSafeInteger(result.revision)) { this.#ready = false; this.refused(); return; }
-      if (migration) {
-        migration.revision = Number(result.revision); this.#initialized = true;
-        if (migration.revision <= this.#canonical.revision) this.#migration = undefined;
-      }
-      else operation!.revision = Number(result.revision);
-      const count = this.#pending.length;
-      this.#pending = this.#pending.filter((p) => p.revision === undefined || p.revision > this.#canonical.revision);
+      if (this.#disposed || !this.#journal.release(entry, epoch)) return;
+      if (!Number.isSafeInteger(result.revision)) { this.#journal.fail(entry, epoch); this.refused(); return; }
       // The ordered event usually paints first. Its receipt changes journal metadata only.
-      if (migration || this.#pending.length !== count) this.#publish(); else this.#checkpoint();
+      if (this.#journal.acknowledge(entry, Number(result.revision), migration)) this.#publish(); else this.#cache.schedule();
       this.#pump();
     }, () => {
-      if (this.#disposed || epoch !== this.#epoch) return;
+      if (this.#disposed || !this.#journal.fail(entry, epoch)) return;
       // Keep the identical input for retry after the next snapshot, including its original base revision.
-      this.#inflight.delete(id); this.#ready = false; this.#checkpoint(); this.refused();
+      this.#cache.schedule(); this.refused();
     });
     // Bounded pipelining preserves socket order without making each independent edit wait for the previous RTT.
     if (!migration) this.#pump();
   }
-  #checkpoint(): void {
-    if (this.#timer !== undefined || this.#disposed) return;
-    this.#timer = setTimeout(() => { this.#timer = undefined; this.flush(); }, 300);
-  }
-  flush(): void {
-    if (this.#disposed) return;
-    clearTimeout(this.#timer); this.#timer = undefined;
-    writeStoredJson(this.#key, { cacheVersion: 2, canonical: this.#canonical, document: this.current(), pending: this.#pending, unresolved: [...this.#unresolved], ...(this.#migration ? { migration: this.#migration } : {}) });
-  }
-  dispose(): void { this.flush(); this.#disposed = true; this.#epoch++; this.#off(); this.#listeners.clear(); this.#loaded?.(); }
+  flush(): void { this.#cache.flush(); }
+  dispose(): void { this.#cache.dispose(); this.#disposed = true; this.#journal.restart(); this.#off(); this.#loaded?.(); }
 }

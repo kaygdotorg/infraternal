@@ -17,7 +17,8 @@ export interface CanvasStore {
   unresolvedWindow?(id: string): boolean;
   flush?(): void;
   dispose?(): void;
-  subscribe(listener: (doc: CanvasDocument) => void): () => void;
+  /** Read the latest projection after asynchronous work instead of retaining an obsolete event snapshot. */
+  subscribe(listener: () => void): () => void;
 }
 
 export class LocalCanvasStore implements CanvasStore {
