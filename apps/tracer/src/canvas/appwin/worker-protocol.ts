@@ -8,12 +8,14 @@
  * encoded access units as they arrive from the one socket.
  */
 
+import type { FrameTrace, ReceiveTrace } from "./frame-trace";
+
 /** Main thread to worker. */
 export type ToWorker =
   /** Hands over the visible surface. Sent once, with the canvas in the transfer list. */
-  | { t: "init"; canvas: OffscreenCanvas; hardware: HardwareAcceleration }
+  | { t: "init"; canvas: OffscreenCanvas; hardware: HardwareAcceleration; measure?: boolean }
   /** One access unit. `bytes` is transferred (the worker owns it). `sequence` is the wire's sequence (starts at 1). */
-  | { t: "chunk"; sequence: number; keyframe: boolean; bytes: ArrayBuffer }
+  | { t: "chunk"; sequence: number; keyframe: boolean; bytes: ArrayBuffer; trace?: ReceiveTrace }
   /** Drops the decoder and every queued frame (a pause, a re-attach). The picture on the surface stays. */
   | { t: "reset" }
   /** Asks for the counters (measurement only). */
@@ -30,7 +32,9 @@ export type FromWorker =
   | { t: "repair"; lastSequence: number }
   /** The decoder cannot work at all. `unsupported-*` is final for this browser; `decode` may be tried again. */
   | { t: "error"; reason: "unsupported-codec" | "unsupported-canvas" | "decode"; detail?: string }
-  | { t: "stats"; stats: WorkerStats };
+  | { t: "stats"; stats: WorkerStats }
+  /** Emitted only by explicitly enabled, content-free stage measurements. */
+  | { t: "trace"; frame: FrameTrace };
 
 export interface WorkerStats {
   received: number;
