@@ -255,6 +255,23 @@ test("a late timer without a reply counts subsequent responsive silence", () => 
   } finally { f.dispose(); }
 });
 
+test("an outstanding probe gets responsive observation after a renderer stall", () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1000);
+    f.stopForwarding();
+    f.advance(30); // A probe is now outstanding, with most of its allowance left.
+    f.suspend(1000);
+    f.runBrowserTimer();
+    // The stall may have started before the timer's due time. Merely removing
+    // lateness after that due time would consume the whole allowance on wake.
+    f.advance(200);
+    expect(f.connection.isWelcomed).toBe(true);
+    f.advance(76);
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
 for (const valid of [false, true]) test(`retirement gives a queued ${valid ? "correlated" : "mismatched"} pong one task turn`, () => {
   const f = fixture(1, 1);
   try {

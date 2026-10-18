@@ -516,11 +516,14 @@ export class MuxConnection {
     return this.livenessSrtt === undefined ? 2000 : Math.max(250, this.livenessSrtt + 4 * this.livenessRttvar + 50);
   }
 
-  /** Credit only observed timer lateness; no extra polling or per-stream work is needed. */
+  /** A late task cannot prove the page was responsive during its scheduled wait. */
   private accountLivenessDelay(now: number): boolean {
     const late = now - this.livenessDueAt;
     if (late <= LIVENESS_TICK_MS) return false;
-    this.lastPongAt += late;
+    // The stall may include time before dueAt, which cannot be measured without
+    // extra polling. Observe a fresh allowance instead of counting that unknown
+    // interval as network silence. Timely tasks keep the existing deadline.
+    if (this.pendingPings.size > 0) this.lastPongAt = now;
     this.lastLivenessStallAt = now;
     // Consume the credit once even if a socket task runs before the timer.
     this.livenessDueAt = now;
