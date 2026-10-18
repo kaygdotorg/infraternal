@@ -14,7 +14,7 @@ fn inherited_fd_is_rejected_instead_of_ignored_by_remote_commands() {
         std::process::id()
     ));
     assert!(!missing.exists());
-    for descriptor in ["999", "not-an-integer"] {
+    for descriptor in ["999", "not-an-integer", "2147483648"] {
         for command in [vec!["run"], vec!["join", "https://example.invalid"]] {
             let output = Command::new(env!("CARGO_BIN_EXE_infraternal"))
                 .args(["--json", "agent"])

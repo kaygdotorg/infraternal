@@ -162,6 +162,9 @@ fn dispatch_action(
     matches: &ArgMatches,
     json_output: bool,
 ) -> ExitCode {
+    if let Some(exit) = reject_undeclared_inherited_fd(action, matches, json_output) {
+        return exit;
+    }
     match action.cli_handler {
         CliHandler::NodeComponent => {
             #[cfg(all(feature = "plugin-agent", target_os = "linux"))]
@@ -252,6 +255,28 @@ fn dispatch_action(
         | CliHandler::RemoveHost
         | CliHandler::SshAskpass => run_operator_action(action, matches, json_output),
     }
+}
+
+/// Refuse an inherited descriptor when the selected action does not declare it as an input.
+fn reject_undeclared_inherited_fd(
+    action: &ActionDefinition,
+    matches: &ArgMatches,
+    json_output: bool,
+) -> Option<ExitCode> {
+    // Ancestor options are carried into descendant parsers; accept one only when this action's
+    // own schema declares it, otherwise it could be parsed successfully and then ignored.
+    if matches.try_contains_id("fd").is_ok_and(|present| present)
+        && !action.input_schema.properties.contains_key("fd")
+    {
+        return Some(output::refuse(
+            json_output,
+            &action.command.join(" "),
+            "This descriptor is only valid when the server starts an infraternal agent.",
+            "Remove --fd and run this command again.",
+            Exit::Usage,
+        ));
+    }
+    None
 }
 
 fn missing_action(json_output: bool) -> ExitCode {
@@ -1405,7 +1430,6 @@ fn harden_startup() -> Result<(), nix::errno::Errno> {
 #[cfg(feature = "remote")]
 fn run_remote_agent(
     action: AgentAction,
-    fd: Option<i32>,
     state: Option<PathBuf>,
     data: Option<PathBuf>,
     json: bool,
@@ -1421,15 +1445,6 @@ fn run_remote_agent(
         AgentAction::Join { .. } => infraternal_plugin_remote::JOIN.id,
         AgentAction::Run => infraternal_plugin_remote::RUN.id,
     };
-    if fd.is_some() {
-        return output::refuse(
-            json,
-            operation,
-            "These infraternal agent options cannot be used together.",
-            "infraternal agent --help",
-            Exit::Usage,
-        );
-    }
     let Ok(data) = data.map_or_else(remote::default_data, Ok) else {
         return output::refuse(
             json,
@@ -1525,11 +1540,6 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
     #[cfg(feature = "remote")]
     {
         if action.cli_handler == CliHandler::RemoteAgent {
-            let fd = matches
-                .try_get_one::<i64>("fd")
-                .ok()
-                .flatten()
-                .and_then(|fd| i32::try_from(*fd).ok());
             let state = matches
                 .try_get_one::<String>("state")
                 .ok()
@@ -1551,7 +1561,7 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
             } else {
                 AgentAction::Run
             };
-            return run_remote_agent(mode, fd, state, data, json);
+            return run_remote_agent(mode, state, data, json);
         }
         if action.cli_handler == CliHandler::ServerRestart {
             let data = matches
