@@ -200,7 +200,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     let cols = doc && doc.layout.type === "tiled" ? columnsFromDocument(doc.layout, m, resolve) : [];
     // First run, or nothing left to restore: one new shell.
     if (!doc && !saved) cols = [{ id: "c1", w: m.colW, wins: [sessions.open(options.host.name)] }];
-    const console_: ViewModel = { id: "console", name: "Console", layout: "tiled", cols, nodes: [], x: 0, y: 0 };
+    const console_: ViewModel = { id: "console", name: "Console", layout: "tiled", cols, nodes: [], x: (doc?.cell.x ?? 0) * CELL, y: (doc?.cell.y ?? 0) * CELL };
     const settings = buildSettingsView(false, m, BUILTIN_SECTIONS);
     settings.x = boxOf(console_, m).w + CELL;
     const recovered = (saved?.views ?? []).filter((v) => v.id !== "console" && v.id !== "mesh" && v.layout.type === "tiled").map((v): ViewModel => ({
@@ -214,11 +214,13 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const offLayout = store.subscribe(() => {
     // Journal any completed local edit before another device's update can replace its presentation.
     canvas.flush();
+    const protectedIds = canvas.cx.store.uncommittedWindows();
     const document = store.current();
     const revision = ++paintRevision;
-    void reconcile(canvas.cx, document, resolve, () => !disposed && revision === paintRevision).then(() => {
+    void reconcile(canvas.cx, document, resolve, () => !disposed && revision === paintRevision, protectedIds).then(() => {
       if (disposed || revision !== paintRevision) return;
-      canvas.cx.store.reset();
+      canvas.cx.store.reset(protectedIds);
+      if (protectedIds.size) canvas.cx.store.changed();
       inventory.setLayout(document);
     });
   });

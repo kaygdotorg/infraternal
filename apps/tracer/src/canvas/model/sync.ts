@@ -11,7 +11,9 @@ import { toDocument } from "./document";
 export interface DocumentSync {
   changed(split?: SplitEdit): void;
   /** Reset the drawing baseline after a canonical update, without creating local edits. */
-  reset(): void;
+  reset(protectedIds?: ReadonlySet<string>): void;
+  /** Local windows not yet represented by a submitted edit. */
+  uncommittedWindows(): ReadonlySet<string>;
   /** Saves now (the page is being hidden). */
   flush(): void;
   dispose(): void;
@@ -39,7 +41,14 @@ export function createDocumentSync(cx: Ctx, persisted: (id: string) => boolean =
   };
   return {
     changed(split) { if (split) splits.set(split.windowId, split); if (!disposed && !timer) timer = window.setTimeout(save, 0); },
-    reset() { before = document(); },
+    reset(protectedIds = new Set()) {
+      before = document();
+      for (const v of before.views) if (v.layout.type === "tiled") for (const c of v.layout.columns) c.windows = c.windows.filter((w) => !protectedIds.has(w.id));
+    },
+    uncommittedWindows() {
+      const saved = new Set(before?.views.flatMap((v) => v.layout.type === "tiled" ? v.layout.columns.flatMap((c) => c.windows.map((w) => w.id)) : []) ?? []);
+      return new Set([...cx.views.values()].filter((v) => persisted(v.view.id)).flatMap((v) => [...v.wins.keys()].filter((id) => !saved.has(id))));
+    },
     flush() { if (timer) { window.clearTimeout(timer); save(); } cx.adapters.store.flush?.(); },
     /** After this nothing is written again: sign-out removes the document right after (D245). */
     dispose() { disposed = true; window.clearTimeout(timer); timer = 0; cx.adapters.store.dispose?.(); },
