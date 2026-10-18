@@ -52,17 +52,24 @@ impl Options {
 /// # Errors
 /// Returns runtime, private-state, shim admission or authenticated bridge failures.
 pub fn run(state: PathBuf, session: Option<uuid::Uuid>) -> io::Result<()> {
-    run_mode(state, session, full_dispatch)
-}
-
-async fn full_dispatch(
-    socket: &Socket,
-    state: Option<PathBuf>,
-    uid: u32,
-    session: sessions::Session,
-) -> io::Result<()> {
-    drop(session);
-    daemon::run_authenticated(socket, state, uid).await
+    // Retry reattaches a published session while the failed attempt's
+    // infraternal agent may still hold the runtime lifetime lock, which plugin
+    // control takes. A reattach serves terminal actions only, through the same
+    // dispatcher instance; a new bridge keeps plugin control (#230). One
+    // closure keeps one bridge instance for both shapes [243].
+    let reattach = session.is_some();
+    run_mode(
+        state,
+        session,
+        async move |socket: &Socket, state, uid, session: sessions::Session| {
+            drop(session);
+            if reattach {
+                daemon::run_authenticated_terminal(socket, state, uid).await
+            } else {
+                daemon::run_authenticated(socket, state, uid).await
+            }
+        },
+    )
 }
 
 fn run_mode<F>(state: PathBuf, session: Option<uuid::Uuid>, serve: F) -> io::Result<()>
