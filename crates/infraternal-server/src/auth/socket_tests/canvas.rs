@@ -1,9 +1,15 @@
-//! Exercises canvas discovery, canonical events and runtime withdrawal on the real authenticated WebSocket [183,198,248].
+//! Exercises canvas discovery, canonical events and runtime withdrawal on the real authenticated WebSocket [16,183,198,202,248].
 use super::*;
 
 #[tokio::test(start_paused = true)]
 #[allow(clippy::too_many_lines)]
 async fn canvas_real_socket_commits_and_runtime_disable_preserve_control() {
+    assert!(
+        crate::compiled_plugins()
+            .iter()
+            .any(|descriptor| descriptor.id == "canvas"),
+        "canvas is missing from the compiled action catalog"
+    );
     let _guard = SERIAL.lock().await;
     let _clock = FrozenSocketTime::new().await;
     let f = fixture().await;
