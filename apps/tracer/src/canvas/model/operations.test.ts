@@ -1,6 +1,6 @@
 /** Stable-neighbour and shared-band layout regressions (#243). */
 import { expect, test } from "bun:test";
-import { edits, reduce, type Intent } from "./operations";
+import { edits, reduce, type Intent } from "./operations.on-demand";
 import type { CanvasDocument } from "./document";
 const doc = (): CanvasDocument => ({ format: "infraternal.canvas", version: 1, revision: 0, views: [{ id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [] } }] });
 const open = (id: string): Intent => ({ type: "open", view_id: "console", column_id: "c", window: { id, target: { type: "settings", section: "appearance" } } });
@@ -37,4 +37,22 @@ test("a three-window reorder sends one semantic move", () => {
   const a = doc(); for (const id of ["c", "b", "a"]) reduce(a, open(id)); const b = structuredClone(a);
   reduce(b, { type: "move", view_id: "console", column_id: "c", window_id: "c" });
   expect(edits(a, b)).toHaveLength(1);
+});
+
+test("a split before the first reference is journalled opens its anchor before splitting", () => {
+  const before = doc(), after = doc(); reduce(after, open("anchor"));
+  reduce(after, { type: "split", view_id: "console", column_id: "right", anchor_id: "anchor", axis: "right", window: { id: "child", target: { type: "settings", section: "appearance" } } });
+  const changes = edits(before, after, new Map([["child", { windowId: "child", anchorId: "anchor", axis: "right" }]]));
+  expect(changes.map((i) => i.type)).toEqual(["open", "split"]);
+  const replay = structuredClone(before); for (const change of changes) reduce(replay, change);
+  expect(replay).toEqual(after);
+});
+
+test("a drop sends the moved membership once, without derived neighbour geometry", () => {
+  const before = doc(); for (const id of ["c", "b", "a"]) reduce(before, open(id));
+  const after = structuredClone(before); reduce(after, { type: "move", view_id: "console", column_id: "c", window_id: "a", after: "c" });
+  const layout = after.views[0]!.layout;
+  if (layout.type === "tiled") for (const col of layout.columns) for (const w of col.windows) w.height = 200;
+  const changes = edits(before, after, new Map([["a", { windowId: "a", move: true as const }]]));
+  expect(changes).toEqual([{ type: "move", view_id: "console", window_id: "a", column_id: "c", after: "c", column_after: null }]);
 });
