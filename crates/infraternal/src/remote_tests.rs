@@ -338,3 +338,60 @@ async fn join_re_enrolls_the_same_hosts_identity_and_refuses_another_host() {
     assert_eq!(std::fs::read(data.join("identity.json")).unwrap(), bytes);
     assert_eq!(std::fs::read_dir(&data).unwrap().count(), 1);
 }
+
+/// Break-it (#230): the host id alone does not name a host. Another server
+/// (a staging copy of the database, or any server that issues the same id)
+/// must not take over an identity enrolled with this one: its invitation has
+/// a different CA, endpoint and server name. Join must refuse it before any
+/// network use and leave the enrolled identity byte-identical, as it did
+/// before re-enrollment existed.
+#[tokio::test]
+async fn join_refuses_the_same_host_id_from_another_server() {
+    let directory = Directory::new();
+    let data = directory.0.join("data");
+    let key = PKey::generate_ed25519().unwrap();
+    let ca = self_signed(&key);
+    let host_id = uuid::Uuid::new_v4();
+    let uid = nix::unistd::Uid::effective().as_raw();
+    let stored = StoredIdentity {
+        host_id,
+        execution_uid: uid,
+        endpoint: "127.0.0.1:7443".parse().unwrap(),
+        server_name: "localhost".into(),
+        ca_der: B64.encode(ca.to_der().unwrap()),
+        certificate_der: B64.encode(ca.to_der().unwrap()),
+        key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    publish(&data, &bytes).unwrap();
+    let other = self_signed(&PKey::generate_ed25519().unwrap());
+    let invitation = serde_json::to_vec(&JoinInvitation {
+        host_id,
+        mode: if uid == 0 {
+            Mode::Rootful
+        } else {
+            Mode::Rootless
+        },
+        execution_uid: uid,
+        token: "public fixture token".into(),
+        ca_der: B64.encode(other.to_der().unwrap()),
+        https_der: None,
+        https_system_roots: false,
+        endpoint: "127.0.0.2:8443".parse().unwrap(),
+        server_name: "other-server.invalid".into(),
+    })
+    .unwrap();
+    let error = join(
+        "https://infraternal-fixture-no-such-host.invalid/remote/join",
+        &data,
+        &invitation,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "remote infraternal agent operation refused",
+        "another server's invitation reached the network with this host's key"
+    );
+    assert_eq!(std::fs::read(data.join("identity.json")).unwrap(), bytes);
+}
