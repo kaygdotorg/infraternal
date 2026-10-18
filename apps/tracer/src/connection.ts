@@ -173,7 +173,7 @@ export class MuxConnection {
   private readonly onVisibility = (): void => this.pageVisibilityChanged();
 
   constructor(private readonly config: ConnectionConfig = {}) {
-    if (typeof document !== "undefined") document.addEventListener("visibilitychange", this.onVisibility);
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function") document.addEventListener("visibilitychange", this.onVisibility);
   }
 
   /** Visibility is transport state, independent of terminal and authentication state. */
@@ -410,7 +410,7 @@ export class MuxConnection {
     globalThis.clearTimeout(this.closeNoteTimer);
     this.closeNoteTimer = undefined;
     this.stopRetryHintListeners();
-    if (typeof document !== "undefined") document.removeEventListener("visibilitychange", this.onVisibility);
+    if (typeof document !== "undefined" && typeof document.removeEventListener === "function") document.removeEventListener("visibilitychange", this.onVisibility);
     this.resetPings();
     for (const call of this.calls.values()) call.reject(new Error("connection closed"));
     this.calls.clear();
