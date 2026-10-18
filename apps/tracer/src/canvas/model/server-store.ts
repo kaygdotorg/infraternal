@@ -1,6 +1,6 @@
 /** Account layout subscription, durable retry journal and drawing cache (D178, D183, D245, D248). */
 import { randomUuid } from "../../identifiers";
-import { canvasKey } from "../../account-storage";
+import { canvasKey, readStoredJson, writeStoredJson } from "../../account-storage";
 import { parseDocument, type CanvasDocument } from "./document";
 import type { Intent, LayoutEdit } from "./operations.on-demand";
 import { onDemand } from "../../on-demand";
@@ -46,8 +46,8 @@ export class ServerCanvasStore implements CanvasStore {
   constructor(private readonly transport: LayoutTransport, account: string, private readonly refused: () => void = () => {}) {
     this.#key = canvasKey(account);
     this.#first = new Promise((resolve) => { this.#loaded = resolve; });
-    try {
-      const value: unknown = JSON.parse(localStorage.getItem(this.#key) ?? "null");
+    {
+      const value = readStoredJson(this.#key);
       const legacy = parseDocument(value);
       if (legacy) { this.#migration = { op_id: randomUuid(), document: legacy }; this.#presented = legacy; this.#cached = true; }
       else if (value && typeof value === "object" && "cacheVersion" in value && value.cacheVersion === 2) {
@@ -59,7 +59,7 @@ export class ServerCanvasStore implements CanvasStore {
           if (cache.migration && typeof cache.migration.op_id === "string" && parseDocument(cache.migration.document)) this.#migration = cache.migration;
         }
       }
-    } catch { /* damaged or unavailable storage: wait for canonical server state */ }
+    }
     this.#off = transport.subscribe({ topic: "canvas.layout" }, (event) => this.#event(event), () => {
       this.#ready = false; this.#busy = false; this.#epoch++;
     });
@@ -150,7 +150,7 @@ export class ServerCanvasStore implements CanvasStore {
   flush(): void {
     if (this.#disposed) return;
     clearTimeout(this.#timer); this.#timer = undefined;
-    try { localStorage.setItem(this.#key, JSON.stringify({ cacheVersion: 2, canonical: this.#canonical, document: this.#presented, pending: this.#pending, ...(this.#migration ? { migration: this.#migration } : {}) })); } catch { /* a storage quota cannot block input or the server */ }
+    writeStoredJson(this.#key, { cacheVersion: 2, canonical: this.#canonical, document: this.#presented, pending: this.#pending, ...(this.#migration ? { migration: this.#migration } : {}) });
   }
   dispose(): void { this.flush(); this.#disposed = true; this.#epoch++; this.#off(); this.#listeners.clear(); this.#loaded?.(); }
 }

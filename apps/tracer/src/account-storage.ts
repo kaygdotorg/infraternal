@@ -51,3 +51,12 @@ export function clearAccountStorage(account: string | undefined): void {
     if (account === undefined || localStorage.getItem(LAST_ACCOUNT) === account) localStorage.removeItem(LAST_ACCOUNT);
   } catch { /* storage is blocked: nothing was written either */ }
 }
+
+/** Read an account drawing cache without making storage availability part of the interaction path. */
+export function readStoredJson(key: string): unknown {
+  try { return JSON.parse(localStorage.getItem(key) ?? "null") as unknown; } catch { return undefined; }
+}
+/** Account cache writes are best effort; unavailable storage never blocks server-owned work. */
+export function writeStoredJson(key: string, value: unknown): void {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode or quota: retain the in-memory drawing */ }
+}
