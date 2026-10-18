@@ -256,6 +256,12 @@ export async function startRealServer(options: {
               if (typeof event.type === "string" && event.type.startsWith("terminal.")) bridge.terminalEvents.push({ stream, type: event.type, at: Date.now() });
             } catch { /* Invalid notices are handled by the browser protocol parser. */ }
           }
+          if (options.timedControls && f.type === "Event") {
+            try {
+              const event = JSON.parse(text.decode(f.eventJson)) as { type?: unknown };
+              if (typeof event.type === "string" && event.type.startsWith("canvas.layout.")) bridge.control.push({ dir: "down", type: "Event", detail: event.type, at: Date.now() });
+            } catch { /* The browser validates event contents. Diagnostics retain only fixed event names. */ }
+          }
           if (f.type === "Close") {
             const close = f as { code?: unknown; reason?: unknown };
             bridge.serverClose = `s${stream === 0 ? 0 : "n"} ${typeof close.reason === "string" ? close.reason : JSON.stringify(close.reason)}`;
@@ -265,7 +271,7 @@ export async function startRealServer(options: {
               if (process.env.REAL_EVENT_TIMES === "1") console.error(`SERVER_CLOSE_FRAME b${bridge.id} stream=${stream} code=${close.code} reason=${JSON.stringify(reason)}`);
             }
           }
-          if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId });
+          if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId, ...(options.timedControls ? { at: Date.now() } : {}) });
         });
         later(() => { if (!bridge.closed && browser.readyState === WebSocket.OPEN) browser.send(bytes, { binary }); });
       });
