@@ -1,7 +1,7 @@
 /** Account layout subscription, durable retry journal and drawing cache (D178, D183, D245, D248). */
 import { randomUuid } from "../../identifiers";
 import { canvasKey, readStoredJson, writeStoredJson } from "../../account-storage";
-import { documentWindows as windows, parseDocument, type CanvasDocument } from "./document";
+import { documentWindows as windows, parseDocument, type CanvasDocument } from "./schema";
 import { edits, reduce, type Intent, type LayoutEdit } from "./operations";
 import { readLayoutCache, type Pending, type Migration } from "./cache";
 import type { CanvasStore } from "./store";

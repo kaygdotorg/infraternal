@@ -5,7 +5,7 @@
  * LocalCanvasStore remains for isolated previews. Local storage is only a drawing cache in production.
  * Cameras and focus belong to each device and never enter this interface.
  */
-import { parseDocument, type CanvasDocument } from "./document";
+import { parseDocument, type CanvasDocument } from "./schema";
 import type { LayoutEdit } from "./operations";
 import { canvasKey } from "../../account-storage";
 

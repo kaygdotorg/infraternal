@@ -15,7 +15,7 @@
  * The full snapshot is replayed after every socket welcome, so missed changes during a disconnect cannot revive a
  * stale row. Ended records stay available to their existing window but disappear from every session list.
  */
-import { documentWindows, type CanvasDocument } from "../model/document";
+import { documentWindows, type CanvasDocument } from "../model/schema";
 import { inventoryKey } from "../../account-storage";
 import type { DeviceInfo, InventoryCapabilities, InventoryStatus, SessionInventory, SessionRecord } from "./inventory";
 

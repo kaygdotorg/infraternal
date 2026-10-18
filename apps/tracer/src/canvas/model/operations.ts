@@ -1,8 +1,8 @@
 /** Stable-ID intents and optimistic reduction for account layouts (D180, D183, #243). */
 import { reduce } from "./reducer";
 export { reduce } from "./reducer";
-import { documentWindows as windows } from "./document";
-import type { CanvasDocument, DocColumn, DocTarget, DocView, DocWindow } from "./document";
+import { documentWindows as windows } from "./schema";
+import type { CanvasDocument, DocColumn, DocTarget, DocView, DocWindow } from "./schema";
 export type Intent =
   | { type: "view.add"; view: DocView }
   | { type: "view.update"; view_id: string; cell?: { x: number; y: number }; name?: string }
