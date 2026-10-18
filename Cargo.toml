@@ -128,3 +128,7 @@ opt-level = "s"
 # recovery fits its measured size only at z (#230).
 [profile.release.package.infraternal-plugin-ssh]
 opt-level = "z"
+
+# Layout control intents stay off the terminal data path; bound their new code footprint [243,248].
+[profile.release.package.infraternal-plugin-canvas]
+opt-level = "s"
