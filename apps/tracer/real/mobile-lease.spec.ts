@@ -55,7 +55,7 @@ test("hidden mobile page keeps its terminal and a refused resume attaches afresh
       });
       await expect(terminal).toHaveAttribute("data-status", "live");
       expect(server.bridges.length).toBe(before);
-      expect(server.bridges.filter(bridge => bridge.closed)).toHaveLength(0);
+      expect(server.bridges.filter(bridge => bridge.closed).length).toBe(0);
     }
     // Delete only fixture connection state, never read or log capability bytes.
     const deleted = spawnSync("python3", ["-c", "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('PRAGMA foreign_keys=ON'); c.execute('DELETE FROM websocket_connections'); c.commit(); c.close()", resolve(server.dataDir, "infraternal.sqlite")]);
@@ -70,7 +70,7 @@ test("hidden mobile page keeps its terminal and a refused resume attaches afresh
     const attached = server.bridges.length;
     await page.waitForTimeout(2000);
     expect(server.bridges.length).toBe(attached);
-    expect(recovered().filter(bridge => bridge.helloResume === false)).toHaveLength(1);
+    expect(recovered().filter(bridge => bridge.helloResume === false).length).toBe(1);
     await terminal.locator(".terminal-host").click({ position: { x: 40, y: 40 } });
     await terminal.locator(".terminal-host textarea").focus();
     await page.keyboard.type("echo mobile-resumed-$((6*7))\n", { delay: 5 });
