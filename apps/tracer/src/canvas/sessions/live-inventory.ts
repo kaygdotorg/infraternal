@@ -15,6 +15,7 @@
  * The full snapshot is replayed after every socket welcome, so missed changes during a disconnect cannot revive a
  * stale row. Ended records stay available to their existing window but disappear from every session list.
  */
+import type { CanvasDocument } from "../model/document";
 import { inventoryKey } from "../../account-storage";
 import type { DeviceInfo, InventoryCapabilities, InventoryStatus, SessionInventory, SessionRecord } from "./inventory";
 
@@ -28,6 +29,8 @@ export interface LiveInventory extends SessionInventory {
   /** Replace one host's cached rows with its full authoritative live-shim set. */
   /** Replaces a host's liveness set and reports newly ended IDs to open terminal streams. */
   reconcile(host: string, ids: readonly string[], ended?: readonly { id: string; status: number }[]): Array<{ id: string; status?: number }>;
+  /** Shared layout membership, independent of this device's terminal attachments. */
+  setLayout(document: CanvasDocument): void;
   dispose(): void;
 }
 
@@ -43,6 +46,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
   const awaitingCensus = new Set<string>();
   const verifiedHosts = new Set<string>();
   let top = 0;
+  let shared: Set<string> | undefined;
   const emit = (): void => { for (const l of listeners) l(); };
   const save = (): void => {
     // After sign-out a late socket message must not write the account's data back (D245).
@@ -60,6 +64,12 @@ export function createLiveInventory(options: { accountId: string; host: string }
   const only = (host: string, id: string): boolean => owners.get(id) === host;
   return {
     can,
+    setLayout(document) {
+      shared = new Set(document.views.flatMap((v) => v.layout.type === "tiled" ? v.layout.columns.flatMap((c) => c.windows.flatMap((w) => w.target.type === "session" ? [w.target.id] : [])) : []));
+      let changed = false;
+      for (const s of records.values()) if (!s.gone) { const state = shared.has(s.id) ? "open" : "detached"; if (s.state !== state) { s.state = state; changed = true; } }
+      if (changed) emit();
+    },
     status: (): InventoryStatus => verifiedHosts.has(options.host) ? "ready" : "loading",
     reload: async () => undefined,
     hosts: () => [...new Set([options.host, ...[...records.values()].filter((record) => !record.gone).map((record) => owners.get(record.id)).filter((host): host is string => Boolean(host))])],
@@ -76,14 +86,14 @@ export function createLiveInventory(options: { accountId: string; host: string }
       if (!s) { s = blank(id, hint?.name ?? "shell"); records.set(id, s); awaitingCensus.add(id); }
       else if (hint?.name && !s.pinned) s.name = hint.name;
       if (s.state === "open") { if (hint?.name && s.name !== hint.name && !s.pinned) emit(); return; }
-      s.state = "open";
+      s.state = shared && !shared.has(id) ? "detached" : "open";
       s.frecency = ++top;
       save();
       emit();
     },
     detach(host, id) {
       const s = only(host, id) ? records.get(id) : undefined;
-      if (!s || s.state !== "open") return;
+      if (!s || s.state !== "open" || shared?.has(id)) return;
       s.state = "detached";
       save();
       emit();
@@ -157,6 +167,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
         // A final close is monotonic: an older in-flight snapshot cannot revive it.
         if (record?.gone) continue;
         if (!record) { record = blank(id, "shell"); records.set(id, record); }
+        if (shared) record.state = shared.has(id) ? "open" : "detached";
       }
       save();
       emit();

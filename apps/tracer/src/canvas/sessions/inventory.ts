@@ -13,6 +13,8 @@
  * test double. An instance without an inventory simply does not offer the manager, the markers or the strip.
  */
 
+import type { CanvasDocument } from "../model/document";
+
 export type SessionState = "open" | "detached" | "exited";
 export type SessionActivity = "output" | "ok" | "fail";
 
@@ -51,6 +53,8 @@ export type InventoryStatus = "loading" | "ready" | "error";
 export interface InventoryCapabilities { rename?: boolean; end?: boolean; runAgain?: boolean; dismiss?: boolean }
 
 export interface SessionInventory {
+  /** Product membership follows the shared layout; previews may keep local attachment state. */
+  setLayout?(document: CanvasDocument): void;
   /** Absent means everything. The product's client-side inventory (live-inventory.ts) cannot end sessions until #100. */
   readonly can?: InventoryCapabilities;
   status(): InventoryStatus;
