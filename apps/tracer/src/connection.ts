@@ -489,14 +489,15 @@ export class MuxConnection {
     };
   }
 
-  /** A refused capability is never retried. The next handshake attaches afresh with existing backoff (#244). */
+  /** Server refusals retain backoff; a refused resume also forgets its capability before fresh attach (#244). */
   private forgetRefusedResume(code: number | undefined, reason: string | undefined): void {
-    if (this.welcomed || !this.resumeSent || (code !== 1008 && reason !== "the server refused to resume the connection")) return;
+    if (this.welcomed || (code !== 1008 && reason !== "the server refused to resume the connection")) return;
+    this.refusalBackoff = true;
+    this.fastRecovery = false;
+    if (!this.resumeSent) return;
     this.credentials?.connectionId.fill(0);
     this.credentials?.resumeToken.fill(0);
     this.credentials = undefined;
-    this.refusalBackoff = true;
-    this.fastRecovery = false;
   }
 
   /**

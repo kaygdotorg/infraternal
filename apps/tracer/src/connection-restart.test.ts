@@ -468,7 +468,7 @@ test("online and foreground events cancel delays and preserve handshakes in prog
   }
 });
 
-for (const online of [true, false]) for (const hint of [false, true]) test(`a refused resume keeps fresh refusal backoff (online: ${online}, new hint: ${hint})`, () => {
+for (const online of [true, false]) for (const hint of [false, true]) for (const resumeFirst of [true, false]) test(`refused handshakes keep growing backoff (online: ${online}, new hint: ${hint}, resume first: ${resumeFirst})`, () => {
   const globals = globalThis as unknown as Record<string, unknown>;
   const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, navigator: globals.navigator, random: Math.random };
   let retry: (() => void) | undefined;
@@ -498,23 +498,26 @@ for (const online of [true, false]) for (const hint of [false, true]) test(`a re
     connection = new MuxConnection();
     connection.openStream({ onSocketOpen: (resume) => attempts.push(resume), onWelcome() {}, onFrame() {}, onDisconnected() {}, hasSession: () => true, onStatus() {} });
     sockets[0]!.onopen?.();
-    sockets[0]!.receive({ type: "Welcome", connectionId: new Uint8Array(16).fill(1), resumeToken: new Uint8Array(32).fill(2), resumeWindowSeconds: 120 });
-    connection.streamAttached(true, 1);
-    connection.forceDrop();
-    retry?.();
-    sockets[1]!.onopen?.();
-    sockets[1]!.receive({ type: "Close", code: 1008, reason: "the server refused to resume the connection" });
+    if (resumeFirst) {
+      sockets[0]!.receive({ type: "Welcome", connectionId: new Uint8Array(16).fill(1), resumeToken: new Uint8Array(32).fill(2), resumeWindowSeconds: 120 });
+      connection.streamAttached(true, 1);
+      connection.forceDrop();
+      retry?.();
+      sockets[1]!.onopen?.();
+    }
+    const refused = resumeFirst ? 1 : 0;
+    sockets[refused]!.receive({ type: "Close", code: 1008, reason: "the server refused to resume the connection" });
     const firstDelay = delay;
     if (hint) (connection as unknown as { retryNow(): void }).retryNow();
     else retry?.();
-    sockets[2]!.onopen?.();
+    sockets[refused + 1]!.onopen?.();
     // Also exercise a transport Close without an application Close frame.
-    sockets[2]!.close();
+    sockets[refused + 1]!.close();
     expect(delay).toBeGreaterThan(firstDelay);
     retry?.();
-    sockets[3]!.onopen?.();
-    expect(attempts).toEqual([false, true, false, false]);
-    sockets[3]!.receive({ type: "Welcome", connectionId: new Uint8Array(16).fill(3), resumeToken: new Uint8Array(32).fill(4), resumeWindowSeconds: 120 });
+    sockets[refused + 2]!.onopen?.();
+    expect(attempts).toEqual(resumeFirst ? [false, true, false, false] : [false, false, false]);
+    sockets[refused + 2]!.receive({ type: "Welcome", connectionId: new Uint8Array(16).fill(3), resumeToken: new Uint8Array(32).fill(4), resumeWindowSeconds: 120 });
     connection.forceDrop();
     expect(delay).toBe(5); // Real success, rather than a hint, restores prompt recovery.
   } finally {
