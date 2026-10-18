@@ -3234,3 +3234,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      by signal 2" instead of a plain exit code 130; that is accepted.
      Rejected: exiting with plain code 130, which let a shell loop carry on
      after Ctrl-C.
+306. **Mesh view ships at its measured size, trim later (owner, 2026-10-18,
+     #236; amends D301):** "sure yes". Merged onto production the honest Mesh
+     view measures +74,368 B x86_64, double the ~37 KB D301 accepted,
+     because its earlier figure was taken against an older, larger base. It
+     ships now at the measured size, like real logins (D298); the trim job
+     (#236) continues and the caps ratchet down with it.
