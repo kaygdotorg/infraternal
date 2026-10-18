@@ -46,6 +46,10 @@ nix = { workspace = true, features = ["inotify", "event"] }
 [lints]
 workspace = true
 
+[[example]]
+name = "desktop-latency-source"
+required-features = ["desktop"]
+
 [dev-dependencies]
 # Safe monotonic timestamps align opt-in test diagnostics with external profiles.
 nix = { workspace = true, features = ["time"] }
