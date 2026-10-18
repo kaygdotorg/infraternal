@@ -144,6 +144,7 @@ pub fn reduce<S: std::hash::BuildHasher>(
 ) -> Result<(), ()> {
     // Bounds apply to the intent even when a close makes the edit a no-op.
     let valid = match intent {
+        Intent::Open { window, .. } | Intent::Split { window, .. } => window.valid(),
         Intent::Resize {
             height,
             span,
@@ -208,29 +209,7 @@ pub fn reduce<S: std::hash::BuildHasher>(
                 return Ok(());
             }
             let cols = columns(doc, view_id)?;
-            let index = cols
-                .iter()
-                .position(|c| c.windows.iter().any(|w| w.id == *anchor_id))
-                .ok_or(())?;
-            match axis {
-                Axis::Down => {
-                    let id = cols[index].id.clone();
-                    insert(cols, &id, window.clone(), Some(anchor_id))?;
-                }
-                Axis::Right => {
-                    if cols.iter().any(|c| c.id == *column_id) {
-                        return Err(());
-                    }
-                    cols.insert(
-                        index + 1,
-                        Column {
-                            id: column_id.clone(),
-                            weight: 1.0,
-                            windows: vec![window.clone()],
-                        },
-                    );
-                }
-            }
+            crate::tiling::split(cols, anchor_id, axis, column_id, window.clone())?;
         }
         Intent::Close { window_id } => {
             for view in &mut doc.views {
@@ -367,6 +346,45 @@ mod tests {
             },
             after: None,
         }
+    }
+    #[test]
+    fn split_divides_only_its_own_band() {
+        let mut doc = document();
+        let closed = HashSet::new();
+        reduce(&mut doc, &open("a"), &closed).unwrap();
+        let Intent::Open { mut window, .. } = open("b") else {
+            panic!("open")
+        };
+        window.id = "b".into();
+        reduce(
+            &mut doc,
+            &Intent::Open {
+                view_id: "console".into(),
+                column_id: "a".into(),
+                window,
+                after: Some("a".into()),
+            },
+            &closed,
+        )
+        .unwrap();
+        let Intent::Open { window, .. } = open("new") else {
+            panic!("open")
+        };
+        reduce(
+            &mut doc,
+            &Intent::Split {
+                view_id: "console".into(),
+                anchor_id: "b".into(),
+                axis: Axis::Right,
+                column_id: "right".into(),
+                window,
+            },
+            &closed,
+        )
+        .unwrap();
+        assert_eq!(doc.windows().find(|w| w.id == "a").unwrap().span, Some(2));
+        assert_eq!(doc.windows().find(|w| w.id == "b").unwrap().row, Some(1));
+        assert_eq!(doc.windows().find(|w| w.id == "new").unwrap().row, Some(1));
     }
     #[test]
     fn independent_edits_commute_and_close_wins_in_both_orders() {

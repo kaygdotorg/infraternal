@@ -608,8 +608,9 @@ INTENT is one of (optional fields may be omitted):
 - `{type:"open",view_id,column_id,window:WINDOW,after?:WINDOW_ID}`: add a v1
   window reference; create a missing column at the end with weight 1.
 - `{type:"split",view_id,anchor_id,axis:"right"|"down",column_id,window:WINDOW}`:
-  insert a new window after the anchor; right inserts a new column after the
-  anchor's column, down inserts in the anchor's column. New IDs are client chosen.
+  divide the anchor's occupied bands (D212), preserving neighbours above and
+  below. Right halves an existing span or adds a half-weight column; down
+  inserts a shared row band. New IDs are client chosen.
   This action never opens a terminal: first obtain a session reference using
   the existing terminal action. Retry that action separately as its contract allows.
 - `{type:"close",window_id}`: close all memberships without ending the session.
