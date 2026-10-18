@@ -228,14 +228,17 @@ fn recover(document: &mut Document, mut incoming: Document) -> Result<(), Error>
         .drain(..)
     {
         view["id"] = json!(uuid::Uuid::new_v4().to_string());
-        view["name"] = json!(format!(
-            "Recovered: {}",
-            model::string(&view, "name")
-                .ok_or(Error)?
-                .chars()
-                .take(189)
-                .collect::<String>()
-        ));
+        // The v1 browser bound counts UTF-16 units, including the recovery prefix.
+        let mut units = 0;
+        let name = model::string(&view, "name")
+            .ok_or(Error)?
+            .chars()
+            .take_while(|c| {
+                units += c.len_utf16();
+                units <= 189
+            })
+            .collect::<String>();
+        view["name"] = Value::String(format!("Recovered: {name}"));
         if let Some(columns) = view
             .get_mut("layout")
             .and_then(|l| l.get_mut("columns"))

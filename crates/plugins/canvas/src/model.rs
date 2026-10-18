@@ -15,7 +15,7 @@ impl Default for Document {
 }
 #[must_use]
 pub fn text(value: &str) -> bool {
-    !value.is_empty() && value.chars().count() <= 200
+    !value.is_empty() && value.encode_utf16().take(201).count() <= 200
 }
 #[must_use]
 pub fn finite(value: f64, low: f64, high: f64) -> bool {

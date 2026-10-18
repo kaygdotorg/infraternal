@@ -592,7 +592,7 @@ A reader overtaken by compaction gets another snapshot rather than a partial
 history. Apply Results and events may interleave; deduplicate by revision.
 
 `Call canvas.layout.apply` input is `{op_id,base_revision,intent}`. IDs are
-nonempty strings of at most 200 Unicode characters; op_id is unique per account
+nonempty strings of at most 200 UTF-16 code units; op_id is unique per account
 across both actions. Reusing it with different input returns an error. An exact
 retry returns its original `{revision}` even after log compaction. Future base
 revisions fail; stale revisions are reduced against current state. Each accepted
@@ -631,7 +631,7 @@ Session targets must name a terminal session owned by this account (including
 ended sessions); references confer no host or session access. Duplicate window
 IDs in a view and differing targets for the same ID are rejected. Documents
 and intents reject unknown fields. Bounds: 64 views, 64 columns per view, 256
-window memberships total, 256 graph pins per view, 200 characters per string;
+window memberships total, 256 graph pins per view, 200 UTF-16 code units per string;
 cell coordinates ±1000, graph coordinates ±100000, column weights 0.1–10,
 height 0.05–10000, span/rows 1–64, row 0–64. Snapshot documents are at most
 48 KiB; apply inputs at most 8 KiB. Log checkpoints occur every 128 revisions,
