@@ -137,6 +137,15 @@ fn run_invocation() -> ExitCode {
     };
     let json_output = matches.get_flag("json");
     let selected = cli::command_tree::selected(&matches);
+    if json_output {
+        // One envelope per command, also when the person gives up on it (D303: 130).
+        let command = if selected.path.is_empty() {
+            "infraternal".to_owned()
+        } else {
+            selected.path.join(" ")
+        };
+        infraternal_shim::exit_on_interrupt(cli::output::interrupted_notice(&command));
+    }
     dispatch_selected_action(&registry, &selected, json_output)
 }
 

@@ -218,9 +218,7 @@ pub enum Exit {
     #[allow(dead_code)]
     // D303 fixes the code now; the first batch command that needs it is not built yet.
     Partial,
-    /// Stopped by the person (Ctrl-C).
-    #[allow(dead_code)]
-    // The shell reports 130 for an uncaught Ctrl-C; commands that catch it will use this.
+    /// Stopped by the person (Ctrl-C); `--json` runs print the `interrupted` envelope first.
     Interrupted,
 }
 
@@ -254,6 +252,21 @@ impl Exit {
             Self::Interrupted => "interrupted",
         }
     }
+}
+
+/// The single line a `--json` run prints when Ctrl-C ends it, rendered ahead of time because
+/// the signal handler may only copy bytes (see `infraternal_shim::exit_on_interrupt`).
+#[must_use]
+pub fn interrupted_notice(command: &str) -> Vec<u8> {
+    let message = "Stopped before it finished.";
+    let mut result = CommandResult::new(command, CommandState::Stopped, message, serde_json::json!({}));
+    result.ok = false;
+    result.error = Some(ErrorInfo {
+        code: Exit::Interrupted.error_code().to_owned(),
+        argument: None,
+        detail: Some(message.to_owned()),
+    });
+    render_json(&result).unwrap_or_default().into_bytes()
 }
 
 /// Formatting controls supplied by the output destination and test snapshots.

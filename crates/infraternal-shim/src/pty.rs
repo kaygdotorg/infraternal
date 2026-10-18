@@ -216,6 +216,35 @@ pub fn stdout_columns() -> Option<u16> {
     let status = unsafe { nix::libc::ioctl(1, nix::libc::TIOCGWINSZ, &raw mut size) };
     (status == 0 && size.ws_col > 0).then_some(size.ws_col)
 }
+/// What the interrupt handler writes to standard output before it exits; set once, read in the handler.
+static INTERRUPT_NOTICE: std::sync::OnceLock<Box<[u8]>> = std::sync::OnceLock::new();
+
+/// Only async-signal-safe calls: an atomic read of the notice, `write(2)` and `_exit(2)`.
+extern "C" fn on_interrupt(_signal: nix::libc::c_int) {
+    if let Some(notice) = INTERRUPT_NOTICE.get() {
+        // SAFETY: the pointer and length come from a live boxed slice that is never freed;
+        // a short or failed write is acceptable because the process exits next.
+        unsafe { nix::libc::write(1, notice.as_ptr().cast(), notice.len()) };
+    }
+    // SAFETY: `_exit` is async-signal-safe and never returns.
+    unsafe { nix::libc::_exit(130) }
+}
+
+/// On SIGINT, write `notice` to standard output and exit 130, without running any other code.
+/// Only the first call has an effect. A later handler installed by a runtime replaces this one.
+pub fn exit_on_interrupt(notice: Vec<u8>) {
+    use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, sigaction};
+    if INTERRUPT_NOTICE.set(notice.into_boxed_slice()).is_err() {
+        return;
+    }
+    let action = SigAction::new(
+        SigHandler::Handler(on_interrupt),
+        SaFlags::empty(),
+        SigSet::empty(),
+    );
+    // SAFETY: the handler above uses only async-signal-safe calls and no locks.
+    let _ = unsafe { sigaction(Signal::SIGINT, &action) };
+}
 /// Detach only before threads or PTYs exist. The original process returns;
 /// the grandchild owns the session and redirects inherited standard handles.
 pub fn detach() -> io::Result<bool> {
