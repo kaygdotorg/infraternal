@@ -518,7 +518,9 @@ for (const online of [true, false]) for (const hint of [false, true]) for (const
     sockets[refused + 2]!.onopen?.();
     expect(attempts).toEqual(resumeFirst ? [false, true, false, false] : [false, false, false]);
     sockets[refused + 2]!.receive({ type: "Welcome", connectionId: new Uint8Array(16).fill(3), resumeToken: new Uint8Array(32).fill(4), resumeWindowSeconds: 120 });
-    connection.forceDrop();
+    // A deliberate forceDrop resets the counter independently of Welcome and
+    // would hide a missing refusal-state reset. Observe an ordinary close.
+    sockets[refused + 2]!.close();
     expect(delay).toBe(5); // Real success, rather than a hint, restores prompt recovery.
   } finally {
     connection?.dispose();
