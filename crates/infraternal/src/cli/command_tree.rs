@@ -37,7 +37,7 @@ pub fn build(registry: &ActionRegistry) -> Command {
         );
     let tree = command_tree(registry);
     for child in &tree.children {
-        root = root.subcommand(build_node(child));
+        root = root.subcommand(build_node(child, &[]));
     }
     root
 }
@@ -136,8 +136,12 @@ fn insert_action<'a>(
     node.action = Some(action);
 }
 
-fn build_node(node: &CommandNode<'_>) -> Command {
+/// `inherited` are the options of the ancestors that every subcommand also accepts, wherever they
+/// are typed. A subcommand that does not declare one still accepts it, but hides it from its help:
+/// listing options it ignores would invite people to pass them.
+fn build_node(node: &CommandNode<'_>, inherited: &[Arg]) -> Command {
     let mut command = Command::new(node.name.clone());
+    let mut shared: Vec<Arg> = Vec::new();
     if let Some(action) = node.action {
         if action.visible {
             command = command
@@ -178,6 +182,7 @@ fn build_node(node: &CommandNode<'_>) -> Command {
                 argument = argument
                     .global(true)
                     .help_heading(format!("{heading} options"));
+                shared.push(argument.clone());
             }
             command = command.arg(argument);
         }
@@ -201,8 +206,19 @@ fn build_node(node: &CommandNode<'_>) -> Command {
     if !node.has_visible_action() {
         command = command.hide(true);
     }
+    for arg in inherited {
+        if !command.get_arguments().any(|own| own.get_id() == arg.get_id()) {
+            command = command.arg(arg.clone().hide(true));
+        }
+    }
+    let mut passed: Vec<Arg> = inherited
+        .iter()
+        .filter(|arg| !shared.iter().any(|own| own.get_id() == arg.get_id()))
+        .cloned()
+        .collect();
+    passed.extend(shared);
     for child in &node.children {
-        command = command.subcommand(build_node(child));
+        command = command.subcommand(build_node(child, &passed));
     }
     command
 }
