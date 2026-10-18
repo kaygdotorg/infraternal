@@ -53,6 +53,7 @@ export class ServerCanvasStore implements CanvasStore {
   async save(doc: CanvasDocument, hints?: ReadonlyMap<string, LayoutEdit>, before?: CanvasDocument, unresolved: ReadonlySet<string> = new Set()): Promise<void> {
     if (this.#disposed) return;
     const previous = structuredClone(before ?? this.current());
+    let patched = false;
     const live = new Map(windows(doc).map((w) => [w.id, w]));
     // Unsatisfied references belong only to the local journal. Complete an unsent birth in place;
     // a sent request is immutable because its operation ID must always identify the same input.
@@ -61,7 +62,7 @@ export class ServerCanvasStore implements CanvasStore {
       const window = live.get(id);
       if (window) for (const p of this.#pending) {
         if (!p.sent && (p.intent.type === "open" || p.intent.type === "split") && p.intent.window.id === id) {
-          p.intent.window.target = structuredClone(window.target);
+          p.intent.window.target = structuredClone(window.target); patched = true;
           for (const old of windows(previous)) if (old.id === id) old.target = structuredClone(window.target);
         }
       }
@@ -75,8 +76,10 @@ export class ServerCanvasStore implements CanvasStore {
       this.#pending = this.#pending.filter((p) => p.sent);
       baseline = this.current();
     }
-    for (const intent of edits(baseline, doc, cancelled ? undefined : hints)) this.#pending.push({ op_id: randomUuid(), base_revision: this.#canonical.revision, intent });
-    this.#checkpoint(); this.#pump();
+    const intents = edits(baseline, doc, cancelled ? undefined : hints);
+    for (const intent of intents) this.#pending.push({ op_id: randomUuid(), base_revision: this.#canonical.revision, intent });
+    if (patched || cancelled || intents.length) this.#publish(); else this.#checkpoint();
+    this.#pump();
   }
   current(): CanvasDocument {
     const doc = structuredClone(this.#migration && (!this.#initialized || this.#migration.revision !== undefined && this.#canonical.revision < this.#migration.revision) ? this.#migration.document : this.#canonical);

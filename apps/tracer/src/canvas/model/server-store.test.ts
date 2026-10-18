@@ -94,7 +94,7 @@ test("an acknowledgement after its ordered event does not repaint the same layou
   const next = document(); reduce(next, opened); await store.save(next);
   const call = transport.calls[0]!;
   transport.event({ type: "canvas.layout.operation", revision: 1, op_id: call.input.op_id, intent: opened });
-  expect(paints).toBe(1); call.resolve({ revision: 1 }); await tick(); expect(paints).toBe(1); store.dispose();
+  expect(paints).toBe(2); call.resolve({ revision: 1 }); await tick(); expect(paints).toBe(2); store.dispose();
 });
 
 test("a bootstrap receipt before its canonical snapshot keeps the legacy layout drawable", async () => {
@@ -119,4 +119,20 @@ test("ready edits share one network round trip with a bounded in-flight window",
   expect(transport.calls).toHaveLength(5);
   expect(transport.calls[1]!.input.base_revision).toBe(0);
   store.dispose();
+});
+
+test("the optimistic semantic projection paints before any server receipt", async () => {
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
+  const paints: CanvasDocument[] = []; store.subscribe((document) => paints.push(document));
+  const next = document(); reduce(next, opened); await store.save(next);
+  expect(paints).toHaveLength(1); expect(paints[0]!.views[0]!.layout).toEqual(next.views[0]!.layout);
+  const call = transport.calls[0]!;
+  transport.event({ type: "canvas.layout.operation", revision: 1, op_id: call.input.op_id, intent: opened });
+  expect(paints).toHaveLength(2); store.dispose();
+});
+
+test("a no-op drawing capture does not trigger another paint", async () => {
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
+  let paints = 0; store.subscribe(() => { paints++; }); await store.save(document());
+  expect(paints).toBe(0); expect(transport.calls).toHaveLength(0); store.dispose();
 });

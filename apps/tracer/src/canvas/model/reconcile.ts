@@ -18,6 +18,7 @@ export async function reconcile(cx: Ctx, read: () => SharedPaint, resolve: (targ
   if (!current()) return;
   // Imports may have yielded to input; capture the latest projection only after those boundaries.
   const { document, protectedIds, protectedViews } = read();
+  if (!current()) return;
   const keep = new Set([...document.views.map((v) => v.id), ...protectedViews]);
   for (const c of [...cx.views.values()]) if (c.view.id !== "settings" && !keep.has(c.view.id)) cx.view.remove(c);
   for (const view of document.views) {
