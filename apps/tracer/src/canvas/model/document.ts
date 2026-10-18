@@ -51,6 +51,11 @@ export interface CanvasDocument {
   views: DocView[];
 }
 
+/** Enumerate drawing memberships without consulting device-local terminal attachments. */
+export function documentWindows(document: CanvasDocument): DocWindow[] {
+  return document.views.flatMap((view) => view.layout.type === "tiled" ? view.layout.columns.flatMap((col) => col.windows) : []);
+}
+
 const MAX_VIEWS = 64, MAX_COLUMNS = 64, MAX_WINDOWS = 256, MAX_TEXT = 200, MAX_BANDS = 64;
 
 /** Turns a runtime window into its stable reference. Windows that cannot be referenced (node cards) are left out. */
