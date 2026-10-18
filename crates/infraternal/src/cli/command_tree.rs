@@ -232,6 +232,13 @@ fn hidden_inherited_arg(argument: &Arg) -> Arg {
     let mut hidden = Arg::new(argument.get_id().clone())
         .action(argument.get_action().clone())
         .hide(true);
+    if argument.get_id() == "fd" {
+        // Preserve validation: descendant agent commands accept this hidden option only so the
+        // dispatcher can reject it as usage, and a non-integer must fail before action execution.
+        hidden = hidden
+            .value_name("INTEGER")
+            .value_parser(value_parser!(i64));
+    }
     if let Some(long) = argument.get_long() {
         hidden = hidden.long(long.to_owned());
     }
