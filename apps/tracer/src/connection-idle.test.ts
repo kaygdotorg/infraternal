@@ -3,14 +3,16 @@ import { expect, test } from "bun:test";
 import { MuxConnection } from "./connection";
 import { encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 
-function fixture(rtt: number, streams: number) {
+function fixture(rtt: number, streams: number, caps = 4n) {
   const globals = globalThis as unknown as Record<string, unknown>;
-  const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, performance: globals.performance };
+  const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, performance: globals.performance, document: globals.document };
   let now = 0, timerId = 0, probes = 0, wakeups = 0, disconnects = 0;
   let forwarding = true;
+  let replyProfile: ((probe: number) => number) | undefined;
   const timers = new Map<number, { at: number; callback(): void }>();
   const schedule = (callback: () => void, delay: number) => { const id = ++timerId; timers.set(id, { at: now + delay, callback }); return id; };
   const sockets: Socket[] = [];
+  const notices: boolean[] = [];
   class Socket {
     static OPEN = 1;
     readyState = 1;
@@ -22,30 +24,37 @@ function fixture(rtt: number, streams: number) {
     constructor() { sockets.push(this); }
     send(bytes: Uint8Array) {
       new WebSocketFrameDecoder().feed(bytes, (stream, frame) => {
+        if (frame.type === "Event" && frame.subId === 0) notices.push((JSON.parse(new TextDecoder().decode(frame.eventJson)) as { hidden: boolean }).hidden);
         if (frame.type === "Ping") {
           probes++;
-          if (forwarding) schedule(() => this.receive(stream, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs }), rtt);
+          if (forwarding) schedule(() => this.receive(stream, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs }), replyProfile?.(probes) ?? rtt);
         }
       });
     }
     receive(stream: number, frame: WireFrame) { this.onmessage?.({ data: encodeMuxedFrame(stream, frame).slice().buffer as ArrayBuffer }); }
     close() {}
   }
-  globals.window = { setTimeout: (callback: () => void, delay: number) => schedule(() => { wakeups++; callback(); }, delay), clearTimeout: (id: number) => timers.delete(id) };
+  globals.window = { setTimeout: (callback: () => void, delay: number) => schedule(() => { wakeups++; callback(); }, delay), clearTimeout: (id: number) => timers.delete(id), addEventListener() {}, removeEventListener() {} };
   globals.location = { protocol: "https:", host: "idle.example.test" };
   globals.WebSocket = Socket;
   globals.performance = { now: () => now };
+  const visibilityListeners = new Set<() => void>();
+  let hidden = false;
+  globals.document = { get hidden() { return hidden; }, get visibilityState() { return hidden ? "hidden" : "visible"; }, addEventListener: (_: string, callback: () => void) => visibilityListeners.add(callback), removeEventListener: (_: string, callback: () => void) => visibilityListeners.delete(callback) };
   const connection = new MuxConnection();
   for (let i = 0; i < streams; i++) connection.openStream({ onSocketOpen() {}, onWelcome() {}, onFrame() {}, onDisconnected() { disconnects++; }, hasSession: () => true, onStatus() {} });
   sockets[0]!.onopen?.();
+  sockets[0]!.receive(0, { type: "Hello", version: 1, caps, clientInfo: "visibility-fixture" });
   sockets[0]!.receive(0, { type: "Welcome", connectionId: new Uint8Array(16), resumeToken: new Uint8Array(32), resumeWindowSeconds: 120 });
   connection.streamAttached(true, 1);
   return {
-    connection,
-    get probes() { return probes; }, get wakeups() { return wakeups; }, get disconnects() { return disconnects; },
+    connection, notices,
+    get probes() { return probes; }, get wakeups() { return wakeups; }, get disconnects() { return disconnects; }, get sockets() { return sockets.length; },
     receive(stream: number, frame: WireFrame) { sockets[0]!.receive(stream, frame); },
     stopForwarding() { forwarding = false; },
     setRoundTrip(ms: number) { rtt = ms; },
+    setReplyProfile(profile: (probe: number) => number) { replyProfile = profile; },
+    setHidden(value: boolean) { hidden = value; for (const listener of visibilityListeners) listener(); },
     suspend(ms: number) { now += ms; },
     advance(ms: number) {
       const until = now + ms;
@@ -77,7 +86,7 @@ for (const rtt of [1, 150]) for (const streams of [1, 28]) test(`healthy idle pr
     f.stopForwarding();
     // Drain replies already in flight before starting the silence oracle.
     f.advance(rtt);
-    f.advance(Math.max(250, rtt + 50) + 26);
+    f.advance(2 * Math.max(250, 2 * rtt + 75) + 26);
     expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
@@ -110,7 +119,7 @@ for (const rtt of [1, 30, 150]) for (const phase of [0, 7, 20, 39]) test(`idle s
     f.advance(1000 + phase);
     f.stopForwarding();
     f.advance(rtt); // Allow only the already issued exact replies to drain.
-    f.advance(Math.max(250, rtt + 50) + 26);
+    f.advance(2 * Math.max(250, 2 * rtt + 75) + 26);
     expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
@@ -166,7 +175,7 @@ for (const streams of [1, 28]) test(`a late timer on a fully answered route pres
     expect(f.connection.isWelcomed).toBe(true);
     f.stopForwarding();
     f.advance(20);
-    f.advance(276);
+    f.advance(526);
     expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
@@ -182,14 +191,14 @@ for (const streams of [1, 28]) test(`a healthy browser route survives 150ms sche
   } finally { f.dispose(); }
 });
 
-test("a quiet dead browser peer is detected within 250ms plus one probe interval", () => {
+test("a quiet dead browser peer is detected within two 250ms allowances plus one probe interval", () => {
   const f = fixture(1, 1);
   try {
     f.advance(1001);
     f.stopForwarding();
     f.advance(200);
     expect(f.connection.isWelcomed).toBe(true);
-    f.advance(76);
+    f.advance(326);
     expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
@@ -204,7 +213,7 @@ test("browser jitter allowance decays after a stable link returns", () => {
     f.advance(10_000);
     f.stopForwarding();
     f.advance(1); // Drain an already issued correlated reply.
-    f.advance(276);
+    f.advance(526);
     expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
@@ -221,5 +230,55 @@ test("a queued healthy reply survives a 150ms browser event-loop stall", () => {
     f.advance(0);
     expect(f.disconnects).toBe(0);
     expect(f.connection.isWelcomed).toBe(true);
+  } finally { f.dispose(); }
+});
+
+for (const suspension of [5000, 30_000]) test(`a hidden page resumes its lease after ${suspension}ms without retiring queued replies`, () => {
+  const f = fixture(150, 28);
+  try {
+    f.advance(3000);
+    f.setHidden(true);
+    f.suspend(suspension);
+    f.advance(0);
+    expect(f.disconnects).toBe(0);
+    f.setHidden(false);
+    f.setRoundTrip(600);
+    f.advance(3000);
+    expect(f.disconnects).toBe(0);
+    expect(f.connection.isWelcomed).toBe(true);
+  } finally { f.dispose(); }
+});
+
+test("a socket lost while hidden waits for visibility before reconnecting", () => {
+  const f = fixture(150, 1);
+  try {
+    f.advance(3000);
+    f.setHidden(true);
+    f.connection.forceDrop();
+    f.advance(60_000);
+    expect(f.sockets).toBe(1);
+    f.setHidden(false);
+    expect(f.sockets).toBe(2);
+  } finally { f.dispose(); }
+});
+
+test("mobile jitter and one retransmission keep a foreground browser lease", () => {
+  const f = fixture(150, 28);
+  try {
+    f.advance(10_000);
+    // Ordered delivery on a lossy reliable transport: a lost packet delays its
+    // reply by another RTT. This is a reply-delay model, not packet-level loss.
+    f.setReplyProfile(probe => [150, 300, 600, 450][probe % 4]! * (probe % 100 === 0 ? 2 : 1));
+    f.advance(60_000);
+    expect(f.disconnects).toBe(0);
+  } finally { f.dispose(); }
+});
+
+for (const supported of [false, true]) test(`visibility notices require both peers to support them: ${supported}`, () => {
+  const f = fixture(150, 1, supported ? 4n : 0n);
+  try {
+    f.setHidden(true);
+    f.setHidden(false);
+    expect(f.notices).toEqual(supported ? [true, false] : []);
   } finally { f.dispose(); }
 });

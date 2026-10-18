@@ -490,7 +490,8 @@ control replies defer their producers until bounded FIFO capacity returns,
 preserving ordering, including the census-before-open-result fence. Actual
 transport errors and closed writers still retire their connections.
 
-A viewer with Hello caps bit 2 (`VIEWER_VISIBILITY`) may send a control-stream
+When both peers advertise Hello caps bit 2 (`VIEWER_VISIBILITY`), the viewer
+may send a control-stream
 `Event` with `sub_id = 0` and at most 128 JSON bytes:
 `{"topic":"connection.visibility","hidden":true}` (or `false`). This is a
 transport notice, not a subscription or plugin action. A hidden page may be

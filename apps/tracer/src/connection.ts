@@ -72,6 +72,8 @@ const VERSION = 1;
 const RESUME_NEXT = 1n;
 /** Hello caps bit 1: this viewer understands the kept-link doubt notices (contracts/wire.md, D300). */
 const LINK_DOUBT_NOTICES = 2n;
+/** Hello bit 2: control Event 0 reports page visibility (#244). */
+const VIEWER_VISIBILITY = 4n;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RECOVERY_SUBSCRIPTION = 45;
@@ -163,11 +165,31 @@ export class MuxConnection {
   private closed = false;
   private welcomed = false;
   private resumeSent = false;
+  private serverVisibility = false;
   private attachedCount = 0;
   /** Streams that attached on this server-side connection: the server keeps a writer row for each, up to its cap. */
   private readonly writersUsed = new Set<number>();
 
-  constructor(private readonly config: ConnectionConfig = {}) {}
+  private readonly onVisibility = (): void => this.pageVisibilityChanged();
+
+  constructor(private readonly config: ConnectionConfig = {}) {
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", this.onVisibility);
+  }
+
+  /** Visibility is transport state, independent of terminal and authentication state. */
+  private pageVisibilityChanged(): void {
+    if (!this.isWelcomed || this.closed) return;
+    this.resetPings(true);
+    this.livenessRtt = undefined;
+    this.livenessSrtt = undefined;
+    this.livenessRttvar = 0;
+    if (this.serverVisibility) this.send(CONTROL_STREAM, { type: "Event", subId: 0, eventJson: encoder.encode(JSON.stringify({ topic: "connection.visibility", hidden: this.pageHidden() })) });
+    this.scheduleLiveness();
+  }
+
+  private pageHidden(): boolean {
+    return typeof document !== "undefined" && document.hidden === true;
+  }
 
   get isOpen(): boolean { return this.socket?.readyState === WebSocket.OPEN; }
   /** True once the server welcomed the current socket. */
@@ -293,7 +315,7 @@ export class MuxConnection {
   /** Probe at the existing cadence; correlated RTT and jitter bound silence [D265, #199]. */
   sampleRoundTrip(urgent = true): void {
     const startedAt = performance.now();
-    if (!this.isWelcomed || this.closed) return;
+    if (!this.isWelcomed || this.closed || this.pageHidden()) return;
     if (urgent) {
       this.fastProbeUntil = startedAt + 250;
       this.scheduleLiveness();
@@ -320,6 +342,7 @@ export class MuxConnection {
 
   /** A pong arrived (on any stream). */
   acceptPong(nonce: bigint, sentUs: bigint): void {
+    if (this.pageHidden()) return;
     const startedAt = this.pendingPings.get(nonce);
     if (startedAt === undefined || sentUs !== BigInt(Math.round(startedAt * 1000))) return;
     const now = performance.now();
@@ -384,6 +407,7 @@ export class MuxConnection {
     globalThis.clearTimeout(this.closeNoteTimer);
     this.closeNoteTimer = undefined;
     this.stopRetryHintListeners();
+    if (typeof document !== "undefined") document.removeEventListener("visibilitychange", this.onVisibility);
     this.resetPings();
     for (const call of this.calls.values()) call.reject(new Error("connection closed"));
     this.calls.clear();
@@ -409,6 +433,7 @@ export class MuxConnection {
     socket.binaryType = "arraybuffer";
     this.socket = socket;
     this.decoder = new WebSocketFrameDecoder();
+    this.serverVisibility = false;
     this.welcomed = false;
 
     socket.onopen = () => {
@@ -418,7 +443,7 @@ export class MuxConnection {
       const resumable = sessionsToResume && credentials !== undefined && Date.now() < credentials.deadline;
       this.resumeSent = resumable;
       // RESUME_NEXT tells the server to wait for the adjacent Resume before issuing Welcome.
-      const hello: WireFrame = { type: "Hello", version: VERSION, caps: (resumable ? RESUME_NEXT : 0n) | LINK_DOUBT_NOTICES, clientInfo: "infraternal-tracer/0.1" };
+      const hello: WireFrame = { type: "Hello", version: VERSION, caps: (resumable ? RESUME_NEXT : 0n) | LINK_DOUBT_NOTICES | VIEWER_VISIBILITY, clientInfo: "infraternal-tracer/0.1" };
       let length = encodeMuxedFrameInto(CONTROL_STREAM, hello, this.sendScratch);
       if (resumable && credentials) {
         length += encodeMuxedFrameInto(CONTROL_STREAM, { type: "Resume", connectionId: credentials.connectionId, resumeToken: credentials.resumeToken }, this.sendScratch, length);
@@ -521,12 +546,14 @@ export class MuxConnection {
 
   /** Match native response estimation without adding timers or changing probe frequency. */
   private responseAllowance(): number {
-    return this.livenessSrtt === undefined ? 2000 : Math.max(250, this.livenessSrtt + 4 * this.livenessRttvar + 50);
+    // The first missed D300 allowance is doubt; a correlated late reply can
+    // still recover. A second consecutive miss retires the foreground route.
+    return this.livenessSrtt === undefined ? 2000 : 2 * Math.min(2000, Math.max(250, 2 * this.livenessSrtt + 4 * this.livenessRttvar + 75));
   }
 
   private checkLiveness(): void {
     this.livenessTimer = 0;
-    if (!this.isWelcomed || this.closed) return;
+    if (!this.isWelcomed || this.closed || this.pageHidden()) return;
     const now = performance.now();
     if (this.pendingPings.size > 0 && now - this.lastPongAt >= this.responseAllowance()) {
       this.retireUnresponsiveSocket();
@@ -545,7 +572,7 @@ export class MuxConnection {
   }
 
   private scheduleLiveness(): void {
-    if (!this.isWelcomed || this.closed) return;
+    if (!this.isWelcomed || this.closed || this.pageHidden()) return;
     window.clearTimeout(this.livenessTimer);
     // Input or a server Ping may have sampled between timer ticks. Schedule at that probe's next due time,
     // rather than skipping a tick and then expiring a healthy low-RTT route before another probe is sent.
@@ -583,6 +610,7 @@ export class MuxConnection {
   private control(frame: WireFrame): void {
     switch (frame.type) {
       case "Hello":
+        this.serverVisibility = (frame.caps & VIEWER_VISIBILITY) !== 0n;
         if (frame.version !== VERSION) this.fail("server uses an unsupported wire version");
         return;
       case "Welcome":
@@ -604,7 +632,8 @@ export class MuxConnection {
         this.livenessRtt = undefined;
         this.livenessSrtt = undefined;
         this.livenessRttvar = 0;
-        this.livenessTimer = window.setTimeout(() => this.checkLiveness(), LIVENESS_TICK_MS);
+        if (this.pageHidden()) this.pageVisibilityChanged();
+        else this.livenessTimer = window.setTimeout(() => this.checkLiveness(), LIVENESS_TICK_MS);
         for (const subId of [...this.subscriptions.keys()]) this.openSubscription(subId);
         for (const l of [...this.welcomeListeners]) l();
         if (!this.resumeSent) this.writersUsed.clear();
@@ -639,8 +668,8 @@ export class MuxConnection {
       }
       case "Ping":
         this.send(CONTROL_STREAM, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
-        // Incoming probes keep sampling alive when background tabs clamp timers.
-        this.sampleRoundTrip(false);
+        // A hidden page can answer when runnable but must not arm local deadlines.
+        if (!this.pageHidden()) this.sampleRoundTrip(false);
         return;
       case "Pong":
         this.acceptPong(frame.nonce, frame.sentUs);
@@ -656,6 +685,7 @@ export class MuxConnection {
 
   private scheduleReconnect(): void {
     if (this.closed || this.retryTimer !== 0) return;
+    if (this.pageHidden()) { this.startRetryHintListeners(); return; }
     // Only welcomed sockets that close before the stable window add to this loop.
     // Unwelcomed route failures restart their recovery schedule in disconnect().
     // Positive jitter spreads retries across pages; first opens retain the ordinary backoff.
@@ -675,7 +705,7 @@ export class MuxConnection {
     const socket = this.socket;
     const retryPending = this.retryTimer !== 0;
     const handshakePending = socket !== undefined && !this.welcomed;
-    if (!retryPending && !handshakePending) return;
+    if (!retryPending && !handshakePending && !this.retryHintListeners) return;
     this.clearRetryTimer();
     this.retryAttempt = 0;
     this.fastRecovery = this.streams.size > 0;
@@ -706,13 +736,13 @@ export class MuxConnection {
     this.retryTimer = 0;
   }
 
-  private resetPings(): void {
+  private resetPings(preserveInput = false): void {
     window.clearTimeout(this.livenessTimer);
     this.livenessTimer = 0;
     this.lastPingAt = -Infinity;
     this.lastRttReportAt = -Infinity;
     this.pendingPings.clear();
-    this.unacknowledgedInput.clear();
+    if (!preserveInput) this.unacknowledgedInput.clear();
     this.fastProbeUntil = 0;
     for (const l of this.rttListeners) l(undefined);
   }

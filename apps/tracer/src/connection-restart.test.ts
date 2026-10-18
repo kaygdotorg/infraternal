@@ -454,6 +454,8 @@ test("online and foreground events cancel delays and preserve handshakes in prog
     expect(connection.isWelcomed).toBe(true);
     expect([...timers.values()].map((timer) => timer.delay)).toEqual([25]);
     expect([...windowListeners.values()].every((handlers) => handlers.size === 0)).toBe(true);
+    expect(documentListeners.get("visibilitychange")?.size).toBe(1); // The lifecycle listener survives Welcome.
+    connection.dispose();
     expect([...documentListeners.values()].every((handlers) => handlers.size === 0)).toBe(true);
   } finally {
     connection?.dispose();

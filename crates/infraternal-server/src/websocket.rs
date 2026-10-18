@@ -62,6 +62,8 @@ const RESUME_NEXT: u64 = 1;
 /// `terminal.link_recovered`. Older viewers reject unknown notices, so they
 /// are never sent one and simply see no indicator for a kept link [D300].
 const LINK_DOUBT_NOTICES: u64 = 1 << 1;
+/// Browser Hello bit 2 enables bounded control-stream visibility notices (#244).
+const VIEWER_VISIBILITY: u64 = 1 << 2;
 const RESUME_WINDOW_SECONDS: u32 = 120;
 // Reject upgrades immediately when the process is at this fixed socket limit.
 const MAX_CONNECTIONS: usize = 256;
@@ -481,7 +483,7 @@ async fn run_socket(
                     CONTROL_STREAM,
                     &Frame::Hello {
                         version: 1,
-                        caps: 0,
+                        caps: VIEWER_VISIBILITY,
                         client_info: "infraternal-server/0.1",
                     },
                     &mut encode,
@@ -517,7 +519,8 @@ async fn run_socket(
         ),
     )
     .await;
-    let Ok(Ok((connection_id, proof_authority, link_doubt_notices))) = handshake else {
+    let Ok(Ok((connection_id, proof_authority, link_doubt_notices, viewer_visibility))) = handshake
+    else {
         let reason = if resume_attempt.is_some() {
             RESUME_REFUSED
         } else {
@@ -604,6 +607,7 @@ async fn run_socket(
         user_id.clone(),
         session_token.clone(),
         proof_authority,
+        viewer_visibility,
     );
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
     let mut ended = EndedStreams::default();
@@ -1367,7 +1371,7 @@ async fn handshake<S, K>(
     session_token: &str,
     pending_welcome: &mut Option<Welcome>,
     resume_attempt: &mut Option<[u8; 16]>,
-) -> Result<([u8; 16], probe_authority::Lease, bool), ()>
+) -> Result<([u8; 16], probe_authority::Lease, bool, bool), ()>
 where
     S: Stream<Item = Result<Message, axum::Error>> + Unpin,
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
@@ -1375,13 +1379,17 @@ where
     let hello = next_wire(source, sink, receive).await?.ok_or(())?;
     socket_deadline(state, user_id, session_token).await?;
     let decoded = decode_muxed_frame(&hello).map_err(|_| ())?;
-    let (resume, link_doubt_notices) = match (decoded.stream_id, decoded.frame) {
+    let (resume, link_doubt_notices, viewer_visibility) = match (decoded.stream_id, decoded.frame) {
         (
             CONTROL_STREAM,
             Frame::Hello {
                 version: 1, caps, ..
             },
-        ) => (caps & RESUME_NEXT != 0, caps & LINK_DOUBT_NOTICES != 0),
+        ) => (
+            caps & RESUME_NEXT != 0,
+            caps & LINK_DOUBT_NOTICES != 0,
+            caps & VIEWER_VISIBILITY != 0,
+        ),
         _ => return Err(()),
     };
     let welcome = if resume {
@@ -1442,7 +1450,12 @@ where
     {
         return Err(());
     }
-    Ok((welcome.connection_id, proof_authority, link_doubt_notices))
+    Ok((
+        welcome.connection_id,
+        proof_authority,
+        link_doubt_notices,
+        viewer_visibility,
+    ))
 }
 
 #[derive(Clone)]
