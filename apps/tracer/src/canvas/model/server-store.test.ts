@@ -71,7 +71,7 @@ test("a pending reference preserves unrelated edits across remote paints and is 
   const resolved = structuredClone(store.current()), layout = resolved.views[0]!.layout;
   if (layout.type === "tiled") layout.columns[0]!.windows.find((w) => w.id === "new")!.target = { type: "session", id: "real", host: "local" };
   await store.save(resolved, undefined, store.current(), new Set());
-  expect(transport.calls).toHaveLength(2);
+  expect(transport.calls).toHaveLength(3);
   expect((transport.calls[1]!.input.intent as Extract<Intent, { type: "split" }>).window.target).toEqual({ type: "session", id: "real", host: "local" });
   store.dispose();
 });
@@ -105,4 +105,18 @@ test("a bootstrap receipt before its canonical snapshot keeps the legacy layout 
   store.dispose();
   const restored = new ServerCanvasStore(new Transport(), "a");
   expect((await restored.load())!.views[0]!.layout).toEqual(legacy.views[0]!.layout); restored.dispose();
+});
+
+test("ready edits share one network round trip with a bounded in-flight window", async () => {
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
+  let previous = document();
+  for (let i = 0; i < 8; i++) {
+    const next = structuredClone(previous); next.views[0]!.name = `Console ${i}`;
+    await store.save(next, undefined, previous); previous = next;
+  }
+  expect(transport.calls).toHaveLength(4);
+  const first = transport.calls[0]!; first.resolve({ revision: 1 }); await tick();
+  expect(transport.calls).toHaveLength(5);
+  expect(transport.calls[1]!.input.base_revision).toBe(0);
+  store.dispose();
 });

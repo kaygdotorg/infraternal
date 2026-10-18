@@ -23,7 +23,7 @@ export class ServerCanvasStore implements CanvasStore {
   #initialized = false;
   #ready = false;
   #disposed = false;
-  #busy = false;
+  readonly #inflight = new Set<string>();
   #epoch = 0;
   #timer: ReturnType<typeof setTimeout> | undefined;
   readonly #listeners = new Set<(doc: CanvasDocument) => void>();
@@ -41,7 +41,7 @@ export class ServerCanvasStore implements CanvasStore {
       this.#migration = cache.migration; this.#cached = true; this.#initialized = cache.canonical.revision > 0;
     }
     this.#off = transport.subscribe({ topic: "canvas.layout" }, (event) => this.#event(event), () => {
-      this.#ready = false; this.#busy = false; this.#epoch++;
+      this.#ready = false; this.#inflight.clear(); this.#epoch++;
     });
   }
   async load(): Promise<CanvasDocument | undefined> {
@@ -108,20 +108,23 @@ export class ServerCanvasStore implements CanvasStore {
     for (const listener of this.#listeners) listener(structuredClone(document));
   }
   #pump(): void {
-    if (this.#disposed || !this.#ready || this.#busy || this.transport.isWelcomed === false) return;
+    if (this.#disposed || !this.#ready || this.#inflight.size >= 4 || this.transport.isWelcomed === false) return;
     if (this.#migration?.revision !== undefined) return;
     const migration = this.#migration;
-    const operation = this.#pending.find((p) => p.revision === undefined);
+    const operation = this.#pending.find((p) => p.revision === undefined && !this.#inflight.has(p.op_id));
     if (!migration && !operation) return;
     if (!migration && operation && (operation.intent.type === "open" || operation.intent.type === "split") && this.#unresolved.has(operation.intent.window.id)) return;
     if (operation && !migration) operation.sent = true;
-    this.#busy = true;
+    const id = migration?.op_id ?? operation!.op_id;
+    if (this.#inflight.has(id)) return;
+    this.#inflight.add(id);
     const epoch = this.#epoch;
     const action = migration ? "canvas.layout.initialize" : "canvas.layout.apply";
     const input = migration ? { ...migration } : { op_id: operation!.op_id, base_revision: operation!.base_revision, intent: operation!.intent };
     void this.transport.call(action, input).then((result) => {
       if (this.#disposed || epoch !== this.#epoch) return;
-      if (!Number.isSafeInteger(result.revision)) { this.#busy = false; this.#ready = false; this.refused(); return; }
+      this.#inflight.delete(id);
+      if (!Number.isSafeInteger(result.revision)) { this.#ready = false; this.refused(); return; }
       if (migration) {
         migration.revision = Number(result.revision); this.#initialized = true;
         if (migration.revision <= this.#canonical.revision) this.#migration = undefined;
@@ -129,15 +132,16 @@ export class ServerCanvasStore implements CanvasStore {
       else operation!.revision = Number(result.revision);
       const count = this.#pending.length;
       this.#pending = this.#pending.filter((p) => p.revision === undefined || p.revision > this.#canonical.revision);
-      this.#busy = false;
       // The ordered event usually paints first. Its receipt changes journal metadata only.
       if (migration || this.#pending.length !== count) this.#publish(); else this.#checkpoint();
       this.#pump();
     }, () => {
       if (this.#disposed || epoch !== this.#epoch) return;
       // Keep the identical input for retry after the next snapshot, including its original base revision.
-      this.#busy = false; this.#ready = false; this.#checkpoint(); this.refused();
+      this.#inflight.delete(id); this.#ready = false; this.#checkpoint(); this.refused();
     });
+    // Bounded pipelining preserves socket order without making each independent edit wait for the previous RTT.
+    if (!migration) this.#pump();
   }
   #checkpoint(): void {
     if (this.#timer !== undefined || this.#disposed) return;
