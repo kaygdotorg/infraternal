@@ -1263,7 +1263,7 @@ export class TerminalClient {
   }
 
   private showInputResendNotice(): void {
-    this.inputResendNotice ??= mountToast(this.config.host);
+    this.inputResendNotice ??= mountToast(this.config.host.parentElement ?? this.config.host, { placement: "parent" });
     this.inputResendNotice.show({
       message: "Your waiting typing is saved. Some may already have reached the shell. Resend it?",
       tone: "error",
