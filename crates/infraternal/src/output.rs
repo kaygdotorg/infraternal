@@ -6,7 +6,7 @@
 
 use std::process::ExitCode;
 
-use crate::cli::output::{CommandResult, CommandState, Exit, emit, print};
+use crate::cli::output::{CommandResult, CommandState, Exit, emit, print_progress};
 use serde_json::json;
 
 /// The command path a person typed for an operator action id.
@@ -40,7 +40,7 @@ pub(crate) fn report(json: bool, action: &str, state: &str, message: &str, next:
     if !next.is_empty() {
         result = result.with_next_step(next);
     }
-    print(&result, json, json);
+    print_progress(&result, json, json);
 }
 
 /// The final, successful result of a command: the one envelope on standard output.

@@ -584,6 +584,21 @@ pub fn emit_to<T: Serialize>(
 
 /// Print a result without deciding the exit code (streams of progress records, tests).
 pub fn print<T: Serialize>(result: &CommandResult<T>, json: bool, to_stderr: bool) {
+    print_with_phase(result, json, to_stderr, true);
+}
+
+/// Write a progress record without marking the command's final result as written.
+/// This keeps the interrupt handler free to emit the final interrupted envelope later.
+pub fn print_progress<T: Serialize>(result: &CommandResult<T>, json: bool, to_stderr: bool) {
+    print_with_phase(result, json, to_stderr, false);
+}
+
+fn print_with_phase<T: Serialize>(
+    result: &CommandResult<T>,
+    json: bool,
+    to_stderr: bool,
+    final_output: bool,
+) {
     let terminal = if to_stderr {
         io::stderr().is_terminal()
     } else {
@@ -594,11 +609,15 @@ pub fn print<T: Serialize>(result: &CommandResult<T>, json: bool, to_stderr: boo
     } else {
         render_pretty(result, RenderOptions::detect(terminal))
     };
-    write_output(rendered, to_stderr);
+    write_rendered(rendered, to_stderr, final_output);
 }
 
 /// Shares formatting-error and destination handling for every rendered result.
 pub fn write_output(output: Result<String, serde_json::Error>, to_stderr: bool) {
+    write_rendered(output, to_stderr, true);
+}
+
+fn write_rendered(output: Result<String, serde_json::Error>, to_stderr: bool, final_output: bool) {
     let rendered = match output {
         Ok(output) => output,
         Err(error) => {
@@ -606,7 +625,9 @@ pub fn write_output(output: Result<String, serde_json::Error>, to_stderr: bool) 
             return;
         }
     };
-    infraternal_shim::begin_final_output();
+    if final_output {
+        infraternal_shim::begin_final_output();
+    }
     let write_result = if to_stderr {
         io::stderr().write_all(rendered.as_bytes())
     } else {
@@ -618,7 +639,9 @@ pub fn write_output(output: Result<String, serde_json::Error>, to_stderr: bool) 
     {
         eprintln!("The result could not be written.\nWhy  {error}");
     }
-    infraternal_shim::finish_final_output();
+    if final_output {
+        infraternal_shim::finish_final_output();
+    }
 }
 
 #[cfg(test)]
