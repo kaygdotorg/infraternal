@@ -257,12 +257,7 @@ async fn a_name_chosen_while_rewound_survives_rolling_forward_and_reattaching() 
             .fetch_all(&pool)
             .await
             .unwrap();
-    let runbook = include_str!("../../../../docs/operations/deploy.md");
-    let steps: Vec<&str> = runbook
-        .split("```sql\n")
-        .skip(1)
-        .map(|part| part.split("```").next().unwrap())
-        .collect();
+    let steps = rewind_steps();
     assert_eq!(steps.len(), 2);
     sqlx::raw_sql(steps[0]).execute(&pool).await.unwrap();
     let mut old = sqlx::migrate!("../../infraternal-server/migrations");
@@ -361,4 +356,83 @@ async fn hidden_names_are_indistinguishable_for_every_non_global_node_manager() 
         }
         assert_eq!(name_of(&pool, hidden).await, "private-machine");
     }
+}
+
+/// Both regressions execute the exact documented SQL, so runbook edits are checked against real schema.
+fn rewind_steps() -> Vec<&'static str> {
+    include_str!("../../../../docs/operations/deploy.md")
+        .split("```sql\n")
+        .skip(1)
+        .map(|part| part.split("```").next().unwrap())
+        .collect()
+}
+
+/// An explicit rename back to the original spelling still gives a person ownership of that name. The old
+/// release records that intent in its audit even though its name-only update leaves automatic provenance.
+#[tokio::test]
+async fn rewind_reconciles_same_spelling_choices_without_freezing_untouched_names() {
+    let pool = pool().await;
+    add_host(&pool, A, "root@minipc01").await;
+    add_host(&pool, B, "root@other-host").await;
+    let service = MeshService::new(pool.clone());
+    let store = service.dataplane();
+    let (chosen, _) = store
+        .attach_named(A, PublicKey([10; 32]), None, false, None)
+        .await
+        .unwrap();
+    let (untouched, _) = store
+        .attach_named(B, PublicKey([11; 32]), None, false, None)
+        .await
+        .unwrap();
+    let steps = rewind_steps();
+    sqlx::raw_sql(steps[0]).execute(&pool).await.unwrap();
+    // Reproduce the previous release's name-only UPDATE and its ordinary revision/audit commit.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("UPDATE mesh_nodes SET name='minipc01' WHERE id=?")
+        .bind(i64::try_from(chosen.0).unwrap())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE mesh_state SET revision=revision+1 WHERE singleton=1")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO mesh_audit(user_id,action,resource,revision,occurred_at,detail_json) SELECT 'owner','mesh.node.rename',?,revision,1,'{}' FROM mesh_state WHERE singleton=1").bind(chosen.0.to_string()).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    sqlx::raw_sql(steps[1]).execute(&pool).await.unwrap();
+    sqlx::migrate!("../../infraternal-server/migrations")
+        .run(&pool)
+        .await
+        .unwrap();
+    let provenance: Vec<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT name,name_source,name_claim FROM mesh_nodes ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        provenance,
+        [
+            ("minipc01".into(), "hand".into(), None),
+            (
+                "other-host".into(),
+                "record".into(),
+                Some("other-host".into())
+            )
+        ]
+    );
+    // A later record update must still rename only the untouched automatic node.
+    sqlx::query("UPDATE remote_host_bootstrap SET address='root@new-record'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    store
+        .attach_named(A, PublicKey([10; 32]), None, false, None)
+        .await
+        .unwrap();
+    store
+        .attach_named(B, PublicKey([11; 32]), None, false, None)
+        .await
+        .unwrap();
+    assert_eq!(name_of(&pool, chosen).await, "minipc01");
+    assert_eq!(name_of(&pool, untouched).await, "new-record");
 }

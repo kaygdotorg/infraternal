@@ -137,18 +137,38 @@ of `infraternal.sqlite` taken, before the rewind:
 ```sql
 BEGIN;
 CREATE TABLE rewind_migrations AS SELECT * FROM _sqlx_migrations WHERE version > 25;
+CREATE TABLE rewind_mesh_names AS
+    SELECT id,name,(SELECT revision FROM mesh_state WHERE singleton=1) AS revision
+    FROM mesh_nodes;
 DELETE FROM _sqlx_migrations WHERE version > 25;
 COMMIT;
 ```
 
 Replace `25` with the newest version the older release ships. The older release
-ignores the extra columns; rows it writes take their defaults (for 0026, a name
-counts as chosen by a person). Before rolling forward again, with the server
-stopped, put the rows back so the migrator does not try to add the columns a
-second time:
+ignores the extra columns. New rows take their defaults (for 0026, a name
+counts as chosen by a person), but renaming an existing row changes only `name`:
+its newer automatic provenance stays untouched. Keep `rewind_mesh_names` for
+the whole rewind. Before rolling forward again, with the server stopped, mark
+names changed since that snapshot, or explicitly renamed in the audit log during
+the rewind, as chosen by a person and clear their old automatic claim. The audit
+check also preserves a person choosing the same spelling or changing back to it.
+Unchanged automatic names retain their provenance, so ordinary record and
+hostname updates still work. Then put the migration rows back so
+the migrator does not try to add the columns a second time:
 
 ```sql
 BEGIN;
+UPDATE mesh_nodes SET name_source='hand',name_claim=NULL
+WHERE id IN (
+    SELECT previous.id FROM rewind_mesh_names AS previous
+    JOIN mesh_nodes AS current ON current.id=previous.id
+    WHERE previous.name<>current.name
+    UNION
+    SELECT CAST(resource AS INTEGER) FROM mesh_audit
+    WHERE action='mesh.node.rename'
+        AND revision>(SELECT revision FROM rewind_mesh_names LIMIT 1)
+);
+DROP TABLE rewind_mesh_names;
 INSERT INTO _sqlx_migrations SELECT * FROM rewind_migrations;
 DROP TABLE rewind_migrations;
 COMMIT;
