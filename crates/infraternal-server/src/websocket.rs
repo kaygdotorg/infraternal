@@ -68,8 +68,16 @@ const BACKEND_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 // Stored expiry changes do not publish revocations; poll only during pending work, never idle.
 const BUSY_AUTHORITY_INTERVAL: Duration = Duration::from_millis(25);
-// Authority/storage stalls fail closed; shutdown cannot inherit the normal one-second writer wait.
+// Deadline of one authority read attempt. Teardown makes exactly one attempt,
+// without renewal, so closing never holds a socket on a busy store for longer.
 const AUTHORITY_READ_TIMEOUT: Duration = Duration::from_millis(25);
+// A read that misses its deadline is a busy store, not a refusal (#240): it is
+// retried while the socket's work stays held, and fails closed after this wait.
+const AUTHORITY_WAIT: Duration = Duration::from_secs(1);
+// Pause between attempts: 5 ms, doubling to 100 ms. A socket stalled for the
+// whole wait makes about 11 attempts, each a read-only SELECT.
+const AUTHORITY_RETRY_PAUSE: Duration = Duration::from_millis(5);
+const AUTHORITY_RETRY_PAUSE_MAX: Duration = Duration::from_millis(100);
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(25);
 // Expired rows are pruned during new handshakes; this caps retained bearer metadata globally.
 const MAX_RESUME_ROWS: i64 = 4096;
@@ -91,6 +99,35 @@ const MAX_CREDIT: u64 = 8 * 1024 * 1024;
 
 type PendingPluginCall = (u32, Result<Vec<u8>, AgentError>);
 
+// Pool connections that authority work may hold at once: half of the
+// production pool's eight (runtime.rs), so retries and renewals under a stalled
+// store can never take the connections the rest of the server needs (#240).
+const AUTHORITY_READS: usize = 4;
+
+/// Server-wide bounds on authority work (#240), shared by every socket.
+struct AuthorityLimits {
+    // Authority reads and renewals running now; at most `AUTHORITY_READS`.
+    // A read waits its turn here within its attempt deadline, in order,
+    // instead of backing off: under a burst of fast reads that costs
+    // microseconds, not a retry pause.
+    reads: Semaphore,
+    // Whether the one session renewal allowed at a time is running.
+    renewing: std::sync::atomic::AtomicBool,
+}
+
+/// A running renewal's read place and renewal flag, given back when its task
+/// ends or is dropped.
+struct RenewalHold(Arc<AuthorityLimits>);
+
+impl Drop for RenewalHold {
+    fn drop(&mut self) {
+        self.0.reads.add_permits(1);
+        self.0
+            .renewing
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// State shared by the authenticated browser socket route.
 #[derive(Clone)]
 pub(crate) struct WebSocketState {
@@ -108,6 +145,7 @@ pub(crate) struct WebSocketState {
     #[cfg(test)]
     terminal_connect_timeout: Duration,
     connections: Arc<Semaphore>,
+    authority: Arc<AuthorityLimits>,
     users: Arc<std::sync::Mutex<HashMap<String, std::sync::Weak<Semaphore>>>>,
     session_changes: watch::Sender<u64>,
 }
@@ -194,6 +232,10 @@ impl WebSocketState {
             #[cfg(test)]
             terminal_connect_timeout: TERMINAL_CONNECT_TIMEOUT,
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+            authority: Arc::new(AuthorityLimits {
+                reads: Semaphore::new(AUTHORITY_READS),
+                renewing: std::sync::atomic::AtomicBool::new(false),
+            }),
             users: Arc::default(),
             session_changes,
         })
@@ -222,6 +264,32 @@ impl WebSocketState {
     #[cfg(feature = "ssh")]
     pub(crate) fn session_notifications(&self) -> watch::Sender<u64> {
         self.session_changes.clone()
+    }
+
+    /// Start a due session renewal without waiting for it (#240). The read that
+    /// asked for it already proved the session live, and renewal is at most
+    /// once a minute against a 30-day session, so running it later is safe. A
+    /// renewal UPDATE can wait up to SQLite's busy timeout behind another
+    /// writer; held in the frame, or retried on a fresh connection each
+    /// attempt, that drained the pool. Here at most one runs server-wide, it
+    /// counts against the authority cap, and when either is busy it is skipped:
+    /// the session is still due, so a later frame starts it again.
+    fn renew_soon(&self, user: &str, token: &str) {
+        use std::sync::atomic::Ordering;
+        let limits = &self.authority;
+        if limits.renewing.swap(true, Ordering::Acquire) {
+            return;
+        }
+        let Ok(place) = limits.reads.try_acquire() else {
+            limits.renewing.store(false, Ordering::Release);
+            return;
+        };
+        // RenewalHold gives both back when the task ends, completed or dropped.
+        place.forget();
+        tokio::spawn(
+            self.auth
+                .renewal(token, user, RenewalHold(Arc::clone(&self.authority))),
+        );
     }
 
     /// Wake authenticated session-list subscribers after the local host changes its live set.
@@ -621,7 +689,14 @@ async fn run_socket(
     pending_plugin_calls.shutdown().await;
     drop(plugins);
     drop(attachments);
-    if loop_result.is_err() && session_is_live(&state, &user_id, &session_token).await {
+    // Only a still-authorized browser hears why its socket ended. One attempt,
+    // no wait and no renewal: a busy store must not hold the transport open
+    // here, and a socket that is closing is not activity.
+    if loop_result.is_err()
+        && read_expiry(&state, &user_id, &session_token, false, Duration::ZERO)
+            .await
+            .is_ok()
+    {
         let _ = tokio::time::timeout(
             CLOSE_TIMEOUT,
             send_frame(
@@ -712,28 +787,36 @@ async fn while_authorized_operation(
                 // polling its owner instead of suspending a transaction while
                 // waiting for that same pool. Neither completion nor progress
                 // renews the already-started authority read's deadline.
-                let authority = socket_deadline(state, user, token);
-                tokio::pin!(authority);
-                tokio::select! {
-                    biased;
-                    changed = revocations.changed() => {
-                        changed.map_err(|_| ())?;
-                        // A guarded poll may itself send bytes. Stop polling
-                        // it on authority loss; a late result check cannot
-                        // undo a write. Finish this same bounded read, then
-                        // recheck after the notification, not its old snapshot.
-                        authority.await?;
-                        expiry = socket_deadline(state, user, token).await?;
+                let recheck = {
+                    let authority = socket_deadline(state, user, token);
+                    tokio::pin!(authority);
+                    tokio::select! {
+                        biased;
+                        changed = revocations.changed() => {
+                            changed.map_err(|_| ())?;
+                            true
+                        }
+                        () = tokio::time::sleep_until(expiry) => true,
+                        checked = &mut authority => {
+                            expiry = checked?;
+                            false
+                        }
+                        result = &mut operation => {
+                            expiry = authority.await?;
+                            break result;
+                        }
                     }
-                    () = tokio::time::sleep_until(expiry) => {
-                        authority.await?;
-                        expiry = socket_deadline(state, user, token).await?;
-                    }
-                    checked = &mut authority => { expiry = checked?; }
-                    result = &mut operation => {
-                        expiry = authority.await?;
-                        break result;
-                    }
+                };
+                // Authority was lost or reached its deadline while a read was
+                // in flight. A guarded poll may itself send bytes, so the
+                // operation is no longer polled; a late result check cannot
+                // undo a write. The in-flight read began before the change and
+                // its answer is stale, so it is dropped here (with its permit
+                // and pool place) instead of awaited: one fresh read decides,
+                // and the socket closes within one bounded wait of the change
+                // (#240, review P3-4), not after two back to back.
+                if recheck {
+                    expiry = socket_deadline(state, user, token).await?;
                 }
             }
             result = &mut operation => break result,
@@ -1714,15 +1797,7 @@ pub(super) async fn probe_deadline(
     let wall = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ())?;
-    let now = i64::try_from(wall.as_secs()).map_err(|_| ())?;
-    #[cfg(test)]
-    let read_timeout = state.authority_read_timeout;
-    #[cfg(not(test))]
-    let read_timeout = AUTHORITY_READ_TIMEOUT;
-    let expiry = tokio::time::timeout(read_timeout, state.auth.live_expiry(token, user, now))
-        .await
-        .map_err(|_| ())?
-        .map_err(|_| ())?;
+    let expiry = read_expiry(state, user, token, false, AUTHORITY_WAIT).await?;
     let wall_deadline = Duration::from_secs(u64::try_from(expiry).map_err(|_| ())?);
     started
         .checked_add(wall_deadline.checked_sub(wall).ok_or(())?)
@@ -1743,41 +1818,92 @@ async fn authority_deadline(
     token: &str,
     renew: bool,
 ) -> Result<tokio::time::Instant, ()> {
-    let now = unix_seconds()?;
-    #[cfg(test)]
-    let read_timeout = state.authority_read_timeout;
-    #[cfg(not(test))]
-    let read_timeout = AUTHORITY_READ_TIMEOUT;
-    let expiry = tokio::time::timeout(read_timeout, async {
-        if renew {
-            state.auth.socket_activity(token, user_id, now).await
-        } else {
-            state.auth.live_expiry(token, user_id, now).await
-        }
-    })
-    .await
-    .map_err(|_| ())?
-    .map_err(|_| ())?;
-    let remaining = u64::try_from(expiry - now).map_err(|_| ())?;
+    let expiry = read_expiry(state, user_id, token, renew, AUTHORITY_WAIT).await?;
+    // The wait may have taken up to AUTHORITY_WAIT: measure the deadline from the
+    // wall clock after the read, so a slow store can never extend a session.
+    let remaining = u64::try_from(expiry - unix_seconds()?).map_err(|_| ())?;
     Ok(tokio::time::Instant::now() + Duration::from_secs(remaining))
 }
 
-async fn session_is_live(state: &WebSocketState, user_id: &str, token: &str) -> bool {
-    let Ok(now) = unix_seconds() else {
-        return false;
-    };
+/// Read the session's expiry, and start its renewal when `renew` is set and it
+/// is due. Each attempt has the fixed per-read deadline. An attempt that misses
+/// it is a busy store, not a refusal (#240): it is dropped and tried again after
+/// a pause (5 ms doubling to 100 ms) until `wait` has passed (`AUTHORITY_WAIT`
+/// everywhere but teardown, which passes zero for a single attempt), then the
+/// read fails closed. A store that answers (no live session, or a storage
+/// error) fails at once and is never retried. The caller does no work
+/// meanwhile: every call site awaits this before it polls the operation it
+/// guards, so input stays queued in order behind the read instead of being
+/// dropped with the socket. One non-generic function serves every call site so
+/// the retry loop is compiled once (D243).
+///
+/// Only the read is retried. It is a SELECT, which a WAL database serves while
+/// another connection holds the write lock, so a dropped attempt gives its
+/// connection back as soon as its statement returns. The renewal is a write
+/// that may wait seconds for that lock; it never runs here (`renew_soon`).
+/// Each attempt holds one of the `AUTHORITY_READS` places, so however many
+/// sockets retry at once they hold at most that many connections.
+///
+/// Expiry is monotonic: once a session's end has passed it is never found live
+/// again. Every attempt reads the wall clock when it starts, so a retry after a
+/// wait that crossed the session's end does not judge the session by a time
+/// that has already gone. The result is checked once more against the clock
+/// after the read, because the attempt that answered may itself have waited
+/// for a connection past the end. Renewal is decided from that same check.
+async fn read_expiry(
+    state: &WebSocketState,
+    user_id: &str,
+    token: &str,
+    renew: bool,
+    wait: Duration,
+) -> Result<i64, ()> {
     #[cfg(test)]
     let read_timeout = state.authority_read_timeout;
     #[cfg(not(test))]
     let read_timeout = AUTHORITY_READ_TIMEOUT;
-    matches!(
-        tokio::time::timeout(
-            read_timeout,
-            state.auth.socket_activity(token, user_id, now)
-        )
-        .await,
-        Ok(Ok(_))
-    )
+    let give_up = tokio::time::Instant::now() + wait;
+    let mut pause = AUTHORITY_RETRY_PAUSE;
+    let expiry = loop {
+        let read = async {
+            let reads = &state.authority.reads;
+            let place = match reads.try_acquire() {
+                Ok(place) => place,
+                Err(_) => reads.acquire().await.ok()?,
+            };
+            let result = match unix_seconds() {
+                Ok(now) => state
+                    .auth
+                    .live_expiry(token, user_id, now)
+                    .await
+                    .map_err(|_| ()),
+                Err(()) => Err(()),
+            };
+            drop(place);
+            Some(result)
+        };
+        match tokio::time::timeout(read_timeout, read).await {
+            Ok(Some(result)) => break result?,
+            _ if tokio::time::Instant::now() + pause < give_up => {
+                tokio::time::sleep(pause).await;
+                pause = (pause * 2).min(AUTHORITY_RETRY_PAUSE_MAX);
+            }
+            _ => return Err(()),
+        }
+    };
+    let now = unix_seconds()?;
+    if expiry <= now {
+        return Err(());
+    }
+    if renew && Auth::renewal_due(expiry, now) {
+        state.renew_soon(user_id, token);
+    }
+    Ok(expiry)
+}
+
+async fn session_is_live(state: &WebSocketState, user_id: &str, token: &str) -> bool {
+    read_expiry(state, user_id, token, true, AUTHORITY_WAIT)
+        .await
+        .is_ok()
 }
 
 struct ClientAttachment {
