@@ -1,5 +1,6 @@
 /** One decoder for offline startup and the durable layout journal, so damaged cache data cannot stall mount (D180, D245). */
-import { randomUuid } from "../../identifiers";
+import { reduce } from "./reducer";
+import { isCanonicalUuid, randomUuid } from "../../identifiers";
 import { parseDocument, type CanvasDocument } from "./document";
 import type { Intent } from "./operations";
 export interface Pending { op_id: string; base_revision: number; intent: Intent; revision?: number; sent?: boolean }
@@ -12,9 +13,22 @@ export function readLayoutCache(value: unknown): LayoutCache | undefined {
   const cache = value as { canonical?: unknown; document?: unknown; pending?: Pending[]; unresolved?: string[]; migration?: Migration };
   const canonical = parseDocument(cache.canonical);
   if (!canonical || !parseDocument(cache.document)) return undefined;
+  const pending = Array.isArray(cache.pending) && cache.pending.length <= 1024 ? cache.pending : [];
+  // A journal is replayed before mount as well as before offline identity is accepted. Never let
+  // damaged local retry data throw while drawing or turn a missing reference into a live session.
+  try {
+    const projected = structuredClone(canonical);
+    for (const p of pending) {
+      if (!p || !isCanonicalUuid(p.op_id) || !Number.isSafeInteger(p.base_revision) || p.base_revision < 0 || !p.intent || typeof p.intent !== "object") return undefined;
+      if ((p.intent.type === "open" || p.intent.type === "split") && (!p.intent.window || typeof p.intent.window.id !== "string")) return undefined;
+      if (p.revision !== undefined && (!Number.isSafeInteger(p.revision) || p.revision < 0)) return undefined;
+      reduce(projected, p.intent);
+    }
+    if (!parseDocument(projected)) return undefined;
+  } catch { return undefined; }
   return {
     canonical,
-    pending: Array.isArray(cache.pending) && cache.pending.length <= 1024 ? cache.pending : [],
+    pending,
     unresolved: new Set(Array.isArray(cache.unresolved) ? cache.unresolved.filter((id) => typeof id === "string") : []),
     ...(cache.migration && typeof cache.migration.op_id === "string" && parseDocument(cache.migration.document) ? { migration: cache.migration } : {}),
   };
