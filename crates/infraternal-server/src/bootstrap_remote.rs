@@ -17,6 +17,9 @@ use std::{collections::HashMap, sync::Mutex, time::Duration};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
+/// Fail a missing installed route promptly so a recoverable setup can expose Retry.
+const INSTALLED_ACTOR_ROUTE_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Fresh identities are owned by one batch until installation commits or rolls back.
 /// No user-provided UUID can overwrite an already enrolled machine's authority.
 pub(super) struct RemoteBackend {
@@ -80,12 +83,47 @@ impl RemoteBackend {
         self.uid(authority, host)?;
         // The installation service has just started. This finite wait owns no
         // background timer and cannot turn token redemption into online proof.
-        tokio::time::timeout(
-            Duration::from_secs(30),
+        #[cfg(test)]
+        let mesh_route_started = std::time::Instant::now();
+        #[cfg(test)]
+        let mesh_route_started_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let result = tokio::time::timeout(
+            INSTALLED_ACTOR_ROUTE_TIMEOUT,
             wait_installed_actor(&self.hosts, host),
         )
-        .await
-        .map_err(|_| {
+        .await;
+        #[cfg(test)]
+        if std::env::var_os("ADDHOST_RETRY_PHASE_TIMING").is_some() {
+            let elapsed_ms = mesh_route_started.elapsed().as_secs_f64() * 1000.0;
+            let epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            println!(
+                "TIMELINE source=server step=mesh_actor_route state=start epoch_ms={:.3}",
+                mesh_route_started_epoch.as_secs_f64() * 1000.0
+            );
+            println!(
+                "TIMELINE source=server step=mesh_actor_route state=end epoch_ms={:.3}",
+                epoch.as_secs_f64() * 1000.0
+            );
+            println!(
+                "METRIC breakit2 step=mesh_actor_route elapsed_ms={:.3} ok={}",
+                elapsed_ms,
+                result.is_ok()
+            );
+            if let Ok(limit_ms) = std::env::var("BREAKIT2_ROUTE_WAIT_MAX_MS") {
+                let limit_ms = limit_ms
+                    .parse::<f64>()
+                    .expect("route-wait test budget must be numeric");
+                assert!(
+                    elapsed_ms <= limit_ms,
+                    "mesh actor route wait took {elapsed_ms:.3} ms, over the {limit_ms:.3} ms budget"
+                );
+            }
+        }
+        result.map_err(|_| {
             Failure::install(
                 "The infraternal agent did not connect. Check the host's service and network.",
             )

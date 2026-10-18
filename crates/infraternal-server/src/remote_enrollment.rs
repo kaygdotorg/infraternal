@@ -47,10 +47,34 @@ impl<S: CaKeySource + ?Sized + 'static> RemoteEnrollment<S> {
             .await
             .map_err(|_| RemoteEnrollmentError)?;
         let csr = ValidatedCsr::parse(csr_der).map_err(|_| RemoteEnrollmentError)?;
+        #[cfg(test)]
+        let certificate_started = std::time::Instant::now();
+        #[cfg(test)]
+        let certificate_started_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
         let certificate = self
             .signer()?
             .sign_host(host, &csr, now)
             .map_err(|_| RemoteEnrollmentError)?;
+        #[cfg(test)]
+        if std::env::var_os("ADDHOST_RETRY_PHASE_TIMING").is_some() {
+            let epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            println!(
+                "TIMELINE source=server step=certificate_sign state=start epoch_ms={:.3}",
+                certificate_started_epoch.as_secs_f64() * 1000.0
+            );
+            println!(
+                "TIMELINE source=server step=certificate_sign state=end epoch_ms={:.3}",
+                epoch.as_secs_f64() * 1000.0
+            );
+            println!(
+                "METRIC breakit2 step=certificate_sign elapsed_ms={:.3} ok=true",
+                certificate_started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         self.store
             .redeem(token, host, mode, now, &certificate.record)
             .await
