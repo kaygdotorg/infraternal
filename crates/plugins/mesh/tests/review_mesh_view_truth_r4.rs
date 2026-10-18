@@ -240,9 +240,10 @@ async fn evidence_server_hostname_moves_only_with_server_rename_authority() {
 }
 
 /// Execute the documented SQL against `SQLx`'s actual schema, with both migrators, rather than checking only
-/// SQLite syntax. Preserve live rows across the rewind and restore checksums before rolling forward.
+/// SQLite syntax. The version-25 rename updates only `name` (api.rs at 895bcdd23:983), so its choice must
+/// survive rolling forward even though it cannot maintain the newer `name_source` and `name_claim` columns.
 #[tokio::test]
-async fn evidence_rewind_runbook_works_with_real_migration_bookkeeping() {
+async fn a_name_chosen_while_rewound_survives_rolling_forward_and_reattaching() {
     let pool = pool().await;
     add_host(&pool, A, "root@minipc01").await;
     let service = MeshService::new(pool.clone());
@@ -286,4 +287,14 @@ async fn evidence_rewind_runbook_works_with_real_migration_bookkeeping() {
             .await
             .unwrap();
     assert_eq!(restored, original);
+    service
+        .dataplane()
+        .attach_named(A, PublicKey([10; 32]), None, false, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        name_of(&pool, node).await,
+        "during-rewind",
+        "rolling forward and reconnecting erased the name chosen on the previous release"
+    );
 }
