@@ -294,14 +294,13 @@ fn usage_error(registry: &ActionRegistry, error: &clap::Error) -> ExitCode {
 fn run_key_memory_check(json_output: bool) -> ExitCode {
     // D244 requires fully protected pages even for a non-root gate runner.
     if infraternal_shim::openssl_secure::initialize() == 1 {
-        output::report(
+        output::done(
             json_output,
             "internal.key-memory-check",
             "ready",
             "Key memory initialization=1; locked pages and dump exclusion enabled",
             "",
-        );
-        ExitCode::SUCCESS
+        )
     } else {
         output::refuse(
             json_output,
@@ -1457,23 +1456,22 @@ fn run_remote_agent(
     })();
     if result.is_ok() {
         if enroll_only {
-            output::report(
+            output::done(
                 json,
                 operation,
                 "enrolled",
                 "This machine is enrolled. Its identity is saved here.",
                 "infraternal agent run",
-            );
+            )
         } else {
-            output::report(
+            output::done(
                 json,
                 operation,
                 "stopped",
                 "The infraternal agent stopped.",
                 "infraternal agent run",
-            );
+            )
         }
-        ExitCode::SUCCESS
     } else {
         output::refuse(
             json,

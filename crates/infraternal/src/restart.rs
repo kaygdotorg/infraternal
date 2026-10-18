@@ -365,7 +365,7 @@ pub(crate) fn run(
         .await
     }) {
         Ok(Ok(warm)) => {
-            super::output::report(
+            super::output::done(
                 json,
                 infraternal_plugin_remote::RESTART.id,
                 "requested",
@@ -375,8 +375,7 @@ pub(crate) fn run(
                     "Server replacement requested cold (CA locked)"
                 },
                 "infraternal status",
-            );
-            std::process::ExitCode::SUCCESS
+            )
         }
         _ => super::output::refuse(
             json,
