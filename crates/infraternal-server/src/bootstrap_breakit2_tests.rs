@@ -689,7 +689,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let mut retry_private = retry_private;
     let mut selected_attempt = 1;
     let mut published_retry = false;
-    let mut done_host = None;
+    let mut joined_host = None;
     let result = tokio::time::timeout(Duration::from_secs(220), async {
         loop {
             let events = batch.events(0).1;
@@ -730,7 +730,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                     );
                 }
                 if event.step == Step::Done {
-                    done_host = event.host_id;
+                    joined_host = event.host_id;
                 }
                 if event.step == Step::Done && std::env::var_os("ADDHOST_INSTANT").is_some() {
                     assert!(event.session_id.is_some(), "instant acceptance requires a published shim, never a legacy completion");
@@ -801,8 +801,39 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     if let Some(private) = readd_private
         && result == Step::Done
     {
-        let host = done_host.expect("a finished add names its host");
+        let host = joined_host.expect("a finished add names its host");
         already_added_opens_a_terminal(&f, &runner, &transport, private, host).await;
+    }
+    if std::env::var_os("BREAKIT2_REMOVE").is_some() {
+        // #235: removal asks the joined host to uninstall itself through the
+        // same server path as the canvas, then revokes it. The harness then
+        // proves on the machine that nothing is left and that it re-adds.
+        let host = joined_host.expect("removal needs a joined host");
+        // Let the harness place the kernel objects a running rootful mesh node
+        // owns before removal starts, so their removal is observed, not assumed.
+        std::fs::write(scratch.join("removal-ready"), b"").unwrap();
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while !scratch.join("removal-go").exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the harness did not release removal");
+        let (cleanup, left) =
+            crate::remote_removal::request_uninstall(&f.backend.hosts, host).await;
+        println!("REMOVAL breakit2 host_cleanup={cleanup} left={left:?}");
+        assert_eq!(cleanup, "requested", "the joined host did not accept its uninstall");
+        // The harness seeds marked mesh objects this installation never
+        // recorded on a rootful host; the host must name them as left (#235).
+        if std::env::var("BREAKIT2_MODE").as_deref() == Ok("root") {
+            assert_eq!(left, ["infraternal0", "infraternal_mesh"]);
+        }
+        f.backend
+            .issuer
+            .store()
+            .revoke("owner", host, crate::runtime::unix_seconds().unwrap())
+            .await
+            .unwrap();
     }
     let active: i64 =
         sqlx::query_scalar("SELECT count(*) FROM remote_hosts WHERE revoked_at IS NULL")
