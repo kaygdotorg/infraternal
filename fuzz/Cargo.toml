@@ -235,3 +235,10 @@ path = "fuzz_targets/runtime_diag.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "canvas_layout_json"
+path = "fuzz_targets/canvas_layout_json.rs"
+test = false
+doc = false
+bench = false
