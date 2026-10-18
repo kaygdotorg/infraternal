@@ -396,4 +396,11 @@ fn status_text_does_not_call_an_unanswered_unit_not_running() {
             .contains("not running"),
         "exit 0, yet the headline says something is not running: {envelope}"
     );
+    assert!(
+        envelope["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("unknown"),
+        "the headline does not name the unanswered status: {envelope}"
+    );
 }

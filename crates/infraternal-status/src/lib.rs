@@ -522,7 +522,11 @@ impl NodeStatus {
             );
         }
         let overall = self.overall();
-        let down = self.down();
+        let down = self.confirmed_down();
+        let has_unknown = self
+            .units
+            .iter()
+            .any(|(_, state)| *state == Activity::Unknown);
         let who = match self.role {
             Role::Server => "The server",
             Role::Host | Role::None => "The infraternal agent",
@@ -530,12 +534,18 @@ impl NodeStatus {
         };
         let plural = self.role == Role::Both;
         let message = if down.is_empty() {
-            format!(
-                "{who} {} running on this machine.",
-                if plural { "are" } else { "is" }
-            )
+            if has_unknown {
+                "The status of part of this machine's setup is unknown.".to_owned()
+            } else {
+                format!(
+                    "{who} {} running on this machine.",
+                    if plural { "are" } else { "is" }
+                )
+            }
         } else if overall == Activity::Active {
             "Part of this machine's setup is not running.".to_owned()
+        } else if has_unknown {
+            "Part of this machine's setup is not running; another status is unknown.".to_owned()
         } else {
             let state = match (overall, plural) {
                 (Activity::Failed, false) => "has failed",
