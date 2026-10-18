@@ -574,7 +574,12 @@ async fn proofs(
                 Some(reply)
             }
         };
-        let active = *activity.borrow();
+        // Probe only under an activation this loop has already applied. Another wake
+        // can win the select beside an unseen activation; that activation's reset
+        // then clears every issued probe, so a probe sent first is refused when its
+        // answer arrives and the route stays unsampled until the next startup tick.
+        // A deactivation is honoured at once, before it is consumed.
+        let active = active && *activity.borrow();
         if first.is_none() && replies.is_empty() {
             let Ok(fast) = context.fast_active() else {
                 context.retire(EndReason::ServerWriteFailed);
@@ -601,7 +606,7 @@ async fn proofs(
         if first.is_none() {
             tokio::task::yield_now().await;
         }
-        let active = *activity.borrow();
+        let active = active && *activity.borrow();
         let result = authority.run(&context.state, &context.user, &context.token, async {
             tokio::select! {
                 biased;
