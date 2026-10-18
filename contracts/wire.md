@@ -604,6 +604,10 @@ after close. Close removes every membership and permanently beats move/resize.
 INTENT is one of (optional fields may be omitted):
 
 - `{type:"view.add",view:VIEW}`: add an empty v1 view (tiled or graph).
+- `{type:"view.update",view_id,cell?:{x,y},name?}`: update only supplied view metadata.
+- `{type:"target",window_id,target:TARGET}`: change the reference in every membership;
+  newly referenced sessions must belong to the account, exactly as for open. A closed
+  window stays closed.
 - `{type:"view.remove",view_id}`: remove a view; its windows stay in other views.
 - `{type:"open",view_id,column_id,window:WINDOW,after?:WINDOW_ID}`: add a v1
   window reference; create a missing column at the end with weight 1.
@@ -626,6 +630,12 @@ INTENT is one of (optional fields may be omitted):
 - `{type:"membership.remove",view_id,window_id}`: remove only this membership.
 - `{type:"pin",view_id,node_id,position?:{x,y}}`: set a graph pin; omit position
   to unpin. Graph references reveal no host configuration.
+
+Open, move and membership.add may include `column_after: COLUMN_ID | null`.
+It affects only a missing destination column: null inserts at the beginning, a
+known ID inserts after that column, and an omitted or missing ID appends. Existing
+columns retain their position. This lets a drag create a column at either edge
+without publishing array indexes.
 
 Session targets must name a terminal session owned by this account (including
 ended sessions); references confer no host or session access. Duplicate window
