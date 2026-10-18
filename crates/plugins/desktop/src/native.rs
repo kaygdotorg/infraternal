@@ -39,7 +39,7 @@ impl Native {
         Self::spawn_mode(executable, true, false)
     }
     /// # Errors
-    /// Starts the opt-in same-process capture candidate, keeping H.264 on the public path.
+    /// Starts same-process companion capture, keeping H.264 on the public path.
     pub fn spawn_surface(executable: &Path) -> io::Result<Self> {
         Self::spawn_mode(executable, false, true)
     }

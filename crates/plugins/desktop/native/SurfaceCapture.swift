@@ -1,4 +1,4 @@
-/// Role: opt-in, same-process ScreenCaptureKit IOSurface → hardware encoder candidate; latest damage replaces queued surfaces [D204,D266].
+/// Role: same-process ScreenCaptureKit IOSurface → hardware encoder capture; latest damage replaces queued surfaces [D204,D266].
 import AppKit
 import CoreMedia
 import ScreenCaptureKit
