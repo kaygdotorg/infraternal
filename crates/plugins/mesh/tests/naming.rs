@@ -196,3 +196,48 @@ async fn the_servers_names_are_kept_for_the_server() {
     assert_eq!(rename(&service, server.0, "server").await, Ok(()));
     assert_eq!(names(&service, "owner").await, ["server", "unnamed"]);
 }
+
+/// A person outranks every automatic name: renaming a node to a name another host's record gave it moves that
+/// node aside (audited as automatic), and only another person's name refuses.
+#[tokio::test]
+async fn a_person_takes_an_automatic_name_and_the_machine_moves_aside() {
+    let pool = pool().await;
+    add_host(&pool, A, "root@minipc01").await;
+    add_host(&pool, B, "root@10.69.69.6").await;
+    let service = MeshService::new(pool.clone());
+    let store = service.dataplane();
+    store
+        .attach_named("server", PublicKey([1; 32]), None, true, Some("monitor01"))
+        .await
+        .unwrap();
+    store
+        .attach_named(A, PublicKey([10; 32]), None, false, None)
+        .await
+        .unwrap();
+    let (b, _) = store
+        .attach_named(B, PublicKey([11; 32]), None, false, None)
+        .await
+        .unwrap();
+    let before = audits_len(&pool).await;
+    assert_eq!(rename(&service, b.0, "minipc01").await, Ok(()));
+    assert_eq!(
+        names(&service, "owner").await,
+        ["monitor01", "minipc01-2", "minipc01"]
+    );
+    assert_eq!(audits_len(&pool).await, before + 1);
+    // The record's machine restarts: it keeps its suffix, and the person's name stays.
+    store
+        .attach_named(A, PublicKey([10; 32]), None, false, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        names(&service, "owner").await,
+        ["monitor01", "minipc01-2", "minipc01"]
+    );
+    // A name a person chose is final: another person cannot take it.
+    let a = store.node_for_host(A).await.unwrap();
+    assert_eq!(
+        rename(&service, a.0, "minipc01").await,
+        Err(MeshApiError::Conflict)
+    );
+}

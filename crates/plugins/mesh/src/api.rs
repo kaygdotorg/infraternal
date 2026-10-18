@@ -919,6 +919,7 @@ impl MeshService {
         }
         // Enrolment only ever adds a remote machine; the server's node comes from its own channel.
         crate::store::refuse_server_names(&mut tx, None, &request.name).await?;
+        crate::store::make_room(&mut tx, None, &request.name).await?;
         // Persist allocation history independently of live rows. Explicitly imported
         // IDs also advance allocation; exhaustion refuses before any identity is issued.
         let id: i64 = sqlx::query_scalar(
@@ -1020,6 +1021,12 @@ impl MeshService {
         let scope_requirements = require_each_scope(&scopes);
         authorize(&mut tx, actor, MANAGE_NODES, &scope_requirements).await?;
         crate::store::refuse_server_names(&mut tx, Some(id), &request.name).await?;
+        let mut scopes = scopes;
+        for moved in crate::store::make_room(&mut tx, Some(id), &request.name).await? {
+            let moved =
+                u64::try_from(moved).map_err(|_| storage_error("stored node id invalid"))?;
+            scopes.extend(endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(moved))).await?);
+        }
         // A person's name is final: automatic naming never touches it again (store.rs `attach_named`, #236).
         let changed = sqlx::query("UPDATE mesh_nodes SET name=?,name_source='hand' WHERE id=?")
             .bind(&request.name)

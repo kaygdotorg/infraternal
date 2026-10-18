@@ -290,6 +290,57 @@ pub(crate) async fn refuse_server_names(
     }
     Ok(())
 }
+/// Frees `name` for a person's choice on node `id` (`None` while enrolling a new one). A person outranks every
+/// automatic name (migration 0026), so a node holding `name` by record, report or placeholder moves aside to a
+/// suffix of its own claim, audited as an automatic rename with the change's revision. Returns the nodes moved.
+///
+/// Only another person's name refuses, as a bare conflict. That is no oracle: the refusal says only that the
+/// name is in use, which every Mesh member can learn from the name's DNS record, while a name a machine
+/// reported (a host fact, hidden from viewers who are not the owner) never refuses anything. The server's names
+/// are refused before this, by [`refuse_server_names`].
+pub(crate) async fn make_room(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: Option<i64>,
+    name: &str,
+) -> Result<Vec<i64>, crate::api::MeshApiError> {
+    let unavailable = |_| storage_error("Mesh storage unavailable.");
+    let nodes: Vec<Named> =
+        sqlx::query("SELECT id,name,name_source,dataplane_host,name_claim FROM mesh_nodes")
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(unavailable)?
+            .iter()
+            .map(|row| Named {
+                id: row.get("id"),
+                name: row.get("name"),
+                source: row.get("name_source"),
+                host: row.get("dataplane_host"),
+                claim: row.get("name_claim"),
+            })
+            .collect();
+    let Some(holder) = nodes
+        .iter()
+        .find(|node| Some(node.id) != id && node.name == name)
+    else {
+        return Ok(Vec::new());
+    };
+    if rank(&holder.source) >= rank("hand") {
+        return Err(crate::api::MeshApiError::Conflict);
+    }
+    let moved = [move_aside(&nodes, holder, name)];
+    rename(tx, &moved)
+        .await
+        .map_err(|_| crate::api::MeshApiError::Conflict)?;
+    // The person's change takes the next revision (`finish_change`); its audit row and this one share it.
+    let revision: i64 = sqlx::query_scalar("SELECT revision+1 FROM mesh_state WHERE singleton=1")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(unavailable)?;
+    audit_renames(tx, &moved, revision)
+        .await
+        .map_err(|_| storage_error("Mesh storage unavailable."))?;
+    Ok(vec![holder.id])
+}
 /// Applies automatic renames in order: a node moved aside first frees the name the next one takes.
 async fn rename(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
