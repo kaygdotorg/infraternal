@@ -135,6 +135,15 @@ pub(crate) const SERVER_WRITE_FAILED: CloseReason = CloseReason::new(
     "websocket_write_failed",
     "the server could not write to the connection",
 );
+/// The session read that authorizes a frame missed its time bound, typically under
+/// database load. The session itself was not refused: the browser reconnects and
+/// the next read decides. Kept apart from `PROTOCOL_ERROR` so a busy server never
+/// reads as a misbehaving browser in the log or on the page.
+pub(crate) const AUTHORITY_UNAVAILABLE: CloseReason = CloseReason::new(
+    "server_busy",
+    "authority_unavailable",
+    "the server was too busy to confirm the session",
+);
 pub(crate) const SERVER_PROCESSING_FAILED: CloseReason = CloseReason::new(
     "server_processing_error",
     "terminal_stream_processing_failed",

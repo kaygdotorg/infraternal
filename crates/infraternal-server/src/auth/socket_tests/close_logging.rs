@@ -578,3 +578,145 @@ async fn failed_client_resume_attempt_logs_each_retained_session() {
     assert_eq!(resumed["fields"]["browser_stream_id"], 1);
     resumed_server.abort();
 }
+
+/// A frame whose authority read misses its bound is a busy server, not a bad frame.
+/// Holding the test pool's one connection stalls every read; the socket must log the
+/// stall as `authority_unavailable` and never as an invalid protocol frame.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep the real agent socket exchange and structured assertions together.
+async fn authority_read_timeout_during_a_frame_logs_authority_unavailable() {
+    let _serial = SERIAL.lock().await;
+    let (capture, _subscriber) = Capture::start();
+    let f = fixture().await;
+    let session_id = [0x75; 16];
+    sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen) VALUES(?,?,1,1)")
+        .bind(session_id.as_slice())
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let (socket, mut host) = UnixStream::pair().unwrap();
+    let state = crate::websocket::WebSocketState::new(
+        f.auth.clone(),
+        f.auth.pool.clone(),
+        EmbeddedAgent::from_test_socket(socket),
+    )
+    .await
+    .unwrap()
+    .with_authority_read_timeout(Duration::from_millis(100));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = crate::websocket::router(state);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    // The host accepts the attach and answers link probes; it never closes the stream.
+    let agent = tokio::spawn(async move {
+        let mut encoded = Vec::new();
+        encode_muxed_frame_into(
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                client_info: "authority-busy-fixture",
+            },
+            &mut encoded,
+        )
+        .unwrap();
+        host.write_all(&encoded).await.unwrap();
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let read = host.read(&mut chunk).await.unwrap();
+            if read == 0 {
+                return;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            while let Ok(decoded) = decode_muxed_frame(&buffer) {
+                let (stream, wire_len) = (decoded.stream_id, decoded.wire_len);
+                let reply = match decoded.frame {
+                    Frame::AttachTerm { .. } => Some(Frame::Ack { in_seq_acked: 0 }),
+                    Frame::Ping { nonce, sent_us } => Some(Frame::Pong { nonce, sent_us }),
+                    _ => None,
+                };
+                if let Some(reply) = reply {
+                    encode_muxed_frame_into(stream, &reply, &mut encoded).unwrap();
+                    host.write_all(&encoded).await.unwrap();
+                }
+                buffer.drain(..wire_len);
+            }
+        }
+    });
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut browser, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .unwrap();
+    assert_server_hello(&mut browser).await;
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "authority-busy",
+        },
+    )
+    .await;
+    read_welcome(&mut browser).await;
+    client_ws_send(
+        &mut browser,
+        1,
+        &Frame::AttachTerm {
+            session_id: &session_id,
+            last_out_seq: 0,
+            last_in_seq: 0,
+        },
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let wire = read_client_frame(&mut browser).await;
+            let decoded = decode_muxed_frame(&wire).unwrap();
+            if decoded.stream_id == 1 {
+                assert!(matches!(decoded.frame, Frame::Ack { .. }));
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    // The pool has one connection: holding it makes every authority read wait out its bound.
+    let held = f.auth.pool.acquire().await.unwrap();
+    client_ws_send(
+        &mut browser,
+        1,
+        &Frame::Resize {
+            cols: 100,
+            rows: 30,
+            px_w: 0,
+            px_h: 0,
+        },
+    )
+    .await;
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let events = capture.events("terminal_stream_closed");
+            if !events.is_empty() {
+                break events;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the stalled socket must log its close");
+    drop(held);
+    assert_eq!(events.len(), 1);
+    let fields = &events[0]["fields"];
+    assert_eq!(fields["who"], "server");
+    assert_eq!(fields["reason_category"], "server_busy", "{fields}");
+    assert_eq!(fields["reason"], "authority_unavailable", "{fields}");
+    assert_eq!(
+        fields["session_id"],
+        Uuid::from_bytes(session_id).to_string()
+    );
+    agent.abort();
+    server.abort();
+}

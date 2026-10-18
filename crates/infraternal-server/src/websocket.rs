@@ -9,10 +9,10 @@ use crate::{
     plugins::{Dispatch, PluginRuntime, SocketPlugins},
     stream_close::{
         AGENT_CONNECTION_DROPPED, AGENT_CONNECTION_REFUSED, AGENT_STREAM_ENDED, ATTACH_REFUSED,
-        ATTACH_UNOWNED, CLIENT_WENT_AWAY, CREDIT_REFUSED, CloseOwner, CloseReason, CloseRecord,
-        CloseWho, INPUT_QUEUE_FULL, NO_SESSION, PROTOCOL_ERROR, RESUME_REFUSED, StreamCloseLog,
-        TERMINAL_ROUTE_IDLE, classify_terminal_close, safe_agent_close_reason,
-        safe_websocket_reason,
+        ATTACH_UNOWNED, AUTHORITY_UNAVAILABLE, CLIENT_WENT_AWAY, CREDIT_REFUSED, CloseOwner,
+        CloseReason, CloseRecord, CloseWho, INPUT_QUEUE_FULL, NO_SESSION, PROTOCOL_ERROR,
+        RESUME_REFUSED, StreamCloseLog, TERMINAL_ROUTE_IDLE, classify_terminal_close,
+        safe_agent_close_reason, safe_websocket_reason,
     },
 };
 use axum::{
@@ -669,8 +669,11 @@ async fn run_socket(
                         }
                         Dispatch::Unhandled => {}
                     }
+                    // Set only when the frame handler itself fails, so a failure of the
+                    // wrapper's own authority reads is never blamed on the frame.
+                    let mut frame_failed = false;
                     let handled = while_authorized(&state, &user_id, &session_token, true, async {
-                        handle_client_frame(
+                        let handled = handle_client_frame(
                             wire,
                             &state,
                             &user_id,
@@ -683,14 +686,15 @@ async fn run_socket(
                             &output_tx,
                             &mut sink,
                             &mut encode,
-                        ).await
+                        ).await;
+                        frame_failed = handled.is_err();
+                        handled
                     }).await;
                     if handled.is_err() {
-                        teardown_reason = if session_is_live(&state, &user_id, &session_token).await {
-                            PROTOCOL_ERROR
-                        } else {
-                            RESUME_REFUSED
-                        };
+                        // Provisional: a failed frame or a missed wrapper read. Teardown
+                        // confirms it with one read, so a refusal or a busy store is
+                        // never logged as a bad frame.
+                        teardown_reason = if frame_failed { PROTOCOL_ERROR } else { AUTHORITY_UNAVAILABLE };
                             loop_result = Err(());
                             break;
                         }
@@ -736,11 +740,20 @@ async fn run_socket(
     drop(plugins);
     if !close_already_logged && !attachments.is_empty() {
         let end = transport.end_reason();
-        let reason = if end == crate::websocket_transport::EndReason::Open {
-            teardown_reason
-        } else {
+        let reason = if end != crate::websocket_transport::EndReason::Open {
             end.close_reason()
+        } else if teardown_reason == PROTOCOL_ERROR
+            || teardown_reason == AUTHORITY_UNAVAILABLE
+            || teardown_reason == crate::stream_close::SERVER_PROCESSING_FAILED
+        {
+            // These exits are guarded work that failed with the transport still
+            // open: its authority read, or the work itself. One bounded read tells
+            // a refusal and a busy server from a real failure.
+            failure_reason(&state, &user_id, &session_token, teardown_reason).await
+        } else {
+            teardown_reason
         };
+        teardown_reason = reason;
         record_socket_close(&state, &attachments, CloseWho::Server, reason, None, None);
     }
     drop(attachments);
@@ -2105,6 +2118,30 @@ fn record_control_close(
         record.browser_stream_close_code = Some(code);
         record.browser_stream_close_reason = Some(close_reason);
         state.close_logs.record(&record);
+    }
+}
+
+/// Why a socket ends after guarded work failed with the transport open. One
+/// non-renewing read decides: a refused session is a refusal; a read that misses its
+/// bound or cannot reach storage means the server was busy, never that the browser
+/// misbehaved; only while the session reads live is the caller's `live` reason true (#227).
+async fn failure_reason(
+    state: &WebSocketState,
+    user_id: &str,
+    token: &str,
+    live: CloseReason,
+) -> CloseReason {
+    let Ok(now) = unix_seconds() else {
+        return AUTHORITY_UNAVAILABLE;
+    };
+    #[cfg(test)]
+    let read_timeout = state.authority_read_timeout;
+    #[cfg(not(test))]
+    let read_timeout = AUTHORITY_READ_TIMEOUT;
+    match tokio::time::timeout(read_timeout, state.auth.live_expiry(token, user_id, now)).await {
+        Ok(Ok(_)) => live,
+        Ok(Err(crate::auth::Error::Denied)) => RESUME_REFUSED,
+        Ok(Err(_)) | Err(_) => AUTHORITY_UNAVAILABLE,
     }
 }
 
