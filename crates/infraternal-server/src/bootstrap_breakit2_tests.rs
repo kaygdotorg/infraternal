@@ -692,6 +692,20 @@ printf 'DIAG_START unit_file=%s state=%s\n' "$unit_state" "$state"
             result
         })
     }
+
+    fn run_with_timeout<'a>(
+        &'a self,
+        script: &'a str,
+        input: Input<'a>,
+        timeout: Duration,
+    ) -> Operation<'a, CommandOutput> {
+        // Keep the live timing adapter transparent to the commit's bounded
+        // deadline while preserving the same commit receipt as ordinary runs.
+        Box::pin(measured(
+            "commit",
+            self.inner.run_with_timeout(script, input, timeout),
+        ))
+    }
 }
 pub(super) struct TimedTransport {
     pub(super) adapter: OpenSsh,
