@@ -1,5 +1,5 @@
-/// <reference lib="webworker" />
 /** Keeps only public app-shell assets that a signed-in page has already used, for offline layout drawing (D245). */
+/// <reference lib="webworker" />
 const worker = globalThis as unknown as ServiceWorkerGlobalScope;
 const cacheName = "infraternal-drawing-v1";
 function staticUrl(input: string): URL | undefined {

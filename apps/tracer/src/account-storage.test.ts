@@ -1,5 +1,6 @@
+/** Account cache isolation and sign-out cleanup, including offline drawing labels (D245). */
 import { beforeEach, expect, test } from "bun:test";
-import { canvasKey, clearAccountStorage, inventoryKey, lastAccountKey, tabSessionKey } from "./account-storage";
+import { canvasKey, clearAccountStorage, drawingIdentityKey, inventoryKey, lastAccountKey, tabSessionKey } from "./account-storage";
 
 class FakeStorage {
   private map = new Map<string, string>();
@@ -16,6 +17,7 @@ beforeEach(() => { g.localStorage = new FakeStorage(); g.sessionStorage = new Fa
 
 function fill(account: string): void {
   g.localStorage.setItem(canvasKey(account), "{}");
+  g.localStorage.setItem(drawingIdentityKey(account), "{}");
   g.localStorage.setItem(inventoryKey(account), "[]");
   g.sessionStorage.setItem(tabSessionKey(account), "s1");
 }
@@ -25,7 +27,7 @@ test("clearing one account leaves a second account and device preferences alone"
   g.localStorage.setItem("tracer.theme", "mocha");
   g.localStorage.setItem(lastAccountKey, "a");
   clearAccountStorage("a");
-  expect(g.localStorage.keys()).toEqual([canvasKey("b"), inventoryKey("b"), "tracer.theme"].sort());
+  expect(g.localStorage.keys()).toEqual([canvasKey("b"), drawingIdentityKey("b"), inventoryKey("b"), "tracer.theme"].sort());
   expect(g.sessionStorage.keys()).toEqual([tabSessionKey("b")]);
 });
 

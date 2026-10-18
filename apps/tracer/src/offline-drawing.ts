@@ -4,10 +4,14 @@ import { isCanonicalUuid } from "./identifiers";
 import { whenIdle } from "./on-demand";
 export interface DrawingIdentity { user_id: string; username?: string; display_name?: string; hostname?: unknown; recovery_pending?: { ready_at: number } | null }
 
-export function cachedDrawingIdentity(): DrawingIdentity | undefined {
+export async function cachedDrawingIdentity(): Promise<DrawingIdentity | undefined> {
   try {
     const account = localStorage.getItem(lastAccountKey);
-    if (!isCanonicalUuid(account) || !localStorage.getItem(canvasKey(account))) return undefined;
+    if (!isCanonicalUuid(account)) return undefined;
+    const canvas = readStoredJson(canvasKey(account));
+    const { parseDocument } = await import("./canvas/model/document");
+    const cache = canvas && typeof canvas === "object" ? canvas as Record<string, unknown> : undefined;
+    if (!parseDocument(canvas) && !parseDocument(cache?.document) && !parseDocument(cache?.canonical)) return undefined;
     const value = readStoredJson(drawingIdentityKey(account));
     if (!value || typeof value !== "object") return undefined;
     const row = value as Record<string, unknown>;
