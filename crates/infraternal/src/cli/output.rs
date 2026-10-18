@@ -606,6 +606,7 @@ pub fn write_output(output: Result<String, serde_json::Error>, to_stderr: bool) 
             return;
         }
     };
+    infraternal_shim::begin_final_output();
     let write_result = if to_stderr {
         io::stderr().write_all(rendered.as_bytes())
     } else {
@@ -617,6 +618,7 @@ pub fn write_output(output: Result<String, serde_json::Error>, to_stderr: bool) 
     {
         eprintln!("The result could not be written.\nWhy  {error}");
     }
+    infraternal_shim::finish_final_output();
 }
 
 #[cfg(test)]

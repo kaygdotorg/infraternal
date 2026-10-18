@@ -63,6 +63,16 @@ pub fn stdout_columns() -> Option<u16> {
 pub fn exit_on_interrupt(notice: Vec<u8>) {
     pty::exit_on_interrupt(notice);
 }
+
+/// Tell the SIGINT handler that the final JSON result is about to be written.
+pub fn begin_final_output() {
+    pty::begin_final_output();
+}
+
+/// Tell the SIGINT handler that the final JSON result has finished writing.
+pub fn finish_final_output() {
+    pty::finish_final_output();
+}
 mod session;
 mod terminal;
 mod terminal_native;

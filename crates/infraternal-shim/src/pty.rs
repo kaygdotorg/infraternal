@@ -11,11 +11,13 @@ use std::{
     ffi::CString,
     fs::File,
     io,
+    mem::MaybeUninit,
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::process::CommandExt,
     },
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicU8, Ordering},
 };
 
 pub struct Pty {
@@ -218,20 +220,111 @@ pub fn stdout_columns() -> Option<u16> {
 }
 /// What the interrupt handler writes to standard output before it exits; set once, read in the handler.
 static INTERRUPT_NOTICE: std::sync::OnceLock<Box<[u8]>> = std::sync::OnceLock::new();
+const OUTPUT_NOT_STARTED: u8 = 0;
+const OUTPUT_WRITING: u8 = 1;
+const INTERRUPT_DURING_OUTPUT: u8 = 2;
+const OUTPUT_FINISHED: u8 = 3;
+const INTERRUPTED_BEFORE_OUTPUT: u8 = 4;
+/// A signal during the final write is deferred until that complete line has been written.
+static FINAL_OUTPUT: AtomicU8 = AtomicU8::new(OUTPUT_NOT_STARTED);
 
-/// Only async-signal-safe calls: an atomic read of the notice, `write(2)` and `_exit(2)`.
-extern "C" fn on_interrupt(_signal: nix::libc::c_int) {
-    if let Some(notice) = INTERRUPT_NOTICE.get() {
-        // SAFETY: the pointer and length come from a live boxed slice that is never freed;
-        // a short or failed write is acceptable because the process exits next.
-        unsafe { nix::libc::write(1, notice.as_ptr().cast(), notice.len()) };
+/// Whether a runtime has installed a chaining handler above this one.
+fn handler_is_current() -> bool {
+    let mut current = MaybeUninit::<nix::libc::sigaction>::uninit();
+    // SAFETY: `sigaction` reads the current action into this stack slot and is async-signal-safe.
+    if unsafe { nix::libc::sigaction(nix::libc::SIGINT, std::ptr::null(), current.as_mut_ptr()) }
+        != 0
+    {
+        return false;
     }
-    // SAFETY: `_exit` is async-signal-safe and never returns.
-    unsafe { nix::libc::_exit(130) }
+    // SAFETY: a successful `sigaction` query initialized the action.
+    unsafe { current.assume_init().sa_sigaction == on_interrupt as *const () as usize }
 }
 
-/// On SIGINT, write `notice` to standard output and exit 130, without running any other code.
-/// Only the first call has an effect. A later handler installed by a runtime replaces this one.
+/// Only lock-free atomics, an async-signal-safe `sigaction` query, `write(2)` and `_exit(2)`.
+extern "C" fn on_interrupt(_signal: nix::libc::c_int) {
+    if !handler_is_current() {
+        // A later runtime handler chains this handler before dispatching its own notification.
+        return;
+    }
+    loop {
+        let phase = FINAL_OUTPUT.load(Ordering::Relaxed);
+        let next = match phase {
+            OUTPUT_NOT_STARTED => INTERRUPTED_BEFORE_OUTPUT,
+            OUTPUT_WRITING => INTERRUPT_DURING_OUTPUT,
+            INTERRUPT_DURING_OUTPUT => return,
+            OUTPUT_FINISHED | INTERRUPTED_BEFORE_OUTPUT => {
+                // SAFETY: `_exit` is async-signal-safe and never returns.
+                unsafe { nix::libc::_exit(130) }
+            }
+            _ => {
+                // SAFETY: unknown state cannot be allowed to write beside a result.
+                unsafe { nix::libc::_exit(130) }
+            }
+        };
+        if FINAL_OUTPUT
+            .compare_exchange(phase, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            if phase == OUTPUT_NOT_STARTED {
+                if let Some(notice) = INTERRUPT_NOTICE.get() {
+                    // SAFETY: the boxed slice is live and never freed; the process exits next.
+                    unsafe { nix::libc::write(1, notice.as_ptr().cast(), notice.len()) };
+                }
+                // SAFETY: `_exit` is async-signal-safe and never returns.
+                unsafe { nix::libc::_exit(130) }
+            }
+            return;
+        }
+    }
+}
+
+/// Enter the final output write, preventing a second line from entering it.
+pub fn begin_final_output() {
+    if INTERRUPT_NOTICE.get().is_none() {
+        return;
+    }
+    if FINAL_OUTPUT
+        .compare_exchange(
+            OUTPUT_NOT_STARTED,
+            OUTPUT_WRITING,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        // SAFETY: an earlier interrupt already owns the final result.
+        unsafe { nix::libc::_exit(130) }
+    }
+}
+
+/// Finish the final write and honor any interrupt deferred while the line was in progress.
+pub fn finish_final_output() {
+    if INTERRUPT_NOTICE.get().is_none() {
+        return;
+    }
+    match FINAL_OUTPUT.compare_exchange(
+        OUTPUT_WRITING,
+        OUTPUT_FINISHED,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    ) {
+        Ok(_) => {}
+        Err(INTERRUPT_DURING_OUTPUT) => {
+            // SAFETY: the complete result has been written; exit without appending a line.
+            unsafe { nix::libc::_exit(130) }
+        }
+        Err(_) => {
+            // SAFETY: an impossible phase cannot be allowed to emit another result.
+            unsafe { nix::libc::_exit(130) }
+        }
+    }
+}
+
+/// On SIGINT before final output starts, write the notice and exit 130. During the final write,
+/// let that complete line finish and then exit without appending another one. A later runtime
+/// handler may chain this handler first; in that case it returns to the runtime's handler.
+/// Only the first call has an effect.
 pub fn exit_on_interrupt(notice: Vec<u8>) {
     use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, sigaction};
     if INTERRUPT_NOTICE.set(notice.into_boxed_slice()).is_err() {
@@ -242,7 +335,7 @@ pub fn exit_on_interrupt(notice: Vec<u8>) {
         SaFlags::empty(),
         SigSet::empty(),
     );
-    // SAFETY: the handler above uses only async-signal-safe calls and no locks.
+    // SAFETY: the handler uses lock-free atomics and async-signal-safe syscalls, without locks.
     let _ = unsafe { sigaction(Signal::SIGINT, &action) };
 }
 /// Detach only before threads or PTYs exist. The original process returns;
