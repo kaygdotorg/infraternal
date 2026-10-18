@@ -1,7 +1,7 @@
 /** Subscription, migration and durable retry ordering regressions for the product canvas (#243). */
 import { beforeEach, expect, test } from "bun:test";
 import { ServerCanvasStore, type LayoutTransport } from "./server-store";
-import { reduce, type Intent } from "./operations";
+import { reduce, type Intent } from "./operations.on-demand";
 import type { CanvasDocument } from "./document";
 import { canvasKey, clearAccountStorage } from "../../account-storage";
 const document = (): CanvasDocument => ({ format: "infraternal.canvas", version: 1, revision: 0, views: [{ id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [] } }] });
@@ -13,7 +13,7 @@ class Transport implements LayoutTransport {
   subscribe(_filter: { topic: string }, event: (e: Record<string, unknown>) => void, open?: () => void): () => void { this.event = event; this.open = open ?? (() => {}); this.open(); return () => { this.event = () => {}; }; }
   snapshot(doc = document(), initialized = true): void { this.event({ type: "canvas.layout.snapshot", document: doc, revision: doc.revision, initialized }); }
 }
-const tick = async (): Promise<void> => { await Promise.resolve(); await Promise.resolve(); };
+const tick = async (): Promise<void> => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
 beforeEach(() => {
   const values = new Map<string, string>();
   const area = { getItem: (k: string) => values.get(k) ?? null, setItem: (k: string, v: string) => values.set(k, v), removeItem: (k: string) => values.delete(k), key: (i: number) => [...values.keys()][i] ?? null, get length() { return values.size; } };
@@ -34,7 +34,7 @@ test("reconnect retries the exact request and an old receipt removes its optimis
   const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
   const next = document(); reduce(next, opened); await store.save(next); const first = transport.calls[0]!;
   first.reject(); await tick(); transport.open();
-  const head = document(); reduce(head, opened); head.revision = 2; transport.snapshot(head);
+  const head = document(); reduce(head, opened); head.revision = 2; transport.snapshot(head); await tick();
   const retry = transport.calls[1]!; expect(retry.input).toEqual(first.input);
   retry.resolve({ revision: 1 }); await tick(); store.flush();
   expect(JSON.parse(localStorage.getItem(canvasKey("a"))!).pending).toHaveLength(0); store.dispose();
@@ -42,7 +42,7 @@ test("reconnect retries the exact request and an old receipt removes its optimis
 test("legacy import remains intact until acknowledged even if another device initialized", async () => {
   const legacy = document(); reduce(legacy, opened); localStorage.setItem(canvasKey("a"), JSON.stringify(legacy));
   const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); expect(await store.load()).toEqual(legacy);
-  transport.snapshot(); store.flush();
+  transport.snapshot(); await tick(); store.flush();
   expect(transport.calls[0]!.action).toBe("canvas.layout.initialize");
   expect(JSON.parse(localStorage.getItem(canvasKey("a"))!).migration.document).toEqual(legacy);
   transport.calls[0]!.resolve({ revision: 1 }); await tick(); store.flush();
