@@ -914,3 +914,7 @@ mod close_logging;
 #[cfg(feature = "remote")]
 #[path = "socket_tests/review_close_log.rs"]
 mod review_close_log;
+
+#[cfg(all(feature = "canvas", feature = "mesh"))]
+#[path = "socket_tests/canvas.rs"]
+mod canvas;
