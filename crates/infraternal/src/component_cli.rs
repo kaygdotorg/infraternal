@@ -17,6 +17,27 @@ use std::{
 
 use crate::cli::output::{CommandResult, CommandState, Exit, RenderOptions, emit, print};
 
+/// Causes that happen before any call to the infraternal agent, tagged inside the `io::Error` so
+/// [`refuse`] can say what really went wrong instead of blaming a reply that never came.
+#[derive(Debug)]
+enum Cause {
+    /// No usable runtime directory: `XDG_RUNTIME_DIR` is unset or not private to this account.
+    NoRuntimeDirectory,
+    /// The input given on standard input is not accepted.
+    BadInput,
+}
+
+impl std::fmt::Display for Cause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NoRuntimeDirectory => "no usable runtime directory",
+            Self::BadInput => "input not accepted",
+        })
+    }
+}
+
+impl std::error::Error for Cause {}
+
 pub(crate) fn run_action(
     action: &infraternal_plugin_api::ActionDefinition,
     arguments: &ArgMatches,
@@ -39,9 +60,10 @@ pub(crate) fn run_action(
                 .take((infraternal_plugin_api::MAX_ACTION_BYTES + 1) as u64)
                 .read_to_end(&mut bytes)?;
             if bytes.len() > infraternal_plugin_api::MAX_ACTION_BYTES {
-                return Err(io::ErrorKind::InvalidInput.into());
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, Cause::BadInput));
             }
-            serde_json::from_slice(&bytes).map_err(io::Error::other)?
+            serde_json::from_slice(&bytes)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, Cause::BadInput))?
         } else {
             json!({})
         };
@@ -58,7 +80,8 @@ pub(crate) fn run_action(
         }
         let state = infraternal_agent::sessions::state_path(
             arguments.get_one::<String>("state").map(PathBuf::from),
-        )?;
+        )
+        .map_err(|_| io::Error::new(io::ErrorKind::NotFound, Cause::NoRuntimeDirectory))?;
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?
@@ -79,32 +102,45 @@ pub(crate) fn run_action(
 
 /// Say which of the possible causes it was, and the one thing to do about it.
 fn refuse(json_output: bool, command: &str, error: &io::Error) -> ExitCode {
-    let (message, why, next, exit) = match error.kind() {
-        io::ErrorKind::NotFound => (
+    let cause = error.get_ref().and_then(|inner| inner.downcast_ref::<Cause>());
+    let (message, why, next, exit) = match (cause, error.kind()) {
+        (Some(Cause::NoRuntimeDirectory), _) => (
+            "The infraternal agent's runtime directory could not be found.",
+            "XDG_RUNTIME_DIR is not set, or it is not a private directory of this account.",
+            "Run this command in a login session of the account that runs the infraternal agent, or pass --state.",
+            Exit::Unreachable,
+        ),
+        (Some(Cause::BadInput), _) => (
+            "The input given on standard input was not accepted.",
+            "It is too large or is not the JSON this command reads.",
+            "infraternal skill",
+            Exit::Usage,
+        ),
+        (None, io::ErrorKind::NotFound) => (
             "The infraternal agent on this machine is not running.",
-            "No agent socket was found in its runtime directory.",
+            "No socket was found in the infraternal agent's runtime directory.",
             "infraternal status",
             Exit::Unreachable,
         ),
-        io::ErrorKind::ConnectionRefused => (
+        (None, io::ErrorKind::ConnectionRefused) => (
             "The infraternal agent on this machine is not running.",
             "Its socket is there, but nothing answers on it.",
             "infraternal status",
             Exit::Unreachable,
         ),
-        io::ErrorKind::PermissionDenied => (
+        (None, io::ErrorKind::PermissionDenied) => (
             "This account is not allowed to use the infraternal agent here.",
-            "The agent answers only the account that runs it.",
+            "The infraternal agent answers only the account that runs it.",
             "Run this command as the account that runs the infraternal agent.",
             Exit::NotAllowed,
         ),
-        io::ErrorKind::TimedOut => (
+        (None, io::ErrorKind::TimedOut) => (
             "The infraternal agent did not answer in time.",
             "There was no reply within 5 seconds.",
             "infraternal status",
             Exit::Unreachable,
         ),
-        _ => (
+        (None, _) => (
             "The infraternal agent could not complete this request.",
             "It sent a reply this command does not understand.",
             "infraternal status",
