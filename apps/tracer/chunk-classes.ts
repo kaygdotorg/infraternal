@@ -22,7 +22,7 @@ export interface MetaOutput {
 }
 
 /** Canvas and account-data entry points loaded after terminal readiness; their exclusive imports are deferred. */
-export const DEFERRED_ROOTS = ["src/canvas/product.ts", "src/canvas/mock/index.ts", "src/canvas/sessions/hosts.ts"];
+export const DEFERRED_ROOTS = ["src/canvas/product.ts", "src/canvas/mock/index.ts", "src/canvas/sessions/hosts.ts", "src/canvas/model/reconcile.ts"];
 /** Modules the person's action loads: named `*.on-demand.ts`. */
 export const ON_DEMAND_PATTERN = /\.on-demand\.ts$/;
 
