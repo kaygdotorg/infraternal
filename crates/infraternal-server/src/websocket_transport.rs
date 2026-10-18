@@ -579,7 +579,7 @@ async fn proofs(
         // then clears every issued probe, so a probe sent first is refused when its
         // answer arrives and the route stays unsampled until the next startup tick.
         // A deactivation is honoured at once, before it is consumed.
-        let active = active && *activity.borrow();
+        let active = activation_applied(active, &activity);
         if first.is_none() && replies.is_empty() {
             let Ok(fast) = context.fast_active() else {
                 context.retire(EndReason::ServerWriteFailed);
@@ -606,7 +606,7 @@ async fn proofs(
         if first.is_none() {
             tokio::task::yield_now().await;
         }
-        let active = active && *activity.borrow();
+        let active = activation_applied(active, &activity);
         let result = authority.run(&context.state, &context.user, &context.token, async {
             tokio::select! {
                 biased;
@@ -626,6 +626,15 @@ async fn proofs(
     }
 }
 
+/// Whether this loop may probe: it is active, and no later activity change is waiting unseen. Reading
+/// the shared value alone is not enough: active, idle and active again between two turns leaves it
+/// true while the reset for the first activation is still owed, and a probe sent before that reset is
+/// cleared and refused when its answer arrives. An unseen change (or a closed channel) means not yet;
+/// the next turn consumes it and resets first.
+fn activation_applied(active: bool, activity: &watch::Receiver<bool>) -> bool {
+    active && !activity.has_changed().unwrap_or(true)
+}
+
 /// An absent deadline parks without creating a timer [D81].
 async fn wait_deadline(deadline: Option<tokio::time::Instant>) {
     match deadline {
@@ -638,6 +647,29 @@ async fn wait_deadline(deadline: Option<tokio::time::Instant>) {
 mod tests {
     //! End conditions stay specific through socket teardown and structured logging.
     use super::*;
+
+    #[test]
+    fn no_probe_in_an_active_idle_active_window() {
+        let (send, mut seen) = watch::channel(false);
+        send.send_replace(true);
+        assert!(
+            !activation_applied(true, &seen),
+            "an unseen change blocks the probe"
+        );
+        assert!(*seen.borrow_and_update());
+        assert!(activation_applied(true, &seen), "applied once consumed");
+        // Deactivate and reactivate before the loop looks again: the value reads true but is unseen.
+        send.send_replace(false);
+        send.send_replace(true);
+        assert!(*seen.borrow(), "the shared value alone cannot tell");
+        assert!(!activation_applied(true, &seen));
+        assert!(!activation_applied(false, &seen));
+        drop(send);
+        assert!(
+            !activation_applied(true, &seen),
+            "a closed channel never probes"
+        );
+    }
 
     #[test]
     fn each_receive_end_has_a_structured_terminal_close_reason() {
