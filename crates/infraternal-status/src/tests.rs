@@ -262,3 +262,17 @@ fn the_headline_names_what_is_down_and_how_to_look() {
     assert_eq!(next, ["systemctl status infraternal-server.service"]);
     assert_eq!(stopped.down().len(), 1);
 }
+
+#[test]
+fn a_manager_that_does_not_answer_is_unknown_not_down() {
+    let fixture = Fixture::new();
+    production_server(&fixture);
+    // Same node, but the service manager cannot be asked at all.
+    let node = probe(&fixture.roots(), &IDS.map(str::to_owned), &|_, _| {
+        Activity::Unknown
+    });
+    assert_eq!(node.overall(), Activity::Unknown);
+    assert!(node.confirmed_down().is_empty(), "unknown is not down");
+    let stopped = fixture.status(&[]);
+    assert_eq!(stopped.confirmed_down().len(), 1);
+}

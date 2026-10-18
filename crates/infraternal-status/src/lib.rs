@@ -495,6 +495,17 @@ impl NodeStatus {
             .collect()
     }
 
+    /// Units that are confirmed not running (stopped or failed). A unit whose manager gave no
+    /// answer is unknown, not down: `status` exits 5 only for what is known to be down (D303).
+    #[must_use]
+    pub fn confirmed_down(&self) -> Vec<&Unit> {
+        self.units
+            .iter()
+            .filter(|(_, state)| matches!(state, Activity::Inactive | Activity::Failed))
+            .map(|(unit, _)| unit)
+            .collect()
+    }
+
     /// Overall activity, one plain sentence, and the follow-ups that are true now.
     /// A machine with nothing installed is not joined: it reports `Inactive` with how to join.
     #[must_use]

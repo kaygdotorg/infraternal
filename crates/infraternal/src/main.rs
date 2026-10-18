@@ -312,7 +312,7 @@ fn run_key_memory_check(json_output: bool) -> ExitCode {
     }
 }
 
-/// What this machine runs, as the shared result; the second value is how many installed services are not running.
+/// What this machine runs, as the shared result; the second value is how many installed services are confirmed not running (unknown ones are not counted).
 fn status_result(
     registry: &ActionRegistry,
     command: &str,
@@ -371,7 +371,7 @@ fn status_result(
     for step in next {
         result = result.with_next_step(step);
     }
-    (result, node.down().len())
+    (result, node.confirmed_down().len())
 }
 
 fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {
