@@ -148,6 +148,14 @@ pub fn object(fields: Vec<(&str, Value)>) -> Value {
     }
     Value::Object(object)
 }
+/// Builds the shared JSON shape for a newly created tiled column.
+pub(crate) fn column(id: &str, weight: f64, windows: Vec<Value>) -> Value {
+    let mut object = serde_json::Map::new();
+    object.insert("id".into(), Value::String(id.into()));
+    object.insert("weight".into(), Value::from(weight));
+    object.insert("windows".into(), Value::Array(windows));
+    Value::Object(object)
+}
 impl Document {
     #[must_use]
     pub fn revision(&self) -> i64 {

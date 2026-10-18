@@ -142,10 +142,7 @@ pub(crate) fn split(
                 / 2.0;
             columns[col]["weight"] = json!(weight);
             new["span"] = json!(1);
-            columns.insert(
-                col + 1,
-                json!({"id":column_id,"weight":weight,"windows":[new]}),
-            );
+            columns.insert(col + 1, model::column(column_id, weight, vec![new]));
         }
     } else {
         let (from, to) = range(columns, col);

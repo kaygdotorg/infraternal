@@ -1,6 +1,6 @@
 //! Applies stable-ID semantic intents to the existing JSON representation; storage supplies permanent close IDs [183,243].
 use crate::model::{self, Document};
-use serde_json::{Value, json};
+use serde_json::Value;
 fn is_closed(closed: &[String], id: &str) -> bool {
     closed.iter().any(|seen| seen == id)
 }
@@ -175,7 +175,7 @@ fn insert(
         .iter()
         .any(|c| model::string(c, "id") == Some(column_id))
     {
-        cols.push(json!({"id":column_id,"weight":1.0,"windows":[]}));
+        cols.push(model::column(column_id, 1.0, Vec::new()));
     }
     let col = cols
         .iter_mut()
@@ -398,6 +398,7 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     fn document() -> Document {
         Document(
             json!({"format":"infraternal.canvas","version":1,"revision":0,"views":[{"id":"console","kind":"console","name":"Console","cell":{"x":0,"y":0},"layout":{"type":"tiled","columns":[]}}]}),
