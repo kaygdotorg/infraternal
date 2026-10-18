@@ -522,24 +522,15 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
         return result;
     }
     let path = command.join(" ");
-    let Some(registered) = registry.find(&command) else {
+    let Some(registered) = registry.find(&command).filter(|r| r.action.is_public()) else {
         return report_failure_as(
             "skill",
             "The requested command has no generated skill in this build.",
-            format!("No visible action is registered for {path:?}."),
+            format!("No public command is registered for {path:?}."),
             json_output,
             Exit::NotFound,
         );
     };
-    if !registered.action.is_public() {
-        return report_failure_as(
-            "skill",
-            "The requested command has no generated skill in this build.",
-            "internal and unbuilt commands are not listed as skills".to_owned(),
-            json_output,
-            Exit::NotFound,
-        );
-    }
     let markdown = match cli::skills::render_action(registered.action) {
         Ok(markdown) => markdown,
         Err(error) => {
