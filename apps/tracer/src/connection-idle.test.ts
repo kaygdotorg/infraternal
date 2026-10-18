@@ -308,3 +308,40 @@ for (const { interval, typing } of [{ interval: 75, typing: true }, { interval: 
     expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
+
+for (const gap of [75, 1000, 60_000]) test(`dead-route stall grace is bounded by two allowances and three ${gap}ms task gaps`, () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1001);
+    f.stopForwarding();
+    f.advance(30); // An issued probe is already outstanding; A = 250ms.
+    const bound = 2 * 250 + 3 * gap;
+    for (let elapsed = gap; elapsed <= bound && f.connection.isWelcomed; elapsed += gap) {
+      f.suspend(gap);
+      f.runBrowserTimer(true);
+    }
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+test("correlated queued replies replenish stall grace across successive healthy stalls", () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1001);
+    f.stopForwarding();
+    for (let cycle = 0; cycle < 10; cycle++) {
+      f.advance(30);
+      f.suspend(1000);
+      f.runBrowserTimer(true);
+      f.replyLatest();
+      expect(f.connection.isWelcomed).toBe(true);
+    }
+    f.advance(30);
+    // With replies gone, subsequent late callbacks still consume the bound.
+    for (let tick = 0; tick < 3 && f.connection.isWelcomed; tick++) {
+      f.suspend(1000);
+      f.runBrowserTimer(true);
+    }
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
