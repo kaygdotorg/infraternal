@@ -435,11 +435,10 @@ fn an_idle_healthy_peer_without_its_own_keepalive_stays_online() {
     );
 }
 
-/// The case the owner asked about, with keepalives on both ends: a host that keeps a fresh handshake but whose
-/// traffic stops reads offline 55-60 s after its last received byte, well inside its 180 s session; one lost
-/// keepalive (50 s of silence) does not flash it offline.
+/// Keep the lost-keepalive no-flapping control. R4 proved later silence indistinguishable from a healthy
+/// peer whose sends the server suppresses, so expiration follows the full session rather than 55–60 seconds.
 #[test]
-fn evidence_a_silent_peer_with_a_fresh_handshake_is_offline_within_a_minute() {
+fn evidence_a_silent_peer_expires_with_its_session_without_flapping() {
     let start = 1_800_000_000;
     let mut tracker = Tracker::default();
     // Healthy: a keepalive every 25 s, one of them lost (no movement from 25 to 75).
@@ -456,15 +455,12 @@ fn evidence_a_silent_peer_with_a_fresh_handshake_is_offline_within_a_minute() {
     }
     // Dead from 100 on: the handshake is only 100 s old, but nothing arrives.
     let mut gone = None;
-    for at in (105..=180).step_by(5) {
+    for at in (105..=185).step_by(5) {
         tracker.record(Some((true, vec![row(start, received)])), start + at);
         if gone.is_none() && !tracker.live(None, start + at).contains_key(&NodeId(3)) {
             gone = Some(at - 100);
         }
     }
     let gone = gone.expect("never went offline");
-    assert!(
-        (55..=60).contains(&gone),
-        "offline {gone} s after the last byte"
-    );
+    assert_eq!(gone, 85, "expiry after the last received byte");
 }

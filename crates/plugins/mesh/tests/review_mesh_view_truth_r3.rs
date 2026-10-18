@@ -228,13 +228,11 @@ fn row(handshake: u64, received: u64) -> PeerRow {
     }
 }
 
-/// The case round 2 recorded as the owner's question: a host with keepalives on both ends that dies with a fresh
-/// handshake. Round 2 read it offline 55–60 s after its last byte; 615ec1deb made received bytes a reason for
-/// online only, so it now stays online until the handshake leaves the 155 s rekey window: here 145 s after it
-/// died. The peer's own sending habit is observable (its bytes moved every keepalive until it died), so the quiet
-/// rule can still apply to peers that showed a keepalive of their own without flashing quiet peers offline.
+/// R4 disproved the sending-habit inference used by the original <=60-second assertion: a healthy peer can
+/// have the same silent receive history. Prefer delayed offline to false offline, and check the full session
+/// expiry both early and late in a session. The earlier no-flapping regressions remain unchanged.
 #[test]
-fn a_dead_peer_that_sent_its_own_keepalives_is_offline_within_a_minute() {
+fn a_dead_peer_expires_at_session_end_without_inferring_a_sending_promise() {
     let start = 1_800_000_000;
     let mut tracker = Tracker::default();
     // Rekey at 0, a keepalive every 25 s through 100; then the host dies.
@@ -247,28 +245,29 @@ fn a_dead_peer_that_sent_its_own_keepalives_is_offline_within_a_minute() {
         assert!(tracker.live(None, start + at).contains_key(&NodeId(3)));
     }
     let mut gone = None;
-    for at in (105..=180).step_by(5) {
+    for at in (105..=185).step_by(5) {
         tracker.record(Some((true, vec![row(start, received)])), start + at);
         if gone.is_none() && !tracker.live(None, start + at).contains_key(&NodeId(3)) {
             gone = Some(at - 100);
         }
     }
-    // Dies at 10 s into a fresh session instead: the handshake window keeps it online for ~145 s.
+    // The same history early in a session must receive the same full session window.
     let mut tracker = Tracker::default();
     tracker.record(Some((true, vec![row(start, 32)])), start);
     tracker.record(Some((true, vec![row(start, 64)])), start + 5);
     let mut fresh_gone = None;
-    for at in (10..=180).step_by(5) {
+    for at in (10..=185).step_by(5) {
         tracker.record(Some((true, vec![row(start, 64)])), start + at);
         if fresh_gone.is_none() && !tracker.live(None, start + at).contains_key(&NodeId(3)) {
             fresh_gone = Some(at - 5);
         }
     }
     let fresh_gone = fresh_gone.expect("never went offline");
-    assert!(
-        fresh_gone <= 60,
-        "offline {fresh_gone} s after its last byte (late in the session: {gone:?} s)"
+    assert_eq!(
+        fresh_gone, 180,
+        "fresh session: expiry after the last received byte"
     );
+    assert_eq!(gone, Some(85), "late session: the same handshake expiry");
 }
 
 /// The gap the module docs accept: an idle peer without its own keepalive that started the session. As responder
