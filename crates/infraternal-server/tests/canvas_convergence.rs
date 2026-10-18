@@ -256,3 +256,28 @@ async fn stale_noop_still_checks_numeric_bounds_before_committing() {
 }
 
 use infraternal_server::canvas_store::Store;
+
+#[tokio::test]
+async fn encoded_document_budget_is_enforced_by_the_host_transaction() {
+    let (store, _) = fixture().await;
+    let mut doc = document(1);
+    doc.0["views"][0]["layout"]["columns"][0]["windows"][0]["target"]["section"] =
+        json!("s".repeat(200));
+    for i in 1..256 {
+        let bytes = serde_json::to_vec(&doc).unwrap();
+        if bytes.len() > infraternal_plugin_canvas::model::MAX_DOCUMENT {
+            break;
+        }
+        doc.0["views"][0]["layout"]["columns"][0]["windows"].as_array_mut().unwrap().push(json!({"id":format!("large{i}"),"target":{"type":"settings","section":"s".repeat(200)}}));
+    }
+    assert!(
+        doc.valid(),
+        "shape remains valid; encoded bytes are a host budget"
+    );
+    let input = serde_json::to_vec(&json!({"op_id":"oversized","document":doc})).unwrap();
+    assert!(input.len() <= infraternal_plugin_canvas::model::MAX_DOCUMENT + 2048);
+    assert!(store.initialize("a", &input).await.is_err());
+    let snapshot = store.events("a", None).await.unwrap();
+    assert_eq!(snapshot[0]["revision"], 0);
+    assert_eq!(snapshot[0]["initialized"], false);
+}
