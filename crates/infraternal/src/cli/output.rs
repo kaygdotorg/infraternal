@@ -192,11 +192,11 @@ impl CommandState {
     }
 }
 
-/// How a command ended (D303). The code is what a shell sees; `error_code` is what the envelope says.
+/// How a command ended (D303). A shell reports 130 for SIGINT termination; `error_code` is what
+/// the envelope says.
 ///
 /// 0 done · 1 failed · 2 the command line is wrong · 3 not allowed · 4 not found ·
-/// 5 off or unreachable · 6 partly done · 130 interrupted. A process killed by
-/// Ctrl-C reports 130 through the shell; `Interrupted` is for commands that catch it.
+/// 5 off or unreachable · 6 partly done · 130 interrupted by Ctrl-C, terminated by SIGINT.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Exit {
     /// Done, or the state that was asked about was found.
@@ -218,7 +218,7 @@ pub enum Exit {
     #[allow(dead_code)]
     // D303 fixes the code now; the first batch command that needs it is not built yet.
     Partial,
-    /// Stopped by the person (Ctrl-C); `--json` runs print the `interrupted` envelope first.
+    /// Stopped by the person (Ctrl-C); `--json` runs print the `interrupted` envelope, then re-raise SIGINT.
     Interrupted,
 }
 

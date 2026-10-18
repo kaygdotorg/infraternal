@@ -129,7 +129,7 @@ fn run_invocation() -> ExitCode {
     let json_output = matches.get_flag("json");
     let selected = cli::command_tree::selected(&matches);
     if json_output {
-        // One envelope per command, also when the person gives up on it (D303: 130).
+        // One envelope per command, also when Ctrl-C stops it (D303/D305).
         let command = if selected.path.is_empty() {
             "infraternal".to_owned()
         } else {

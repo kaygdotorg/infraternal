@@ -46,7 +46,8 @@ to run a server). A group typed alone, such as `infraternal mesh`, lists its
 commands. `status` exits 5 when an installed service is not running.
 
 Exit codes (D303): 0 done, 1 failed, 2 wrong command line, 3 not allowed,
-4 not found, 5 off or unreachable, 6 partly done, 130 interrupted.
+4 not found, 5 off or unreachable, 6 partly done, 130 interrupted by Ctrl-C
+(terminated by SIGINT).
 
 A command that is not built yet is hidden: it is absent from `--help`, from
 `infraternal skill` and from the written skill files, and typing it is an
