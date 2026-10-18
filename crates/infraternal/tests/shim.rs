@@ -33,10 +33,16 @@ impl Session {
     ) -> Self {
         let counter = NEXT.fetch_add(1, Ordering::Relaxed);
         let id = format!("{:016x}{counter:016x}", std::process::id());
-        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/session-bounds/t{}-{counter}",
-            std::process::id()
-        ));
+        // Socket names include the full state path; keep gate fixtures under its per-job root.
+        let state = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
+            || {
+                PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+                    ".cache/codex-scratch/session-bounds/t{}-{counter}",
+                    std::process::id()
+                ))
+            },
+            |root| PathBuf::from(root).join(format!("s{counter}")),
+        );
         let mut command = if let Some((parent, scope)) = units {
             let mut command = Command::new("systemd-run");
             command.args(["--user","--quiet","--unit",parent,"--property","KillMode=control-group","--working-directory"])
