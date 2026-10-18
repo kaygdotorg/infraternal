@@ -96,7 +96,7 @@ async fn retarget_checks_account_ownership_even_after_close() {
         4
     );
     assert_eq!(
-        store.events("a", None).await.unwrap()[0]["document"]["views"][0]["layout"]["columns"][0]["windows"],
+        store.events("a", None).await.unwrap()[0]["document"]["views"][0]["layout"]["columns"],
         json!([])
     );
 }

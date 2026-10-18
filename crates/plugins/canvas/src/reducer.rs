@@ -174,6 +174,20 @@ fn remove(cols: &mut [Value], id: &str) -> Option<Value> {
     }
     None
 }
+/// Empty tracks crossed by a span remain part of the grid; other empty columns no longer consume capacity.
+#[allow(clippy::cast_precision_loss)]
+fn prune(columns: &mut Vec<Value>) {
+    // Validation bounds the difference to at most 64, exactly representable in f64.
+    for at in (0..columns.len()).rev() {
+        let covered = columns[..at].iter().enumerate().any(|(from, col)| {
+            model::windows(col)
+                .any(|w| w.get("span").and_then(Value::as_f64).unwrap_or(1.0) > (at - from) as f64)
+        });
+        if model::windows(&columns[at]).next().is_none() && !covered {
+            columns.remove(at);
+        }
+    }
+}
 /// Reduces against current state. The caller discards the working document on any error.
 /// # Errors
 /// Refuses invalid bounds, missing destinations and reuse of stable IDs.
@@ -414,6 +428,22 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
         }
         _ => return Err(()),
     }
+    if matches!(kind, "close" | "move" | "membership.remove") {
+        for view in doc
+            .0
+            .get_mut("views")
+            .and_then(Value::as_array_mut)
+            .ok_or(())?
+        {
+            if let Some(columns) = view
+                .get_mut("layout")
+                .and_then(|l| l.get_mut("columns"))
+                .and_then(Value::as_array_mut)
+            {
+                prune(columns);
+            }
+        }
+    }
     if doc.valid() { Ok(()) } else { Err(()) }
 }
 
@@ -513,6 +543,16 @@ mod tests {
         assert!(!valid_intent(
             &json!({"type":"target","window_id":"a","target":{"type":"unknown"}})
         ));
+    }
+    #[test]
+    fn repeated_open_close_does_not_exhaust_column_capacity() {
+        let mut doc = document();
+        for i in 0..70 {
+            let id = format!("window-{i}");
+            reduce(&mut doc, &open(&id), &[]).unwrap();
+            reduce(&mut doc, &json!({"type":"close","window_id":id}), &[]).unwrap();
+        }
+        assert_eq!(doc.0["views"][0]["layout"]["columns"], json!([]));
     }
     #[test]
     fn sample_corpus_preserves_strict_variant_fields_and_round_trips() {
