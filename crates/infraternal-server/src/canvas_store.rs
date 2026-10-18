@@ -64,14 +64,13 @@ impl Store {
             && after <= revision
             && i64::try_from(rows.len() - 1).ok() == Some(revision - after)
         {
-            return rows
-                .iter()
-                .skip(1)
-                .map(|r| {
-                    serde_json::from_slice(r.get::<&str, _>("event").as_bytes())
-                        .map_err(Error::from)
-                })
-                .collect();
+            let mut events = Vec::with_capacity(rows.len() - 1);
+            for row in &rows[1..] {
+                events.push(serde_json::from_slice(
+                    row.get::<&str, _>("event").as_bytes(),
+                )?);
+            }
+            return Ok(events);
         }
         let document = Document(serde_json::from_slice(
             head.get::<&str, _>("document").as_bytes(),
