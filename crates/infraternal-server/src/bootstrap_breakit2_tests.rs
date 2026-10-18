@@ -596,6 +596,8 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let timeout_retry = std::env::var_os("BREAKIT2_TIMEOUT_RETRY").is_some();
     let retry_private = (timeout_retry || std::env::var_os("BREAKIT2_RETRY").is_some())
         .then(|| private.clone());
+    // Adding the same host a second time must name the existing host (#189).
+    let readd_private = std::env::var_os("BREAKIT2_READD").is_some().then(|| private.clone());
     let transport = Arc::new(FixtureTransport {
         transport: Arc::new(TimedTransport {
             adapter: OpenSsh {
@@ -687,6 +689,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let mut retry_private = retry_private;
     let mut selected_attempt = 1;
     let mut published_retry = false;
+    let mut done_host = None;
     let result = tokio::time::timeout(Duration::from_secs(220), async {
         loop {
             let events = batch.events(0).1;
@@ -725,6 +728,9 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                         "METRIC breakit2 failed_step={:?} status={:?}",
                         failure.failed_step, failure.exit_status
                     );
+                }
+                if event.step == Step::Done {
+                    done_host = event.host_id;
                 }
                 if event.step == Step::Done && std::env::var_os("ADDHOST_INSTANT").is_some() {
                     assert!(event.session_id.is_some(), "instant acceptance requires a published shim, never a legacy completion");
@@ -792,6 +798,12 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
             "a network timeout must precede the retry"
         );
     }
+    if let Some(private) = readd_private
+        && result == Step::Done
+    {
+        let host = done_host.expect("a finished add names its host");
+        already_added_opens_a_terminal(&f, &runner, &transport, private, host).await;
+    }
     let active: i64 =
         sqlx::query_scalar("SELECT count(*) FROM remote_hosts WHERE revoked_at IS NULL")
             .fetch_one(&f.pool)
@@ -811,6 +823,77 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     } else {
         assert_eq!(result, Step::Done, "real SSH bootstrap did not complete");
     }
+}
+
+/// Adds the just-added host again, then opens a terminal on the host id the
+/// refusal names, the way the wizard's "Open a terminal" does (#189).
+async fn already_added_opens_a_terminal(
+    f: &Fixture,
+    runner: &Bootstrap,
+    transport: &FixtureTransport,
+    private: Vec<u8>,
+    host: Uuid,
+) {
+    *transport.private.lock().unwrap() = Some(Secret::new(private));
+    let address = std::env::var("BREAKIT2_TARGET").unwrap();
+    let mode = if std::env::var("BREAKIT2_MODE").unwrap_or_default() == "root" {
+        InstallMode::Root
+    } else {
+        InstallMode::Rootless
+    };
+    let started = Instant::now();
+    let batch = runner
+        .start_authenticated(
+            "owner".into(),
+            Secret::new(f.cookie.as_bytes().to_vec()),
+            vec![Target {
+                id: "again".into(),
+                address: TargetAddress::Manual(address),
+                credential: None,
+                mode,
+                root_consent: mode == InstallMode::Root,
+            }],
+            None,
+        )
+        .unwrap();
+    let mut changed = batch.subscribe();
+    let failure = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if let Some(event) = batch
+                .events(0)
+                .1
+                .into_iter()
+                .find(|event| matches!(event.step, Step::Done | Step::Failed))
+            {
+                return event;
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(failure.step, Step::Failed, "a second add of the same host must be refused");
+    let failure = failure.failure.expect("the refusal carries its failure");
+    let wire = serde_json::to_value(&failure).unwrap();
+    println!(
+        "PROOF already_added={} host_id_matches={} refused_ms={}",
+        failure.already_added,
+        wire["host_id"] == host.to_string(),
+        started.elapsed().as_millis()
+    );
+    assert!(failure.already_added);
+    assert_eq!(wire["host_id"], host.to_string());
+    let actor = f.backend.hosts.actor(host).await.unwrap();
+    let session = actor
+        .open(TerminalSize {
+            cols: 80,
+            rows: 24,
+            px_w: 0,
+            px_h: 0,
+        })
+        .await
+        .unwrap();
+    instant::EarlyTerminal::open_on_named_host(&actor, Uuid::from_bytes(session)).await;
 }
 
 /// Observe only whether the test fixture reaches the intended fixed failure step.
