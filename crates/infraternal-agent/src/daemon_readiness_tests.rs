@@ -438,7 +438,10 @@ async fn a_dropped_peer_still_accepts_the_write_while_a_forked_copy_holds_it() {
     // What a child between fork and exec holds: another reference to the file.
     let forked_copy = reader.try_clone().unwrap();
     drop(reader);
-    let reply = infraternal_plugin_api::ActionReply { json: b"{}".to_vec(), after_write: None };
+    let reply = infraternal_plugin_api::ActionReply {
+        json: b"{}".to_vec(),
+        after_write: None,
+    };
     let result = deferred_reply(&mut Transmit::default(), &socket, 0, 1, reply).await;
     drop(forked_copy);
     assert!(
@@ -457,14 +460,14 @@ async fn the_unhealthy_handoff_case_races_concurrent_spawns() {
     let spawner = {
         let stop = stop.clone();
         std::thread::spawn(move || {
-            let mut spawned = 0u32;
+            let mut children = 0u32;
             while !stop.load(Ordering::Relaxed) {
                 if let Ok(mut child) = std::process::Command::new("true").spawn() {
                     let _ = child.wait();
-                    spawned += 1;
+                    children += 1;
                 }
             }
-            spawned
+            children
         })
     };
     let mut unexpected = 0;
@@ -473,13 +476,24 @@ async fn the_unhealthy_handoff_case_races_concurrent_spawns() {
         let (writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
         let socket = Socket::inherited(writer.as_raw_fd()).unwrap();
         drop(reader);
-        let reply = infraternal_plugin_api::ActionReply { json: b"{}".to_vec(), after_write: None };
-        if deferred_reply(&mut Transmit::default(), &socket, 0, 1, reply).await.is_ok() {
+        let reply = infraternal_plugin_api::ActionReply {
+            json: b"{}".to_vec(),
+            after_write: None,
+        };
+        if deferred_reply(&mut Transmit::default(), &socket, 0, 1, reply)
+            .await
+            .is_ok()
+        {
             unexpected += 1;
         }
     }
     stop.store(true, Ordering::Relaxed);
-    let spawned = spawner.join().unwrap();
-    println!("unhealthy_handoff_race rounds={rounds} spawned={spawned} write_succeeded={unexpected}");
-    assert_eq!(unexpected, 0, "a dropped peer accepted {unexpected} of {rounds} writes");
+    let children = spawner.join().unwrap();
+    println!(
+        "unhealthy_handoff_race rounds={rounds} spawned={children} write_succeeded={unexpected}"
+    );
+    assert_eq!(
+        unexpected, 0,
+        "a dropped peer accepted {unexpected} of {rounds} writes"
+    );
 }

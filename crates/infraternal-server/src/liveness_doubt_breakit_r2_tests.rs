@@ -52,7 +52,11 @@ async fn a_window_that_reconnects_mid_doubt_is_told_and_recovered() {
     attachments.insert(2, fresh);
     tokio::time::advance(TICK).await;
     report_doubt(&mut route, &mut doubted, &attachments);
-    assert_eq!(drain(&mut new_rx), (0, 0), "an unsettled window is not told");
+    assert_eq!(
+        drain(&mut new_rx),
+        (0, 0),
+        "an unsettled window is not told"
+    );
     attachments.get_mut(&2).unwrap().awaiting_ack = false;
     tokio::time::advance(TICK).await;
     report_doubt(&mut route, &mut doubted, &attachments);
@@ -74,7 +78,8 @@ async fn doubt_retry_sends_one_notice_per_window_per_episode() {
     for id in 1..=8u64 {
         let (tx, rx) = mpsc::channel(1);
         if id % 2 == 0 {
-            tx.try_send(TerminalOutput::Ack { in_seq_acked: 0 }).unwrap();
+            tx.try_send(TerminalOutput::Ack { in_seq_acked: 0 })
+                .unwrap();
         }
         attachments.insert(id, attachment(tx));
         receivers.push(rx);
@@ -125,5 +130,9 @@ async fn a_pinned_dead_host_retires_within_two_ceilings_without_doubt() {
         report_doubt(&mut route, &mut doubted, &attachments);
         assert!(died.elapsed() <= CEILING * 2 + TICK, "retired late");
     }
-    assert_eq!(drain(&mut rx), (0, 0), "a pinned link reports only retirement");
+    assert_eq!(
+        drain(&mut rx),
+        (0, 0),
+        "a pinned link reports only retirement"
+    );
 }
