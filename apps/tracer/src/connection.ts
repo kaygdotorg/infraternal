@@ -245,6 +245,8 @@ export class MuxConnection {
     const subId = this.nextSubscription++;
     this.subscriptions.set(subId, { filter, onEvent, onOpen });
     if (this.isWelcomed) this.openSubscription(subId);
+    // Account state must load before any terminal window exists (D248).
+    if (!this.socket && !this.closed) this.connect();
     return () => { this.subscriptions.delete(subId); };
   }
 
@@ -505,7 +507,7 @@ export class MuxConnection {
     for (const s of [...this.streams.values()]) s.onDisconnected(forced);
     this.status("Connection lost. Reconnecting…");
     // With no stream left there is nothing to restore; the next `openStream` connects again.
-    if (this.streams.size > 0) this.scheduleReconnect();
+    if (this.streams.size > 0 || this.subscriptions.size > 0) this.scheduleReconnect();
   }
 
   /** Match native response estimation without adding timers or changing probe frequency. */
