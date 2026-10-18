@@ -238,3 +238,52 @@ async fn evidence_server_hostname_moves_only_with_server_rename_authority() {
         Ok(())
     );
 }
+
+/// Execute the documented SQL against `SQLx`'s actual schema, with both migrators, rather than checking only
+/// SQLite syntax. Preserve live rows across the rewind and restore checksums before rolling forward.
+#[tokio::test]
+async fn evidence_rewind_runbook_works_with_real_migration_bookkeeping() {
+    let pool = pool().await;
+    add_host(&pool, A, "root@minipc01").await;
+    let service = MeshService::new(pool.clone());
+    let (node, _) = service
+        .dataplane()
+        .attach_named(A, PublicKey([10; 32]), None, false, None)
+        .await
+        .unwrap();
+    let original: Vec<(i64, Vec<u8>)> =
+        sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let runbook = include_str!("../../../../docs/operations/deploy.md");
+    let steps: Vec<&str> = runbook
+        .split("```sql\n")
+        .skip(1)
+        .map(|part| part.split("```").next().unwrap())
+        .collect();
+    assert_eq!(steps.len(), 2);
+    sqlx::raw_sql(steps[0]).execute(&pool).await.unwrap();
+    let mut old = sqlx::migrate!("../../infraternal-server/migrations");
+    old.migrations
+        .to_mut()
+        .retain(|migration| migration.version <= 25);
+    old.run(&pool).await.unwrap();
+    sqlx::query("UPDATE mesh_nodes SET name='during-rewind' WHERE id=?")
+        .bind(i64::try_from(node.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(steps[1]).execute(&pool).await.unwrap();
+    sqlx::migrate!("../../infraternal-server/migrations")
+        .run(&pool)
+        .await
+        .unwrap();
+    assert_eq!(name_of(&pool, node).await, "during-rewind");
+    let restored: Vec<(i64, Vec<u8>)> =
+        sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(restored, original);
+}
