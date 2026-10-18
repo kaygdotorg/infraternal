@@ -1378,6 +1378,7 @@ dependencies = [
  "axum",
  "infraternal-agent",
  "infraternal-plugin-api",
+ "infraternal-plugin-canvas",
  "infraternal-plugin-host-facts",
  "infraternal-plugin-mesh",
  "infraternal-plugin-release",
