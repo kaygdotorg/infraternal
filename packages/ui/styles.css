@@ -167,7 +167,10 @@
 .ui-toast-marker .tick { width: 20px; height: 20px; }
 .ui-toast-marker .tick-fill { background: var(--ok); }
 .ui-toast-marker .tick svg { width: 14px; height: 14px; stroke: var(--bg); }
+.ui-toast-actions { display: flex; flex: none; align-items: center; gap: 2px; }
+.ui-toast-actions[hidden] { display: none !important; }
 .ui-toast-action { min-height: 32px; flex: none; padding: 0 8px; border-radius: 8px; color: var(--accent) !important; font-size: var(--text-body); font-weight: var(--fw-label); white-space: nowrap; }
+.ui-toast-action[hidden] { display: none !important; }
 .ui-toast-marker .tick { width: 18px; height: 18px; }
 /* A glyph in place of the tick (toast icon): neutral, so a waiting state never reads as success. */
 .ui-toast-glyph { display: grid; width: 22px; height: 22px; flex: none; place-items: center; color: var(--fg-2); }

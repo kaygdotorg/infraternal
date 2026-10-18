@@ -1,4 +1,4 @@
-/** One reusable, accessible status toast with an optional action for product surfaces. */
+/** One reusable, accessible status toast with optional actions for product surfaces. */
 import { ICONS } from "./icons";
 import { tick } from "./tick";
 
@@ -13,6 +13,12 @@ export interface ToastMessage {
   /** The message with entity chips in it (`entityText`); it replaces `message` on screen, which stays the plain text. */
   messageNode?: Node;
   action?: ToastAction;
+  /** A second action beside the primary action, for a clear alternative such as Discard. */
+  secondaryAction?: ToastAction;
+  /** Accessible name for action choices that have a keyboard focus handoff. */
+  actionGroupLabel?: string;
+  /** ARIA shortcut value that focuses the action group, such as `Control+Shift+Space`. */
+  actionGroupKeyShortcuts?: string;
   duration?: number;
   /** `error` replaces the success tick with a caution mark (TASTE: a tick only for success): the message is a failure or a lost connection. */
   tone?: "ok" | "error";
@@ -32,6 +38,8 @@ export interface ToastMessage {
 
 export interface ToastController {
   show(value: ToastMessage): void;
+  /** Focuses an available action by visual order, returning false when none is available. */
+  focusAction(index?: number): boolean;
   dismiss(): void;
   dispose(): void;
 }
@@ -70,10 +78,20 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
   label.setAttribute("role", "status");
   label.setAttribute("aria-live", "polite");
 
+  const actions = document.createElement("div");
+  actions.className = "ui-toast-actions";
+  actions.setAttribute("role", "group");
+  actions.hidden = true;
+
   const action = document.createElement("button");
   action.type = "button";
   action.className = "ui-toast-action ui-button";
   action.hidden = true;
+
+  const secondaryAction = document.createElement("button");
+  secondaryAction.type = "button";
+  secondaryAction.className = "ui-toast-action ui-button";
+  secondaryAction.hidden = true;
 
   const close = document.createElement("button");
   close.type = "button";
@@ -83,25 +101,27 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
   close.dataset.tip = "Dismiss";
   close.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>`;
 
-  host.append(marker, glyph, label, action, close);
+  actions.append(action, secondaryAction);
+  host.append(marker, glyph, label, actions, close);
   parent.append(host);
 
   let hideTimer = 0;
   let selectAction: ToastAction["onSelect"] | undefined;
+  let selectSecondaryAction: ToastAction["onSelect"] | undefined;
   let closeHandler: (() => void) | undefined;
   const finish = (): void => { const run = closeHandler; closeHandler = undefined; run?.(); };
   const dismiss = (): void => {
     window.clearTimeout(hideTimer);
     hideTimer = 0;
     selectAction = undefined;
+    selectSecondaryAction = undefined;
     host.dataset.open = "false";
     window.setTimeout(() => {
       if (host.dataset.open === "false") host.hidden = true;
     }, 190);
     finish();
   };
-  const onAction = (event: MouseEvent): void => {
-    const run = selectAction;
+  const onAction = (run: ToastAction["onSelect"] | undefined, event: MouseEvent): void => {
     // The action runs before the close hand-over, so whoever listens sees what the action started.
     const handler = closeHandler;
     closeHandler = undefined;
@@ -109,7 +129,10 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
     run?.(event);
     handler?.();
   };
-  action.addEventListener("click", onAction);
+  const primaryClick = (event: MouseEvent): void => onAction(selectAction, event);
+  const secondaryClick = (event: MouseEvent): void => onAction(selectSecondaryAction, event);
+  action.addEventListener("click", primaryClick);
+  secondaryAction.addEventListener("click", secondaryClick);
   close.addEventListener("click", dismiss);
 
   return {
@@ -125,8 +148,20 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
       if (icon) glyph.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18">${icon}</svg>`;
       if (value.messageNode) label.replaceChildren(value.messageNode); else label.textContent = value.message;
       selectAction = value.action?.onSelect;
+      selectSecondaryAction = value.secondaryAction?.onSelect;
       action.textContent = value.action?.label ?? "";
       action.hidden = !value.action;
+      secondaryAction.textContent = value.secondaryAction?.label ?? "";
+      secondaryAction.hidden = !value.secondaryAction;
+      actions.hidden = !value.action && !value.secondaryAction;
+      if (actions.hidden) {
+        actions.removeAttribute("aria-label");
+        actions.removeAttribute("aria-keyshortcuts");
+      } else {
+        actions.setAttribute("aria-label", value.actionGroupLabel ?? "Notification actions");
+        if (value.actionGroupKeyShortcuts) actions.setAttribute("aria-keyshortcuts", value.actionGroupKeyShortcuts);
+        else actions.removeAttribute("aria-keyshortcuts");
+      }
       host.dataset.tone = value.tone ?? "ok";
       host.hidden = false;
       host.dataset.open = "false";
@@ -134,10 +169,19 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
       const duration = value.duration ?? 4200;
       if (duration > 0) hideTimer = window.setTimeout(dismiss, duration);
     },
+    focusAction(index = 0) {
+      if (!Number.isInteger(index) || index < 0) return false;
+      const available = [action, secondaryAction].filter((button) => !button.hidden);
+      const target = available[index];
+      if (!target || host.hidden) return false;
+      target.focus({ preventScroll: true });
+      return true;
+    },
     dismiss,
     dispose() {
       window.clearTimeout(hideTimer);
-      action.removeEventListener("click", onAction);
+      action.removeEventListener("click", primaryClick);
+      secondaryAction.removeEventListener("click", secondaryClick);
       close.removeEventListener("click", dismiss);
       host.remove();
     },
