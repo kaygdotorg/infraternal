@@ -16,7 +16,7 @@
  * stale row. Ended records stay available to their existing window but disappear from every session list.
  */
 import { documentWindows, type CanvasDocument } from "../model/schema";
-import { inventoryKey } from "../../account-storage";
+import { inventoryKey, createStoredJsonCache, readStoredJson } from "../../account-storage";
 import type { DeviceInfo, InventoryCapabilities, InventoryStatus, SessionInventory, SessionRecord } from "./inventory";
 
 interface Stored { host?: string; id: string; name: string; pinned: boolean; frecency: number }
@@ -36,9 +36,7 @@ export interface LiveInventory extends SessionInventory {
 
 export function createLiveInventory(options: { accountId: string; host: string }): LiveInventory {
   const key = inventoryKey(options.accountId);
-  let disposed = false;
   const records = new Map<string, SessionRecord>();
-  const listeners = new Set<() => void>();
   const owners = new Map<string, string>();
   // Only windows opened on this device need status after its sidecar is superseded.
   const opened = new Set<string>();
@@ -47,16 +45,12 @@ export function createLiveInventory(options: { accountId: string; host: string }
   const verifiedHosts = new Set<string>();
   let top = 0;
   let shared: Set<string> | undefined;
-  const emit = (): void => { for (const l of listeners) l(); };
-  const save = (): void => {
-    // After sign-out a late socket message must not write the account's data back (D245).
-    if (disposed) return;
-    const rows: Stored[] = [...records.values()].filter((s) => !s.gone).map((s) => ({ host: owners.get(s.id) ?? options.host, id: s.id, name: s.name, pinned: s.pinned, frecency: s.frecency }));
-    try { window.localStorage.setItem(key, JSON.stringify(rows)); } catch { /* private mode: the inventory then lasts for this page */ }
-  };
+  const storage = () => window.localStorage;
+  const cache = createStoredJsonCache(key, () => [...records.values()].filter((s) => !s.gone).map((s): Stored => ({ host: owners.get(s.id) ?? options.host, id: s.id, name: s.name, pinned: s.pinned, frecency: s.frecency })), storage);
+  const save = cache.flush, emit = cache.notify;
   const blank = (id: string, name: string): SessionRecord => ({ id, name, pinned: false, state: "detached", lastOutput: "", age: "", viewers: 0, size: "", frecency: 0, screen: [] });
   try {
-    const rows = JSON.parse(window.localStorage.getItem(key) ?? "[]") as Stored[];
+    const rows = (readStoredJson(key, storage) ?? []) as Stored[];
     for (const r of rows) if (typeof r.id === "string" && typeof r.name === "string") { owners.set(r.id, typeof r.host === "string" && r.host.length <= 200 ? r.host : options.host); records.set(r.id, { ...blank(r.id, r.name), pinned: Boolean(r.pinned), frecency: Number(r.frecency) || 0 }); top = Math.max(top, Number(r.frecency) || 0); }
   } catch { /* unreadable: start empty */ }
 
@@ -183,7 +177,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
     },
     sizedFor: (): DeviceInfo | undefined => undefined,
     takeOver() { /* every window of this account is this device until #99 */ },
-    onChange(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    dispose() { disposed = true; listeners.clear(); },
+    onChange: cache.subscribe,
+    dispose: cache.dispose,
   };
 }
