@@ -1,6 +1,7 @@
 /** Starts auth and the terminal, keeping the terminal bundle off the unauthenticated path. */
 import { AuthError, checkStatus, checkSession, recoveryAuth } from "./auth";
 import { registerSignOut } from "./sign-out";
+import { cacheDrawingIdentity, cachedDrawingIdentity, type DrawingIdentity } from "./offline-drawing";
 import { lastAccountKey, tabSessionKey } from "./account-storage";
 import { recordSignIn } from "./hints";
 import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/src/faulty-terminal";
@@ -148,7 +149,9 @@ async function start(): Promise<void> {
   } catch (error: unknown) {
     await fontsReady;
     installTooltips();
-    renderUnavailable(safeMessage(error));
+    const cached = error instanceof AuthError && error.status !== undefined ? undefined : await cachedDrawingIdentity();
+    if (cached) { activeUserId = cached.user_id; await showTerminal(cached, true); }
+    else renderUnavailable(safeMessage(error));
   }
 }
 
@@ -170,18 +173,16 @@ async function showAuthState(setupRequired: boolean): Promise<void> {
   }
 }
 
-/** Narrows additive server metadata from the authenticated session response. */
-type SessionWithHostname = NonNullable<Awaited<ReturnType<typeof checkSession>>> & { hostname?: unknown };
-
-function sessionHostname(session: Awaited<ReturnType<typeof checkSession>>): string | undefined {
+function sessionHostname(session: DrawingIdentity | undefined): string | undefined {
   if (!session) return undefined;
-  const hostname = (session as SessionWithHostname).hostname;
+  const hostname = session.hostname;
   return typeof hostname === "string" && hostname.trim() ? hostname.trim() : undefined;
 }
 
 function installForegroundListener(): void {
   if (foregroundListenerInstalled) return;
   foregroundListenerInstalled = true;
+  window.addEventListener("online", () => { void checkForegroundSession(); });
   let wasHidden = document.hidden;
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
@@ -316,7 +317,7 @@ function stopBackdrop(instant = false): void {
   }, 260);
 }
 
-async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSession>>, instant = false): Promise<void> {
+async function showTerminal(knownSession?: DrawingIdentity, instant = false): Promise<void> {
   // Startup already authenticated this snapshot. Reuse it rather than adding
   // another network round trip; the socket still checks authority on connection.
   const identity = knownSession ?? await checkSession();
@@ -325,6 +326,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     renderUnavailable("Could not read this server's name. Try again.");
     return;
   }
+  if (identity) cacheDrawingIdentity({ ...identity, hostname: hostName });
   window.clearTimeout(welcomeTimer);
   welcomeEffect?.destroy();
   welcomeEffect = undefined;
@@ -421,6 +423,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
         host: { name: hostName },
         accountId: activeUserId ?? "account",
         predictiveEcho,
+        ...(__CLUSTERS_PREVIEW__ && productTestMode ? { previewStore: new (await import("./canvas/model/store")).LocalCanvasStore(activeUserId ?? "account") } : {}),
         ...(productTestMode ? { onFirstClient: (client: TerminalClient) => {
           window.__tracerProductTestDouble = {
             isConnected: () => client.isConnected,

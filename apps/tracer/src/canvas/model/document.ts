@@ -5,9 +5,8 @@
  * - Views have a kind and a layout. Tiled: columns of windows with relative weights. Graph: the nodes the
  *   person pinned (the rest are laid out automatically). Views sit on a coarse grid, stored in cells.
  * - Windows reference their target by a stable id plus a readable name (the same ids back deep links, #86).
- * - Edges and grants are never stored here; the Mesh owns them.
- * - Sync (#98) works by small server-applied operations with a revision number. Until then the whole document is
- *   saved locally, and `revision` counts saves so the two paths agree on order.
+ * - Network access rules are never stored here; the Mesh owns them.
+ * - Shared revisions come from server-applied semantic operations. Browser storage holds only a drawing cache.
  *
  * `toDocument` and `fromDocument` convert between this and the runtime model (`types.ts`). `parseDocument` is the
  * only way untrusted JSON (storage, an import, the server) becomes a document: it checks shape and bounds and
