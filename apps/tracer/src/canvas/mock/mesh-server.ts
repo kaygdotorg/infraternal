@@ -4,8 +4,9 @@
  * adapter (`mesh/api.ts`) runs unchanged against it.
  *
  * What it adds to the server's shapes, because the UI needs them and the issue asks for them (PROPOSED in
- * protocol.ts): `access`, and a node's `os`, `address`, `path`, `via` and `behind`. `includeAccess` /
- * `includeExtras` turn those off, which is how a server that does not send them yet is tested.
+ * protocol.ts): `access`, and a node's `os`, `address`, `via`, `behind` and the `relay` path. `includeAccess` /
+ * `includeExtras` turn those off, which is how a server that does not send them yet is tested. A live node's
+ * `direct` path is the server's own (#236) and is always sent, with `last_seen` null as the server sends it.
  *
  * Besides the happy path it can be told to misbehave, which is what the specs for the unhappy states need: stay
  * silent (loading), refuse everything (a person without Mesh grants), fail the next call, answer slowly, send
@@ -122,8 +123,9 @@ export class FakeMeshServer implements MeshTransport {
   page(cursor: { revision: number; offset: number } | undefined, size: number): Record<string, unknown> {
     const nodes = [...this.nodes.values()].map((n) => ({
       node: { id: n.id, host: n.name, tags: [...this.tags].filter(([, m]) => m.has(n.id)).map(([t]) => t).sort() },
-      live: n.live, last_seen: n.live ? 1_700_000_000 : null, last_rtt_us: n.rttUs ?? null,
-      ...(this.includeExtras ? { os: n.os, address: n.address, path: n.path, ...(n.via ? { via: n.via } : {}), ...(n.behind ? { behind: true } : {}) } : {}),
+      live: n.live, last_seen: n.live && this.includeExtras ? 1_700_000_000 : null, last_rtt_us: n.rttUs ?? null,
+      ...(n.live && n.path === "direct" ? { path: "direct" } : {}),
+      ...(this.includeExtras ? { os: n.os, address: n.address, ...(n.path === "relay" ? { path: n.path } : {}), ...(n.via ? { via: n.via } : {}), ...(n.behind ? { behind: true } : {}) } : {}),
     }));
     const end = (e: string): Record<string, unknown> => (e.startsWith("tag:") ? { Tag: e.slice(4) } : { Node: this.idOf(e) });
     const tags = [...this.tags].map(([name, m]) => ({ name, members: [...m].sort((a, b) => a - b) }));

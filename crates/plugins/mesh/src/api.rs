@@ -48,6 +48,9 @@ pub struct MeshNode {
     pub last_seen: Option<i64>,
     /// Last measured round-trip time in microseconds.
     pub last_rtt_us: Option<u64>,
+    /// How packets reach the node from the server while it is online, when the server's device shows it (#236).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<crate::presence::NodePath>,
 }
 
 /// A tag and its stable node membership.
@@ -296,6 +299,8 @@ pub enum MeshApiError {
     NotFound,
     /// A unique name, key, or nonempty-tag invariant would be violated.
     Conflict,
+    /// The name belongs to the server's node: `server`, or the server's own name (#236).
+    Reserved,
     /// SQLite or serialization failed; details are intentionally not exposed.
     Storage,
 }
@@ -310,6 +315,7 @@ impl MeshApiError {
             Self::Denied => br#"{"error":"forbidden"}"#,
             Self::NotFound => br#"{"error":"not found"}"#,
             Self::Conflict => br#"{"error":"conflict"}"#,
+            Self::Reserved => br#"{"error":"reserved for the server"}"#,
             Self::Storage => br#"{"error":"mesh unavailable"}"#,
         }
     }
@@ -475,7 +481,24 @@ fn validate_name(name: &str) -> Result<(), MeshApiError> {
     Ok(())
 }
 
-fn validate_host(name: &str) -> Result<(), MeshApiError> {
+/// Whether `name` is the label for a node without a known name (`unnamed`, `unnamed-<n>`): placeholders, and
+/// what a viewer without host facts reads for a hostname (`decode_host`). Nobody may hold one as a real name.
+pub(crate) fn is_unnamed_label(name: &str) -> bool {
+    name == "unnamed"
+        || name
+            .strip_prefix("unnamed-")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// A person cannot choose a label kept for unnamed nodes; it would read as a placeholder.
+fn refuse_unnamed_label(name: &str) -> Result<(), MeshApiError> {
+    if is_unnamed_label(name) {
+        return Err(MeshApiError::InvalidInput);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_host(name: &str) -> Result<(), MeshApiError> {
     validate_name(name)
 }
 
@@ -491,6 +514,8 @@ fn node_id(id: u64) -> Result<i64, MeshApiError> {
 pub struct MeshService {
     pool: SqlitePool,
     updates: broadcast::Sender<MeshChange>,
+    // Runtime liveness from the server's own device; never persisted (presence.rs, #236).
+    presence: std::sync::Arc<crate::presence::Presence>,
     // Request-local authority is never installed in the shared service.
     fresh_authority: Option<String>,
     store: crate::store::Store,
@@ -510,6 +535,7 @@ impl MeshService {
             store: crate::store::Store::new(pool.clone()),
             pool,
             updates,
+            presence: std::sync::Arc::default(),
             fresh_authority: None,
             invalid_hosts: crate::diagnostics::InvalidHosts::default(),
             list_diagnostics: StorageDiagnostics::new("mesh.list"),
@@ -547,6 +573,24 @@ impl MeshService {
         let mut request = self.clone();
         request.fresh_authority = Some(token_hash);
         request
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pool_for_tests(&self) -> SqlitePool {
+        self.pool.clone()
+    }
+
+    /// Install the server's current reading of who is online; watchers wake only when it changed (#236).
+    pub fn set_presence(&self, live: crate::presence::Live) {
+        self.presence.replace(live);
+    }
+
+    /// Watch presence transitions. They advance no revision; socket.rs resyncs only viewers who see a change.
+    #[must_use]
+    pub fn subscribe_presence(
+        &self,
+    ) -> tokio::sync::watch::Receiver<std::sync::Arc<crate::presence::Live>> {
+        self.presence.subscribe()
     }
 
     /// Subscribe to post-commit revision invalidations; a lagging reader should reload its filtered list.
@@ -835,6 +879,7 @@ impl MeshService {
                     access.all && !restrict_to_filter,
                     &visible_tags,
                     &self.invalid_hosts,
+                    !access.owner,
                 )
                 .await?;
                 transaction
@@ -854,6 +899,15 @@ impl MeshService {
                             .and_then(|seen| seen.checked_add(NODE_LIVE_SECONDS + 1))
                     })
                     .min();
+                // Presence is the device's first-hand reading; it marks nodes online without a stored
+                // observation, and its transitions are pushed, so it adds no expiry deadline.
+                let mut snapshot = snapshot;
+                for node in &mut snapshot.nodes {
+                    if let Some(path) = self.presence.get(node.node.id) {
+                        node.live = true;
+                        node.path = path;
+                    }
+                }
                 Ok((page_snapshot(snapshot, filter.cursor)?, deadline))
             })
             .await
@@ -880,6 +934,9 @@ impl MeshService {
                 return Err(MeshApiError::NotFound);
             }
         }
+        // Enrolment only ever adds a remote machine; the server's node comes from its own channel.
+        refuse_unnamed_label(&request.name)?;
+        crate::store::make_room(&mut tx, actor, None, &request.name).await?;
         // Persist allocation history independently of live rows. Explicitly imported
         // IDs also advance allocation; exhaustion refuses before any identity is issued.
         let id: i64 = sqlx::query_scalar(
@@ -977,10 +1034,20 @@ impl MeshService {
     ) -> Result<u64, MeshApiError> {
         let id = node_id(request.node_id)?;
         let mut tx = self.begin_change().await?;
+        // Names share one global namespace. Check authority before any name lookup: refusing only a
+        // hidden collision would let scoped managers confirm hostnames by comparing it with a free name.
+        authorize(&mut tx, actor, MANAGE_NODES, &[]).await?;
         let scopes = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(request.node_id))).await?;
-        let scope_requirements = require_each_scope(&scopes);
-        authorize(&mut tx, actor, MANAGE_NODES, &scope_requirements).await?;
-        let changed = sqlx::query("UPDATE mesh_nodes SET name=? WHERE id=?")
+        refuse_unnamed_label(&request.name)?;
+        let mut scopes = scopes;
+        for moved in crate::store::make_room(&mut tx, actor, Some(id), &request.name).await? {
+            let moved =
+                u64::try_from(moved).map_err(|_| storage_error("stored node id invalid"))?;
+            let theirs = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(moved))).await?;
+            scopes.extend(theirs);
+        }
+        // A person's name is final: automatic naming never touches it again (store.rs `attach_named`, #236).
+        let changed = sqlx::query("UPDATE mesh_nodes SET name=?,name_source='hand' WHERE id=?")
             .bind(&request.name)
             .bind(id)
             .execute(&mut *tx)
@@ -1570,6 +1637,8 @@ impl MeshService {
 struct ViewAccess {
     all: bool,
     tags: BTreeSet<String>,
+    /// Host facts, a machine's reported hostname among them, are the owner's alone (websocket.rs).
+    owner: bool,
 }
 
 async fn view_access(
@@ -1586,6 +1655,7 @@ async fn view_access(
         return Ok(ViewAccess {
             all: true,
             tags: BTreeSet::new(),
+            owner: true,
         });
     }
     let rows = sqlx::query("SELECT DISTINCT ra.action,ra.scope_tag FROM mesh_user_roles AS ur JOIN mesh_role_actions AS ra ON ra.role_name=ur.role_name WHERE ur.user_id=?")
@@ -1737,12 +1807,14 @@ async fn read_snapshot(
     all: bool,
     scopes: &BTreeSet<String>,
     invalid_hosts: &crate::diagnostics::InvalidHosts,
+    hide_hostnames: bool,
 ) -> Result<MeshSnapshot, MeshApiError> {
-    let node_rows =
-        sqlx::query("SELECT id,name,public_key,last_seen,last_rtt_us FROM mesh_nodes ORDER BY id")
-            .fetch_all(&mut **tx)
-            .await
-            .map_err(|error| map_sql_error(error))?;
+    let node_rows = sqlx::query(
+        "SELECT id,name,name_source,public_key,last_seen,last_rtt_us FROM mesh_nodes ORDER BY id",
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| map_sql_error(error))?;
     let mut memberships = BTreeMap::<i64, Vec<String>>::new();
     let mut tag_members = BTreeMap::<String, Vec<NodeId>>::new();
     for row in
@@ -1772,7 +1844,7 @@ async fn read_snapshot(
         if !all && !tags.iter().any(|tag| scopes.contains(tag)) {
             continue;
         }
-        if let Some(node) = decode_host(&row, id, tags, now) {
+        if let Some(node) = decode_host(&row, id, tags, now, hide_hostnames) {
             nodes.push(node);
         } else {
             invalid_hosts.report(id);
@@ -1857,9 +1929,23 @@ fn decode_host(
     id: i64,
     tags: Vec<String>,
     now: i64,
+    hide_hostnames: bool,
 ) -> Option<MeshNode> {
-    let host: String = row.try_get("name").ok()?;
+    let mut host: String = row.try_get("name").ok()?;
     validate_host(&host).ok()?;
+    // A name taken from a machine's own hostname is a host fact: a viewer without host facts sees a neutral
+    // label instead (#236). The owner typed record names, and a person chose hand-set ones. The label carries
+    // the node's id, so it is stable and distinct: names stay unique for every viewer (rows and pills are keyed
+    // by name), and no person or machine can hold one (`is_unnamed_label`). Placeholders get the same label, so
+    // a hidden hostname and a real placeholder look alike.
+    if hide_hostnames {
+        match row.try_get::<String, _>("name_source").ok()?.as_str() {
+            "server" => "server".clone_into(&mut host),
+            "placeholder" if host == "server" => {}
+            "reported" | "placeholder" => host = format!("unnamed-{id}"),
+            _ => {}
+        }
+    }
     let key: Vec<u8> = row.try_get("public_key").ok()?;
     let last_seen: Option<i64> = row.try_get("last_seen").ok()?;
     let last_rtt: Option<i64> = row.try_get("last_rtt_us").ok()?;
@@ -1879,6 +1965,7 @@ fn decode_host(
             .is_some_and(|seen| seen <= now && seen >= now.saturating_sub(NODE_LIVE_SECONDS)),
         last_seen,
         last_rtt_us: last_rtt.map(u64::try_from).transpose().ok()?,
+        path: None,
     })
 }
 

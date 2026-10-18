@@ -143,15 +143,17 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,144,112 bytes |
-  | `aarch64-unknown-linux-musl` | 19,370,696 bytes |
+  | `x86_64-unknown-linux-musl` | 21,225,872 bytes |
+  | `aarch64-unknown-linux-musl` | 19,427,688 bytes |
 
-  These are the release-4 measurements: release-prod-live plus CLI overhaul
-  (#239) and status truth (#237), +47,968 / +45,176 bytes. This one-off D243
-  exception is accepted within the task's +64 KB ceiling for D299's versioned
-  `--json` envelope and D303–D305 command behavior, together with #237's
-  status truth (+17 KB). The trim follow-up is owed; each cap stays at its
-  exact measured size until a later measured reduction ratchets it down.
+  These are the release-5 measurements, adding the Mesh view (#236) to the
+  release-4 measurements below: +81,760 / +56,992 bytes. The x86_64 increase
+  follows D306's accepted Mesh view size and stays below this task's +90 KB
+  stop line. Each cap stays at its exact measured size until a later measured
+  reduction ratchets it down. Release 4's one-off D243 exception was accepted
+  within the task's +64 KB ceiling for D299's versioned `--json` envelope and
+  D303–D305 command behavior, together with #237's status truth (+17 KB).
+  The trim follow-up is owed.
 
   The release-2 measurements were: the release-retry line (next paragraph,
   21,080,848 / 19,316,360) plus D300 host-link doubt (#234), already-added

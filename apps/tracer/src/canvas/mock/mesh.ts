@@ -44,7 +44,7 @@ export function createMockMesh(world: MockWorld): MockMesh {
     const seed: FakeMeshSeed = count ? generateMesh(count, extra) : mode === "empty" ? { nodes: [], tags: {}, grants: [] } : seedMesh(INITIAL_GRANTS);
     const state: FakeMeshState = mode === "loading" ? "loading" : mode === "error" ? "error" : mode === "denied" ? "denied" : "ready";
     server = new FakeMeshServer(seed, state);
-    // `?meshserver=today`: the server as it is now, without the fields the issue proposes (access, os, address, path).
+    // `?meshserver=today`: the server as it is now, without the fields the issue proposes (access, os, address, relay).
     if (params.get("meshserver") === "today") { server.includeAccess = false; server.includeExtras = false; }
     // Only an operator holds Mesh grants in the mockup (D187); everyone else gets the refusal a server would give.
     server.access = world.role === "operator" ? { view: true, manageGrants: true } : { view: false, manageGrants: false };

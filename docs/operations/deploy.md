@@ -116,3 +116,63 @@ late exec refusal recovers the retained current image with an independent CA
 handoff. See [safe replacement](replacement.md) for admission, recovery and
 platform qualifications. A successful exec with an invalid handoff still serves
 cold-locked; check administrator CA status after every replacement.
+
+## Rolling back across a database migration
+
+A release refuses to start on a database that a newer release migrated: its
+migrator does not know the newer versions and stops with `VersionMissing(N)`.
+A rollback within the deploy itself is safe: the production deploy script
+copies `/var/lib/infraternal` after stopping the server and, when the 20 s
+health check fails, restores that copy together with the previous binary.
+
+A deliberate rewind later (`ALLOW_REWIND=1` to an older SHA after a bug shows
+up in production) is different. Its copy is taken after the newer migrations
+ran, so the old binary fails its health check and the script puts the new
+binary back. Restoring an older backup by hand loses every change since it was
+taken. When the newer migrations are additive (new columns or tables only, as
+`0026_mesh_node_name_source` and `0027_mesh_node_name_claim` of #236 are), set
+their bookkeeping rows aside instead. With the server stopped and a fresh copy
+of `infraternal.sqlite` taken, before the rewind:
+
+```sql
+BEGIN;
+CREATE TABLE rewind_migrations AS SELECT * FROM _sqlx_migrations WHERE version > 25;
+CREATE TABLE rewind_mesh_names AS
+    SELECT id,name,(SELECT revision FROM mesh_state WHERE singleton=1) AS revision
+    FROM mesh_nodes;
+DELETE FROM _sqlx_migrations WHERE version > 25;
+COMMIT;
+```
+
+Replace `25` with the newest version the older release ships. The older release
+ignores the extra columns. New rows take their defaults (for 0026, a name
+counts as chosen by a person), but renaming an existing row changes only `name`:
+its newer automatic provenance stays untouched. Keep `rewind_mesh_names` for
+the whole rewind. Before rolling forward again, with the server stopped, mark
+names changed since that snapshot, or explicitly renamed in the audit log during
+the rewind, as chosen by a person and clear their old automatic claim. The audit
+check also preserves a person choosing the same spelling or changing back to it.
+Unchanged automatic names retain their provenance, so ordinary record and
+hostname updates still work. Then put the migration rows back so
+the migrator does not try to add the columns a second time:
+
+```sql
+BEGIN;
+UPDATE mesh_nodes SET name_source='hand',name_claim=NULL
+WHERE id IN (
+    SELECT previous.id FROM rewind_mesh_names AS previous
+    JOIN mesh_nodes AS current ON current.id=previous.id
+    WHERE previous.name<>current.name
+    UNION
+    SELECT CAST(resource AS INTEGER) FROM mesh_audit
+    WHERE action='mesh.node.rename'
+        AND revision>(SELECT revision FROM rewind_mesh_names LIMIT 1)
+);
+DROP TABLE rewind_mesh_names;
+INSERT INTO _sqlx_migrations SELECT * FROM rewind_migrations;
+DROP TABLE rewind_migrations;
+COMMIT;
+```
+
+A migration that rewrites or drops data cannot be rewound this way; its pull
+request must say so and name the backup to restore.

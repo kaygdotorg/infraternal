@@ -37,6 +37,10 @@ impl NodeChannel for PeerChannel {
                 }))
                 .unwrap());
             }
+            if action == "host.facts.read" {
+                // A node without host facts: the coordinator keeps its stored name (#236).
+                return Err("host facts disabled");
+            }
             assert_eq!(action, "mesh.configure");
             let chunk: Chunk = serde_json::from_slice(&input).unwrap();
             let reply = serde_json::to_vec(

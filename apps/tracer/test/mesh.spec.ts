@@ -432,7 +432,7 @@ test.describe("access", () => {
     expect(await page.locator(".cl-arrow").count()).toBeGreaterThan(0);
     expect(await page.locator(".cl-arrow-handle").count()).toBe(0); // least privilege: nothing to drag without `access`
     expect(await page.locator('.ui-window[data-kind="node"] .cl-port:not([hidden])').count()).toBe(0);
-    expect(await sub(page, "build-01")).toBe("42 ms"); // no path was sent, so none is claimed
+    expect(await sub(page, "build-01")).toBe("direct · 42 ms"); // the server reports its own direct sessions (#236)
     await expect(page.locator('.ui-window[data-window-id="n-build-01"] .cl-node-detail')).toHaveText("tag:ci"); // no address was sent either
   });
 
@@ -686,6 +686,11 @@ for (const theme of ["ink", "paper"]) {
       await intoMesh(page);
       await expect(page.locator('.ui-window[data-window-id="n-build-01"]')).toBeVisible();
       await capture(page, `mesh-${theme}-${label}`, testInfo);
+      // What the server sends today (#236): machine names, online from its own device, direct sessions.
+      await open(page, "&meshserver=today", size, 6, theme);
+      await intoMesh(page);
+      await expect(page.locator('.ui-window[data-window-id="n-build-01"] .cl-node-sub')).toHaveText("direct · 42 ms");
+      await capture(page, `mesh-today-${theme}-${label}`, testInfo);
       await open(page, "&mesh=1000", size, 6, theme);
       await probe(page, (p) => p.flyView("mesh"));
       await expect.poll(async () => (await stats(page))?.chips, { timeout: 20_000 }).toBeGreaterThanOrEqual(20);
