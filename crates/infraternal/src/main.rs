@@ -526,7 +526,7 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
         return report_failure_as(
             "skill",
             "The requested command has no generated skill in this build.",
-            format!("No public command is registered for {path:?}."),
+            "The command path supplied to skill is not a public action.".to_owned(),
             json_output,
             Exit::NotFound,
         );

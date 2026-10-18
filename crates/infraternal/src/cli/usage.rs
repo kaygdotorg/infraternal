@@ -40,16 +40,6 @@ fn argument_name(raw: &str) -> Option<String> {
     (is_option || is_placeholder).then(|| first.to_owned())
 }
 
-/// A subcommand-looking word: short, lowercase letters, digits and dashes only.
-fn word_like(raw: &str) -> Option<String> {
-    (raw.len() <= 40
-        && !raw.is_empty()
-        && raw
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'))
-    .then(|| raw.to_owned())
-}
-
 fn context_strings(error: &clap::Error, kind: ContextKind) -> Vec<String> {
     match error.get(kind) {
         Some(ContextValue::String(value)) => vec![value.clone()],
@@ -106,15 +96,7 @@ pub fn result(root: &Command, args: &[String], error: &clap::Error) -> CommandRe
             Some(name) => format!("{shown} has no option {name}."),
             None => format!("{shown} was given an argument it does not accept."),
         },
-        ErrorKind::InvalidSubcommand => {
-            match context_strings(error, ContextKind::InvalidSubcommand)
-                .first()
-                .and_then(|word| word_like(word))
-            {
-                Some(word) => format!("{shown} has no command {word}."),
-                None => format!("{shown} was given a command it does not have."),
-            }
-        }
+        ErrorKind::InvalidSubcommand => format!("{shown} has no command in this position."),
         ErrorKind::MissingRequiredArgument => {
             format!("{shown} needs {}.", names.join(" and "))
         }
