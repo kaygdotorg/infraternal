@@ -170,8 +170,10 @@ async fn rename(service: &MeshService, node: u64, name: &str) -> Result<(), Mesh
         .map(drop)
 }
 
-/// `server` and the server's own hostname belong to the server's node: a person cannot give either to a remote
-/// machine (the refusal says so plainly), and the server's node itself may still be called `server`.
+/// `server` belongs to the server's node: a person cannot give it to a remote machine (the refusal says so
+/// plainly), and the server's node itself may still be called `server`. The server's hostname is an automatic
+/// name and yields to a person like any other (round-3 review: a refusal would confirm the hidden hostname to
+/// viewers who see the server only as `server`).
 #[tokio::test]
 async fn the_servers_names_are_kept_for_the_server() {
     let pool = pool().await;
@@ -186,15 +188,20 @@ async fn the_servers_names_are_kept_for_the_server() {
         .attach_named(A, PublicKey([10; 32]), None, false, None)
         .await
         .unwrap();
-    for name in ["server", "monitor01"] {
-        assert_eq!(
-            rename(&service, a.0, name).await,
-            Err(MeshApiError::Reserved),
-            "{name}"
-        );
-    }
+    assert_eq!(
+        rename(&service, a.0, "server").await,
+        Err(MeshApiError::Reserved)
+    );
+    assert_eq!(rename(&service, a.0, "monitor01").await, Ok(()));
+    assert_eq!(names(&service, "owner").await, ["monitor01-2", "monitor01"]);
+    // The server keeps its suffix across a restart; a person's name is never taken back.
+    store
+        .attach_named("server", PublicKey([1; 32]), None, true, Some("monitor01"))
+        .await
+        .unwrap();
+    assert_eq!(names(&service, "owner").await, ["monitor01-2", "monitor01"]);
     assert_eq!(rename(&service, server.0, "server").await, Ok(()));
-    assert_eq!(names(&service, "owner").await, ["server", "unnamed"]);
+    assert_eq!(names(&service, "owner").await, ["server", "monitor01"]);
 }
 
 /// A person outranks every automatic name: renaming a node to a name another host's record gave it moves that

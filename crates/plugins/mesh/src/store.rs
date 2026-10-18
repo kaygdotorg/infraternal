@@ -279,14 +279,15 @@ async fn wanted_name(
     Ok((wanted, records))
 }
 /// Frees `name` for `actor`'s choice on node `id` (`None` while enrolling a new one). A person outranks every
-/// automatic name (migration 0026), so a node holding `name` by record, report or placeholder moves aside to a
-/// suffix of its own claim, audited under `actor` as an automatic rename with the change's revision. Returns the nodes moved,
-/// over which the caller must hold the same authority as over the node it names (`rename_node`).
+/// automatic name (migration 0026), so a node holding `name` by record, report, placeholder or the server's own
+/// hostname moves aside to a suffix of its own claim, audited under `actor` as an automatic rename with the
+/// change's revision. Returns the nodes moved, over which the caller must hold the same authority as over the node
+/// it names (`rename_node`, which refuses with a bare conflict otherwise).
 ///
-/// Only another person's name refuses, as a bare conflict. That is no oracle: the refusal says only that the
-/// name is in use, which every Mesh member can learn from the name's DNS record, while a name a machine
-/// reported (a host fact, hidden from viewers who are not the owner) never refuses anything. The server's names
-/// refuse with [`crate::api::MeshApiError::Reserved`], except for the server's own node.
+/// Only the label `server` and another person's name refuse here. Neither is an oracle: every viewer reads the
+/// server's node as `server`, and a bare conflict says only that the name is in use, which every Mesh member can
+/// learn from the name's DNS record. A host fact hidden from viewers who are not the owner (a reported hostname,
+/// the server's hostname) answers a caller allowed to move its node exactly as a free name does.
 pub(crate) async fn make_room(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     actor: &str,
@@ -295,15 +296,16 @@ pub(crate) async fn make_room(
 ) -> Result<Vec<i64>, crate::api::MeshApiError> {
     let unavailable = |_| storage_error("Mesh storage unavailable.");
     let nodes = named_nodes(tx).await.map_err(unavailable)?;
-    // `server`, which every viewer without host facts reads as the server, and the server node's current name
-    // (its hostname) belong to the server's node. Automatic naming never gives either to a remote machine
-    // (`wanted_name`); refusing them here closes the person's path, so no viewer sees two nodes called `server`
-    // and `server.<suffix>` never points at a remote.
-    let server = nodes
-        .iter()
-        .find(|node| node.host.as_deref() == Some(SERVER_LABEL));
-    let servers = name == SERVER_LABEL || server.is_some_and(|server| server.name == name);
-    if servers && server.is_none_or(|server| Some(server.id) != id) {
+    // `server` is how every viewer without host facts reads the server's node, so no other node may carry it:
+    // nobody sees two `server` nodes and `server.<suffix>` never points at a remote. The server's hostname is an
+    // automatic name like any other: refusing it would confirm a hidden hostname, and whoever may move the
+    // server's node aside may rename it directly anyway.
+    // Before the server's node exists, `server` is still kept for it.
+    if name == SERVER_LABEL
+        && !nodes
+            .iter()
+            .any(|node| node.host.as_deref() == Some(SERVER_LABEL) && Some(node.id) == id)
+    {
         return Err(crate::api::MeshApiError::Reserved);
     }
     let Some(holder) = nodes
