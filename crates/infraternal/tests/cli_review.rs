@@ -7,7 +7,7 @@
 
 use std::{
     io::Read,
-    os::unix::{fs::PermissionsExt, net::UnixListener},
+    os::unix::{fs::PermissionsExt, net::UnixListener, process::ExitStatusExt},
     process::{Command, Output, Stdio},
     time::{Duration, Instant},
 };
@@ -176,7 +176,6 @@ fn ctrl_c_in_json_mode_ends_with_an_interrupted_envelope_and_exit_130() {
         .unwrap()
         .read_to_string(&mut out)
         .unwrap();
-    use std::os::unix::process::ExitStatusExt;
     // D303: 130 interrupted. A shell reports 130 for death by SIGINT; a process that catches it exits 130.
     assert!(
         code.code() == Some(130) || code.signal() == Some(2),
