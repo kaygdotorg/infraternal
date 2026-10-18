@@ -15,7 +15,7 @@
  * The full snapshot is replayed after every socket welcome, so missed changes during a disconnect cannot revive a
  * stale row. Ended records stay available to their existing window but disappear from every session list.
  */
-import type { CanvasDocument, DocTarget } from "../model/document";
+import { documentWindows, type CanvasDocument } from "../model/document";
 import { inventoryKey } from "../../account-storage";
 import type { DeviceInfo, InventoryCapabilities, InventoryStatus, SessionInventory, SessionRecord } from "./inventory";
 
@@ -65,8 +65,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
   return {
     can,
     setLayout(document) {
-      const targets: Extract<DocTarget, { type: "session" }>[] = [];
-      for (const view of document.views) if (view.layout.type === "tiled") for (const col of view.layout.columns) for (const window of col.windows) if (window.target.type === "session") targets.push(window.target);
+      const targets = documentWindows(document).flatMap((window) => window.target.type === "session" ? [window.target] : []);
       shared = new Set(targets.map((t) => t.id));
       let changed = false;
       for (const s of records.values()) if (!s.gone) {

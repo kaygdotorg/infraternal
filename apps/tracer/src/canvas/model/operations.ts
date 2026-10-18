@@ -1,4 +1,5 @@
 /** Stable-ID intents and optimistic reduction for account layouts (D180, D183, #243). */
+import { documentWindows as windows } from "./document";
 import type { CanvasDocument, DocColumn, DocTarget, DocView, DocWindow } from "./document";
 export type Intent =
   | { type: "view.add"; view: DocView }
@@ -17,7 +18,6 @@ export interface MoveEdit { windowId: string; move: true }
 export type LayoutEdit = SplitEdit | MoveEdit;
 export interface SplitEdit { windowId: string; anchorId: string; axis: "right" | "down" }
 const cols = (v: DocView): DocColumn[] => v.layout.type === "tiled" ? v.layout.columns : [];
-const windows = (d: CanvasDocument): DocWindow[] => d.views.flatMap((v) => cols(v).flatMap((c) => c.windows));
 const equal = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 /** Compare completed changes using stable neighbours, never numeric placement indexes. */
 export function edits(before: CanvasDocument, after: CanvasDocument, splits: ReadonlyMap<string, LayoutEdit> = new Map()): Intent[] {
@@ -63,8 +63,8 @@ export function edits(before: CanvasDocument, after: CanvasDocument, splits: Rea
       for (const [i, w] of c.windows.entries()) {
         const neighbour = c.windows[i - 1]?.id;
         const at = { view_id: v.id, column_id: c.id, ...(!previousCols.some((p) => p.id === c.id) ? { column_after: v.layout.columns[ci - 1]?.id ?? null } : {}), ...(neighbour ? { after: neighbour } : {}) };
-        const was = old.get(w.id), membership = memberships.get(w.id), hint = splits.get(w.id), split = hint && "axis" in hint ? hint : undefined;
-        if (!was) result.push(split ? { type: "split", view_id: v.id, column_id: c.id, window: w, anchor_id: split.anchorId, axis: split.axis } : { type: "open", ...at, window: w });
+        const was = old.get(w.id), membership = memberships.get(w.id);
+        if (!was) result.push({ type: "open", ...at, window: w });
         else if (!membership) result.push({ type: "membership.add", ...at, window_id: w.id });
         else if (membership.col !== c.id || membership.after !== neighbour) result.push({ type: "move", ...at, window_id: w.id });
         if (was) {
