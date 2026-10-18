@@ -299,6 +299,8 @@ pub enum MeshApiError {
     NotFound,
     /// A unique name, key, or nonempty-tag invariant would be violated.
     Conflict,
+    /// The name belongs to the server's node: `server`, or the server's own name (#236).
+    Reserved,
     /// SQLite or serialization failed; details are intentionally not exposed.
     Storage,
 }
@@ -313,6 +315,7 @@ impl MeshApiError {
             Self::Denied => br#"{"error":"forbidden"}"#,
             Self::NotFound => br#"{"error":"not found"}"#,
             Self::Conflict => br#"{"error":"conflict"}"#,
+            Self::Reserved => br#"{"error":"reserved for the server"}"#,
             Self::Storage => br#"{"error":"mesh unavailable"}"#,
         }
     }
@@ -914,6 +917,8 @@ impl MeshService {
                 return Err(MeshApiError::NotFound);
             }
         }
+        // Enrolment only ever adds a remote machine; the server's node comes from its own channel.
+        crate::store::refuse_server_names(&mut tx, None, &request.name).await?;
         // Persist allocation history independently of live rows. Explicitly imported
         // IDs also advance allocation; exhaustion refuses before any identity is issued.
         let id: i64 = sqlx::query_scalar(
@@ -1014,6 +1019,7 @@ impl MeshService {
         let scopes = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(request.node_id))).await?;
         let scope_requirements = require_each_scope(&scopes);
         authorize(&mut tx, actor, MANAGE_NODES, &scope_requirements).await?;
+        crate::store::refuse_server_names(&mut tx, Some(id), &request.name).await?;
         // A person's name is final: automatic naming never touches it again (store.rs `attach_named`, #236).
         let changed = sqlx::query("UPDATE mesh_nodes SET name=?,name_source='hand' WHERE id=?")
             .bind(&request.name)

@@ -234,6 +234,30 @@ async fn wanted_name(
     };
     Ok((wanted, records))
 }
+/// Refuses a person's name for node `id` (`None` while enrolling a new one) that belongs to the server's node:
+/// `server`, which every viewer without host facts reads as the server, and the name the server's node carries
+/// now (its hostname). Automatic naming never gives either to a remote machine (`wanted_name`); this closes the
+/// hand path, so no viewer ever sees two nodes called `server` and `server.<suffix>` never points at a remote.
+/// The server's node itself may take either.
+pub(crate) async fn refuse_server_names(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: Option<i64>,
+    name: &str,
+) -> Result<(), crate::api::MeshApiError> {
+    let server: Option<(i64, String)> =
+        sqlx::query_as("SELECT id,name FROM mesh_nodes WHERE dataplane_host='server'")
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|_| storage_error("Mesh storage unavailable."))?;
+    let is_server = server
+        .as_ref()
+        .is_some_and(|(server, _)| Some(*server) == id);
+    let servers = name == SERVER_LABEL || server.is_some_and(|(_, held)| held == name);
+    if servers && !is_server {
+        return Err(crate::api::MeshApiError::Reserved);
+    }
+    Ok(())
+}
 /// Applies automatic renames in order: a node moved aside first frees the name the next one takes.
 async fn rename(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,

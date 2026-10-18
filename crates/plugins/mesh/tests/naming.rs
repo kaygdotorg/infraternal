@@ -3,7 +3,7 @@
 #![cfg(feature = "server")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use infraternal_plugin_mesh::{
-    api::{MeshFilter, MeshService},
+    api::{MeshApiError, MeshFilter, MeshService},
     policy::model::PublicKey,
 };
 use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
@@ -155,4 +155,44 @@ async fn a_viewer_without_host_facts_does_not_see_reported_hostnames() {
         names(&service, "guest").await,
         ["server", "unnamed", "minipc01"]
     );
+}
+
+async fn rename(service: &MeshService, node: u64, name: &str) -> Result<(), MeshApiError> {
+    let input = serde_json::json!({"node_id":node,"name":name});
+    service
+        .execute(
+            "owner",
+            "mesh.node.rename",
+            &serde_json::to_vec(&input).unwrap(),
+            NOW,
+        )
+        .await
+        .map(drop)
+}
+
+/// `server` and the server's own hostname belong to the server's node: a person cannot give either to a remote
+/// machine (the refusal says so plainly), and the server's node itself may still be called `server`.
+#[tokio::test]
+async fn the_servers_names_are_kept_for_the_server() {
+    let pool = pool().await;
+    add_host(&pool, A, "root@10.69.69.5").await;
+    let service = MeshService::new(pool);
+    let store = service.dataplane();
+    let (server, _) = store
+        .attach_named("server", PublicKey([1; 32]), None, true, Some("monitor01"))
+        .await
+        .unwrap();
+    let (a, _) = store
+        .attach_named(A, PublicKey([10; 32]), None, false, None)
+        .await
+        .unwrap();
+    for name in ["server", "monitor01"] {
+        assert_eq!(
+            rename(&service, a.0, name).await,
+            Err(MeshApiError::Reserved),
+            "{name}"
+        );
+    }
+    assert_eq!(rename(&service, server.0, "server").await, Ok(()));
+    assert_eq!(names(&service, "owner").await, ["server", "unnamed"]);
 }

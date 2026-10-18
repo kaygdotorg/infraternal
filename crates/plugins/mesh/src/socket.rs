@@ -196,6 +196,7 @@ fn mesh_error_event(error: MeshApiError) -> Value {
         MeshApiError::FreshRequired => "confirm with your passkey again",
         MeshApiError::NotFound => "not found",
         MeshApiError::Conflict => "conflict",
+        MeshApiError::Reserved => "reserved for the server",
         MeshApiError::Storage => "mesh unavailable",
     };
     json!({"type":"error","error":message})

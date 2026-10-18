@@ -202,6 +202,7 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
         // Changing or ending access also needs a recent passkey check; the server answers both "no" and "check first" alike.
         : error.reason === "forbidden" ? `Could not ${what}. You may not be allowed to, or you need to confirm with your passkey first. Sign in again and try once more.`
         : error.reason === "conflict" ? `Could not ${what}: that already exists.`
+        : error.reason === "reserved for the server" ? `Could not ${what}: that name belongs to the server.`
         : error.reason === "not found" ? `Could not ${what}: it is no longer there.`
         : error.reason === "invalid input" ? `Could not ${what}: the server did not accept those details.`
         : `Could not ${what}. The mesh is busy; please try again in a moment.`);
