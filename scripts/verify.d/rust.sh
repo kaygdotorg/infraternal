@@ -111,15 +111,35 @@ rust_check_cli_group() {
     local binary="$1"
     local group="$2"
     local output
+    local stderr_file
+    local stderr_present=no
     local exit_code=0
 
-    output="$("$binary" "$group" --json 2>&1)" || exit_code=$?
-    if [[ "$exit_code" -ne 0 || "$output" != *'"schema_version":1'* || "$output" != *"\"command\":\"$group join\""* ]]; then
-        printf 'unexpected %s group: exit=%s output=%s\n' "$group" "$exit_code" "$output" >&2
+    stderr_file="$(mktemp)" || return 1
+    output="$("$binary" "$group" --json 2>"$stderr_file")" || exit_code=$?
+    [[ ! -s "$stderr_file" ]] || stderr_present=yes
+    rm -f "$stderr_file"
+    if [[ "$exit_code" -ne 0 || "$stderr_present" != no ]] || ! python3 -c '
+import json
+import sys
+
+lines = sys.stdin.read().splitlines()
+if len(lines) != 1:
+    raise SystemExit(1)
+result = json.loads(lines[0])
+if result.get("schema_version") != 1:
+    raise SystemExit(1)
+expected = f"{sys.argv[1]} join"
+commands = result.get("data", {}).get("commands", [])
+if not any(isinstance(command, dict) and command.get("command") == expected for command in commands):
+    raise SystemExit(1)
+' "$group" <<<"$output" 2>/dev/null; then
+        printf 'unexpected %s group: exit=%s, expected one versioned JSON envelope; stderr_present=%s\n' \
+            "$group" "$exit_code" "$stderr_present" >&2
         return 1
     fi
 
-    printf '%s group: exit 0, versioned JSON listing of its commands\n' "$group"
+    printf '%s group: exit 0, one parsed versioned JSON listing of its commands\n' "$group"
 }
 
 # Disabled CLI plugins must leave both their actions and role crates out of the binary.
