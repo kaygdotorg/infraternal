@@ -213,8 +213,18 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
                         .is_some_and(serde_json::Map::is_empty),
                     _ => false,
                 });
-            if !empty || model::views(&doc.0).any(|v| v.get("id") == view.get("id")) {
+            if !empty {
                 return Err(());
+            }
+            if let Some(existing) = model::views(&doc.0).find(|v| v.get("id") == view.get("id")) {
+                // Stable built-in IDs can be offered concurrently; existing contents remain canonical.
+                return if existing.get("kind") == view.get("kind")
+                    && existing["layout"]["type"] == view["layout"]["type"]
+                {
+                    Ok(())
+                } else {
+                    Err(())
+                };
             }
             doc.0
                 .get_mut("views")
@@ -543,6 +553,18 @@ mod tests {
         assert!(!valid_intent(
             &json!({"type":"target","window_id":"a","target":{"type":"unknown"}})
         ));
+    }
+    #[test]
+    fn concurrent_builtin_view_creation_preserves_existing_contents() {
+        let mut doc = document();
+        reduce(&mut doc, &open("window"), &[]).unwrap();
+        let before = doc.clone();
+        let mut view = doc.0["views"][0].clone();
+        view["layout"]["columns"] = json!([]);
+        reduce(&mut doc, &json!({"type":"view.add","view":view}), &[]).unwrap();
+        assert_eq!(doc, before);
+        view["layout"] = json!({"type":"graph","pinned":{}});
+        assert!(reduce(&mut doc, &json!({"type":"view.add","view":view}), &[]).is_err());
     }
     #[test]
     fn repeated_open_close_does_not_exhaust_column_capacity() {

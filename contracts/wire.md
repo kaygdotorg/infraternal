@@ -603,7 +603,8 @@ after close. Close removes every membership and permanently beats move/resize.
 
 INTENT is one of (optional fields may be omitted):
 
-- `{type:"view.add",view:VIEW}`: add an empty v1 view (tiled or graph).
+- `{type:"view.add",view:VIEW}`: add an empty v1 view (tiled or graph). An existing
+  ID of the same kind/layout type is a no-op, preserving its metadata and contents.
 - `{type:"view.update",view_id,cell?:{x,y},name?}`: update only supplied view metadata.
 - `{type:"target",window_id,target:TARGET}`: change the reference in every membership;
   newly referenced sessions must belong to the account, exactly as for open. A closed
