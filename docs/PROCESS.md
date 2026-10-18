@@ -143,15 +143,18 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,080,848 bytes |
-  | `aarch64-unknown-linux-musl` | 19,316,360 bytes |
+  | `x86_64-unknown-linux-musl` | 21,082,288 bytes |
+  | `aarch64-unknown-linux-musl` | 19,317,288 bytes |
 
   These are the release-retry measurements (#230 merged into the #189
   production line, 3048580c1): the production line measured 21,090,448 /
   19,316,264 bytes; the merge is 9,920 / 160 bytes smaller. Taking the
   commit guard only after terminal proof adds back 256 / 128 bytes, and
   keeping the root restage command within one kernel argument another
-  128 / 128 bytes; binding the root program once removes 64 / 0 (#230). Lifetime-safe
+  128 / 128 bytes; binding the root program once removes 64 / 0 (#230).
+  Published-setup Retry (retry-instant, #230) adds 1,440 / 928 bytes: a
+  registry-less reattach on the existing dispatcher instance and same-host
+  re-enrollment on join, within D243's 16 KiB allowance. Lifetime-safe
   retry adds its runtime-lock helper, kernel endpoint checks and helper
   refresh; its SSH management crate moves from s to z (#230), which more than
   offsets that code on x86_64. The faster add-host path (#189) keeps its
