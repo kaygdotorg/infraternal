@@ -265,6 +265,7 @@ fn reject_undeclared_inherited_fd(
 ) -> Option<ExitCode> {
     // Ancestor options are carried into descendant parsers; accept one only when this action's
     // own schema declares it, otherwise it could be parsed successfully and then ignored.
+    #[cfg(any(feature = "remote", all(feature = "plugin-agent", target_os = "linux")))]
     if matches.try_contains_id("fd").is_ok_and(|present| present)
         && !action.input_schema.properties.contains_key("fd")
     {
@@ -276,6 +277,9 @@ fn reject_undeclared_inherited_fd(
             Exit::Usage,
         ));
     }
+    // Builds without these plugins have neither the descriptor action nor the output adapter.
+    #[cfg(not(any(feature = "remote", all(feature = "plugin-agent", target_os = "linux"))))]
+    let _ = (action, matches, json_output);
     None
 }
 
