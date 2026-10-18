@@ -97,7 +97,10 @@ fn unbuilt() -> [ActionDefinition; 3] {
                 "Stopping the infraternal agent disconnects this node from its server.".to_owned(),
             ],
         })
-        .with_example("agent down", "Stop the infraternal agent component on this node."),
+        .with_example(
+            "agent down",
+            "Stop the infraternal agent component on this node.",
+        ),
         ActionDefinition::new(
             ["agent", "status"],
             "Show the infraternal agent component state.",
@@ -113,7 +116,10 @@ fn unbuilt() -> [ActionDefinition; 3] {
             ),
         )
         .not_available_yet()
-        .with_example("agent status", "Check the infraternal agent component state."),
+        .with_example(
+            "agent status",
+            "Check the infraternal agent component state.",
+        ),
     ]
 }
 

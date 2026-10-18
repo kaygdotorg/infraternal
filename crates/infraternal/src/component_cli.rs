@@ -102,7 +102,9 @@ pub(crate) fn run_action(
 
 /// Say which of the possible causes it was, and the one thing to do about it.
 fn refuse(json_output: bool, command: &str, error: &io::Error) -> ExitCode {
-    let cause = error.get_ref().and_then(|inner| inner.downcast_ref::<Cause>());
+    let cause = error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<Cause>());
     let (message, why, next, exit) = match (cause, error.kind()) {
         (Some(Cause::NoRuntimeDirectory), _) => (
             "The infraternal agent's runtime directory could not be found.",

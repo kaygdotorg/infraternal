@@ -265,9 +265,7 @@ async fn redeem(url: &str, root: Option<&X509>, request: &JoinRequest) -> io::Re
     std::pin::Pin::new(&mut stream)
         .connect()
         .await
-        .map_err(|_| {
-            Failure::Tls.error(io::ErrorKind::PermissionDenied)
-        })?;
+        .map_err(|_| Failure::Tls.error(io::ErrorKind::PermissionDenied))?;
     // Hyper is the same HTTP engine used by the server; retain its bounded codec.
     let (mut sender, connection) =
         hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))

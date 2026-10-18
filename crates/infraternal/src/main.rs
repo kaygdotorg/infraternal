@@ -283,11 +283,9 @@ fn parse_failure(registry: &ActionRegistry, error: &clap::Error, json: bool) -> 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let tree = cli::command_tree::build(registry);
     match error.kind() {
-        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion if json => emit(
-            cli::usage::help_result(&tree, &args, error),
-            true,
-            Exit::Ok,
-        ),
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion if json => {
+            emit(cli::usage::help_result(&tree, &args, error), true, Exit::Ok)
+        }
         ErrorKind::DisplayHelp
         | ErrorKind::DisplayVersion
         | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
@@ -1508,13 +1506,14 @@ fn run_remote_agent(
                 remote::public_error,
             ),
             "Check the server address and that this machine is still enrolled, then run the command again.",
-            result.as_ref().err().map_or(Exit::Failed, |error| {
-                match remote::Failure::of(error) {
+            result
+                .as_ref()
+                .err()
+                .map_or(Exit::Failed, |error| match remote::Failure::of(error) {
                     Some(remote::Failure::Tls) => Exit::NotAllowed,
                     Some(remote::Failure::Dns(_) | remote::Failure::Connect) => Exit::Unreachable,
                     Some(remote::Failure::Refused) | None => Exit::Failed,
-                }
-            }),
+                }),
         )
     }
 }

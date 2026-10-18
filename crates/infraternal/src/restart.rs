@@ -364,19 +364,17 @@ pub(crate) fn run(
         )
         .await
     }) {
-        Ok(Ok(warm)) => {
-            super::output::done(
-                json,
-                infraternal_plugin_remote::RESTART.id,
-                "requested",
-                if warm {
-                    "Server replacement requested with CA handoff"
-                } else {
-                    "Server replacement requested cold (CA locked)"
-                },
-                "infraternal status",
-            )
-        }
+        Ok(Ok(warm)) => super::output::done(
+            json,
+            infraternal_plugin_remote::RESTART.id,
+            "requested",
+            if warm {
+                "Server replacement requested with CA handoff"
+            } else {
+                "Server replacement requested cold (CA locked)"
+            },
+            "infraternal status",
+        ),
         _ => super::output::refuse(
             json,
             infraternal_plugin_remote::RESTART.id,

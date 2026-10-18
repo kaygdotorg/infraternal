@@ -207,7 +207,10 @@ fn build_node(node: &CommandNode<'_>, inherited: &[Arg]) -> Command {
         command = command.hide(true);
     }
     for arg in inherited {
-        if !command.get_arguments().any(|own| own.get_id() == arg.get_id()) {
+        if !command
+            .get_arguments()
+            .any(|own| own.get_id() == arg.get_id())
+        {
             command = command.arg(arg.clone().hide(true));
         }
     }
@@ -395,7 +398,11 @@ mod tests {
         let registry = registry().expect("action registry");
         let help = build(&registry).render_help().to_string();
         for line in help.lines() {
-            assert!(line.chars().count() <= 80, "{} columns: {line}", line.chars().count());
+            assert!(
+                line.chars().count() <= 80,
+                "{} columns: {line}",
+                line.chars().count()
+            );
         }
     }
 

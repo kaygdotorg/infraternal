@@ -259,7 +259,12 @@ impl Exit {
 #[must_use]
 pub fn interrupted_notice(command: &str) -> Vec<u8> {
     let message = "Stopped before it finished.";
-    let mut result = CommandResult::new(command, CommandState::Stopped, message, serde_json::json!({}));
+    let mut result = CommandResult::new(
+        command,
+        CommandState::Stopped,
+        message,
+        serde_json::json!({}),
+    );
     result.ok = false;
     result.error = Some(ErrorInfo {
         code: Exit::Interrupted.error_code().to_owned(),
