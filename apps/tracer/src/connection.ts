@@ -150,6 +150,8 @@ export class MuxConnection {
   private lastPingAt = -Infinity;
   private retryTimer = 0;
   private retryAttempt = 0;
+  /** Server refusals remain failures even when browser network hints lag. */
+  private refusalBackoff = false;
   private readonly closeNotes = new CloseNotes();
   /** The console summary's timer. It runs on the global timer, apart from the reconnect schedule on `window`. */
   private closeNoteTimer: ReturnType<typeof setTimeout> | undefined;
@@ -493,6 +495,7 @@ export class MuxConnection {
     this.credentials?.connectionId.fill(0);
     this.credentials?.resumeToken.fill(0);
     this.credentials = undefined;
+    this.refusalBackoff = true;
     this.fastRecovery = false;
   }
 
@@ -523,10 +526,9 @@ export class MuxConnection {
       this.fastRecovery = [...this.streams.values()].some((stream) => stream.hasSession());
       if (lived || forced) this.retryAttempt = 0;
     } else {
-      // Keep the prompt path checks while the browser reports the network down.
-      // Once it reports online, a failed handshake consumes the quick recovery
-      // and retains its count so another refused route uses growing backoff.
-      if (typeof navigator !== "undefined" && navigator.onLine === false) this.retryAttempt = 0;
+      // Preserve prompt network-outage checks, but an explicit server refusal
+      // proves the offline hint stale. Its backoff survives until real success.
+      if (!this.refusalBackoff && typeof navigator !== "undefined" && navigator.onLine === false) this.retryAttempt = 0;
       else this.fastRecovery = false;
     }
     // The server retains a live writer indefinitely; its grace starts on disconnect
@@ -627,6 +629,8 @@ export class MuxConnection {
           deadline: Infinity,
           windowMs: frame.resumeWindowSeconds * 1000,
         };
+        if (this.refusalBackoff) this.retryAttempt = 0;
+        this.refusalBackoff = false;
         this.welcomed = true;
         this.welcomedAt = performance.now();
         this.lastPongAt = this.welcomedAt;
@@ -710,8 +714,8 @@ export class MuxConnection {
     const handshakePending = socket !== undefined && !this.welcomed;
     if (!retryPending && !handshakePending && !this.retryHintListeners) return;
     this.clearRetryTimer();
-    this.retryAttempt = 0;
-    this.fastRecovery = this.streams.size > 0;
+    if (!this.refusalBackoff) this.retryAttempt = 0;
+    this.fastRecovery = !this.refusalBackoff && this.streams.size > 0;
     // A WebSocket already opening across the outage is itself the immediate retry. Closing it here
     // discards a handshake the browser can resume when its network returns.
     if (socket && socket.readyState !== WebSocket.CLOSED) return;
