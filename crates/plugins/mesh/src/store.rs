@@ -163,11 +163,34 @@ fn free_name(nodes: &[Named], base: &str, except: i64, skip: bool, taken: &str) 
     suffixed.into_iter().find(|name| available(name))
 }
 /// Moves `holder` off `name`, which a stronger claim takes: to the first free suffix of the holder's own claim
-/// (`web-2` claimed `web` goes to `web-3`, not `web-2-2`), else `mesh-<host>`. Its claim and source stay.
+/// (`web-2` claimed `web` goes to `web-3`, not `web-2-2`), else `mesh-<host>` or a free `mesh-<id>-<n>`.
+/// Its claim and source stay. A fixed fallback alone can conflict and expose a hidden hostname to a global
+/// manager, so exhaustion must keep searching rather than turn into a different rename result (#236).
 fn move_aside(nodes: &[Named], holder: &Named, name: &str) -> Renamed {
     let base = holder.claim.as_deref().unwrap_or(&holder.name);
-    let to = free_name(nodes, base, holder.id, false, name)
-        .unwrap_or_else(|| format!("mesh-{}", holder.host.as_deref().unwrap_or_default()));
+    let to = free_name(nodes, base, holder.id, false, name).unwrap_or_else(|| {
+        // Build the borrowed set only on suffix exhaustion; ordinary naming retains its existing path.
+        let occupied: BTreeSet<&str> = nodes
+            .iter()
+            .filter(|node| node.id != holder.id)
+            .map(|node| node.name.as_str())
+            .chain([name])
+            .collect();
+        let fallback = format!("mesh-{}", holder.host.as_deref().unwrap_or_default());
+        if !occupied.contains(fallback.as_str()) {
+            return fallback;
+        }
+        let mut suffix = 0_u64;
+        loop {
+            // Decimal signed node IDs and u64 suffixes fit the 63-byte name limit. There are fewer
+            // inventory rows than u64 suffixes, so a free spelling appears before overflow.
+            let fallback = format!("mesh-{}-{suffix}", holder.id);
+            if !occupied.contains(fallback.as_str()) {
+                return fallback;
+            }
+            suffix += 1;
+        }
+    });
     Renamed {
         id: holder.id,
         from: holder.name.clone(),

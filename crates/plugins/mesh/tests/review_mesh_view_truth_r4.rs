@@ -436,3 +436,64 @@ async fn rewind_reconciles_same_spelling_choices_without_freezing_untouched_name
     assert_eq!(name_of(&pool, chosen).await, "minipc01");
     assert_eq!(name_of(&pool, untouched).await, "new-record");
 }
+
+/// A global manager cannot see reported hostnames either. Filling all ordinary suffixes and the old fixed
+/// fallback must not make a hidden name conflict while a free guess succeeds.
+#[tokio::test]
+async fn a_global_manager_cannot_probe_a_hidden_name_by_exhausting_move_aside_names() {
+    let pool = pool().await;
+    add_host(&pool, A, "root@10.69.69.5").await;
+    add_host(&pool, B, "root@10.69.69.6").await;
+    add_manager(&pool, "global-admin", None).await;
+    let service = MeshService::new(pool.clone());
+    let store = service.dataplane();
+    let (hidden, _) = store
+        .attach_named(A, PublicKey([10; 32]), None, false, Some("private-machine"))
+        .await
+        .unwrap();
+    let (own, _) = store
+        .attach_named(B, PublicKey([11; 32]), None, false, None)
+        .await
+        .unwrap();
+    let mut occupied: Vec<String> = (2..=9)
+        .map(|suffix| format!("private-machine-{suffix}"))
+        .collect();
+    occupied.extend([format!("mesh-{A}"), format!("mesh-{}-0", hidden.0)]);
+    for (index, name) in occupied.iter().enumerate() {
+        let key = [u8::try_from(index + 20).unwrap(); 32];
+        service
+            .execute(
+                "owner",
+                "mesh.node.enroll",
+                &serde_json::to_vec(&serde_json::json!({"name":name,"public_key":key})).unwrap(),
+                NOW,
+            )
+            .await
+            .unwrap();
+    }
+    let before = service
+        .list("global-admin", MeshFilter::default(), NOW)
+        .await
+        .unwrap();
+    assert!(
+        !before
+            .nodes
+            .iter()
+            .any(|node| node.node.host == "private-machine")
+    );
+    let free = rename(&service, "global-admin", own, "private-machinf").await;
+    let hidden_guess = rename(&service, "global-admin", own, "private-machine").await;
+    assert_eq!(
+        hidden_guess, free,
+        "exhausted fallback confirmed a hidden name"
+    );
+    assert_eq!(hidden_guess, Ok(()));
+    let moved = name_of(&pool, hidden).await;
+    assert_ne!(moved, "private-machine");
+    assert!(!occupied.contains(&moved));
+    store
+        .attach_named(A, PublicKey([10; 32]), None, false, Some("private-machine"))
+        .await
+        .unwrap();
+    assert_eq!(name_of(&pool, hidden).await, moved);
+}
