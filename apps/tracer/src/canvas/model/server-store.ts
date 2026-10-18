@@ -1,7 +1,7 @@
 /** Account layout subscription, durable retry journal and drawing cache (D178, D183, D245, D248). */
 import { randomUuid } from "../../identifiers";
 import { canvasKey, readStoredJson, writeStoredJson } from "../../account-storage";
-import { parseDocument, type CanvasDocument } from "./document";
+import { documentWindows as windows, parseDocument, type CanvasDocument } from "./document";
 import { edits, reduce, type Intent, type LayoutEdit } from "./operations";
 import type { CanvasStore } from "./store";
 
@@ -18,7 +18,6 @@ export class ServerCanvasStore implements CanvasStore {
   readonly acceptsPendingReferences = true;
   #unresolved = new Set<string>();
   #canonical = empty();
-  #presented = empty();
   #pending: Pending[] = [];
   #migration: Migration | undefined;
   #cached = false;
@@ -40,12 +39,12 @@ export class ServerCanvasStore implements CanvasStore {
     {
       const value = readStoredJson(this.#key);
       const legacy = parseDocument(value);
-      if (legacy) { this.#migration = { op_id: randomUuid(), document: legacy }; this.#presented = legacy; this.#cached = true; }
+      if (legacy) { this.#migration = { op_id: randomUuid(), document: legacy }; this.#cached = true; }
       else if (value && typeof value === "object" && "cacheVersion" in value && value.cacheVersion === 2) {
         const cache = value as { canonical?: unknown; document?: unknown; pending?: Pending[]; unresolved?: string[]; migration?: Migration };
         const canonical = parseDocument(cache.canonical), document = parseDocument(cache.document);
         if (canonical && document) {
-          this.#canonical = canonical; this.#presented = document; this.#cached = true; this.#initialized = canonical.revision > 0;
+          this.#canonical = canonical; this.#cached = true; this.#initialized = canonical.revision > 0;
           if (Array.isArray(cache.unresolved)) this.#unresolved = new Set(cache.unresolved.filter((id) => typeof id === "string"));
           if (Array.isArray(cache.pending) && cache.pending.length <= 1024) this.#pending = cache.pending;
           if (cache.migration && typeof cache.migration.op_id === "string" && parseDocument(cache.migration.document)) this.#migration = cache.migration;
@@ -58,14 +57,13 @@ export class ServerCanvasStore implements CanvasStore {
   }
   async load(): Promise<CanvasDocument | undefined> {
     if (!this.#cached) await this.#first;
-    return this.#cached || this.#initialized || this.#presented.views.length ? structuredClone(this.#presented) : undefined;
+    return this.#cached || this.#initialized || this.current().views.length ? this.current() : undefined;
   }
   /** Record each completed edit immediately; only cache serialization is coalesced. */
   unresolvedWindow(id: string): boolean { return this.#unresolved.has(id); }
   async save(doc: CanvasDocument, hints?: ReadonlyMap<string, LayoutEdit>, before?: CanvasDocument, unresolved: ReadonlySet<string> = new Set()): Promise<void> {
     if (this.#disposed) return;
-    const previous = structuredClone(before ?? this.#presented);
-    const windows = (d: CanvasDocument) => d.views.flatMap((v) => v.layout.type === "tiled" ? v.layout.columns.flatMap((c) => c.windows) : []);
+    const previous = structuredClone(before ?? this.current());
     const live = new Map(windows(doc).map((w) => [w.id, w]));
     // Unsatisfied references belong only to the local journal. Complete an unsent birth in place;
     // a sent request is immutable because its operation ID must always identify the same input.
@@ -89,7 +87,6 @@ export class ServerCanvasStore implements CanvasStore {
       baseline = this.current();
     }
     for (const intent of edits(baseline, doc, cancelled ? undefined : hints)) this.#pending.push({ op_id: randomUuid(), base_revision: this.#canonical.revision, intent });
-    this.#presented = structuredClone(doc);
     this.#checkpoint(); this.#pump();
   }
   current(): CanvasDocument {
@@ -117,10 +114,8 @@ export class ServerCanvasStore implements CanvasStore {
   }
   #publish(): void {
     const document = this.current();
-    // A legacy document stays drawable and intact until its migration is acknowledged.
-    this.#presented = !this.#initialized && this.#migration ? structuredClone(this.#migration.document) : document;
     this.#checkpoint();
-    for (const listener of this.#listeners) listener(structuredClone(this.#presented));
+    for (const listener of this.#listeners) listener(structuredClone(document));
   }
   #pump(): void {
     if (this.#disposed || !this.#ready || this.#busy || this.transport.isWelcomed === false) return;
@@ -138,8 +133,12 @@ export class ServerCanvasStore implements CanvasStore {
       if (!Number.isSafeInteger(result.revision)) { this.#busy = false; this.#ready = false; this.refused(); return; }
       if (migration) { this.#migration = undefined; this.#initialized = true; }
       else operation!.revision = Number(result.revision);
+      const count = this.#pending.length;
       this.#pending = this.#pending.filter((p) => p.revision === undefined || p.revision > this.#canonical.revision);
-      this.#busy = false; this.#publish(); this.#pump();
+      this.#busy = false;
+      // The ordered event usually paints first. Its receipt changes journal metadata only.
+      if (migration || this.#pending.length !== count) this.#publish(); else this.#checkpoint();
+      this.#pump();
     }, () => {
       if (this.#disposed || epoch !== this.#epoch) return;
       // Keep the identical input for retry after the next snapshot, including its original base revision.
@@ -153,7 +152,7 @@ export class ServerCanvasStore implements CanvasStore {
   flush(): void {
     if (this.#disposed) return;
     clearTimeout(this.#timer); this.#timer = undefined;
-    writeStoredJson(this.#key, { cacheVersion: 2, canonical: this.#canonical, document: this.#presented, pending: this.#pending, unresolved: [...this.#unresolved], ...(this.#migration ? { migration: this.#migration } : {}) });
+    writeStoredJson(this.#key, { cacheVersion: 2, canonical: this.#canonical, document: this.current(), pending: this.#pending, unresolved: [...this.#unresolved], ...(this.#migration ? { migration: this.#migration } : {}) });
   }
   dispose(): void { this.flush(); this.#disposed = true; this.#epoch++; this.#off(); this.#listeners.clear(); this.#loaded?.(); }
 }

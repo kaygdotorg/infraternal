@@ -86,3 +86,11 @@ test("closing an unsent shell removes its unresolved birth without blocking surv
   expect(intent.type).toBe("open"); expect(intent.window.id).toBe("child");
   store.flush(); expect(JSON.stringify(JSON.parse(localStorage.getItem(canvasKey("a"))!).pending)).not.toContain('"id":"pending"'); store.dispose();
 });
+test("an acknowledgement after its ordered event does not repaint the same layout", async () => {
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
+  let paints = 0; store.subscribe(() => { paints++; });
+  const next = document(); reduce(next, opened); await store.save(next);
+  const call = transport.calls[0]!;
+  transport.event({ type: "canvas.layout.operation", revision: 1, op_id: call.input.op_id, intent: opened });
+  expect(paints).toBe(1); call.resolve({ revision: 1 }); await tick(); expect(paints).toBe(1); store.dispose();
+});
