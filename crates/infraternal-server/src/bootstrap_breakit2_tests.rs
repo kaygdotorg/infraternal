@@ -792,6 +792,9 @@ impl Backend for ObservedBackend {
     fn observe_link(&self, a: &Authority, h: Uuid, round_trip: Duration) {
         self.0.observe_link(a, h, round_trip);
     }
+    fn setup_commit_timeout(&self, a: &Authority, h: Uuid) -> Option<Duration> {
+        self.0.setup_commit_timeout(a, h)
+    }
     fn early_terminal(&self) -> bool {
         std::env::var_os("ADDHOST_INSTANT").is_some() && self.0.early_terminal()
     }
