@@ -356,6 +356,18 @@ pub fn finish_final_output() {
 /// Only the first call has an effect.
 pub fn exit_on_interrupt(notice: Vec<u8>) {
     use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, sigaction};
+    let mut inherited = MaybeUninit::<nix::libc::sigaction>::uninit();
+    // SAFETY: a null action reads the current disposition without changing it. If the query
+    // fails, keep the existing policy because installing a handler could change SIG_IGN.
+    if unsafe { nix::libc::sigaction(nix::libc::SIGINT, std::ptr::null(), inherited.as_mut_ptr()) }
+        != 0
+    {
+        return;
+    }
+    // SAFETY: sigaction initialized the previous disposition after returning success.
+    if unsafe { inherited.assume_init() }.sa_sigaction == nix::libc::SIG_IGN {
+        return;
+    }
     if INTERRUPT_NOTICE.set(notice.into_boxed_slice()).is_err() {
         return;
     }
