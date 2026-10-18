@@ -143,10 +143,14 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,080,144 bytes |
-  | `aarch64-unknown-linux-musl` | 19,322,648 bytes |
+  | `x86_64-unknown-linux-musl` | 21,096,144 bytes |
+  | `aarch64-unknown-linux-musl` | 19,325,520 bytes |
 
-  These are the release-2 measurements: the release-retry line (next paragraph,
+  These are the release-3 measurements (release-2 plus #230 same-server
+  re-enrollment and #227 close logging): +16,000 / +2,872 bytes over release-2
+  (D243, with the logging growth covered by D301).
+
+  The release-2 measurements were: the release-retry line (next paragraph,
   21,080,848 / 19,316,360) plus D300 host-link doubt (#234), already-added
   "Open a terminal" (#189), host removal that uninstalls itself (#235) and
   authority reads retried through a busy store (#240): -704 / +6,288 bytes
