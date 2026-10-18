@@ -162,6 +162,10 @@
 .ui-toast[data-open="false"] { opacity: 0; transform: translateY(8px) scale(0.97); pointer-events: none; }
 /* One type scale per platform (docs/design/TASTE.md): desktop 13 px body, touch 16 px. */
 .ui-toast { min-height: 44px; gap: 10px; padding: 6px 8px 6px 12px; border-radius: 14px; }
+/* A long message with actions stacks them under it (toast.ts sets data-stacked) instead of squeezing the text beside them. */
+.ui-toast[data-stacked="true"] { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; column-gap: 10px; row-gap: 2px; }
+.ui-toast[data-stacked="true"] .ui-toast-message { padding-top: 5px; }
+.ui-toast[data-stacked="true"] .ui-toast-actions { grid-column: 1 / -1; justify-self: end; }
 .ui-toast-message { min-width: 0; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.4; }
 .ui-toast-marker { display: grid; width: 22px; height: 22px; flex: none; place-items: center; }
 .ui-toast-marker .tick { width: 20px; height: 20px; }

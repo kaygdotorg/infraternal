@@ -49,6 +49,9 @@ export interface ToastOptions {
   placement?: "viewport" | "parent";
 }
 
+/** Messages longer than this stack their actions beneath the text; shorter ones keep the actions beside it. */
+const STACK_AFTER = 36;
+
 /** Mounts the one shared toast surface into `parent`, usually the active app shell. */
 export function mountToast(parent: HTMLElement, options: ToastOptions = {}): ToastController {
   const host = document.createElement("aside");
@@ -163,6 +166,7 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
         else actions.removeAttribute("aria-keyshortcuts");
       }
       host.dataset.tone = value.tone ?? "ok";
+      host.dataset.stacked = String(Boolean(value.action || value.secondaryAction) && value.message.length > STACK_AFTER);
       host.hidden = false;
       host.dataset.open = "false";
       requestAnimationFrame(() => { if (!host.hidden) host.dataset.open = "true"; });
