@@ -16,10 +16,10 @@ SPEC.loader.exec_module(MEASURE)
 class JoinDeadlineReview(unittest.TestCase):
     """Require healthy delayed hosts to finish without a second manual Retry."""
 
-    def run_case(self, *, retry=False, rtt=0, startup=0, instant=True, tcp_only=False):
+    def run_case(self, *, retry=False, rtt=0, startup=0, instant=True, tcp_only=False, mode="rootless"):
         self.assertEqual(os.uname().nodename, "infraternal-perf-test")
         fixture = Path(os.environ["REVIEW_JOIN_ARTIFACTS"])
-        target = "review-retry-join-time"
+        target = os.environ.get("REVIEW_JOIN_CONTAINER", "retry-join-time-r2")
         original = MEASURE.docker
 
         def docker(*args, **kwargs):
@@ -48,7 +48,8 @@ class JoinDeadlineReview(unittest.TestCase):
         arguments = ["measure.py", "--fresh", "--container-name", target,
                      "--controller-ip", "172.17.0.1", "--test-binary",
                      os.environ.get("REVIEW_JOIN_CONTROLLER", str(fixture / "server-tests")),
-                     "--payload", str(fixture / "payload"), "--rtt", "150" if rtt else "0"]
+                     "--payload", str(fixture / "payload"), "--rtt", "150" if rtt else "0",
+                     "--mode", mode, "--user", "root" if mode == "root" else "target"]
         if instant:
             arguments += ["--session-payload", str(fixture / "session")]
         if retry:
@@ -57,7 +58,7 @@ class JoinDeadlineReview(unittest.TestCase):
                            ADDHOST_RETRY_PHASE_TIMING="1", INFRATERNAL_TEST_RTT="0")
         if instant:
             environment["ADDHOST_INSTANT"] = "1"
-        print(f"REVIEW rtt_ms={rtt} startup_seconds={startup} retry={retry} instant={instant} tcp_only={tcp_only}", flush=True)
+        print(f"REVIEW rtt_ms={rtt} startup_seconds={startup} retry={retry} instant={instant} tcp_only={tcp_only} mode={mode}", flush=True)
         try:
             with mock.patch.object(MEASURE, "DOCKER", ["docker"]), \
                  mock.patch.object(MEASURE, "TARGET", "addhost-breakit2-target"), \
@@ -106,6 +107,21 @@ class JoinDeadlineReview(unittest.TestCase):
 
     def test_retry_tcp_fallback_600_ms_rtt(self):
         self.run_case(retry=True, rtt=600, tcp_only=True)
+
+    def test_retry_root_lan(self):
+        self.run_case(retry=True, mode="root")
+
+    def test_clean_150_ms_rtt(self):
+        self.run_case(rtt=150)
+
+    def test_retry_150_ms_rtt(self):
+        self.run_case(retry=True, rtt=150)
+
+    def test_clean_tcp_fallback_150_ms_rtt(self):
+        self.run_case(rtt=150, tcp_only=True)
+
+    def test_retry_tcp_fallback_150_ms_rtt(self):
+        self.run_case(retry=True, rtt=150, tcp_only=True)
 
 
 if __name__ == "__main__":
