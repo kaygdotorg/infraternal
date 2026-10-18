@@ -106,6 +106,22 @@ rust_check_cli_stub() {
     printf '%s subcommand: exit 2, versioned JSON unavailable result\n' "$mode"
 }
 
+# A group typed alone lists its commands in one envelope and exits 0 (#239): `agent` does too.
+rust_check_cli_group() {
+    local binary="$1"
+    local group="$2"
+    local output
+    local exit_code=0
+
+    output="$("$binary" "$group" --json 2>&1)" || exit_code=$?
+    if [[ "$exit_code" -ne 0 || "$output" != *'"schema_version":1'* || "$output" != *"\"command\":\"$group join\""* ]]; then
+        printf 'unexpected %s group: exit=%s output=%s\n' "$group" "$exit_code" "$output" >&2
+        return 1
+    fi
+
+    printf '%s group: exit 0, versioned JSON listing of its commands\n' "$group"
+}
+
 # Disabled CLI plugins must leave both their actions and role crates out of the binary.
 rust_check_cli_plugin_compile_out() {
     local dependency_tree
@@ -201,7 +217,7 @@ rust_static_build_check() {
     # Inspect both freshly built images; iterate never qualifies stale artifacts.
     CARGO_TARGET_DIR="$target_dir" bun test scripts/release/static-metadata-review.test.ts || failed=1
     rust_check_cli_stub "$x86_binary" "server" || failed=1
-    rust_check_cli_stub "$x86_binary" "agent" || failed=1
+    rust_check_cli_group "$x86_binary" "agent" || failed=1
     return "$failed"
 }
 
