@@ -56,7 +56,7 @@ function fixture(rtt: number, streams: number, caps = 4n) {
     stopForwarding() { forwarding = false; },
     setRoundTrip(ms: number) { rtt = ms; },
     setReplyProfile(profile: (probe: number) => number) { replyProfile = profile; },
-    setHidden(value: boolean) { hidden = value; for (const listener of visibilityListeners) listener(); },
+    setHidden(value: boolean, dispatch = true) { hidden = value; if (dispatch) for (const listener of visibilityListeners) listener(); },
     suspend(ms: number) { now += ms; },
     advance(ms: number) {
       const until = now + ms;
@@ -296,5 +296,24 @@ test("hiding a page cancels a retry scheduled while it was visible", () => {
     expect(f.sockets).toBe(1);
     f.setHidden(false);
     expect(f.sockets).toBe(2);
+  } finally { f.dispose(); }
+});
+
+for (const dispatchVisibleBeforeReplies of [true, false]) test(`review: queued replies cannot retire a restored hidden page when visibility dispatch precedes replies: ${dispatchVisibleBeforeReplies}`, () => {
+  const f = fixture(150, 28);
+  try {
+    f.advance(3000);
+    f.setHidden(true);
+    f.suspend(30_000);
+    // Restore the property separately from dispatching visibilitychange, so
+    // already queued socket tasks can run on either side of that notification.
+    f.setHidden(false, dispatchVisibleBeforeReplies);
+    f.advance(0);
+    if (!dispatchVisibleBeforeReplies) f.setHidden(false);
+    f.advance(3000);
+    expect(f.disconnects).toBe(0);
+    expect(f.sockets).toBe(1);
+    expect(f.connection.isWelcomed).toBe(true);
+    expect(f.notices).toEqual([true, false]);
   } finally { f.dispose(); }
 });
