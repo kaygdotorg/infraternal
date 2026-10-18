@@ -40,6 +40,7 @@ fn main() {
             "native/Permissions.swift",
             "native/CaptureState.swift",
             "native/FrameDamage.swift",
+            "native/FramePixels.swift",
             "native/Inventory.swift",
             "native/Geometry.swift",
             "native/Input.swift",

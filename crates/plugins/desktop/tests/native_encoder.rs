@@ -90,6 +90,18 @@ fn raw_encoder_drops_preserve_delta_references_and_refresh_quality() {
 }
 
 #[test]
+fn delivered_pixels_are_owned_and_raw_drops_never_confirm_new_content() {
+    run_swift_fixture(
+        "frame-pixels",
+        &[
+            "native/FramePixels.swift",
+            "tests/fixtures/frame-pixels-test.swift",
+        ],
+        true,
+    );
+}
+
+#[test]
 fn empty_native_damage_rectangles_do_not_schedule_unchanged_pictures() {
     run_swift_fixture(
         "frame-damage",
