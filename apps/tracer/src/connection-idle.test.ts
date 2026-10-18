@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { MuxConnection } from "./connection";
 import { encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 
-function fixture(rtt: number, streams: number) {
+function fixture(rtt: number, streams: number, subscription = false) {
   const globals = globalThis as unknown as Record<string, unknown>;
   const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, performance: globals.performance };
   let now = 0, timerId = 0, probes = 0, wakeups = 0, disconnects = 0;
@@ -36,6 +36,7 @@ function fixture(rtt: number, streams: number) {
   globals.WebSocket = Socket;
   globals.performance = { now: () => now };
   const connection = new MuxConnection();
+  if (subscription) connection.subscribe({ topic: "canvas.layout" }, () => {});
   for (let i = 0; i < streams; i++) connection.openStream({ onSocketOpen() {}, onWelcome() {}, onFrame() {}, onDisconnected() { disconnects++; }, hasSession: () => true, onStatus() {} });
   sockets[0]!.onopen?.();
   sockets[0]!.receive(0, { type: "Welcome", connectionId: new Uint8Array(16), resumeToken: new Uint8Array(32), resumeWindowSeconds: 120 });
@@ -222,4 +223,10 @@ test("a queued healthy reply survives a 150ms browser event-loop stall", () => {
     expect(f.disconnects).toBe(0);
     expect(f.connection.isWelcomed).toBe(true);
   } finally { f.dispose(); }
+});
+
+
+test("a layout subscription starts the connection before any terminal exists", () => {
+  const f = fixture(30, 0, true);
+  try { expect(f.connection.isWelcomed).toBe(true); } finally { f.dispose(); }
 });
