@@ -281,10 +281,15 @@ pub struct RenderOptions {
 }
 
 impl RenderOptions {
-    /// Width comes from the terminal, then `$COLUMNS`, then 80. Colour is off outside a
-    /// terminal and with `NO_COLOR`; the state mark stays on a terminal.
+    /// Width comes from the terminal, then `$COLUMNS`, then 80.
+    ///
+    /// A dumb terminal (`TERM=dumb`, as in an editor's shell buffer) cannot show escapes or the
+    /// state marks, so it is treated like a pipe. Colour is also off when `NO_COLOR` is set to a
+    /// non-empty value; an empty one is ignored, which is what the convention says and what the
+    /// parser's own messages already do, so the two halves of the binary agree.
     #[must_use]
     pub fn detect(terminal: bool) -> Self {
+        let terminal = terminal && std::env::var_os("TERM").is_none_or(|term| term != "dumb");
         let width = infraternal_shim::stdout_columns()
             .map(usize::from)
             .or_else(|| {
@@ -295,7 +300,7 @@ impl RenderOptions {
             .unwrap_or(80);
         Self {
             terminal,
-            color: terminal && std::env::var_os("NO_COLOR").is_none(),
+            color: terminal && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty()),
             width,
         }
     }
