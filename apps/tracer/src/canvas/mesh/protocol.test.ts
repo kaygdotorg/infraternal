@@ -42,6 +42,23 @@ test("fields the server does not send are absent, never invented", () => {
   expect(parseSnapshot({ ...today, nodes: [{ ...today.nodes[0], os: "plan9" }, today.nodes[1]] })!.nodes[0]!.os).toBeUndefined();
 });
 
+// The server since #236: liveness from its own device (no stored observation, so `last_seen` is null), the path
+// while a session is up, and each machine under its own name. Owner report 2026-10-17: minipc01 passing traffic.
+const presence = {
+  revision: 4,
+  nodes: [
+    { node: { id: 1, public_key: Array.from({ length: 32 }, () => 1), host: "monitor01", tags: [] }, live: true, last_seen: null, last_rtt_us: null },
+    { node: { id: 3, public_key: Array.from({ length: 32 }, () => 3), host: "minipc01", tags: [] }, live: true, last_seen: null, last_rtt_us: null, path: "direct" },
+  ],
+  tags: [],
+  grants: [],
+};
+
+test("a node the server sees passing traffic is online, on its path, under its machine's name", () => {
+  const s = parseSnapshot(presence)!;
+  expect(s.nodes.map((n) => [n.name, n.state, n.path])).toEqual([["monitor01", "online", undefined], ["minipc01", "online", "direct"]]);
+});
+
 test("anything that is not a list is refused, whole", () => {
   for (const bad of [null, [], "x", {}, { ...today, revision: -1 }, { ...today, revision: 1.5 }, { ...today, nodes: "no" }, { ...today, nodes: [{ live: true }] }, { ...today, tags: [{ name: "", members: [] }] }]) expect(parseSnapshot(bad)).toBeUndefined();
   // Two nodes with one id would make an endpoint ambiguous.

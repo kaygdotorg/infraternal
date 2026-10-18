@@ -154,6 +154,60 @@ pub struct MeshNodePlugin {
     owner: Arc<Mutex<Owner>>,
     changed: AtomicBool,
     server_link: infraternal_plugin_api::server_path::ServerLink,
+    // The kernel dump behind the first `mesh.peers` page, reused by the pages that follow it (see `peer_page`).
+    dump: Option<(std::time::Instant, Counters)>,
+}
+type Counters =
+    std::collections::BTreeMap<crate::policy::model::PublicKey, crate::wireguard::Counters>;
+/// How long the following pages of one listing reuse the first page's kernel dump. A listing pages through in
+/// milliseconds; anything older is a new listing and reads the kernel again.
+const DUMP_REUSE: std::time::Duration = std::time::Duration::from_secs(2);
+/// One `mesh.peers` page: the peers after `cursor`, as many as fit one action frame.
+///
+/// Linear in the page: the cursor seeks the ordered peer map and each row's encoded size is added up once, rather
+/// than re-encoding the whole page after every row (#236, review: 54 pages at 1000 peers were ~30 ms per listing).
+fn peer_page(
+    config: Option<&crate::dataplane::Config>,
+    counters: &Counters,
+    cursor: Option<&Cursor>,
+    presence: bool,
+) -> Result<serde_json::Value, PluginError> {
+    use std::ops::Bound::{Excluded, Unbounded};
+    let mut peers = Vec::new();
+    let mut last = None;
+    let mut more = false;
+    if let Some(config) = config {
+        let from = cursor.map_or(Unbounded, |cursor| Excluded(cursor.node));
+        // `[` and `]`, plus a comma between rows.
+        let mut size = 1;
+        for (id, peer) in config.peers.range((from, Unbounded)) {
+            let stats = counters.get(&peer.peer.key).cloned().unwrap_or_default();
+            let value = if presence {
+                json!([
+                    id,
+                    stats.handshake_secs,
+                    stats.received_bytes,
+                    stats.persistent_keepalive_secs
+                ])
+            } else {
+                json!({"node":id,"peer":peer.peer,"inbound":policy_summary(&peer.inbound),"outbound":policy_summary(&peer.outbound),"counters":stats,"path":if stats.handshake_secs > 0 {"Direct"} else {"Unproven"}})
+            };
+            // Fit resource-bound pages by encoded bytes, not an arbitrary peer-count cap [214].
+            size += serde_json::to_vec(&value)
+                .map_err(|_| PluginError::Rejected)?
+                .len()
+                + 1;
+            if size > infraternal_plugin_api::MAX_ACTION_BYTES - 128 {
+                more = true;
+                break;
+            }
+            peers.push(value);
+            last = Some(*id);
+        }
+    }
+    Ok(
+        json!({"peers":peers,"version":config.map(|config|config.version),"next_cursor":if more {last.zip(config).map(|(node,config)|Cursor {version:config.version,node})} else {None}}),
+    )
 }
 impl MeshNodePlugin {
     /// Bind one process-owned component to its validated public-state directory.
@@ -166,6 +220,7 @@ impl MeshNodePlugin {
             })),
             changed: AtomicBool::new(false),
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
+            dump: None,
         }
     }
 }
@@ -178,6 +233,7 @@ impl Default for MeshNodePlugin {
             })),
             changed: AtomicBool::new(false),
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
+            dump: None,
         }
     }
 }
@@ -197,6 +253,11 @@ struct IdentityProbe {
 pub struct Page {
     #[serde(default)]
     cursor: Option<Cursor>,
+    /// Rows of counters only, `[node, handshake_secs, received_bytes, persistent_keepalive_secs]`, for the
+    /// server's presence poll (presence.rs). The server asks only its own node, which is always the same build,
+    /// so an older node never sees the field. A quarter of the bytes of a full row: fewer pages per poll.
+    #[serde(default)]
+    presence: bool,
 }
 #[derive(Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -347,40 +408,23 @@ impl AgentPlugin for MeshNodePlugin {
                 }) {
                     return Err(PluginError::Rejected);
                 }
-                let counters = if node.active() {
-                    crate::wireguard::Device::counters().map_err(|_| PluginError::Rejected)?
-                } else {
-                    std::collections::BTreeMap::default()
-                };
-                let mut peers = Vec::new();
-                let mut last = None;
-                let mut more = false;
-                if let Some(config) = node.config() {
-                    for (id, peer) in &config.peers {
-                        if page
-                            .cursor
-                            .as_ref()
-                            .is_some_and(|cursor| *id <= cursor.node)
-                        {
-                            continue;
-                        }
-                        let stats = counters.get(&peer.peer.key).cloned().unwrap_or_default();
-                        let value = json!({"node":id,"peer":peer.peer,"inbound":policy_summary(&peer.inbound),"outbound":policy_summary(&peer.outbound),"counters":stats,"path":if stats.handshake_secs > 0 {"Direct"} else {"Unproven"}});
-                        // Fit resource-bound pages by encoded bytes, not an arbitrary peer-count cap [214].
-                        peers.push(value);
-                        if serde_json::to_vec(&peers)
-                            .map_err(|_| PluginError::Rejected)?
-                            .len()
-                            > infraternal_plugin_api::MAX_ACTION_BYTES - 128
-                        {
-                            peers.pop();
-                            more = true;
-                            break;
-                        }
-                        last = Some(*id);
-                    }
+                // One kernel dump per listing: the first page reads the device, the pages after it reuse that
+                // reading, so a listing of N pages costs one dump, not N.
+                let reuse = page.cursor.is_some()
+                    && self
+                        .dump
+                        .as_ref()
+                        .is_some_and(|(at, _)| at.elapsed() < DUMP_REUSE);
+                if !reuse {
+                    let counters = if node.active() {
+                        crate::wireguard::Device::counters().map_err(|_| PluginError::Rejected)?
+                    } else {
+                        Counters::default()
+                    };
+                    self.dump = Some((std::time::Instant::now(), counters));
                 }
-                json!({"peers":peers,"version":node.config().map(|config|config.version),"next_cursor":if more {last.zip(node.config()).map(|(node,config)|Cursor {version:config.version,node})} else {None}})
+                let (_, counters) = self.dump.as_ref().ok_or(PluginError::Rejected)?;
+                peer_page(node.config(), counters, page.cursor.as_ref(), page.presence)?
             }
         };
         if matches!(action, "mesh.up" | "mesh.down") {
@@ -671,5 +715,164 @@ mod identity_upgrade_tests {
         assert!(legacy.get("compact_access").is_none());
         let negotiated = serde_json::json!(super::identity_response(Some(identity), true));
         assert_eq!(negotiated["compact_access"], true);
+    }
+}
+
+/// `mesh.peers` paging and its cost (#236).
+#[cfg(test)]
+mod peer_page_tests {
+    #![allow(clippy::expect_used)]
+    use super::{Counters, Cursor, peer_page};
+    fn peer_config(peers: u64) -> crate::dataplane::Config {
+        use crate::{
+            dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
+            policy::{
+                model::{Addresses, NodeId, PublicKey},
+                rules::TrafficPolicy,
+            },
+        };
+        let address = |id: u64| {
+            let id = u32::try_from(id).expect("fixture id");
+            Addresses {
+                ipv4: std::net::Ipv4Addr::from(0x0afe_0000 + id),
+                ipv6: std::net::Ipv6Addr::from((0xfd01_u128 << 112) + u128::from(id)),
+            }
+        };
+        Config {
+            local_key: None,
+            server: Some(NodeId(1)),
+            node: NodeId(1),
+            version: 4,
+            addresses: address(1),
+            default_policy: DefaultPolicy::Allow,
+            peers: (2..=peers + 1)
+                .map(|id| {
+                    let byte = u8::try_from(id % 251).expect("fixture key");
+                    (
+                        NodeId(id),
+                        PeerPolicy {
+                            peer: Peer {
+                                key: PublicKey([byte; 32]),
+                                addresses: address(id),
+                                endpoint: Some(std::net::SocketAddr::from((
+                                    [203, 0, 113, 7],
+                                    40_000,
+                                ))),
+                            },
+                            inbound: TrafficPolicy::All,
+                            outbound: TrafficPolicy::All,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+    fn page_through(
+        config: &crate::dataplane::Config,
+        counters: &Counters,
+        presence: bool,
+    ) -> Vec<serde_json::Value> {
+        let mut pages = Vec::new();
+        let mut cursor: Option<Cursor> = None;
+        loop {
+            let page = peer_page(Some(config), counters, cursor.as_ref(), presence).expect("page");
+            assert!(
+                serde_json::to_vec(&page).expect("encode").len()
+                    <= infraternal_plugin_api::MAX_ACTION_BYTES
+            );
+            cursor = serde_json::from_value(page["next_cursor"].clone()).expect("cursor");
+            pages.push(page);
+            if cursor.is_none() {
+                return pages;
+            }
+        }
+    }
+    /// Every peer is listed once, in order, and every page fits one action frame (#236).
+    #[test]
+    fn peer_pages_cover_every_peer_once_within_the_frame() {
+        let config = peer_config(500);
+        let pages = page_through(&config, &Counters::default(), false);
+        let listed: Vec<u64> = pages
+            .iter()
+            .flat_map(|page| page["peers"].as_array().expect("rows").clone())
+            .map(|row| row["node"].as_u64().expect("node"))
+            .collect();
+        assert_eq!(listed, (2..=501).collect::<Vec<_>>());
+        // The presence form lists the same peers as counter rows, in a fraction of the pages.
+        let compact = page_through(&config, &Counters::default(), true);
+        let listed: Vec<u64> = compact
+            .iter()
+            .flat_map(|page| page["peers"].as_array().expect("rows").clone())
+            .map(|row| row[0].as_u64().expect("node"))
+            .collect();
+        assert_eq!(listed, (2..=501).collect::<Vec<_>>());
+        assert!(
+            compact.len() * 3 < pages.len(),
+            "{} vs {}",
+            compact.len(),
+            pages.len()
+        );
+        assert!(pages.len() > 1);
+        // A full page is as full as a frame allows: one more row would not fit.
+        let first = serde_json::to_vec(&pages[0]["peers"])
+            .expect("encode")
+            .len();
+        assert!(
+            first > infraternal_plugin_api::MAX_ACTION_BYTES - 128 - 200,
+            "{first}"
+        );
+    }
+    /// Poll cost at scale, userspace only: every `mesh.peers` page the server's node builds for one poll, its
+    /// encoding and decoding across the action frame, and the server's `presence::read_peers` (#236). The kernel
+    /// dump is one per poll and measured separately. Run with
+    /// `cargo test -p infraternal-plugin-mesh --features agent --release --lib -- --ignored --nocapture poll_cost`.
+    #[cfg(feature = "server")]
+    #[test]
+    #[ignore = "measurement"]
+    fn poll_cost() {
+        for peers in [50_u64, 500, 1000] {
+            let config = peer_config(peers);
+            let counters: Counters = config
+                .peers
+                .values()
+                .map(|peer| {
+                    (
+                        peer.peer.key,
+                        crate::wireguard::Counters {
+                            persistent_keepalive_secs: 25,
+                            handshake_secs: 1_800_000_000,
+                            received_bytes: 925_000,
+                            sent_bytes: 925_000,
+                            #[cfg(feature = "test-support")]
+                            handshake_nanos: 0,
+                        },
+                    )
+                })
+                .collect();
+            let rounds = 50;
+            let started = std::time::Instant::now();
+            let mut pages = 0;
+            for _ in 0..rounds {
+                let mut rows = Vec::new();
+                let mut cursor: Option<Cursor> = None;
+                pages = 0;
+                loop {
+                    pages += 1;
+                    let page =
+                        peer_page(Some(&config), &counters, cursor.as_ref(), true).expect("page");
+                    let wire = serde_json::to_vec(&page).expect("encode");
+                    match crate::presence::read_peers(&wire, &mut rows).expect("decode") {
+                        Some(next) => cursor = Some(serde_json::from_value(next).expect("cursor")),
+                        None => break,
+                    }
+                }
+                assert_eq!(rows.len(), config.peers.len());
+            }
+            let per_poll = started.elapsed() / rounds;
+            println!(
+                "peers={peers} pages={pages} per_poll={per_poll:?} cpu_share_at_5s={:.3}%",
+                per_poll.as_secs_f64() / 5.0 * 100.0
+            );
+        }
     }
 }

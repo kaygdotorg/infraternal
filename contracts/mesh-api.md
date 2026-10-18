@@ -18,7 +18,7 @@ uses `Result { ok: true }` with the listed JSON value. A failure uses
 | `mesh.list` | `MeshFilter` | `MeshSnapshot` | Any assigned Mesh management action grants view access, subject to its tag scopes. |
 | `mesh.node.enroll` | `{"name":string,"public_key":[u8;32],"host_id"?:string}` | `{"node_id":u64,"revision":u64}` | Global `mesh.manage_nodes` |
 | `mesh.node.observe` | `{"node_id":u64,"last_rtt_us"?:u64\|null}` | `{"revision":u64}` | `mesh.manage_nodes` covering every current node tag |
-| `mesh.node.rename` | `{"node_id":u64,"name":string}` | `{"revision":u64}` | `mesh.manage_nodes` covering every current node tag |
+| `mesh.node.rename` | `{"node_id":u64,"name":string}` | `{"revision":u64}` | Global `mesh.manage_nodes` |
 | `mesh.node.delete` | `{"node_id":u64}` | `{"revision":u64}` | `mesh.manage_nodes` covering every current node tag |
 | `mesh.tag.create` | `{"name":string}` | `{"revision":u64}` | `mesh.manage_tags` |
 | `mesh.tag.rename` | `{"name":string,"new_name":string}` | `{"revision":u64}` | `mesh.manage_tags` |
@@ -103,8 +103,14 @@ means instance-wide authority. Explicit `scopes: null` is refused as `invalid
 input` before any role, revision or audit is committed; it never becomes global
 authority. A role granting
 `mesh.manage_roles` is global and cannot have tag scopes. Node enrollment and
-role management are global actions; node observation, rename and delete can
-use `mesh.manage_nodes` scoped to tags. A scoped node edit must cover every
+node rename and role management are global actions; node observation and delete
+can use `mesh.manage_nodes` scoped to tags. Node names occupy one globally unique
+namespace. Rename checks global authority before looking up any name, so callers
+without it receive `denied` for both a hidden occupied name and an unused name
+(#236). Global node managers may move automatic name holders aside, including
+reported hostnames hidden in their inventory view; hand-chosen names still
+conflict. A scoped role, even combined with global authority for a different
+action, cannot rename nodes. A scoped node edit must cover every
 current node membership; an untagged node requires a global node-management
 role. Tag membership changes require `mesh.manage_tags` on the destination
 tag and every current node membership; untagged hosts require global access.
