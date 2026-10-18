@@ -827,7 +827,7 @@ fn install_server(
             if install_args.dry_run {
                 data["plan"] = json!(plan);
             }
-            let result = CommandResult::new(
+            let mut result = CommandResult::new(
                 command,
                 CommandState::Ready,
                 if install_args.dry_run {
@@ -842,6 +842,11 @@ fn install_server(
             } else {
                 "infraternal status"
             });
+            if install_args.dry_run {
+                // The unit file is data for a person to read and copy: the generic renderer
+                // would reflow its lines into prose and break it.
+                result = result.with_body(plan);
+            }
             print_result(&result, json_output, false);
             ExitCode::SUCCESS
         }
