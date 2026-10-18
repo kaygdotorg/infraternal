@@ -16,7 +16,6 @@ use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
 const A: &str = "00000000-0000-4000-8000-00000000000a";
 const B: &str = "00000000-0000-4000-8000-00000000000b";
 const C: &str = "00000000-0000-4000-8000-00000000000c";
-const D: &str = "00000000-0000-4000-8000-00000000000d";
 const NOW: i64 = 1_800_000_000;
 
 async fn memory() -> SqlitePool {
