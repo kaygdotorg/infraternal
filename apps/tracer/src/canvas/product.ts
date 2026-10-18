@@ -11,7 +11,7 @@
  * sees it at once, loading, so its pinned nodes are kept in the document while the snapshot is on its way.
  * This module is a lazy chunk, loaded after sign-in and never on the sign-in path.
  */
-import { onDemand } from "../on-demand";
+import { onDemand, whenIdle } from "../on-demand";
 import { ensureHostMarks, hostPlatformFromOs, type HostPlatform } from "../../../../packages/ui/src/host-icons";
 import { ConnectionPool, MuxConnection } from "../connection";
 import { isCanonicalUuid } from "../identifiers";
@@ -28,7 +28,6 @@ import { CELL, boxOf } from "./layout/geometry";
 import { columnsFromDocument, docHasGroups, type DocTarget } from "./model/document";
 import { loadGroups } from "./layout/groups-handle";
 import { ServerCanvasStore } from "./model/server-store";
-import { reconcile } from "./model/reconcile";
 import type { ViewModel, WindowModel } from "./model/types";
 import { createLazyMeshApi } from "./mesh/lazy";
 import { connectionTransport } from "./mesh/transport";
@@ -187,14 +186,16 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     for (const h of hosts) canvas.cx.win.setHostIdentity({ host: h.name, hostId: h.id }, { ...(h.os ? { os: h.os } : {}), user: h.user });
   };
   const resolve = (target: DocTarget): Partial<WindowModel> | undefined => {
-      if (target.type !== "session") return undefined;
-      if (target.hostId) {
-        sessions.registerHost({ id: target.hostId, name: target.host, ...(target.user ? { user: target.user } : {}), ...(target.address ? { address: target.address } : {}) });
-        return { host: target.host, hostId: target.hostId, sessionId: target.id, ...(target.name ? { session: target.name } : {}), ...(target.user ? { user: target.user } : {}), ...(target.address ? { address: target.address } : {}) };
-      }
-      // Historical documents represent only the embedded host. Unknown labels are never rebound locally.
-      return target.host === options.host.name ? { host: options.host.name, sessionId: target.id, ...(target.name ? { session: target.name } : {}), ...(embedded.user ? { user: embedded.user } : {}), ...(embedded.os ? { os: embedded.os } : {}) } : undefined;
-    };
+    if (target.type !== "session") return undefined;
+    const reference = { host: target.host, sessionId: target.id, ...(target.name ? { session: target.name } : {}) };
+    if (target.hostId) {
+      const identity = { ...(target.user ? { user: target.user } : {}), ...(target.address ? { address: target.address } : {}) };
+      sessions.registerHost({ id: target.hostId, name: target.host, ...identity });
+      return { ...reference, hostId: target.hostId, ...identity };
+    }
+    // Historical references can select the known embedded host only.
+    return target.host === options.host.name ? { ...reference, ...(embedded.user ? { user: embedded.user } : {}), ...(embedded.os ? { os: embedded.os } : {}) } : undefined;
+  };
   canvas.setViews((m) => {
     const doc = saved?.views.find((v) => v.id === "console");
     let cols = doc && doc.layout.type === "tiled" ? columnsFromDocument(doc.layout, m, resolve) : [];
@@ -208,6 +209,12 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     }));
     return [console_, ...recovered, settings];
   });
+  // The Mesh view follows the server's answer (D187).
+  const offMeshView = offerMeshView(canvas.cx, mesh, { keep: Boolean(savedMesh) });
+  if (savedMesh) {
+    const view = canvas.cx.views.get("mesh");
+    if (view) { view.view.x = savedMesh.cell.x * CELL; view.view.y = savedMesh.cell.y * CELL; view.sx.set(view.view.x, true); view.sy.set(view.view.y, true); }
+  }
   // Capture initial structure once; subsequent server paints reset the comparison baseline.
   if (saved) canvas.cx.store.reset(); else canvas.cx.store.changed();
   let paintRevision = 0;
@@ -217,7 +224,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     const protectedIds = canvas.cx.store.uncommittedWindows();
     const document = store.current();
     const revision = ++paintRevision;
-    void reconcile(canvas.cx, document, resolve, () => !disposed && revision === paintRevision, protectedIds).then(() => {
+    void onDemand(() => import("./model/reconcile.on-demand")).then(({ reconcile }) => reconcile(canvas.cx, document, resolve, () => !disposed && revision === paintRevision, protectedIds)).then(() => {
       if (disposed || revision !== paintRevision) return;
       canvas.cx.store.reset(protectedIds);
       if (protectedIds.size) canvas.cx.store.changed();
@@ -225,10 +232,9 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     });
   });
   if (saved) inventory.setLayout(saved);
-  // The Mesh view follows the server's answer (D187).
-  const offMeshView = offerMeshView(canvas.cx, mesh, { keep: Boolean(savedMesh) });
   canvas.cx.nav.flyView("console", true);
   canvasReady();
+  whenIdle(() => { if (!disposed) { store.prepare(); void onDemand(() => import("./model/reconcile.on-demand")).catch(() => undefined); } });
   const first = [...(canvas.cx.views.get("console")?.wins.values() ?? [])][0];
   if (first) canvas.cx.win.setActive(first);
   // Neither inventory code nor its RPC competes with the first terminal frame.
