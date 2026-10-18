@@ -521,6 +521,9 @@ async fn run_socket(
     let mut loop_result = Ok(());
     let mut teardown_reason = crate::stream_close::SERVER_PROCESSING_FAILED;
     let mut close_already_logged = false;
+    // Set when teardown already read the session's authority, so the 1011 Close below reuses that
+    // answer instead of reading a second time (#227).
+    let mut session_live_at_teardown = None;
     loop {
         transport.active(!attachments.is_empty());
         tokio::select! {
@@ -749,7 +752,10 @@ async fn run_socket(
             // These exits are guarded work that failed with the transport still
             // open: its authority read, or the work itself. One bounded read tells
             // a refusal and a busy server from a real failure.
-            failure_reason(&state, &user_id, &session_token, teardown_reason).await
+            let (reason, live) =
+                failure_reason(&state, &user_id, &session_token, teardown_reason).await;
+            session_live_at_teardown = Some(live);
+            reason
         } else {
             teardown_reason
         };
@@ -757,7 +763,12 @@ async fn run_socket(
         record_socket_close(&state, &attachments, CloseWho::Server, reason, None, None);
     }
     drop(attachments);
-    if loop_result.is_err() && session_is_live(&state, &user_id, &session_token).await {
+    if loop_result.is_err()
+        && match session_live_at_teardown {
+            Some(live) => live,
+            None => session_is_live(&state, &user_id, &session_token).await,
+        }
+    {
         let _ = tokio::time::timeout(
             CLOSE_TIMEOUT,
             send_frame(
@@ -2121,27 +2132,28 @@ fn record_control_close(
     }
 }
 
-/// Why a socket ends after guarded work failed with the transport open. One
-/// non-renewing read decides: a refused session is a refusal; a read that misses its
-/// bound or cannot reach storage means the server was busy, never that the browser
-/// misbehaved; only while the session reads live is the caller's `live` reason true (#227).
+/// Why a socket ends after guarded work failed with the transport open, and whether the session still
+/// reads live. One non-renewing read decides both: a refused session is a refusal; a read that misses
+/// its bound or cannot reach storage means the server was busy, never that the browser misbehaved; only
+/// while the session reads live is the caller's `live` reason true (#227). Teardown reuses the liveness
+/// for the 1011 Close, so a failed exit costs one authority read, not two.
 async fn failure_reason(
     state: &WebSocketState,
     user_id: &str,
     token: &str,
     live: CloseReason,
-) -> CloseReason {
+) -> (CloseReason, bool) {
     let Ok(now) = unix_seconds() else {
-        return AUTHORITY_UNAVAILABLE;
+        return (AUTHORITY_UNAVAILABLE, false);
     };
     #[cfg(test)]
     let read_timeout = state.authority_read_timeout;
     #[cfg(not(test))]
     let read_timeout = AUTHORITY_READ_TIMEOUT;
     match tokio::time::timeout(read_timeout, state.auth.live_expiry(token, user_id, now)).await {
-        Ok(Ok(_)) => live,
-        Ok(Err(crate::auth::Error::Denied)) => RESUME_REFUSED,
-        Ok(Err(_)) | Err(_) => AUTHORITY_UNAVAILABLE,
+        Ok(Ok(_)) => (live, true),
+        Ok(Err(crate::auth::Error::Denied)) => (RESUME_REFUSED, false),
+        Ok(Err(_)) | Err(_) => (AUTHORITY_UNAVAILABLE, false),
     }
 }
 
