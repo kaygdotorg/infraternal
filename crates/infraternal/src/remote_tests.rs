@@ -395,3 +395,94 @@ async fn join_refuses_the_same_host_id_from_another_server() {
     );
     assert_eq!(std::fs::read(data.join("identity.json")).unwrap(), bytes);
 }
+
+/// The same server may move (#230): a changed endpoint alone does not refuse
+/// re-enrollment, while a different server name does.
+#[tokio::test]
+async fn join_re_enrolls_for_a_moved_server_but_not_a_renamed_one() {
+    let directory = Directory::new();
+    let data = directory.0.join("data");
+    let key = PKey::generate_ed25519().unwrap();
+    let ca = self_signed(&key);
+    let host_id = uuid::Uuid::new_v4();
+    let uid = nix::unistd::Uid::effective().as_raw();
+    let stored = StoredIdentity {
+        host_id,
+        execution_uid: uid,
+        endpoint: "127.0.0.1:7443".parse().unwrap(),
+        server_name: "localhost".into(),
+        ca_der: B64.encode(ca.to_der().unwrap()),
+        certificate_der: B64.encode(ca.to_der().unwrap()),
+        key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    publish(&data, &bytes).unwrap();
+    let invitation = |server_name: &str| {
+        serde_json::to_vec(&JoinInvitation {
+            host_id,
+            mode: if uid == 0 {
+                Mode::Rootful
+            } else {
+                Mode::Rootless
+            },
+            execution_uid: uid,
+            token: "public fixture token".into(),
+            ca_der: stored.ca_der.clone(),
+            https_der: None,
+            https_system_roots: false,
+            endpoint: "127.0.0.2:8443".parse().unwrap(),
+            server_name: server_name.into(),
+        })
+        .unwrap()
+    };
+    let url = "https://infraternal-fixture-no-such-host.invalid/remote/join";
+    let error = join(url, &data, &invitation("localhost"))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().starts_with("Join DNS lookup failed"),
+        "{error}"
+    );
+    let error = join(url, &data, &invitation("renamed.invalid"))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "remote infraternal agent operation refused"
+    );
+    assert_eq!(std::fs::read(data.join("identity.json")).unwrap(), bytes);
+}
+
+/// A re-enrollment never overwrites an identity that changed after its key
+/// was read (#230): another join or a renewal published in between wins.
+#[test]
+fn replace_aborts_when_the_identity_changed_since_it_was_read() {
+    let directory = Directory::new();
+    let data = directory.0.join("data");
+    let key = PKey::generate_ed25519().unwrap();
+    let ca = self_signed(&key);
+    let mut stored = StoredIdentity {
+        host_id: uuid::Uuid::new_v4(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+        endpoint: "127.0.0.1:7443".parse().unwrap(),
+        server_name: "localhost".into(),
+        ca_der: B64.encode(ca.to_der().unwrap()),
+        certificate_der: B64.encode(ca.to_der().unwrap()),
+        key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+    };
+    publish(&data, &serde_json::to_vec(&stored).unwrap()).unwrap();
+    let (_, snapshot) = load_snapshot(&data).unwrap();
+    stored.endpoint = "127.0.0.3:7443".parse().unwrap();
+    let renewed = serde_json::to_vec(&stored).unwrap();
+    replace(&data, &renewed, None).unwrap();
+    assert_eq!(
+        replace(&data, b"stale re-enrollment", Some(&snapshot))
+            .unwrap_err()
+            .to_string(),
+        "remote infraternal agent operation refused"
+    );
+    assert_eq!(std::fs::read(data.join("identity.json")).unwrap(), renewed);
+    assert_eq!(std::fs::read_dir(&data).unwrap().count(), 1);
+    let (_, current) = load_snapshot(&data).unwrap();
+    replace(&data, &renewed, Some(&current)).unwrap();
+}

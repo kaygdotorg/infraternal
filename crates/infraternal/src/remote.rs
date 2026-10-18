@@ -58,13 +58,13 @@ pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()>
     }
     // The host key is immutable (#78): SSH setup copies an enrolled identity
     // into its transaction before joining, and a published-setup Retry joins
-    // the same host again (#87, #230). Re-enroll that host's own key; an
-    // identity for another host or uid is refused before any network use.
-    let previous = enrolled_key(data, invitation.host_id, uid)?;
-    let reenroll = previous.is_some();
-    let key = match previous {
-        Some(key) => key,
-        None => PKey::generate_ed25519().map_err(|_| refused())?,
+    // the same host again (#87, #230). Re-enroll that host's own key only for
+    // the server that enrolled it; anything else is refused before any
+    // network use, so this key's CSR never reaches another server.
+    let previous = enrolled_key(data, &invitation, uid)?;
+    let (key, snapshot) = match previous {
+        Some((key, snapshot)) => (key, Some(snapshot)),
+        None => (PKey::generate_ed25519().map_err(|_| refused())?, None),
     };
     let mut csr = X509Req::builder().map_err(|_| refused())?;
     csr.set_subject_name(&X509NameBuilder::new().map_err(|_| refused())?.build())
@@ -115,21 +115,7 @@ pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()>
     {
         return Err(refused());
     }
-    let mut trust = X509StoreBuilder::new().map_err(|_| refused())?;
-    trust.add_cert(root).map_err(|_| refused())?;
-    let mut parameters = openssl::x509::verify::X509VerifyParam::new().map_err(|_| refused())?;
-    parameters
-        .set_purpose(openssl::x509::X509PurposeId::SSL_CLIENT)
-        .map_err(|_| refused())?;
-    trust.set_param(&parameters).map_err(|_| refused())?;
-    let chain = openssl::stack::Stack::new().map_err(|_| refused())?;
-    if !X509StoreContext::new()
-        .map_err(|_| refused())?
-        .init(&trust.build(), &certificate, &chain, |ctx| {
-            ctx.verify_cert()
-        })
-        .map_err(|_| refused())?
-    {
+    if !chains_to(&certificate, root)? {
         return Err(refused());
     }
     let stored = StoredIdentity {
@@ -142,32 +128,66 @@ pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()>
         key_der: B64.encode(key.private_key_to_pkcs8().map_err(|_| refused())?),
     };
     let bytes = serde_json::to_vec(&stored).map_err(|_| refused())?;
-    if reenroll {
-        replace(data, &bytes)
-    } else {
-        publish(data, &bytes)
+    match snapshot {
+        Some(snapshot) => replace(data, &bytes, Some(&snapshot)),
+        None => publish(data, &bytes),
     }
 }
 
-/// Return the key of an identity already enrolled for exactly this host and uid.
+/// Verify `certificate` as a client certificate issued under `root` alone.
+fn chains_to(certificate: &X509, root: X509) -> io::Result<bool> {
+    let mut trust = X509StoreBuilder::new().map_err(|_| refused())?;
+    trust.add_cert(root).map_err(|_| refused())?;
+    let mut parameters = openssl::x509::verify::X509VerifyParam::new().map_err(|_| refused())?;
+    parameters
+        .set_purpose(openssl::x509::X509PurposeId::SSL_CLIENT)
+        .map_err(|_| refused())?;
+    trust.set_param(&parameters).map_err(|_| refused())?;
+    let chain = openssl::stack::Stack::new().map_err(|_| refused())?;
+    X509StoreContext::new()
+        .map_err(|_| refused())?
+        .init(&trust.build(), certificate, &chain, |ctx| ctx.verify_cert())
+        .map_err(|_| refused())
+}
+
+/// Return the key of an identity this invitation may re-enroll, and the file
+/// it was read from.
+///
+/// The host id alone does not name a host: a cloned server database or any
+/// other server can issue the same id (#230). Only the server that enrolled
+/// the identity may re-enroll it: same host id, uid and server name, and the
+/// invitation's CA is the stored one or issued the stored certificate. The
+/// endpoint may change (a server moved to another address).
 fn enrolled_key(
     data: &Path,
-    host: uuid::Uuid,
+    invitation: &JoinInvitation,
     uid: u32,
-) -> io::Result<Option<PKey<openssl::pkey::Private>>> {
+) -> io::Result<Option<(PKey<openssl::pkey::Private>, Snapshot)>> {
     prepare_directory(data)?;
     match std::fs::symlink_metadata(data.join("identity.json")) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(refused()),
         Ok(_) => {}
     }
-    let stored = load(data)?;
-    if stored.host_id != host || stored.execution_uid != uid {
+    let (stored, snapshot) = load_snapshot(data)?;
+    if stored.host_id != invitation.host_id
+        || stored.execution_uid != uid
+        || stored.server_name != invitation.server_name
+    {
         return Err(refused());
     }
-    PKey::private_key_from_pkcs8(&B64.decode(&stored.key_der).map_err(|_| refused())?)
-        .map(Some)
-        .map_err(|_| refused())
+    let der = |value: &str| B64.decode(value).map_err(|_| refused());
+    let stored_ca = der(&stored.ca_der)?;
+    let invited_ca = der(&invitation.ca_der)?;
+    if stored_ca != invited_ca {
+        let certificate = X509::from_der(&der(&stored.certificate_der)?).map_err(|_| refused())?;
+        let root = X509::from_der(&invited_ca).map_err(|_| refused())?;
+        if !chains_to(&certificate, root)? {
+            return Err(refused());
+        }
+    }
+    let key = PKey::private_key_from_pkcs8(&der(&stored.key_der)?).map_err(|_| refused())?;
+    Ok(Some((key, snapshot)))
 }
 
 /// DNS is its own boundary: retain only known public resolver diagnostics.
@@ -357,7 +377,20 @@ fn publish(data: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// Read the private identity, refusing links, shared files and oversized input.
+/// The identity file a join or renewal read: its inode and exact bytes.
+/// A replace aborts unless identity.json is still this file, so a concurrent
+/// enrollment or renewal is never overwritten with a stale identity.
+struct Snapshot {
+    device: u64,
+    inode: u64,
+    bytes: Vec<u8>,
+}
+
 fn load(data: &Path) -> io::Result<StoredIdentity> {
+    load_snapshot(data).map(|(stored, _)| stored)
+}
+
+fn load_snapshot(data: &Path) -> io::Result<(StoredIdentity, Snapshot)> {
     use std::{
         io::Read,
         os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
@@ -379,7 +412,13 @@ fn load(data: &Path) -> io::Result<StoredIdentity> {
     if bytes.len() > 8192 {
         return Err(refused());
     }
-    serde_json::from_slice(&bytes).map_err(|_| refused())
+    let stored = serde_json::from_slice(&bytes).map_err(|_| refused())?;
+    let snapshot = Snapshot {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        bytes,
+    };
+    Ok((stored, snapshot))
 }
 
 pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
@@ -431,12 +470,17 @@ impl infraternal_agent::remote_renewal::CertificatePublisher for IdentityPublish
         replace(
             &self.data,
             &serde_json::to_vec(&stored).map_err(|_| refused())?,
+            None,
         )
     }
 }
 
 /// Atomically replace an existing private identity; never create one or follow a link.
-fn replace(data: &Path, bytes: &[u8]) -> io::Result<()> {
+///
+/// With `expected`, identity.json must still be that file (same inode and
+/// bytes) just before the rename; otherwise nothing is replaced. The window
+/// left between this check and the rename is a few syscalls.
+fn replace(data: &Path, bytes: &[u8], expected: Option<&Snapshot>) -> io::Result<()> {
     use std::{
         io::Write,
         os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
@@ -463,6 +507,15 @@ fn replace(data: &Path, bytes: &[u8]) -> io::Result<()> {
             .open(&pending)?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        if let Some(expected) = expected {
+            let (_, now) = load_snapshot(data)?;
+            if now.device != expected.device
+                || now.inode != expected.inode
+                || now.bytes != expected.bytes
+            {
+                return Err(refused());
+            }
+        }
         std::fs::rename(&pending, data.join("identity.json"))?;
         std::fs::File::open(data)?.sync_all()
     })();
