@@ -6,12 +6,26 @@
 //! `mesh.peers`. This module reads them on the server and keeps the answer in memory:
 //!
 //! - **The server node is online while its own Mesh component is On.** It is the machine answering the request.
-//! - **A peer is online, on a direct path, while its session is live and it is still sending.** `WireGuard` discards
-//!   a session [`SESSION_SECS`] after its handshake, so an older handshake (or none) is offline. Within the
-//!   session, a peer with a persistent keepalive sends at least once per keepalive interval; when its received
-//!   bytes stop moving for [`quiet_secs`] (two intervals plus one poll), it is gone. With 25 s keepalives a dead
-//!   peer reads offline after at most ~55–60 s instead of up to 180 s. Two intervals, not one: a single lost
-//!   keepalive datagram must not flash a healthy node offline.
+//! - **A peer is online, on a direct path, while its session is live.** The proof is the peer's last handshake,
+//!   timed against how `WireGuard` really rekeys, never against the peer's own sending habits:
+//!   - `WireGuard` discards a session [`SESSION_SECS`] after its handshake, so an older handshake (or none) is
+//!     offline.
+//!   - The server's own peer entry sends at least once per keepalive, and a session's initiator starts a new
+//!     handshake on its first send after [`REKEY_AFTER_SECS`]. So a live peer answers a rekey within
+//!     [`handshake_window`] (120 s + keepalive + one lost-and-retried initiation: 155 s at 25 s) whether or not it
+//!     sends anything itself. A handshake older than that means the peer stopped answering.
+//!   - Bytes received from the peer within [`quiet_secs`] also prove the session, for the stretch where the peer
+//!     started the session and rekeys it itself (up to the session window).
+//!
+//!   Silence alone never reads offline: a remote without a keepalive of its own (an infraternal agent from before
+//!   #129, or any peer configured without one) sends nothing on an idle link but its handshake responses, and is
+//!   alive. A dead peer therefore reads offline when its handshake runs out of the window: 10–155 s after it died,
+//!   depending on where in its rekey cycle that was, plus at most one poll. Faster detection would need a signal
+//!   that tells a quiet live peer from a dead one, and byte counters cannot.
+//!
+//!   One gap remains for a peer that sends nothing and started the session itself (it sent traffic, then went
+//!   idle): the server, as responder, does not rekey at 120 s, so that one session can read offline from 155 s
+//!   until the peer rekeys on the server's next keepalive after 165 s (or the server does once the session ends).
 //! - **Every reading has an age limit.** When the server's own node stops answering, the last reading counts for
 //!   at most [`STALE`] and is then dropped: nodes read offline, never frozen online. Within that limit the session
 //!   and quiet rules above still apply to the age of the data at every poll.
@@ -41,6 +55,10 @@ use std::{
 
 /// `WireGuard`'s reject-after time: a session this old carries no packets.
 pub const SESSION_SECS: u64 = 180;
+/// `WireGuard`'s rekey-after time: a session's initiator starts a new handshake on its first send after this.
+pub const REKEY_AFTER_SECS: u64 = 120;
+/// `WireGuard`'s retry interval for a handshake initiation that got no answer.
+pub const REKEY_TIMEOUT_SECS: u64 = 5;
 /// How often the server reads its own peer table.
 pub const POLL: Duration = Duration::from_secs(5);
 /// How long a reading counts once the server's node stops answering: two missed polls, then offline.
@@ -48,11 +66,26 @@ pub const STALE: Duration = Duration::from_secs(15);
 /// The most `mesh.peers` pages one poll follows; a page is up to one action frame of peers.
 const MAX_PAGES: usize = 1024;
 
-/// How long a peer with `keepalive` may send nothing before it reads offline: two keepalive intervals and one poll.
-/// `None` without a keepalive, when silence is normal and only the session window applies.
+/// How old a live peer's handshake can get when the server's peer entry sends a keepalive every `keepalive`
+/// seconds: the server's next send after [`REKEY_AFTER_SECS`] comes at most one keepalive later and starts a
+/// rekey; one lost initiation is retried [`REKEY_TIMEOUT_SECS`] later, and one more interval covers the answer's
+/// trip. Without a keepalive nothing forces a rekey, and only the session window applies.
 #[must_use]
-pub fn quiet_secs(keepalive: u64) -> Option<u64> {
-    (keepalive > 0).then(|| 2 * keepalive + POLL.as_secs())
+pub fn handshake_window(keepalive: u64) -> u64 {
+    if keepalive == 0 {
+        return SESSION_SECS;
+    }
+    REKEY_AFTER_SECS
+        .saturating_add(keepalive)
+        .saturating_add(2 * REKEY_TIMEOUT_SECS)
+        .min(SESSION_SECS)
+}
+
+/// For how long bytes received from a peer prove its session: two of the server's keepalive intervals and one poll
+/// (at least two polls without a keepalive). Only ever a reason to read online, never offline.
+#[must_use]
+pub fn quiet_secs(keepalive: u64) -> u64 {
+    2 * keepalive.max(POLL.as_secs()) + POLL.as_secs()
 }
 
 /// How packets reach a node from the server, when it is known.
@@ -213,10 +246,11 @@ impl Tracker {
         for (node, seen) in &self.peers {
             let handshake = seen.row.handshake;
             // A clock far in the future must not keep a node online forever either.
-            let in_session = handshake > 0 && now.abs_diff(handshake) <= SESSION_SECS;
-            let sending = quiet_secs(seen.row.keepalive)
-                .is_none_or(|quiet| now.saturating_sub(seen.moved_at) <= quiet);
-            if in_session && sending {
+            let age = now.abs_diff(handshake);
+            let in_session = handshake > 0 && age <= SESSION_SECS;
+            let answering = age <= handshake_window(seen.row.keepalive);
+            let sending = now.saturating_sub(seen.moved_at) <= quiet_secs(seen.row.keepalive);
+            if in_session && (answering || sending) {
                 live.insert(*node, Some(NodePath::Direct));
             }
         }
@@ -322,25 +356,41 @@ mod tests {
         );
     }
 
-    /// A peer that stops sending reads offline two keepalives and one poll later, not when its session ends.
+    /// A dead peer reads offline once its handshake is older than a live session's rekey allows, even though its
+    /// session window has not ended; a quiet live peer whose handshake is fresh stays online.
     #[test]
-    fn a_peer_that_stops_sending_is_offline_before_its_session_ends() {
-        let mut tracker = tracked(vec![row(3, NOW - 10, 100, 25)]);
-        let quiet = quiet_secs(25).unwrap();
-        assert_eq!(quiet, 55);
-        // Still sending: online.
-        tracker.record(Some((true, vec![row(3, NOW - 10, 200, 25)])), NOW + 30);
-        assert!(tracker.live(None, NOW + 30).contains_key(&NodeId(3)));
-        // Silent from NOW + 30 on: online through the quiet window, offline after it.
-        for at in (35..=30 + quiet).step_by(5) {
-            tracker.record(Some((true, vec![row(3, NOW - 10, 200, 25)])), NOW + at);
+    fn a_peer_that_stops_answering_rekeys_is_offline_before_its_session_ends() {
+        let window = handshake_window(25);
+        assert_eq!(window, 155);
+        assert_eq!(handshake_window(0), SESSION_SECS);
+        // Nothing received since the handshake: online through the rekey window.
+        let mut tracker = tracked(vec![row(3, NOW, 100, 25)]);
+        for at in (5..=window).step_by(5) {
+            tracker.record(Some((true, vec![row(3, NOW, 100, 25)])), NOW + at);
             assert!(
                 tracker.live(None, NOW + at).contains_key(&NodeId(3)),
                 "{at}"
             );
         }
-        let at = NOW + 30 + quiet + 5;
-        tracker.record(Some((true, vec![row(3, NOW - 10, 200, 25)])), at);
+        let at = NOW + window + 5;
+        tracker.record(Some((true, vec![row(3, NOW, 100, 25)])), at);
+        assert!(tracker.live(None, at).is_empty());
+    }
+
+    /// Bytes still arriving keep a peer online past the rekey window (it started the session and rekeys it
+    /// itself), but never past the session window.
+    #[test]
+    fn traffic_proves_a_session_until_it_ends() {
+        let mut tracker = tracked(vec![row(3, NOW, 0, 25)]);
+        for at in (5..=SESSION_SECS).step_by(5) {
+            tracker.record(Some((true, vec![row(3, NOW, at, 25)])), NOW + at);
+            assert!(
+                tracker.live(None, NOW + at).contains_key(&NodeId(3)),
+                "{at}"
+            );
+        }
+        let at = NOW + SESSION_SECS + 5;
+        tracker.record(Some((true, vec![row(3, NOW, at, 25)])), at);
         assert!(tracker.live(None, at).is_empty());
     }
 
