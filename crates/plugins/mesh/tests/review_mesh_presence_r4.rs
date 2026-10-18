@@ -69,3 +69,24 @@ fn a_passive_keepalive_does_not_turn_later_silence_into_a_false_offline() {
         "one passive reply poisoned later sessions: {offline:?}"
     );
 }
+
+/// Recreating a kernel peer resets its counters and handshake while keeping the inventory node ID. A
+/// sending habit from the removed peer must not survive into the fresh peer's quiet live session.
+#[test]
+fn a_counter_reset_discards_the_previous_peers_keepalive_classification() {
+    let mut tracker = Tracker::default();
+    assert!(record(&mut tracker, 0, START, 1_000));
+    assert!(record(&mut tracker, 25, START, 1_032));
+    assert!(!record(&mut tracker, 30, 0, 0));
+    assert!(record(&mut tracker, 35, START + 35, 180));
+    let mut offline = Vec::new();
+    for at in (40..=155).step_by(5) {
+        if !record(&mut tracker, at, START + 35, 180) {
+            offline.push(at);
+        }
+    }
+    assert!(
+        offline.is_empty(),
+        "a recreated peer inherited the removed peer's habit: {offline:?}"
+    );
+}
