@@ -1535,23 +1535,40 @@ async fn resume_connection(
         .bind(connection_id.as_slice())
         .execute(&mut *transaction)
         .await?;
-    require_socket_authority_tx(&mut transaction, user_id, authority).await?;
+    require_socket_authority_tx(&mut transaction, user_id, authority)
+        .await
+        .inspect_err(|_| log_resume_refusal("session_authority"))?;
     let row = sqlx::query("SELECT token_hash,expires_at FROM websocket_connections WHERE connection_id=? AND user_id=? AND active=0 AND expires_at>=?")
         .bind(connection_id.as_slice())
         .bind(user_id)
         .bind(now)
         .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or_else(|| sqlx::Error::Protocol("resume rejected".into()))?;
+        .await?;
+    let Some(row) = row else {
+        // Diagnose only fixed state categories, inside the existing writer lock.
+        // Never read or print capability bytes for diagnostics; ownership remains
+        // enforced by the original admission query above.
+        let check: Option<String> = sqlx::query_scalar("SELECT CASE WHEN user_id != ? THEN 'connection_owner' WHEN active != 0 THEN 'connection_active' WHEN expires_at < ? THEN 'resume_expired' ELSE 'connection_state' END FROM websocket_connections WHERE connection_id=?")
+            .bind(user_id).bind(now).bind(connection_id.as_slice())
+            .fetch_optional(&mut *transaction).await?;
+        let check = match check.as_deref() {
+            Some("connection_owner") => "connection_owner",
+            Some("connection_active") => "connection_active",
+            Some("resume_expired") => "resume_expired",
+            Some(_) => "connection_state",
+            None => "connection_missing",
+        };
+        return Err(resume_refused(check));
+    };
     let stored: Vec<u8> = row.get("token_hash");
     let previous_expiry: i64 = row.get("expires_at");
     let requested_hash = token_hash(&token);
     if stored.len() != 32 || !openssl::memcmp::eq(&stored, &requested_hash) {
-        return Err(sqlx::Error::Protocol("resume rejected".into()));
+        return Err(resume_refused("token_mismatch"));
     }
     let previous_token_hash: [u8; 32] = stored
         .try_into()
-        .map_err(|_| sqlx::Error::Protocol("resume rejected".into()))?;
+        .map_err(|_| resume_refused("token_shape"))?;
     let active: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM websocket_connections WHERE user_id=? AND active=1",
     )
@@ -1559,7 +1576,7 @@ async fn resume_connection(
     .fetch_one(&mut *transaction)
     .await?;
     if active >= 16 {
-        return Err(sqlx::Error::Protocol("connection limit reached".into()));
+        return Err(resume_refused("connection_capacity"));
     }
     let welcome = Welcome {
         connection_id,
@@ -1581,11 +1598,28 @@ async fn resume_connection(
         .await?
         .rows_affected();
     if changed != 1 {
-        return Err(sqlx::Error::Protocol("resume rejected".into()));
+        return Err(resume_refused("rotation_conflict"));
     }
-    require_socket_authority_tx(&mut transaction, user_id, authority).await?;
+    require_socket_authority_tx(&mut transaction, user_id, authority)
+        .await
+        .inspect_err(|_| log_resume_refusal("session_authority"))?;
     transaction.commit().await?;
     Ok(welcome)
+}
+
+/// Fixed diagnostic categories only: clients retain the generic refusal and
+/// administrators can distinguish expiry, overlap and a lost rotation (#244).
+fn resume_refused(check: &'static str) -> sqlx::Error {
+    log_resume_refusal(check);
+    sqlx::Error::Protocol(check.into())
+}
+
+fn log_resume_refusal(check: &'static str) {
+    tracing::info!(
+        event = "connection_resume_refused",
+        check,
+        "connection resume check refused"
+    );
 }
 
 async fn rollback_connection(pool: &SqlitePool, user_id: &str, welcome: &Welcome) {
