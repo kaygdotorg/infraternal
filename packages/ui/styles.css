@@ -905,7 +905,7 @@
 /* A long leaf name gives way to its marks and notes instead of wrapping onto a second line. */
 .bm-leaf .bm-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A caption between groups inside one section: the host above its sessions. It has no branch of its own. */
-.bm-subhead { display: flex; align-items: center; height: var(--row); padding: 0 8px; color: var(--fg-3); font: var(--fw-label) var(--text-caption)/1.2 var(--font-mono); letter-spacing: 0; }
+.bm-subhead { display: flex; align-items: center; height: var(--row); padding: 0 8px; color: var(--fg-2); font: var(--fw-label) var(--text-caption)/1.2 var(--font-mono); letter-spacing: 0; }
 
 /* Entity chips (entity-chip.ts): a recognised thing named in text. Text-height, on the baseline, one unit when the line
    wraps, never animated. The fill is set inline from the palette tokens, so a theme switch recolours it with no script. */
