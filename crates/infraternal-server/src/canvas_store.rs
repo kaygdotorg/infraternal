@@ -127,7 +127,9 @@ impl Store {
         let _writer = self.writes.lock().await;
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool).await?;
         let mut document = head(&mut tx, account).await?;
-        if let Some(revision) = receipt(&mut tx, account, op_id, &encoded).await? {
+        if let Some(revision) =
+            receipt(&mut tx, account, op_id, &encoded, document.revision()).await?
+        {
             return Ok(revision);
         }
         let mut noop = false;
@@ -329,6 +331,7 @@ async fn receipt(
     account: &str,
     id: &str,
     request: &str,
+    revision: i64,
 ) -> Result<Option<i64>, Error> {
     if let Some(row) =
         sqlx::query("SELECT request,revision FROM canvas_receipts WHERE account=? AND op_id=?")
@@ -342,12 +345,9 @@ async fn receipt(
         }
         return Ok(Some(row.get("revision")));
     }
-    let count: i64 = sqlx::query("SELECT count(*) FROM canvas_receipts WHERE account=?")
-        .bind(account)
-        .fetch_one(&mut **tx)
-        .await?
-        .get(0);
-    if count >= MAX_RECEIPTS {
+    // One unique accepted call increments the head and inserts one receipt in
+    // the same transaction. Check retries first so the quota never expires them.
+    if revision >= MAX_RECEIPTS {
         return Err(Error);
     }
     Ok(None)
