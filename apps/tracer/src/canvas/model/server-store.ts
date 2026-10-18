@@ -79,7 +79,7 @@ export class ServerCanvasStore implements CanvasStore {
     this.#checkpoint(); this.#pump();
   }
   current(): CanvasDocument {
-    const doc = structuredClone(!this.#initialized && this.#migration ? this.#migration.document : this.#canonical);
+    const doc = structuredClone(this.#migration && (!this.#initialized || this.#migration.revision !== undefined && this.#canonical.revision < this.#migration.revision) ? this.#migration.document : this.#canonical);
     for (const p of this.#pending) reduce(doc, p.intent);
     return doc;
   }
@@ -99,6 +99,7 @@ export class ServerCanvasStore implements CanvasStore {
       this.#pending = this.#pending.filter((p) => p.op_id !== event.op_id);
     } else return;
     this.#pending = this.#pending.filter((p) => p.revision === undefined || p.revision > this.#canonical.revision);
+    if (this.#migration?.revision !== undefined && this.#migration.revision <= this.#canonical.revision) this.#migration = undefined;
     this.#publish(); this.#loaded?.(); this.#loaded = undefined; this.#pump();
   }
   #publish(): void {
@@ -108,6 +109,7 @@ export class ServerCanvasStore implements CanvasStore {
   }
   #pump(): void {
     if (this.#disposed || !this.#ready || this.#busy || this.transport.isWelcomed === false) return;
+    if (this.#migration?.revision !== undefined) return;
     const migration = this.#migration;
     const operation = this.#pending.find((p) => p.revision === undefined);
     if (!migration && !operation) return;
@@ -120,7 +122,10 @@ export class ServerCanvasStore implements CanvasStore {
     void this.transport.call(action, input).then((result) => {
       if (this.#disposed || epoch !== this.#epoch) return;
       if (!Number.isSafeInteger(result.revision)) { this.#busy = false; this.#ready = false; this.refused(); return; }
-      if (migration) { this.#migration = undefined; this.#initialized = true; }
+      if (migration) {
+        migration.revision = Number(result.revision); this.#initialized = true;
+        if (migration.revision <= this.#canonical.revision) this.#migration = undefined;
+      }
       else operation!.revision = Number(result.revision);
       const count = this.#pending.length;
       this.#pending = this.#pending.filter((p) => p.revision === undefined || p.revision > this.#canonical.revision);

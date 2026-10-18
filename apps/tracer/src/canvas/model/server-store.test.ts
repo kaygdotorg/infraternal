@@ -39,13 +39,15 @@ test("reconnect retries the exact request and an old receipt removes its optimis
   retry.resolve({ revision: 1 }); await tick(); store.flush();
   expect(JSON.parse(localStorage.getItem(canvasKey("a"))!).pending).toHaveLength(0); store.dispose();
 });
-test("legacy import remains intact until acknowledged even if another device initialized", async () => {
+test("legacy import remains intact until canonical confirmation even if another device initialized", async () => {
   const legacy = document(); reduce(legacy, opened); localStorage.setItem(canvasKey("a"), JSON.stringify(legacy));
   const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); expect(await store.load()).toEqual(legacy);
   transport.snapshot(); await tick(); store.flush();
   expect(transport.calls[0]!.action).toBe("canvas.layout.initialize");
   expect(JSON.parse(localStorage.getItem(canvasKey("a"))!).migration.document).toEqual(legacy);
   transport.calls[0]!.resolve({ revision: 1 }); await tick(); store.flush();
+  expect(JSON.parse(localStorage.getItem(canvasKey("a"))!).migration.revision).toBe(1);
+  const confirmed = structuredClone(legacy); confirmed.revision = 1; transport.snapshot(confirmed); store.flush();
   expect(JSON.parse(localStorage.getItem(canvasKey("a"))!).migration).toBeUndefined(); store.dispose();
 });
 test("dispose cancels late cache writes after sign-out", async () => {
@@ -93,4 +95,14 @@ test("an acknowledgement after its ordered event does not repaint the same layou
   const call = transport.calls[0]!;
   transport.event({ type: "canvas.layout.operation", revision: 1, op_id: call.input.op_id, intent: opened });
   expect(paints).toBe(1); call.resolve({ revision: 1 }); await tick(); expect(paints).toBe(1); store.dispose();
+});
+
+test("a bootstrap receipt before its canonical snapshot keeps the legacy layout drawable", async () => {
+  const legacy = document(); reduce(legacy, opened); localStorage.setItem(canvasKey("a"), JSON.stringify(legacy));
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot(document(), false);
+  const call = transport.calls[0]!; call.resolve({ revision: 1 }); await tick();
+  expect(store.current().views[0]!.layout).toEqual(legacy.views[0]!.layout);
+  store.dispose();
+  const restored = new ServerCanvasStore(new Transport(), "a");
+  expect((await restored.load())!.views[0]!.layout).toEqual(legacy.views[0]!.layout); restored.dispose();
 });
