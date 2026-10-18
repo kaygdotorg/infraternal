@@ -417,6 +417,11 @@ fn run_overview(registry: &ActionRegistry, json_output: bool) -> ExitCode {
     )
 }
 
+/// "1 command", "4 commands".
+fn count_commands(count: usize) -> String {
+    format!("{count} command{}", if count == 1 { "" } else { "s" })
+}
+
 /// A group typed alone (`infraternal mesh`) lists what it can do.
 fn run_group(registry: &ActionRegistry, path: &[&str], json_output: bool) -> Option<ExitCode> {
     let commands: Vec<_> = cli::skills::commands(registry)
@@ -448,11 +453,7 @@ fn run_group(registry: &ActionRegistry, path: &[&str], json_output: bool) -> Opt
         CommandResult::new(
             name.clone(),
             CommandState::Ready,
-            if commands.len() == 1 {
-                format!("infraternal {name} has 1 command.")
-            } else {
-                format!("infraternal {name} has {} commands.", commands.len())
-            },
+            format!("infraternal {name} has {}.", count_commands(commands.len())),
             json!({"commands": commands}),
         )
         .with_body(body)
@@ -507,11 +508,11 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
         let result = CommandResult::new(
             "skill",
             CommandState::Ready,
-            if commands.len() == 1 {
-                "1 command is enabled in this build.".to_owned()
-            } else {
-                format!("{} commands are enabled in this build.", commands.len())
-            },
+            format!(
+                "{} {} enabled in this build.",
+                count_commands(commands.len()),
+                if commands.len() == 1 { "is" } else { "are" }
+            ),
             json!({"commands": commands, "skill": "", "files": []}),
         )
         .with_next_step("infraternal skill <command>");
