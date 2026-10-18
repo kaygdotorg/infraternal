@@ -15,7 +15,16 @@ pub fn valid_intent(value: &Value) -> bool {
     let fields = match kind {
         "view.add" => &["type", "view"][..],
         "view.remove" => &["type", "view_id"][..],
-        "open" => &["type", "view_id", "column_id", "window", "after"][..],
+        "view.update" => &["type", "view_id", "cell", "name"][..],
+        "target" => &["type", "window_id", "target"][..],
+        "open" => &[
+            "type",
+            "view_id",
+            "column_id",
+            "window",
+            "after",
+            "column_after",
+        ][..],
         "split" => &[
             "type",
             "view_id",
@@ -25,7 +34,14 @@ pub fn valid_intent(value: &Value) -> bool {
             "window",
         ][..],
         "close" => &["type", "window_id"][..],
-        "move" | "membership.add" => &["type", "view_id", "window_id", "column_id", "after"][..],
+        "move" | "membership.add" => &[
+            "type",
+            "view_id",
+            "window_id",
+            "column_id",
+            "after",
+            "column_after",
+        ][..],
         "resize" => &["type", "window_id", "height", "span", "rows", "row"][..],
         "weight" => &["type", "view_id", "column_id", "weight"][..],
         "membership.remove" => &["type", "view_id", "window_id"][..],
@@ -37,10 +53,10 @@ pub fn valid_intent(value: &Value) -> bool {
     }
     let strings = match kind {
         "view.add" => &[][..],
-        "view.remove" => &["view_id"][..],
+        "view.remove" | "view.update" => &["view_id"][..],
         "open" | "weight" => &["view_id", "column_id"][..],
         "split" => &["view_id", "anchor_id", "axis", "column_id"][..],
-        "close" | "resize" => &["window_id"][..],
+        "close" | "resize" | "target" => &["window_id"][..],
         "move" | "membership.add" => &["view_id", "window_id", "column_id"][..],
         "membership.remove" => &["view_id", "window_id"][..],
         "pin" => &["view_id", "node_id"][..],
@@ -49,14 +65,23 @@ pub fn valid_intent(value: &Value) -> bool {
     if !strings
         .iter()
         .all(|key| model::string(value, key).is_some())
-        || value
-            .get("after")
-            .is_some_and(|v| !v.is_null() && !v.as_str().is_some_and(model::text))
+        || ["after", "column_after"].iter().any(|key| {
+            value
+                .get(key)
+                .is_some_and(|v| !v.is_null() && !v.as_str().is_some_and(model::text))
+        })
     {
         return false;
     }
     match kind {
         "view.add" => value.get("view").is_some_and(model::view),
+        "view.update" => {
+            value.get("cell").is_none_or(|p| model::point(p, 1000.0))
+                && value
+                    .get("name")
+                    .is_none_or(|v| v.as_str().is_some_and(model::text))
+        }
+        "target" => value.get("target").is_some_and(model::target),
         "open" | "split" => {
             value.get("window").is_some_and(model::window)
                 && (kind != "split"
@@ -102,6 +127,7 @@ fn insert(
     column_id: &str,
     window: Value,
     after: Option<&str>,
+    column_after: Option<&Value>,
 ) -> Result<(), ()> {
     if cols
         .iter()
@@ -114,7 +140,14 @@ fn insert(
         .iter()
         .any(|c| model::string(c, "id") == Some(column_id))
     {
-        cols.push(json!({"id":column_id,"weight":1.0,"windows":[]}));
+        let at = column_after.map_or(cols.len(), |value| {
+            value.as_str().map_or(0, |id| {
+                cols.iter()
+                    .position(|c| model::string(c, "id") == Some(id))
+                    .map_or(cols.len(), |i| i + 1)
+            })
+        });
+        cols.insert(at, json!({"id":column_id,"weight":1.0,"windows":[]}));
     }
     let col = cols
         .iter_mut()
@@ -175,6 +208,52 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
                 .ok_or(())?
                 .push(view.clone());
         }
+        "view.update" => {
+            let id = s(intent, "view_id")?;
+            if let Some(view) = doc
+                .0
+                .get_mut("views")
+                .and_then(Value::as_array_mut)
+                .ok_or(())?
+                .iter_mut()
+                .find(|v| model::string(v, "id") == Some(id))
+            {
+                for field in ["cell", "name"] {
+                    if let Some(value) = intent.get(field) {
+                        view[field] = value.clone();
+                    }
+                }
+            }
+        }
+        "target" => {
+            let id = s(intent, "window_id")?;
+            if !is_closed(closed, id) {
+                for view in doc
+                    .0
+                    .get_mut("views")
+                    .and_then(Value::as_array_mut)
+                    .ok_or(())?
+                {
+                    if let Some(cols) = view
+                        .get_mut("layout")
+                        .and_then(|l| l.get_mut("columns"))
+                        .and_then(Value::as_array_mut)
+                    {
+                        for col in cols {
+                            for window in col
+                                .get_mut("windows")
+                                .and_then(Value::as_array_mut)
+                                .ok_or(())?
+                            {
+                                if model::string(window, "id") == Some(id) {
+                                    window["target"] = intent["target"].clone();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         "view.remove" => {
             let id = s(intent, "view_id")?;
             doc.0
@@ -199,6 +278,7 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
                     s(intent, "column_id")?,
                     window.clone(),
                     model::string(intent, "after"),
+                    intent.get("column_after"),
                 )?;
             } else {
                 crate::tiling::split(
@@ -239,6 +319,7 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
                     s(intent, "column_id")?,
                     window,
                     model::string(intent, "after"),
+                    intent.get("column_after"),
                 )?;
             }
         }
@@ -301,6 +382,7 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
                 s(intent, "column_id")?,
                 window,
                 model::string(intent, "after"),
+                intent.get("column_after"),
             )?;
         }
         "membership.remove" => {
@@ -390,6 +472,47 @@ mod tests {
         assert_eq!(doc.windows().find(|w| w["id"] == "a").unwrap()["span"], 2);
         assert_eq!(doc.windows().find(|w| w["id"] == "b").unwrap()["row"], 1);
         assert_eq!(doc.windows().find(|w| w["id"] == "new").unwrap()["row"], 1);
+    }
+    #[test]
+    fn view_metadata_targets_and_column_neighbours_are_semantic() {
+        let mut doc = document();
+        reduce(&mut doc, &open("a"), &[]).unwrap();
+        let mut b = open("b");
+        b["column_after"] = Value::Null;
+        reduce(&mut doc, &b, &[]).unwrap();
+        assert_eq!(doc.0["views"][0]["layout"]["columns"][0]["id"], "b");
+        reduce(
+            &mut doc,
+            &json!({"type":"view.update","view_id":"console","cell":{"x":2,"y":3},"name":"Work"}),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(doc.0["views"][0]["cell"], json!({"x":2,"y":3}));
+        let target = json!({"type":"settings","section":"shortcuts"});
+        reduce(
+            &mut doc,
+            &json!({"type":"target","window_id":"a","target":target}),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            doc.windows().find(|w| w["id"] == "a").unwrap()["target"],
+            target
+        );
+        reduce(&mut doc, &json!({"type":"close","window_id":"a"}), &[]).unwrap();
+        reduce(
+            &mut doc,
+            &json!({"type":"target","window_id":"a","target":target}),
+            &["a".into()],
+        )
+        .unwrap();
+        assert!(!doc.windows().any(|w| w["id"] == "a"));
+        assert!(!valid_intent(
+            &json!({"type":"view.update","view_id":"console","cell":{"x":1001,"y":0}})
+        ));
+        assert!(!valid_intent(
+            &json!({"type":"target","window_id":"a","target":{"type":"unknown"}})
+        ));
     }
     #[test]
     fn sample_corpus_preserves_strict_variant_fields_and_round_trips() {
