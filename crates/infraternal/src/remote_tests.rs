@@ -253,3 +253,88 @@ async fn join_dns_failure_reports_resolution_instead_of_generic_refusal() {
     .unwrap_err();
     assert!(error.to_string().starts_with("Join DNS lookup failed"));
 }
+
+fn self_signed(key: &PKey<openssl::pkey::Private>) -> X509 {
+    let mut certificate = X509::builder().unwrap();
+    certificate.set_version(2).unwrap();
+    let name = openssl::x509::X509NameBuilder::new().unwrap().build();
+    certificate.set_subject_name(&name).unwrap();
+    certificate.set_issuer_name(&name).unwrap();
+    certificate.set_pubkey(key).unwrap();
+    certificate
+        .set_not_before(&openssl::asn1::Asn1Time::from_unix(1_700_000_000).unwrap())
+        .unwrap();
+    certificate
+        .set_not_after(&openssl::asn1::Asn1Time::from_unix(2_000_000_000).unwrap())
+        .unwrap();
+    certificate.sign(key, MessageDigest::null()).unwrap();
+    certificate.build()
+}
+
+/// SSH setup copies the host's enrolled identity into its transaction before
+/// joining, and a published-setup Retry joins again for the same host (#230).
+/// Join must re-enroll that host's own key instead of refusing the identity;
+/// an identity for any other host is still refused before any network use.
+#[tokio::test]
+async fn join_re_enrolls_the_same_hosts_identity_and_refuses_another_host() {
+    let directory = Directory::new();
+    let data = directory.0.join("data");
+    let key = PKey::generate_ed25519().unwrap();
+    let ca = self_signed(&key);
+    let host_id = uuid::Uuid::new_v4();
+    let uid = nix::unistd::Uid::effective().as_raw();
+    let stored = StoredIdentity {
+        host_id,
+        execution_uid: uid,
+        endpoint: "127.0.0.1:7443".parse().unwrap(),
+        server_name: "localhost".into(),
+        ca_der: B64.encode(ca.to_der().unwrap()),
+        certificate_der: B64.encode(ca.to_der().unwrap()),
+        key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    publish(&data, &bytes).unwrap();
+    let invitation = |host_id| {
+        serde_json::to_vec(&JoinInvitation {
+            host_id,
+            mode: if uid == 0 {
+                Mode::Rootful
+            } else {
+                Mode::Rootless
+            },
+            execution_uid: uid,
+            token: "public fixture token".into(),
+            ca_der: stored.ca_der.clone(),
+            https_der: None,
+            https_system_roots: false,
+            endpoint: "127.0.0.1:7443".parse().unwrap(),
+            server_name: "localhost".into(),
+        })
+        .unwrap()
+    };
+    // The same host reaches enrollment: only the unreachable fixture server refuses it.
+    let error = join(
+        "https://infraternal-fixture-no-such-host.invalid/remote/join",
+        &data,
+        &invitation(host_id),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().starts_with("Join DNS lookup failed"),
+        "{error}"
+    );
+    let error = join(
+        "https://infraternal-fixture-no-such-host.invalid/remote/join",
+        &data,
+        &invitation(uuid::Uuid::new_v4()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "remote infraternal agent operation refused"
+    );
+    assert_eq!(std::fs::read(data.join("identity.json")).unwrap(), bytes);
+    assert_eq!(std::fs::read_dir(&data).unwrap().count(), 1);
+}

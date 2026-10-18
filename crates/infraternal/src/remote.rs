@@ -56,8 +56,16 @@ pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()>
     if uid != invitation.execution_uid || (invitation.mode == Mode::Rootless) == (uid == 0) {
         return Err(refused());
     }
-    prepare(data)?;
-    let key = PKey::generate_ed25519().map_err(|_| refused())?;
+    // The host key is immutable (#78): SSH setup copies an enrolled identity
+    // into its transaction before joining, and a published-setup Retry joins
+    // the same host again (#87, #230). Re-enroll that host's own key; an
+    // identity for another host or uid is refused before any network use.
+    let previous = enrolled_key(data, invitation.host_id, uid)?;
+    let reenroll = previous.is_some();
+    let key = match previous {
+        Some(key) => key,
+        None => PKey::generate_ed25519().map_err(|_| refused())?,
+    };
     let mut csr = X509Req::builder().map_err(|_| refused())?;
     csr.set_subject_name(&X509NameBuilder::new().map_err(|_| refused())?.build())
         .map_err(|_| refused())?;
@@ -133,8 +141,33 @@ pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()>
         certificate_der: response.certificate_der,
         key_der: B64.encode(key.private_key_to_pkcs8().map_err(|_| refused())?),
     };
-    publish(data, &serde_json::to_vec(&stored).map_err(|_| refused())?)?;
-    Ok(())
+    let bytes = serde_json::to_vec(&stored).map_err(|_| refused())?;
+    if reenroll {
+        replace(data, &bytes)
+    } else {
+        publish(data, &bytes)
+    }
+}
+
+/// Return the key of an identity already enrolled for exactly this host and uid.
+fn enrolled_key(
+    data: &Path,
+    host: uuid::Uuid,
+    uid: u32,
+) -> io::Result<Option<PKey<openssl::pkey::Private>>> {
+    prepare_directory(data)?;
+    match std::fs::symlink_metadata(data.join("identity.json")) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(refused()),
+        Ok(_) => {}
+    }
+    let stored = load(data)?;
+    if stored.host_id != host || stored.execution_uid != uid {
+        return Err(refused());
+    }
+    PKey::private_key_from_pkcs8(&B64.decode(&stored.key_der).map_err(|_| refused())?)
+        .map(Some)
+        .map_err(|_| refused())
 }
 
 /// DNS is its own boundary: retain only known public resolver diagnostics.
@@ -279,6 +312,14 @@ impl Drop for AbortConnection {
 }
 
 fn prepare(data: &Path) -> io::Result<()> {
+    prepare_directory(data)?;
+    match std::fs::symlink_metadata(data.join("identity.json")) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        _ => Err(refused()),
+    }
+}
+
+fn prepare_directory(data: &Path) -> io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -291,10 +332,7 @@ fn prepare(data: &Path) -> io::Result<()> {
     {
         return Err(refused());
     }
-    match std::fs::symlink_metadata(data.join("identity.json")) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        _ => Err(refused()),
-    }
+    Ok(())
 }
 
 fn publish(data: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -318,7 +356,8 @@ fn publish(data: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
-pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
+/// Read the private identity, refusing links, shared files and oversized input.
+fn load(data: &Path) -> io::Result<StoredIdentity> {
     use std::{
         io::Read,
         os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
@@ -340,7 +379,11 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
     if bytes.len() > 8192 {
         return Err(refused());
     }
-    let stored: StoredIdentity = serde_json::from_slice(&bytes).map_err(|_| refused())?;
+    serde_json::from_slice(&bytes).map_err(|_| refused())
+}
+
+pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
+    let stored = load(data)?;
     let identity = RemoteIdentity {
         identity: Identity {
             certificate: X509::from_der(
@@ -358,7 +401,6 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
         server_name: stored.server_name.clone(),
         execution_uid: stored.execution_uid,
     };
-    drop(bytes);
     let installation =
         state
             .as_ref()
@@ -382,47 +424,50 @@ struct IdentityPublisher {
 }
 impl infraternal_agent::remote_renewal::CertificatePublisher for IdentityPublisher {
     fn publish(&self, certificate: &X509) -> io::Result<()> {
-        use std::{
-            io::Write,
-            os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
-        };
-        let directory = std::fs::symlink_metadata(&self.data)?;
-        let current = std::fs::symlink_metadata(self.data.join("identity.json"))?;
-        let uid = nix::unistd::Uid::effective().as_raw();
-        if !directory.is_dir()
-            || directory.uid() != uid
-            || directory.permissions().mode() & 0o077 != 0
-            || !current.is_file()
-            || current.uid() != uid
-            || current.permissions().mode() & 0o077 != 0
-        {
-            return Err(refused());
-        }
         let mut stored = serde_json::to_value(&self.stored).map_err(|_| refused())?;
         stored["certificate_der"] = B64
             .encode(certificate.to_der().map_err(|_| refused())?)
             .into();
-        let bytes = serde_json::to_vec(&stored).map_err(|_| refused())?;
-        if bytes.len() > 8192 {
-            return Err(refused());
-        }
-        let pending = self
-            .data
-            .join(format!("identity-{}.pending", uuid::Uuid::new_v4()));
-        let result = (|| {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&pending)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            std::fs::rename(&pending, self.data.join("identity.json"))?;
-            std::fs::File::open(&self.data)?.sync_all()
-        })();
-        let _ = std::fs::remove_file(pending);
-        result
+        replace(
+            &self.data,
+            &serde_json::to_vec(&stored).map_err(|_| refused())?,
+        )
     }
+}
+
+/// Atomically replace an existing private identity; never create one or follow a link.
+fn replace(data: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::{
+        io::Write,
+        os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    };
+    let directory = std::fs::symlink_metadata(data)?;
+    let current = std::fs::symlink_metadata(data.join("identity.json"))?;
+    let uid = nix::unistd::Uid::effective().as_raw();
+    if !directory.is_dir()
+        || directory.uid() != uid
+        || directory.permissions().mode() & 0o077 != 0
+        || !current.is_file()
+        || current.uid() != uid
+        || current.permissions().mode() & 0o077 != 0
+        || bytes.len() > 8192
+    {
+        return Err(refused());
+    }
+    let pending = data.join(format!("identity-{}.pending", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&pending)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&pending, data.join("identity.json"))?;
+        std::fs::File::open(data)?.sync_all()
+    })();
+    let _ = std::fs::remove_file(pending);
+    result
 }
 
 #[cfg(test)]
