@@ -906,3 +906,11 @@ mod review_authority_retry;
 mod review_input_credit;
 #[path = "socket_tests/transient_authority_stall.rs"]
 mod transient_authority_stall;
+
+#[cfg(feature = "remote")]
+#[path = "socket_tests/close_logging.rs"]
+mod close_logging;
+
+#[cfg(feature = "remote")]
+#[path = "socket_tests/review_close_log.rs"]
+mod review_close_log;

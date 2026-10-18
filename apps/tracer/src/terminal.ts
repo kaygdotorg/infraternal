@@ -1,7 +1,7 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
 import { terminalRefusal } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
-import { plainCloseReason } from "./close-reasons";
+import { reattachReason, recoveringReason } from "./close-reasons";
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
 import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../packages/ui/src/terminal-cursor-layer";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
@@ -930,7 +930,7 @@ export class TerminalClient {
             this.connectionIsResume = true;
             this.replayResponseFence = undefined;
             this.suppressReplayResponses = true;
-            this.setStatus("Catching up…");
+            this.setStatus(recoveringReason(typeof notice.reason === "string" ? notice.reason : undefined));
           } else if (notice.type === "terminal.link_doubt") {
             // The host link missed one reply but is kept: this is live output,
             // not replay. Only say so; replies to the program and typing go on.
@@ -981,8 +981,9 @@ export class TerminalClient {
         return;
       case "Close":
         if (frame.code === CLOSE_SESSION_GONE) { this.endSession(); return; }
-        this.setStatus(plainCloseReason(frame.reason));
-        if (this.ownsConnection) this.conn.forceClose();
+        // Every other stream close reattaches by itself, so its status never reads as an ending.
+        this.setStatus(reattachReason(frame.reason));
+        if (this.ownsConnection) this.conn.forceClose(frame.code, frame.reason);
         else this.retryStream();
         return;
       default:

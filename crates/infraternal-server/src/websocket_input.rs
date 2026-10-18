@@ -1,6 +1,9 @@
 //! Owns each browser terminal's cancellable Input/Resize FIFO while durable input credit is parked [128][215].
 
-use crate::embedded::{AttachmentHandle, TerminalOutput};
+use crate::{
+    embedded::{AttachmentHandle, TerminalOutput},
+    stream_close::CloseWho,
+};
 use bytes::Bytes;
 use std::sync::Arc;
 use tokio::{
@@ -38,7 +41,14 @@ impl InputQueue {
             while let Some(request) = receiver.recv().await {
                 if handle.send_frame(request.wire.clone()).await.is_err() {
                     let _ = output
-                        .send((stream, TerminalOutput::Closed { code: 1013 }))
+                        .send((
+                            stream,
+                            TerminalOutput::Closed {
+                                who: CloseWho::Server,
+                                code: 1013,
+                                reason: "remote stream unavailable",
+                            },
+                        ))
                         .await;
                     return;
                 }

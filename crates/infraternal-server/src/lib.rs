@@ -77,6 +77,7 @@ pub mod remote_standby_request;
 mod remote_startup;
 mod runtime;
 mod server_tls;
+mod stream_close;
 mod terminal_exit;
 mod web_assets;
 mod websocket;

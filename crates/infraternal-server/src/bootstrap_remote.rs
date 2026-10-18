@@ -1059,6 +1059,7 @@ async fn finish_canary(
                 }
                 TerminalOutput::Closed {
                     code: CLOSE_SESSION_GONE,
+                    ..
                 } => return Ok(()),
                 TerminalOutput::Closed { .. } => return Err(unavailable()),
                 _ => {}

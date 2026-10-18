@@ -445,7 +445,7 @@ async fn primary_ping_during_terminal_flood() {
                     }
                     TerminalOutput::Recovered if index == 1 => recoveries += 1,
                     // Count instead of panicking so a failing variant still reports numbers.
-                    TerminalOutput::Closed { code } => {
+                    TerminalOutput::Closed { code, .. } => {
                         retired += 1;
                         eprintln!("PING_FLOOD_TERMINAL_RETIRED index={index} code={code}");
                     }
