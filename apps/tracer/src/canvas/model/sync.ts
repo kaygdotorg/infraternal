@@ -4,12 +4,12 @@
  * a revision that grows with every save. The server store journals semantic edits; only its drawing cache serialization is delayed.
  */
 import type { Ctx } from "../context";
-import type { SplitEdit } from "./operations";
+import type { LayoutEdit } from "./operations.on-demand";
 import type { CanvasDocument } from "./document";
 import { toDocument } from "./document";
 
 export interface DocumentSync {
-  changed(split?: SplitEdit): void;
+  changed(split?: LayoutEdit): void;
   /** Reset the drawing baseline after a canonical update, without creating local edits. */
   reset(protectedIds?: ReadonlySet<string>): void;
   /** Local windows not yet represented by a submitted edit. */
@@ -24,7 +24,7 @@ export function createDocumentSync(cx: Ctx, persisted: (id: string) => boolean =
   let disposed = false;
   let revision = 0;
   let before: CanvasDocument | undefined;
-  const splits = new Map<string, SplitEdit>();
+  const splits = new Map<string, LayoutEdit>();
   const document = (): CanvasDocument => toDocument([...cx.views.values()].filter((c) => persisted(c.view.id)).map((c) => c.view), cx.state.metrics, revision);
   const save = (): void => {
     timer = 0;
