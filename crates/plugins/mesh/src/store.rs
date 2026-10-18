@@ -102,6 +102,8 @@ struct Named {
     name: String,
     source: String,
     host: Option<String>,
+    /// The name its source asked for before any suffix (migration 0027); `None` when that is `name` itself.
+    claim: Option<String>,
 }
 /// One automatic name change, applied in order and written to the audit log with the attach's revision.
 struct Renamed {
@@ -109,20 +111,68 @@ struct Renamed {
     from: String,
     to: String,
     source: String,
+    /// The claim to store with the new name; `None` keeps the stored one (a node moved aside keeps its claim).
+    claim: Option<String>,
 }
 /// What one attach names: the attaching node's name and who gave it, and the other nodes it moves aside.
 struct Naming {
     name: String,
     source: &'static str,
     moved: Vec<Renamed>,
+    /// The name asked for before any suffix; `None` for a placeholder.
+    claim: Option<String>,
+}
+/// The name for node `except` among `base` (unless `skip`) and `base-2` … `base-9`: one no other node holds and
+/// that is not `taken` (the name being handed to someone else in the same change). The node's current name wins
+/// when it is one of the suffixes and still free, so a node at `web-3` stays there when `web-2` frees up; `base`
+/// itself, when free, still wins over any suffix.
+fn free_name(nodes: &[Named], base: &str, except: i64, skip: bool, taken: &str) -> Option<String> {
+    let stem = base[..base.len().min(61)].trim_end_matches('-');
+    let available = |name: &str| {
+        name != taken
+            && !nodes
+                .iter()
+                .any(|node| node.id != except && node.name == name)
+    };
+    if !skip && available(base) {
+        return Some(base.to_owned());
+    }
+    let suffixed = (2..=9).map(|n| format!("{stem}-{n}"));
+    let current = nodes
+        .iter()
+        .find(|node| node.id == except)
+        .map(|node| node.name.as_str());
+    if let Some(current) = current
+        && available(current)
+        && suffixed.clone().any(|name| name == current)
+    {
+        return Some(current.to_owned());
+    }
+    suffixed.into_iter().find(|name| available(name))
+}
+/// Moves `holder` off `name`, which a stronger claim takes: to the first free suffix of the holder's own claim
+/// (`web-2` claimed `web` goes to `web-3`, not `web-2-2`), else `mesh-<host>`. Its claim and source stay.
+fn move_aside(nodes: &[Named], holder: &Named, name: &str) -> Renamed {
+    let base = holder.claim.as_deref().unwrap_or(&holder.name);
+    let to = free_name(nodes, base, holder.id, false, name)
+        .unwrap_or_else(|| format!("mesh-{}", holder.host.as_deref().unwrap_or_default()));
+    Renamed {
+        id: holder.id,
+        from: holder.name.clone(),
+        to,
+        source: holder.source.clone(),
+        claim: None,
+    }
 }
 /// Names a node of `host` (`id`, currently `current`) that `wanted` names, given every other node's name and the
 /// names the owner gave other hosts (`records`). Pure, so the whole decision is one place and testable.
 ///
 /// Free: it takes the name. Held by a node of lower rank (an automatic name, never a person's): that node moves
-/// aside to a suffixed name and this one takes it. Held by an equal or higher rank: this node, the newcomer, gets
-/// the suffix (`minipc01-2` … `-9`). A reported hostname also yields to every other host's record name, enrolled
-/// or not, so a machine cannot pose as one the owner named. With no name, a new node is `unnamed`.
+/// aside to the next free suffix of its *own* claim and this one takes it. Held by an equal or higher rank: this
+/// node, the newcomer, gets the suffix (`minipc01-2` … `-9`). A node that already holds a free suffix of its claim
+/// keeps it rather than shuffling to a lower one, so restarts in any order rename nothing. A reported hostname
+/// also yields to every other host's record name, enrolled or not, so a machine cannot pose as one the owner
+/// named. With no name, a new node is `unnamed`.
 /// `None` keeps the current name.
 fn naming(
     nodes: &[Named],
@@ -132,22 +182,8 @@ fn naming(
     wanted: Option<(String, &'static str)>,
     records: &[String],
 ) -> Option<Naming> {
-    // The first of `base` (unless `skip`) and `base-2` … `base-9` no node other than `except` holds.
-    let free = |base: &str, except: i64, skip: bool| {
-        let stem = base[..base.len().min(61)].trim_end_matches('-');
-        (usize::from(skip)..9)
-            .map(|n| {
-                if n == 0 {
-                    base.to_owned()
-                } else {
-                    format!("{stem}-{}", n + 1)
-                }
-            })
-            .find(|name| {
-                !nodes
-                    .iter()
-                    .any(|node| node.id != except && node.name == *name)
-            })
+    let free = |base: &str, except: i64, skip: bool, taken: &str| {
+        free_name(nodes, base, except, skip, taken)
     };
     let Some((wanted, source)) = wanted else {
         if current.is_some() {
@@ -156,38 +192,34 @@ fn naming(
         let name = if host == SERVER_LABEL {
             SERVER_LABEL.to_owned()
         } else {
-            free(UNNAMED, id, false).unwrap_or_else(|| format!("mesh-{host}"))
+            free(UNNAMED, id, false, "").unwrap_or_else(|| format!("mesh-{host}"))
         };
         return Some(Naming {
             name,
             source: "placeholder",
             moved: Vec::new(),
+            claim: None,
         });
     };
+    let claim = wanted.clone();
     let holder = nodes
         .iter()
         .find(|node| node.id != id && node.name == wanted);
     let mut moved = Vec::new();
     let name = if source == "reported" && records.contains(&wanted) {
-        free(&wanted, id, true)
+        free(&wanted, id, true, "")
     } else if let Some(holder) = holder.filter(|holder| rank(&holder.source) < rank(source)) {
-        let to = free(&wanted, holder.id, true)
-            .unwrap_or_else(|| format!("mesh-{}", holder.host.as_deref().unwrap_or_default()));
-        moved.push(Renamed {
-            id: holder.id,
-            from: holder.name.clone(),
-            to,
-            source: holder.source.clone(),
-        });
+        moved.push(move_aside(nodes, holder, &wanted));
         Some(wanted)
     } else {
-        free(&wanted, id, holder.is_some())
+        free(&wanted, id, holder.is_some(), "")
     };
     match (name, current) {
         (Some(name), current) if current != Some(name.as_str()) => Some(Naming {
             name,
             source,
             moved,
+            claim: Some(claim),
         }),
         (Some(_), _) | (None, Some(_)) => None,
         (None, None) => naming(nodes, id, host, None, None, records),
@@ -264,10 +296,13 @@ async fn rename(
     renamed: &[Renamed],
 ) -> Result<(), &'static str> {
     for rename in renamed {
-        sqlx::query("UPDATE mesh_nodes SET name=?,name_source=? WHERE id=?")
-            .bind(&rename.to)
-            .bind(&rename.source)
-            .bind(rename.id)
+        sqlx::query(
+            "UPDATE mesh_nodes SET name=?,name_source=?,name_claim=COALESCE(?,name_claim) WHERE id=?",
+        )
+        .bind(&rename.to)
+        .bind(&rename.source)
+        .bind(&rename.claim)
+        .bind(rename.id)
             .execute(&mut **tx)
             .await
             .map_err(|_| "Mesh identity conflicts.")?;
@@ -370,7 +405,7 @@ impl Store {
         }
         let (wanted, records) = wanted_name(&mut tx, host, server, reported).await?;
         let nodes: Vec<Named> =
-            sqlx::query("SELECT id,name,name_source,dataplane_host FROM mesh_nodes")
+            sqlx::query("SELECT id,name,name_source,dataplane_host,name_claim FROM mesh_nodes")
                 .fetch_all(&mut *tx)
                 .await
                 .map_err(|_| "Mesh storage unavailable.")?
@@ -380,6 +415,7 @@ impl Store {
                     name: row.get("name"),
                     source: row.get("name_source"),
                     host: row.get("dataplane_host"),
+                    claim: row.get("name_claim"),
                 })
                 .collect();
         let mut renamed = Vec::new();
@@ -400,6 +436,7 @@ impl Store {
                     from: name,
                     to: naming.name,
                     source: naming.source.to_owned(),
+                    claim: naming.claim,
                 });
             }
             rename(&mut tx, &renamed).await?;
@@ -431,7 +468,7 @@ impl Store {
                 .ok_or("Mesh identity invalid.")?;
             renamed = naming.moved;
             rename(&mut tx, &renamed).await?;
-            sqlx::query("INSERT INTO mesh_nodes(id,name,name_source,public_key,dataplane_host,endpoint) VALUES(?,?,?,?,?,?)").bind(high).bind(naming.name).bind(naming.source).bind(key.0.as_slice()).bind(host).bind(&endpoint).execute(&mut *tx).await.map_err(|_|"Mesh identity conflicts.")?;
+            sqlx::query("INSERT INTO mesh_nodes(id,name,name_source,name_claim,public_key,dataplane_host,endpoint) VALUES(?,?,?,?,?,?,?)").bind(high).bind(naming.name).bind(naming.source).bind(naming.claim).bind(key.0.as_slice()).bind(host).bind(&endpoint).execute(&mut *tx).await.map_err(|_|"Mesh identity conflicts.")?;
             high
         };
         let revision = sqlx::query_scalar::<_,i64>("UPDATE mesh_state SET revision=revision+1 WHERE singleton=1 AND revision<9223372036854775807 RETURNING revision").fetch_one(&mut *tx).await.map_err(|_|"Mesh storage unavailable.")?;
