@@ -1,5 +1,7 @@
 //! Dispatches compiled node control on platforms without the existing Linux shim runtime; native providers reuse the common writer [D198,D232].
 pub use crate::daemon_writer::approximate_snapshots_total;
+#[cfg(not(target_os = "linux"))]
+pub(crate) use crate::daemon_writer::hello_capabilities;
 use crate::{
     channel::Channel,
     daemon_writer::{Message, reply, writer},

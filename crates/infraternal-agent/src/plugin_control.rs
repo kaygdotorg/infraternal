@@ -67,6 +67,7 @@ enum Job {
         context: Option<infraternal_plugin_api::admission::NodeContext>,
         result: tokio::sync::oneshot::Sender<Result<PreparedReply, PluginError>>,
     },
+    #[cfg(any(test, target_os = "linux"))]
     Admit {
         action: String,
         context: infraternal_plugin_api::admission::NodeContext,
@@ -345,6 +346,7 @@ impl Registry {
                                 publish_paths(&registry, &paths);
                                 let _ = result.send(());
                             }
+                            #[cfg(any(test, target_os = "linux"))]
                             Job::Admit {
                                 action,
                                 context,
@@ -380,6 +382,7 @@ impl Registry {
         }
         Ok(())
     }
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) async fn admit(
         &self,
         action: &str,
@@ -428,6 +431,7 @@ impl Registry {
     pub(crate) fn server_paths(&self) -> tokio::sync::watch::Receiver<Option<std::net::IpAddr>> {
         self.paths.subscribe()
     }
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Vec<u8>> {
         self.events.subscribe()
     }
@@ -557,7 +561,7 @@ impl Service {
             // process-owned instances only when a caller needs an action.
             #[cfg(all(feature = "remote", target_os = "linux"))]
             let installation = installation.cloned();
-            #[cfg(not(feature = "remote"))]
+            #[cfg(not(all(feature = "remote", target_os = "linux")))]
             let installation = installation.copied();
             #[cfg(any(test, feature = "native-streams"))]
             let registry = supplied

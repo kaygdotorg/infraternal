@@ -11,6 +11,25 @@ use tokio::sync::mpsc;
 #[cfg(target_os = "linux")]
 use tokio::sync::oneshot;
 
+/// The pre-sent QUIC greeting and daemon greeting must serialize identically:
+/// the control adapter consumes the daemon's greeting only after exact comparison.
+pub(crate) fn hello_capabilities(native: bool, renewal: bool) -> u64 {
+    infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
+        | if native {
+            infraternal_plugin_api::channel::REMOTE_WRITER_BINDING
+                | infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS
+                | infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
+                | infraternal_plugin_api::channel::REMOTE_PATH_PROOF
+        } else {
+            0
+        }
+        | if renewal {
+            infraternal_plugin_api::channel::LIVE_RENEWAL
+        } else {
+            0
+        }
+}
+
 /// Process-wide count of approximate repaints written to the leg-B socket.
 /// Constant-space and content-free; metrics adapters can export this value.
 static APPROXIMATE_SNAPSHOTS: AtomicU64 = AtomicU64::new(0);

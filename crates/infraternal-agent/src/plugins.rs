@@ -140,13 +140,15 @@ pub(crate) fn registry_at(
 /// restarts). Only the root infraternal agent can create them; a rootless
 /// installation has none. Ownership is this installation's mesh state record,
 /// never the shared name or marker: see `Node::plan_retirement`.
-#[cfg(feature = "remote")]
+#[cfg(all(feature = "remote", target_os = "linux"))]
 pub const KERNEL: infraternal_plugin_remote::uninstall::Kernel =
     infraternal_plugin_remote::uninstall::Kernel {
         inspect: inspect_kernel_state,
         retire: retire_kernel_state,
     };
-#[cfg(feature = "remote")]
+// The uninstall callback keeps its fallible signature even without kernel roles.
+#[cfg(all(feature = "remote", target_os = "linux"))]
+#[cfg_attr(not(feature = "mesh"), allow(clippy::unnecessary_wraps))]
 fn inspect_kernel_state(state: &std::path::Path) -> std::io::Result<Vec<&'static str>> {
     #[cfg(all(feature = "mesh", target_os = "linux"))]
     if nix::unistd::Uid::effective().is_root() {
@@ -156,7 +158,8 @@ fn inspect_kernel_state(state: &std::path::Path) -> std::io::Result<Vec<&'static
     let _ = state;
     Ok(Vec::new())
 }
-#[cfg(feature = "remote")]
+#[cfg(all(feature = "remote", target_os = "linux"))]
+#[cfg_attr(not(feature = "mesh"), allow(clippy::unnecessary_wraps))]
 fn retire_kernel_state(state: &std::path::Path) -> std::io::Result<Vec<&'static str>> {
     #[cfg(all(feature = "mesh", target_os = "linux"))]
     if nix::unistd::Uid::effective().is_root() {

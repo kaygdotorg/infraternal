@@ -66,24 +66,7 @@ struct Open {
     rows: u16,
 }
 
-/// The pre-sent QUIC greeting and daemon greeting must serialize identically:
-/// the control adapter consumes the daemon's greeting only after exact comparison.
-pub(crate) fn hello_capabilities(native: bool, renewal: bool) -> u64 {
-    infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
-        | if native {
-            infraternal_plugin_api::channel::REMOTE_WRITER_BINDING
-                | infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS
-                | infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
-                | infraternal_plugin_api::channel::REMOTE_PATH_PROOF
-        } else {
-            0
-        }
-        | if renewal {
-            infraternal_plugin_api::channel::LIVE_RENEWAL
-        } else {
-            0
-        }
-}
+pub(crate) use crate::daemon_writer::hello_capabilities;
 
 async fn emit(tx: &mpsc::Sender<Message>, message: Message) -> io::Result<()> {
     tx.send(message)
