@@ -172,6 +172,67 @@ fn a_paged_listing_is_still_one_envelope() {
     assert_eq!(envelope["data"]["peers"].as_array().map(Vec::len), Some(2));
 }
 
+#[test]
+fn a_failed_later_page_emits_only_the_failure_envelope() {
+    // Discard accumulated rows when a later reply cannot be presented. The first page must
+    // never report success for an incomplete listing (#239, D299).
+    let home = home("failed-later-page");
+    let state = private_state(&home);
+    let agent = fake_agent(
+        &state,
+        vec![
+            json!({"peers": [mesh_peer(7)], "version": 1, "next_cursor": {"version": 1, "node": 7}}),
+            json!({"peers": "unexpected input", "version": 1, "next_cursor": null}),
+        ],
+    );
+    let args = [
+        "--json",
+        "mesh",
+        "peers",
+        "--state",
+        state.to_str().unwrap(),
+    ];
+    let output = cli(&home, &args);
+    agent.join().unwrap();
+    let envelope = one_envelope(&args, &output);
+    assert_eq!(output.status.code(), Some(1), "{envelope}");
+    assert_eq!(envelope["ok"], false, "{envelope}");
+    assert!(envelope["data"]["peers"].is_null(), "{envelope}");
+}
+
+#[test]
+fn three_pages_preserve_order_and_only_the_final_cursor() {
+    let home = home("three-pages");
+    let state = private_state(&home);
+    let agent = fake_agent(
+        &state,
+        vec![
+            json!({"peers": [mesh_peer(7)], "version": 1, "next_cursor": {"version": 1, "node": 7}}),
+            json!({"peers": [mesh_peer(8)], "version": 1, "next_cursor": {"version": 1, "node": 8}}),
+            json!({"peers": [mesh_peer(9)], "version": 1, "next_cursor": null}),
+        ],
+    );
+    let args = [
+        "--json",
+        "mesh",
+        "peers",
+        "--state",
+        state.to_str().unwrap(),
+    ];
+    let output = cli(&home, &args);
+    agent.join().unwrap();
+    let envelope = one_envelope(&args, &output);
+    assert_eq!(output.status.code(), Some(0), "{envelope}");
+    let nodes: Vec<_> = envelope["data"]["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|peer| peer["node"].as_u64().unwrap())
+        .collect();
+    assert_eq!(nodes, [7, 8, 9]);
+    assert!(envelope["data"]["next_cursor"].is_null(), "{envelope}");
+}
+
 // ---- Ctrl-C (D303/D305: 130 through the shell) -----------------------------------------
 
 #[test]
