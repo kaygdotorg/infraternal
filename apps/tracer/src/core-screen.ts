@@ -752,6 +752,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     registerShortcuts({ id: "terminal", title: "Terminal", area: "terminal", shortcuts: [
       { id: "tray", label: "Focus the key tray", keys: "F6" },
       { id: "back", label: "Back to the terminal", keys: "Shift+F6" },
+      { id: "focus-resend-actions", label: "Focus saved typing actions", keys: { mac: "⌘⇧Space", other: "Ctrl+Shift+Space" }, combo: platformCombo({ code: "Space", mod: true, shift: true }, { code: "Space", mod: true, shift: true }) },
     ] }),
     registerShortcuts({ id: "global", title: "Everywhere", area: "global", shortcuts: [
       { id: "palette", label: "Open the command palette", keys: PALETTE_KEYS, combo: paletteCombo(), alternates: [paletteAlternate()] },
@@ -766,6 +767,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   // the palette, since a terminal never receives ⌘; a declined press goes through to the terminal (Ctrl+K stays the shell's).
   // The font chords act on the one terminal here; on the canvas the canvas binds them to its active window.
   if (!options.canvas) removeShortcuts.push(...bindTerminalFont(() => client));
+  removeShortcuts.push(bindShortcut("focus-resend-actions", () => { client?.focusInputResendActions(); }, () => client?.hasPendingInputResend() ?? false));
   removeShortcuts.push(bindShortcut("palette", () => setPalette(palette.hidden, "keyboard"), (event) => !stage.hasAttribute("data-locked") || (isMacPlatform() && event.metaKey)));
   // The panel's keys ("?" and ⌘/) come from the registry, so they can be rebound and reach a focused terminal. Only the canvas
   // screen has the panel, as before.

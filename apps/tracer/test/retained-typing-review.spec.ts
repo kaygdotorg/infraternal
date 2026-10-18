@@ -52,12 +52,13 @@ test("review: saved typing offers a non-resend exit in the live terminal window"
   await pendingTyping(page);
   const notice = page.locator('.cl[data-view="console"] .ui-window .ui-toast');
   await expect(notice.getByRole("status")).toHaveAttribute("aria-live", "polite");
+  await expect(notice.getByRole("group", { name: /Saved typing actions/ })).toHaveAttribute("aria-label", /Ctrl\+Shift\+Space/);
   await expect(notice.getByRole("button", { name: "Resend typing" })).toBeVisible();
   await expect(notice.getByRole("button", { name: "Discard" })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("retained-typing-actions.png") });
 });
 
-test("review: keyboard can reach Resend typing from the terminal without sending more typing", async ({ page }) => {
+test("review: terminal keys stay with the shell and the shortcut reaches saved typing actions", async ({ page }) => {
   const delivered = await pendingTyping(page);
   const card = page.locator('.cl[data-view="console"] .ui-window').first();
   const input = card.locator(".terminal-host textarea");
@@ -65,8 +66,11 @@ test("review: keyboard can reach Resend typing from the terminal without sending
   const discard = card.getByRole("button", { name: "Discard" });
   await input.focus();
   await page.keyboard.press("Tab");
+  await expect(input).toBeFocused();
+  await expect.poll(() => delivered.join("")).toBe("\t");
   await page.keyboard.press("Shift+Tab");
-  await expect.poll(() => delivered.join("")).toBe("synthetic-offline\t\u001b[Z");
+  await expect(input).toBeFocused();
+  await expect.poll(() => delivered.join("")).toBe("\t\u001b[Z");
   await expect(resend).toBeVisible();
   await page.keyboard.press("Control+Shift+Space");
   await expect(resend).toBeFocused();
@@ -74,7 +78,7 @@ test("review: keyboard can reach Resend typing from the terminal without sending
   await expect(discard).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(card.locator(".ui-toast")).toBeHidden();
-  expect(delivered.join("")).toBe("synthetic-offline\t\u001b[Z");
+  expect(delivered.join("")).toBe("\t\u001b[Z");
 });
 
 

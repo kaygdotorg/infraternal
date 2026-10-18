@@ -9,6 +9,7 @@ interface TerminalProbe {
   handleInput(text: string): void;
   resendRetainedInput(): void;
   releaseReplayResponsesAfterPaint(): void;
+  retainedInput?: Uint8Array;
   attached: boolean;
   attachmentConfirmed: boolean;
   replayResponseFence: bigint | undefined;
@@ -97,12 +98,15 @@ for (const sentBeforeDrop of [false, true]) test(`review: refusal fallback prese
     expect(frames.filter(({ socket, frame }) => socket === 2 && frame.type === "Input")).toHaveLength(0);
     terminal.replayResponseFence = 0n;
     terminal.releaseReplayResponsesAfterPaint();
-    expect(retained.length).toBe(11);
+    expect(terminal.retainedInput?.byteLength).toBe(11);
+    expect(retained.length).toBe(0);
     expect(notices).toBe(2);
     expect(frames.filter(({ socket, frame }) => socket === 2 && frame.type === "Input")).toHaveLength(0);
     // #244 chooses explicit consent: a new writer cannot prove prior delivery.
     terminal.resendRetainedInput();
     terminal.resendRetainedInput(); // A second tap cannot duplicate input.
+    expect(terminal.retainedInput).toBeUndefined();
+    expect(retained.length).toBe(11);
     const delivered = frames.filter(({ socket, frame }) => socket === 2 && frame.type === "Input")
       .map(({ frame }) => frame.type === "Input" ? new TextDecoder().decode(frame.bytes) : "").join("");
     expect(delivered).toBe("never-sent\n");

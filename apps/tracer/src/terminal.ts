@@ -1,5 +1,6 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
+import { bindingLabel } from "../../../packages/ui/src/shortcuts";
 import { terminalRefusal } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
 import { reattachReason, recoveringReason } from "./close-reasons";
@@ -236,8 +237,11 @@ export class TerminalClient {
   private readonly terminal: Terminal;
   private readonly ghostty: GhosttyActivityControls;
   private readonly inputQueue = new ByteQueue(INPUT_QUEUE_LIMIT);
-  /** A fresh writer cannot deduplicate old input; keep the bounded queue until explicit consent. */
+  /** Uncertain bytes from an old writer stay separate from input typed into the live fresh writer. */
+  private retainedInput: Uint8Array | undefined;
+  /** A fresh writer cannot deduplicate old input; the saved bytes wait for an explicit choice. */
   private inputNeedsResend = false;
+  private inputResendNoticeVisible = false;
   private inputResendNotice: ToastController | undefined;
   private readonly outputQueue = new ByteQueue(INITIAL_CREDIT);
   private readonly inputScratch = new Uint8Array(INPUT_FRAME_LIMIT);
@@ -847,6 +851,10 @@ export class TerminalClient {
     window.visualViewport?.removeEventListener("scroll", this.onViewportChange);
     this.inputResendNotice?.dispose();
     this.inputQueue.clear();
+    this.retainedInput?.fill(0);
+    this.retainedInput = undefined;
+    this.inputNeedsResend = false;
+    this.inputResendNoticeVisible = false;
     this.outputQueue.clear();
     this.pendingSnapshot?.bytes.fill(0);
     // A shared connection only detaches this stream: the session keeps running (D178).
@@ -1168,12 +1176,40 @@ export class TerminalClient {
     this.cursorEpoch += 1;
     this.receivedOutSeq = 0n;
     this.lastOutSeq = 0n;
-    this.inputNeedsResend = retainInput && this.inputQueue.length > 0;
-    this.nextInSeq = this.inputNeedsResend ? BigInt(this.inputQueue.length) : 0n;
+
+    // A fresh writer has its own sequence space. Keep uncertain earlier bytes aside, so keys typed after this reset
+    // can start at sequence zero and flow to the live shell while the person decides what to do with the old bytes.
+    const previousLength = retainInput ? this.retainedInput?.byteLength ?? 0 : 0;
+    const currentLength = retainInput ? this.inputQueue.length : 0;
+    const retainedLength = previousLength + currentLength;
+    if (retainedLength > INPUT_QUEUE_LIMIT) {
+      this.protocolFailure("input resume queue exceeded its bound");
+      return;
+    }
+    let nextRetained: Uint8Array | undefined;
+    if (retainedLength > 0) {
+      nextRetained = new Uint8Array(retainedLength);
+      if (this.retainedInput && retainInput) nextRetained.set(this.retainedInput);
+      let copied = 0;
+      while (copied < currentLength) {
+        const count = this.inputQueue.copyOut(copied, nextRetained.subarray(previousLength + copied));
+        if (count === 0) {
+          nextRetained.fill(0);
+          this.protocolFailure("input resume queue is inconsistent");
+          return;
+        }
+        copied += count;
+      }
+    }
+    this.retainedInput?.fill(0);
+    this.retainedInput = nextRetained;
+    this.inputNeedsResend = nextRetained !== undefined;
+    this.inputQueue.clear();
+    this.nextInSeq = 0n;
     this.ackedInSeq = 0n;
     if (!this.inputNeedsResend) {
-      this.inputQueue.clear();
       this.inputResendNotice?.dismiss();
+      this.inputResendNoticeVisible = false;
     }
     this.outputQueue.clear();
     this.replayResponseFence = undefined;
@@ -1182,10 +1218,23 @@ export class TerminalClient {
     this.pendingSnapshot = undefined;
     this.prediction?.resetForSnapshot();
     this.terminal.reset();
+    this.resumeInputIfRoom();
+  }
+
+  /** Input capacity is shared by the live writer queue and bytes awaiting a resend decision. */
+  private availableInputSpace(): number {
+    return this.inputQueue.free - (this.retainedInput?.byteLength ?? 0);
+  }
+
+  private resumeInputIfRoom(): void {
+    if (!this.inputPaused || this.availableInputSpace() < INPUT_RESUME_GUARD) return;
+    this.inputPaused = false;
+    this.terminal.options.disableStdin = false;
+    if (this.inputAtCapacityMessageShown) this.setStatus("");
+    this.inputAtCapacityMessageShown = false;
   }
 
   private resendUnacknowledgedInput(): void {
-    if (this.inputNeedsResend) return;
     let offset = 0;
     let sequence = this.ackedInSeq;
     while (offset < this.inputQueue.length) {
@@ -1221,7 +1270,7 @@ export class TerminalClient {
       // Large paste events take the slow path; ordinary key events reuse inputScratch.
       encoded = encoder.encode(data);
     }
-    if (encoded.byteLength > this.inputQueue.free) {
+    if (encoded.byteLength > this.availableInputSpace()) {
       this.pauseInput("Typing is paused until the connection catches up.");
       return;
     }
@@ -1233,7 +1282,7 @@ export class TerminalClient {
     this.nextInSeq += BigInt(encoded.byteLength);
     // An Attach request is not a ready shim: per-key frames would fill its
     // bounded handshake queue. Retain them locally until replay confirms it.
-    if (this.attachmentConfirmed && !this.inputNeedsResend) {
+    if (this.attachmentConfirmed) {
       for (let offset = 0; offset < encoded.byteLength;) {
         const length = Math.min(INPUT_FRAME_LIMIT, encoded.byteLength - offset);
         this.sendFrame(this.streamId, {
@@ -1248,7 +1297,7 @@ export class TerminalClient {
     // drawn in this same task, so no host echo can be processed (and painted) before the prediction is.
     // `encoded` may alias inputScratch, which the queue has already copied; prediction copies what it keeps.
     this.prediction?.input(data, firstSequence, encoded, this.predictionSafe());
-    if (this.inputQueue.free < INPUT_RESUME_GUARD) {
+    if (this.availableInputSpace() < INPUT_RESUME_GUARD) {
       this.pauseInput("Typing is paused because too much is waiting to be sent. It resumes when the connection is back.");
     }
   }
@@ -1257,19 +1306,58 @@ export class TerminalClient {
   resendRetainedInput(): void {
     if (!this.inputNeedsResend || this.closed) return;
     if (!this.attachmentConfirmed) { this.showInputResendNotice(); return; }
+    const retained = this.retainedInput;
+    if (!retained || this.nextInSeq > MAX_U64 - BigInt(retained.byteLength)) {
+      this.protocolFailure("input resume sequence exceeded its bound");
+      return;
+    }
+    if (!this.inputQueue.push(retained)) {
+      this.protocolFailure("input resume queue exceeded its bound");
+      return;
+    }
+    this.nextInSeq += BigInt(retained.byteLength);
+    retained.fill(0);
+    this.retainedInput = undefined;
     this.inputNeedsResend = false;
+    this.inputResendNoticeVisible = false;
     this.inputResendNotice?.dismiss();
     this.resendUnacknowledgedInput();
   }
 
+  /** Discard only the uncertain bytes from the earlier writer; live fresh-shell input stays queued normally. */
+  discardRetainedInput(): void {
+    if (!this.inputNeedsResend || this.closed) return;
+    this.retainedInput?.fill(0);
+    this.retainedInput = undefined;
+    this.inputNeedsResend = false;
+    this.inputResendNoticeVisible = false;
+    this.inputResendNotice?.dismiss();
+    this.resumeInputIfRoom();
+  }
+
+  /** Reports only a visible resend choice, so the focus shortcut stays inert at other times. */
+  hasPendingInputResend(): boolean {
+    return this.inputNeedsResend && this.inputResendNoticeVisible && !this.closed;
+  }
+
+  /** The keyboard shortcut hands focus to the existing notice; normal Tab remains a terminal key. */
+  focusInputResendActions(): boolean {
+    if (!this.hasPendingInputResend()) return false;
+    return this.inputResendNotice?.focusAction() ?? false;
+  }
+
   private showInputResendNotice(): void {
     this.inputResendNotice ??= mountToast(this.config.host.parentElement ?? this.config.host, { placement: "parent" });
+    const focusShortcut = bindingLabel("focus-resend-actions") || "Ctrl+Shift+Space";
     this.inputResendNotice.show({
-      message: "Your waiting typing is saved. Some may already have reached the shell. Resend it?",
+      message: "Some saved typing may already have reached the shell.",
       tone: "error",
       duration: 0,
+      actionGroupLabel: `Saved typing actions. Press ${focusShortcut} to focus these actions.`,
       action: { label: "Resend typing", onSelect: () => this.resendRetainedInput() },
+      secondaryAction: { label: "Discard", onSelect: () => this.discardRetainedInput() },
     });
+    this.inputResendNoticeVisible = true;
   }
 
   private encoderIntoScratch(data: string): Uint8Array | undefined {
@@ -1290,12 +1378,7 @@ export class TerminalClient {
     }
     this.inputQueue.consume(acknowledged);
     this.ackedInSeq = sequence;
-    if (this.inputPaused && this.inputQueue.free >= INPUT_RESUME_GUARD) {
-      this.inputPaused = false;
-      this.terminal.options.disableStdin = false;
-      if (this.inputAtCapacityMessageShown) this.setStatus("");
-      this.inputAtCapacityMessageShown = false;
-    }
+    this.resumeInputIfRoom();
   }
 
   private acceptOutput(sequence: bigint, bytes: Uint8Array, message: Uint8Array): void {
