@@ -137,3 +137,15 @@ test("a no-op drawing capture does not trigger another paint", async () => {
   expect(paints).toBe(0); expect(transport.calls).toHaveLength(0); store.dispose();
 });
 
+test("an interrupted first load does not turn a revision-zero cache into an intentional empty layout", async () => {
+  const empty: CanvasDocument = { format: "infraternal.canvas", version: 1, revision: 0, views: [] };
+  localStorage.setItem(canvasKey("a"), JSON.stringify({ cacheVersion: 2, canonical: empty, document: empty, pending: [] }));
+  const first = new ServerCanvasStore(new Transport(), "a"); expect(await first.load()).toBeUndefined(); first.dispose();
+  empty.revision = 2;
+  localStorage.setItem(canvasKey("a"), JSON.stringify({ cacheVersion: 2, canonical: empty, document: empty, pending: [] }));
+  const intentional = new ServerCanvasStore(new Transport(), "a"); expect((await intentional.load())?.views).toEqual([]); intentional.dispose();
+  const transport = new Transport(), live = new ServerCanvasStore(transport, "b");
+  empty.revision = 0; transport.snapshot(empty, false);
+  transport.event({ type: "canvas.layout.operation", revision: 1, op_id: "close", noop: true, intent: { type: "close", window_id: "missing" } });
+  expect((await live.load())?.views).toEqual([]); live.dispose();
+});

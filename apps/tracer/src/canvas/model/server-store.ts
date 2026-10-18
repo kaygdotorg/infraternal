@@ -14,7 +14,6 @@ export interface LayoutTransport {
 export class ServerCanvasStore implements CanvasStore {
   readonly acceptsPendingReferences = true;
   readonly #journal: LayoutJournal;
-  #cached = false;
   #disposed = false;
   readonly #cache: ReturnType<typeof createStoredJsonCache>;
   readonly #off: () => void;
@@ -23,17 +22,18 @@ export class ServerCanvasStore implements CanvasStore {
 
   constructor(private readonly transport: LayoutTransport, account: string, private readonly refused: () => void = () => {}) {
     const key = canvasKey(account);
-    this.#first = new Promise((resolve) => { this.#loaded = resolve; });
     const cache = readLayoutCache(readStoredJson(key));
-    this.#journal = new LayoutJournal(cache); this.#cached = cache !== undefined;
+    this.#first = cache ? Promise.resolve() : new Promise<void>((resolve) => { this.#loaded = resolve; });
+    this.#journal = new LayoutJournal(cache);
     this.#cache = createStoredJsonCache(key, () => layoutCacheValue(this.#journal));
     this.#off = transport.subscribe({ topic: "canvas.layout" }, (event) => this.#event(event), () => {
       this.#journal.restart();
     });
   }
   async load(): Promise<CanvasDocument | undefined> {
-    if (!this.#cached) await this.#first;
-    return this.#cached || this.#journal.initialized || this.current().views.length ? this.current() : undefined;
+    await this.#first;
+    const document = this.current();
+    return this.#journal.initialized || this.#journal.migration || document.views.length ? document : undefined;
   }
   /** A placeholder drawing ID must never be used to attach a terminal. */
   unresolvedWindow(id: string): boolean { return this.#journal.unresolved.has(id); }

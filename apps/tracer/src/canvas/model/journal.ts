@@ -29,7 +29,7 @@ export class LayoutJournal {
     } else if (event.type === "canvas.layout.operation") {
       if (event.revision !== this.canonical.revision + 1 || !event.intent || typeof event.intent !== "object") return false;
       if (!event.noop) reduce(this.canonical, event.intent as Intent);
-      this.canonical.revision = Number(event.revision);
+      this.canonical.revision = Number(event.revision); this.initialized = true;
       this.pending = this.pending.filter((p) => p.op_id !== event.op_id);
     } else return false;
     this.#prune(); return true;
