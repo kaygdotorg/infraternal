@@ -789,6 +789,9 @@ pub(super) struct ObservedBackend(
     pub(super) Option<CanaryReturnHook>,
 );
 impl Backend for ObservedBackend {
+    fn observe_link(&self, a: &Authority, h: Uuid, round_trip: Duration) {
+        self.0.observe_link(a, h, round_trip);
+    }
     fn early_terminal(&self) -> bool {
         std::env::var_os("ADDHOST_INSTANT").is_some() && self.0.early_terminal()
     }
