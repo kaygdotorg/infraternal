@@ -62,7 +62,7 @@ for (const sentBeforeDrop of [false, true]) test(`review: refusal fallback prese
       closed: false, attached: false, attachmentConfirmed: false, sessionGone: false,
       hasAttached: false, sessionId: new Uint8Array(16), streamId: 1,
       inputModifiers: { ctrl: "off", alt: "off" }, inputQueue: queue,
-      inputScratch: new Uint8Array(16 * 1024), nextInSeq: 0n, ackedInSeq: 0n,
+      inputScratch: new Uint8Array(16 * 1024), nextInSeq: sentBeforeDrop ? 7n : 0n, ackedInSeq: sentBeforeDrop ? 7n : 0n,
       lastOutSeq: 0n, receivedOutSeq: 0n, cursorEpoch: 0,
       outputQueue: { length: 0, clear() {} },
       config: { hooks: {}, status: { textContent: "" } }, conn,
@@ -100,6 +100,8 @@ for (const sentBeforeDrop of [false, true]) test(`review: refusal fallback prese
     const delivered = frames.filter(({ socket, frame }) => socket === 2 && frame.type === "Input")
       .map(({ frame }) => frame.type === "Input" ? new TextDecoder().decode(frame.bytes) : "").join("");
     expect(delivered).toBe("never-sent\n");
+    const sent = frames.find(({ socket, frame }) => socket === 2 && frame.type === "Input")?.frame;
+    expect(sent?.type === "Input" ? sent.inSeq : undefined).toBe(0n);
   } finally {
     connection?.dispose();
     for (const [key, value] of Object.entries(original)) { if (value === undefined) delete globals[key]; else globals[key] = value; }
