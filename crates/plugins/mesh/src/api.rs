@@ -1034,24 +1034,16 @@ impl MeshService {
     ) -> Result<u64, MeshApiError> {
         let id = node_id(request.node_id)?;
         let mut tx = self.begin_change().await?;
+        // Names share one global namespace. Check authority before any name lookup: refusing only a
+        // hidden collision would let scoped managers confirm hostnames by comparing it with a free name.
+        authorize(&mut tx, actor, MANAGE_NODES, &[]).await?;
         let scopes = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(request.node_id))).await?;
-        let scope_requirements = require_each_scope(&scopes);
-        authorize(&mut tx, actor, MANAGE_NODES, &scope_requirements).await?;
         refuse_unnamed_label(&request.name)?;
         let mut scopes = scopes;
         for moved in crate::store::make_room(&mut tx, actor, Some(id), &request.name).await? {
             let moved =
                 u64::try_from(moved).map_err(|_| storage_error("stored node id invalid"))?;
             let theirs = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(moved))).await?;
-            // Moving a node aside renames it, so it needs the same authority as renaming it directly. Without it
-            // the change is refused as a bare conflict, the answer a name in use gets anyway (`make_room`), and
-            // the dropped transaction undoes the move.
-            authorize(&mut tx, actor, MANAGE_NODES, &require_each_scope(&theirs))
-                .await
-                .map_err(|error| match error {
-                    MeshApiError::Denied => MeshApiError::Conflict,
-                    error => error,
-                })?;
             scopes.extend(theirs);
         }
         // A person's name is final: automatic naming never touches it again (store.rs `attach_named`, #236).

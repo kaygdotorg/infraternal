@@ -281,13 +281,12 @@ async fn wanted_name(
 /// Frees `name` for `actor`'s choice on node `id` (`None` while enrolling a new one). A person outranks every
 /// automatic name (migration 0026), so a node holding `name` by record, report, placeholder or the server's own
 /// hostname moves aside to a suffix of its own claim, audited under `actor` as an automatic rename with the
-/// change's revision. Returns the nodes moved, over which the caller must hold the same authority as over the node
-/// it names (`rename_node`, which refuses with a bare conflict otherwise).
+/// change's revision. Returns the nodes moved so their scopes receive the change notice. The caller must
+/// authorize global node management before looking up names: target-only authority would expose hidden names
+/// through a conflict or require moving a holder the caller cannot manage.
 ///
-/// Only the label `server` and another person's name refuse here. Neither is an oracle: every viewer reads the
-/// server's node as `server`, and a bare conflict says only that the name is in use, which every Mesh member can
-/// learn from the name's DNS record. A host fact hidden from viewers who are not the owner (a reported hostname,
-/// the server's hostname) answers a caller allowed to move its node exactly as a free name does.
+/// Only the label `server` and another person's name refuse here. Global node managers can already rename
+/// automatic holders directly, so reported and server hostnames answer exactly as free names do.
 pub(crate) async fn make_room(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     actor: &str,

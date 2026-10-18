@@ -142,8 +142,8 @@ async fn a_scoped_manager_cannot_confirm_a_hidden_reported_hostname() {
     );
 }
 
-/// A refused move must leave inventory, audit and revision intact, including the automatic rename performed
-/// before authorization. The next query reacquires the sole connection, so it observes the queued rollback.
+/// A refused rename must leave inventory, audit and revision intact. Global namespace authority is checked
+/// before a holder can move; reacquiring the sole connection also observes the queued transaction rollback.
 #[tokio::test]
 async fn evidence_a_refused_move_rolls_back_inventory_audit_and_revision() {
     let pool = pool().await;
@@ -174,7 +174,7 @@ async fn evidence_a_refused_move_rolls_back_inventory_audit_and_revision() {
     let mut changes = service.subscribe();
     assert_eq!(
         rename(&service, "dev-admin", own, "minipc01").await,
-        Err(MeshApiError::Conflict)
+        Err(MeshApiError::Denied)
     );
     assert_eq!(name_of(&pool, hidden).await, "minipc01");
     assert_eq!(name_of(&pool, own).await, before);
@@ -219,7 +219,7 @@ async fn evidence_server_hostname_moves_only_with_server_rename_authority() {
     tag(&pool, "dev", own).await;
     assert_eq!(
         rename(&service, "dev-admin", own, "monitor01").await,
-        Err(MeshApiError::Conflict)
+        Err(MeshApiError::Denied)
     );
     assert_eq!(name_of(&pool, server).await, "monitor01");
     assert_eq!(
@@ -297,4 +297,68 @@ async fn a_name_chosen_while_rewound_survives_rolling_forward_and_reattaching() 
         "during-rewind",
         "rolling forward and reconnecting erased the name chosen on the previous release"
     );
+}
+
+/// Every hidden source and role combination gets the same refusal for an occupied or free spelling.
+/// Global authority for another action and the union of scoped node roles cannot become global naming authority.
+#[tokio::test]
+async fn hidden_names_are_indistinguishable_for_every_non_global_node_manager() {
+    for source in ["record", "reported", "hand", "server"] {
+        let pool = pool().await;
+        add_host(
+            &pool,
+            A,
+            if source == "record" {
+                "root@private-machine"
+            } else {
+                "root@10.69.69.5"
+            },
+        )
+        .await;
+        add_host(&pool, B, "root@10.69.69.6").await;
+        add_manager(&pool, "scoped", Some("dev")).await;
+        add_manager(&pool, "other-global", None).await;
+        sqlx::query("UPDATE mesh_role_actions SET action='mesh.manage_tags' WHERE role_name='other-global-nodes'").execute(&pool).await.unwrap();
+        add_manager(&pool, "both", Some("dev")).await;
+        sqlx::query(
+            "INSERT INTO mesh_user_roles(user_id,role_name) VALUES('both','other-global-nodes')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let service = MeshService::new(pool.clone());
+        let store = service.dataplane();
+        let (hidden, _) = store
+            .attach_named(
+                if source == "server" { "server" } else { A },
+                PublicKey([10; 32]),
+                None,
+                source == "server",
+                Some("private-machine"),
+            )
+            .await
+            .unwrap();
+        if source == "hand" {
+            rename(&service, "owner", hidden, "private-machine")
+                .await
+                .unwrap();
+        }
+        let (own, _) = store
+            .attach_named(B, PublicKey([11; 32]), None, false, None)
+            .await
+            .unwrap();
+        tag(&pool, "prod", hidden).await;
+        tag(&pool, "dev", own).await;
+        sqlx::query("INSERT INTO mesh_role_actions(role_name,action,scope_tag) VALUES('both-nodes','mesh.manage_nodes','prod')").execute(&pool).await.unwrap();
+        for actor in ["scoped", "other-global", "both", "unknown"] {
+            for name in ["private-machine", "private-machinf"] {
+                assert_eq!(
+                    rename(&service, actor, own, name).await,
+                    Err(MeshApiError::Denied),
+                    "{source}/{actor}/{name}"
+                );
+            }
+        }
+        assert_eq!(name_of(&pool, hidden).await, "private-machine");
+    }
 }
