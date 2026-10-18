@@ -53,11 +53,13 @@ export async function reconcile(cx: Ctx, read: () => SharedPaint, resolve: (targ
         const relabel = rec.model.host !== model.host || rec.model.user !== model.user || rec.model.session !== model.session;
         const sameHost = rec.model.hostId === model.hostId && rec.model.host === model.host;
         const retargeted = rec.model.sessionId !== model.sessionId || rec.model.hostId !== model.hostId;
-        rec.model.host = model.host;
-        for (const k of ["sessionId", "session", "hostId", "user", "address", "os"] as const) { if (model[k] === undefined) delete rec.model[k]; else Object.assign(rec.model, { [k]: model[k] }); }
+        if (rec.model !== model) {
+          for (const k of ["sessionId", "session", "hostId", "user", "address", "os", "h", "span", "rows", "row"] as const) delete rec.model[k];
+          Object.assign(rec.model, model);
+        }
         if (retargeted && (!sameHost || !rec.binding?.retarget?.(rec.model))) { rec.binding?.dispose(); makeBody(cx, rec); rec.binding?.setActive(cx.state.activeWin === rec); }
         if (relabel) rec.card.setTitle({ host: rec.model.host, ...(rec.model.user ? { user: rec.model.user } : {}), ...(rec.model.session ? { session: rec.model.session } : {}) });
-        for (const k of ["h", "span", "rows", "row"] as const) { if (model[k] === undefined) delete rec.model[k]; else rec.model[k] = model[k]; } }
+      }
     }
     // Bindings keep the original model object. Columns must share it so asynchronous reference
     // completion reaches the next document instead of reopening the same shell on every paint.

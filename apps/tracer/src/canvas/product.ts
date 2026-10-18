@@ -11,7 +11,7 @@
  * sees it at once, loading, so its pinned nodes are kept in the document while the snapshot is on its way.
  * This module is a lazy chunk, loaded after sign-in and never on the sign-in path.
  */
-import { onDemand, whenIdle } from "../on-demand";
+import { onDemand } from "../on-demand";
 import { ensureHostMarks, hostPlatformFromOs, type HostPlatform } from "../../../../packages/ui/src/host-icons";
 import { ConnectionPool, MuxConnection } from "../connection";
 import { isCanonicalUuid } from "../identifiers";
@@ -28,6 +28,7 @@ import { CELL, boxOf } from "./layout/geometry";
 import { columnsFromDocument, viewFromDocument, docHasGroups, type DocTarget } from "./model/document";
 import { loadGroups } from "./layout/groups-handle";
 import { ServerCanvasStore } from "./model/server-store";
+import { reconcile } from "./model/reconcile";
 import type { ViewModel, WindowModel } from "./model/types";
 import { createLazyMeshApi } from "./mesh/lazy";
 import { connectionTransport } from "./mesh/transport";
@@ -223,10 +224,10 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const paintLayout = (): void => {
     if (canvas.cx.state.movingWindow) { paintAfterDrop = true; return; }
     const revision = ++paintRevision;
-    void import("./model/reconcile").then(({ reconcile }) => reconcile(canvas.cx, () => {
+    void reconcile(canvas.cx, () => {
       canvas.flush();
       return { document: store.current!(), protectedIds: canvas.cx.store.uncommittedWindows(), protectedViews: canvas.cx.store.uncommittedViews() };
-    }, resolve, () => !disposed && revision === paintRevision));
+    }, resolve, () => !disposed && revision === paintRevision);
   };
   // A canonical update cannot reparent a lifted window in the middle of its gesture.
   const dropped = (): void => { if (paintAfterDrop) { paintAfterDrop = false; queueMicrotask(paintLayout); } };
@@ -238,7 +239,6 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   if (saved) inventory.setLayout(saved);
   canvas.cx.nav.flyView("console", true);
   canvasReady();
-  whenIdle(() => { if (!disposed) { void import("./model/reconcile").catch(() => undefined); } });
   const first = [...(canvas.cx.views.get("console")?.wins.values() ?? [])][0];
   if (first) canvas.cx.win.setActive(first);
   // Neither inventory code nor its RPC competes with the first terminal frame.
