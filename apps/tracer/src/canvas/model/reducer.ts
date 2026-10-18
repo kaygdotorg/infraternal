@@ -1,5 +1,5 @@
 /** Pure stable-ID layout projection shared by optimistic edits and offline journal validation (D180, D183, D245). */
-import { documentWindows as windows, type CanvasDocument, type DocColumn, type DocView, type DocWindow } from "./document";
+import { documentWindows as windows, type CanvasDocument, type DocColumn, type DocView, type DocWindow } from "./schema";
 import type { Intent } from "./operations";
 const cols = (v: DocView): DocColumn[] => v.layout.type === "tiled" ? v.layout.columns : [];
 /** Missing memberships stay missing after close; callers deduplicate the server's ordered revisions. */

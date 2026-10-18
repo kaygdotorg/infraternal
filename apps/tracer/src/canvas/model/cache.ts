@@ -1,7 +1,7 @@
 /** One decoder for offline startup and the durable layout journal, so damaged cache data cannot stall mount (D180, D245). */
 import { reduce } from "./reducer";
 import { isCanonicalUuid, randomUuid } from "../../identifiers";
-import { parseDocument, type CanvasDocument } from "./document";
+import { parseDocument, type CanvasDocument } from "./schema";
 import type { Intent } from "./operations";
 export interface Pending { op_id: string; base_revision: number; intent: Intent; revision?: number; sent?: boolean }
 export interface Migration { op_id: string; document: CanvasDocument; revision?: number }
