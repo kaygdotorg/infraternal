@@ -323,6 +323,11 @@ impl Backend for ObservedBackend {
     }
 
     fn record_failure(&self, t: &Target, h: Option<Uuid>, p: Step, f: &Failure) {
+        // Fixed public fields only: the typed kind, step, status and boundary tail.
+        println!(
+            "FAILURE breakit2 phase={p:?} kind={:?} step={:?} status={:?} tail={:?}",
+            f.kind, f.failed_step, f.exit_status, f.log_tail
+        );
         self.0.record_failure(t, h, p, f);
     }
     fn invitation_with_trust<'a>(
