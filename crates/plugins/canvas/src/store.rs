@@ -135,8 +135,7 @@ impl Store {
             false,
         )
         .await?;
-        tx.commit().await?;
-        self.changes.send_replace(());
+        commit(tx, self.changes.clone()).await?;
         Ok(document.revision)
     }
     /// Compare-and-set bootstrap, preserving a differing loser as recoverable views.
@@ -200,10 +199,21 @@ impl Store {
             true,
         )
         .await?;
-        tx.commit().await?;
-        self.changes.send_replace(());
+        commit(tx, self.changes.clone()).await?;
         Ok(document.revision)
     }
+}
+async fn commit(tx: Transaction<'static, Sqlite>, changes: watch::Sender<()>) -> Result<(), Error> {
+    // COMMIT can become durable before its caller receives the acknowledgement.
+    // Keep its invalidation in the same finite task so socket cancellation cannot
+    // strand connected devices on an older revision. No timer or worker is retained.
+    tokio::spawn(async move {
+        tx.commit().await?;
+        changes.send_replace(());
+        Ok::<(), Error>(())
+    })
+    .await
+    .map_err(|_| Error)?
 }
 #[allow(clippy::items_after_statements)]
 fn decode<T: serde::de::DeserializeOwned>(input: &[u8], max: usize) -> Result<T, Error> {
@@ -353,6 +363,36 @@ mod tests {
         .await
         .unwrap();
         Store::new(pool)
+    }
+    #[tokio::test]
+    async fn cancelled_commit_still_invalidates_a_durable_change() {
+        use std::{future::Future, task::Poll};
+        let store = fixture().await;
+        let mut notice = store.changes();
+        notice.borrow_and_update();
+        let mut tx = infraternal_plugin_api::storage::begin_immediate(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO canvas_heads VALUES('a',0,'{}',0)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let mut pending = Box::pin(commit(tx, store.changes.clone()));
+        let ready =
+            std::future::poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_ready())).await;
+        assert!(!ready, "commit needs the database worker acknowledgement");
+        drop(pending);
+        // This single-connection read fences completion of COMMIT and connection return.
+        let committed: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM canvas_heads WHERE account='a')")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert!(committed);
+        assert!(
+            notice.has_changed().unwrap(),
+            "durable commit lost its subscriber invalidation when its caller was cancelled"
+        );
     }
     #[tokio::test]
     async fn cas_retry_and_foreign_account_isolation() {
