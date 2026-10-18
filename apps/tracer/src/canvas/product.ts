@@ -148,7 +148,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
         } else canvas.cx.win.open(hostId);
         applyIdentities([{ id: hostId, name: host.name, ...(host.user ? { user: host.user } : {}), os: host.os }]);
       }
-    } },
+    }, openHost(hostId) { canvas.cx.win.open(hostId); }, hasHost: (hostId) => sessions.hosts().some((host) => host.id === hostId) },
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
   });
   const authority = createAuthorityControl(core, { service: loadProvisioning });

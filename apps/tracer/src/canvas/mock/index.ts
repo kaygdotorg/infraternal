@@ -72,8 +72,14 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   const addHost = createAddHost(core, {
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
     service: provisioning,
-    sink: { enrolled: (hosts, status) => enrol(hosts, status), setupInPill: true },
+    sink: {
+      enrolled: (hosts, status) => enrol(hosts, status),
+      setupInPill: true,
+      // The test double names an existing host by UUID; the mock world knows hosts by name.
+      openHost: (id) => canvas.cx.win.open(MOCK_HOST_BY_ID[id] ?? id),
+    },
   });
+  const MOCK_HOST_BY_ID: Record<string, string> = { "6f1d0a52-7c3e-4b8a-9d21-0a5e4c7b1f30": "build-01" };
   function openAddHost(): void { warmSetup(); addHost.open(); }
   function enrol(hosts: EnrolledHost[], status?: Element): void {
     for (const host of hosts) {
@@ -253,6 +259,8 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     setCamera: (cx_: number, cy: number, z: number) => { cx.nav.applyCanvasLock(false); camera.set({ cx: cx_, cy, z }); },
     flyCamera: (cx_: number, cy: number, z: number) => { cx.nav.applyCanvasLock(false); camera.flyTo(() => ({ cx: cx_, cy, z })); },
     views: () => [...cx.views.values()].map((c) => ({ id: c.view.id, name: c.view.name, team: Boolean(c.view.team), x: c.x, y: c.y, w: boxOf(c.view, state.metrics).w, h: boxOf(c.view, state.metrics).h, windows: [...c.wins.keys()] })),
+    /** The focused window's id (specs check where a flow handed the keys). */
+    activeWindow: (): string | undefined => state.activeWin?.model.id,
     /** A new session on the host in its own window (the inventory creates it, as a split does). */
     newShell: (host: string): string | undefined => {
       const rec = inventory.create?.(host);

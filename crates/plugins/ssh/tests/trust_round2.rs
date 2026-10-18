@@ -56,7 +56,7 @@ async fn multi_key_target_trusts_once_and_reconnects_without_a_loop() {
     assert_eq!(failure.fingerprints[0], expected);
     ssh.confirm_host_key(
         destination.clone(),
-        &failure.host_key_challenge.unwrap().to_string(),
+        &failure.host_key_challenge().unwrap().to_string(),
         &failure.fingerprints[0],
         &Confirm,
     )
@@ -169,12 +169,12 @@ async fn assert_explicit_replacement(
         .unwrap();
     assert_eq!(changed.kind, FailureKind::HostKey);
     assert!(
-        changed.host_key_challenge.is_some(),
+        changed.host_key_challenge().is_some(),
         "changed application pins can be rechecked"
     );
     ssh.confirm_host_key(
         destination.clone(),
-        &changed.host_key_challenge.unwrap().to_string(),
+        &changed.host_key_challenge().unwrap().to_string(),
         &changed.fingerprints[0],
         &Confirm,
     )
@@ -184,7 +184,7 @@ async fn assert_explicit_replacement(
     assert!(
         ssh.confirm_host_key(
             destination.clone(),
-            &concurrent.host_key_challenge.unwrap().to_string(),
+            &concurrent.host_key_challenge().unwrap().to_string(),
             &concurrent.fingerprints[0],
             &Confirm
         )
