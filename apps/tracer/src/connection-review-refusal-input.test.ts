@@ -35,7 +35,7 @@ for (const sentBeforeDrop of [false, true]) test(`review: refusal fallback prese
         frames.push({ socket: this.index, frame: frame.type === "Input" ? { ...frame, bytes: frame.bytes.slice() } : frame });
       });
     }
-    receive(frame: WireFrame) { this.onmessage?.({ data: encodeMuxedFrame(0, frame).slice().buffer as ArrayBuffer }); }
+    receive(frame: WireFrame, stream = 0) { this.onmessage?.({ data: encodeMuxedFrame(stream, frame).slice().buffer as ArrayBuffer }); }
     close() { this.readyState = 3; this.onclose?.(); }
   }
   const retained: number[] = [];
@@ -43,6 +43,7 @@ for (const sentBeforeDrop of [false, true]) test(`review: refusal fallback prese
     get free() { return 1024 * 1024 - retained.length; },
     get length() { return retained.length; },
     clear() { retained.length = 0; },
+    consume(length: number) { retained.splice(0, length); },
     push(bytes: Uint8Array) { retained.push(...bytes); return true; },
     copyOut(offset: number, target: Uint8Array) {
       const bytes = Uint8Array.from(retained).subarray(offset, offset + target.length);
@@ -62,7 +63,7 @@ for (const sentBeforeDrop of [false, true]) test(`review: refusal fallback prese
       closed: false, attached: false, attachmentConfirmed: false, sessionGone: false,
       hasAttached: false, sessionId: new Uint8Array(16), streamId: 1,
       inputModifiers: { ctrl: "off", alt: "off" }, inputQueue: queue,
-      inputScratch: new Uint8Array(16 * 1024), nextInSeq: sentBeforeDrop ? 7n : 0n, ackedInSeq: sentBeforeDrop ? 7n : 0n,
+      inputScratch: new Uint8Array(16 * 1024), nextInSeq: 0n, ackedInSeq: 0n,
       lastOutSeq: 0n, receivedOutSeq: 0n, cursorEpoch: 0,
       outputQueue: { length: 0, clear() {} },
       config: { hooks: {}, status: { textContent: "" } }, conn,
@@ -75,11 +76,16 @@ for (const sentBeforeDrop of [false, true]) test(`review: refusal fallback prese
     sockets[0]!.onopen?.(); sockets[0]!.receive(welcome());
     terminal.replayResponseFence = 0n;
     terminal.releaseReplayResponsesAfterPaint();
-    if (sentBeforeDrop) terminal.handleInput("never-sent\n");
+    if (sentBeforeDrop) {
+      terminal.handleInput("prior-\n");
+      sockets[0]!.receive({ type: "Ack", inSeqAcked: 7n }, 1);
+      expect(retained.length).toBe(0);
+      terminal.handleInput("never-sent\n");
+    }
     sockets[0]!.close();
     if (!sentBeforeDrop) terminal.handleInput("never-sent\n");
     expect(retained.length).toBe(11);
-    expect(frames.filter(({ frame }) => frame.type === "Input")).toHaveLength(sentBeforeDrop ? 1 : 0);
+    expect(frames.filter(({ frame }) => frame.type === "Input")).toHaveLength(sentBeforeDrop ? 2 : 0);
     const retry = () => { const next = [...timers.entries()].at(-1)!; timers.delete(next[0]); next[1](); };
     retry(); sockets[1]!.onopen?.();
     sockets[1]!.receive({ type: "Close", code: 1008, reason: "the server refused to resume the connection" });
