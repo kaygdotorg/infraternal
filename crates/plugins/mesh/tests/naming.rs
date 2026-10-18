@@ -153,7 +153,7 @@ async fn a_viewer_without_host_facts_does_not_see_reported_hostnames() {
     );
     assert_eq!(
         names(&service, "guest").await,
-        ["server", "unnamed", "minipc01"]
+        ["server", "unnamed-2", "minipc01"]
     );
 }
 

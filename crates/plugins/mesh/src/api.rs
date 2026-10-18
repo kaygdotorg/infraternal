@@ -481,6 +481,23 @@ fn validate_name(name: &str) -> Result<(), MeshApiError> {
     Ok(())
 }
 
+/// Whether `name` is the label for a node without a known name (`unnamed`, `unnamed-<n>`): placeholders, and
+/// what a viewer without host facts reads for a hostname (`decode_host`). Nobody may hold one as a real name.
+pub(crate) fn is_unnamed_label(name: &str) -> bool {
+    name == "unnamed"
+        || name
+            .strip_prefix("unnamed-")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// A person cannot choose a label kept for unnamed nodes; it would read as a placeholder.
+fn refuse_unnamed_label(name: &str) -> Result<(), MeshApiError> {
+    if is_unnamed_label(name) {
+        return Err(MeshApiError::InvalidInput);
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_host(name: &str) -> Result<(), MeshApiError> {
     validate_name(name)
 }
@@ -918,6 +935,7 @@ impl MeshService {
             }
         }
         // Enrolment only ever adds a remote machine; the server's node comes from its own channel.
+        refuse_unnamed_label(&request.name)?;
         crate::store::refuse_server_names(&mut tx, None, &request.name).await?;
         crate::store::make_room(&mut tx, None, &request.name).await?;
         // Persist allocation history independently of live rows. Explicitly imported
@@ -1020,6 +1038,7 @@ impl MeshService {
         let scopes = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(request.node_id))).await?;
         let scope_requirements = require_each_scope(&scopes);
         authorize(&mut tx, actor, MANAGE_NODES, &scope_requirements).await?;
+        refuse_unnamed_label(&request.name)?;
         crate::store::refuse_server_names(&mut tx, Some(id), &request.name).await?;
         let mut scopes = scopes;
         for moved in crate::store::make_room(&mut tx, Some(id), &request.name).await? {
@@ -1915,11 +1934,15 @@ fn decode_host(
     let mut host: String = row.try_get("name").ok()?;
     validate_host(&host).ok()?;
     // A name taken from a machine's own hostname is a host fact: a viewer without host facts sees a neutral
-    // label instead (#236). The owner typed record names, and a person chose hand-set ones.
+    // label instead (#236). The owner typed record names, and a person chose hand-set ones. The label carries
+    // the node's id, so it is stable and distinct: names stay unique for every viewer (rows and pills are keyed
+    // by name), and no person or machine can hold one (`is_unnamed_label`). Placeholders get the same label, so
+    // a hidden hostname and a real placeholder look alike.
     if hide_hostnames {
         match row.try_get::<String, _>("name_source").ok()?.as_str() {
             "server" => "server".clone_into(&mut host),
-            "reported" => "unnamed".clone_into(&mut host),
+            "placeholder" if host == "server" => {}
+            "reported" | "placeholder" => host = format!("unnamed-{id}"),
             _ => {}
         }
     }

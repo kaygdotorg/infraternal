@@ -80,6 +80,10 @@ pub fn machine_name(source: &str) -> Option<String> {
         return None;
     }
     crate::api::validate_host(&label).ok()?;
+    // A machine called `unnamed-3` would read as a placeholder, and clash with what hidden viewers see.
+    if crate::api::is_unnamed_label(&label) {
+        return None;
+    }
     Some(label)
 }
 /// Who named a node; a higher rank may move a lower one's automatic name aside (migration 0026, #236).
