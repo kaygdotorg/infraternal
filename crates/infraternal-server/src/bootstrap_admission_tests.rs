@@ -34,6 +34,8 @@ async fn installed_admission_waits_for_the_active_route() {
         .await
         .unwrap();
     let hosts = RemoteHosts::default();
+    let mut waiting = Box::pin(wait_installed_actor(&hosts, host, Duration::from_secs(30)));
+    assert!(waiting.as_mut().now_or_never().is_none());
     // Reproduce the observable admission window directly: installed metadata
     // is visible while the same actor still owns its old SSH route. No session
     // may be opened merely because that metadata has become visible.
@@ -48,7 +50,6 @@ async fn installed_admission_waits_for_the_active_route() {
     assert!(hosts.installed(host).await);
     let ssh_actor = hosts.actor(host).await.unwrap();
     assert!(!ssh_actor.installed_route().await.unwrap());
-    let mut waiting = Box::pin(wait_installed_actor(&hosts, host));
     assert!(
         waiting.as_mut().now_or_never().is_none(),
         "ledger admission released the old SSH route"
@@ -93,6 +94,7 @@ async fn installed_admission_waits_for_the_active_route() {
         .unwrap();
     let actor = tokio::time::timeout(Duration::from_secs(5), waiting)
         .await
+        .unwrap()
         .unwrap();
     assert!(actor.installed_route().await.unwrap());
     drop((actor, ssh_actor, hosts));
@@ -100,4 +102,27 @@ async fn installed_admission_waits_for_the_active_route() {
     if let Err(error) = peer.await {
         assert!(error.is_cancelled(), "admission peer panicked: {error}");
     }
+}
+
+/// A failed route must keep the old startup allowance even on a fast SSH link.
+#[tokio::test(start_paused = true)]
+async fn missing_route_uses_link_scaled_bound_without_inventory_extensions() {
+    let hosts = RemoteHosts::default();
+    let budget = installed_actor_budget(Duration::from_millis(600));
+    assert_eq!(budget, Duration::from_millis(34800));
+    assert_eq!(
+        installed_actor_budget(Duration::ZERO),
+        Duration::from_secs(30)
+    );
+    let waiting = wait_installed_actor(&hosts, Uuid::new_v4(), budget);
+    tokio::pin!(waiting);
+    assert!(waiting.as_mut().now_or_never().is_none());
+    tokio::time::advance(Duration::from_secs(29)).await;
+    hosts.5.publish();
+    assert!(waiting.as_mut().now_or_never().is_none());
+    tokio::time::advance(Duration::from_secs(5)).await;
+    hosts.5.publish();
+    assert!(waiting.as_mut().now_or_never().is_none());
+    tokio::time::advance(Duration::from_millis(801)).await;
+    assert!(waiting.await.is_err());
 }

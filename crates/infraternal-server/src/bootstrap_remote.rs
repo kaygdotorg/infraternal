@@ -17,8 +17,12 @@ use std::{collections::HashMap, sync::Mutex, time::Duration};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
-/// Fail a missing installed route promptly so a recoverable setup can expose Retry.
-const INSTALLED_ACTOR_ROUTE_TIMEOUT: Duration = Duration::from_secs(1);
+/// Preserve the original startup allowance and add eight authenticated command
+/// round trips for TLS fallback, greeting and actor admission. This is a failure
+/// bound, never a delay: route notifications release a healthy host immediately.
+fn installed_actor_budget(round_trip: Duration) -> Duration {
+    Duration::from_secs(30).saturating_add(round_trip.saturating_mul(8))
+}
 
 /// Fresh identities are owned by one batch until installation commits or rolls back.
 /// No user-provided UUID can overwrite an already enrolled machine's authority.
@@ -33,6 +37,7 @@ pub(super) struct Attempt {
     owner: String,
     batch: Uuid,
     uid: u32,
+    link_round_trip: Duration,
     destination: Option<(String, Option<String>)>,
     canary: Option<(EmbeddedAgent, [u8; 16], [u32; 2])>,
     retirement: Option<tokio::task::JoinHandle<Result<(), Failure>>>,
@@ -81,19 +86,24 @@ impl RemoteBackend {
     async fn actor(&self, authority: &Authority, host: Uuid) -> Result<EmbeddedAgent, Failure> {
         self.authorize(authority).await?;
         self.uid(authority, host)?;
-        // The installation service has just started. This finite wait owns no
-        // background timer and cannot turn token redemption into online proof.
+        let budget = self
+            .attempts
+            .lock()
+            .map_err(|_| unavailable())?
+            .get(&host)
+            .map_or_else(
+                || installed_actor_budget(Duration::ZERO),
+                |attempt| installed_actor_budget(attempt.link_round_trip),
+            );
+        // The service and actor each receive a link-scaled startup allowance.
+        // Queue admission is progress, but never authenticated online proof.
         #[cfg(test)]
         let mesh_route_started = std::time::Instant::now();
         #[cfg(test)]
         let mesh_route_started_epoch = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        let result = tokio::time::timeout(
-            INSTALLED_ACTOR_ROUTE_TIMEOUT,
-            wait_installed_actor(&self.hosts, host),
-        )
-        .await;
+        let result = wait_installed_actor(&self.hosts, host, budget).await;
         #[cfg(test)]
         if std::env::var_os("ADDHOST_RETRY_PHASE_TIMING").is_some() {
             let elapsed_ms = mesh_route_started.elapsed().as_secs_f64() * 1000.0;
@@ -123,11 +133,7 @@ impl RemoteBackend {
                 );
             }
         }
-        result.map_err(|_| {
-            Failure::install(
-                "The infraternal agent did not connect. Check the host's service and network.",
-            )
-        })
+        result
     }
     /// Match immutable failed-bootstrap coordinates before automatic remote cleanup.
     async fn owns_failed_setup_record(
@@ -233,6 +239,7 @@ impl RemoteBackend {
                         owner: authority.owner.clone(),
                         batch: authority.batch,
                         uid,
+                        link_round_trip: Duration::ZERO,
                         destination: Some((address.to_owned(), lookup.clone())),
                         canary: None,
                         retirement: None,
@@ -290,6 +297,15 @@ impl RemoteBackend {
     }
 }
 impl Backend for RemoteBackend {
+    fn observe_link(&self, authority: &Authority, host: Uuid, round_trip: Duration) {
+        if let Ok(mut attempts) = self.attempts.lock()
+            && let Some(attempt) = attempts.get_mut(&host)
+            && attempt.owner == authority.owner
+            && attempt.batch == authority.batch
+        {
+            attempt.link_round_trip = round_trip;
+        }
+    }
     fn session_notifications(&self, notify: tokio::sync::watch::Sender<u64>) {
         if let Ok(mut current) = self.sessions_changed.lock() {
             *current = Some(notify);
@@ -598,16 +614,46 @@ impl Backend for RemoteBackend {
     }
 }
 /// Ledger admission alone does not identify the actor's currently greeted route.
-async fn wait_installed_actor(hosts: &RemoteHosts, host: Uuid) -> EmbeddedAgent {
-    loop {
-        if hosts.installed(host).await
-            && let Some(actor) = hosts.actor(host).await
-            && actor.installed_route().await.unwrap_or(false)
-        {
-            return actor;
+async fn wait_installed_actor(
+    hosts: &RemoteHosts,
+    host: Uuid,
+    budget: Duration,
+) -> Result<EmbeddedAgent, Failure> {
+    // Subscribe before inspecting the registry: admission between inspection
+    // and suspension must remain visible, including the first host insertion.
+    let mut admitted = hosts.5.subscribe();
+    let actor = tokio::time::timeout(budget, async {
+        loop {
+            if hosts.installed(host).await
+                && let Some(actor) = hosts.actor(host).await
+            {
+                break Ok::<_, Failure>(actor);
+            }
+            admitted.changed().await.map_err(|_| unavailable())?;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    })
+    .await
+    .map_err(|_| route_unavailable())??;
+    // An admitted replacement can still be queued behind the old SSH route.
+    // Grant this concrete startup transition its own allowance, once only;
+    // unrelated inventory events cannot extend a stalled host's deadline.
+    tokio::time::timeout(budget, async {
+        let mut changed = actor.changes();
+        loop {
+            if actor.installed_route().await.map_err(|_| unavailable())? {
+                return Ok(actor);
+            }
+            tokio::select! {
+                result = changed.changed() => result.map_err(|_| unavailable())?,
+                result = admitted.changed() => result.map_err(|_| unavailable())?,
+            }
+        }
+    })
+    .await
+    .map_err(|_| route_unavailable())?
+}
+fn route_unavailable() -> Failure {
+    Failure::install("The infraternal agent did not connect. Check the host's service and network.")
 }
 fn cookie(authority: &Authority) -> Result<&str, Failure> {
     std::str::from_utf8(authority.session().ok_or_else(unavailable)?.expose())
@@ -1527,6 +1573,7 @@ mod tests {
                 owner: "owner".into(),
                 batch: Uuid::new_v4(),
                 uid: 1002,
+                link_round_trip: Duration::ZERO,
                 destination: None,
                 canary: None,
                 retirement: None,
@@ -1538,6 +1585,7 @@ mod tests {
                 owner: "other-owner".into(),
                 batch: Uuid::new_v4(),
                 uid: 1003,
+                link_round_trip: Duration::ZERO,
                 destination: None,
                 canary: None,
                 retirement: None,
@@ -1704,6 +1752,7 @@ mod tests {
                         owner: "owner".into(),
                         batch: Uuid::new_v4(),
                         uid: 1002,
+                        link_round_trip: Duration::ZERO,
                         destination: Some((format!("user@host-{index}.example.invalid"), None)),
                         canary: None,
                         retirement: None,
