@@ -42,6 +42,7 @@ impl Capture {
     }
 
     fn events(&self, name: &str) -> Vec<serde_json::Value> {
+        crate::stream_close::settled();
         String::from_utf8(self.0.lock().unwrap().clone())
             .unwrap()
             .lines()
