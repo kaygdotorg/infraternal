@@ -12,3 +12,7 @@ test("a valid unresolved reference remains local and replayable", () => {
   const value = readLayoutCache({ ...cache({ type: "open", view_id: "console", column_id: "c", window: { id: "w", target: { type: "session", id: "w", host: "local" } } }), unresolved: ["w"] });
   expect(value?.pending).toHaveLength(1); expect(value?.unresolved.has("w")).toBe(true);
 });
+test("a valid offline journal is retained beyond a short burst", () => {
+  const pending = Array.from({ length: 1025 }, (_, i) => ({ op_id: `00000000-0000-4000-8000-${i.toString(16).padStart(12, "0")}`, base_revision: 1, intent: { type: "view.update", view_id: "console", name: `Console ${i}` } }));
+  expect(readLayoutCache({ cacheVersion: 2, canonical, document: canonical, pending })?.pending).toHaveLength(1025);
+});

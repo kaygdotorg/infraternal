@@ -13,7 +13,7 @@ export function readLayoutCache(value: unknown): LayoutCache | undefined {
   const cache = value as { canonical?: unknown; document?: unknown; pending?: Pending[]; unresolved?: string[]; migration?: Migration };
   const canonical = parseDocument(cache.canonical);
   if (!canonical || !parseDocument(cache.document)) return undefined;
-  if (cache.pending !== undefined && (!Array.isArray(cache.pending) || cache.pending.length > 1024)) return undefined;
+  if (cache.pending !== undefined && !Array.isArray(cache.pending)) return undefined;
   const pending = cache.pending ?? [];
   const migration = cache.migration;
   if (migration && (typeof migration.op_id !== "string" || !parseDocument(migration.document) || migration.revision !== undefined && (!Number.isSafeInteger(migration.revision) || migration.revision < 0))) return undefined;
