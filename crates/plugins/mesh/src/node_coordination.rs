@@ -42,6 +42,17 @@ async fn read_identity(channel: &dyn NodeChannel) -> Option<Identity> {
         .filter(|identity| identity.public_key.0 != [0; 32] && identity.port != 0)
 }
 
+/// The hostname the machine's infraternal agent reports in its host facts, when it reports one.
+/// Only names a node the host record cannot name (store.rs `attach_named`, #236); any failure reads as none.
+async fn read_hostname(channel: &dyn NodeChannel) -> Option<String> {
+    let reply = channel
+        .call("host.facts.read", br#"{"includeLive":false}"#.to_vec())
+        .await
+        .ok()?;
+    let facts: serde_json::Value = serde_json::from_slice(&reply).ok()?;
+    facts["hostname"].as_str().map(str::to_owned)
+}
+
 /// One event-driven worker belongs to the generic plugin lifecycle; disabling
 /// aborts and joins it. A disconnect never deletes durable mesh membership.
 // Keep acknowledged-version recovery and source invalidation in one event loop.
@@ -85,6 +96,7 @@ pub async fn run(
                 } else {
                     None
                 };
+                let reported = read_hostname(channel.as_ref()).await;
                 let ip = channel.observed_ip();
                 let endpoint =
                     (!ip.is_unspecified()).then(|| std::net::SocketAddr::new(ip, identity.port));
@@ -93,11 +105,12 @@ pub async fn run(
                         return;
                     };
                     store
-                        .attach(
+                        .attach_named(
                             channel.id(),
                             identity.public_key,
                             endpoint,
                             channel.is_server(),
+                            reported.as_deref(),
                         )
                         .await
                 };
@@ -265,12 +278,16 @@ mod tests {
         queried: tokio::sync::Notify,
         applied: tokio::sync::Semaphore,
         frames: Mutex<Vec<(Option<u64>, u64, bool)>>,
+        hostname: Option<&'static str>,
     }
     impl Channel {
         fn new() -> Arc<Self> {
             Self::with_server(false)
         }
         fn with_server(server: bool) -> Arc<Self> {
+            Self::named(server, None)
+        }
+        fn named(server: bool, hostname: Option<&'static str>) -> Arc<Self> {
             let (notices, _) = tokio::sync::watch::channel(());
             Arc::new(Self {
                 server,
@@ -284,6 +301,7 @@ mod tests {
                 queried: tokio::sync::Notify::new(),
                 applied: tokio::sync::Semaphore::new(0),
                 frames: Mutex::new(Vec::new()),
+                hostname,
             })
         }
         fn changed(&self) {
@@ -376,6 +394,12 @@ mod tests {
                 if action == "mesh.status" {
                     return Ok(br#"{"server_link":{"source_port":43210}}"#.to_vec());
                 }
+                if action == "host.facts.read" {
+                    return self
+                        .hostname
+                        .map(|name| format!(r#"{{"hostname":"{name}"}}"#).into_bytes())
+                        .ok_or("host facts disabled");
+                }
                 assert_eq!(action, "mesh.configure");
                 if !self.server && self.supports_server_paths() {
                     assert_eq!(
@@ -432,6 +456,92 @@ mod tests {
             .await
             .unwrap();
         service
+    }
+    async fn names(service: &MeshService) -> Vec<String> {
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        let snapshot = service
+            .list("owner", crate::api::MeshFilter::default(), now)
+            .await
+            .unwrap();
+        snapshot
+            .nodes
+            .into_iter()
+            .map(|node| node.node.host)
+            .collect()
+    }
+    async fn attach_once(service: &MeshService, channel: Arc<Channel>) {
+        let worker = tokio::spawn(run(
+            service.dataplane(),
+            service.clone(),
+            channel.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        channel.wait().await;
+        worker.abort();
+        let _ = worker.await;
+    }
+    /// Owner report 2026-10-17 (#236): minipc01 appeared as "mesh-<host id>" and the server as "server".
+    #[tokio::test]
+    async fn placeholder_names_become_the_machines_names() {
+        let service = service().await;
+        let host = "00000000-0000-4000-8000-000000000001";
+        // Enrolled before names were known: the node carries a placeholder.
+        service
+            .dataplane()
+            .attach(host, PublicKey([2; 32]), None, false)
+            .await
+            .unwrap();
+        assert_eq!(names(&service).await, ["server", "unnamed"]);
+        sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address) VALUES(?,'root@minipc01')")
+            .bind(uuid::Uuid::parse_str(host).unwrap().as_bytes().as_slice())
+            .execute(&service.pool_for_tests())
+            .await
+            .unwrap();
+        // The host record wins over what the machine reports.
+        attach_once(&service, Channel::named(false, Some("other-name"))).await;
+        attach_once(&service, Channel::named(true, Some("monitor01"))).await;
+        assert_eq!(names(&service).await, ["monitor01", "minipc01"]);
+    }
+    #[tokio::test]
+    async fn a_reported_hostname_names_a_host_added_by_address() {
+        let service = service().await;
+        let host = "00000000-0000-4000-8000-000000000001";
+        sqlx::query(
+            "INSERT INTO remote_host_bootstrap(host_id,address) VALUES(?,'root@10.69.69.217')",
+        )
+        .bind(uuid::Uuid::parse_str(host).unwrap().as_bytes().as_slice())
+        .execute(&service.pool_for_tests())
+        .await
+        .unwrap();
+        attach_once(&service, Channel::named(false, Some("minipc01"))).await;
+        assert_eq!(names(&service).await, ["server", "minipc01"]);
+    }
+    #[tokio::test]
+    async fn a_name_a_person_chose_is_kept() {
+        let service = service().await;
+        let host = "00000000-0000-4000-8000-000000000001";
+        let (node, _) = service
+            .dataplane()
+            .attach(host, PublicKey([2; 32]), None, false)
+            .await
+            .unwrap();
+        service
+            .execute(
+                "owner",
+                "mesh.node.rename",
+                &serde_json::to_vec(&serde_json::json!({"node_id":node.0,"name":"lab"})).unwrap(),
+                1,
+            )
+            .await
+            .unwrap();
+        attach_once(&service, Channel::named(false, Some("minipc01"))).await;
+        assert_eq!(names(&service).await, ["server", "lab"]);
     }
     #[tokio::test]
     async fn peer_route_precedes_configuration_and_retires_with_the_node() {
