@@ -7,6 +7,18 @@ use crate::embedded::TerminalOutput;
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)]
 async fn saturated_native_control_queue_does_not_hide_primary_terminal_output() {
+    verify_saturated_primary(false).await;
+}
+
+/// Periodic liveness must retain its request while ordinary control is full;
+/// independent terminal traffic remains useful within the probe reply budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scheduled_probe_preserves_primary_at_full_native_control_capacity() {
+    verify_saturated_primary(true).await;
+}
+
+#[allow(clippy::too_many_lines)]
+async fn verify_saturated_primary(wait_for_probe: bool) {
     let (server, node, root, _) = identities();
     let (store, _pool, host_id, _) = super::super::revocation::admitted_store(&node, &root).await;
     let hosts = RemoteHosts::default();
@@ -213,10 +225,24 @@ async fn saturated_native_control_queue_does_not_hide_primary_terminal_output() 
     })
     .await
     .expect("fault must prove one active blocked control flight plus a queued Pong");
-    assert!(live_connection.close_reason().is_none());
+    assert!(
+        live_connection.close_reason().is_none(),
+        "primary closed during saturation: {:?}",
+        live_connection.close_reason()
+    );
     assert!(!control_call.0.is_finished());
     assert!(warm_connection.close_reason().is_none());
     eprintln!("CONTROL_SATURATION active=true queued=1 native_primary_live=true shadow_output=0");
+    if wait_for_probe {
+        // Three 25 ms probe turns are shorter than the 250 ms reply allowance and
+        // the 1 s active-write deadline. This tests queue admission, not latency.
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        assert!(
+            live_connection.close_reason().is_none(),
+            "scheduled probe retired a healthy saturated primary: {:?}",
+            live_connection.close_reason()
+        );
+    }
 
     Transmit::default()
         .send(
@@ -250,8 +276,14 @@ async fn saturated_native_control_queue_does_not_hide_primary_terminal_output() 
         Ok(Some(TerminalOutput::Ack { .. })) => "ack",
         Ok(Some(TerminalOutput::RouteExpired)) => "route expired",
         Ok(Some(TerminalOutput::Reconnecting)) => "reconnecting",
+        Ok(Some(TerminalOutput::LinkDoubt)) => "link doubt",
+        Ok(Some(TerminalOutput::Recovered)) => "recovered",
         Ok(Some(TerminalOutput::Closed { .. })) => "closed",
     };
+    eprintln!(
+        "PRIMARY_DELIVERY outcome={outcome} close={:?}",
+        live_connection.close_reason()
+    );
     // Abort ownership before asserting, so even an intended red cannot leave a
     // detached pending Call. Endpoints/listener own every other task/stream.
     drop(control_call);

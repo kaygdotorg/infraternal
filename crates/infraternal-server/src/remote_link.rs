@@ -975,3 +975,24 @@ async fn pump(
         }
     }
 }
+
+#[cfg(test)]
+impl RemoteLink {
+    /// Observe the actual authenticated connection close in measurement fixtures.
+    #[cfg(test)]
+    pub(crate) fn test_connection_for_peer(
+        peer: std::net::SocketAddr,
+    ) -> Option<quinn::Connection> {
+        let link = TEST_LINKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&peer)
+            .and_then(std::sync::Weak::upgrade)?;
+        match &link.transport {
+            LinkTransport::Quic(native) => Some(native.connection.clone()),
+            LinkTransport::Tcp { .. } => None,
+            #[cfg(feature = "ssh")]
+            LinkTransport::Ssh { .. } => None,
+        }
+    }
+}

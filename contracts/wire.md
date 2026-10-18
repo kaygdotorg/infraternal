@@ -481,6 +481,15 @@ existing terminal Ack before its correlated Pong, including when output is
 parked. Unchanged fences remain Pong-only: they do not add repeated Ack frames
 or storage work. Merely accepted input is never acknowledged as written.
 
+Local send-queue pressure alone never retires a connection or terminal for a
+liveness probe (#234). Skip a scheduled Ping before issuing its correlation
+when the bounded FIFO has no room; skipping never starts or renews a reply
+deadline. A best-effort Pong or terminal-command Ping may likewise be omitted
+at capacity. Outstanding correlated replies retain the timeout below. Reliable
+control replies defer their producers until bounded FIFO capacity returns,
+preserving ordering, including the census-before-open-result fence. Actual
+transport errors and closed writers still retire their connections.
+
 Probe replies echo nonce and timestamp. Only a new correlated reply renews a
 route deadline; ordinary traffic, unsolicited replies and stale sockets do not.
 Startup, pending input and recent link doubt keep browser probes pipelined
@@ -492,7 +501,30 @@ unknown and retains the bounded two-second startup grace. Correlated replies
 initialize `srtt = RTT`, `rttvar = RTT / 2`; subsequent samples update
 `rttvar = 3/4 × rttvar + 1/4 × abs(srtt − RTT)` before
 `srtt = 7/8 × srtt + 1/8 × RTT` ([RFC 6298 §2](https://www.rfc-editor.org/rfc/rfc6298.html#section-2) estimator).
-The response allowance is `max(srtt + 4 × rttvar + 50 ms, 250 ms)`.
+The browser response allowance is `max(srtt + 4 × rttvar + 50 ms, 250 ms)`.
+Host routes (the primary host link and its terminal streams) carry ordered
+replies that one lost packet holds back for about one more round trip, so
+their allowance is `clamp(2 × srtt + 4 × rttvar + 75 ms, 250 ms, 2 s)` [D300].
+On the primary host link a first miss only marks the route doubtful: the
+link, its streams and writers stay. Each settled stream of a viewer that set
+browser Hello caps bit 1 (`LINK_DOUBT_NOTICES`) receives
+`{"type":"terminal.link_doubt","session_id":"UUID"}`. The viewer shows that
+the link may be reconnecting and changes nothing else: live output is not
+replay, so it keeps answering terminal queries and sending input, and the
+server keeps its Ack checks strict. A correlated reply within a second
+allowance clears the doubt; the same streams then receive
+`terminal.link_recovered`, which clears only that indicator and is never a
+replay fence. A doubt belongs to its link: once the link is retired or
+replaced, the streams receive `terminal.reconnecting` and only the
+replacement's own `terminal.replay_complete` confirms them. Viewers without
+bit 1 receive neither notice. A stream whose queue was full when doubt began
+is told on a later tick of the same episode. The link is retired only after
+the second consecutive allowance passes without a reply. A link that has never
+answered retires at its startup grace. A link whose doubt recovered while its
+allowance sat at the 2 s ceiling raises no further doubt (its delay is the
+path, not a loss) until a reply brings the allowance below the ceiling; it
+still retires after two allowances. Viewers ignore terminal notice types they
+do not know.
 The floor tolerates a 150 ms scheduler/main-thread stall on a healthy low-RTT
 route, rather than confusing local load with peer loss. A settled quiet link
 therefore detects silence within that floor plus one probe interval (at most
