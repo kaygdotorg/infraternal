@@ -16,7 +16,7 @@ test("server and host close reasons identify why a terminal reconnects, in plain
     "a terminal frame exceeded the size limit", "the terminal stream sent an invalid protocol frame",
     "the server refused the terminal attachment", "the server refused to resume the connection",
     "the server stopped receiving connection replies", "the server could not write to the connection",
-    "the server could not continue the terminal stream",
+    "the server could not continue the terminal stream", "the server was too busy to confirm the session",
   ];
   for (const reason of named) {
     const text = plainCloseReason(reason);
@@ -25,6 +25,7 @@ test("server and host close reasons identify why a terminal reconnects, in plain
     expect(text.endsWith(".")).toBe(true);
   }
   expect(plainCloseReason("remote stream unavailable")).toBe("The infraternal agent on the host lost its connection to the server.");
+  expect(plainCloseReason("the server was too busy to confirm the session")).toBe("The server was too busy to confirm your session; reconnecting.");
 });
 
 test("routine detach and connection rotation reasons stay neutral", () => {
