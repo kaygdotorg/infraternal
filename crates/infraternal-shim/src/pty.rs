@@ -241,7 +241,7 @@ fn handler_is_current() -> bool {
     unsafe { current.assume_init().sa_sigaction == on_interrupt as *const () as usize }
 }
 
-/// Only lock-free atomics, an async-signal-safe `sigaction` query, `write(2)` and `_exit(2)`.
+/// Only lock-free atomics, an async-signal-safe `sigaction` query, `write(2)` and SIGINT reset.
 extern "C" fn on_interrupt(_signal: nix::libc::c_int) {
     if !handler_is_current() {
         // A later runtime handler chains this handler before dispatching its own notification.
@@ -253,14 +253,8 @@ extern "C" fn on_interrupt(_signal: nix::libc::c_int) {
             OUTPUT_NOT_STARTED => INTERRUPTED_BEFORE_OUTPUT,
             OUTPUT_WRITING => INTERRUPT_DURING_OUTPUT,
             INTERRUPT_DURING_OUTPUT => return,
-            OUTPUT_FINISHED | INTERRUPTED_BEFORE_OUTPUT => {
-                // SAFETY: `_exit` is async-signal-safe and never returns.
-                unsafe { nix::libc::_exit(130) }
-            }
-            _ => {
-                // SAFETY: unknown state cannot be allowed to write beside a result.
-                unsafe { nix::libc::_exit(130) }
-            }
+            // Unknown state cannot be allowed to write beside a result.
+            _ => return_by_sigint(),
         };
         if FINAL_OUTPUT
             .compare_exchange(phase, next, Ordering::Relaxed, Ordering::Relaxed)
@@ -271,11 +265,46 @@ extern "C" fn on_interrupt(_signal: nix::libc::c_int) {
                     // SAFETY: the boxed slice is live and never freed; the process exits next.
                     unsafe { nix::libc::write(1, notice.as_ptr().cast(), notice.len()) };
                 }
-                // SAFETY: `_exit` is async-signal-safe and never returns.
-                unsafe { nix::libc::_exit(130) }
+                return_by_sigint();
             }
             return;
         }
+    }
+}
+
+/// Restore the default action and terminate by SIGINT so calling shells stop their scripts.
+fn return_by_sigint() -> ! {
+    // SAFETY: the signal action and mask are initialized before use. These syscalls are
+    // async-signal-safe, so this also works when called by `on_interrupt`.
+    unsafe {
+        let mut action = MaybeUninit::<nix::libc::sigaction>::zeroed().assume_init();
+        if nix::libc::sigemptyset(&raw mut action.sa_mask) != 0 {
+            nix::libc::_exit(130);
+        }
+        action.sa_sigaction = nix::libc::SIG_DFL;
+        action.sa_flags = 0;
+        if nix::libc::sigaction(nix::libc::SIGINT, &raw const action, std::ptr::null_mut()) != 0 {
+            nix::libc::_exit(130);
+        }
+
+        let mut unblocked = MaybeUninit::<nix::libc::sigset_t>::uninit();
+        if nix::libc::sigemptyset(unblocked.as_mut_ptr()) != 0
+            || nix::libc::sigaddset(unblocked.as_mut_ptr(), nix::libc::SIGINT) != 0
+        {
+            nix::libc::_exit(130);
+        }
+        let unblocked = unblocked.assume_init();
+        if nix::libc::sigprocmask(
+            nix::libc::SIG_UNBLOCK,
+            &raw const unblocked,
+            std::ptr::null_mut(),
+        ) != 0
+            || nix::libc::raise(nix::libc::SIGINT) != 0
+        {
+            nix::libc::_exit(130);
+        }
+        // The default SIGINT action should have ended the process before `raise` returned.
+        nix::libc::_exit(130);
     }
 }
 
@@ -293,8 +322,8 @@ pub fn begin_final_output() {
         )
         .is_err()
     {
-        // SAFETY: an earlier interrupt already owns the final result.
-        unsafe { nix::libc::_exit(130) }
+        // An earlier interrupt already owns the final result.
+        return_by_sigint();
     }
 }
 
@@ -311,19 +340,19 @@ pub fn finish_final_output() {
     ) {
         Ok(_) => {}
         Err(INTERRUPT_DURING_OUTPUT) => {
-            // SAFETY: the complete result has been written; exit without appending a line.
-            unsafe { nix::libc::_exit(130) }
+            // The complete result has been written; stop without appending another line.
+            return_by_sigint();
         }
         Err(_) => {
             // SAFETY: an impossible phase cannot be allowed to emit another result.
-            unsafe { nix::libc::_exit(130) }
+            return_by_sigint();
         }
     }
 }
 
-/// On SIGINT before final output starts, write the notice and exit 130. During the final write,
-/// let that complete line finish and then exit without appending another one. A later runtime
-/// handler may chain this handler first; in that case it returns to the runtime's handler.
+/// On SIGINT before final output starts, write the notice and re-raise SIGINT. During the final
+/// write, let that complete line finish and then re-raise without appending another one. A later
+/// runtime handler may chain this handler first; in that case it returns to the runtime's handler.
 /// Only the first call has an effect.
 pub fn exit_on_interrupt(notice: Vec<u8>) {
     use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, sigaction};

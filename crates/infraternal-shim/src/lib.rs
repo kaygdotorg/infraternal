@@ -58,8 +58,8 @@ pub fn detach() -> std::io::Result<bool> {
 pub fn stdout_columns() -> Option<u16> {
     pty::stdout_columns()
 }
-/// Make SIGINT write `notice` to standard output and exit 130 (the CLI's one-envelope contract in
-/// JSON mode, #239). The handler does nothing else, so it is safe at any point of the run.
+/// Make SIGINT write `notice` to standard output, restore the default SIGINT action and re-raise
+/// the signal (the CLI's one-envelope contract in JSON mode, D305/#239).
 pub fn exit_on_interrupt(notice: Vec<u8>) {
     pty::exit_on_interrupt(notice);
 }
