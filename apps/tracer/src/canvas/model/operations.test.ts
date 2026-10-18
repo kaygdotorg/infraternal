@@ -23,3 +23,18 @@ test("reorder uses stable neighbours and emits no document", () => {
   const changes = edits(a, b); expect(changes.every((i) => i.type === "move")).toBe(true);
   const replay = structuredClone(a); for (const change of changes) reduce(replay, change); expect(replay).toEqual(b);
 });
+
+test("a completed split emits its semantic intent rather than intermediate sizing edits", () => {
+  const a = doc(); reduce(a, open("a")); const b = structuredClone(a);
+  const split: Intent = { type: "split", view_id: "console", anchor_id: "a", axis: "right", column_id: "right", window: { id: "new", target: { type: "settings", section: "appearance" } } };
+  reduce(b, split);
+  const changes = edits(a, b, new Map([["new", { windowId: "new", anchorId: "a", axis: "right" }]]));
+  expect(changes).toHaveLength(1); expect(changes[0]?.type).toBe("split");
+  const replay = structuredClone(a); for (const edit of changes) reduce(replay, edit); expect(replay).toEqual(b);
+});
+
+test("a three-window reorder sends one semantic move", () => {
+  const a = doc(); for (const id of ["c", "b", "a"]) reduce(a, open(id)); const b = structuredClone(a);
+  reduce(b, { type: "move", view_id: "console", column_id: "c", window_id: "c" });
+  expect(edits(a, b)).toHaveLength(1);
+});
