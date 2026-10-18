@@ -63,12 +63,14 @@ function waiting() {
 
 test("review: saved typing can be declined without closing the live shell", () => {
   const f = waiting();
+  const held = f.client.retainedInput!;
   expect(f.client.retainedInput?.byteLength).toBe(14);
   expect(f.queue.length).toBe(0);
   expect(f.sent).toHaveLength(0);
   // Declining must release only the retained bytes, then allow fresh typing at offset zero.
   expect(f.notice().secondaryAction?.label).toBe("Discard");
   f.notice().secondaryAction?.onSelect();
+  expect(held.every((byte) => byte === 0)).toBe(true);
   expect(f.client.retainedInput).toBeUndefined();
   expect(f.client.inputNeedsResend).toBe(false);
   f.client.handleInput("fresh\n");
@@ -110,8 +112,10 @@ test("review: retained input and consent are local to their terminal window", ()
 
 test("review: selecting a different session removes saved typing and its action", () => {
   const f = waiting();
+  const held = f.client.retainedInput!;
   const staleAction = f.notice().action!;
   f.client.restartCursors();
+  expect(held.every((byte) => byte === 0)).toBe(true);
   expect(f.client.retainedInput).toBeUndefined();
   expect(f.queue.length).toBe(0);
   expect(f.dismissals()).toBe(1);
@@ -148,6 +152,7 @@ test("review: window disposal clears held input and rejects a stale resend actio
   const original = { window: globals.window, document: globals.document };
   const f = waiting();
   const staleAction = f.notice().action!;
+  const held = f.client.retainedInput!;
   let noticeDisposed = 0;
   let streamClosed = 0;
   Object.assign(f.client, {
@@ -164,6 +169,8 @@ test("review: window disposal clears held input and rejects a stale resend actio
     globals.document = { removeEventListener() {} };
     (f.client as unknown as { dispose(): void }).dispose();
     expect(f.client.closed).toBe(true);
+    expect(held.every((byte) => byte === 0)).toBe(true);
+    expect(f.client.retainedInput).toBeUndefined();
     expect(f.queue.length).toBe(0);
     expect(noticeDisposed).toBe(1);
     expect(streamClosed).toBe(1);
