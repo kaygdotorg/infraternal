@@ -280,7 +280,8 @@ async fn wanted_name(
 }
 /// Frees `name` for `actor`'s choice on node `id` (`None` while enrolling a new one). A person outranks every
 /// automatic name (migration 0026), so a node holding `name` by record, report or placeholder moves aside to a
-/// suffix of its own claim, audited under `actor` as an automatic rename with the change's revision. Returns the nodes moved.
+/// suffix of its own claim, audited under `actor` as an automatic rename with the change's revision. Returns the nodes moved,
+/// over which the caller must hold the same authority as over the node it names (`rename_node`).
 ///
 /// Only another person's name refuses, as a bare conflict. That is no oracle: the refusal says only that the
 /// name is in use, which every Mesh member can learn from the name's DNS record, while a name a machine
