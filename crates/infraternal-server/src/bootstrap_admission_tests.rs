@@ -111,6 +111,16 @@ async fn missing_route_uses_link_scaled_bound_without_inventory_extensions() {
     let budget = installed_actor_budget(Duration::from_millis(600));
     assert_eq!(budget, Duration::from_millis(34800));
     assert_eq!(
+        setup_commit_budget(Duration::from_millis(600)),
+        Duration::from_millis(70800),
+        "commit includes both sequential route phases and two SSH exchanges"
+    );
+    assert_eq!(
+        setup_commit_budget(Duration::ZERO),
+        Duration::from_secs(60),
+        "the command deadline still covers both minimum route phases"
+    );
+    assert_eq!(
         installed_actor_budget(Duration::ZERO),
         Duration::from_secs(30)
     );

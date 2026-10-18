@@ -17,11 +17,20 @@ use std::{collections::HashMap, sync::Mutex, time::Duration};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
-/// Preserve the original startup allowance and add eight authenticated command
-/// round trips for TLS fallback, greeting and actor admission. This is a failure
+/// Preserve the original per-phase startup allowance and add eight authenticated
+/// exchanges for TLS fallback, greeting and actor admission. This is a failure
 /// bound, never a delay: route notifications release a healthy host immediately.
 fn installed_actor_budget(round_trip: Duration) -> Duration {
     Duration::from_secs(30).saturating_add(round_trip.saturating_mul(8))
+}
+
+/// Cover both sequential route phases plus SSH command admission and its exit receipt.
+/// Bootstrap caps the SSH child at its 180-second attempt limit. Below that
+/// ceiling, readiness reports its route-specific timeout before SSH cancels it.
+fn setup_commit_budget(round_trip: Duration) -> Duration {
+    installed_actor_budget(round_trip)
+        .saturating_mul(2)
+        .saturating_add(round_trip.saturating_mul(2))
 }
 
 /// Fresh identities are owned by one batch until installation commits or rolls back.
@@ -305,6 +314,14 @@ impl Backend for RemoteBackend {
         {
             attempt.link_round_trip = round_trip;
         }
+    }
+    fn setup_commit_timeout(&self, authority: &Authority, host: Uuid) -> Option<Duration> {
+        self.attempts
+            .lock()
+            .ok()?
+            .get(&host)
+            .filter(|attempt| attempt.owner == authority.owner && attempt.batch == authority.batch)
+            .map(|attempt| setup_commit_budget(attempt.link_round_trip))
     }
     fn session_notifications(&self, notify: tokio::sync::watch::Sender<u64>) {
         if let Ok(mut current) = self.sessions_changed.lock() {
