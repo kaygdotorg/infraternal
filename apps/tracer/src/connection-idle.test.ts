@@ -8,6 +8,7 @@ function fixture(rtt: number, streams: number) {
   const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, performance: globals.performance };
   let now = 0, timerId = 0, probes = 0, wakeups = 0, disconnects = 0;
   let forwarding = true;
+  let latestProbe = { nonce: 0n, sentUs: 0n };
   const timers = new Map<number, { at: number; callback(): void }>();
   const browserTimers = new Set<number>();
   const schedule = (callback: () => void, delay: number) => { const id = ++timerId; timers.set(id, { at: now + delay, callback }); return id; };
@@ -24,6 +25,7 @@ function fixture(rtt: number, streams: number) {
     send(bytes: Uint8Array) {
       new WebSocketFrameDecoder().feed(bytes, (stream, frame) => {
         if (frame.type === "Ping") {
+          latestProbe = { nonce: frame.nonce, sentUs: frame.sentUs };
           probes++;
           if (forwarding) schedule(() => this.receive(stream, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs }), rtt);
         }
@@ -48,11 +50,13 @@ function fixture(rtt: number, streams: number) {
     stopForwarding() { forwarding = false; },
     setRoundTrip(ms: number) { rtt = ms; },
     suspend(ms: number) { now += ms; },
-    runBrowserTimer() {
+    runBrowserTimer(onTime = false) {
       const next = [...timers].filter(([id]) => browserTimers.has(id)).sort((a, b) => a[1].at - b[1].at)[0]!;
+      if (onTime) now = Math.max(now, next[1].at);
       timers.delete(next[0]);
       next[1].callback();
     },
+    replyLatest(valid = true) { sockets[0]!.receive(0, { type: "Pong", nonce: latestProbe.nonce, sentUs: latestProbe.sentUs + (valid ? 0n : 1n) }); },
     advance(ms: number) {
       const until = now + ms;
       for (;;) {
@@ -248,5 +252,21 @@ test("a late timer without a reply counts subsequent responsive silence", () => 
     expect(f.connection.isWelcomed).toBe(true);
     f.advance(276);
     expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+for (const valid of [false, true]) test(`retirement gives a queued ${valid ? "correlated" : "mismatched"} pong one task turn`, () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1000);
+    f.stopForwarding();
+    f.advance(200);
+    // Deliver the expiry timer exactly on time: this exercises the final task
+    // yield independently of any scheduling-lag credit.
+    f.runBrowserTimer(true);
+    expect(f.connection.isWelcomed).toBe(true);
+    f.replyLatest(valid);
+    f.advance(1);
+    expect(f.connection.isWelcomed).toBe(valid);
   } finally { f.dispose(); }
 });
