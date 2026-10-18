@@ -1,4 +1,5 @@
 /** Account layout subscription, durable retry journal and drawing cache (D178, D183, D245, D248). */
+import { randomUuid } from "../../identifiers";
 import { canvasKey } from "../../account-storage";
 import { parseDocument, type CanvasDocument } from "./document";
 import { edits, reduce, type Intent, type SplitEdit } from "./operations";
@@ -37,7 +38,7 @@ export class ServerCanvasStore implements CanvasStore {
     try {
       const value: unknown = JSON.parse(localStorage.getItem(this.key) ?? "null");
       const legacy = parseDocument(value);
-      if (legacy) { this.migration = { op_id: crypto.randomUUID(), document: legacy }; this.presented = legacy; this.cached = true; }
+      if (legacy) { this.migration = { op_id: randomUuid(), document: legacy }; this.presented = legacy; this.cached = true; }
       else if (value && typeof value === "object" && "cacheVersion" in value && value.cacheVersion === 2) {
         const cache = value as { canonical?: unknown; document?: unknown; pending?: Pending[]; migration?: Migration; initialized?: boolean };
         const canonical = parseDocument(cache.canonical), document = parseDocument(cache.document);
@@ -54,19 +55,19 @@ export class ServerCanvasStore implements CanvasStore {
   }
   async load(): Promise<CanvasDocument | undefined> {
     if (!this.cached) await this.first;
-    return this.presented.views.length ? structuredClone(this.presented) : undefined;
+    return this.initialized || this.presented.views.length ? structuredClone(this.presented) : undefined;
   }
   /** Record each completed edit immediately; only cache serialization is coalesced. */
   async save(doc: CanvasDocument, splits?: ReadonlyMap<string, SplitEdit>, before?: CanvasDocument): Promise<void> {
     if (this.disposed) return;
-    for (const intent of edits(before ?? this.presented, doc, splits)) this.pending.push({ op_id: crypto.randomUUID(), base_revision: this.canonical.revision, intent });
+    for (const intent of edits(before ?? this.presented, doc, splits)) this.pending.push({ op_id: randomUuid(), base_revision: this.canonical.revision, intent });
     this.presented = structuredClone(doc);
     this.checkpoint(); this.pump();
   }
   current(): CanvasDocument { const doc = structuredClone(this.canonical); for (const p of this.pending) reduce(doc, p.intent); return doc; }
   subscribe(listener: (doc: CanvasDocument) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   private event(event: Record<string, unknown>): void {
-    if (this.disposed || !Number.isSafeInteger(event.revision) || Number(event.revision) < this.canonical.revision) return;
+    if (this.disposed || !Number.isSafeInteger(event.revision) || (event.type !== "canvas.layout.snapshot" || this.ready) && Number(event.revision) < this.canonical.revision) return;
     if (event.type === "canvas.layout.snapshot") {
       const document = parseDocument(event.document);
       if (!document || document.revision !== event.revision) return;
