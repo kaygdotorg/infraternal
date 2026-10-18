@@ -194,6 +194,11 @@ impl Store {
                 )
                 .await?;
             }
+            if model::string(intent, "type") == Some("target") {
+                // Retargeting introduces a reference just as opening does; close must never bypass admission.
+                let window = json!({"target": intent.get("target").ok_or(Error)?});
+                ownership(&mut tx, account, std::iter::once(&window)).await?;
+            }
             if model::string(intent, "type") == Some("close") {
                 let id = model::string(intent, "window_id").ok_or(Error)?;
                 // At most one tombstone is added per accepted revision; the
