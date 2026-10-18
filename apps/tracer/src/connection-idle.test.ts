@@ -45,6 +45,7 @@ function fixture(rtt: number, streams: number) {
   connection.streamAttached(true, 1);
   return {
     connection,
+    get latestProbe() { return { ...latestProbe }; },
     get probes() { return probes; }, get wakeups() { return wakeups; }, get disconnects() { return disconnects; },
     receive(stream: number, frame: WireFrame) { sockets[0]!.receive(stream, frame); },
     stopForwarding() { forwarding = false; },
@@ -340,6 +341,50 @@ test("correlated queued replies replenish stall grace across successive healthy 
     // With replies gone, subsequent late callbacks still consume the bound.
     for (let tick = 0; tick < 3 && f.connection.isWelcomed; tick++) {
       f.suspend(1000);
+      f.runBrowserTimer(true);
+    }
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+// These schedules model browser task order; they do not measure host latency.
+for (const kind of ["duplicate", "wrong timestamp", "unknown nonce"] as const) test(`${kind} replies cannot replenish consumed stall grace`, () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1001);
+    const answered = f.latestProbe;
+    f.stopForwarding();
+    f.advance(30);
+    for (let cycle = 0; cycle < 10 && f.connection.isWelcomed; cycle++) {
+      f.suspend(cycle % 2 === 0 ? 100 : 25);
+      f.runBrowserTimer(true);
+      if (kind === "duplicate") f.receive(0, { type: "Pong", ...answered });
+      else {
+        const probe = f.latestProbe;
+        f.receive(0, { type: "Pong", nonce: probe.nonce + (kind === "unknown nonce" ? 1000n : 0n), sentUs: probe.sentUs + (kind === "wrong timestamp" ? 1n : 0n) });
+      }
+    }
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+test("a queued correlated reply cancels confirmation without letting a duplicate renew it", () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1001);
+    f.stopForwarding();
+    f.advance(30);
+    f.suspend(1000);
+    f.runBrowserTimer(true); // Consume local grace.
+    f.suspend(250);
+    f.runBrowserTimer(true); // Arm confirmation before the socket task.
+    const answered = f.latestProbe;
+    f.replyLatest();
+    expect(f.connection.isWelcomed).toBe(true);
+    f.advance(30);
+    for (let cycle = 0; cycle < 5 && f.connection.isWelcomed; cycle++) {
+      f.suspend(1000);
+      f.receive(0, { type: "Pong", ...answered });
       f.runBrowserTimer(true);
     }
     expect(f.connection.isWelcomed).toBe(false);
