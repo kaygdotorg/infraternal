@@ -361,6 +361,7 @@ export class MuxConnection {
     const socket = this.socket;
     if (!socket) return;
     this.noteClose(code, reason, "the server");
+    this.forgetRefusedResume(code, reason);
     this.disconnect(socket);
     socket.close();
   }
@@ -452,9 +453,19 @@ export class MuxConnection {
       if (this.socket !== socket || this.closed) return;
       const internalRotation = event?.code === 4001 && event.reason === "tracer connection rotation";
       if (!internalRotation) this.noteClose(event?.code, event?.reason);
+      this.forgetRefusedResume(event?.code, event?.reason);
       this.disconnect(socket);
       if (!internalRotation) this.status(plainCloseReason(event?.reason || "connection ended"));
     };
+  }
+
+  /** A refused capability is never retried. The next handshake attaches afresh with existing backoff (#244). */
+  private forgetRefusedResume(code: number | undefined, reason: string | undefined): void {
+    if (this.welcomed || !this.resumeSent || (code !== 1008 && reason !== "the server refused to resume the connection")) return;
+    this.credentials?.connectionId.fill(0);
+    this.credentials?.resumeToken.fill(0);
+    this.credentials = undefined;
+    this.fastRecovery = false;
   }
 
   /**

@@ -463,3 +463,53 @@ test("online and foreground events cancel delays and preserve handshakes in prog
     }
   }
 });
+
+test("a refused resume forgets its capability once and fresh refusals keep backing off", () => {
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, random: Math.random };
+  let retry: (() => void) | undefined;
+  let delay = 0;
+  const sockets: Socket[] = [];
+  const attempts: boolean[] = [];
+  class Socket {
+    static OPEN = 1;
+    readyState = 1;
+    binaryType = "";
+    onopen?: () => void;
+    onclose?: (event: { code: number; reason: string }) => void;
+    onmessage?: (event: { data: ArrayBuffer }) => void;
+    constructor() { sockets.push(this); }
+    send() {}
+    receive(frame: Parameters<typeof encodeMuxedFrame>[1]) { this.onmessage?.({ data: encodeMuxedFrame(0, frame).slice().buffer as ArrayBuffer }); }
+    close() { this.readyState = 3; this.onclose?.({ code: 1008, reason: "the server refused to resume the connection" }); }
+  }
+  let connection: MuxConnection | undefined;
+  try {
+    Math.random = () => 0;
+    globals.window = { setTimeout: (callback: () => void, ms: number) => { retry = callback; delay = ms; return 1; }, clearTimeout() {} };
+    globals.location = { protocol: "https:", host: "resume.example.test" };
+    globals.WebSocket = Socket;
+    connection = new MuxConnection();
+    connection.openStream({ onSocketOpen: (resume) => attempts.push(resume), onWelcome() {}, onFrame() {}, onDisconnected() {}, hasSession: () => true, onStatus() {} });
+    sockets[0]!.onopen?.();
+    sockets[0]!.receive({ type: "Welcome", connectionId: new Uint8Array(16).fill(1), resumeToken: new Uint8Array(32).fill(2), resumeWindowSeconds: 120 });
+    connection.streamAttached(true, 1);
+    connection.forceDrop();
+    retry?.();
+    sockets[1]!.onopen?.();
+    sockets[1]!.receive({ type: "Close", code: 1008, reason: "the server refused to resume the connection" });
+    const firstDelay = delay;
+    retry?.();
+    sockets[2]!.onopen?.();
+    // Also exercise a transport Close without an application Close frame.
+    sockets[2]!.close();
+    expect(delay).toBeGreaterThan(firstDelay);
+    retry?.();
+    sockets[3]!.onopen?.();
+    expect(attempts).toEqual([false, true, false, false]);
+  } finally {
+    connection?.dispose();
+    Math.random = original.random;
+    for (const key of ["window", "location", "WebSocket"] as const) { if (original[key] === undefined) delete globals[key]; else globals[key] = original[key]; }
+  }
+});
