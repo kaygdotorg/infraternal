@@ -25,6 +25,8 @@ const root = resolve(import.meta.dirname, "../../..");
 export interface Bridge {
   id: number;
   closed: boolean;
+  /** Whether this socket requested resume in Hello; no capability bytes are retained. */
+  helloResume?: boolean;
   /** Which side ended the socket first, and its close code. */
   closedBy?: string;
   /** UTF-8 close reason from the first socket close event. */
@@ -218,6 +220,7 @@ export async function startRealServer(options: {
                 : f.type === "Resize" ? ` cols=${f.cols} rows=${f.rows}` : "";
             console.error(`FRAME ${Date.now() % 100000} b${bridge.id} up s${stream} ${f.type}${detail}`);
           }
+          if (f.type === "Hello" && stream === 0) bridge.helloResume = (f.caps & 1n) !== 0n;
           if (f.type === "AttachTerm") {
             bridge.attached.set(stream, [...(bridge.attached.get(stream) ?? []), Buffer.from(f.sessionId).toString("hex")]);
             bridge.attachTimes?.push({ stream, at: Date.now() });
