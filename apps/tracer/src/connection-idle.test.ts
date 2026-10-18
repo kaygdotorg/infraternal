@@ -9,6 +9,7 @@ function fixture(rtt: number, streams: number) {
   let now = 0, timerId = 0, probes = 0, wakeups = 0, disconnects = 0;
   let forwarding = true;
   const timers = new Map<number, { at: number; callback(): void }>();
+  const browserTimers = new Set<number>();
   const schedule = (callback: () => void, delay: number) => { const id = ++timerId; timers.set(id, { at: now + delay, callback }); return id; };
   const sockets: Socket[] = [];
   class Socket {
@@ -31,7 +32,7 @@ function fixture(rtt: number, streams: number) {
     receive(stream: number, frame: WireFrame) { this.onmessage?.({ data: encodeMuxedFrame(stream, frame).slice().buffer as ArrayBuffer }); }
     close() {}
   }
-  globals.window = { setTimeout: (callback: () => void, delay: number) => schedule(() => { wakeups++; callback(); }, delay), clearTimeout: (id: number) => timers.delete(id) };
+  globals.window = { setTimeout: (callback: () => void, delay: number) => { const id = schedule(() => { browserTimers.delete(id); wakeups++; callback(); }, delay); browserTimers.add(id); return id; }, clearTimeout: (id: number) => { browserTimers.delete(id); timers.delete(id); } };
   globals.location = { protocol: "https:", host: "idle.example.test" };
   globals.WebSocket = Socket;
   globals.performance = { now: () => now };
@@ -47,6 +48,11 @@ function fixture(rtt: number, streams: number) {
     stopForwarding() { forwarding = false; },
     setRoundTrip(ms: number) { rtt = ms; },
     suspend(ms: number) { now += ms; },
+    runBrowserTimer() {
+      const next = [...timers].filter(([id]) => browserTimers.has(id)).sort((a, b) => a[1].at - b[1].at)[0]!;
+      timers.delete(next[0]);
+      next[1].callback();
+    },
     advance(ms: number) {
       const until = now + ms;
       for (;;) {
@@ -209,7 +215,7 @@ test("browser jitter allowance decays after a stable link returns", () => {
   } finally { f.dispose(); }
 });
 
-test("a queued healthy reply survives a 150ms browser event-loop stall", () => {
+for (const timerFirst of [false, true]) for (const stall of [150, 1000, 60_000]) test(`a queued healthy reply survives a ${stall}ms browser event-loop stall with ${timerFirst ? "timer" : "reply"} first`, () => {
   const f = fixture(1, 1);
   try {
     f.advance(1000);
@@ -217,9 +223,30 @@ test("a queued healthy reply survives a 150ms browser event-loop stall", () => {
     while (f.probes === issued) f.advance(1);
     // A request is outstanding; only local callbacks are held. The queued
     // correlated reply may precede the delayed liveness timer on resume.
-    f.suspend(150);
+    f.suspend(stall);
+    if (timerFirst) f.runBrowserTimer();
     f.advance(0);
     expect(f.disconnects).toBe(0);
     expect(f.connection.isWelcomed).toBe(true);
+    // The renderer delay must not train a slower network deadline. A later
+    // real outage still consumes the original allowance on a responsive page.
+    f.stopForwarding();
+    f.advance(276);
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+test("a late timer without a reply counts subsequent responsive silence", () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1000);
+    f.stopForwarding();
+    f.advance(2);
+    f.suspend(1000);
+    f.runBrowserTimer();
+    // No timer may retire synchronously on waking a blocked page.
+    expect(f.connection.isWelcomed).toBe(true);
+    f.advance(276);
+    expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
