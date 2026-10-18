@@ -20,20 +20,22 @@ const subOf = (n: WireNode): string => {
   return [path, rtt].filter(Boolean).join(" · ") || "online";
 };
 
-export function createLayoutModel(source: MeshSource): (m: Metrics) => MeshLayout {
+export function createLayoutModel(source: Pick<MeshSource, "data">, ownPins?: () => Readonly<Record<string, { x: number; y: number }>> | undefined): (m: Metrics) => MeshLayout {
   const objects = new Map<string, NodeModel>();
-  let cache: { key: string; layout: MeshLayout } | undefined;
+  let cache: { key: string; layout: MeshLayout; pins: unknown } | undefined;
   return (m) => {
     const data: MeshData = source.data();
-    const { nodes, tags, pins } = data;
-    const key = `${data.version}:${m.nodeW}x${m.nodeH}:${pins.size}`;
-    if (cache?.key === key) return cache.layout;
+    const { nodes, tags } = data;
+    const pinned = ownPins?.();
+    const pins = pinned ?? Object.fromEntries(data.pins);
+    const key = `${data.version}:${m.nodeW}x${m.nodeH}:${pinned ? Object.keys(pinned).length : data.pins.size}`;
+    if (cache?.key === key && cache.pins === pinned) return cache.layout;
     const memberOf = new Map<string, string[]>();
     for (const [tag, members] of Object.entries(tags)) for (const h of members) (memberOf.get(h) ?? memberOf.set(h, []).get(h)!).push(tag);
     const placed = layoutMesh({
       hosts: [...nodes.keys()].map((id) => ({ id, tags: memberOf.get(id) ?? [] })),
       tags: Object.keys(tags),
-      pins: Object.fromEntries(pins),
+      pins,
       nodeW: m.nodeW, nodeH: m.nodeH,
     });
     const out: NodeModel[] = [];
@@ -54,7 +56,7 @@ export function createLayoutModel(source: MeshSource): (m: Metrics) => MeshLayou
     const clusters: Cluster[] = placed.clusters;
     // With nothing to draw the view keeps a usable size for its loading, empty and error states.
     const layout: MeshLayout = { nodes: out, size: out.length ? placed.size : { w: 880, h: 400 }, clusters };
-    cache = { key, layout };
+    cache = { key, layout, pins: pinned };
     return layout;
   };
 }

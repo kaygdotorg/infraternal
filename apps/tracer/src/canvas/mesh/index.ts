@@ -28,6 +28,8 @@ import type { MeshSource } from "./source";
 export interface MeshModule {
   /** Fills a graph view with its node cards and arrows. */
   buildGraph(c: ViewRec): void;
+  /** Shared pins changed without changing host inventory. */
+  refreshLayout(c: ViewRec): void;
   /** The camera came to rest: arrows redraw when the zoom changed enough to change their head size. */
   redraw(): void;
   /** Redraws the arrows that follow the camera (called on the next frame). */
@@ -104,7 +106,7 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
   const offFailure = source.onFailure((message) => cx.toast.show({ message }));
   const hostCount = (): number => source.data().nodes.size;
   return {
-    buildGraph, redraw, updateOverlay,
+    buildGraph, redraw, updateOverlay, refreshLayout: (c) => gv?.refresh(c),
     summaryRows: () => [["Hosts", String(hostCount())], ["Allowed access", String(source.grants().length)], ["Through another host", String(source.grants().filter((g) => g.via).length)]],
     countText: () => `${hostCount()} host${hostCount() === 1 ? "" : "s"} · ${source.grants().length} allowed`,
     grants: () => source.grants().map((g) => ({ ...g })),
