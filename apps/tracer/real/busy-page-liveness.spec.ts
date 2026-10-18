@@ -257,3 +257,160 @@ test("repeated busy tasks do not keep a stopped route live", async ({ page }, in
     await server.dispose();
   }
 });
+
+/** Restores real sessions with deterministic task gaps so input can precede later renderers. */
+async function reviewRestore(page: Page, server: Awaited<ReturnType<typeof startRealServer>>, count: number): Promise<void> {
+  await enrol(page, server.origin, server.token);
+  const windows = page.locator('.cl[data-view="console"] .ui-window');
+  const savedCount = () => page.evaluate(() => {
+    const key = `infraternal.canvas.${localStorage.getItem("tracer.user-id")}`;
+    const doc = JSON.parse(localStorage.getItem(key) ?? "null") as CanvasDocument | null;
+    const view = doc?.views.find((entry) => entry.id === "console");
+    return view?.layout.type === "tiled" ? view.layout.columns.flatMap((column) => column.windows).length : 0;
+  });
+  for (let index = 1; index < count; index++) {
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:split:down", source: "pointer" } })));
+    await expect(windows).toHaveCount(index + 1);
+    // A window with no created session cannot be restored. Historical bridges
+    // can include references that later retries replaced, so read the document.
+    await expect.poll(savedCount, { timeout: 15_000 }).toBe(index + 1);
+  }
+  await expect.poll(savedCount).toBe(count);
+  await page.evaluate(() => {
+    const key = `infraternal.canvas.${localStorage.getItem("tracer.user-id")}`;
+    const doc = JSON.parse(localStorage.getItem(key) ?? "null") as CanvasDocument;
+    const view = doc.views.find((entry) => entry.id === "console");
+    if (view?.layout.type !== "tiled") throw new Error("missing saved terminal view");
+    const windows = view.layout.columns.flatMap((column) => column.windows).map(({ id, target }) => ({ id, target, height: 1 }));
+    view.layout.columns = [{ id: "review-column", weight: 1, windows }];
+    doc.views = [view];
+    const save = () => localStorage.setItem(key, JSON.stringify(doc));
+    save();
+    window.addEventListener("pagehide", save, { once: true });
+  });
+  await page.addInitScript(() => {
+    const schedule = window.setTimeout.bind(window);
+    let next = 0;
+    window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      if (timeout === 0 && typeof handler === "function" && Function.prototype.toString.call(handler).includes("[native code]")) {
+        next = Math.max(next, performance.now()) + 150;
+        return schedule(handler, next - performance.now(), ...args);
+      }
+      return schedule(handler, timeout, ...args);
+    }) as typeof window.setTimeout;
+  });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.locator('.terminal-host textarea').first().waitFor({ state: "attached" });
+  expect(await page.locator('.terminal-host textarea').count()).toBeLessThan(count);
+}
+
+for (const surface of ["palette", "button", "removed input"] as const) test(`round-2 restore preserves ${surface} focus across 30 windows`, async ({ page }, info) => {
+  const server = await startRealServer({ latencyMs: 75 });
+  try {
+    await reviewRestore(page, server, 30);
+    if (surface === "palette") {
+      await page.keyboard.press("Control+Shift+K");
+      await page.locator("#palette-input").fill("review focus stays here");
+    } else if (surface === "button") {
+      await page.locator("#sidebar-toggle").focus();
+      // Closing the selected window while another surface has focus must not
+      // leave a deferred focus request on the next selected renderer.
+      await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:close", source: "keyboard" } })));
+    } else {
+      await page.evaluate(() => {
+        const field = document.createElement("input");
+        document.body.append(field);
+        field.focus();
+        field.value = "review";
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+        field.remove();
+      });
+    }
+    const focus = await page.evaluate(() => document.activeElement?.id || document.activeElement?.tagName);
+    // Inspect every subsequent focus change, including a steal that is later
+    // hidden by a palette refocus, rather than checking only the final element.
+    await page.evaluate(() => {
+      const changes: string[] = [];
+      (window as unknown as { reviewFocusChanges: string[] }).reviewFocusChanges = changes;
+      document.addEventListener("focusin", (event) => {
+        if (event.target instanceof Element && event.target.closest(".terminal-host")) changes.push(event.target.tagName);
+      }, true);
+    });
+    const count = surface === "button" ? 29 : 30;
+    await expect(page.locator('.cl[data-view="console"] .terminal-host textarea')).toHaveCount(count, { timeout: 30_000 });
+    await page.waitForTimeout(1000);
+    expect(await page.evaluate(() => document.activeElement?.id || document.activeElement?.tagName)).toBe(focus);
+    expect(await page.evaluate(() => (window as unknown as { reviewFocusChanges: string[] }).reviewFocusChanges)).toEqual([]);
+    await page.screenshot({ path: info.outputPath(`restore-${surface.replaceAll(" ", "-")}.png`) });
+    console.log(`REVIEW_FOCUS ${JSON.stringify({ surface, count, focus })}`);
+  } finally {
+    await page.close();
+    await server.dispose();
+  }
+});
+
+for (const coarse of [false, true]) test(`round-2 single-window open ${coarse ? "waits for a tap" : "takes desktop focus"}`, async ({ browser }, info) => {
+  const server = await startRealServer({ latencyMs: 75 });
+  const context = await browser.newContext({ ignoreHTTPSErrors: true, hasTouch: coarse, isMobile: coarse, viewport: coarse ? { width: 393, height: 852 } : { width: 1440, height: 900 } });
+  const page = await context.newPage();
+  try {
+    await enrol(page, server.origin, server.token);
+    const input = page.locator('.terminal-host textarea').first();
+    await input.waitFor({ state: "attached" });
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(coarse);
+    if (coarse) {
+      await page.waitForTimeout(1000);
+      await expect(input).not.toBeFocused();
+      await input.locator("..").tap({ position: { x: 40, y: 40 } });
+      await expect(input).toBeFocused();
+    } else {
+      await expect(input).toBeFocused();
+    }
+    await page.screenshot({ path: info.outputPath(coarse ? "phone-tap.png" : "desktop-open.png") });
+    console.log(`REVIEW_FOCUS ${JSON.stringify({ coarse, focused: await input.evaluate((node) => node === document.activeElement) })}`);
+  } finally {
+    await context.close();
+    await server.dispose();
+  }
+});
+
+test("round-2 only the selected restored window takes initial focus", async ({ page }) => {
+  const server = await startRealServer({ latencyMs: 75 });
+  try {
+    await page.addInitScript(() => {
+      const windows: string[] = [];
+      (window as unknown as { reviewFocusedWindows: string[] }).reviewFocusedWindows = windows;
+      document.addEventListener("focusin", (event) => {
+        if (!(event.target instanceof Element) || !event.target.closest(".terminal-host")) return;
+        const id = event.target.closest<HTMLElement>(".ui-window")?.dataset.windowId;
+        if (id) windows.push(id);
+      }, true);
+    });
+    await reviewRestore(page, server, 8);
+    await expect(page.locator('.cl[data-view="console"] .terminal-host textarea')).toHaveCount(8);
+    await page.waitForTimeout(1000);
+    const chosen = await page.locator('.cl[data-view="console"] .ui-window[data-active]').getAttribute("data-window-id");
+    expect(await page.evaluate(() => [...new Set((window as unknown as { reviewFocusedWindows: string[] }).reviewFocusedWindows)])).toEqual([chosen]);
+  } finally {
+    await page.close();
+    await server.dispose();
+  }
+});
+
+test("round-2 typing during 30-window restore remains in one shell", async ({ page }) => {
+  const server = await startRealServer({ latencyMs: 75 });
+  try {
+    await reviewRestore(page, server, 30);
+    const input = page.locator('.terminal-host textarea').first();
+    await input.focus();
+    const chosen = await input.evaluate((node) => node.closest<HTMLElement>(".ui-window")?.dataset.windowId);
+    await page.keyboard.type("echo review-thirty-$((6*7))\n", { delay: 35 });
+    await expect(page.locator('.cl[data-view="console"] .terminal-host textarea')).toHaveCount(30);
+    await expect.poll(() => server.bridges.flatMap((bridge) => [...bridge.output.values()]).filter((output) => output.includes("review-thirty-42")).length, { timeout: 15_000 }).toBe(1);
+    expect(await page.evaluate(() => document.activeElement?.closest<HTMLElement>(".ui-window")?.dataset.windowId)).toBe(chosen);
+    console.log(`REVIEW_FOCUS ${JSON.stringify({ typingWindows: 30, chosen, executed: 1 })}`);
+  } finally {
+    await page.close();
+    await server.dispose();
+  }
+});
