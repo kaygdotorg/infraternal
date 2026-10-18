@@ -114,3 +114,36 @@ test("review: another disconnect before consent keeps all typing behind consent"
   expect(f.sent).toHaveLength(1);
   expect(f.sent[0]?.type === "Input" ? f.sent[0].bytes.length : undefined).toBe(19);
 });
+
+test("review: window disposal clears held input and rejects a stale resend action", () => {
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const original = { window: globals.window, document: globals.document };
+  const f = waiting();
+  const staleAction = f.notice().action!;
+  let noticeDisposed = 0;
+  let streamClosed = 0;
+  Object.assign(f.client, {
+    cancelStreamRetry() {}, pendingLinkRows: new Map(), forcedLinkRows: new Map(),
+    disposeTouch() {}, pauseTerminal() {}, offRoundTrip() {},
+    resizeObserver: { disconnect() {} },
+    config: { host: { removeEventListener() {} } },
+    terminal: { dispose() {} },
+    conn: { streamAttached() {}, closeStream() { streamClosed += 1; } },
+    inputResendNotice: { dispose() { noticeDisposed += 1; } },
+  });
+  try {
+    globals.window = { removeEventListener() {} };
+    globals.document = { removeEventListener() {} };
+    (f.client as unknown as { dispose(): void }).dispose();
+    expect(f.client.closed).toBe(true);
+    expect(f.queue.length).toBe(0);
+    expect(noticeDisposed).toBe(1);
+    expect(streamClosed).toBe(1);
+    staleAction.onSelect();
+    expect(f.sent).toHaveLength(0);
+  } finally {
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete globals[key]; else globals[key] = value;
+    }
+  }
+});
