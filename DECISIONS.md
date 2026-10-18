@@ -3225,3 +3225,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      it put something in front of the person. A refused request says why and
      what to do, and exits 3; a request waiting for approval says who must
      approve. Every command, including these, has `--json` (D299).
+305. **Ctrl-C stops the calling script too (owner, 2026-10-18, #239; refines
+     D303):** "this!" When the person presses Ctrl-C, `infraternal` finishes
+     its `--json` envelope (`interrupted`), restores the default SIGINT action
+     and re-raises the signal, the way most command-line tools end. A shell
+     loop or script that runs `infraternal` then stops as well, and `$?`
+     still reads 130. Programs that call `infraternal` directly see "killed
+     by signal 2" instead of a plain exit code 130; that is accepted.
+     Rejected: exiting with plain code 130, which let a shell loop carry on
+     after Ctrl-C.
