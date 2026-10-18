@@ -468,9 +468,9 @@ test("online and foreground events cancel delays and preserve handshakes in prog
   }
 });
 
-test("a refused resume forgets its capability once and fresh refusals keep backing off", () => {
+for (const online of [true, false]) test(`a refused resume forgets its capability once and fresh refusals keep backing off when online hint is ${online}`, () => {
   const globals = globalThis as unknown as Record<string, unknown>;
-  const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, random: Math.random };
+  const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, navigator: globals.navigator, random: Math.random };
   let retry: (() => void) | undefined;
   let delay = 0;
   const sockets: Socket[] = [];
@@ -493,6 +493,8 @@ test("a refused resume forgets its capability once and fresh refusals keep backi
     globals.window = { setTimeout: (callback: () => void, ms: number) => { retry = callback; delay = ms; return 1; }, clearTimeout() {} };
     globals.location = { protocol: "https:", host: "resume.example.test" };
     globals.WebSocket = Socket;
+    // Offline hints can lag a working route; an explicit refusal is a real server response.
+    globals.navigator = { onLine: online };
     connection = new MuxConnection();
     connection.openStream({ onSocketOpen: (resume) => attempts.push(resume), onWelcome() {}, onFrame() {}, onDisconnected() {}, hasSession: () => true, onStatus() {} });
     sockets[0]!.onopen?.();
@@ -514,6 +516,6 @@ test("a refused resume forgets its capability once and fresh refusals keep backi
   } finally {
     connection?.dispose();
     Math.random = original.random;
-    for (const key of ["window", "location", "WebSocket"] as const) { if (original[key] === undefined) delete globals[key]; else globals[key] = original[key]; }
+    for (const key of ["window", "location", "WebSocket", "navigator"] as const) { if (original[key] === undefined) delete globals[key]; else globals[key] = original[key]; }
   }
 });
