@@ -20,6 +20,7 @@
  * the same pixels costs no work at all (D254). The worker exists only while its window streams; the page ends it when
  * the window closes or has been off screen for long.
  */
+import { traceClock, type FrameTrace, type ReceiveTrace } from "./frame-trace";
 import type { FromWorker, ToWorker, WorkerStats } from "./worker-protocol";
 import { MAX_VIDEO_BYTES } from "../../../../../packages/protocol/src/desktop";
 
@@ -55,7 +56,10 @@ let lastSequence = 0;
 let waitingKeyframe = true;
 let repairPending = false;
 let timestamp = 0;
-interface CodedUnit { keyframe: boolean; bytes: Uint8Array; stamp: number }
+interface CodedUnit { keyframe: boolean; bytes: Uint8Array; stamp: number; trace?: FrameTrace }
+// The map exists only for measurement; decoder timestamps keep delayed outputs
+// attached to their own wire sequence, including when a newer unit is queued.
+let traces: Map<number, FrameTrace> | undefined;
 const pending: CodedUnit[] = [];
 const MAX_PENDING_UNITS = 8;
 let pendingBytes = 0;
@@ -88,16 +92,20 @@ function repair(): void {
 
 function output(frame: VideoFrame): void {
   stats.decoded++;
+  const trace = traces?.get(frame.timestamp);
+  if (trace) { traces!.delete(frame.timestamp); trace.decodedAt = traceClock(); }
   try {
     // Newer work is already accepted. Converting obsolete output would block its
     // callback and can overload the bounded decoder with avoidable canvas work.
-    if (frame.timestamp < timestamp) { stats.superseded++; return; }
+    if (frame.timestamp < timestamp) { stats.superseded++; if (trace) trace.outcome = "superseded"; return; }
     if (!canvas || !context) return;
     if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
       canvas.width = frame.displayWidth;
       canvas.height = frame.displayHeight;
     }
+    if (trace) trace.drawStartedAt = traceClock();
     context.drawImage(frame, 0, 0);
+    if (trace) { trace.drawFinishedAt = traceClock(); trace.width = frame.displayWidth; trace.height = frame.displayHeight; trace.outcome = "painted"; }
     stats.painted++;
     if (first) { first = false; post({ t: "first", width: frame.displayWidth, height: frame.displayHeight }); }
     if (frame.displayWidth !== shownW || frame.displayHeight !== shownH) {
@@ -106,6 +114,7 @@ function output(frame: VideoFrame): void {
     }
   } finally {
     frame.close();
+    if (trace) post({ t: "trace", frame: trace });
     // Output proves codec progress even if its dequeue event is still pending.
     // No decoded picture waits here for that separate event or a display tick.
     pump();
@@ -118,11 +127,12 @@ function retireDecoder(keepPending = false): void {
   if (!keepPending) discardPending();
   if (repairTimer !== undefined) { scope.clearTimeout(repairTimer); repairTimer = undefined; }
   if (decoder && decoder.state !== "closed") decoder.close();
+  traces?.clear();
   decoder = undefined;
   codec = undefined;
 }
 
-function decodeUnit(keyframe: boolean, bytes: Uint8Array, stamp: number): void {
+function decodeUnit(keyframe: boolean, bytes: Uint8Array, stamp: number, trace?: FrameTrace): void {
   if (keyframe) {
     const wanted = avcCodecString(bytes) ?? codec;
     if (!wanted) { discardPending(); repair(); return; }
@@ -149,6 +159,7 @@ function decodeUnit(keyframe: boolean, bytes: Uint8Array, stamp: number): void {
     repairPending = false;
   }
   if (!decoder) { stats.dropped++; repair(); return; }
+  if (trace) { trace.submittedAt = traceClock(); traces!.set(stamp, trace); }
   try { decoder.decode(new EncodedVideoChunk({ type: keyframe ? "key" : "delta", timestamp: stamp, data: bytes })); }
   catch { retireDecoder(); post({ t: "error", reason: "decode" }); repair(); }
 }
@@ -160,12 +171,13 @@ function pump(): void {
     while (pending.length && (decoder?.decodeQueueSize ?? 0) < 2) {
       const unit = pending.shift()!;
       pendingBytes -= unit.bytes.byteLength;
-      decodeUnit(unit.keyframe, unit.bytes, unit.stamp);
+      decodeUnit(unit.keyframe, unit.bytes, unit.stamp, unit.trace);
     }
   } finally { pumping = false; }
 }
 
-function chunk(sequence: number, keyframe: boolean, buffer: ArrayBuffer): void {
+function chunk(sequence: number, keyframe: boolean, buffer: ArrayBuffer, receipt?: ReceiveTrace): void {
+  const receivedAt = traces ? traceClock() : 0;
   stats.received++;
   if (sequence <= lastSequence) return;
   const continuous = sequence === lastSequence + 1;
@@ -195,13 +207,14 @@ function chunk(sequence: number, keyframe: boolean, buffer: ArrayBuffer): void {
   // Advance before decoder admission: even output from an admitted older unit
   // is obsolete while a newer accepted picture waits for its codec references.
   const bytes = new Uint8Array(buffer), stamp = ++timestamp;
+  const trace: FrameTrace | undefined = traces && receipt ? { ...receipt, sequence, workerReceivedAt: receivedAt, outcome: "unpainted" } : undefined;
   // Ordinary delivery allocates no pending record. Only references waiting for
   // codec capacity need the extra bounded queue entry.
   if (!pending.length && (decoder?.decodeQueueSize ?? 0) < 2) {
-    decodeUnit(keyframe, bytes, stamp);
+    decodeUnit(keyframe, bytes, stamp, trace);
     return;
   }
-  pending.push({ keyframe, bytes, stamp });
+  pending.push({ keyframe, bytes, stamp, ...(trace ? { trace } : {}) });
   pendingBytes += buffer.byteLength;
   stats.pendingPeak = Math.max(stats.pendingPeak, pending.length);
   stats.pendingBytesPeak = Math.max(stats.pendingBytesPeak, pendingBytes);
@@ -212,6 +225,7 @@ scope.onmessage = (event: MessageEvent<ToWorker>) => {
   const m = event.data;
   switch (m.t) {
     case "init":
+      traces = m.measure ? new Map() : undefined;
       canvas = m.canvas;
       hardware = m.hardware;
       // `alpha: false` lets the browser skip blending the picture with the page behind it. `desynchronized` (present without
@@ -222,7 +236,7 @@ scope.onmessage = (event: MessageEvent<ToWorker>) => {
         post({ t: "error", reason: context ? "unsupported-codec" : "unsupported-canvas" });
       }
       return;
-    case "chunk": chunk(m.sequence, m.keyframe, m.bytes); return;
+    case "chunk": chunk(m.sequence, m.keyframe, m.bytes, m.trace); return;
     case "reset":
       retireDecoder();
       lastSequence = 0; waitingKeyframe = true; repairPending = false; first = true;

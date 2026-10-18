@@ -226,6 +226,27 @@ test("decoder output presents the newest admitted picture immediately and releas
     }
     send({ t: "stats" });
     expect(messages.at(-1)).toMatchObject({ t: "stats", stats: { pendingPeak: 8, pendingBytesPeak: MAX_VIDEO_BYTES } });
+    expect(messages.filter(m => m.t === "trace")).toHaveLength(0);
+    send({ t: "reset" });
+    send({ t: "init", canvas, hardware: "no-preference", measure: true });
+    for (let i = 0; i < 3; i++) send({
+      t: "chunk", sequence: 100 + i, keyframe: i === 0,
+      bytes: new Uint8Array(i === 0 ? [0, 0, 0, 1, 0x67, 0x64, 0, 0x28] : [0x41]).buffer,
+      trace: { captureNs: String(900 + i), bytes: i === 0 ? 8 : 1, receivedAt: 1, copyFinishedAt: 2 },
+    });
+    const measured = current!;
+    for (let i = 0; i < 3; i++) finish(measured, i);
+    const receipts = messages.filter(m => m.t === "trace").map(m => m.frame);
+    expect(receipts.map(r => [r.sequence, r.captureNs, r.outcome])).toEqual([
+      [100, "900", "superseded"], [101, "901", "superseded"], [102, "902", "painted"],
+    ]);
+    for (const receipt of receipts) {
+      expect(receipt.workerReceivedAt).toBeLessThanOrEqual(receipt.submittedAt!);
+      expect(receipt.submittedAt).toBeLessThanOrEqual(receipt.decodedAt!);
+    }
+    expect(receipts[2]!.decodedAt).toBeLessThanOrEqual(receipts[2]!.drawStartedAt!);
+    expect(receipts[2]!.drawStartedAt).toBeLessThanOrEqual(receipts[2]!.drawFinishedAt!);
+
   } finally {
     scope.onmessage?.({ data: { t: "close" } } as MessageEvent<ToWorker>);
     Object.assign(globalThis, { self: saved.self, VideoDecoder: saved.decoder, EncodedVideoChunk: saved.chunk });
