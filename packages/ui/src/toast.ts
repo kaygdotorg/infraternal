@@ -36,10 +36,16 @@ export interface ToastController {
   dispose(): void;
 }
 
+export interface ToastOptions {
+  /** Window notices use a positioned, unscrolled parent so canvas transforms cannot move the action off screen. */
+  placement?: "viewport" | "parent";
+}
+
 /** Mounts the one shared toast surface into `parent`, usually the active app shell. */
-export function mountToast(parent: HTMLElement): ToastController {
+export function mountToast(parent: HTMLElement, options: ToastOptions = {}): ToastController {
   const host = document.createElement("aside");
   host.className = "ui-toast ui-overlay-surface";
+  if (options.placement === "parent") host.style.position = "absolute";
   host.hidden = true;
   host.setAttribute("aria-label", "Notification");
   host.setAttribute("role", "group");
