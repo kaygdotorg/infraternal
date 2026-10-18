@@ -55,35 +55,3 @@ export const densityMilli = (size: StreamSize): number => Math.min(4000, Math.ma
 export function sizeChanged(a: StreamSize | undefined, b: StreamSize): boolean {
   return !a || Math.abs(a.width - b.width) >= 2 || Math.abs(a.height - b.height) >= 2 || a.backingScale !== b.backingScale;
 }
-
-/** A canvas window's frame and its limits in layout pixels; `chrome` is the frame around the picture area. */
-export interface ShapeBox {
-  width: number;
-  height: number;
-  chromeWidth: number;
-  chromeHeight: number;
-  minWidth: number;
-  maxWidth: number;
-  minHeight: number;
-  maxHeight: number;
-}
-
-/**
- * The frame that gives the picture area the remote window's `aspect` (width / height), so the picture fills it and is
- * never stretched. The height stays where it is and the width follows; past a width limit the width stays at the limit
- * and the height follows instead. A frame already within a pixel of the shape is returned unchanged, so repeated
- * reports of the same remote shape never move the window.
- */
-export function shapeFor(box: ShapeBox, aspect: number): { width: number; height: number } {
-  const same = { width: box.width, height: box.height };
-  if (!(aspect > 0) || !Number.isFinite(aspect)) return same;
-  const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
-  let height = box.height;
-  let width = (height - box.chromeHeight) * aspect + box.chromeWidth;
-  if (width > box.maxWidth || width < box.minWidth) {
-    width = clamp(width, box.minWidth, box.maxWidth);
-    height = clamp((width - box.chromeWidth) / aspect + box.chromeHeight, box.minHeight, box.maxHeight);
-  }
-  width = Math.round(width); height = Math.round(height);
-  return Math.abs(width - box.width) <= 1 && Math.abs(height - box.height) <= 1 ? same : { width, height };
-}

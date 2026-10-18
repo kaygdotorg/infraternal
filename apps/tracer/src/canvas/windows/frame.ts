@@ -12,7 +12,7 @@
  * - The window's kind decides its actions: only a terminal has split controls, only terminals and logs close.
  */
 import { createWindowCard, type WindowAction } from "../../../../../packages/ui/src/window-card";
-import { attachWindowResize, type ResizeFrame, type ResizeStart, type WindowResizeHost } from "../../../../../packages/ui/src/window-resize";
+import { attachWindowResize, shapeFor, type ResizeFrame, type ResizeStart, type WindowResizeHost } from "../../../../../packages/ui/src/window-resize";
 import type { Ctx, ViewRec, WinRec } from "../context";
 import type { WindowModel } from "../model/types";
 import { ICON, SESSION_ICON, iconFor } from "../views/icons";
@@ -21,7 +21,6 @@ import { beginMove } from "./move";
 import { coarse } from "../dom";
 import { scrollerOf } from "../layout/columns";
 import { RecentList } from "../recency";
-import { shapeFor } from "../appwin/size";
 
 export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   const actions: WindowAction[] = [];

@@ -1,6 +1,7 @@
 /** The size a stream asks the machine for always passes the wire's checks (contracts/wire.md section 9, the helper's Size.validate). */
 import { expect, test } from "bun:test";
-import { chooseSize, densityMilli, shapeFor, sizeChanged } from "./size";
+import { chooseSize, densityMilli, sizeChanged } from "./size";
+import { shapeFor } from "../../../../../packages/ui/src/window-resize";
 
 /** The machine's own check, written out. */
 function acceptable(s: ReturnType<typeof chooseSize>): boolean {
