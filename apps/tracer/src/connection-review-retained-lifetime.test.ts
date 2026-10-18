@@ -6,12 +6,14 @@ import type { WireFrame } from "../../../packages/protocol/src/codec";
 
 interface Probe {
   inputNeedsResend: boolean;
+  retainedInput?: Uint8Array;
   attachmentConfirmed: boolean;
   closed: boolean;
   nextInSeq: bigint;
   restartCursors(retain?: boolean): void;
   showInputResendNotice(): void;
   resendRetainedInput(): void;
+  discardRetainedInput(): void;
   resendUnacknowledgedInput(): void;
   handleInput(text: string): void;
 }
@@ -33,7 +35,7 @@ function fixture() {
     },
   };
   const client = Object.assign(Object.create(TerminalClient.prototype), {
-    closed: false, attachmentConfirmed: false, inputNeedsResend: false,
+    closed: false, attachmentConfirmed: false, inputNeedsResend: false, retainedInput: undefined,
     inputQueue: queue, inputScratch: new Uint8Array(16 * 1024),
     inputModifiers: { ctrl: "off", alt: "off" }, cursorEpoch: 0,
     nextInSeq: 0n, ackedInSeq: 0n, sessionId: new Uint8Array(16),
@@ -61,18 +63,37 @@ function waiting() {
 
 test("review: saved typing can be declined without closing the live shell", () => {
   const f = waiting();
-  expect(f.queue.length).toBe(14);
-  expect(f.sent).toHaveLength(0);
-  // This shared surface offers one action plus an optional Dismiss control.
-  // Declining must release the held bytes, then allow fresh typing at offset zero.
-  expect(f.notice().dismissible).toBe(true);
-  expect(typeof f.notice().onClose).toBe("function");
-  f.notice().onClose?.();
+  expect(f.client.retainedInput?.byteLength).toBe(14);
   expect(f.queue.length).toBe(0);
+  expect(f.sent).toHaveLength(0);
+  // Declining must release only the retained bytes, then allow fresh typing at offset zero.
+  expect(f.notice().secondaryAction?.label).toBe("Discard");
+  f.notice().secondaryAction?.onSelect();
+  expect(f.client.retainedInput).toBeUndefined();
   expect(f.client.inputNeedsResend).toBe(false);
   f.client.handleInput("fresh\n");
   expect(f.sent).toHaveLength(1);
   expect(f.sent[0]?.type === "Input" ? f.sent[0].inSeq : undefined).toBe(0n);
+});
+
+test("review: new typing reaches the fresh shell while saved typing stays pending", () => {
+  const f = waiting();
+  const saved = f.client.retainedInput?.slice();
+  f.client.handleInput("fresh\n");
+
+  expect(f.client.inputNeedsResend).toBe(true);
+  expect(f.client.retainedInput).toEqual(saved);
+  expect(f.sent).toHaveLength(1);
+  expect(f.sent[0]?.type === "Input" ? new TextDecoder().decode(f.sent[0].bytes) : "").toBe("fresh\n");
+  expect(f.notice().action?.label).toBe("Resend typing");
+
+  f.notice().secondaryAction?.onSelect();
+  expect(f.client.retainedInput).toBeUndefined();
+  expect(f.queue.length).toBe(6);
+  expect(f.sent).toHaveLength(1);
+  f.client.handleInput("more\n");
+  expect(f.sent).toHaveLength(2);
+  expect(f.sent[1]?.type === "Input" ? f.sent[1].inSeq : undefined).toBe(6n);
 });
 
 test("review: retained input and consent are local to their terminal window", () => {
@@ -83,13 +104,15 @@ test("review: retained input and consent are local to their terminal window", ()
   expect(first.sent).toHaveLength(1);
   expect(second.sent).toHaveLength(0);
   expect(second.client.inputNeedsResend).toBe(true);
-  expect(second.queue.length).toBe(14);
+  expect(second.client.retainedInput?.byteLength).toBe(14);
+  expect(second.queue.length).toBe(0);
 });
 
 test("review: selecting a different session removes saved typing and its action", () => {
   const f = waiting();
   const staleAction = f.notice().action!;
   f.client.restartCursors();
+  expect(f.client.retainedInput).toBeUndefined();
   expect(f.queue.length).toBe(0);
   expect(f.dismissals()).toBe(1);
   staleAction.onSelect();
@@ -99,20 +122,25 @@ test("review: selecting a different session removes saved typing and its action"
   expect(f.sent[0]?.type === "Input" ? f.sent[0].inSeq : undefined).toBe(0n);
 });
 
-test("review: another disconnect before consent keeps all typing behind consent", () => {
+test("review: another refused writer retains pending and unacknowledged fresh typing", () => {
   const f = waiting();
-  f.client.attachmentConfirmed = false;
-  f.notice().action!.onSelect();
   f.client.handleInput("more\n");
+  expect(f.sent).toHaveLength(1);
+  expect(f.client.inputNeedsResend).toBe(true);
+
+  f.client.attachmentConfirmed = false;
+  f.client.restartCursors(true);
+  expect(f.client.retainedInput?.byteLength).toBe(19);
+  expect(f.queue.length).toBe(0);
+  f.sent.length = 0;
   f.client.resendUnacknowledgedInput();
   expect(f.sent).toHaveLength(0);
-  expect(f.queue.length).toBe(19);
   f.client.attachmentConfirmed = true;
-  f.client.resendUnacknowledgedInput();
-  expect(f.sent).toHaveLength(0);
+  f.client.showInputResendNotice();
   f.notice().action!.onSelect();
   expect(f.sent).toHaveLength(1);
-  expect(f.sent[0]?.type === "Input" ? f.sent[0].bytes.length : undefined).toBe(19);
+  expect(f.sent[0]?.type === "Input" ? new TextDecoder().decode(f.sent[0].bytes) : "").toBe("synthetic-old\nmore\n");
+  expect(f.sent[0]?.type === "Input" ? f.sent[0].inSeq : undefined).toBe(0n);
 });
 
 test("review: window disposal clears held input and rejects a stale resend action", () => {
