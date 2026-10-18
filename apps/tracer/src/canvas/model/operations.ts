@@ -1,12 +1,14 @@
 /** Stable-ID intents and optimistic reduction for account layouts (D180, D183, #243). */
-import type { CanvasDocument, DocColumn, DocView, DocWindow } from "./document";
+import type { CanvasDocument, DocColumn, DocTarget, DocView, DocWindow } from "./document";
 export type Intent =
   | { type: "view.add"; view: DocView }
+  | { type: "view.update"; view_id: string; cell?: { x: number; y: number }; name?: string }
+  | { type: "target"; window_id: string; target: DocTarget }
   | { type: "view.remove"; view_id: string }
-  | { type: "open"; view_id: string; column_id: string; window: DocWindow; after?: string }
+  | { type: "open"; view_id: string; column_id: string; window: DocWindow; after?: string; column_after?: string | null }
   | { type: "split"; view_id: string; column_id: string; window: DocWindow; anchor_id: string; axis: "right" | "down" }
   | { type: "close"; window_id: string }
-  | { type: "move" | "membership.add"; view_id: string; column_id: string; window_id: string; after?: string }
+  | { type: "move" | "membership.add"; view_id: string; column_id: string; window_id: string; after?: string; column_after?: string | null }
   | { type: "membership.remove"; view_id: string; window_id: string }
   | { type: "resize"; window_id: string; height?: number; span?: number; rows?: number; row?: number }
   | { type: "weight"; view_id: string; column_id: string; weight: number }
@@ -25,6 +27,7 @@ export function edits(before: CanvasDocument, after: CanvasDocument, splits: Rea
   for (const v of after.views) {
     const previous = before.views.find((p) => p.id === v.id);
     if (!previous) result.push({ type: "view.add", view: { ...v, layout: v.layout.type === "graph" ? { type: "graph", pinned: {} } : { type: "tiled", columns: [] } } });
+    if (previous && (!equal(previous.cell, v.cell) || previous.name !== v.name)) result.push({ type: "view.update", view_id: v.id, ...(!equal(previous.cell, v.cell) ? { cell: v.cell } : {}), ...(previous.name !== v.name ? { name: v.name } : {}) });
     if (v.layout.type === "graph") {
       const pins = previous?.layout.type === "graph" ? previous.layout.pinned : {};
       for (const id of new Set([...Object.keys(pins), ...Object.keys(v.layout.pinned)])) if (!equal(pins[id], v.layout.pinned[id])) {
@@ -40,15 +43,16 @@ export function edits(before: CanvasDocument, after: CanvasDocument, splits: Rea
     const previousCols = previous ? cols(previous) : [];
     const memberships = new Map(previousCols.flatMap((c) => c.windows.map((w, i) => [w.id, { col: c.id, after: c.windows[i - 1]?.id }] as const)));
     for (const id of memberships.keys()) if (live.has(id) && !v.layout.columns.some((c) => c.windows.some((w) => w.id === id))) result.push({ type: "membership.remove", view_id: v.id, window_id: id });
-    for (const c of v.layout.columns) {
+    for (const [ci, c] of v.layout.columns.entries()) {
       for (const [i, w] of c.windows.entries()) {
         const neighbour = c.windows[i - 1]?.id;
-        const at = { view_id: v.id, column_id: c.id, ...(neighbour ? { after: neighbour } : {}) };
+        const at = { view_id: v.id, column_id: c.id, ...(!previousCols.some((p) => p.id === c.id) ? { column_after: v.layout.columns[ci - 1]?.id ?? null } : {}), ...(neighbour ? { after: neighbour } : {}) };
         const was = old.get(w.id), membership = memberships.get(w.id), split = splits.get(w.id);
         if (!was) result.push(split ? { type: "split", view_id: v.id, column_id: c.id, window: w, anchor_id: split.anchorId, axis: split.axis } : { type: "open", ...at, window: w });
         else if (!membership) result.push({ type: "membership.add", ...at, window_id: w.id });
         else if (membership.col !== c.id || membership.after !== neighbour) result.push({ type: "move", ...at, window_id: w.id });
         if (was) {
+          if (!equal(was.target, w.target)) result.push({ type: "target", window_id: w.id, target: w.target });
           const size: Extract<Intent, { type: "resize" }> = { type: "resize", window_id: w.id }; let changed = false;
           for (const field of ["height", "span", "rows", "row"] as const) if (was[field] !== w[field]) { size[field] = w[field] ?? (field === "row" ? 0 : 1); changed = true; }
           if (changed) result.push(size);
@@ -58,7 +62,18 @@ export function edits(before: CanvasDocument, after: CanvasDocument, splits: Rea
       if (c.windows.length && Math.abs((prior?.weight ?? 1) - c.weight) > 0.001) result.push({ type: "weight", view_id: v.id, column_id: c.id, weight: Math.max(0.1, Math.min(10, c.weight)) });
     }
   }
-  return result;
+  const working = structuredClone(before), compact: Intent[] = [];
+  // Earlier insertions already move their following neighbours. Do not turn one drag into redundant moves.
+  for (const intent of [...result.filter((i) => i.type !== "membership.remove"), ...result.filter((i) => i.type === "membership.remove")]) {
+    if (intent.type === "move") {
+      const view = working.views.find((v) => v.id === intent.view_id);
+      const col = view && cols(view).find((c) => c.id === intent.column_id);
+      const at = col?.windows.findIndex((w) => w.id === intent.window_id) ?? -1;
+      if (at >= 0 && col?.windows[at - 1]?.id === intent.after) continue;
+    }
+    compact.push(intent); reduce(working, intent);
+  }
+  return compact;
 }
 /** Missing memberships stay missing after close; callers deduplicate the server's ordered revisions. */
 export function reduce(doc: CanvasDocument, intent: Intent): void {
@@ -66,7 +81,9 @@ export function reduce(doc: CanvasDocument, intent: Intent): void {
   if (intent.type === "view.remove") { doc.views = doc.views.filter((v) => v.id !== intent.view_id); return; }
   if (intent.type === "close") { for (const v of doc.views) for (const c of cols(v)) c.windows = c.windows.filter((w) => w.id !== intent.window_id); return; }
   if (intent.type === "resize") { for (const w of windows(doc)) if (w.id === intent.window_id) for (const k of ["height", "span", "rows", "row"] as const) if (intent[k] !== undefined) w[k] = intent[k]; return; }
+  if (intent.type === "target") { for (const w of windows(doc)) if (w.id === intent.window_id) w.target = structuredClone(intent.target); return; }
   const view = doc.views.find((v) => v.id === intent.view_id); if (!view) return;
+  if (intent.type === "view.update") { if (intent.cell) view.cell = { ...intent.cell }; if (intent.name) view.name = intent.name; return; }
   if (intent.type === "pin") { if (view.layout.type === "graph") { if (intent.position) view.layout.pinned[intent.node_id] = { ...intent.position }; else delete view.layout.pinned[intent.node_id]; } return; }
   const columns = cols(view);
   if (intent.type === "weight") { const col = columns.find((c) => c.id === intent.column_id); if (col) col.weight = intent.weight; return; }
@@ -78,7 +95,9 @@ export function reduce(doc: CanvasDocument, intent: Intent): void {
   else for (const c of columns) { const at = c.windows.findIndex((w) => w.id === intent.window_id); if (at >= 0) { window = c.windows.splice(at, 1)[0]; break; } }
   if (!window || columns.some((c) => c.windows.some((w) => w.id === window!.id))) return;
   let col = columns.find((c) => c.id === intent.column_id);
-  if (!col) { col = { id: intent.column_id, weight: 1, windows: [] }; columns.push(col); }
+  if (!col) { col = { id: intent.column_id, weight: 1, windows: [] };
+    const neighbour = columns.findIndex((c) => c.id === intent.column_after);
+    columns.splice(intent.column_after === null ? 0 : neighbour < 0 ? columns.length : neighbour + 1, 0, col); }
   const at = intent.after ? col.windows.findIndex((w) => w.id === intent.after) : -1;
   col.windows.splice(intent.after && at < 0 ? col.windows.length : at + 1, 0, structuredClone(window));
 }
