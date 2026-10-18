@@ -20,7 +20,7 @@
  * the same pixels costs no work at all (D254). The worker exists only while its window streams; the page ends it when
  * the window closes or has been off screen for long.
  */
-import { traceClock, type FrameTrace, type ReceiveTrace } from "./frame-trace";
+import { traceClock, TRACE_LIMIT, type FrameTrace, type ReceiveTrace } from "./frame-trace";
 import type { FromWorker, ToWorker, WorkerStats } from "./worker-protocol";
 import { MAX_VIDEO_BYTES } from "../../../../../packages/protocol/src/desktop";
 
@@ -159,7 +159,14 @@ function decodeUnit(keyframe: boolean, bytes: Uint8Array, stamp: number, trace?:
     repairPending = false;
   }
   if (!decoder) { stats.dropped++; repair(); return; }
-  if (trace) { trace.submittedAt = traceClock(); traces!.set(stamp, trace); }
+  if (trace) {
+    if (traces!.size === TRACE_LIMIT) {
+      const oldest = traces!.keys().next().value!;
+      post({ t: "trace", frame: traces!.get(oldest)! });
+      traces!.delete(oldest);
+    }
+    trace.submittedAt = traceClock(); traces!.set(stamp, trace);
+  }
   try { decoder.decode(new EncodedVideoChunk({ type: keyframe ? "key" : "delta", timestamp: stamp, data: bytes })); }
   catch { retireDecoder(); post({ t: "error", reason: "decode" }); repair(); }
 }

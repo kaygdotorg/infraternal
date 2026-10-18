@@ -246,6 +246,21 @@ test("decoder output presents the newest admitted picture immediately and releas
     }
     expect(receipts[2]!.decodedAt).toBeLessThanOrEqual(receipts[2]!.drawStartedAt!);
     expect(receipts[2]!.drawStartedAt).toBeLessThanOrEqual(receipts[2]!.drawFinishedAt!);
+    // A codec may admit requests before delivering output. Missing callbacks
+    // must not turn the opt-in diagnostic into an unbounded metadata queue.
+    send({ t: "reset" }); holdDecoder = false; messages.length = 0;
+    send({ t: "init", canvas, hardware: "no-preference", measure: true });
+    for (let i = 1; i <= 515; i++) send({
+      t: "chunk", sequence: i, keyframe: i === 1,
+      bytes: new Uint8Array(i === 1 ? [0, 0, 0, 1, 0x67, 0x64, 0, 0x28] : [0x41]).buffer,
+      trace: { captureNs: String(i), bytes: 1, receivedAt: 1, copyFinishedAt: 2 },
+    });
+    expect(messages.filter(m => m.t === "trace").map(m => [m.frame.sequence, m.frame.outcome])).toEqual([
+      [1, "unpainted"], [2, "unpainted"], [3, "unpainted"],
+    ]);
+    finish(current!, 514);
+    expect(messages.at(-1)).toMatchObject({ t: "trace", frame: { sequence: 515, captureNs: "515", outcome: "painted" } });
+
 
   } finally {
     scope.onmessage?.({ data: { t: "close" } } as MessageEvent<ToWorker>);

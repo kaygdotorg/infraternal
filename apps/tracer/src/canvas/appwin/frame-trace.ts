@@ -18,14 +18,14 @@ export type ReceiveTrace = Pick<FrameTrace, "captureNs" | "bytes" | "receivedAt"
 export const traceClock = (): number => performance.timeOrigin + performance.now();
 export const traceEnabled = (): boolean => typeof location !== "undefined" && new URLSearchParams(location.search).get("appwinMeasure") === "1";
 const frames: FrameTrace[] = [];
-const LIMIT = 512;
+export const TRACE_LIMIT = 512;
 declare global {
   interface Window { __infraternalAppWindowTrace?: { take(): FrameTrace[] } }
 }
 /** A diagnostic reads and clears the bounded buffer; normal viewing exposes no global or extra messages. */
 export function recordFrame(frame: FrameTrace): void {
   if (!traceEnabled()) return;
-  if (frames.length === LIMIT) frames.shift();
+  if (frames.length === TRACE_LIMIT) frames.shift();
   frames.push(frame);
   window.__infraternalAppWindowTrace ??= { take: () => frames.splice(0) };
 }
