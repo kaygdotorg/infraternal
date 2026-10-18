@@ -64,6 +64,21 @@ fn signal_stop_joins_capture_without_waiting_for_a_blocked_encoder() {
         },
         time::{Duration, Instant},
     };
+    // This fixed-pixel fixture deliberately exercises the owned-copy fallback.
+    // Select it in a child so parallel tests never mutate process environment.
+    if std::env::var_os("INFRATERNAL_DESKTOP_OWNED").is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .env("INFRATERNAL_DESKTOP_OWNED", "1")
+            .args([
+                "--exact",
+                "signal_stop_joins_capture_without_waiting_for_a_blocked_encoder",
+                "--nocapture",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success(), "owned-copy shutdown fixture failed");
+        return;
+    }
     let root =
         std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from("target"), PathBuf::from);
     let dir = root.join(format!("desktop-helper-stop-{}", std::process::id()));
