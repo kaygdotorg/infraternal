@@ -12,6 +12,7 @@ pub use action::{
 pub mod admission;
 pub mod channel;
 pub mod node_channel;
+pub mod present;
 pub mod release_version;
 /// One pipeline-stamped identity shared by reported versions and lockstep downloads [225,226].
 pub const VERSION: &str = env!("INFRATERNAL_VERSION");
@@ -485,13 +486,25 @@ pub trait AgentPlugin: Send {
     fn human_status_action(&self, _action_id: &str) -> Option<&'static str> {
         None
     }
-    /// Render public output inside the plugin, keeping feature fields out of core adapters.
+    /// Present public output inside the plugin, keeping feature fields out of core adapters.
+    /// The answer, the aligned detail and the machine form come from one place so they cannot disagree.
     /// # Errors
     /// Rejects malformed public JSON.
-    fn format_human(&self, _action_id: &str, output: &[u8]) -> Result<String, PluginError> {
+    fn present(
+        &self,
+        _action_id: &str,
+        output: &[u8],
+        _width: usize,
+    ) -> Result<present::Presented, PluginError> {
         let value: serde_json::Value =
             serde_json::from_slice(output).map_err(|_| PluginError::Rejected)?;
-        serde_json::to_string_pretty(&value).map_err(|_| PluginError::Rejected)
+        Ok(present::Presented {
+            tone: present::Tone::Good,
+            message: String::new(),
+            body: serde_json::to_string_pretty(&value).map_err(|_| PluginError::Rejected)? + "\n",
+            next: Vec::new(),
+            data: value,
+        })
     }
     /// Validate and execute one declared action.
     /// # Errors
@@ -667,15 +680,20 @@ impl PluginRegistry {
         }
         Ok(Some(id))
     }
-    /// Format a bounded public reply with the implementation's pure presenter.
+    /// Present a bounded public reply with the implementation's pure presenter.
     /// # Errors
     /// Refuses private control actions, oversized replies and malformed presentation data.
-    pub fn format_human(&self, action_id: &str, output: &[u8]) -> Result<String, PluginError> {
+    pub fn present(
+        &self,
+        action_id: &str,
+        output: &[u8],
+        width: usize,
+    ) -> Result<present::Presented, PluginError> {
         if output.len() > MAX_ACTION_BYTES {
             return Err(PluginError::MessageTooLarge);
         }
         self.public_plugin(action_id)?
-            .format_human(action_id, output)
+            .present(action_id, output, width)
     }
     fn public_plugin(&self, action_id: &str) -> Result<&dyn AgentPlugin, PluginError> {
         self.plugins
@@ -762,6 +780,23 @@ pub enum PluginError {
 
 #[cfg(test)]
 mod tests;
+
+/// Whether commands for components that are not built yet are compiled in (feature `placeholders`).
+/// Default builds leave them out: they are hidden anyway (D299), and their text costs binary size (D243).
+pub const PLACEHOLDERS: bool = cfg!(feature = "placeholders");
+
+/// The placeholder actions `build` makes, or none in a default build. The closure is never
+/// called then, so its strings and schemas are not linked into the binary.
+#[must_use]
+pub fn placeholders<I: IntoIterator<Item = ActionDefinition>>(
+    build: impl FnOnce() -> I,
+) -> Vec<ActionDefinition> {
+    if PLACEHOLDERS {
+        build().into_iter().collect()
+    } else {
+        Vec::new()
+    }
+}
 
 /// Adapt hosted action metadata into the shared CLI registry without duplicating routes.
 ///

@@ -5,6 +5,18 @@ use infraternal_plugin_api::{
     JsonSchema,
 };
 
+/// Plain words on when each operator command is the right one.
+fn when_to_use(id: &str) -> &'static str {
+    match id {
+        "remote.host.remove" => "Use this when a machine should no longer belong to your server.",
+        "remote.host.join" => {
+            "Use this on a machine that should become part of an existing server."
+        }
+        "remote.host.run" => "Use this on an enrolled machine to bring its connection back up.",
+        _ => "Use this on the machine that runs the server, when it should restart.",
+    }
+}
+
 /// Adapt the existing transport action rather than duplicating its help and skill instructions.
 fn action(
     definition: infraternal_plugin_api::ActionDef,
@@ -15,7 +27,7 @@ fn action(
     let mut action = ActionDefinition::new(
         command.iter().copied(),
         definition.summary,
-        definition.summary,
+        when_to_use(definition.id),
         definition.instructions.iter().copied(),
         inputs,
         operator_output(definition),
@@ -58,38 +70,15 @@ fn action(
     action
 }
 
-/// Operator records keep the deployed format, while removal can print a hosted challenge/result.
+/// Operator records use the shared envelope; `data` carries the hosted response when there is one
+/// (for example the passkey challenge of a host removal) and is empty for progress records.
 fn operator_output(definition: infraternal_plugin_api::ActionDef) -> JsonSchema {
-    let required = if definition.id == super::REMOVE.id {
-        Vec::new()
-    } else {
-        vec!["state".to_owned(), "message".to_owned()]
-    };
-    let mut schema = JsonSchema::object(
-        [
-            (
-                "state".to_owned(),
-                JsonSchema::string("Confirmed operator state."),
-            ),
-            (
-                "message".to_owned(),
-                JsonSchema::string("Operator result summary."),
-            ),
-            (
-                "next".to_owned(),
-                JsonSchema::string("Recommended follow-up."),
-            ),
-        ],
-        required,
-    )
-    .with_description(format!(
-        "Operator records for {}. Hosted response schema: {}.",
+    let mut data = JsonSchema::empty_object().with_description(format!(
+        "Hosted response for {}, shaped by schema {}; empty for progress records.",
         definition.id, definition.output.0
     ));
-    // Hosted schemas remain authoritative for challenge/result fields. Local CLI
-    // errors may also use the versioned envelope; neither requires rewriting deployed output.
-    schema.additional_properties = Some(true);
-    schema
+    data.additional_properties = Some(true);
+    JsonSchema::command_result_with(data)
 }
 
 /// Enrollment and reconnect remain actions owned by the infraternal agent component.
@@ -103,11 +92,13 @@ pub fn agent_actions() -> Vec<ActionDefinition> {
                 [
                     (
                         "url".to_owned(),
-                        JsonSchema::string("Pinned server enrollment URL."),
+                        JsonSchema::string(
+                            "The server's enrollment address, from your invitation.",
+                        ),
                     ),
                     (
                         "enroll_only".to_owned(),
-                        JsonSchema::boolean("Save identity without starting the connection."),
+                        JsonSchema::boolean("Save the identity and stop; do not connect yet."),
                     ),
                 ],
                 ["url".to_owned()],
@@ -133,7 +124,7 @@ pub fn restart_action() -> ActionDefinition {
         JsonSchema::object(
             [(
                 "binary".to_owned(),
-                JsonSchema::string("Verified replacement executable."),
+                JsonSchema::string("Program to restart into, instead of the current one."),
             )],
             std::iter::empty(),
         ),
@@ -149,18 +140,27 @@ pub fn remove_action() -> ActionDefinition {
         &["remove-host"],
         JsonSchema::object(
             [
-                ("host".to_owned(), JsonSchema::string("Enrolled host UUID.")),
+                (
+                    "host".to_owned(),
+                    JsonSchema::string("ID of the host to remove."),
+                ),
                 (
                     "server".to_owned(),
-                    JsonSchema::string("Existing server URL."),
+                    JsonSchema::string(
+                        "Address of your server, such as https://infra.example.org.",
+                    ),
                 ),
                 (
                     "finish".to_owned(),
-                    JsonSchema::boolean("Complete fresh proof using private stdin."),
+                    JsonSchema::boolean(
+                        "Finish the removal with your passkey proof, read from standard input.",
+                    ),
                 ),
                 (
                     "retain".to_owned(),
-                    JsonSchema::boolean("Keep the installation after revoking access."),
+                    JsonSchema::boolean(
+                        "Cut the host's access but leave the infraternal agent installed on it.",
+                    ),
                 ),
             ],
             ["host".to_owned(), "server".to_owned()],

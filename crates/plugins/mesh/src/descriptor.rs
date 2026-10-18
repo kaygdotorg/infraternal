@@ -306,7 +306,13 @@ pub fn cli_plugin() -> infraternal_plugin_api::PluginDefinition {
     use infraternal_plugin_api::ActionTarget;
     #[cfg(all(feature = "agent", target_os = "linux"))]
     use infraternal_plugin_api::JsonSchema;
-    let mut plugin = DESCRIPTOR.cli_plugin(ActionTarget::Global);
+    let mut plugin = if infraternal_plugin_api::PLACEHOLDERS {
+        DESCRIPTOR.cli_plugin(ActionTarget::Global)
+    } else {
+        infraternal_plugin_api::PluginDefinition::new(DESCRIPTOR.id, "", [])
+    };
+    "Link your machines privately and see how they reach each other."
+        .clone_into(&mut plugin.description);
     #[cfg(all(feature = "agent", target_os = "linux"))]
     for mut action in crate::node_actions::DESCRIPTOR
         .cli_plugin(ActionTarget::Host)
@@ -317,17 +323,19 @@ pub fn cli_plugin() -> infraternal_plugin_api::PluginDefinition {
         "Use this action on the running local infraternal agent."
             .clone_into(&mut action.when_to_use);
         action.safety.notes.clear();
+        // Scripts and tests use these; people do not need them in help.
+        action.cli_hidden_inputs = vec!["input_stdin".to_owned(), "state".to_owned()];
         action.input_schema = JsonSchema::object(
             [
                 (
                     "state".to_owned(),
                     JsonSchema::string(
-                        "Private runtime directory of the running infraternal agent.",
+                        "Runtime folder of the infraternal agent, if not the default.",
                     ),
                 ),
                 (
                     "input_stdin".to_owned(),
-                    JsonSchema::boolean("Read bounded action JSON from standard input."),
+                    JsonSchema::boolean("Read the request as JSON from standard input."),
                 ),
             ],
             std::iter::empty(),
@@ -335,10 +343,9 @@ pub fn cli_plugin() -> infraternal_plugin_api::PluginDefinition {
         if action.command == ["mesh", "up"] {
             // Preserve the declared SSH request flag; unsupported node inputs
             // remain refused by the component rather than claiming SSH is live.
-            let declaration = crate::policy::cli::plugin();
             action.input_schema.properties.insert(
                 "ssh".to_owned(),
-                declaration.actions[0].input_schema.properties["ssh"].clone(),
+                JsonSchema::boolean("Also turn on SSH access over the mesh."),
             );
         }
         plugin.actions.push(action);

@@ -31,11 +31,49 @@ struct StoredIdentity {
     key_der: String,
 }
 
+/// Why a join step failed, in the classes a caller acts on.
+///
+/// The class travels inside the `io::Error` as its source, so the command can pick the exit
+/// code (D303) from the type. Matching on message text would silently stop working the day a
+/// message is reworded. `Display` is the public sentence: it names no path, address or secret.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Failure {
+    /// The invitation or the answer was not accepted; the reason is deliberately not detailed.
+    Refused,
+    /// The server's name could not be resolved.
+    Dns(&'static str),
+    /// The server could not be reached.
+    Connect,
+    /// The server's certificate did not verify.
+    Tls,
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Refused => "remote infraternal agent operation refused",
+            Self::Dns(sentence) => sentence,
+            Self::Connect => "Join connection failed.",
+            Self::Tls => "Join TLS verification failed.",
+        })
+    }
+}
+
+impl std::error::Error for Failure {}
+
+impl Failure {
+    /// The class an error carries, if it was built by this module.
+    pub(crate) fn of(error: &io::Error) -> Option<Self> {
+        error.get_ref()?.downcast_ref::<Self>().copied()
+    }
+
+    fn error(self, kind: io::ErrorKind) -> io::Error {
+        io::Error::new(kind, self)
+    }
+}
+
 fn refused() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::PermissionDenied,
-        "remote infraternal agent operation refused",
-    )
+    Failure::Refused.error(io::ErrorKind::PermissionDenied)
 }
 
 pub(crate) fn default_data() -> io::Result<PathBuf> {
@@ -205,6 +243,7 @@ async fn connect_enrollment(name: &str, port: u16) -> io::Result<tokio::net::Tcp
     let addresses = tokio::net::lookup_host((name, port))
         .await
         .map_err(|error| {
+            // Only these known resolver diagnostics are kept; anything else could carry a name.
             let message = match error.to_string().as_str() {
                 "failed to lookup address information: Temporary failure in name resolution" => {
                     "Join DNS lookup failed: Temporary failure in name resolution."
@@ -214,27 +253,21 @@ async fn connect_enrollment(name: &str, port: u16) -> io::Result<tokio::net::Tcp
                 }
                 _ => "Join DNS lookup failed.",
             };
-            io::Error::new(error.kind(), message)
+            Failure::Dns(message).error(error.kind())
         })?
         .collect::<Vec<_>>();
     tokio::net::TcpStream::connect(addresses.as_slice())
         .await
-        .map_err(|error| io::Error::new(error.kind(), "Join connection failed."))
+        .map_err(|error| Failure::Connect.error(error.kind()))
 }
 
-/// CLI output can carry only these authored public contexts, never arbitrary errors.
+/// CLI output can carry only these authored public sentences, never arbitrary errors.
 pub(crate) fn public_error(error: &io::Error) -> &'static str {
-    match error.to_string().as_str() {
-        "Join DNS lookup failed: Temporary failure in name resolution." => {
-            "Join DNS lookup failed: Temporary failure in name resolution."
-        }
-        "Join DNS lookup failed: Name or service not known." => {
-            "Join DNS lookup failed: Name or service not known."
-        }
-        "Join DNS lookup failed." => "Join DNS lookup failed.",
-        "Join connection failed." => "Join connection failed.",
-        "Join TLS verification failed." => "Join TLS verification failed.",
-        _ => "Remote infraternal agent operation failed",
+    match Failure::of(error) {
+        Some(Failure::Dns(sentence)) => sentence,
+        Some(Failure::Connect) => "Join connection failed.",
+        Some(Failure::Tls) => "Join TLS verification failed.",
+        Some(Failure::Refused) | None => "Remote infraternal agent operation failed",
     }
 }
 
@@ -292,12 +325,7 @@ async fn redeem(url: &str, root: Option<&X509>, request: &JoinRequest) -> io::Re
     std::pin::Pin::new(&mut stream)
         .connect()
         .await
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Join TLS verification failed.",
-            )
-        })?;
+        .map_err(|_| Failure::Tls.error(io::ErrorKind::PermissionDenied))?;
     // Hyper is the same HTTP engine used by the server; retain its bounded codec.
     let (mut sender, connection) =
         hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))

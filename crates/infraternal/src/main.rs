@@ -41,14 +41,16 @@ mod install;
 use std::{
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
-    process::{Command, ExitCode, Stdio},
+    process::ExitCode,
 };
 
 #[cfg(feature = "plugin-server")]
 use std::net::SocketAddr;
 
 use clap::ArgMatches;
-use cli::output::{CommandResult, CommandState, RenderOptions, render_json, render_pretty};
+use cli::output::{CommandResult, CommandState, Exit, emit};
+#[cfg(feature = "plugin-server")]
+use cli::output::{render_json, write_output};
 use infraternal_plugin_api::{
     ActionAvailability, ActionDefinition, ActionRegistry, CliHandler, JsonSchema, JsonSchemaType,
 };
@@ -129,59 +131,35 @@ fn run_invocation() -> ExitCode {
     let registry = match cli::actions::registry_for(requested_root) {
         Ok(registry) => registry,
         Err(error) => {
-            print_result(
-                &CommandResult::new(
-                    "cli",
+            return emit(
+                CommandResult::new(
+                    "infraternal",
                     CommandState::Failed,
-                    "The command registry could not be loaded.",
+                    "The command list could not be loaded.",
                     json!({}),
                 )
                 .with_details(error.to_string()),
-                false,
-                true,
+                requested_json_early(),
+                Exit::Failed,
             );
-            return ExitCode::FAILURE;
         }
     };
-    let requested_json = std::env::args_os().any(|argument| argument == "--json");
+    let requested_json = requested_json_early();
     let matches = match cli::command_tree::build(&registry).try_get_matches() {
         Ok(matches) => matches,
-        Err(error)
-            if requested_json
-                && !matches!(
-                    error.kind(),
-                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
-                ) =>
-        {
-            // Invalid private transport coordinates must not leak through Clap diagnostics.
-            #[cfg(feature = "remote")]
-            return output::refuse(
-                true,
-                "cli",
-                "Invalid command arguments",
-                "Read the command help and retry.",
-                2,
-            );
-            #[cfg(not(feature = "remote"))]
-            {
-                print_result(
-                    &CommandResult::new(
-                        "cli",
-                        CommandState::Failed,
-                        "Invalid command arguments.",
-                        json!({}),
-                    )
-                    .with_next_step("Read the command help and retry."),
-                    true,
-                    false,
-                );
-                return ExitCode::from(2);
-            }
-        }
-        Err(error) => error.exit(),
+        Err(error) => return parse_failure(&registry, &error, requested_json),
     };
     let json_output = matches.get_flag("json");
     let selected = cli::command_tree::selected(&matches);
+    if json_output {
+        // One envelope per command, also when Ctrl-C stops it (D303/D305).
+        let command = if selected.path.is_empty() {
+            "infraternal".to_owned()
+        } else {
+            selected.path.join(" ")
+        };
+        infraternal_shim::exit_on_interrupt(cli::output::interrupted_notice(&command));
+    }
     dispatch_selected_action(&registry, &selected, json_output)
 }
 
@@ -191,8 +169,12 @@ fn dispatch_selected_action(
     json_output: bool,
 ) -> ExitCode {
     let path = selected.path.iter().map(String::as_str).collect::<Vec<_>>();
+    if path.is_empty() {
+        return run_overview(registry, json_output);
+    }
     let Some(registered) = registry.find(&path) else {
-        return missing_action(json_output);
+        return run_group(registry, &path, json_output)
+            .unwrap_or_else(|| missing_action(json_output));
     };
     dispatch_action(registry, registered.action, selected.matches, json_output)
 }
@@ -270,7 +252,7 @@ fn dispatch_action(
         CliHandler::EmbeddedAgent => {
             #[cfg(feature = "plugin-agent")]
             {
-                run_embedded_agent(matches, json_output)
+                run_embedded_agent(registry, matches, json_output)
             }
             #[cfg(not(feature = "plugin-agent"))]
             {
@@ -327,18 +309,46 @@ fn run_ssh_session(matches: &ArgMatches) -> ExitCode {
 }
 
 fn missing_action(json_output: bool) -> ExitCode {
-    print_result(
-        &CommandResult::new(
-            "cli",
-            CommandState::Failed,
-            "The requested command is not registered in this build.",
+    emit(
+        CommandResult::new(
+            "infraternal",
+            CommandState::Refused,
+            "That is not a command this build has.",
             json!({}),
         )
-        .with_next_step("Run `infraternal --help` to see the enabled commands."),
+        .with_next_step("infraternal --help"),
         json_output,
-        true,
-    );
-    ExitCode::from(2)
+        Exit::Usage,
+    )
+}
+
+/// Whether `--json` was typed anywhere, known before any parsing so failures can honour it.
+fn requested_json_early() -> bool {
+    std::env::args_os().any(|argument| argument == "--json")
+}
+
+/// What to do with a command line that did not parse (see `cli::usage`).
+///
+/// Help and version are not failures: people get the parser's text, `--json` callers one envelope
+/// that carries the same text. Every real failure is worded by us, in text and in JSON, so the
+/// value that was typed (it may be a URL with a token, or a path) is never echoed back.
+fn parse_failure(registry: &ActionRegistry, error: &clap::Error, json: bool) -> ExitCode {
+    use clap::error::ErrorKind;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let tree = cli::command_tree::build(registry);
+    match error.kind() {
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion if json => {
+            emit(cli::usage::help_result(&tree, &args, error), true, Exit::Ok)
+        }
+        ErrorKind::DisplayHelp
+        | ErrorKind::DisplayVersion
+        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            if !json =>
+        {
+            error.exit()
+        }
+        _ => emit(cli::usage::result(&tree, &args, error), json, Exit::Usage),
+    }
 }
 
 /// The shipping diagnostic refuses partial protection independently of server development policy.
@@ -346,69 +356,163 @@ fn missing_action(json_output: bool) -> ExitCode {
 fn run_key_memory_check(json_output: bool) -> ExitCode {
     // D244 requires fully protected pages even for a non-root gate runner.
     if infraternal_shim::openssl_secure::initialize() == 1 {
-        output::report(
+        output::done(
             json_output,
             "internal.key-memory-check",
             "ready",
             "Key memory initialization=1; locked pages and dump exclusion enabled",
-            "Run this check under an 8 MiB memlock limit.",
-        );
-        ExitCode::SUCCESS
+            "",
+        )
     } else {
         output::refuse(
             json_output,
             "internal.key-memory-check",
             "Key memory refused",
-            "Check the compiled provider and memlock limit.",
-            1,
+            "Raise the memlock limit to at least 8 MiB and run the check again.",
+            Exit::Failed,
         )
     }
 }
 
-fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {
-    let server_active = systemd_server_state();
-    let role = match server_active {
-        Some(true) => "server",
-        Some(false) => "node",
-        None => "unknown",
+/// What this machine runs, as the shared result; the second value is how many installed services are confirmed not running (unknown ones are not counted).
+fn status_result(
+    registry: &ActionRegistry,
+    command: &str,
+) -> (CommandResult<serde_json::Value>, usize) {
+    use infraternal_status::Activity;
+    let ids: Vec<String> = registry
+        .plugins()
+        .filter(|plugin| plugin.id != "cli")
+        .map(|plugin| plugin.id.clone())
+        .collect();
+    let node = infraternal_status::probe(
+        &infraternal_status::Roots::detect(),
+        &ids,
+        &infraternal_status::manager_activity,
+    );
+    let (activity, message, next) = node.headline();
+    let state = match activity {
+        Activity::Active => CommandState::Running,
+        Activity::Inactive => CommandState::Stopped,
+        Activity::Failed => CommandState::Failed,
+        Activity::Unknown => CommandState::Unknown,
     };
-    let mut components = Vec::new();
-    for plugin in registry.plugins().filter(|plugin| plugin.id != "cli") {
-        let state = match (plugin.id.as_str(), server_active) {
-            ("server", Some(true)) => "Running",
-            ("server", Some(false)) => "Stopped",
-            ("server", None) => "Unknown",
-            _ => "Not available yet",
-        };
-        components.push(json!({"name": plugin.id, "state": state}));
-    }
-
-    let (state, message, next_step) = match server_active {
-        Some(true) => (
-            CommandState::Running,
-            "An infraternal server service is running on this node.",
-            "No action is needed while the server service is running.",
-        ),
-        Some(false) => (
-            CommandState::Stopped,
-            "No infraternal server service is running on this node.",
-            "Run `infraternal server init` to create a server on this node.",
-        ),
-        None => (
-            CommandState::Unknown,
-            "The infraternal server service state could not be read.",
-            "Check the user and system service managers for the infraternal server unit.",
-        ),
+    // A component without a runtime yet is not something this machine has.
+    let components: Vec<_> = node
+        .components
+        .iter()
+        .filter(|c| c.state != "Not available yet")
+        .map(|c| json!({"name": c.name, "state": c.state, "state_detail": c.detail}))
+        .collect();
+    // People get the components table; the role id is a scripting detail.
+    let options = cli::output::RenderOptions::detect(io::stdout().is_terminal());
+    let rows: Vec<Vec<String>> = node
+        .components
+        .iter()
+        .filter(|c| c.state != "Not available yet")
+        .map(|c| vec![c.name.clone(), c.state.clone(), c.detail.clone()])
+        .collect();
+    let tint = |column: usize, text: &str| {
+        (options.color && column == 1)
+            .then(|| cli::output::state_tint(text))
+            .flatten()
     };
-    let result = CommandResult::new(
-        "status",
+    let mut result = CommandResult::new(
+        command,
         state,
         message,
-        json!({"role": role, "components": components}),
+        json!({"role": node.role.id(), "components": components}),
     )
-    .with_next_step(next_step);
-    print_result(&result, json_output, false);
-    ExitCode::SUCCESS
+    .with_body(infraternal_plugin_api::present::table(
+        &["Component", "State", "Detail"],
+        &rows,
+        0,
+        options.usable_width(),
+        Some(&tint),
+    ));
+    for step in next {
+        result = result.with_next_step(step);
+    }
+    (result, node.confirmed_down().len())
+}
+
+fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {
+    let (result, down) = status_result(registry, "status");
+    finish_status(result, down, json_output)
+}
+
+/// `status` exits 5 when something that should run is down, so `infraternal status || alert`
+/// works in a script (D303). The report itself is information, so it stays on standard output.
+fn finish_status(
+    result: CommandResult<serde_json::Value>,
+    down: usize,
+    json_output: bool,
+) -> ExitCode {
+    if down == 0 {
+        return emit(result, json_output, Exit::Ok);
+    }
+    cli::output::emit_to(
+        result.with_error_code("component_down"),
+        json_output,
+        Exit::Unreachable,
+        false,
+    )
+}
+
+/// Bare `infraternal`: the status overview, or how to join when this machine is not set up (D299).
+fn run_overview(registry: &ActionRegistry, json_output: bool) -> ExitCode {
+    let (result, down) = status_result(registry, "infraternal");
+    finish_status(
+        result.with_next_step("infraternal --help"),
+        down,
+        json_output,
+    )
+}
+
+/// "1 command", "4 commands".
+fn count_commands(count: usize) -> String {
+    format!("{count} command{}", if count == 1 { "" } else { "s" })
+}
+
+/// A group typed alone (`infraternal mesh`) lists what it can do.
+fn run_group(registry: &ActionRegistry, path: &[&str], json_output: bool) -> Option<ExitCode> {
+    let commands: Vec<_> = cli::skills::commands(registry)
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .command
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .starts_with(path)
+        })
+        .collect();
+    if commands.is_empty() {
+        return None;
+    }
+    let rows: Vec<Vec<String>> = commands
+        .iter()
+        .map(|entry| vec![entry.command.clone(), entry.description.clone()])
+        .collect();
+    let body = infraternal_plugin_api::present::table(
+        &["Command", "What it does"],
+        &rows,
+        0,
+        cli::output::RenderOptions::detect(false).usable_width(),
+        None,
+    );
+    let name = path.join(" ");
+    Some(emit(
+        CommandResult::new(
+            name.clone(),
+            CommandState::Ready,
+            format!("infraternal {name} has {}.", count_commands(commands.len())),
+            json!({"commands": commands}),
+        )
+        .with_body(body)
+        .with_next_step(format!("infraternal {name} <command> --help")),
+        json_output,
+        Exit::Ok,
+    ))
 }
 
 fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool) -> ExitCode {
@@ -421,11 +525,12 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
         .collect::<Vec<_>>();
     let write_directory = matches.get_one::<String>("write");
     if write_directory.is_some() && !command.is_empty() {
-        return report_failure(
+        return report_failure_as(
             "skill",
             "Choose a command path or a destination directory.",
             "--write cannot be combined with a command path".to_owned(),
             json_output,
+            Exit::Usage,
         );
     }
 
@@ -437,8 +542,7 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
                     CommandState::Ready,
                     format!("Wrote {} command skill files.", files.len()),
                     json!({"commands": [], "skill": "", "files": files}),
-                )
-                .with_next_step("Open a generated Markdown file to review its command contract.");
+                );
                 print_result(&result, json_output, false);
                 ExitCode::SUCCESS
             }
@@ -456,10 +560,14 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
         let result = CommandResult::new(
             "skill",
             CommandState::Ready,
-            format!("{} commands are enabled in this build.", commands.len()),
+            format!(
+                "{} {} enabled in this build.",
+                count_commands(commands.len()),
+                if commands.len() == 1 { "is" } else { "are" }
+            ),
             json!({"commands": commands, "skill": "", "files": []}),
         )
-        .with_next_step("Run `infraternal skill <command>` to print one command skill.");
+        .with_next_step("infraternal skill <command>");
         print_result(&result, json_output, false);
         return ExitCode::SUCCESS;
     }
@@ -468,22 +576,15 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
         return result;
     }
     let path = command.join(" ");
-    let Some(registered) = registry.find(&command) else {
-        return report_failure(
+    let Some(registered) = registry.find(&command).filter(|r| r.action.is_public()) else {
+        return report_failure_as(
             "skill",
             "The requested command has no generated skill in this build.",
-            format!("No visible action is registered for {path:?}."),
+            "The command path supplied to skill is not a public action.".to_owned(),
             json_output,
+            Exit::NotFound,
         );
     };
-    if !registered.action.visible {
-        return report_failure(
-            "skill",
-            "The requested command has no generated skill in this build.",
-            "internal commands are not listed as skills".to_owned(),
-            json_output,
-        );
-    }
     let markdown = match cli::skills::render_action(registered.action) {
         Ok(markdown) => markdown,
         Err(error) => {
@@ -499,7 +600,7 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
         let result = CommandResult::new(
             format!("skill {}", command.join(" ")),
             CommandState::Ready,
-            format!("Generated the skill for `infraternal {path}`."),
+            format!("Generated the skill for infraternal {path}."),
             json!({"commands": [], "skill": markdown, "files": []}),
         );
         print_result(&result, true, false);
@@ -546,88 +647,6 @@ fn run_skill_group(
     Some(ExitCode::SUCCESS)
 }
 
-fn systemd_server_state() -> Option<bool> {
-    let scopes: [&[&str]; 2] = [&["--user"], &[]];
-    let mut every_manager_responded = true;
-    for scope in scopes {
-        let output = Command::new("systemctl")
-            .args(scope)
-            .args([
-                "list-units",
-                "--type=service",
-                "--all",
-                "--no-legend",
-                "--no-pager",
-                "--plain",
-                "--full",
-            ])
-            .env("LC_ALL", "C")
-            .env("COLUMNS", "4096")
-            .env("SYSTEMD_COLORS", "0")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            every_manager_responded = false;
-            continue;
-        }
-        if server_state_from_units(&String::from_utf8_lossy(&output.stdout)) == Some(true) {
-            return Some(true);
-        }
-    }
-    every_manager_responded.then_some(false)
-}
-
-fn server_state_from_units(units: &str) -> Option<bool> {
-    let mut found = false;
-    for line in units.lines() {
-        let mut fields = line.split_whitespace();
-        let (Some(unit), Some(_load), Some(active), Some(_sub)) =
-            (fields.next(), fields.next(), fields.next(), fields.next())
-        else {
-            continue;
-        };
-        if !unit.ends_with(".service") {
-            continue;
-        }
-        let description = fields.collect::<Vec<_>>().join(" ");
-        if description.starts_with("infraternal server (") && description.ends_with(')') {
-            found = true;
-            if active == "active" {
-                return Some(true);
-            }
-        }
-    }
-    found.then_some(false)
-}
-
-#[cfg(test)]
-mod status_tests {
-    //! Verifies status recognizes server services independently of their chosen unit name.
-
-    use super::server_state_from_units;
-
-    #[test]
-    fn custom_named_server_service_is_reported_as_running() {
-        let units = "infraternal-edge.service loaded active running infraternal server (infraternal-edge)\n";
-        assert_eq!(server_state_from_units(units), Some(true));
-    }
-
-    #[test]
-    fn custom_named_stopped_server_service_is_reported_as_stopped() {
-        let units =
-            "infraternal-edge.service loaded inactive dead infraternal server (infraternal-edge)\n";
-        assert_eq!(server_state_from_units(units), Some(false));
-    }
-
-    #[test]
-    fn unrelated_services_do_not_appear_as_infraternal_servers() {
-        let units = "infraternal-edge.service loaded active running infraternal mesh component\n";
-        assert_eq!(server_state_from_units(units), None);
-    }
-}
-
 fn run_unavailable(action: &ActionDefinition, json_output: bool) -> ExitCode {
     let command = action.command.join(" ");
     let data = empty_action_data(action);
@@ -645,35 +664,29 @@ fn run_unavailable(action: &ActionDefinition, json_output: bool) -> ExitCode {
     let next_step = if action.hosted.is_some() {
         "Use the server UI with an authenticated session to run this plugin action."
     } else {
-        "Run `infraternal status` to review this node's current components."
+        "infraternal status"
     };
-    print_result(
-        &CommandResult::new(command, state, message, data).with_next_step(next_step),
+    emit(
+        CommandResult::new(command, state, message, data).with_next_step(next_step),
         json_output,
-        state == CommandState::Failed,
-    );
-    if state == CommandState::Unavailable {
-        ExitCode::from(2)
-    } else {
-        ExitCode::FAILURE
-    }
+        Exit::Failed,
+    )
 }
 
 #[cfg(feature = "plugin-server")]
 fn run_server(matches: &ArgMatches, json_output: bool) -> ExitCode {
     if !server_configuration_was_supplied(matches) {
-        print_result(
-            &CommandResult::new(
+        return emit(
+            CommandResult::new(
                 "server",
                 CommandState::Unavailable,
                 "The server is not configured yet.",
                 json!({"listen": "127.0.0.1:7443", "public_origin": "https://localhost:7443"}),
             )
-            .with_next_step("Run `infraternal server init` to configure a server."),
+            .with_next_step("infraternal server init"),
             json_output,
-            false,
+            Exit::Usage,
         );
-        return ExitCode::from(2);
     }
     let args = match server_args(matches) {
         Ok(args) => args,
@@ -866,11 +879,8 @@ fn run_server_install_compat(_matches: &ArgMatches, json_output: bool) -> ExitCo
         "The legacy server install path is disabled and did not create a service.",
         json!({"service": "", "enabled": false, "dry_run": false}),
     )
-    .with_next_step(
-        "Run `infraternal server init --dry-run` to review setup, then use `infraternal server init --yes` to create the service.",
-    );
-    print_result(&result, json_output, false);
-    ExitCode::from(2)
+    .with_next_step("infraternal server init --dry-run");
+    emit(result, json_output, Exit::Usage)
 }
 
 #[cfg(feature = "plugin-server")]
@@ -890,7 +900,7 @@ fn install_server(
             if install_args.dry_run {
                 data["plan"] = json!(plan);
             }
-            let result = CommandResult::new(
+            let mut result = CommandResult::new(
                 command,
                 CommandState::Ready,
                 if install_args.dry_run {
@@ -901,10 +911,15 @@ fn install_server(
                 data,
             )
             .with_next_step(if install_args.dry_run {
-                "Review the plan, then run `infraternal server init --yes` to apply it."
+                "infraternal server init --yes"
             } else {
-                "Run `infraternal status` to review the server service."
+                "infraternal status"
             });
+            if install_args.dry_run {
+                // The unit file is data for a person to read and copy: the generic renderer
+                // would reflow its lines into prose and break it.
+                result = result.with_body(plan);
+            }
             print_result(&result, json_output, false);
             ExitCode::SUCCESS
         }
@@ -949,7 +964,7 @@ fn run_setup_token(matches: &ArgMatches, json_output: bool) -> ExitCode {
             );
             if json_output {
                 // Both private-pipe readers remain valid; the capability never enters logs or argv.
-                write_command_output(
+                write_output(
                     render_json(&SetupTokenOutput {
                         result: &result,
                         token: &token,
@@ -1051,7 +1066,7 @@ fn run_server_foreground(
                     action_id,
                     &error.to_string(),
                     "Check configuration and retained public server trust.",
-                    1,
+                    Exit::Failed,
                 );
             }
             #[cfg(not(feature = "remote"))]
@@ -1067,23 +1082,30 @@ fn run_server_foreground(
 }
 
 #[cfg(feature = "plugin-agent")]
-fn run_embedded_agent(matches: &ArgMatches, json_output: bool) -> ExitCode {
+fn run_embedded_agent(
+    registry: &ActionRegistry,
+    matches: &ArgMatches,
+    json_output: bool,
+) -> ExitCode {
     let Some(fd) = matches
         .get_one::<i64>("fd")
         .and_then(|fd| i32::try_from(*fd).ok())
     else {
-        print_result(
-            &CommandResult::new(
+        // Typed by a person (the server passes a descriptor), `agent` is a group like the others.
+        if let Some(listed) = run_group(registry, &["agent"], json_output) {
+            return listed;
+        }
+        return emit(
+            CommandResult::new(
                 "agent",
                 CommandState::Unavailable,
                 "The infraternal agent needs a server connection to start.",
                 json!({}),
             )
-            .with_next_step("Use `infraternal agent up` when component setup is available."),
+            .with_next_step("infraternal agent join --help"),
             json_output,
-            false,
+            Exit::Usage,
         );
-        return ExitCode::from(2);
     };
     let state = matches.get_one::<String>("state").map(PathBuf::from);
     match infraternal_agent::run_embedded(fd, state) {
@@ -1147,8 +1169,19 @@ where
 }
 
 fn report_failure(command: &str, message: &str, details: String, json_output: bool) -> ExitCode {
-    print_result(
-        &CommandResult::new(
+    report_failure_as(command, message, details, json_output, Exit::Failed)
+}
+
+/// Like [`report_failure`], for a failure that D303 gives its own exit code (not found, usage).
+fn report_failure_as(
+    command: &str,
+    message: &str,
+    details: String,
+    json_output: bool,
+    exit: Exit,
+) -> ExitCode {
+    emit(
+        CommandResult::new(
             command,
             CommandState::Failed,
             message,
@@ -1156,9 +1189,8 @@ fn report_failure(command: &str, message: &str, details: String, json_output: bo
         )
         .with_details(details),
         json_output,
-        true,
-    );
-    ExitCode::FAILURE
+        exit,
+    )
 }
 
 /// Keep failed JSON results typed by the action's declared `data` schema.
@@ -1219,8 +1251,9 @@ mod failure_data_tests {
 
     #[test]
     fn unavailable_results_keep_registered_data_shapes() {
+        #[cfg(feature = "placeholders")]
         assert_eq!(failure_data("up"), json!({"started": []}));
-        #[cfg(feature = "plugin-server")]
+        #[cfg(all(feature = "plugin-server", feature = "placeholders"))]
         assert_eq!(failure_data("server features"), json!({"features": []}));
     }
 
@@ -1240,37 +1273,7 @@ mod failure_data_tests {
 }
 
 fn print_result<T: Serialize>(result: &CommandResult<T>, json_output: bool, to_stderr: bool) {
-    let to_stderr = to_stderr && !json_output;
-    let terminal = if to_stderr {
-        io::stderr().is_terminal()
-    } else {
-        io::stdout().is_terminal()
-    };
-    let output = if json_output {
-        render_json(result)
-    } else {
-        render_pretty(result, RenderOptions::detect(terminal))
-    };
-    write_command_output(output, to_stderr);
-}
-
-/// Shares formatting-error and destination handling for standard and compatibility output.
-fn write_command_output(output: Result<String, serde_json::Error>, to_stderr: bool) {
-    let rendered = match output {
-        Ok(output) => output,
-        Err(error) => {
-            eprintln!("Could not format command output.\nTechnical detail: {error}");
-            return;
-        }
-    };
-    let write_result = if to_stderr {
-        io::stderr().write_all(rendered.as_bytes())
-    } else {
-        io::stdout().write_all(rendered.as_bytes())
-    };
-    if let Err(error) = write_result {
-        eprintln!("Could not write command output.\nTechnical detail: {error}");
-    }
+    cli::output::print(result, json_output, to_stderr && !json_output);
 }
 
 #[cfg(all(unix, feature = "plugin-server"))]
@@ -1436,7 +1439,7 @@ fn harden_startup() -> Result<(), nix::errno::Errno> {
 #[cfg(feature = "remote")]
 fn run_remote_agent(
     action: AgentAction,
-    fd: Option<i32>,
+    has_fd: bool,
     state: Option<PathBuf>,
     data: Option<PathBuf>,
     json: bool,
@@ -1452,30 +1455,31 @@ fn run_remote_agent(
         AgentAction::Join { .. } => infraternal_plugin_remote::JOIN.id,
         AgentAction::Run => infraternal_plugin_remote::RUN.id,
     };
-    if fd.is_some() {
+    // Remote actions use the enrolled identity; only the hidden parent action consumes this fd.
+    if has_fd {
         return output::refuse(
             json,
             operation,
-            "Incompatible infraternal agent modes",
-            "Choose one infraternal agent mode.",
-            2,
+            "These infraternal agent options cannot be used together.",
+            "infraternal agent --help",
+            Exit::Usage,
         );
     }
     let Ok(data) = data.map_or_else(remote::default_data, Ok) else {
         return output::refuse(
             json,
             operation,
-            "Infraternal agent data directory unavailable",
-            "Set a private identity directory with --data.",
-            1,
+            "The infraternal agent has no private directory for its identity.",
+            "Pass --data with a directory only this account can read.",
+            Exit::Failed,
         );
     };
     output::report(
         json,
         operation,
         "starting",
-        "Preparing the enrolled host connection",
-        "Keep invitation material on private stdin; retain private identity locally.",
+        "Preparing the connection to the server.",
+        "",
     );
     let result = (|| -> std::io::Result<()> {
         use std::io::Read;
@@ -1498,41 +1502,47 @@ fn run_remote_agent(
                 json,
                 operation,
                 "enrolled",
-                "Private host identity retained",
-                "Keep this process running to maintain the connection.",
+                "This machine is enrolled. Connecting now; keep this running.",
+                "",
             );
         }
         remote_service::run(runtime, remote::run(&data, state))
     })();
     if result.is_ok() {
         if enroll_only {
-            output::report(
+            output::done(
                 json,
                 operation,
                 "enrolled",
-                "Private host identity retained",
-                "Start the service with infraternal agent run using this identity directory.",
-            );
+                "This machine is enrolled. Its identity is saved here.",
+                "infraternal agent run",
+            )
         } else {
-            output::report(
+            output::done(
                 json,
                 operation,
                 "stopped",
-                "Remote infraternal agent stopped",
-                "Reconnect with the retained enrolled identity when needed.",
-            );
+                "The infraternal agent stopped.",
+                "infraternal agent run",
+            )
         }
-        ExitCode::SUCCESS
     } else {
         output::refuse(
             json,
             operation,
             result.as_ref().err().map_or(
-                "Remote infraternal agent operation failed",
+                "The infraternal agent could not finish.",
                 remote::public_error,
             ),
-            "Check the enrolled identity and existing server trust.",
-            1,
+            "Check the server address and that this machine is still enrolled, then run the command again.",
+            result
+                .as_ref()
+                .err()
+                .map_or(Exit::Failed, |error| match remote::Failure::of(error) {
+                    Some(remote::Failure::Tls) => Exit::NotAllowed,
+                    Some(remote::Failure::Dns(_) | remote::Failure::Connect) => Exit::Unreachable,
+                    Some(remote::Failure::Refused) | None => Exit::Failed,
+                }),
         )
     }
 }
@@ -1553,11 +1563,7 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
     #[cfg(feature = "remote")]
     {
         if action.cli_handler == CliHandler::RemoteAgent {
-            let fd = matches
-                .try_get_one::<i64>("fd")
-                .ok()
-                .flatten()
-                .and_then(|fd| i32::try_from(*fd).ok());
+            let has_fd = matches.try_contains_id("fd").is_ok_and(|present| present);
             let state = matches
                 .try_get_one::<String>("state")
                 .ok()
@@ -1579,7 +1585,7 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
             } else {
                 AgentAction::Run
             };
-            return run_remote_agent(mode, fd, state, data, json);
+            return run_remote_agent(mode, has_fd, state, data, json);
         }
         #[cfg(feature = "plugin-server")]
         if action.cli_handler == CliHandler::ServerRestart {
@@ -1604,11 +1610,12 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
                 .get_one::<String>("host")
                 .and_then(|host| host.parse().ok());
             let Some(host) = host else {
-                return report_failure(
+                return report_failure_as(
                     "remove-host",
                     "Invalid host identifier.",
                     "expected a host UUID".to_owned(),
                     json,
+                    Exit::Usage,
                 );
             };
             return host_remove::run(
