@@ -630,7 +630,9 @@ fn ssh_askpass_action() -> ActionDefinition {
 #[cfg(all(test, feature = "release"))]
 mod release_tests {
     //! Preserves release operator paths and hosted discovery through lazy server metadata.
-    use super::{registry, registry_for};
+    #[cfg(feature = "placeholders")]
+    use super::registry;
+    use super::registry_for;
     use infraternal_plugin_api::CliHandler;
 
     #[test]

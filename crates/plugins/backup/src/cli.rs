@@ -87,7 +87,7 @@ mod tests {
         assert_eq!(plugin.id, "backup");
         if !infraternal_plugin_api::PLACEHOLDERS {
             // Default builds leave the declarations out; the feature build checks them.
-            assert!(plugin.actions.is_empty());
+            assert_eq!(plugin.actions.len(), 0);
             return;
         }
         assert_eq!(plugin.actions.len(), 3);

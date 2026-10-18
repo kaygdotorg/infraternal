@@ -137,7 +137,16 @@ mod tests {
         assert_eq!(plugin.actions.len(), 1 + unbuilt + remote);
         assert_eq!(plugin.actions[0].command, ["agent"]);
         assert!(!plugin.actions[0].visible);
-        for action in plugin.actions.iter().skip(1).take(3) {
+        for action in plugin
+            .actions
+            .iter()
+            .skip(1)
+            .take(if infraternal_plugin_api::PLACEHOLDERS {
+                3
+            } else {
+                0
+            })
+        {
             assert_eq!(action.command[0], "agent");
             assert!(
                 action
