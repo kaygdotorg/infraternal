@@ -267,7 +267,12 @@ else:
         let native_pid = Pid::from_raw(line.trim().parse().unwrap());
         let component = DesktopComponent::new(PathBuf::new(), PathBuf::new());
         *component.child.lock().unwrap() = Some(helper);
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        // This fixture drives one component; do not require a multi-thread runtime
+        // feature in the production dependency just to run its shutdown test.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let result = runtime.block_on(component.set_enabled(false));
         let native_still_present = std::fs::read_to_string(format!("/proc/{native_pid}/stat"))
             .is_ok_and(|stat| {
