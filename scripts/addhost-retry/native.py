@@ -31,6 +31,7 @@ def main():
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--timeout-retry', action='store_true')
     parser.add_argument('--retry', action='store_true', help='inject an immediate published setup failure, then measure Retry (#230)')
+    parser.add_argument('--route-wait-max-ms', type=int, help='optional route-wait assertion, separate from Retry duration')
     parser.add_argument('--mode', choices=['rootless', 'root'], default='rootless')
     parser.add_argument('--session-binary', type=Path, help='early session image; selects the published (instant) path')
     parser.add_argument('--stale-helper', type=Path, help='older binary swapped into the executable cache once the agent runs')
@@ -148,7 +149,6 @@ PidFile {root}/sshd.pid
             if args.session_binary:
                 environment['ADDHOST_RETRY_PHASE_TIMING'] = '1'
                 environment['ADDHOST_RETRY_LOCK_TIMING'] = '1'
-                environment['BREAKIT2_ROUTE_WAIT_MAX_MS'] = '1500'
                 environment['BREAKIT2_RETRY_MAX_MS'] = '2000'
         if args.session_binary:
             environment['ADDHOST_INSTANT'] = '1'
@@ -158,7 +158,11 @@ PidFile {root}/sshd.pid
             environment['BREAKIT2_RETRY_MAX_MS'] = '2000'
             environment['ADDHOST_RETRY_PHASE_TIMING'] = '1'
             environment['ADDHOST_RETRY_LOCK_TIMING'] = '1'
-            environment['BREAKIT2_ROUTE_WAIT_MAX_MS'] = '1500'
+        # A silent first attempt retains its link-scaled startup allowance.
+        # Retry's LAN budget remains separate from that deliberately blocked wait.
+        if args.route_wait_max_ms is not None:
+            assert args.route_wait_max_ms > 0
+            environment['BREAKIT2_ROUTE_WAIT_MAX_MS'] = str(args.route_wait_max_ms)
         if args.session_binary and (args.retry or args.timeout_retry):
             lock_trace_path = root / 'retry-lock-trace' if root_mode else Path(f'/run/user/{uid}/retry-lock-trace')
             lock_trace_path.touch(mode=0o600, exist_ok=False)
