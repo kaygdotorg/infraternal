@@ -16,7 +16,7 @@ SPEC.loader.exec_module(MEASURE)
 class JoinDeadlineReview(unittest.TestCase):
     """Require healthy delayed hosts to finish without a second manual Retry."""
 
-    def run_case(self, *, retry=False, rtt=0, startup=0, instant=True):
+    def run_case(self, *, retry=False, rtt=0, startup=0, instant=True, tcp_only=False):
         self.assertEqual(os.uname().nodename, "infraternal-perf-test")
         fixture = Path(os.environ["REVIEW_JOIN_ARTIFACTS"])
         target = "review-retry-join-time"
@@ -27,6 +27,12 @@ class JoinDeadlineReview(unittest.TestCase):
             if "netem" in args and args[-1] == "75ms":
                 args = (*args[:-1], f"{rtt // 2}ms")
             result = original(*args, **kwargs)
+            if args[:4] == ("exec", target, "systemctl", "mask") and tcp_only:
+                MEASURE.stage_packet_filter()
+                # Refuse only the daemon's fixture UDP port in this target;
+                # enrollment HTTPS and the real TCP fallback remain reachable.
+                original("exec", "-i", target, "/usr/sbin/nft", "-f", "-",
+                         input=b"table inet review_join { chain output { type filter hook output priority 0; policy accept; udp dport 4930 counter drop; } ; }\n")
             if args[:4] == ("exec", target, "systemctl", "mask") and startup:
                 original("exec", target, "sh", "-c",
                          "mkdir -p /home/target/.config/systemd/user/infraternal-agent.service.d; "
@@ -51,7 +57,7 @@ class JoinDeadlineReview(unittest.TestCase):
                            ADDHOST_RETRY_PHASE_TIMING="1", INFRATERNAL_TEST_RTT="0")
         if instant:
             environment["ADDHOST_INSTANT"] = "1"
-        print(f"REVIEW rtt_ms={rtt} startup_seconds={startup} retry={retry} instant={instant}", flush=True)
+        print(f"REVIEW rtt_ms={rtt} startup_seconds={startup} retry={retry} instant={instant} tcp_only={tcp_only}", flush=True)
         try:
             with mock.patch.object(MEASURE, "DOCKER", ["docker"]), \
                  mock.patch.object(MEASURE, "TARGET", "addhost-breakit2-target"), \
@@ -91,6 +97,15 @@ class JoinDeadlineReview(unittest.TestCase):
 
     def test_full_image_slow_service_start(self):
         self.run_case(startup=2, instant=False)
+
+    def test_tcp_fallback_zero_rtt(self):
+        self.run_case(tcp_only=True)
+
+    def test_clean_tcp_fallback_600_ms_rtt(self):
+        self.run_case(rtt=600, tcp_only=True)
+
+    def test_retry_tcp_fallback_600_ms_rtt(self):
+        self.run_case(retry=True, rtt=600, tcp_only=True)
 
 
 if __name__ == "__main__":
