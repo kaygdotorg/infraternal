@@ -182,7 +182,7 @@ fn build_node(node: &CommandNode<'_>, inherited: &[Arg]) -> Command {
                 argument = argument
                     .global(true)
                     .help_heading(format!("{heading} options"));
-                shared.push(argument.clone());
+                shared.push(hidden_inherited_arg(&argument));
             }
             command = command.arg(argument);
         }
@@ -211,19 +211,34 @@ fn build_node(node: &CommandNode<'_>, inherited: &[Arg]) -> Command {
             .get_arguments()
             .any(|own| own.get_id() == arg.get_id())
         {
-            command = command.arg(arg.clone().hide(true));
+            command = command.arg(hidden_inherited_arg(arg));
         }
     }
     let mut passed: Vec<Arg> = inherited
         .iter()
         .filter(|arg| !shared.iter().any(|own| own.get_id() == arg.get_id()))
-        .cloned()
+        .map(hidden_inherited_arg)
         .collect();
     passed.extend(shared);
     for child in &node.children {
         command = command.subcommand(build_node(child, &passed));
     }
     command
+}
+
+/// Descendants only need to consume an inherited switch and its value; repeating the full argument
+/// metadata at each tree level needlessly retains its clone and validation machinery in the binary.
+fn hidden_inherited_arg(argument: &Arg) -> Arg {
+    let mut hidden = Arg::new(argument.get_id().clone())
+        .action(argument.get_action().clone())
+        .hide(true);
+    if let Some(long) = argument.get_long() {
+        hidden = hidden.long(long.to_owned());
+    }
+    if let Some(short) = argument.get_short() {
+        hidden = hidden.short(short);
+    }
+    hidden
 }
 
 fn long_about(action: &ActionDefinition) -> String {
