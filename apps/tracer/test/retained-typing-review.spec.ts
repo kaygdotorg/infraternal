@@ -42,7 +42,7 @@ async function pendingTyping(page: Page): Promise<string[]> {
   await expect.poll(() => resumeSeen).toBe(true);
   await page.keyboard.type("synthetic-offline");
   refusal!.send(Buffer.from(encodeMuxedFrame(0, { type: "Close", code: 1008, reason: "the server refused to resume the connection" })));
-  await expect(card.getByRole("button", { name: "Resend typing" })).toBeVisible();
+  await expect(card.getByRole("button", { name: "Send again" })).toBeVisible();
   await expect(card).toHaveAttribute("data-status", "live");
   expect(delivered).toHaveLength(0);
   return delivered;
@@ -53,7 +53,7 @@ test("review: saved typing offers a non-resend exit in the live terminal window"
   const notice = page.locator('.cl[data-view="console"] .ui-window .ui-toast');
   await expect(notice.getByRole("status")).toHaveAttribute("aria-live", "polite");
   await expect(notice.getByRole("group", { name: /Saved typing actions/ })).toHaveAttribute("aria-label", /Ctrl\+Shift\+Space/);
-  await expect(notice.getByRole("button", { name: "Resend typing" })).toBeVisible();
+  await expect(notice.getByRole("button", { name: "Send again" })).toBeVisible();
   await expect(notice.getByRole("button", { name: "Discard" })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("retained-typing-actions.png") });
 });
@@ -62,7 +62,7 @@ test("review: terminal keys stay with the shell and the shortcut reaches saved t
   const delivered = await pendingTyping(page);
   const card = page.locator('.cl[data-view="console"] .ui-window').first();
   const input = card.locator(".terminal-host textarea");
-  const resend = card.getByRole("button", { name: "Resend typing" });
+  const resend = card.getByRole("button", { name: "Send again" });
   const discard = card.getByRole("button", { name: "Discard" });
   await input.focus();
   await page.keyboard.press("Tab");
@@ -82,9 +82,9 @@ test("review: terminal keys stay with the shell and the shortcut reaches saved t
 });
 
 
-test("review: a focused Resend typing button accepts Enter", async ({ page }) => {
+test("review: a focused Send again button accepts Enter", async ({ page }) => {
   const delivered = await pendingTyping(page);
-  const resend = page.getByRole("button", { name: "Resend typing" });
+  const resend = page.getByRole("button", { name: "Send again" });
   await resend.focus();
   await page.keyboard.press("Enter");
   await expect.poll(() => delivered.join("")).toBe("synthetic-offline");
@@ -99,7 +99,7 @@ test("review: typing in the fresh shell does not grow or dismiss the saved typin
   await input.focus();
   await page.keyboard.type("fresh-shell");
   await expect.poll(() => delivered.join("")).toBe("fresh-shell");
-  await expect(notice.getByRole("button", { name: "Resend typing" })).toBeVisible();
+  await expect(notice.getByRole("button", { name: "Send again" })).toBeVisible();
   await expect(notice.getByRole("button", { name: "Discard" })).toBeVisible();
 
   await notice.getByRole("button", { name: "Discard" }).click();

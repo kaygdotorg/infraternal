@@ -1,5 +1,6 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
+import { ICONS } from "../../../packages/ui/src/icons";
 import { bindingLabel } from "../../../packages/ui/src/shortcuts";
 import { terminalRefusal } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
@@ -1350,11 +1351,13 @@ export class TerminalClient {
     this.inputResendNotice ??= mountToast(this.config.host.parentElement ?? this.config.host, { placement: "parent" });
     const focusShortcut = bindingLabel("focus-resend-actions") || "Ctrl+Shift+Space";
     this.inputResendNotice.show({
-      message: "Some saved typing may already have reached the shell.",
-      tone: "error",
+      // Retained bytes were sent but never acknowledged (or never sent), so the page cannot know whether the old shell
+      // saw them: say "may not have arrived", and name the duplicate risk by calling the action "Send again".
+      message: "New shell. Offline typing may not have arrived.",
+      icon: ICONS.terminal,
       duration: 0,
       actionGroupLabel: `Saved typing actions. Press ${focusShortcut} to focus these actions.`,
-      action: { label: "Resend typing", onSelect: () => this.resendRetainedInput() },
+      action: { label: "Send again", onSelect: () => this.resendRetainedInput() },
       secondaryAction: { label: "Discard", onSelect: () => this.discardRetainedInput() },
     });
     this.inputResendNoticeVisible = true;

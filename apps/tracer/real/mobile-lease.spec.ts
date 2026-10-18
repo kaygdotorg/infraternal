@@ -73,7 +73,7 @@ test("hidden mobile page keeps its terminal and a refused resume attaches afresh
     await expect.poll(() => recovered().filter(bridge => bridge.helloResume === false).length, { timeout: 30_000 }).toBe(1);
     await expect(terminal).toHaveAttribute("data-status", "live", { timeout: 30_000 });
     console.log("MOBILE_UI fresh attach ready");
-    const resend = page.getByRole("button", { name: "Resend typing", exact: true });
+    const resend = page.getByRole("button", { name: "Send again", exact: true });
     await expect(resend).toBeVisible();
     await expect(page.getByText("Your waiting typing is saved.", { exact: false })).toBeVisible();
     const retainedOutput = () => server.bridges.flatMap(bridge => [...bridge.output.values()]).join("");

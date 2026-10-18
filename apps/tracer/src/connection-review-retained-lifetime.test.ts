@@ -85,7 +85,7 @@ test("review: new typing reaches the fresh shell while saved typing stays pendin
   expect(f.client.retainedInput).toEqual(saved);
   expect(f.sent).toHaveLength(1);
   expect(f.sent[0]?.type === "Input" ? new TextDecoder().decode(f.sent[0].bytes) : "").toBe("fresh\n");
-  expect(f.notice().action?.label).toBe("Resend typing");
+  expect(f.notice().action?.label).toBe("Send again");
 
   f.notice().secondaryAction?.onSelect();
   expect(f.client.retainedInput).toBeUndefined();
