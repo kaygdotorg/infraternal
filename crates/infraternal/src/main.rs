@@ -450,11 +450,12 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
         .collect::<Vec<_>>();
     let write_directory = matches.get_one::<String>("write");
     if write_directory.is_some() && !command.is_empty() {
-        return report_failure(
+        return report_failure_as(
             "skill",
             "Choose a command path or a destination directory.",
             "--write cannot be combined with a command path".to_owned(),
             json_output,
+            Exit::Usage,
         );
     }
 
@@ -497,19 +498,21 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
     }
     let path = command.join(" ");
     let Some(registered) = registry.find(&command) else {
-        return report_failure(
+        return report_failure_as(
             "skill",
             "The requested command has no generated skill in this build.",
             format!("No visible action is registered for {path:?}."),
             json_output,
+            Exit::NotFound,
         );
     };
     if !registered.action.is_public() {
-        return report_failure(
+        return report_failure_as(
             "skill",
             "The requested command has no generated skill in this build.",
             "internal and unbuilt commands are not listed as skills".to_owned(),
             json_output,
+            Exit::NotFound,
         );
     }
     let markdown = match cli::skills::render_action(registered.action) {
@@ -1066,6 +1069,17 @@ where
 }
 
 fn report_failure(command: &str, message: &str, details: String, json_output: bool) -> ExitCode {
+    report_failure_as(command, message, details, json_output, Exit::Failed)
+}
+
+/// Like [`report_failure`], for a failure that D303 gives its own exit code (not found, usage).
+fn report_failure_as(
+    command: &str,
+    message: &str,
+    details: String,
+    json_output: bool,
+    exit: Exit,
+) -> ExitCode {
     emit(
         CommandResult::new(
             command,
@@ -1075,7 +1089,7 @@ fn report_failure(command: &str, message: &str, details: String, json_output: bo
         )
         .with_details(details),
         json_output,
-        Exit::Failed,
+        exit,
     )
 }
 
