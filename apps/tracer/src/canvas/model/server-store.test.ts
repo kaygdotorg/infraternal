@@ -1,6 +1,7 @@
 /** Subscription, migration and durable retry ordering regressions for the product canvas (#243). */
 import { beforeEach, expect, test } from "bun:test";
 import { ServerCanvasStore, type LayoutTransport } from "./server-store";
+import { ActionRefused } from "../../connection";
 import { reduce, type Intent } from "./operations";
 import type { CanvasDocument } from "./document";
 import { canvasKey, clearAccountStorage } from "../../account-storage";
@@ -8,8 +9,8 @@ const document = (): CanvasDocument => ({ format: "infraternal.canvas", version:
 class Transport implements LayoutTransport {
   event: (e: Record<string, unknown>) => void = () => {};
   open: () => void = () => {};
-  calls: Array<{ action: string; input: Record<string, unknown>; resolve: (r: Record<string, unknown>) => void; reject: () => void }> = [];
-  call(action: string, input: Record<string, unknown>): Promise<Record<string, unknown>> { return new Promise((resolve, reject) => this.calls.push({ action, input: structuredClone(input), resolve, reject: () => reject(Error("disconnected")) })); }
+  calls: Array<{ action: string; input: Record<string, unknown>; resolve: (r: Record<string, unknown>) => void; reject: (error?: Error) => void }> = [];
+  call(action: string, input: Record<string, unknown>): Promise<Record<string, unknown>> { return new Promise((resolve, reject) => this.calls.push({ action, input: structuredClone(input), resolve, reject: (error?: Error) => reject(error ?? Error("disconnected")) })); }
   subscribe(_filter: { topic: string }, event: (e: Record<string, unknown>) => void, open?: () => void): () => void { this.event = event; this.open = open ?? (() => {}); this.open(); return () => { this.event = () => {}; }; }
   snapshot(doc = document(), initialized = true): void { this.event({ type: "canvas.layout.snapshot", document: doc, revision: doc.revision, initialized }); }
 }
@@ -148,4 +149,16 @@ test("an interrupted first load does not turn a revision-zero cache into an inte
   empty.revision = 0; transport.snapshot(empty, false);
   transport.event({ type: "canvas.layout.operation", revision: 1, op_id: "close", noop: true, intent: { type: "close", window_id: "missing" } });
   expect((await live.load())?.views).toEqual([]); live.dispose();
+});
+
+// A permanently refused intent must not suppress every subsequent independent edit.
+test("review: a refused structural edit cannot strand later valid edits", async () => {
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
+  try {
+    const next = document(); reduce(next, opened); await store.save(next);
+    const refused = transport.calls[0]!; refused.reject(new ActionRefused(undefined, "invalid")); await tick();
+    const later = store.current(); later.views[0]!.name = "Later edit";
+    await store.save(later, undefined, next); await tick();
+    expect(transport.calls.some((call) => (call.input.intent as Intent).type === "view.update")).toBe(true);
+  } finally { store.dispose(); }
 });
