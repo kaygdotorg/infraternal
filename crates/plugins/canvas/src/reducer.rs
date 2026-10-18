@@ -1,7 +1,9 @@
 //! Applies stable-ID semantic intents to the existing JSON representation; storage supplies permanent close IDs [183,243].
 use crate::model::{self, Document};
 use serde_json::{Value, json};
-use std::collections::HashSet;
+fn is_closed(closed: &[String], id: &str) -> bool {
+    closed.iter().any(|seen| seen == id)
+}
 fn s<'a>(value: &'a Value, key: &str) -> Result<&'a str, ()> {
     model::string(value, key).ok_or(())
 }
@@ -143,11 +145,7 @@ fn remove(cols: &mut [Value], id: &str) -> Option<Value> {
 /// # Errors
 /// Refuses invalid bounds, missing destinations and reuse of stable IDs.
 #[allow(clippy::result_unit_err, clippy::too_many_lines)]
-pub fn reduce<S: std::hash::BuildHasher>(
-    doc: &mut Document,
-    intent: &Value,
-    closed: &HashSet<String, S>,
-) -> Result<(), ()> {
+pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(), ()> {
     if !doc.valid() || !valid_intent(intent) {
         return Err(());
     }
@@ -188,10 +186,10 @@ pub fn reduce<S: std::hash::BuildHasher>(
         "open" | "split" => {
             let window = intent.get("window").ok_or(())?;
             let id = s(window, "id")?;
-            if closed.contains(id) || doc.windows().any(|w| model::string(w, "id") == Some(id)) {
+            if is_closed(closed, id) || doc.windows().any(|w| model::string(w, "id") == Some(id)) {
                 return Err(());
             }
-            if kind == "split" && closed.contains(s(intent, "anchor_id")?) {
+            if kind == "split" && is_closed(closed, s(intent, "anchor_id")?) {
                 return Ok(());
             }
             let cols = columns(doc, s(intent, "view_id")?)?;
@@ -231,7 +229,7 @@ pub fn reduce<S: std::hash::BuildHasher>(
         }
         "move" => {
             let id = s(intent, "window_id")?;
-            if closed.contains(id) {
+            if is_closed(closed, id) {
                 return Ok(());
             }
             let cols = columns(doc, s(intent, "view_id")?)?;
@@ -246,7 +244,7 @@ pub fn reduce<S: std::hash::BuildHasher>(
         }
         "resize" => {
             let id = s(intent, "window_id")?;
-            if closed.contains(id) {
+            if is_closed(closed, id) {
                 return Ok(());
             }
             for view in doc
@@ -290,7 +288,7 @@ pub fn reduce<S: std::hash::BuildHasher>(
         }
         "membership.add" => {
             let id = s(intent, "window_id")?;
-            if closed.contains(id) {
+            if is_closed(closed, id) {
                 return Ok(());
             }
             let window = doc
@@ -354,7 +352,7 @@ mod tests {
             let a = format!("a{sample}");
             let b = format!("b{sample}");
             let mut doc = document();
-            let closed = HashSet::new();
+            let closed = Vec::new();
             reduce(&mut doc, &open(&a), &closed).unwrap();
             reduce(&mut doc, &open(&b), &closed).unwrap();
             let resize = json!({"type":"resize","window_id":a,"height":2.0});
@@ -368,8 +366,7 @@ mod tests {
             reduce(&mut right, &resize, &closed).unwrap();
             assert_eq!(left, right);
             let close = json!({"type":"close","window_id":a});
-            let mut tombstones = HashSet::new();
-            tombstones.insert(a.clone());
+            let tombstones = vec![a.clone()];
             reduce(&mut left, &close, &closed).unwrap();
             reduce(&mut left, &resize, &tombstones).unwrap();
             reduce(&mut right, &resize, &closed).unwrap();
@@ -382,7 +379,7 @@ mod tests {
     #[test]
     fn split_divides_only_its_own_band() {
         let mut doc = document();
-        let closed = HashSet::new();
+        let closed = Vec::new();
         reduce(&mut doc, &open("a"), &closed).unwrap();
         let mut b = open("b");
         b["column_id"] = json!("a");

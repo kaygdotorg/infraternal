@@ -5,7 +5,6 @@ use infraternal_plugin_canvas::{
 };
 use serde_json::{Value, json};
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
 
@@ -161,14 +160,25 @@ impl Store {
                 return Err(Error);
             }
             let intent = request.get("intent").ok_or(Error)?;
-            let closed: HashSet<String> =
-                sqlx::query("SELECT window_id FROM canvas_closed WHERE account=?")
-                    .bind(account)
-                    .fetch_all(&mut *tx)
-                    .await?
-                    .into_iter()
-                    .map(|row| row.get(0))
-                    .collect();
+            // Each intent can inspect only its own ID and a split anchor. Probe
+            // the account index instead of loading its lifetime close history.
+            let id = intent
+                .get("window")
+                .and_then(|w| model::string(w, "id"))
+                .or_else(|| model::string(intent, "window_id"))
+                .unwrap_or("");
+            let anchor = model::string(intent, "anchor_id").unwrap_or("");
+            let closed: Vec<String> = sqlx::query(
+                "SELECT window_id FROM canvas_closed WHERE account=? AND window_id IN (?,?)",
+            )
+            .bind(account)
+            .bind(id)
+            .bind(anchor)
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .map(|row| row.get(0))
+            .collect();
             let before = document.clone();
             reduce(&mut document, intent, &closed)?;
             document.normalize();
@@ -184,11 +194,8 @@ impl Store {
             }
             if model::string(intent, "type") == Some("close") {
                 let id = model::string(intent, "window_id").ok_or(Error)?;
-                if closed.len() >= usize::try_from(MAX_RECEIPTS).map_err(|_| Error)?
-                    && !closed.contains(id)
-                {
-                    return Err(Error);
-                }
+                // At most one tombstone is added per accepted revision; the
+                // permanent receipt quota also bounds this table.
                 sqlx::query("INSERT OR IGNORE INTO canvas_closed(account,window_id) VALUES(?,?)")
                     .bind(account)
                     .bind(id)
@@ -221,7 +228,7 @@ impl Store {
     }
 }
 fn recover(document: &mut Document, mut incoming: Document) -> Result<(), Error> {
-    let mut ids = HashMap::<String, String>::new();
+    let mut ids = Vec::<(String, String)>::new();
     for mut view in incoming
         .0
         .get_mut("views")
@@ -254,10 +261,14 @@ fn recover(document: &mut Document, mut incoming: Document) -> Result<(), Error>
                     .ok_or(Error)?
                 {
                     let old = model::string(window, "id").ok_or(Error)?.to_owned();
-                    window["id"] = json!(
-                        ids.entry(old)
-                            .or_insert_with(|| uuid::Uuid::new_v4().to_string())
-                    );
+                    let id = if let Some((_, id)) = ids.iter().find(|(seen, _)| *seen == old) {
+                        id.clone()
+                    } else {
+                        let id = uuid::Uuid::new_v4().to_string();
+                        ids.push((old, id.clone()));
+                        id
+                    };
+                    window["id"] = Value::String(id);
                 }
             }
         }
@@ -357,14 +368,15 @@ async fn ownership<'a>(
     account: &str,
     windows: impl Iterator<Item = &'a Value>,
 ) -> Result<(), Error> {
-    let mut seen = HashSet::new();
+    let mut seen = Vec::new();
     for window in windows {
         let target = window.get("target").ok_or(Error)?;
         if model::string(target, "type") == Some("session") {
             let id = model::string(target, "id").ok_or(Error)?;
-            if !seen.insert(id) {
+            if seen.contains(&id) {
                 continue;
             }
+            seen.push(id);
             let uuid = uuid::Uuid::parse_str(id).map_err(|_| Error)?;
             let owned: bool = sqlx::query(
                 "SELECT EXISTS(SELECT 1 FROM terminal_sessions WHERE id=? AND user_id=?)",
