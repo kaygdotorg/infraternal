@@ -66,8 +66,9 @@ export function createLiveInventory(options: { accountId: string; host: string }
     can,
     setLayout(document) {
       shared = new Set(document.views.flatMap((v) => v.layout.type === "tiled" ? v.layout.columns.flatMap((c) => c.windows.flatMap((w) => w.target.type === "session" ? [w.target.id] : [])) : []));
+      const names = new Map(document.views.flatMap((v) => v.layout.type === "tiled" ? v.layout.columns.flatMap((c) => c.windows.flatMap((w) => w.target.type === "session" && w.target.name ? [[w.target.id, w.target.name] as const] : [])) : []));
       let changed = false;
-      for (const s of records.values()) if (!s.gone) { const state = shared.has(s.id) ? "open" : "detached"; if (s.state !== state) { s.state = state; changed = true; } }
+      for (const s of records.values()) if (!s.gone) { const state = shared.has(s.id) ? "open" : "detached"; if (s.state !== state) { s.state = state; changed = true; } const name = names.get(s.id); if (name && name !== s.name) { s.name = name; changed = true; } }
       if (changed) emit();
     },
     status: (): InventoryStatus => verifiedHosts.has(options.host) ? "ready" : "loading",
