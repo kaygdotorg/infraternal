@@ -1163,7 +1163,7 @@ export class TerminalClient {
     else this.setStatus("This session has ended. Open a new shell to continue.");
   }
 
-  /** Starts the stream's cursors over: its session is attached again from the beginning, as after a reload. */
+  /** Fresh writers start at zero; retained typing requires explicit consent before its rebased bytes can replay. */
   private restartCursors(retainInput = false): void {
     this.cursorEpoch += 1;
     this.receivedOutSeq = 0n;

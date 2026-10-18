@@ -693,8 +693,8 @@ export class MuxConnection {
   private scheduleReconnect(): void {
     if (this.closed || this.retryTimer !== 0) return;
     if (this.pageHidden()) { this.startRetryHintListeners(); return; }
-    // Only welcomed sockets that close before the stable window add to this loop.
-    // Unwelcomed route failures restart their recovery schedule in disconnect().
+    // Failed handshakes and short-lived welcomed routes share a growing counter.
+    // Offline path checks stay prompt until a refusal proves the hint stale.
     // Positive jitter spreads retries across pages; first opens retain the ordinary backoff.
     // An ordinary restart must regain typing within RTT + 50 ms [D259]. Once
     // a terminal really worked, check promptly during that bounded recovery
@@ -706,7 +706,7 @@ export class MuxConnection {
     this.startRetryHintListeners();
   }
 
-  /** Online and foreground hints reset retry state while an in-flight handshake remains the active attempt. */
+  /** Hints retry promptly without replacing an in-flight handshake or resetting refusal backoff. */
   private retryNow(): void {
     if (this.closed || this.pageHidden()) return;
     const socket = this.socket;
