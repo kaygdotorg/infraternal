@@ -490,6 +490,18 @@ control replies defer their producers until bounded FIFO capacity returns,
 preserving ordering, including the census-before-open-result fence. Actual
 transport errors and closed writers still retire their connections.
 
+A viewer with Hello caps bit 2 (`VIEWER_VISIBILITY`) may send a control-stream
+`Event` with `sub_id = 0` and at most 128 JSON bytes:
+`{"topic":"connection.visibility","hidden":true}` (or `false`). This is a
+transport notice, not a subscription or plugin action. A hidden page may be
+suspended indefinitely: pause browser probes and discard outstanding probe
+correlations, retaining the socket, terminal streams and writers. Authentication
+expiry, revocation and resource bounds still apply. When visible, restart the
+unknown-RTT lease without reusing probe IDs; old replies cannot train its RTT.
+If the transport ended during suspension, wait until visible before reconnecting.
+The notice cannot preserve a socket when the operating system closes it; use the
+ordinary resume window, then a fresh attach if that capability is refused (#244).
+
 Probe replies echo nonce and timestamp. Only a new correlated reply renews a
 route deadline; ordinary traffic, unsolicited replies and stale sockets do not.
 Startup, pending input and recent link doubt keep browser probes pipelined
