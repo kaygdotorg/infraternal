@@ -281,3 +281,31 @@ async fn encoded_document_budget_is_enforced_by_the_host_transaction() {
     assert_eq!(snapshot[0]["revision"], 0);
     assert_eq!(snapshot[0]["initialized"], false);
 }
+
+#[tokio::test]
+async fn permanent_receipts_do_not_copy_large_bootstrap_documents() {
+    let (store, pool) = fixture().await;
+    let doc = document(60);
+    for i in 0..8 {
+        init(&store, doc.clone(), &format!("large-{i}")).await;
+    }
+    let bytes: i64 =
+        sqlx::query_scalar("SELECT sum(length(request)) FROM canvas_receipts WHERE account=?")
+            .bind("a")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    println!("permanent_retry_receipts=8 request_bytes={bytes}");
+    assert!(
+        bytes <= 8 * 128,
+        "permanent retry request data grew with the import: {bytes} B"
+    );
+    let reordered = format!(
+        r#"{{"op_id":"large-0","document":{}}}"#,
+        serde_json::to_string(&doc).unwrap()
+    );
+    assert_eq!(
+        store.initialize("a", reordered.as_bytes()).await.unwrap(),
+        1
+    );
+}
