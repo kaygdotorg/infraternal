@@ -1265,7 +1265,7 @@ export class TerminalClient {
   private showInputResendNotice(): void {
     this.inputResendNotice ??= mountToast(this.config.host);
     this.inputResendNotice.show({
-      message: "Reconnected. Your waiting typing is saved. Some may already have reached the shell. Resend it?",
+      message: "Your waiting typing is saved. Some may already have reached the shell. Resend it?",
       tone: "error",
       duration: 0,
       action: { label: "Resend typing", onSelect: () => this.resendRetainedInput() },
