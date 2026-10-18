@@ -67,6 +67,12 @@ export interface TerminalHooks {
   onSessionCreated?: (sessionId: string) => void;
   onAttached?: (resumed: boolean, terminal: TerminalClient) => void;
   onDisconnected?: (forced: boolean) => void;
+  /**
+   * The host link missed a reply but is kept (`terminal.link_doubt`, D300, #234), or answered again
+   * (`terminal.link_recovered`). A product surface shows its connection indicator in the reconnecting
+   * state meanwhile; the terminal's own status text is not shown on the canvas.
+   */
+  onLinkDoubt?: (doubted: boolean) => void;
   /** Final output has painted; clean exits may close their window. */
   onExited?: (status: number) => void;
   /**
@@ -930,9 +936,11 @@ export class TerminalClient {
             // not replay. Only say so; replies to the program and typing go on.
             const shown = this.config.status.textContent ?? "";
             if (shown === "" || shown === LINK_DOUBT_STATUS) this.setStatus(LINK_DOUBT_STATUS);
+            this.config.hooks?.onLinkDoubt?.(true);
           } else if (notice.type === "terminal.link_recovered") {
             // Clears only its own indicator; it is never a replay fence.
             if (this.config.status.textContent === LINK_DOUBT_STATUS) this.setStatus("");
+            this.config.hooks?.onLinkDoubt?.(false);
           } else if (notice.type === "terminal.snapshot" && notice.approximate === true) {
             this.setStatus("Reconnected. The screen may be slightly out of date.");
           } else if (notice.type === "terminal.snapshot_unavailable") {
