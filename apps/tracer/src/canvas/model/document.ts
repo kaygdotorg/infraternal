@@ -55,8 +55,8 @@ export interface CanvasDocument {
 const MAX_VIEWS = 64, MAX_COLUMNS = 64, MAX_WINDOWS = 256, MAX_TEXT = 200, MAX_BANDS = 64;
 
 /** Turns a runtime window into its stable reference. Windows that cannot be referenced (node cards) are left out. */
-function targetOf(w: WindowModel): DocTarget | undefined {
-  if (w.kind === "terminal") return w.sessionId ? { type: "session", id: w.sessionId, host: w.host, ...(w.hostId ? { hostId: w.hostId, ...(w.user ? { user: w.user } : {}), ...(w.address ? { address: w.address } : {}) } : {}), ...(w.session ? { name: w.session } : {}) } : undefined;
+function targetOf(w: WindowModel, pending: boolean): DocTarget | undefined {
+  if (w.kind === "terminal") return w.sessionId || pending ? { type: "session", id: w.sessionId ?? w.id, host: w.host, ...(w.hostId ? { hostId: w.hostId, ...(w.user ? { user: w.user } : {}), ...(w.address ? { address: w.address } : {}) } : {}), ...(w.session ? { name: w.session } : {}) } : undefined;
   if (w.kind === "settings") return { type: "settings", section: w.id.slice(2) };
   if (w.kind === "containers" || w.kind === "logs") return { type: w.kind, host: w.host };
   return undefined;
@@ -68,11 +68,11 @@ function targetOf(w: WindowModel): DocTarget | undefined {
  * group window's band when it arranges it), so the windows are written as they stand. `row` exists only for a window in a
  * group, where the list order alone cannot place a window that spans columns.
  */
-function docColumns(cols: readonly ColumnModel[], metrics: Metrics): DocColumn[] {
+function docColumns(cols: readonly ColumnModel[], metrics: Metrics, pending: boolean): DocColumn[] {
   return cols.map((c): DocColumn => ({
     id: c.id, weight: Number((c.w / metrics.colW).toFixed(3)),
     windows: c.wins.flatMap((w): DocWindow[] => {
-      const target = targetOf(w);
+      const target = targetOf(w, pending);
       if (!target) return [];
       return [{
         id: w.id, target, ...(w.h ? { height: w.h } : {}),
@@ -87,16 +87,16 @@ export function docHasGroups(doc: CanvasDocument): boolean {
   return doc.views.some((v) => v.layout.type === "tiled" && v.layout.columns.some((c) => c.windows.some((w) => (w.span ?? 1) > 1 || (w.rows ?? 1) > 1 || w.row !== undefined)));
 }
 
-export function toDocument(views: readonly ViewModel[], metrics: Metrics, revision: number): CanvasDocument {
+export function toDocument(views: readonly ViewModel[], metrics: Metrics, revision: number, pending = false): CanvasDocument {
   return {
     format: FORMAT, version: VERSION, revision,
     views: views.map((v): DocView => ({
       id: v.id, kind: v.id, name: v.name, cell: { x: Math.round(v.x / CELL), y: Math.round(v.y / CELL) },
       layout: v.layout === "graph"
-        ? { type: "graph", pinned: Object.fromEntries(v.nodes.filter((n) => n.pinned).map((n) => [n.id, { x: Math.round(n.x), y: Math.round(n.y) }])) }
+        ? { type: "graph", pinned: v.graphPins ? structuredClone(v.graphPins) : Object.fromEntries(v.nodes.filter((n) => n.pinned).map((n) => [n.id, { x: Math.round(n.x), y: Math.round(n.y) }])) }
         : {
           type: "tiled",
-          columns: docColumns(v.cols, metrics),
+          columns: docColumns(v.cols, metrics, pending),
         },
     })),
   };
@@ -107,12 +107,12 @@ export function toDocument(views: readonly ViewModel[], metrics: Metrics, revisi
  * live fields (host, user, system, name); it returns nothing for a target that no longer exists, and that window
  * is dropped rather than shown broken.
  */
-export function columnsFromDocument(layout: Extract<DocLayout, { type: "tiled" }>, metrics: Metrics, resolve: (target: DocTarget) => Partial<WindowModel> | undefined): ColumnModel[] {
+export function columnsFromDocument(layout: Extract<DocLayout, { type: "tiled" }>, metrics: Metrics, resolve: (target: DocTarget, windowId: string) => Partial<WindowModel> | undefined): ColumnModel[] {
   const cols: ColumnModel[] = [];
   for (const c of layout.columns) {
     const wins: WindowModel[] = [];
     for (const w of c.windows) {
-      const live = resolve(w.target);
+      const live = resolve(w.target, w.id);
       if (!live) continue;
       const base: WindowModel = {
         id: w.id, kind: w.target.type === "session" ? "terminal" : w.target.type, host: "host" in w.target ? w.target.host : "", ...(w.height ? { h: w.height } : {}),
