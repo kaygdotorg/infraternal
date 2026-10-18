@@ -5,8 +5,9 @@ from PIL import Image
 os.environ['TRACER_TEST_PORT']='4346'
 ROOT=pathlib.Path.home()/'infraternal-bench/app-windows-latency'
 args=json.loads(sys.stdin.readline())
+job=args.get('job','app-windows-latency')
 import re
-if not re.fullmatch(r'[a-z0-9-]{1,48}',args['label']):raise SystemExit(2)
+if not re.fullmatch(r'[a-z0-9-]{1,48}',job) or not re.fullmatch(r'[a-z0-9-]{1,48}',args['label']):raise SystemExit(2)
 E=ROOT/'evidence'/args['label'];E.mkdir(parents=True,exist_ok=False)
 BIN=ROOT/'bin'
 class PhaseComplete(Exception):
@@ -80,23 +81,11 @@ def consent_check():
   session='app-windows-latency-consent'
   state=cua('get_window_state',{'pid':v['pid'],'window_id':v['window_id'],'session':session,'include_screenshot':False,'max_depth':12,'max_elements':300})
   controls=list(walk(state));safe=json.dumps(state)
-  # A prompt for our helper may be accepted; password controls are never filled.
-  if any('secure' in str(x.get('role','')).lower() or 'password' in str(x.get('role','')).lower() for x in controls):
-   emit({'kind':'helper_password_sheet','controls':[{key:x[key] for key in ('role','title','name','label') if key in x} for x in controls]})
-   cancel=next((x for x in controls if x.get('title')=='Cancel' or x.get('name')=='Cancel' or x.get('label')=='Cancel'),None)
-   if cancel and cancel.get('element_token'):cua('click',{'pid':v['pid'],'window_id':v['window_id'],'session':session,'delivery_mode':'foreground','element_token':cancel['element_token']})
-   raise RuntimeError('helper password sheet requires owner; no input supplied')
-  if 'Allow' in safe and ('requesting' in safe or 'bypass' in safe):
-   fresh=cua('get_window_state',{'pid':v['pid'],'window_id':v['window_id'],'session':session,'include_screenshot':True,'screenshot_out_file':str(E/'helper-consent-before.png'),'max_depth':12,'max_elements':300})
-   buttons=[x for x in walk(fresh) if x.get('title')=='Allow' or x.get('name')=='Allow' or x.get('label')=='Allow']
-   if len(buttons)!=1:raise RuntimeError('helper Allow control ambiguous')
-   button=buttons[0]
-   click={'pid':v['pid'],'window_id':v['window_id'],'session':session,'delivery_mode':'foreground'}
-   if button.get('element_token'):click['element_token']=button['element_token']
-   else:raise RuntimeError('helper Allow control lacks stable token')
-   cua('click',click)
-   after=cua('get_desktop_state',{'session':session,'screenshot_out_file':str(E/'helper-consent-after.png')})
-   if 'requesting to bypass' in json.dumps(after):raise RuntimeError('helper prompt remains')
+  # A re-signed diagnostic must retain existing permission. Never approve a
+  # new permission request or type into a password sheet in this measurement.
+  if any('secure' in str(x.get('role','')).lower() or 'password' in str(x.get('role','')).lower() for x in controls) or ('Allow' in safe and ('requesting' in safe or 'bypass' in safe)):
+   emit({'kind':'helper_permission_changed','controls':[{key:x[key] for key in ('role','title','name','label') if key in x} for x in controls]})
+   raise RuntimeError('helper permission changed; owner intervention required')
  emit({'kind':'consent','checked':True,'our_windows':len(matches)})
 
 emit({'kind':'runner','pid':os.getpid()})
@@ -107,16 +96,17 @@ try:
    if attempt==0 or attempt%5==0:emit({'kind':'lock_wait','owner':(lock/'owner').read_text()})
    time.sleep(60)
  if not locked:raise RuntimeError('Mac lock unavailable')
- (lock/'owner').write_text('app-windows-latency\n');(lock/'pid').write_text(str(args['controller_pid'])+'\n');(lock/'started').write_text(time.strftime('%Y-%m-%dT%H:%M:%S%z')+'\n')
+ (lock/'owner').write_text(job+'\n');(lock/'pid').write_text(str(args['controller_pid'])+'\n');(lock/'started').write_text(time.strftime('%Y-%m-%dT%H:%M:%S%z')+'\n')
  stage='VM readiness';emit({'kind':'vm_readiness_request'})
- readiness=json.loads(sys.stdin.readline());emit({'kind':'vm_readiness','idle':readiness.get('idle',[])})
+ readiness=json.loads(sys.stdin.readline());emit({'kind':'vm_readiness','idle':readiness.get('idle',[]),'phase':readiness.get('phase','vm'),'refusal':readiness.get('refusal')})
  if not readiness.get('ready'):raise RuntimeError('named VM or private server unavailable')
  args.update(readiness)
  def screen_deadline(signum,frame):raise TimeoutError('owned on-screen deadline')
  ledger=ROOT/'evidence/on-screen-ledger.json';used=json.loads(ledger.read_text()).get('seconds',0) if ledger.exists() else 0
- if used>=43*60:raise RuntimeError('owned on-screen allowance exhausted')
+ job_ledger=ROOT/'evidence'/(job+'-screen-ledger.json');job_used=json.loads(job_ledger.read_text()).get('seconds',0) if job_ledger.exists() else 0
+ if used>=43*60 or job_used>=18*60:raise RuntimeError('owned on-screen allowance exhausted')
  screen_start=time.monotonic()
- signal.signal(signal.SIGALRM,screen_deadline);signal.alarm(max(1,int(44*60-used)))
+ signal.signal(signal.SIGALRM,screen_deadline);signal.alarm(max(1,int(min(18*60-job_used,43*60-used))))
  battery();emit({'kind':'environment','text':command(['sw_vers'])+command(['sysctl','-n','hw.model','hw.ncpu','hw.memsize'])+command(['uptime'])})
  console=console_state();emit({'kind':'console','state':console})
  if not console['ready']:raise RuntimeError('console is locked or secure input is active')
@@ -144,11 +134,12 @@ try:
  stage='helper wrappers'
  consent_errors=[]
  runtime=pathlib.Path.home()/'infraternal-bench'/('wl-'+uuid.uuid4().hex[:4]);runtime.mkdir(mode=0o700);runtime_owned=True
- native=pathlib.Path('/Users/kayg/infraternal-bench/app-windows/InfraternalCaptureHelper.app/Contents/MacOS/InfraternalCaptureHelper')
+ native=pathlib.Path(args.get('native') or '/Users/kayg/infraternal-bench/app-windows/InfraternalCaptureHelper.app/Contents/MacOS/InfraternalCaptureHelper')
+ if args.get('native') and not native.resolve().is_relative_to((ROOT/'native-diagnostic').resolve()):raise RuntimeError('diagnostic companion outside owned directory')
  helper_hash=command(['shasum','-a','256',str(native)]).split()[0]
  emit({'kind':'native_helper','hash':helper_hash})
  command(['codesign','--verify','--strict',str(native.parent.parent.parent)])
- if helper_hash!='7b7ad2bcbc18f4f390f00d001b59984b1998665c8ddae9846520b83875001dc5':raise RuntimeError('approved companion version changed')
+ if helper_hash!=(args.get('native_hash') or '7b7ad2bcbc18f4f390f00d001b59984b1998665c8ddae9846520b83875001dc5'):raise RuntimeError('approved companion version changed')
  pidlog=E/'helper-pids.txt';pidlog.write_text('');(E/'helper-metrics.log').write_text('');helper_births={}
  for name,target in [('helper',BIN/'helper'),('native',native)]:
   wrapper=runtime/name
@@ -169,8 +160,12 @@ try:
    except Exception as e:
     consent_errors.append(type(e).__name__)
  monitor=threading.Thread(target=watch_launches,daemon=True);monitor.start()
+ def consent_guard():
+  # The watcher cannot raise on the browser thread. Refuse its next operation
+  # instead of continuing a whole measurement after a changed permission.
+  if consent_errors:raise RuntimeError('helper consent monitor refused the run')
  env=dict(os.environ,INFRATERNAL_DESKTOP_COMPANION=str(runtime/'native'),INFRATERNAL_DESKTOP_MEASURE='1',INFRATERNAL_DESKTOP_BENCH_DIR=str(runtime),INFRATERNAL_DESKTOP_BENCH_HELPER=str(runtime/'helper'))
- if args.get('resources_only'):env.pop('INFRATERNAL_DESKTOP_MEASURE',None)
+ if args.get('resources_only') or not args.get('pipeline_diagnostics',True):env.pop('INFRATERNAL_DESKTOP_MEASURE',None)
  env.pop('INFRATERNAL_DESKTOP_SURFACE',None);env.pop('INFRATERNAL_DESKTOP_OWNED',None)
  if args.get('pipeline')=='surface':env['INFRATERNAL_DESKTOP_SURFACE']='1'
  if args.get('pipeline')=='owned':env['INFRATERNAL_DESKTOP_OWNED']='1'
@@ -235,6 +230,7 @@ try:
  context.route('**/decode.worker*.js',lambda route:route.fulfill(status=200,content_type='text/javascript',body=args['worker'] if args.get('resources_only') else args['observer']+'\n'+args['worker']))
  page.goto(args['origin']+('/?bg=none' if args.get('resources_only') else '/?appwinMeasure=1&bg=none'));page.locator('.cl-viewport').wait_for()
  def call(action,input=None):
+  consent_guard()
   result=page.evaluate("async([a,i])=>{try{return {ok:true,value:await window.__appWindowBench.call(a,i)}}catch(e){return {ok:false,reason:['forbidden','conflict','not found','unavailable','invalid','rejected'].includes(e.reason)?e.reason:'other',name:e.name==='ActionRefused'?'ActionRefused':'Error',failure:['connection closed','connection lost','fixture action timeout','fixture socket timeout'].includes(e.message)?e.message:'refused'}}}",[action,input or {}])
   if not result['ok']:
    emit({'kind':'action_refused','action':action,'reason':result['reason'],'name':result['name'],'failure':result['failure']});raise RuntimeError('fixture action refused')
@@ -248,20 +244,25 @@ try:
  else:raise RuntimeError('source never became online')
  browser_ids=descendants({play._impl_obj._connection._transport._proc.pid})-{play._impl_obj._connection._transport._proc.pid};owned.update(browser_ids)
  def resource_sample(label):
+  consent_guard()
   source_ids=descendants({source.pid});owned.update(source_ids);ids=source_ids|browser_ids|({window.pid} if 'window' in globals() else set())
   begin=time.perf_counter_ns();worker_before=page.evaluate('window.__appWindowBench.stats()');draw_before=len(all_draws)
   rows=[];sample_times=[]
   for i in range(5):
+   consent_guard()
    sample_times.append(time.perf_counter_ns());rows.append(command(['ps','-p',','.join(map(str,ids)),'-o','pid=,ppid=,%cpu=,rss=,time=,comm=']));page.wait_for_timeout(1000)
   worker_after=page.evaluate('window.__appWindowBench.stats()');end=time.perf_counter_ns()
   host=command(['top','-l','2','-s','1','-n','0'])
   emit({'kind':'resources','label':label,'worker_before':worker_before,'worker_after':worker_after,'source_draws':len(all_draws)-draw_before,'begin_perf_ns':begin,'end_perf_ns':end,'host':host,'rows':rows,'sample_times_ns':sample_times,'source_pids':list(source_ids),'browser_pids':list(browser_ids),'uptime':command(['uptime'])})
+  if label=='idle' and args.get('require_idle'):
+   if len(all_draws)!=draw_before or not worker_before or not worker_after or any(worker_after[k]!=worker_before[k] for k in ('received','decoded','painted')):raise RuntimeError('unchanged native window still sends or paints frames')
  # Remove the fixture's initial terminal before both resource baselines.
  initial_terminal=page.locator('.ui-window[data-kind="terminal"] [data-action="close"]')
  if initial_terminal.count():initial_terminal.first.evaluate('(b)=>b.click()')
  page.wait_for_timeout(1000)
  resource_sample('empty')
  stage='native fixture'
+ emit({'kind':'native_fixture','sha256':command(['shasum','-a','256',str(BIN/'latency-window')]).split()[0]})
  window=launch([str(BIN/'latency-window')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1)
  while True:
   ready=json.loads(window.stdout.readline())
@@ -275,7 +276,8 @@ try:
   for line in window.stdout:
    row=json.loads(line);all_draws.append(row);native_queue.put(row)
  threading.Thread(target=draw_reader,daemon=True).start()
- def native_command(value):window.stdin.write(value+'\n');window.stdin.flush()
+ def native_command(value):
+  consent_guard();window.stdin.write(value+'\n');window.stdin.flush()
  def own_inventory():return [w for w in call('desktop.windows',{'host_id':host_id})['windows'] if w['owner_pid']==window.pid]
  for attempt in range(10):
   try:
@@ -314,8 +316,14 @@ try:
   best=min(samples,key=lambda r:r['after']-r['before'])
   worker_mapping={'samples':samples,'lower_ms':best['before']-best['worker'],'upper_ms':best['after']-best['worker']}
  emit({'kind':'clocks','timebase':base,'native':native_mapping,'browser':browser_mapping,'worker':worker_mapping})
+ def source_round_trips(phase):
+  samples=[page.evaluate("async()=>{const began=performance.timeOrigin+performance.now();await window.__appWindowBench.call('desktop.session.clock',{session_id:window.__appWindowBench.session});return {at:performance.timeOrigin+performance.now(),ms:performance.timeOrigin+performance.now()-began};}") for _ in range(8)]
+  emit({'kind':'source_round_trips','phase':phase,'samples':samples})
+ if not args.get('resources_only'):source_round_trips('before')
  info=browser.new_browser_cdp_session().send('SystemInfo.getInfo');emit({'kind':'browser_rendering','version':browser.version,'gpu':info.get('gpu')})
- def drain():return page.evaluate('()=>({probe:window.__appWindowBench.take(),frames:window.__infraternalAppWindowTrace?.take()??[]})')
+ def drain():
+  consent_guard()
+  return page.evaluate('()=>({probe:window.__appWindowBench.take(),frames:window.__infraternalAppWindowTrace?.take()??[]})')
  # Actual compositor pixels are sampled separately below; worker readback is not presentation.
  composites=[]
  palette=[[38,89,204],[38,191,89],[204,64,51],[179,64,191],[38,179,191],[204,166,38],[102,64,204],[191,102,51]]
@@ -331,7 +339,7 @@ try:
  own_windows=cua('list_windows',{'on_screen_only':True}).get('windows',[])
  emit({'kind':'owned_window_layout','windows':[{k:w.get(k) for k in ['pid','window_id','bounds']} for w in own_windows if w.get('pid') in owned]})
  emit({'kind':'viewer_animation_frames','times':page.evaluate('()=>new Promise(resolve=>{const times=[];const next=t=>{times.push(t);if(times.length===96)resolve(times);else requestAnimationFrame(next)};requestAnimationFrame(next)})')})
- if not args.get('resources_only'):
+ if not args.get('resources_only') and not args.get('demo_only'):
   stage='change samples'
   for index in range(48):
    if index==24:
@@ -386,15 +394,24 @@ try:
  frames=[]
  def screencast(event):
   frames.append({'timestamp':event['metadata'].get('timestamp'),'data':event['data']});cdp.send('Page.screencastFrameAck',{'sessionId':event['sessionId']})
- cdp.on('Page.screencastFrame',screencast);native_command('motion');page.wait_for_timeout(5000);native_command('idle');cdp.send('Page.stopScreencast')
+ cdp.on('Page.screencastFrame',screencast)
+ surface.click(position={'x':150,'y':120});page.wait_for_timeout(2500)
+ page.keyboard.type('infraternal demo',delay=120);page.wait_for_timeout(2000)
+ native_command('wide');page.wait_for_timeout(2500)
+ page.keyboard.type(' typing',delay=120);page.wait_for_timeout(2000)
+ cdp.send('Page.stopScreencast')
+ typed_count=max((r.get('typed_count',0) for r in all_draws),default=0)
+ if typed_count<22 or not frames:raise RuntimeError('demo typing or recording incomplete')
+ page.screenshot(path=str(E/'canvas-demo-after.png'))
  for i,frame in enumerate(frames):(E/('record-%04d.jpg'%i)).write_bytes(base64.b64decode(frame['data']))
  (E/'recording-timestamps.json').write_text(json.dumps([f['timestamp'] for f in frames]))
- emit({'kind':'recording','frames':len(frames)})
+ emit({'kind':'recording','frames':len(frames),'typed_count':typed_count,'canvas_after':page.locator('.ui-window[data-kind="app"]').bounding_box()})
+ source_round_trips('after')
  emit({'kind':'network_rtt_after','raw':command(['ping','-n','-c','5','-W','1000','10.69.69.125'])})
  console=console_state();emit({'kind':'console_after','state':console})
  if not console['ready']:raise RuntimeError('console changed during sampling')
  emit({'kind':'decoder_properties','properties':decoder_properties})
- if consent_errors:raise RuntimeError('consent monitor could not verify every launch')
+ consent_guard()
  emit({'kind':'clocks_after','native':native_clock(),'browser':browser_clock()});battery();emit({'kind':'result','status':'measured','phase_seconds':time.monotonic()-start})
 except PhaseComplete:
  pass
@@ -463,8 +480,10 @@ finally:
    shutil.rmtree(runtime)
   signal.alarm(0)
   if 'screen_start' in locals():
-   total=used+time.monotonic()-screen_start;ledger.write_text(json.dumps({'seconds':total}));emit({'kind':'on_screen_ledger','seconds':total})
-  if (lock/'owner').read_text().strip()=='app-windows-latency' and (lock/'pid').read_text().strip()==str(args['controller_pid']):
+   elapsed=time.monotonic()-screen_start;total=used+elapsed;job_total=job_used+elapsed
+   ledger.write_text(json.dumps({'seconds':total}));job_ledger.write_text(json.dumps({'seconds':job_total}))
+   emit({'kind':'on_screen_ledger','seconds':total,'job':job,'job_seconds':job_total})
+  if (lock/'owner').read_text().strip()==job and (lock/'pid').read_text().strip()==str(args['controller_pid']):
    for name in ['owner','pid','started']:(lock/name).unlink()
    lock.rmdir();emit({'kind':'lock_released'})
 
