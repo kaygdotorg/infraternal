@@ -1,6 +1,7 @@
 /** Cache public drawing identity and already-used static assets; authority always comes from the server (D245). */
 import { canvasKey, drawingIdentityKey, lastAccountKey, readStoredJson, writeStoredJson } from "./account-storage";
 import { isCanonicalUuid } from "./identifiers";
+import { readLayoutCache } from "./canvas/model/cache";
 import { whenIdle } from "./on-demand";
 export interface DrawingIdentity { user_id: string; username?: string; display_name?: string; hostname?: unknown; recovery_pending?: { ready_at: number } | null }
 
@@ -9,7 +10,6 @@ export async function cachedDrawingIdentity(): Promise<DrawingIdentity | undefin
     const account = localStorage.getItem(lastAccountKey);
     if (!isCanonicalUuid(account)) return undefined;
     const canvas = readStoredJson(canvasKey(account));
-    const { readLayoutCache } = await import("./canvas/model/cache");
     if (!readLayoutCache(canvas)) return undefined;
     const value = readStoredJson(drawingIdentityKey(account));
     if (!value || typeof value !== "object") return undefined;
