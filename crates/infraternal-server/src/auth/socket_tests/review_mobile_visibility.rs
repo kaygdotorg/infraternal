@@ -7,7 +7,7 @@ type Browser =
 /// Set short expiry after upgrade renewal but before proof authority is created.
 /// The hidden notice and subsequent correlated reply never renew that expiry.
 async fn parked_socket(
-    expire: bool,
+    short_session: bool,
 ) -> (Fixture, Browser, tokio::task::JoinHandle<()>, Option<i64>) {
     let (f, address, server) = socket_fixture().await;
     let cookie = format!("__Host-infraternal={}", f.session);
@@ -15,7 +15,7 @@ async fn parked_socket(
         .await
         .unwrap();
     assert_server_hello(&mut socket).await;
-    let expiry = if expire {
+    let expiry = if short_session {
         Some(
             sqlx::query_scalar::<_, i64>(
                 "UPDATE sessions SET expires=unixepoch()+2 WHERE user_id=? RETURNING expires",
