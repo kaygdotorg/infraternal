@@ -399,7 +399,8 @@ test("online and foreground events cancel delays and preserve handshakes in prog
       removeEventListener: (type: string, callback: () => void) => remove(windowListeners, type, callback),
     };
     globals.document = {
-      visibilityState: "hidden",
+      visibilityState: "visible",
+      get hidden() { return (globals.document as { visibilityState: string }).visibilityState === "hidden"; },
       addEventListener: (type: string, callback: () => void) => add(documentListeners, type, callback),
       removeEventListener: (type: string, callback: () => void) => remove(documentListeners, type, callback),
     };
@@ -436,6 +437,7 @@ test("online and foreground events cancel delays and preserve handshakes in prog
     admit(sockets[2]!);
     sockets[2]!.close();
     expect([...timers.values()][0]?.delay).toBe(5);
+    (globals.document as { visibilityState: string }).visibilityState = "hidden";
     fire(documentListeners, "visibilitychange");
     expect(sockets).toHaveLength(3);
     (globals.document as { visibilityState: string }).visibilityState = "visible";

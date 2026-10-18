@@ -7,6 +7,7 @@ function fixture(rtt: number, streams: number, caps = 4n) {
   const globals = globalThis as unknown as Record<string, unknown>;
   const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, performance: globals.performance, document: globals.document };
   let now = 0, timerId = 0, probes = 0, wakeups = 0, disconnects = 0;
+  let online = () => {};
   let forwarding = true;
   let replyProfile: ((probe: number) => number) | undefined;
   const timers = new Map<number, { at: number; callback(): void }>();
@@ -34,7 +35,7 @@ function fixture(rtt: number, streams: number, caps = 4n) {
     receive(stream: number, frame: WireFrame) { this.onmessage?.({ data: encodeMuxedFrame(stream, frame).slice().buffer as ArrayBuffer }); }
     close() {}
   }
-  globals.window = { setTimeout: (callback: () => void, delay: number) => schedule(() => { wakeups++; callback(); }, delay), clearTimeout: (id: number) => timers.delete(id), addEventListener() {}, removeEventListener() {} };
+  globals.window = { setTimeout: (callback: () => void, delay: number) => schedule(() => { wakeups++; callback(); }, delay), clearTimeout: (id: number) => timers.delete(id), addEventListener: (type: string, callback: () => void) => { if (type === "online") online = callback; }, removeEventListener: () => { online = () => {}; } };
   globals.location = { protocol: "https:", host: "idle.example.test" };
   globals.WebSocket = Socket;
   globals.performance = { now: () => now };
@@ -49,6 +50,7 @@ function fixture(rtt: number, streams: number, caps = 4n) {
   connection.streamAttached(true, 1);
   return {
     connection, notices,
+    online() { online(); },
     get probes() { return probes; }, get wakeups() { return wakeups; }, get disconnects() { return disconnects; }, get sockets() { return sockets.length; },
     receive(stream: number, frame: WireFrame) { sockets[0]!.receive(stream, frame); },
     stopForwarding() { forwarding = false; },
@@ -255,6 +257,7 @@ test("a socket lost while hidden waits for visibility before reconnecting", () =
     f.advance(3000);
     f.setHidden(true);
     f.connection.forceDrop();
+    f.online();
     f.advance(60_000);
     expect(f.sockets).toBe(1);
     f.setHidden(false);
@@ -280,5 +283,18 @@ for (const supported of [false, true]) test(`visibility notices require both pee
     f.setHidden(true);
     f.setHidden(false);
     expect(f.notices).toEqual(supported ? [true, false] : []);
+  } finally { f.dispose(); }
+});
+
+test("hiding a page cancels a retry scheduled while it was visible", () => {
+  const f = fixture(150, 1);
+  try {
+    f.advance(3000);
+    f.connection.forceDrop();
+    f.setHidden(true);
+    f.advance(1000);
+    expect(f.sockets).toBe(1);
+    f.setHidden(false);
+    expect(f.sockets).toBe(2);
   } finally { f.dispose(); }
 });

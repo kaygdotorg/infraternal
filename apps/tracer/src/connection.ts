@@ -178,7 +178,10 @@ export class MuxConnection {
 
   /** Visibility is transport state, independent of terminal and authentication state. */
   private pageVisibilityChanged(): void {
-    if (!this.isWelcomed || this.closed) return;
+    if (this.closed) return;
+    // A retry armed before hiding must also park; its foreground hint stays installed.
+    if (this.pageHidden()) this.clearRetryTimer();
+    if (!this.isWelcomed) return;
     this.resetPings(true);
     this.livenessRtt = undefined;
     this.livenessSrtt = undefined;
@@ -701,7 +704,7 @@ export class MuxConnection {
 
   /** Online and foreground hints reset retry state while an in-flight handshake remains the active attempt. */
   private retryNow(): void {
-    if (this.closed) return;
+    if (this.closed || this.pageHidden()) return;
     const socket = this.socket;
     const retryPending = this.retryTimer !== 0;
     const handshakePending = socket !== undefined && !this.welcomed;
