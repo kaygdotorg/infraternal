@@ -25,7 +25,7 @@ import type { ProvisioningService } from "./addhost/service";
 import { createWindowFlowHost } from "./addhost/window-host";
 import { createCanvas, type CanvasController } from "./create";
 import { CELL, boxOf } from "./layout/geometry";
-import { columnsFromDocument, docHasGroups, type DocTarget } from "./model/document";
+import { columnsFromDocument, viewFromDocument, docHasGroups, type DocTarget } from "./model/document";
 import { loadGroups } from "./layout/groups-handle";
 import { ServerCanvasStore } from "./model/server-store";
 import type { ViewModel, WindowModel } from "./model/types";
@@ -208,9 +208,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     const console_: ViewModel = { id: "console", name: "Console", layout: "tiled", cols, nodes: [], x: (doc?.cell.x ?? 0) * CELL, y: (doc?.cell.y ?? 0) * CELL };
     const settings = buildSettingsView(false, m, BUILTIN_SECTIONS);
     settings.x = boxOf(console_, m).w + CELL;
-    const recovered = (saved?.views ?? []).filter((v) => v.id !== "console" && v.id !== "mesh").map((v): ViewModel => ({
-      id: v.id, name: v.name, layout: v.layout.type === "graph" ? "graph" : "tiled", ...(v.layout.type === "graph" ? { graphPins: v.layout.pinned } : {}), cols: v.layout.type === "tiled" ? columnsFromDocument(v.layout, m, resolve) : [], nodes: [], x: v.cell.x * CELL, y: v.cell.y * CELL,
-    }));
+    const recovered = (saved?.views ?? []).filter((v) => v.id !== "console" && v.id !== "mesh").map((v) => viewFromDocument(v, v.layout.type === "tiled" ? columnsFromDocument(v.layout, m, resolve) : []));
     return [console_, ...recovered, settings];
   });
   // The Mesh view follows the server's answer (D187).

@@ -2,7 +2,7 @@
 import type { Ctx, ViewRec } from "../context";
 import { CELL } from "../layout/geometry";
 import { loadGroups } from "../layout/groups-handle";
-import { columnsFromDocument, type CanvasDocument, type DocTarget, type DocView } from "./document";
+import { columnsFromDocument, viewFromDocument, type CanvasDocument, type DocTarget, type DocView } from "./document";
 import { makeBody } from "../views/body";
 import type { WindowModel } from "./types";
 
@@ -25,14 +25,14 @@ export async function reconcile(cx: Ctx, read: () => SharedPaint, resolve: (targ
     let c = cx.views.get(view.id);
     // Graph content is owned by its existing source; layout only positions its pins.
     if (view.layout.type === "graph") {
-      if (!c) { c = cx.view.build({ id: view.id, name: view.name, layout: "graph", cols: [], nodes: [], graphPins: view.layout.pinned, x: view.cell.x * CELL, y: view.cell.y * CELL }); cx.views.set(view.id, c); }
+      if (!c) { c = cx.view.build(viewFromDocument(view)); cx.views.set(view.id, c); }
       else if (JSON.stringify(c.view.graphPins) !== JSON.stringify(view.layout.pinned)) { c.view.graphPins = view.layout.pinned; cx.mesh?.refreshLayout(c); }
       place(c, view);
       continue;
     }
     const columns = columnsFromDocument(view.layout, cx.state.metrics, resolve);
     if (!c) {
-      c = cx.view.build({ id: view.id, name: view.name, layout: "tiled", cols: columns, nodes: [], x: view.cell.x * CELL, y: view.cell.y * CELL });
+      c = cx.view.build(viewFromDocument(view, columns));
       cx.views.set(view.id, c); continue;
     }
     // New shells have not acquired a stable reference yet; do not discard them when another device edits.

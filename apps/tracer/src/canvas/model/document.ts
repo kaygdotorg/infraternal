@@ -89,3 +89,8 @@ export function columnsFromDocument(layout: Extract<DocLayout, { type: "tiled" }
   return cols;
 }
 
+
+/** Build shared view metadata once for startup and later server projections. */
+export function viewFromDocument(view: DocView, cols: ColumnModel[] = []): ViewModel {
+  return { id: view.id, name: view.name, layout: view.layout.type, cols, nodes: [], x: view.cell.x * CELL, y: view.cell.y * CELL, ...(view.layout.type === "graph" ? { graphPins: view.layout.pinned } : {}) };
+}
