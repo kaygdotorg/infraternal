@@ -33,7 +33,7 @@ pub mod remote_tls;
 /// Remove one enrolled host under a purpose-bound fresh owner passkey proof.
 pub const REMOVE: ActionDef = ActionDef {
     id: "remote.host.remove",
-    summary: "Remove a host from your server and uninstall its infraternal agent.",
+    summary: "Remove a host and uninstall its infraternal agent.",
     instructions: &[
         "Find the host's ID in the app and the address of your server.",
         "Run the command to see what will happen: the host loses access and its SSH trust is forgotten.",

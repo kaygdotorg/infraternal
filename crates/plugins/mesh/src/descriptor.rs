@@ -311,7 +311,7 @@ pub fn cli_plugin() -> infraternal_plugin_api::PluginDefinition {
     } else {
         infraternal_plugin_api::PluginDefinition::new(DESCRIPTOR.id, "", [])
     };
-    "Connect your machines privately and see how they reach each other."
+    "Link your machines privately and see how they reach each other."
         .clone_into(&mut plugin.description);
     #[cfg(all(feature = "agent", target_os = "linux"))]
     for mut action in crate::node_actions::DESCRIPTOR

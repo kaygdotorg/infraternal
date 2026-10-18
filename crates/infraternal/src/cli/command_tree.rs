@@ -390,6 +390,16 @@ mod tests {
     }
 
     #[test]
+    fn root_help_lines_fit_80_columns() {
+        // The parser does not wrap help in this build, so the descriptions must be short enough.
+        let registry = registry().expect("action registry");
+        let help = build(&registry).render_help().to_string();
+        for line in help.lines() {
+            assert!(line.chars().count() <= 80, "{} columns: {line}", line.chars().count());
+        }
+    }
+
+    #[test]
     fn unbuilt_placeholders_are_neither_shown_nor_parsed() {
         // D299 C5: `up`, `relay`, `mesh list` and friends only say "not available yet".
         let registry = registry().expect("action registry");
