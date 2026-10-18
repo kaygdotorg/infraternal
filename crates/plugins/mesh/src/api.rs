@@ -936,7 +936,7 @@ impl MeshService {
         }
         // Enrolment only ever adds a remote machine; the server's node comes from its own channel.
         refuse_unnamed_label(&request.name)?;
-        crate::store::make_room(&mut tx, None, &request.name).await?;
+        crate::store::make_room(&mut tx, actor, None, &request.name).await?;
         // Persist allocation history independently of live rows. Explicitly imported
         // IDs also advance allocation; exhaustion refuses before any identity is issued.
         let id: i64 = sqlx::query_scalar(
@@ -1039,7 +1039,7 @@ impl MeshService {
         authorize(&mut tx, actor, MANAGE_NODES, &scope_requirements).await?;
         refuse_unnamed_label(&request.name)?;
         let mut scopes = scopes;
-        for moved in crate::store::make_room(&mut tx, Some(id), &request.name).await? {
+        for moved in crate::store::make_room(&mut tx, actor, Some(id), &request.name).await? {
             let moved =
                 u64::try_from(moved).map_err(|_| storage_error("stored node id invalid"))?;
             scopes.extend(endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(moved))).await?);

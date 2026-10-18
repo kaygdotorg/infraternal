@@ -278,9 +278,9 @@ async fn wanted_name(
     };
     Ok((wanted, records))
 }
-/// Frees `name` for a person's choice on node `id` (`None` while enrolling a new one). A person outranks every
+/// Frees `name` for `actor`'s choice on node `id` (`None` while enrolling a new one). A person outranks every
 /// automatic name (migration 0026), so a node holding `name` by record, report or placeholder moves aside to a
-/// suffix of its own claim, audited as an automatic rename with the change's revision. Returns the nodes moved.
+/// suffix of its own claim, audited under `actor` as an automatic rename with the change's revision. Returns the nodes moved.
 ///
 /// Only another person's name refuses, as a bare conflict. That is no oracle: the refusal says only that the
 /// name is in use, which every Mesh member can learn from the name's DNS record, while a name a machine
@@ -288,6 +288,7 @@ async fn wanted_name(
 /// refuse with [`crate::api::MeshApiError::Reserved`], except for the server's own node.
 pub(crate) async fn make_room(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    actor: &str,
     id: Option<i64>,
     name: &str,
 ) -> Result<Vec<i64>, crate::api::MeshApiError> {
@@ -322,7 +323,7 @@ pub(crate) async fn make_room(
         .fetch_one(&mut **tx)
         .await
         .map_err(unavailable)?;
-    audit_renames(tx, &moved, revision)
+    audit_renames(tx, &moved, revision, actor)
         .await
         .map_err(|_| storage_error("Mesh storage unavailable."))?;
     Ok(vec![holder.id])
@@ -365,19 +366,21 @@ async fn rename(
     }
     Ok(())
 }
-/// Audits automatic renames with the attach's revision. An automatic rename is attributed to the instance owner,
-/// the only person who adds hosts, and says it was automatic.
+/// Audits automatic renames with the change's revision, under the person who caused them (`actor`), else under
+/// the instance owner: an attach has no person, and only the owner adds hosts. Each row says it was automatic.
 async fn audit_renames(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     renamed: &[Renamed],
     revision: i64,
+    actor: &str,
 ) -> Result<(), &'static str> {
     for rename in renamed {
         let detail = serde_json::json!({"node_id":rename.id,"name":rename.to,"previous":rename.from,"source":rename.source,"automatic":true});
-        sqlx::query("INSERT INTO mesh_audit(user_id,action,resource,revision,occurred_at,detail_json) SELECT id,'mesh.node.name',?,?,unixepoch(),? FROM users WHERE owner=1 ORDER BY rowid LIMIT 1")
+        sqlx::query("INSERT INTO mesh_audit(user_id,action,resource,revision,occurred_at,detail_json) SELECT id,'mesh.node.name',?1,?2,unixepoch(),?3 FROM users WHERE id=?4 OR owner=1 ORDER BY id=?4 DESC,rowid LIMIT 1")
             .bind(rename.id.to_string())
             .bind(revision)
             .bind(detail.to_string())
+            .bind(actor)
             .execute(&mut **tx)
             .await
             .map_err(|_| "Mesh storage unavailable.")?;
@@ -517,7 +520,7 @@ impl Store {
             high
         };
         let revision = sqlx::query_scalar::<_,i64>("UPDATE mesh_state SET revision=revision+1 WHERE singleton=1 AND revision<9223372036854775807 RETURNING revision").fetch_one(&mut *tx).await.map_err(|_|"Mesh storage unavailable.")?;
-        audit_renames(&mut tx, &renamed, revision).await?;
+        audit_renames(&mut tx, &renamed, revision, "").await?;
         tx.commit().await.map_err(|_| "Mesh storage unavailable.")?;
         Ok((
             NodeId(u64::try_from(id).map_err(|_| "Mesh identity invalid.")?),
