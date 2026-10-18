@@ -27,8 +27,11 @@
 //!   idle): the server, as responder, does not rekey at 120 s, so that one session can read offline from 155 s
 //!   until the peer rekeys on the server's next keepalive after 165 s (or the server does once the session ends).
 //! - **Every reading has an age limit.** When the server's own node stops answering, the last reading counts for
-//!   at most [`STALE`] and is then dropped: nodes read offline, never frozen online. Within that limit the session
-//!   and quiet rules above still apply to the age of the data at every poll.
+//!   at most [`STALE`] and is then dropped: nodes read offline, never frozen online. Presence is only re-evaluated
+//!   when a poll ends, so nodes go offline at the first poll that ends after that: **20 s** after the last good
+//!   reading, whether the node's calls fail at once (polls at +5, +10, +15, +20 s) or each runs into the node
+//!   channel's 5 s call timeout (polls ending at +10 and +20 s). Within that limit the session and handshake rules
+//!   above still apply to the age of the data at every poll.
 //!
 //! Choices, and the alternatives rejected:
 //! - In memory, not in `mesh_nodes.last_seen`: writing an observation per peer per poll would cost an fsync, an audit
@@ -61,7 +64,8 @@ pub const REKEY_AFTER_SECS: u64 = 120;
 pub const REKEY_TIMEOUT_SECS: u64 = 5;
 /// How often the server reads its own peer table.
 pub const POLL: Duration = Duration::from_secs(5);
-/// How long a reading counts once the server's node stops answering: two missed polls, then offline.
+/// How long a reading counts once the server's node stops answering. Offline follows at the first poll that ends
+/// after it, 20 s after the last good reading (module docs).
 pub const STALE: Duration = Duration::from_secs(15);
 /// The most `mesh.peers` pages one poll follows; a page is up to one action frame of peers.
 const MAX_PAGES: usize = 1024;
@@ -405,6 +409,18 @@ mod tests {
                 .live(Some(NodeId(1)), NOW + STALE.as_secs() + 1)
                 .is_empty()
         );
+    }
+
+    /// The documented bound: polls that fail at once leave nodes online through +15 s and offline at +20 s.
+    #[test]
+    fn nodes_go_offline_twenty_seconds_after_the_last_good_reading() {
+        let mut tracker = tracked(vec![row(3, NOW - 10, 100, 25)]);
+        for at in [5, 10, 15] {
+            tracker.record(None, NOW + at);
+            assert!(!tracker.live(None, NOW + at).is_empty(), "{at}");
+        }
+        tracker.record(None, NOW + 20);
+        assert!(tracker.live(None, NOW + 20).is_empty());
     }
 
     #[test]
