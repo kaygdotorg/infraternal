@@ -221,36 +221,85 @@ pub struct MissingBinary {
 }
 
 /// Human diagnostics are trusted static text; fingerprints are independently validated.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 pub struct Failure {
     pub kind: FailureKind,
     pub message: &'static str,
     pub log_tail: Vec<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_step: Option<InstallStep>,
     /// Public process status only; command output is never serialized.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_status: Option<u8>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub already_added: bool,
     /// Trusted server payload coordinates; never fields echoed from SSH stderr.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub missing_binary: Option<Box<MissingBinary>>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fingerprints: Vec<String>,
     /// Exact public key family selected for this confirmation and subsequent negotiation.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub host_key_type: Option<String>,
     /// An existing application pin differs; replacement requires this explicit confirmation.
-    #[serde(skip_serializing_if = "is_false")]
     pub host_key_changed: bool,
     /// Only exhausted D183 authentication permits the UI to request another method.
-    #[serde(skip_serializing_if = "is_false")]
     pub choose_method: bool,
-    /// Public first-contact handle; never admission by possession alone.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub host_key_challenge: Option<uuid::Uuid>,
+    /// The two rarely-set uuids, boxed so every `Result<_, Failure>` stays small (`clippy::result_large_err`).
+    ids: Option<Box<FailureIds>>,
 }
+
+/// Each uuid keeps its own field, so one can never be read or sent as the other.
+#[derive(Clone, Debug, Default)]
+struct FailureIds {
+    /// Binds a host-key confirmation to the observation that produced it.
+    host_key_challenge: Option<uuid::Uuid>,
+    /// The owner's existing host that makes this an already-added failure.
+    existing_host_id: Option<uuid::Uuid>,
+}
+
+/// Serialize the failure's wire fields; each UUID has its own key and its own field.
+impl Serialize for Failure {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct("Failure", 12)?;
+        state.serialize_field("kind", &self.kind)?;
+        state.serialize_field("message", &self.message)?;
+        state.serialize_field("log_tail", &self.log_tail)?;
+        if let Some(failed_step) = self.failed_step {
+            state.serialize_field("failed_step", &failed_step)?;
+        }
+        if let Some(exit_status) = self.exit_status {
+            state.serialize_field("exit_status", &exit_status)?;
+        }
+        if self.already_added {
+            state.serialize_field("already_added", &self.already_added)?;
+        }
+        if let Some(missing_binary) = &self.missing_binary {
+            state.serialize_field("missing_binary", missing_binary)?;
+        }
+        if !self.fingerprints.is_empty() {
+            state.serialize_field("fingerprints", &self.fingerprints)?;
+        }
+        if let Some(host_key_type) = &self.host_key_type {
+            state.serialize_field("host_key_type", host_key_type)?;
+        }
+        if self.host_key_changed {
+            state.serialize_field("host_key_changed", &self.host_key_changed)?;
+        }
+        if self.choose_method {
+            state.serialize_field("choose_method", &self.choose_method)?;
+        }
+        if let Some(uuid) = self.ids.as_deref().and_then(|ids| ids.host_key_challenge) {
+            state.serialize_field("host_key_challenge", &uuid)?;
+        }
+        if let Some(uuid) = self.ids.as_deref().and_then(|ids| ids.existing_host_id)
+            && self.already_added
+        {
+            state.serialize_field("host_id", &uuid)?;
+        }
+        state.end()
+    }
+}
+
 impl Failure {
     #[must_use]
     pub fn new(kind: FailureKind, message: &'static str) -> Self {
@@ -266,8 +315,32 @@ impl Failure {
             host_key_type: None,
             host_key_changed: false,
             choose_method: false,
-            host_key_challenge: None,
+            ids: None,
         }
+    }
+    /// Return the public challenge only while this error represents a host-key refusal.
+    #[must_use]
+    pub fn host_key_challenge(&self) -> Option<uuid::Uuid> {
+        if self.already_added {
+            None
+        } else {
+            self.ids.as_deref().and_then(|ids| ids.host_key_challenge)
+        }
+    }
+
+    /// Record the challenge used to bind host-key confirmation to this observation.
+    pub fn set_host_key_challenge(&mut self, challenge: Option<uuid::Uuid>) {
+        if challenge.is_some() || self.ids.is_some() {
+            self.ids.get_or_insert_with(Box::default).host_key_challenge = challenge;
+        }
+    }
+
+    /// Attach the owner's existing host id to the already-added failure.
+    #[must_use]
+    pub fn with_existing_host_id(mut self, host_id: uuid::Uuid) -> Self {
+        self.already_added = true;
+        self.ids.get_or_insert_with(Box::default).existing_host_id = Some(host_id);
+        self
     }
     /// Bounded diagnosis for server logs; authentication and trust always retain their categories.
     #[must_use]
@@ -387,14 +460,6 @@ impl Failure {
         Self::new(FailureKind::Install, message)
     }
 }
-#[allow(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "Serde skip predicates receive a reference."
-)]
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.failed_step {
@@ -449,4 +514,52 @@ pub struct Event {
     pub failure: Option<Failure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub leftovers: Option<Box<Leftovers>>,
+}
+
+#[cfg(test)]
+mod failure_serialization_tests {
+    //! Preserve the public UUID key while sharing one compact failure reference slot.
+    use super::{Failure, FailureKind};
+
+    #[test]
+    fn uuid_reference_uses_the_outcome_specific_wire_key() {
+        let id = uuid::Uuid::from_u128(42);
+        let mut challenge = Failure::new(FailureKind::HostKey, "Confirm this host key.");
+        challenge.set_host_key_challenge(Some(id));
+        let challenge = serde_json::to_value(challenge).unwrap();
+        assert_eq!(challenge["host_key_challenge"], id.to_string());
+        assert!(challenge.get("host_id").is_none());
+
+        let duplicate = Failure::install("This host is already added.").with_existing_host_id(id);
+        let duplicate = serde_json::to_value(duplicate).unwrap();
+        assert_eq!(duplicate["host_id"], id.to_string());
+        assert_eq!(duplicate["already_added"].as_bool(), Some(true));
+        assert!(duplicate.get("host_key_challenge").is_none());
+    }
+
+    /// The exact JSON of both uuid-bearing shapes, and a size bound so `Result<_, Failure>` stays below the lint limit.
+    #[test]
+    fn wire_format_is_exact_and_failure_stays_small() {
+        let id = uuid::Uuid::from_u128(42);
+        let mut challenge = Failure::new(FailureKind::HostKey, "Confirm this host key.");
+        challenge.set_host_key_challenge(Some(id));
+        assert_eq!(
+            serde_json::to_string(&challenge).unwrap(),
+            format!(
+                r#"{{"kind":"host-key","message":"Confirm this host key.","log_tail":[],"host_key_challenge":"{id}"}}"#
+            )
+        );
+        let duplicate = Failure::install("Already added.").with_existing_host_id(id);
+        assert_eq!(
+            serde_json::to_string(&duplicate).unwrap(),
+            format!(
+                r#"{{"kind":"install","message":"Already added.","log_tail":[],"already_added":true,"host_id":"{id}"}}"#
+            )
+        );
+        assert!(
+            std::mem::size_of::<Failure>() <= 128,
+            "{}",
+            std::mem::size_of::<Failure>()
+        );
+    }
 }

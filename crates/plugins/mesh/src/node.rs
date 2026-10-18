@@ -158,6 +158,89 @@ impl Node {
         }
         Ok(node)
     }
+    /// Decide, changing nothing, which kernel objects host uninstall removes.
+    ///
+    /// The interface name and the component marker are shared by every
+    /// infraternal agent on the machine, so neither proves the object is this
+    /// installation's: the server's embedded infraternal agent and `mesh up`
+    /// make the same marked `infraternal0`. Only an interface whose `WireGuard`
+    /// key is the one this state recorded (or, for state written before that
+    /// record existed, the key the coordinator bound) is ours. Its packet
+    /// filter is ours when the state recorded a frontend and no other node's
+    /// interface is live.
+    ///
+    /// Every object is decided before any is deleted (#235). An object with our
+    /// name that is not ours is never an error: uninstall leaves it and names it,
+    /// because the caller has usually already stopped the service.
+    /// # Errors
+    /// Reports unsafe state or a failed kernel or packet-filter query.
+    pub fn plan_retirement(path: &std::path::Path) -> io::Result<Retirement> {
+        let (recorded, backend) = match crate::node_state::Store::open(path) {
+            Ok((store, state)) => (
+                store
+                    .recorded_interface()?
+                    .or_else(|| state.config.and_then(|config| config.local_key)),
+                state.backend,
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (None, None),
+            Err(error) => return Err(error),
+        };
+        let mut left = Vec::new();
+        // None: no interface with our name. Some(ours?) otherwise.
+        let interface =
+            match Device::owned() {
+                Ok(false) => None,
+                // A marked link without a readable WireGuard key is not provably ours.
+                Ok(true) => Some(recorded.is_some_and(|recorded| {
+                    Device::identity().is_ok_and(|(key, _)| key == recorded)
+                })),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Some(false),
+                Err(error) => return Err(error),
+            };
+        if interface == Some(false) {
+            left.push(crate::wireguard::INTERFACE);
+        }
+        let mut firewall = backend.map_or_else(Firewall::default, Firewall::for_backend);
+        let filter = match firewall.adopt() {
+            Ok(()) if !firewall.installed() => None,
+            Ok(()) if backend.is_some() && recorded.is_some() && interface != Some(false) => {
+                Some(firewall)
+            }
+            Ok(()) => {
+                left.push(firewall.name());
+                None
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                left.push(firewall.name());
+                None
+            }
+            // Without a supported packet-filter frontend the node could never
+            // install a filter, so there is none to remove.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::Unsupported
+                ) =>
+            {
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(Retirement {
+            interface: interface == Some(true),
+            filter,
+            left,
+        })
+    }
+    /// Remove the kernel objects this installation created, without a running node.
+    ///
+    /// Host uninstall calls this after the service has stopped (#235): it
+    /// decides every object first (`plan_retirement`), then deletes only ours.
+    /// # Errors
+    /// Reports unsafe state or a failed kernel deletion; never foreign ownership.
+    pub fn retire(path: &std::path::Path) -> io::Result<Vec<&'static str>> {
+        Self::plan_retirement(path)?.execute()
+    }
     /// Read the retained component intent, including an explicitly stopped node.
     #[must_use]
     pub fn enabled(&self) -> bool {
@@ -218,6 +301,11 @@ impl Node {
         }
         self.firewall.adopt()?;
         let (key, public_key) = Key::generate()?;
+        // Name the interface in this installation's state before it exists:
+        // host uninstall removes only an interface whose key matches (#235).
+        if let Some(store) = &self.store {
+            store.record_interface(&public_key)?;
+        }
         Device::create()?;
         self.owned = true;
         let port = 0;
@@ -765,6 +853,31 @@ impl Node {
 }
 // No Drop cleanup: kernel state and established flows survive control process loss [166].
 
+/// The kernel objects host uninstall removes, decided before any is deleted (#235).
+pub struct Retirement {
+    interface: bool,
+    filter: Option<Firewall>,
+    left: Vec<&'static str>,
+}
+impl Retirement {
+    /// Objects with our name that this installation did not create; they stay.
+    #[must_use]
+    pub fn left(&self) -> &[&'static str] {
+        &self.left
+    }
+    /// Delete exactly the planned objects and return the names left in place.
+    /// # Errors
+    /// Reports a failed kernel deletion.
+    pub fn execute(self) -> io::Result<Vec<&'static str>> {
+        if self.interface {
+            Device::delete()?;
+        }
+        if let Some(mut filter) = self.filter {
+            filter.remove()?;
+        }
+        Ok(self.left)
+    }
+}
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]

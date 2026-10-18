@@ -19,6 +19,8 @@ const INPUT_RESUME_GUARD = 16 * 1024;
 const INPUT_FRAME_LIMIT = 16 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RENDER_IDLE_MS = 700;
+/** Shown while the host link is doubted but kept (`terminal.link_doubt`, D300); recovery clears only this text. */
+const LINK_DOUBT_STATUS = "Reconnecting…";
 const TERMINAL_FONT_SIZE_DESKTOP = 14;
 const TERMINAL_FONT_SIZE_TOUCH = 13;
 /** The font sizes a keyboard step or a pinch may reach (terminal-touch.ts uses the same range). */
@@ -65,6 +67,12 @@ export interface TerminalHooks {
   onSessionCreated?: (sessionId: string) => void;
   onAttached?: (resumed: boolean, terminal: TerminalClient) => void;
   onDisconnected?: (forced: boolean) => void;
+  /**
+   * The host link missed a reply but is kept (`terminal.link_doubt`, D300, #234), or answered again
+   * (`terminal.link_recovered`). A product surface shows its connection indicator in the reconnecting
+   * state meanwhile; the terminal's own status text is not shown on the canvas.
+   */
+  onLinkDoubt?: (doubted: boolean) => void;
   /** Final output has painted; clean exits may close their window. */
   onExited?: (status: number) => void;
   /**
@@ -923,6 +931,16 @@ export class TerminalClient {
             this.replayResponseFence = undefined;
             this.suppressReplayResponses = true;
             this.setStatus("Catching up…");
+          } else if (notice.type === "terminal.link_doubt") {
+            // The host link missed one reply but is kept: this is live output,
+            // not replay. Only say so; replies to the program and typing go on.
+            const shown = this.config.status.textContent ?? "";
+            if (shown === "" || shown === LINK_DOUBT_STATUS) this.setStatus(LINK_DOUBT_STATUS);
+            this.config.hooks?.onLinkDoubt?.(true);
+          } else if (notice.type === "terminal.link_recovered") {
+            // Clears only its own indicator; it is never a replay fence.
+            if (this.config.status.textContent === LINK_DOUBT_STATUS) this.setStatus("");
+            this.config.hooks?.onLinkDoubt?.(false);
           } else if (notice.type === "terminal.snapshot" && notice.approximate === true) {
             this.setStatus("Reconnected. The screen may be slightly out of date.");
           } else if (notice.type === "terminal.snapshot_unavailable") {
@@ -948,9 +966,8 @@ export class TerminalClient {
             if (this.pendingExit && (this.pendingExit.status !== status || this.pendingExit.finalSeq !== finalSeq || (this.pendingExit.retired === true) !== retired)) throw new Error("changed exit");
             this.pendingExit = { status, finalSeq, retired };
             this.finishExit();
-          } else {
-            throw new Error("unknown terminal notice");
           }
+          // Any other notice type comes from a newer server: it is additive, so ignore it.
         } catch {
           this.protocolFailure("invalid terminal notice");
         }

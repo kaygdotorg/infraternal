@@ -54,6 +54,8 @@ export interface FailureDetail {
   fingerprints?: string[];
   host_key_challenge?: string;
   already_added?: boolean;
+  /** Existing host matched by an owner-scoped duplicate check; only on `already_added`. */
+  host_id?: string;
   missing_binary?: { architecture: string; path: string };
   failed_step?: "get-arm64-binary" | "get-x86-64-binary" | "connect" | "upload" | "install" | "join" | "start" | "readiness";
   host_key_type?: string;
@@ -144,6 +146,7 @@ function parseFailure(value: unknown): FailureDetail | undefined {
   if (typeof value.host_key_type === "string") failure.host_key_type = value.host_key_type;
   if (value.host_key_changed === true) failure.host_key_changed = true;
   if (value.already_added === true) failure.already_added = true;
+  if (failure.already_added && isCanonicalUuid(value.host_id)) failure.host_id = value.host_id;
   if (isRecord(value.missing_binary) && typeof value.missing_binary.architecture === "string" && typeof value.missing_binary.path === "string") {
     failure.missing_binary = { architecture: value.missing_binary.architecture, path: value.missing_binary.path };
   }

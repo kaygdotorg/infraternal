@@ -123,7 +123,7 @@ impl SshTransport for PublicChallenge {
                 infraternal_plugin_ssh::model::FailureKind::HostKey,
                 "The fixture host key needs confirmation.",
             );
-            failure.host_key_challenge = Some(self.0);
+            failure.set_host_key_challenge(Some(self.0));
             failure
                 .fingerprints
                 .push(format!("SHA256:{}", "a".repeat(43)));

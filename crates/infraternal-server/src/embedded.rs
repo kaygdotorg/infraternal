@@ -92,6 +92,13 @@ pub(crate) enum TerminalOutput {
     Ack { in_seq_acked: u64 },
     /// The shared host link is rebinding; keep this stream and its input writer.
     Reconnecting,
+    /// The shared host link missed one reply but is kept: show that it may be
+    /// reconnecting while live output, terminal replies and input keep flowing.
+    /// Unlike `Reconnecting`, nothing is replaced and nothing is replayed [D300].
+    LinkDoubt,
+    /// The doubted host link answered again: clear only the `LinkDoubt`
+    /// indicator. It never confirms a replay; replays own their fences [D300].
+    Recovered,
     /// A route expired; only an authenticated browser consumer may request rebind.
     RouteExpired,
     /// The agent retired one terminal stream.
@@ -850,11 +857,20 @@ async fn run_actor(
     #[cfg(not(feature = "remote"))]
     let mut writes = ();
     let mut probe_queue = std::collections::VecDeque::new();
-    let mut liveness = Liveness::new();
+    let mut liveness = Liveness::host_link();
+    // Windows told about the current doubt episode on the current link; only
+    // they get its recovery. Every lease reset and every lost link clears it.
+    let mut doubted = Vec::new();
     let mut ticks = tokio::time::interval(TICK);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
+        // A doubt belongs to the link it was raised on. Once that link is gone,
+        // its windows were told Reconnecting and only the replacement's own
+        // replay fence may confirm them [D300, #234].
+        if connection.is_none() {
+            doubted.clear();
+        }
         #[cfg(feature = "remote")]
         hot.observe(&attachments);
         #[cfg(feature = "remote")]
@@ -878,7 +894,7 @@ async fn run_actor(
                     if matches!(event, priming::Event::Incoming(Some(Incoming::Activate))) {
                         writes.stop().await;
                         // The promoted connection has not answered this route's probes yet.
-                        liveness = Liveness::new();
+                        fresh_host_lease(&mut liveness, &mut doubted);
                     }
                     process_priming(event, &mut hot, &mut connection, &mut attachments, &mut routes, &mut pending, &changes, &mut writes).await;
                 },
@@ -909,7 +925,7 @@ async fn run_actor(
                 connection = Some(fresh);
                 connected_at = std::time::Instant::now();
                 changes.send_replace(());
-                liveness = Liveness::new();
+                fresh_host_lease(&mut liveness, &mut doubted);
             } else {
                 tracing::warn!("infraternal agent connection failed; awaiting reconnect");
                 backoff = (backoff * 2).min(Duration::from_secs(30));
@@ -924,7 +940,7 @@ async fn run_actor(
         };
         // Nothing probes an unused host link. A later attachment gets a fresh lease.
         if attachments.is_empty() {
-            liveness = Liveness::new();
+            fresh_host_lease(&mut liveness, &mut doubted);
         }
         #[cfg(feature = "remote")]
         let control_ready = writes.can_admit();
@@ -964,7 +980,7 @@ async fn run_actor(
                 if matches!(event, priming::Event::Incoming(Some(Incoming::Activate))) {
                     writes.stop().await;
                     // The promoted connection has not answered this route's probes yet.
-                    liveness = Liveness::new();
+                    fresh_host_lease(&mut liveness, &mut doubted);
                 }
                 #[cfg(feature = "remote")]
                 process_priming(event, &mut hot, &mut connection, &mut attachments, &mut routes, &mut pending, &changes, &mut writes).await;
@@ -972,9 +988,17 @@ async fn run_actor(
                 match event {}
             }
             _ = ticks.tick(), if !attachments.is_empty() => {
-                let (nonce, sent_us) = liveness.ping();
+                // Local FIFO pressure says nothing about peer health. A skipped
+                // probe starts no reply lease; outstanding leases still expire.
+                let probe_ok = !control_ready || {
+                    let (nonce, sent_us) = liveness.ping();
+                    write_frame(link, 0, &Frame::Ping { nonce, sent_us }).await
+                };
                 let available = matches!(*session_inventory.borrow(), SessionInventoryState::Available(_));
-                if (liveness.expired() || !write_frame(link, 0, &Frame::Ping { nonce, sent_us }).await
+                // One miss may be a single lost packet held behind retransmission:
+                // the windows show reconnecting and the link stays [D300].
+                report_doubt(&mut liveness, &mut doubted, &attachments);
+                if (liveness.retired() || !probe_ok
                     || !route_proofs::tick(link, &mut attachments, &mut routes, &mut pending, available, &mut probe_queue).await)
                     && let Some(old) = connection.take() {
                         #[cfg(feature = "remote")]
@@ -1086,7 +1110,11 @@ async fn run_actor(
                     changes.send_replace(());continue;
                 }
                 if let Incoming::Pong { stream_id: 0, nonce, sent_us } = incoming {
-                    liveness.pong(nonce, sent_us);
+                    // The reply that clears doubt confirms the same windows on the same link.
+                    let doubtful = liveness.doubtful();
+                    if liveness.pong(nonce, sent_us) && doubtful {
+                        notify_doubt(true, &mut doubted, &attachments);
+                    }
                     continue;
                 }
                 if let Incoming::SessionInventory(ids) = incoming {
@@ -2551,8 +2579,14 @@ async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &F
         {
             return false;
         }
-        // Admission is guarded by queue readiness in the single actor turn.
-        return sender.try_send(Bytes::from(encoded)).is_ok();
+        // Reliable control admission is guarded by readiness in the single
+        // actor turn. A best-effort Pong may lose that slot to queued work;
+        // let the peer's reply deadline decide health instead of retiring here.
+        return match sender.try_send(Bytes::from(encoded)) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => matches!(frame, Frame::Pong { .. }),
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        };
     }
     let (peer, encode) = (&mut connection.peer, &mut connection.encode);
     if encode_muxed_frame_into(stream_id, frame, encode).is_err() {
@@ -2571,12 +2605,19 @@ async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &F
     )
 }
 
+#[cfg_attr(test, track_caller)]
 fn connection_lost(
     connection: AgentConnection,
     attachments: &mut HashMap<u64, AttachmentState>,
     routes: &mut HashMap<u32, u64>,
     pending: &mut HashMap<u32, PendingCall>,
 ) {
+    // Measurement fixtures name the actor branch that retired a primary.
+    #[cfg(test)]
+    TEST_CLOSE_LINES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(std::panic::Location::caller().line());
     routes.clear();
     notify_reconnecting(attachments);
     for (_, call) in pending.drain() {
@@ -2585,6 +2626,58 @@ fn connection_lost(
     // An old child gets bounded TERM/KILL cleanup independently of recovery.
     // Accepted shim input and surviving session processes remain authoritative.
     tokio::spawn(cleanup_connection(connection));
+}
+
+/// A new or promoted host link starts a fresh lease with no doubt episode: a
+/// doubt raised on an earlier link never confirms windows on this one [#234].
+fn fresh_host_lease(liveness: &mut Liveness, doubted: &mut Vec<u64>) {
+    *liveness = Liveness::host_link();
+    doubted.clear();
+}
+
+/// One tick of doubt reporting for the primary host link [D300]. Every tick of
+/// a doubt episode offers the notice again, so a window whose queue was full
+/// when the episode began is told once it has room (it is skipped while it is
+/// already in `doubted`). The recovery side retries the same way [#234].
+fn report_doubt(
+    liveness: &mut Liveness,
+    doubted: &mut Vec<u64>,
+    attachments: &HashMap<u64, AttachmentState>,
+) {
+    if liveness.doubt_started() || liveness.doubtful() {
+        notify_doubt(false, doubted, attachments);
+    } else if !doubted.is_empty() {
+        notify_doubt(true, doubted, attachments);
+    }
+}
+
+/// Tells settled windows that the shared host link is doubtful, or that it
+/// answered again [D300]. Doubt never changes the link, and recovery confirms
+/// only the windows that doubt reached; replays and rebinds own their fences.
+/// A window whose queue is full keeps its place: it is told on a later tick,
+/// so none waits for a confirmation it never receives and none is retired.
+fn notify_doubt(
+    recovered: bool,
+    doubted: &mut Vec<u64>,
+    attachments: &HashMap<u64, AttachmentState>,
+) {
+    let settled = |a: &AttachmentState| !a.awaiting_ack && !a.proof_rebind_pending;
+    if recovered {
+        doubted.retain(|id| {
+            attachments.get(id).is_some_and(|a| {
+                settled(a) && a.output.try_send(TerminalOutput::Recovered).is_err()
+            })
+        });
+    } else {
+        for (&id, a) in attachments {
+            if settled(a)
+                && !doubted.contains(&id)
+                && a.output.try_send(TerminalOutput::LinkDoubt).is_ok()
+            {
+                doubted.push(id);
+            }
+        }
+    }
 }
 
 /// A stalled host does not retire its surviving PTYs. A full consumer still
@@ -2760,6 +2853,10 @@ async fn next_writes(writes: &mut writes::State) -> (u32, bool) {
 async fn next_writes(_state: &mut ()) -> (u32, bool) {
     std::future::pending().await
 }
+
+/// Source lines of every `connection_lost` call, in order, for diagnostics.
+#[cfg(test)]
+pub(crate) static TEST_CLOSE_LINES: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
 
 #[cfg(all(test, feature = "remote"))]
 pub(crate) fn test_control_queue_state(peer: std::net::SocketAddr) -> Option<(bool, usize)> {

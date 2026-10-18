@@ -206,13 +206,14 @@ impl RemoteBackend {
                 host,
                 published: false,
             };
-            let existing: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)))")
-                .bind(&authority.owner).bind(address).bind(&lookup).bind(&lookup).fetch_one(&self.issuer.store().0).await.map_err(|_|unavailable())?;
-            if existing {
-                let mut failure =
-                    Failure::install("This host is already added. Open its terminal from Console.");
-                failure.already_added = true;
-                return Err(failure);
+            let existing: Option<Vec<u8>> = sqlx::query_scalar("SELECT h.id FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)) ORDER BY (b.address=?) DESC, h.id LIMIT 1")
+                .bind(&authority.owner).bind(address).bind(&lookup).bind(&lookup).bind(address).fetch_optional(&self.issuer.store().0).await.map_err(|_|unavailable())?;
+            if let Some(host_id) = existing {
+                let host_id = Uuid::from_slice(&host_id).map_err(|_| unavailable())?;
+                return Err(Failure::install(
+                    "This host is already added. Open its terminal from Console.",
+                )
+                .with_existing_host_id(host_id));
             }
             if let Some(register) = register {
                 register(host)?;
@@ -1006,6 +1007,8 @@ async fn canary_output(
             TerminalOutput::Closed { .. } => break,
             TerminalOutput::Ack { .. }
             | TerminalOutput::Reconnecting
+            | TerminalOutput::LinkDoubt
+            | TerminalOutput::Recovered
             | TerminalOutput::RouteExpired => {}
         }
     }
@@ -1108,6 +1111,14 @@ mod tests {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/src/bootstrap_review_cleanup_tests.rs"
+        ));
+    }
+
+    mod already_added_breakit {
+        //! Break-it review of the already-added host id (#189).
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/bootstrap_already_added_breakit_tests.rs"
         ));
     }
 
@@ -1390,6 +1401,13 @@ mod tests {
         let event = finished(&batch).await;
         assert_eq!(event.step, Step::Failed);
         assert!(event.message.contains("administrator passkey"));
+        let failure = event.failure.as_ref().unwrap();
+        assert!(
+            serde_json::to_value(failure)
+                .unwrap()
+                .get("host_id")
+                .is_none()
+        );
         assert_eq!(f.opens.load(Ordering::Relaxed), 1);
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_hosts")
             .fetch_one(&f.pool)
@@ -1404,7 +1422,12 @@ mod tests {
         sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,'user@fixture',NULL)").bind(f.prior.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
         let event = finished(&start(&f, "owner")).await;
         assert_eq!(event.step, Step::Failed);
-        assert!(event.failure.unwrap().already_added);
+        let failure = event.failure.as_ref().unwrap();
+        assert!(failure.already_added);
+        assert_eq!(
+            serde_json::to_value(failure).unwrap()["host_id"],
+            f.prior.to_string()
+        );
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM remote_hosts")
                 .fetch_one(&f.pool)
@@ -1417,7 +1440,19 @@ mod tests {
     #[tokio::test]
     async fn foreign_or_revoked_authority_never_opens_ssh() {
         let f = fixture(true).await;
-        assert_eq!(finished(&start(&f, "stranger")).await.step, Step::Failed);
+        sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,'user@fixture',NULL)")
+            .bind(f.prior.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let foreign = finished(&start(&f, "stranger")).await;
+        assert_eq!(foreign.step, Step::Failed);
+        assert!(
+            serde_json::to_value(foreign.failure.as_ref().unwrap())
+                .unwrap()
+                .get("host_id")
+                .is_none()
+        );
         sqlx::query("DELETE FROM sessions")
             .execute(&f.pool)
             .await

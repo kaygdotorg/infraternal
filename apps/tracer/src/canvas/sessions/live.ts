@@ -100,7 +100,15 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     private ghostTimer = 0;
     private connectionStabilityTimer = 0;
     private connectedNow = false;
-    get connected(): boolean { return this.connectedNow; }
+    /** The host link missed a reply but is kept (#234): the pill reads reconnecting until it answers or retires. */
+    private doubted = false;
+    get connected(): boolean { return this.connectedNow && !this.doubted; }
+    private setDoubted(doubted: boolean): void {
+      if (doubted === this.doubted) return;
+      const before = this.connected;
+      this.doubted = doubted;
+      if (before !== this.connected) this.connectionChanged?.();
+    }
     private setConnected(connected: boolean, settleMs = 0): void {
       if (!connected) {
         window.clearTimeout(this.connectionStabilityTimer);
@@ -117,8 +125,11 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         return;
       }
       if (connected === this.connectedNow) return;
+      const before = this.connected;
       this.connectedNow = connected;
-      this.connectionChanged?.();
+      // A dropped or retargeted link replaces the doubt; a fresh attach starts undoubted.
+      if (!connected) this.doubted = false;
+      if (before !== this.connected) this.connectionChanged?.();
     }
     /** Marks for the switch timeline (`sw:<n>:<step>`); a few microseconds each, read by the real specs. */
     private readonly n = ++serial;
@@ -190,6 +201,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         ...(first ? options.firstHooks : {}),
         onAttached: (resumed, terminal) => { this.setConnected(true, resumed ? 300 : 0); this.mark("attached"); if (!firstSettled) window.setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(settle)), 1000); if (first) options.firstHooks?.onAttached?.(resumed, terminal); },
         onPaintedOutput: (bytes, at, sequence) => { if (!firstSettled && this.client?.readScreenText().trim()) settle(); if (!this.painted) { this.painted = true; this.mark("painted"); this.endGhost(); } if (first) options.firstHooks?.onPaintedOutput?.(bytes, at, sequence); },
+        onLinkDoubt: (doubted) => this.setDoubted(doubted),
         onDisconnected: (forced) => { this.setConnected(false); if (first) options.firstHooks?.onDisconnected?.(forced); },
         onExited: (status) => { this.exited?.(status); if (first) options.firstHooks?.onExited?.(status); },
         // The ghost of the last screen sits in the host element, which the ended state hides.

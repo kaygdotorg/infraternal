@@ -2,10 +2,11 @@
 //!
 //! Each terminal owns one pending output frame. Input/Resize commands have eight slots;
 //! shared-stream Credit is accumulated in constant space without occupying that FIFO;
-//! a full queue retires only that stream, cancelling its shim link. Unacknowledged
+//! Input/Resize overload retires only that stream; probes may be skipped. Unacknowledged
 //! input is replayed on attachment using shim-owned per-writer cursors. Bulk output has eight slots
 //! and awaits capacity. Control replies use a separate eight-slot lane, selected
-//! first at frame boundaries; reply overload retires the channel without stalling dispatch. Starved sessions close
+//! first at frame boundaries; reply producers wait for bounded FIFO capacity. Native
+//! terminal dispatch continues on its independent streams. Starved sessions close
 //! their shim socket after 250 ms, then reconnect for a fresh credit-funded
 //! ring replay or a flagged bounded repaint. Unviewed sessions stay disconnected so their PTYs keep progressing.
 //! A closed shim or failed terminal task closes only its mux stream. A session
@@ -247,8 +248,9 @@ async fn write_event(
     .await
 }
 
-// Shared dispatch must never await the capacity consumed by a stalled writer.
-// Unacknowledged input remains with the shim and can be replayed on reconnect.
+// Only shared dispatch owns this sender. Reply-producing select branches are
+// polled with room for their largest turn: census then open Result. No branch
+// waits inline for a stalled writer or discards a reliable control response.
 fn reply(tx: &mpsc::Sender<Message>, message: Message) -> io::Result<()> {
     tx.try_send(message).map_err(|error| match error {
         mpsc::error::TrySendError::Full(_) => {
@@ -526,6 +528,8 @@ async fn run_channel<const SESSION_ONLY: bool>(
     };
     let (tx, rx) = mpsc::channel(8);
     let (control, control_rx) = mpsc::channel(8);
+    #[cfg(test)]
+    let control_observer = census_retry_tests::observer(&state);
     let dispatch = async {
         let mut published_sessions = None;
         let mut census_pending =
@@ -553,6 +557,14 @@ async fn run_channel<const SESSION_ONLY: bool>(
             Result<Session, infraternal_plugin_api::admission::OpenRefusal>,
         )> = JoinSet::new();
         loop {
+            // One selected source emits at most two replies. The sole producer
+            // cannot lose this capacity while polling a branch. Deferring the
+            // source retains its existing bounded state and response ordering.
+            let control_ready = control.capacity() >= 2;
+            #[cfg(test)]
+            if let Some(observer) = &control_observer {
+                observer.publish(&control, census_pending);
+            }
             tokio::select! {
                 changed = retirements.changed() => {
                     changed?;
@@ -564,9 +576,9 @@ async fn run_channel<const SESSION_ONLY: bool>(
                     registry.refresh();
                     census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
                 }
-                capacity = control.reserve(), if census_pending => {
-                    // A full queue keeps the latest census pending. Capacity is
-                    // the only retry wakeup; idle channels have no scheduled work.
+                capacity = control.reserve_many(if census_pending { 1 } else { 2 }), if census_pending || !control_ready => {
+                    // A pending census needs one slot; a fresh reply turn needs
+                    // two. Capacity is the only retry wakeup, with no idle timer.
                     drop(capacity.map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?);
                     census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
                 }
@@ -576,7 +588,7 @@ async fn run_channel<const SESSION_ONLY: bool>(
                     } else {
                         std::future::pending().await
                     }
-                }, if !SESSION_ONLY => {
+                }, if !SESSION_ONLY && control_ready => {
                     let (call_id,result)=result.ok_or_else(||sessions::invalid("plugin worker stopped"))?;
                     match result {
                         Ok(result)=>reply(&control,Message::Deferred(0,call_id,result))?,
@@ -589,7 +601,7 @@ async fn run_channel<const SESSION_ONLY: bool>(
                     } else {
                         std::future::pending().await
                     }
-                }, if !SESSION_ONLY => {
+                }, if !SESSION_ONLY && control_ready => {
                     let event=match event {
                         Ok(event)=>event,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>b"{\"type\":\"plugin.event\",\"id\":\"plugins.resync\"}".to_vec(),
@@ -597,7 +609,7 @@ async fn run_channel<const SESSION_ONLY: bool>(
                     };
                     reply(&control,Message::Event(0,event))?;
                 }
-                result = jobs.join_next(), if !jobs.is_empty() => {
+                result = jobs.join_next(), if control_ready && !jobs.is_empty() => {
                     let (stream, result) = result.ok_or_else(|| sessions::invalid("missing relay task"))?.map_err(io::Error::other)?;
                     // Close/re-attach may reuse a stream before the old task exits.
                     // Its completion must not remove the replacement's live sender.
@@ -610,7 +622,7 @@ async fn run_channel<const SESSION_ONLY: bool>(
                     registry.refresh();
                     census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
                 }
-                result = renewals.join_next(), if !SESSION_ONLY && !renewals.is_empty() => {
+                result = renewals.join_next(), if !SESSION_ONLY && control_ready && !renewals.is_empty() => {
                     // The private image never starts these jobs. Keep their result
                     // handlers outside that monomorph as well as the select mask.
                     if SESSION_ONLY { return Err(sessions::invalid("session image cannot complete identity renewal")); }
@@ -618,7 +630,7 @@ async fn run_channel<const SESSION_ONLY: bool>(
                     let (ok, json) = match result { Ok(json) => (true, json), Err(_) => (false, b"{}".to_vec()) };
                     reply(&control, Message::Result(0, call_id, ok, json))?;
                 }
-                result = opens.join_next(), if !SESSION_ONLY && !opens.is_empty() => {
+                result = opens.join_next(), if !SESSION_ONLY && control_ready && !opens.is_empty() => {
                     // The private image never starts these jobs. Keep their result
                     // handlers outside that monomorph as well as the select mask.
                     if SESSION_ONLY { return Err(sessions::invalid("session image cannot complete session launch")); }
@@ -639,7 +651,7 @@ async fn run_channel<const SESSION_ONLY: bool>(
                         Err(reason) => reply(&control, Message::Result(stream, call_id, false, reason.json()?))?,
                     }
                 }
-                decoded = receive.next(socket) => {
+                decoded = receive.next(socket), if control_ready => {
                     let decoded = decoded?;
                     let stream = decoded.stream_id;
                     if execution_uid.is_some() && (stream % 2 != 0 || matches!(decoded.frame, Frame::Hello { .. })) {
@@ -647,7 +659,11 @@ async fn run_channel<const SESSION_ONLY: bool>(
                     }
                     match decoded.frame {
                         Frame::Hello {version: 1, ..} if stream == 0 => {}
-                        Frame::Ping {nonce, sent_us} if stream == 0 => reply(&control, Message::Pong(0, nonce, sent_us))?,
+                        Frame::Ping {nonce, sent_us} if stream == 0 => {
+                            reply(&control, Message::Pong(0, nonce, sent_us))?;
+                            #[cfg(test)]
+                            if let Some(observer) = &control_observer { observer.replied(); }
+                        },
                         #[cfg(feature = "remote")]
                         Frame::Call {call_id, action_id, input_json} if stream == 0 && matches!(action_id, "transport.csr" | "transport.certificate") && renewal.is_some() => {
                             if !renewals.is_empty() || input_json.len() > infraternal_plugin_api::channel::MAX_CONTROL_JSON {
@@ -753,13 +769,6 @@ async fn run_channel<const SESSION_ONLY: bool>(
                         }
                     }
                 }
-            }
-            // A coalesced request burst can consume all slots in one poll,
-            // before the outer select polls an otherwise ready writer. Give
-            // it one scheduling turn at the batch boundary, never wait for
-            // capacity. A genuinely stalled writer still refuses the next reply.
-            if control.capacity() == 0 {
-                tokio::task::yield_now().await;
             }
         }
     };

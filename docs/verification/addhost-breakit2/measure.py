@@ -28,6 +28,74 @@ def generated_key():
     return private, "ssh-ed25519 " + base64.b64encode(raw).decode()
 
 
+def stage_packet_filter():
+    """Copy this host's packet-filter frontend into the target; the image has none."""
+    docker("cp", "/usr/sbin/nft", f"{TARGET}:/usr/sbin/nft", stdout=subprocess.DEVNULL)
+    listing = subprocess.check_output(["/usr/bin/ldd", "/usr/sbin/nft"], text=True)
+    for line in listing.splitlines():
+        fields = line.split()
+        library = fields[2] if len(fields) > 2 and fields[1] == "=>" else ""
+        if library.startswith("/") and subprocess.run(DOCKER + ["exec", TARGET, "test", "-e", library]).returncode:
+            docker("cp", "-L", library, f"{TARGET}:{library}", stdout=subprocess.DEVNULL)
+
+
+def mesh_state():
+    """Report the mesh kernel objects on the target by name only."""
+    link = subprocess.run(DOCKER + ["exec", TARGET, "ip", "link", "show", "infraternal0"], capture_output=True).returncode == 0
+    tables = subprocess.run(DOCKER + ["exec", TARGET, "sh", "-c", "[ -x /usr/sbin/nft ] && /usr/sbin/nft list tables || true"], capture_output=True, text=True).stdout
+    return f"mesh_link_present={link} mesh_table_present={'inet infraternal_mesh' in tables}"
+
+
+# Everything removal must take away, per mode, as one shell probe on the target.
+REMOVAL_PROBE = """
+set -u
+if [ "$1" = root ]; then
+  base=/var/lib/infraternal unit=/etc/systemd/system/infraternal-agent.service launcher=/usr/local/bin/infraternal
+  active=$(systemctl is-active infraternal-agent.service || true)
+  scopes=$(systemctl list-units --all --plain --no-legend 'infraternal-session-*' | wc -l)
+else
+  base=/home/target/.local/share/infraternal unit=/home/target/.config/systemd/user/infraternal-agent.service launcher=/home/target/.local/bin/infraternal
+  user() { runuser -u target -- env XDG_RUNTIME_DIR=/run/user/1101 "$@"; }
+  active=$(user systemctl --user is-active infraternal-agent.service || true)
+  scopes=$(user systemctl --user list-units --all --plain --no-legend 'infraternal-session-*' | wc -l)
+fi
+processes=0
+for comm in /proc/[0-9]*/comm; do
+  [ "$(cat "$comm" 2>/dev/null)" = infraternal ] && processes=$((processes + 1))
+done
+present() { if [ -e "$1" ] || [ -L "$1" ]; then echo True; else echo False; fi; }
+echo "unit_active=$active session_scopes=$scopes infraternal_processes=$processes data_present=$(present $base) unit_present=$(present $unit) launcher_present=$(present $launcher)"
+"""
+
+
+def prove_removed(mode):
+    """Poll until the host-side uninstall finished (bounded by its 30 s limit), then require nothing of it left.
+
+    The rootful seed is a marked interface and table this installation never
+    recorded, as the server's own infraternal agent would own on its machine:
+    uninstall must leave both (#235). The kernel tests in
+    crates/plugins/mesh/tests/review_retire_ownership.rs prove that a
+    recorded interface and filter are removed.
+    """
+    clean = "unit_active=inactive session_scopes=0 infraternal_processes=0 data_present=False unit_present=False launcher_present=False"
+    seeded = mode == "root"
+    kept = f"mesh_link_present={seeded} mesh_table_present={seeded}"
+    deadline = time.monotonic() + 45
+    while True:
+        state = subprocess.run(DOCKER + ["exec", TARGET, "sh", "-c", REMOVAL_PROBE, "probe", mode], capture_output=True, text=True).stdout.strip()
+        mesh = mesh_state()
+        done = state == clean and mesh == kept
+        if done or time.monotonic() > deadline:
+            break
+        time.sleep(0.25)
+    print(f"REMOVED mode={mode} {state} {mesh}", flush=True)
+    if seeded:
+        # Leave the fixture as the seed found it for the re-add run.
+        subprocess.run(DOCKER + ["exec", TARGET, "ip", "link", "delete", "infraternal0"], capture_output=True)
+        subprocess.run(DOCKER + ["exec", TARGET, "/usr/sbin/nft", "delete table inet infraternal_mesh"], capture_output=True)
+    assert done, "removal left infraternal on the host, or took a mesh object it did not create"
+
+
 def main():
     global TARGET
     parser = argparse.ArgumentParser(description=__doc__)
@@ -37,6 +105,7 @@ def main():
     parser.add_argument("--ssh-server", choices=["openssh", "netbird"], default="openssh")
     parser.add_argument("--netbird-binary", type=Path, help="owned standalone real server fixture")
     parser.add_argument("--expect-failure", action="store_true", help="assert refusal, retired authority and empty owned host state")
+    parser.add_argument("--remove", action="store_true", help="after joining, remove the host as the canvas does and prove nothing is left on it (#235)")
     parser.add_argument("--fresh", action="store_true", help="recreate only this lane target before measuring")
     parser.add_argument("--test-binary", type=Path, required=True)
     parser.add_argument("--payload", type=Path, required=True)
@@ -179,6 +248,35 @@ def main():
             environment["INFRATERNAL_REMOTE_TEST_SESSION_BINARY"] = str(args.session_payload)
         if args.expect_failure:
             environment["BREAKIT2_EXPECT_FAILURE"] = "1"
+        seeder = None
+        if args.remove:
+            if args.expect_failure:
+                parser.error("--remove needs a successful join")
+            environment["BREAKIT2_REMOVE"] = "1"
+            for name in ("removal-ready", "removal-go"):
+                (scratch / name).unlink(missing_ok=True)
+            if args.mode == "root":
+                stage_packet_filter()
+            import threading
+            def seed():
+                # Wait for the joined host, then place marked kernel objects
+                # this installation never recorded, as another infraternal
+                # agent on the machine would own them. Removal must leave both
+                # and name them (#235).
+                deadline = time.monotonic() + 300
+                while not (scratch / "removal-ready").exists():
+                    if time.monotonic() > deadline:
+                        return
+                    time.sleep(0.05)
+                if args.mode == "root":
+                    for command in (["ip", "link", "add", "infraternal0", "type", "wireguard"],
+                                    ["ip", "link", "set", "infraternal0", "alias", "infraternal.mesh.v1"],
+                                    ["/usr/sbin/nft", "add table inet infraternal_mesh { comment \"infraternal.mesh.v1\"; }"]):
+                        docker("exec", TARGET, *command)
+                    print("SEEDED " + mesh_state(), flush=True)
+                (scratch / "removal-go").write_bytes(b"")
+            seeder = threading.Thread(target=seed, daemon=True)
+            seeder.start()
         time.sleep(0.3)
         command = [str(args.test_binary.resolve()), live_tests[0], "--exact", "--ignored", "--nocapture"]
         if os.environ.get("ADDHOST_FAST_TCP_PROFILE") == "1":
@@ -198,6 +296,9 @@ def main():
                 sampler.join()
         else:
             result = subprocess.run(command, input=private, env=environment, cwd=ROOT)
+        if result.returncode == 0 and args.remove:
+            prove_removed(args.mode)
+            raise SystemExit(0)
         if result.returncode == 0 and not args.expect_failure:
             home = "/root" if args.user == "root" else "/home/target"
             base = "/var/lib/infraternal" if args.mode == "root" else f"{home}/.local/share/infraternal"

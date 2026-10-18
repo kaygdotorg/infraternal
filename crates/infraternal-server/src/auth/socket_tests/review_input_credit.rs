@@ -536,13 +536,13 @@ async fn idle_probe_authority_refreshes_expiry_after_authorized_activity() {
     let mut authority = crate::websocket::probe_authority::Lease::new(&state, &f.user, &f.session)
         .await
         .unwrap();
-    assert!(
-        f.auth
-            .socket_activity(&f.session, &f.user, now)
-            .await
-            .unwrap()
-            > now + 5
-    );
+    f.auth.renewal(&f.session, &f.user, ()).await;
+    let renewed: i64 = sqlx::query_scalar("SELECT expires FROM sessions WHERE token_hash=?")
+        .bind(hash(&f.session))
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert!(renewed > now + 5);
     tokio::time::advance(Duration::from_secs(6)).await;
     authority
         .run(&state, &f.user, &f.session, async { Ok::<(), ()>(()) })

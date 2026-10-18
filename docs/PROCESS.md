@@ -143,10 +143,16 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,080,848 bytes |
-  | `aarch64-unknown-linux-musl` | 19,316,360 bytes |
+  | `x86_64-unknown-linux-musl` | 21,080,144 bytes |
+  | `aarch64-unknown-linux-musl` | 19,322,648 bytes |
 
-  These are the release-retry measurements (#230 merged into the #189
+  These are the release-2 measurements: the release-retry line (next paragraph,
+  21,080,848 / 19,316,360) plus D300 host-link doubt (#234), already-added
+  "Open a terminal" (#189), host removal that uninstalls itself (#235) and
+  authority reads retried through a busy store (#240): -704 / +6,288 bytes
+  in all (D243).
+
+  The earlier release-retry measurements (#230 merged into the #189
   production line, 3048580c1): the production line measured 21,090,448 /
   19,316,264 bytes; the merge is 9,920 / 160 bytes smaller. Taking the
   commit guard only after terminal proof adds back 256 / 128 bytes, and

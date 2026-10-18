@@ -24,6 +24,16 @@ impl EarlyTerminal {
         println!("PROOF early_prompt=interactive input_before=confirmed session={session} writer={}", terminal.handle.stream_id());
         terminal
     }
+    /// A new terminal on an existing host answers input, then exits (#189).
+    pub(super) async fn open_on_named_host(actor: &EmbeddedAgent, session: Uuid) {
+        // Terminal streams are even; 2 belongs to the early session above.
+        let (handle, output) = actor.attach(*session.as_bytes(), 0, 0, 4).await.unwrap().split();
+        let mut terminal = Self { handle, output, input: 0, confirmed: 0, received: Vec::new() };
+        terminal.send(&Frame::Credit { bytes: 65536 }).await;
+        terminal.command(b"printf 'OPENED_%s\\n' TERMINAL\n", b"OPENED_TERMINAL\r\n").await;
+        terminal.send(&Frame::Input {in_seq: terminal.input, bytes: b"exit\n"}).await;
+        println!("PROOF open_terminal=interactive session={session} input_acked_bytes={}", terminal.confirmed);
+    }
     async fn send(&self, frame: &Frame<'_>) {
         let mut wire = Vec::new();
         encode_muxed_frame_into(1, frame, &mut wire).unwrap();
@@ -36,7 +46,7 @@ impl EarlyTerminal {
                 self.received.extend_from_slice(&bytes);
             },
             TerminalOutput::Ack {in_seq_acked} => self.confirmed = self.confirmed.max(in_seq_acked),
-            TerminalOutput::Event {..} | TerminalOutput::Reconnecting => {},
+            TerminalOutput::Event {..} | TerminalOutput::Reconnecting | TerminalOutput::LinkDoubt | TerminalOutput::Recovered => {},
             TerminalOutput::Closed {..} | TerminalOutput::RouteExpired => panic!("the original early session closed or expired during handover"),
         }
     }

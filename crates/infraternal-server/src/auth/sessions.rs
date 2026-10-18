@@ -123,19 +123,40 @@ impl Auth {
         self.revocations.subscribe()
     }
 
-    /// Recheck every hot-path event with a read, renewing active sessions at most once a minute.
-    /// Return the resulting expiry so a watchdog can reuse this exact authority read.
-    pub(crate) async fn socket_activity(&self, token: &str, user: &str, now: i64) -> Result<i64> {
-        let expiry = self.live_expiry(token, user, now).await?;
-        if expiry < now + SESSION - 60 {
-            let changed = sqlx::query("UPDATE sessions SET expires=? WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>?")
-                .bind(now + SESSION).bind(hash(token)).bind(user).bind(now).execute(&self.pool).await?.rows_affected();
-            if changed != 1 {
-                return Err(Error::Denied);
-            }
-            return Ok(now + SESSION);
-        }
-        Ok(expiry)
+    /// Whether a live session read at `now` with this `expiry` is due for its
+    /// at-most-once-a-minute slide. Only ever asked after a read proved it live.
+    pub(crate) fn renewal_due(expiry: i64, now: i64) -> bool {
+        expiry < now + SESSION - 60
+    }
+
+    /// Slide an active socket's session forward by a full session, off the
+    /// read path (#240). The future owns everything it needs, so the caller
+    /// can run it without holding the socket's frame. It reads the clock
+    /// when the UPDATE runs, and `expires>now` keeps it from extending a
+    /// session that ended, or reviving one that was revoked (deleted), while
+    /// it waited. The write may wait on SQLite's busy timeout behind another
+    /// writer; the caller bounds how many of these run at once. Its outcome is
+    /// not reported: a failed or skipped renewal is retried on a later frame,
+    /// and the socket's own reads still see the old, still-valid expiry.
+    /// `hold` is dropped when the renewal ends or is dropped; the caller uses
+    /// it to return its bounds. The task is boxed as an `Operation` so spawning
+    /// it reuses the task code already compiled for plugin node work (D243).
+    pub(crate) fn renewal(
+        &self,
+        token: &str,
+        user: &str,
+        hold: impl Send + 'static,
+    ) -> infraternal_plugin_api::Operation<'static, ()> {
+        let pool = self.pool.clone();
+        let token_hash = hash(token);
+        let user = user.to_owned();
+        Box::pin(async move {
+            let _hold = hold;
+            // SQLite's own clock, read when the statement runs: a renewal that
+            // waited behind a writer judges the session at that moment.
+            let _ = sqlx::query("UPDATE sessions SET expires=unixepoch()+? WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch()")
+                .bind(SESSION).bind(token_hash).bind(user).execute(&pool).await;
+        })
     }
 
     /// Read a socket's actual deadline without sliding it during idle checks.
