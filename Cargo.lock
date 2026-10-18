@@ -1420,6 +1420,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "infraternal-plugin-canvas"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "infraternal-plugin-api",
+ "infraternal-protocol",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "infraternal-plugin-host-facts"
 version = "0.1.0"
 dependencies = [

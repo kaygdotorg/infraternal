@@ -1,0 +1,19 @@
+# Server-owned account layout references and semantic conflict reduction [180,183,248].
+[package]
+name = "infraternal-plugin-canvas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+infraternal-plugin-api = { workspace = true, features = ["socket-host"] }
+infraternal-protocol.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+uuid.workspace = true

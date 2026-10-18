@@ -14,6 +14,7 @@ members = [
     "crates/plugins/ssh",
     "crates/plugins/relay",
     "crates/plugins/backup",
+    "crates/plugins/canvas",
     "crates/plugins/host-facts",
     "crates/plugins/mesh",
     "crates/plugins/remote",
