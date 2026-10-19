@@ -176,3 +176,10 @@ COMMIT;
 
 A migration that rewrites or drops data cannot be rewound this way; its pull
 request must say so and name the backup to restore.
+
+Migration `0028_remote_host_hostname` (#236) adds the retained hostname column
+and replaces existing UUID-shaped Mesh placeholders with audited unnamed
+labels. A deliberate rewind across it restores the pre-migration database
+backup; do not remove its bookkeeping row and run the older binary against the
+rewritten names. The deploy script's automatic health-check rollback already
+restores the database copy it took before migration.
