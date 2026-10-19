@@ -2,11 +2,17 @@
 import ast
 import io
 import json
+import os
 import pathlib
-import sys
-import unittest
+import shlex
 import signal
+import subprocess
+import sys
+import tempfile
+import unittest
 from types import SimpleNamespace
+
+SCRATCH = pathlib.Path.home() / '.cache/codex-scratch/review-app-windows-r3b/python-tests'
 
 
 class RecordingTypingTests(unittest.TestCase):
@@ -97,6 +103,64 @@ class CaptureRetirementTests(unittest.TestCase):
         namespace['stop_capture']()
         self.assertEqual(actions, ['sealed', ('source', signal.SIGINT), (101, signal.SIGTERM)])
 
+    def test_refusal_marker_blocks_a_later_capture_launch(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        stop = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'stop_capture')
+        wrapper = next(node for node in ast.walk(tree)
+                       if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                       and node.func.attr == 'write_text' and node.args
+                       and 'bridge to an independently launched signed app' in ast.unparse(node.args[0]))
+        SCRATCH.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
+            runtime = pathlib.Path(temporary)
+            stopped = []
+            namespace = {
+                'runtime': runtime, 'signal': signal,
+                'source': SimpleNamespace(send_signal=lambda value: stopped.append(value)),
+                'capture_helpers': set(), 'helper_births': {}, 'subprocess': subprocess, 'os': os,
+            }
+            exec(compile(ast.Module(body=[stop], type_ignores=[]), str(source), 'exec'), namespace)
+            namespace['stop_capture']()
+            self.assertEqual(stopped, [signal.SIGINT])
+
+            marker_output = runtime / 'capture-started'
+            script = eval(compile(ast.Expression(body=wrapper.args[0]), str(source), 'eval'), {
+                'runtime': runtime, 'shlex': shlex,
+                'argv': ['/usr/bin/touch', str(marker_output)], 'args': {},
+            })
+            executable = runtime / 'native'
+            executable.write_text(script)
+            executable.chmod(0o700)
+            result = subprocess.run(['/bin/sh', str(executable)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertFalse(marker_output.exists())
+
+    def test_same_second_pid_reuse_is_not_signalled(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        function = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'stop_capture')
+        actions = []
+        start = 'Mon Oct 19 19:00:00 2026'
+        namespace = {
+            'runtime': pathlib.Path('/unused'), 'signal': signal,
+            'source': SimpleNamespace(send_signal=lambda value: actions.append(('source', value))),
+            'helper_births': {101: start}, 'capture_helpers': {101},
+            # `ps -o lstart` reports second-resolution text, so this models a
+            # different process reusing the same PID within that displayed second.
+            'subprocess': SimpleNamespace(run=lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=start)),
+            'os': SimpleNamespace(kill=lambda pid, value: actions.append((pid, value))),
+        }
+        class Marker:
+            def __truediv__(self, name): return self
+            def open(self, mode):
+                if mode != 'x': raise AssertionError('atomic refusal marker required')
+                return io.StringIO()
+        namespace['runtime'] = Marker()
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        namespace['stop_capture']()
+        self.assertEqual(actions, [('source', signal.SIGINT)])
+
     def test_resource_collection_includes_independent_helpers_by_identity(self):
         source = pathlib.Path(__file__).with_name('measure-mac.py')
         tree = ast.parse(source.read_text())
@@ -112,7 +176,7 @@ class CaptureRetirementTests(unittest.TestCase):
 class ConsentTests(unittest.TestCase):
     """Execute only the consent guard, without importing or launching the browser driver."""
 
-    def check_prompt(self, controls, *, own_helper=True, title=None):
+    def check_prompt(self, controls, *, own_helper=True, title=None, prompt_text='requesting to bypass'):
         source = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path(__file__).with_name('measure-mac.py')
         tree = ast.parse(source.read_text())
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'consent_check')
@@ -123,7 +187,7 @@ class ConsentTests(unittest.TestCase):
             if name == 'list_windows':
                 return {'windows': [{'title': title or ('InfraternalCaptureHelper' if own_helper else 'Unrelated application'), 'pid': 101, 'window_id': 202}]}
             if name == 'get_window_state':
-                return {'text': 'requesting to bypass', 'controls': controls}
+                return {'text': prompt_text, 'controls': controls}
             if name == 'get_desktop_state':
                 return {}
             return {}
@@ -169,6 +233,15 @@ class ConsentTests(unittest.TestCase):
         refused, calls = self.check_prompt([{'role': 'button', 'title': 'Allow', 'element_token': 'allow'}], own_helper=False)
         self.assertFalse(refused)
         self.assertEqual(calls, ['list_windows'])
+
+    def test_helper_prompt_text_variant_without_requesting_or_bypass_is_refused(self):
+        refused, calls = self.check_prompt(
+            [{'role': 'button', 'title': 'Allow', 'element_token': 'allow'}],
+            title='InfraternalCaptureHelper would like to record the screen',
+            prompt_text='InfraternalCaptureHelper would like to record the screen',
+        )
+        self.assertTrue(refused)
+        self.assertNotIn('click', calls)
 
 
 class CompositorGeometryTests(unittest.TestCase):
