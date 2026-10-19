@@ -219,6 +219,14 @@ export class AppBinding implements SessionBinding {
   private paintControl(control: ControlState): void {
     if (this.disposed) return;
     this.lastControl = control;
+    if (control.kind === "none" || control.kind === "view-only" || control.kind === "paused") this.queued.length = 0;
+    // Automatic reacquisition also owns pending input. Defer only this drain so
+    // takeControl can send the current Size before Input; ordinary input stays synchronous.
+    if (control.kind === "controlled" && this.queued.length) queueMicrotask(() => {
+      if (this.disposed || !this.armed() || this.stream.controlState.kind !== "controlled") return;
+      const pending = this.queued.splice(0);
+      for (const input of pending) this.stream.sendInput(input);
+    });
     // Only a live picture carries the control line; a state's own strip owns the slot otherwise.
     if (this.lastState.kind !== "live") return;
     const line = controlLine(control, this.o.machine);
@@ -257,12 +265,7 @@ export class AppBinding implements SessionBinding {
     const c = this.stream.controlState;
     if (c.kind === "view-only" || c.kind === "paused") return;
     if (this.queued.length < 32) this.queued.push(input);
-    if (c.kind === "none") {
-      void this.stream.takeControl().then((ok) => {
-        const pending = this.queued.splice(0);
-        if (ok) for (const i of pending) this.stream.sendInput(i);
-      });
-    }
+    if (c.kind === "none") void this.stream.takeControl();
   }
 
   private endControl(): void {
