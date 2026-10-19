@@ -210,16 +210,19 @@ fn kernel_holds(path: &Path) -> Option<bool> {
 }
 
 /// Waits briefly for the kernel socket dump to forget a just-closed endpoint.
-fn sessions_after_close(runtime: &File) -> Result<(), u8> {
+fn after_close<T: PartialEq>(live: &T, mut inspect: impl FnMut() -> T) -> T {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
     loop {
-        match sessions(runtime) {
-            Err(73) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            result => return result,
+        let result = inspect();
+        if result != *live || std::time::Instant::now() >= deadline {
+            return result;
         }
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
+}
+
+fn sessions_after_close(runtime: &File) -> Result<(), u8> {
+    after_close(&Err(73), || sessions(runtime))
 }
 
 /// Kernel ownership remains observable when a runtime makes descriptors private.
@@ -232,9 +235,15 @@ fn legacy_inspection_finds_a_real_bound_socket() {
     assert_eq!(kernel_holds(&path), Some(true));
     let other = fixture.state().join("other.sock");
     drop(std::os::unix::net::UnixListener::bind(&other).unwrap());
-    assert_eq!(kernel_holds(&other), Some(false));
+    assert_eq!(
+        after_close(&Some(true), || kernel_holds(&other)),
+        Some(false)
+    );
     drop(listener);
-    assert_eq!(kernel_holds(&path), Some(false));
+    assert_eq!(
+        after_close(&Some(true), || kernel_holds(&path)),
+        Some(false)
+    );
 }
 
 /// Names are never read: newline homes and absolute aliases keep the same identity.
@@ -255,7 +264,10 @@ fn legacy_inspection_is_independent_of_the_bound_name() {
         let listener = std::os::unix::net::UnixListener::bind(&bound).unwrap();
         assert_eq!(kernel_holds(&probed), Some(true));
         drop(listener);
-        assert_eq!(kernel_holds(&probed), Some(false));
+        assert_eq!(
+            after_close(&Some(true), || kernel_holds(&probed)),
+            Some(false)
+        );
         fs::remove_file(probed).unwrap();
     }
 }
