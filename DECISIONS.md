@@ -3283,3 +3283,17 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        column is drawn at least at a readable minimum width and the canvas
        scrolls sideways; the saved weights stay exactly what was set, so a
        phone never rewrites the desktop's layout.
+310. **Machine pill uses the machine cards; per-user memory pool agreed
+     (owner, 2026-10-19; completes D309):**
+     - **#94:** "it should indeed replace it". The machine pill's machine
+       section becomes a compact version of the glassy machine cards (name,
+       OS mark, three dot meters, uptime) and opens the full Machine view.
+       One look for machine facts everywhere.
+     - **#205 / D270:** "agreed then". Each person's process keeps its
+       terminal screens and scrollback in one pool of 1/32 of the machine's
+       usable memory, clamped to 80–512 MiB, with a per-session floor of
+       256 KiB–2 MiB. The pool covers only infraternal's own screen memory;
+       programs run in a shell (builds, AI agents) are separate processes
+       and are not limited by it. When the pool is full, a new session is
+       refused with a clear message instead of pushing the machine into
+       swap.
