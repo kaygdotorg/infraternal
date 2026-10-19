@@ -4,6 +4,25 @@
 //! forbid it. Each boundary documents descriptor, pointer and fork invariants.
 #![deny(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+#[cfg(feature = "host-diagnostics")]
+mod host_trace;
+// All arguments disappear from normal builds, including timestamp calls.
+macro_rules! trace_host {
+    ($stage:ident, $session:expr, $fd:expr, $offset:expr, $bytes:expr) => {
+        trace_host!($stage, $session, $fd, $offset, $bytes, 0);
+    };
+    ($stage:ident, $session:expr, $fd:expr, $offset:expr, $bytes:expr, $extra:expr) => {
+        #[cfg(feature = "host-diagnostics")]
+        crate::host_trace::record(
+            crate::host_trace::Stage::$stage,
+            $session,
+            $fd,
+            $offset,
+            $bytes,
+            $extra,
+        );
+    };
+}
 pub mod ended;
 pub mod frame;
 mod locale;
@@ -52,7 +71,6 @@ pub fn prepare_spawn(attributes: &mut nix::spawn::PosixSpawnAttr) -> nix::Result
 pub fn detach() -> std::io::Result<bool> {
     pty::detach()
 }
-
 /// Width in columns of the terminal on standard output, or `None` when it is not a terminal.
 /// The CLI sizes its tables from this before it falls back to `$COLUMNS`.
 #[must_use]
@@ -74,8 +92,15 @@ pub fn begin_final_output() {
 pub fn finish_final_output() {
     pty::finish_final_output();
 }
+#[cfg(all(test, feature = "process-per-user"))]
+#[path = "../tests/unit/heap_accounting.rs"]
+mod heap_accounting;
 mod session;
 mod terminal;
+#[cfg(feature = "process-per-user")]
+mod terminal_limits;
+#[cfg(feature = "process-per-user")]
+mod terminal_memory;
 mod terminal_native;
 pub use session::{Config, run, run_with_retention};
 
@@ -93,3 +118,9 @@ pub fn process_exit_descriptor(pid: u32) -> std::io::Result<std::os::fd::OwnedFd
 }
 #[cfg(feature = "ca-handoff")]
 pub mod openssl_secure;
+
+#[cfg(feature = "process-per-user")]
+pub use session::user_host::{run_host, run_host_accounted};
+
+#[cfg(feature = "process-per-user")]
+pub use pty::handoff::{receive_masters, send_masters};

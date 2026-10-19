@@ -41,6 +41,14 @@ enum Recovery {
 }
 pub struct Terminal {
     engine: Engine,
+    #[cfg(feature = "process-per-user")]
+    history_budget: usize,
+    #[cfg(feature = "process-per-user")]
+    bounded: bool,
+    #[cfg(feature = "process-per-user")]
+    host: Option<std::sync::Arc<crate::terminal_memory::HostBudget>>,
+    #[cfg(feature = "process-per-user")]
+    limits: crate::terminal_limits::Limits,
     observer: Observer,
     parser: vte::Parser,
     pending: Vec<u8>,
@@ -51,6 +59,17 @@ pub struct Terminal {
     recovery_pending: bool,
 }
 impl Terminal {
+    /// Inspect the live flag independently of repaint, which ends synchronization.
+    #[cfg(all(test, feature = "process-per-user"))]
+    pub(crate) fn research_synchronized_output(&self) -> io::Result<bool> {
+        self.engine.synchronized_output()
+    }
+    /// Compare native state independently of the bounded repaint serializer.
+    #[cfg(all(test, feature = "process-per-user"))]
+    pub(crate) fn research_state_difference(&self, other: &Self) -> usize {
+        self.engine.state_difference(&other.engine)
+            + usize::from(self.pending != other.pending || self.dimensions != other.dimensions)
+    }
     #[cfg(test)]
     pub(crate) fn allocation_fixture(engine: Engine, prefix: &[u8]) -> Self {
         let mut terminal = Self::new(80, 24).unwrap();
@@ -62,8 +81,62 @@ impl Terminal {
     }
 
     pub fn new(cols: u16, rows: u16) -> io::Result<Self> {
+        Self::build(
+            cols,
+            rows,
+            SCROLLBACK_BYTES,
+            false,
+            #[cfg(feature = "process-per-user")]
+            None,
+        )
+    }
+    /// Reuse the selected VT engine with an explicit research retention budget.
+    #[cfg(all(test, feature = "process-per-user"))]
+    pub(super) fn with_history_budget(cols: u16, rows: u16, history: usize) -> io::Result<Self> {
+        Self::with_host_budget(cols, rows, history, None)
+    }
+    /// A bounded terminal that also charges the host-wide native budget.
+    #[cfg(feature = "process-per-user")]
+    pub(super) fn with_host_budget(
+        cols: u16,
+        rows: u16,
+        history: usize,
+        host: Option<std::sync::Arc<crate::terminal_memory::HostBudget>>,
+    ) -> io::Result<Self> {
+        let mut terminal = Self::build(cols, rows, history, true, host.clone())?;
+        terminal.host = host;
+        Ok(terminal)
+    }
+    fn build(
+        cols: u16,
+        rows: u16,
+        history: usize,
+        bounded: bool,
+        #[cfg(feature = "process-per-user")] host: Option<
+            std::sync::Arc<crate::terminal_memory::HostBudget>,
+        >,
+    ) -> io::Result<Self> {
+        #[cfg(feature = "process-per-user")]
+        let engine = if bounded {
+            Engine::bounded(cols, rows, history, host)?
+        } else {
+            Engine::new(cols, rows, history)?
+        };
+        #[cfg(not(feature = "process-per-user"))]
+        let engine = {
+            let _ = bounded;
+            Engine::new(cols, rows, history)?
+        };
         Ok(Self {
-            engine: Engine::new(cols, rows, SCROLLBACK_BYTES)?,
+            engine,
+            #[cfg(feature = "process-per-user")]
+            history_budget: history,
+            #[cfg(feature = "process-per-user")]
+            bounded,
+            #[cfg(feature = "process-per-user")]
+            host: None,
+            #[cfg(feature = "process-per-user")]
+            limits: crate::terminal_limits::Limits::default(),
             observer: Observer::default(),
             parser: vte::Parser::new(),
             pending: Vec::with_capacity(4096),
@@ -74,6 +147,34 @@ impl Terminal {
         })
     }
     pub fn process(&mut self, bytes: &[u8]) {
+        #[cfg(feature = "process-per-user")]
+        if self.bounded {
+            use crate::terminal_limits::Action;
+            let mut limits = std::mem::take(&mut self.limits);
+            let mut start = 0;
+            for (index, &byte) in bytes.iter().enumerate() {
+                match limits.byte(byte) {
+                    Action::Keep => {}
+                    action => {
+                        self.process_unbounded(&bytes[start..index]);
+                        match action {
+                            Action::Restart => self.process_unbounded(&[0x1b, byte]),
+                            Action::Start(introducer) => {
+                                self.process_unbounded(&[0x1b, introducer]);
+                            }
+                            Action::Drop | Action::Keep => {}
+                        }
+                        start = index + 1;
+                    }
+                }
+            }
+            self.process_unbounded(&bytes[start..]);
+            self.limits = limits;
+            return;
+        }
+        self.process_unbounded(bytes);
+    }
+    fn process_unbounded(&mut self, bytes: &[u8]) {
         // A persistent allocation refusal must not stop PTY/ring progress.
         // Retry fresh ownership on later output; until then, touch no handle.
         if self.recovery_pending && self.recover(None).is_err() {
@@ -97,7 +198,14 @@ impl Terminal {
                 self.carry_overflow = false;
             }
             if !self.pending.is_empty() || byte == 0x1b || byte >= 0xc0 {
-                if self.pending.len() < MAX_FRAME - 9 {
+                let carry_limit = MAX_FRAME - 9;
+                #[cfg(feature = "process-per-user")]
+                let carry_limit = if self.bounded {
+                    crate::terminal_limits::STRING_BYTES
+                } else {
+                    carry_limit
+                };
+                if self.pending.len() < carry_limit {
                     self.pending.push(byte);
                 } else {
                     self.carry_overflow = true;
@@ -147,6 +255,20 @@ impl Terminal {
         Ok(())
     }
     fn recover(&mut self, ring: Option<&Ring>) -> io::Result<()> {
+        #[cfg(feature = "process-per-user")]
+        let mut restored = Self::build(
+            self.dimensions.0,
+            self.dimensions.1,
+            self.history_budget,
+            self.bounded,
+            self.host.clone(),
+        )?;
+        // Clone, not take: a later error below leaves `self` in place.
+        #[cfg(feature = "process-per-user")]
+        {
+            restored.host.clone_from(&self.host);
+        }
+        #[cfg(not(feature = "process-per-user"))]
         let mut restored = Self::new(self.dimensions.0, self.dimensions.1)?;
         let complete = ring.filter(|ring| ring.start() == 0 && self.recovery == Recovery::Exact);
         if let Some(ring) = complete {
@@ -164,10 +286,46 @@ impl Terminal {
         *self = restored;
         Ok(())
     }
+    #[cfg(feature = "process-per-user")]
+    pub(super) fn memory(&self) -> (usize, usize, bool) {
+        self.engine.memory()
+    }
+    #[cfg(feature = "process-per-user")]
+    pub(super) fn ownership(&self) -> io::Result<(usize, usize, usize, usize, usize)> {
+        let (ordinary, pages, _) = self.engine.allocation_classes();
+        Ok((
+            ordinary,
+            pages,
+            self.engine.resident_pages()?,
+            self.engine.encoded_bytes(),
+            self.pending.capacity(),
+        ))
+    }
+    /// Read only native row-count metadata; compressed backing stays cold.
+    #[cfg(feature = "process-per-user")]
+    pub(super) fn retained_history_rows(&self) -> usize {
+        self.engine.history_rows()
+    }
     /// A clean or still-pending rebuild cannot certify faithful state. Keep
     /// this provenance across peer replacement and further output/resizes.
     pub fn requires_approximation(&self) -> bool {
+        #[cfg(feature = "process-per-user")]
+        if self.engine.memory().2 {
+            return true;
+        }
         self.recovery == Recovery::Approximate || self.recovery_pending
+    }
+    // A discarded ESC at the frame boundary still belongs to the unfinished
+    // string and must be reproduced before the next live byte arrives.
+    // Snapshot uses one interface across feature builds; the default has no
+    // extra carry state beyond its existing parser prefix.
+    #[cfg_attr(not(feature = "process-per-user"), allow(clippy::unused_self))]
+    fn carry_suffix(&self) -> &'static [u8] {
+        #[cfg(feature = "process-per-user")]
+        if self.bounded {
+            return self.limits.carry_suffix();
+        }
+        b""
     }
     /// Bounded visible fallback; fidelity gaps and clipping are explicitly
     /// announced by the negotiated frame, never substituted for a faithful VT.
@@ -176,12 +334,13 @@ impl Terminal {
         let budget = MAX_FRAME - 10;
         // Preserve unfinished syntax only when the entire carry and a useful
         // repaint fit. Never trim a control string or UTF-8 scalar in half.
-        let carry = if !self.carry_overflow && self.pending.len() <= budget - 256 {
+        let extra = self.carry_suffix();
+        let carry = if !self.carry_overflow && self.pending.len() + extra.len() <= budget - 256 {
             self.pending.as_slice()
         } else {
             &[]
         };
-        let mut out = vec![0; budget - carry.len()];
+        let mut out = vec![0; budget - carry.len() - extra.len()];
         let len = self.engine.approximate_snapshot(&mut out);
         out.truncate(len);
         if out.is_empty() {
@@ -190,6 +349,7 @@ impl Terminal {
             out.extend_from_slice(b"\x1bc");
         }
         out.extend_from_slice(carry);
+        out.extend_from_slice(extra);
         out
     }
     pub fn snapshot(&self) -> io::Result<Vec<u8>> {
@@ -204,7 +364,8 @@ impl Terminal {
                 "unfinished VT sequence exceeds frozen frame limit",
             ));
         }
-        let mut out = vec![0; MAX_FRAME - 9 - self.pending.len()];
+        let extra = self.carry_suffix();
+        let mut out = vec![0; MAX_FRAME - 9 - self.pending.len() - extra.len()];
         // Retry only when the bounded frame cannot fit the tail. The visible
         // screens are mandatory; Error(1) remains the session's response if
         // even those exceed the frozen 1 MiB frame limit.
@@ -213,6 +374,7 @@ impl Terminal {
             if let Some(len) = self.engine.try_snapshot(&mut out, tail)? {
                 out.truncate(len);
                 out.extend_from_slice(&self.pending);
+                out.extend_from_slice(extra);
                 return Ok(out);
             }
             if tail == 0 {
@@ -245,3 +407,27 @@ mod resize_recovery;
 #[cfg(test)]
 #[path = "../tests/unit/recovery_bench.rs"]
 mod recovery_measurements;
+
+#[cfg(all(test, feature = "process-per-user"))]
+#[path = "../tests/unit/ppu_memory_bench.rs"]
+mod ppu_memory_bench;
+
+#[cfg(all(test, feature = "compact-history"))]
+#[path = "../tests/unit/compact_history.rs"]
+mod compact_history;
+
+#[cfg(all(test, feature = "process-per-user"))]
+#[path = "../tests/unit/review_r2.rs"]
+mod review_r2;
+
+#[cfg(all(test, feature = "process-per-user"))]
+#[path = "../tests/unit/ppu_host_budget.rs"]
+mod host_budget;
+
+#[cfg(all(test, feature = "process-per-user"))]
+#[path = "../tests/unit/review_r3.rs"]
+mod review_r3;
+
+#[cfg(test)]
+#[path = "../tests/unit/review_r3_default.rs"]
+mod review_r3_default;

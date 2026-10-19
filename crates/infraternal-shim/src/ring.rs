@@ -19,6 +19,11 @@ impl Ring {
         }
     }
     #[must_use]
+    #[cfg(feature = "process-per-user")]
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.bytes.capacity()
+    }
+    #[must_use]
     pub fn head(&self) -> u64 {
         self.head
     }
@@ -33,11 +38,25 @@ impl Ring {
     pub fn origin_slices(&self) -> Option<(&[u8], &[u8])> {
         (self.start() == 0).then_some(self.bytes.as_slices())
     }
+    /// Borrow a bounded retained range across at most one physical wrap.
+    /// Like `read`, the current head is a valid empty range, but stale and
+    /// future offsets are refused. No temporary payload allocation is needed.
+    #[cfg(feature = "process-per-user")]
+    #[must_use]
+    pub(crate) fn read_slices(&self, seq: u64, limit: usize) -> Option<(&[u8], &[u8])> {
+        let offset = usize::try_from(seq.checked_sub(self.start())?).ok()?;
+        let count = limit.min(self.bytes.len().checked_sub(offset)?);
+        let (first, second) = self.bytes.as_slices();
+        let second_at = offset.saturating_sub(first.len());
+        let first_at = offset.min(first.len());
+        let first = &first[first_at..first.len().min(first_at + count)];
+        Some((first, &second[second_at..second_at + count - first.len()]))
+    }
     /// Append output without resetting its identity when the ring wraps.
     /// # Errors
     /// Fails rather than wrapping the absolute offset after `u64::MAX` bytes.
     pub fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.head = self
+        let head = self
             .head
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| io::Error::other("output offset exhausted"))?;
@@ -48,7 +67,34 @@ impl Ring {
             .saturating_add(keep)
             .saturating_sub(self.capacity);
         self.bytes.drain(..discard);
+        #[cfg(feature = "process-per-user")]
+        {
+            let needed = self.bytes.len() + keep;
+            // Geometric VecDeque growth can double a non-power-of-two share.
+            // Past the lazy VT prefix, commit small scale shares once: sparse
+            // producers must not fault in more ring pages for hours. Large
+            // single-session rings still grow lazily, bounded by their share.
+            let precommit = needed > 4096 && self.capacity <= 128 * 1024;
+            let reserve = if needed == 0 {
+                0
+            } else if precommit {
+                self.capacity
+            } else {
+                needed.next_power_of_two().min(self.capacity)
+            };
+            if reserve > self.bytes.capacity() {
+                self.bytes
+                    .try_reserve_exact(reserve - self.bytes.len())
+                    .map_err(io::Error::other)?;
+                if precommit {
+                    let retained = self.bytes.len();
+                    self.bytes.resize(self.capacity, 0);
+                    self.bytes.truncate(retained);
+                }
+            }
+        }
         self.bytes.extend(&bytes[bytes.len() - keep..]);
+        self.head = head;
         Ok(())
     }
     /// Read at most limit bytes, or None if the offset is outside retained history.

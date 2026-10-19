@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""Stage artifacts and run separately locked reliability phases on the named VM [D270/D262].
+
+Build artifacts on infraternal-dev first. This wrapper never builds remotely,
+changes SSH trust, or counts an unsupported product path as success. The explicit
+two-hour phase freezes the same fixture between short shared-lock segments;
+other phases release between runs. Use --smoke for driver validation, never as
+full-duration adoption evidence.
+"""
+import argparse
+import json
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import tarfile
+import os
+
+SSH = ['netbird', 'ssh', '--no-browser', 'root@10.69.69.208']
+PHASES = ['soak', 'corpus', 'faults', 'process-events', 'memory', 'properties', 'fuzz']
+# Keep the longest allowed run ID plus the 32-digit session pathname below
+# Linux sun_path's 108-byte bound, including its terminating NUL.
+PHASE_DIRS = {'process-events': 'events'}
+
+
+def stage(repo, args, remote):
+    """Stream only this suite's files and supplied artifacts into a private run."""
+    subprocess.run(SSH + [f'mkdir -p {shlex.quote(remote)}'], check=True)
+    receiver = subprocess.Popen(SSH + [f'tar -xf - -C {shlex.quote(remote)}'], stdin=subprocess.PIPE)
+    try:
+        with tarfile.open(fileobj=receiver.stdin, mode='w|') as archive:
+            for relative in ['scripts/bench/ppu_soak.py', 'scripts/agent_fixture.py',
+                             'scripts/bench/ppu_clock.py', 'scripts/bench/ppu_segment.py',
+                             'scripts/latency_proxy.py', 'crates/infraternal/tests/profile',
+                             'crates/infraternal-shim/tests/fixtures']:
+                archive.add(repo / relative, arcname=relative)
+            archive.add(args.binary, arcname='infraternal')
+            if args.panic_test_binary:
+                archive.add(args.panic_test_binary, arcname='shim-tests')
+            if args.fuzz_binary:
+                archive.add(args.fuzz_binary, arcname='ppu-terminal-fuzz')
+                archive.add(args.fuzz_corpus, arcname='fuzz-corpus')
+    finally:
+        receiver.stdin.close()
+    assert receiver.wait() == 0, 'artifact copy failed'
+
+
+def command(args, phase, remote):
+    """Lock waiting is outside the measurement timeout and private memory scope."""
+    evidence = f'{remote}/{PHASE_DIRS.get(phase, phase)}'
+    if phase == 'fuzz':
+        inner = [f'{remote}/ppu-terminal-fuzz', f'{remote}/fuzz-corpus', '-seed=270205',
+                 f'-max_total_time={30 if args.smoke else 1800}', '-max_len=131072',
+                 f'-artifact_prefix={remote}/fuzz-']
+        timeout = 90 if args.smoke else 1860
+    elif phase == 'properties':
+        inner = [f'{remote}/shim-tests', '--exact',
+                 'terminal::fidelity::fidelity_seeded_smoke' if args.smoke else
+                 'terminal::fidelity::fidelity_seeded_nightly',
+                 '--nocapture', '--test-threads=1']
+        if not args.smoke:
+            inner += ['--ignored']
+        timeout = 1860
+    else:
+        inner = ['python3', '-B', f'{remote}/scripts/bench/ppu_soak.py',
+                 '--binary', f'{remote}/infraternal', '--source', args.source,
+                 '--evidence', evidence, '--mode', phase, '--sessions',
+                 str(20 if args.smoke else 1000)]
+        if phase in ('soak', 'corpus'):
+            seconds = 90 if args.smoke else (7200 if phase == 'soak' else 1800)
+            inner += ['--seconds', str(seconds), '--warmup', '20' if args.smoke else '600']
+            timeout = seconds + 300
+        else:
+            timeout = 600
+        if phase == 'corpus':
+            inner += ['--corpus', f'{remote}/crates/infraternal-shim/tests/fixtures']
+        if phase == 'faults' and args.panic_test_binary:
+            inner += ['--panic-test-binary', f'{remote}/shim-tests']
+    unit = f'ppu-soak-{args.run}-{phase}'
+    if phase in ('soak', 'corpus') and not args.smoke:
+        # Preserve the same shells/VT allocations for two active hours while
+        # releasing the shared machine between at most 29-minute segments.
+        invocation = ['python3', '-B', f'{remote}/scripts/bench/ppu_segment.py',
+                      '--unit', unit, '--receipts', f'{evidence}-segments',
+                      '--timeout', str(timeout), '--', *inner]
+        return f'cd {shlex.quote(remote)} && ' + shlex.join(invocation)
+    # All fixture work stays in the named transient unit; no separate CPU load.
+    invocation = ['flock', '-w', '3600', '/var/lock/perf-bench.lock',
+                  'timeout', '--signal=TERM', '--kill-after=15', str(timeout),
+                  'systemd-run', '--quiet', '--scope', '--unit', unit,
+                  '-p', 'CPUWeight=10000', '-p', 'MemoryMax=5G',
+                  '-p', 'MemorySwapMax=0', '-p', 'OOMPolicy=kill'] + inner
+    return f'cd {shlex.quote(remote)} && ' + shlex.join(invocation)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--binary', type=Path, required=True)
+    parser.add_argument('--panic-test-binary', type=Path)
+    parser.add_argument('--fuzz-binary', type=Path)
+    parser.add_argument('--fuzz-corpus', type=Path)
+    parser.add_argument('--source', required=True)
+    parser.add_argument('--evidence', type=Path, required=True)
+    parser.add_argument('--phase', choices=PHASES, action='append')
+    parser.add_argument('--run', default=f'r{os.getpid()}')
+    parser.add_argument('--smoke', action='store_true')
+    args = parser.parse_args()
+    if not re.fullmatch(r'[a-z0-9-]{1,10}', args.run):
+        parser.error('--run must be a unique short identifier (1–10 lower-case characters)')
+    phases = args.phase or PHASES
+    if 'properties' in phases and not args.panic_test_binary:
+        parser.error('properties needs --panic-test-binary (the musl shim unit-test executable)')
+    if 'fuzz' in phases and (not args.fuzz_binary or not args.fuzz_corpus):
+        parser.error('fuzz needs --fuzz-binary and --fuzz-corpus from ppu-fuzz-build')
+    args.evidence.mkdir(parents=True, exist_ok=False)
+    remote = f'/root/infraternal-bench/ppu-soak/{args.run}'
+    stage(Path(__file__).resolve().parents[2], args, remote)
+    outcomes = []
+    for phase in phases:
+        print(f'{phase}: waiting for perf lock; smoke={args.smoke}', flush=True)
+        with (args.evidence / f'{phase}.log').open('wb') as log:
+            result = subprocess.run(SSH + [command(args, phase, remote)],
+                                    stdout=log, stderr=subprocess.STDOUT)
+        code = result.returncode
+        if phase == 'properties' and '1 passed' not in (args.evidence / f'{phase}.log').read_text():
+            code = code or 1  # A misspelled test filter must never pass an empty suite.
+        outcomes.append(dict(phase=phase, exit=code, smoke=args.smoke))
+        print(f'{phase}: exit={result.returncode}', flush=True)
+        # Fetch receipts even after a failed phase. Never discard the failed run.
+        directory = PHASE_DIRS.get(phase, phase)
+        paths = directory + (f' {directory}-segments' if phase in ('soak', 'corpus') and not args.smoke else '')
+        fetch = (f'cd {shlex.quote(remote)} && find {paths} -type f -print0 | tar --null -T - -cf -'
+                 if phase in ('soak', 'corpus', 'faults', 'process-events', 'memory') else
+                 f'cd {shlex.quote(remote)} && find . -maxdepth 1 -type f -name "fuzz-*" '
+                 '-print0 | tar --null -T - -cf -')
+        with (args.evidence / f'{phase}-remote.tar').open('wb') as receipt:
+            subprocess.run(SSH + [fetch],
+                           stdout=receipt, check=True)
+    (args.evidence / 'outcomes.json').write_text(json.dumps(outcomes, indent=2) + '\n')
+    raise SystemExit(0 if all(row['exit'] == 0 for row in outcomes) else 1)
+
+
+if __name__ == '__main__':
+    main()

@@ -24,7 +24,9 @@ unsafe extern "C" {
     ) -> i32;
     #[cfg(test)]
     fn infraternal_vt_compare(a: *mut c_void, b: *mut c_void, strict: bool) -> usize;
-    #[cfg(test)]
+    #[cfg(all(test, feature = "process-per-user"))]
+    fn ghostty_terminal_mode_get(terminal: *mut c_void, tag: u16, out: *mut bool) -> i32;
+    #[cfg(any(test, feature = "process-per-user"))]
     fn ghostty_terminal_get(terminal: *mut c_void, tag: i32, out: *mut c_void) -> i32;
     fn infraternal_vt_approximate(terminal: *mut c_void, data: *mut u8, len: usize) -> usize;
     fn infraternal_vt_snapshot(
@@ -33,20 +35,117 @@ unsafe extern "C" {
         len: usize,
         tail: usize,
     ) -> usize;
+    #[cfg(feature = "compact-history")]
+    fn infraternal_vt_compact(terminal: *mut c_void, full: bool);
+    #[cfg(feature = "process-per-user")]
+    fn infraternal_vt_screen_pages(cols: u16, rows: u16, page_len: *mut usize) -> usize;
+}
+/// Sizes a shared-host terminal's floor for one `cols` x `rows` screen, at
+/// the page shape of the native build [#205].
+#[cfg(feature = "process-per-user")]
+fn reserve_screens(memory: &mut crate::terminal_memory::Memory, cols: u16, rows: u16) {
+    let mut page_len = 0;
+    // SAFETY: pure layout arithmetic over the pinned page shape; writes only
+    // the provided local.
+    let pages = unsafe { infraternal_vt_screen_pages(cols, rows, &raw mut page_len) };
+    memory.reserve_screens(pages, page_len);
 }
 // A failed resize can partially mutate Ghostty page ownership. None is a
 // permanent tombstone: even destruction would inspect invalid native state.
-// Retired allocations remain held until shim exit pending transactional resize
-// upstream (#37); recreating the engine must never revive this handle.
-pub(super) struct Engine(Option<NonNull<c_void>>);
+// Default builds retain retired allocations until shim exit (#37). The
+// shared host owns a separate allocation list and reclaims that list without
+// traversing the retired graph; neither path revives an invalid handle.
+/// Visible screens, parser/style state and reflow transients of one bounded
+/// engine, beyond its history share [D270].
+#[cfg(feature = "process-per-user")]
+pub(super) const SCREEN_RESERVATION: usize = 8 * 1024 * 1024;
+/// Each screen-pool item is charged one header page on top of the item that
+/// native history accounting counts. Items are at least eight pages, so an
+/// eighth of the share covers every header; a unit test pins the ratio.
+/// Compact history reserves twice its share instead.
+#[cfg(all(
+    feature = "process-per-user",
+    any(test, not(feature = "compact-history"))
+))]
+pub(super) const ITEM_HEADER_SHARE: usize = 8;
+pub(super) struct Engine(
+    Option<NonNull<c_void>>,
+    #[cfg(feature = "process-per-user")] Option<Box<crate::terminal_memory::Memory>>,
+);
 impl Engine {
+    #[cfg(all(test, feature = "process-per-user"))]
+    pub(super) fn synchronized_output(&self) -> io::Result<bool> {
+        let handle = self.0.ok_or_else(|| io::Error::other("retired VT"))?;
+        let mut value = false;
+        // SAFETY: the live handle and bool output remain valid synchronously.
+        // ModeTag is packed u16: low 15 bits are the mode, ANSI flag is clear.
+        let result = unsafe { ghostty_terminal_mode_get(handle.as_ptr(), 2026, &raw mut value) };
+        if result == 0 {
+            Ok(value)
+        } else {
+            Err(io::Error::other("native mode query failed"))
+        }
+    }
+    /// A shared-host engine whose reservation is derived from its history
+    /// share: the share itself, one header page per screen-pool item, and a
+    /// fixed allowance for the visible screens, parser state and the
+    /// transient pages of a reflow. A history share therefore always fits,
+    /// whatever share the host hands out. `host` adds the host-wide ceiling.
+    #[cfg(feature = "process-per-user")]
+    pub fn bounded(
+        cols: u16,
+        rows: u16,
+        bytes: usize,
+        host: Option<std::sync::Arc<crate::terminal_memory::HostBudget>>,
+    ) -> io::Result<Self> {
+        #[cfg(not(feature = "compact-history"))]
+        let limit = SCREEN_RESERVATION
+            .saturating_add(bytes)
+            .saturating_add(bytes / ITEM_HEADER_SHARE);
+        // Cold pages retain virtual mappings for infallible exact restore.
+        // Their encoded allocations still obey the configured history share.
+        #[cfg(feature = "compact-history")]
+        let limit = SCREEN_RESERVATION + bytes.saturating_mul(2);
+        Self::build(cols, rows, bytes, limit, host)
+    }
     pub fn new(cols: u16, rows: u16, bytes: usize) -> io::Result<Self> {
+        Self::build(
+            cols,
+            rows,
+            bytes,
+            8 * 1024 * 1024 + bytes.saturating_mul(2) + usize::from(cols) * usize::from(rows) * 32,
+            #[cfg(feature = "process-per-user")]
+            None,
+        )
+    }
+    fn build(
+        cols: u16,
+        rows: u16,
+        bytes: usize,
+        limit: usize,
+        #[cfg(feature = "process-per-user")] host: Option<
+            std::sync::Arc<crate::terminal_memory::HostBudget>,
+        >,
+    ) -> io::Result<Self> {
+        #[cfg(not(feature = "process-per-user"))]
+        let _ = limit;
         let mut raw = std::ptr::null_mut();
+        #[cfg(all(feature = "process-per-user", not(feature = "compact-history")))]
+        let mut memory = crate::terminal_memory::Memory::with_host(limit, 0, host);
+        #[cfg(feature = "compact-history")]
+        let mut memory = crate::terminal_memory::Memory::with_host(limit, bytes, host);
+        // The first screen comes from the floor, so it is sized first.
+        #[cfg(feature = "process-per-user")]
+        reserve_screens(&mut memory, cols, rows);
+        #[cfg(not(feature = "process-per-user"))]
+        let allocator = std::ptr::null();
+        #[cfg(feature = "process-per-user")]
+        let allocator = memory.abi();
         // SAFETY: null selects Ghostty's allocator. Options matches its C ABI;
         // out is writable and a successful call transfers unique ownership.
         let result = unsafe {
             ghostty_terminal_new(
-                std::ptr::null(),
+                allocator,
                 &raw mut raw,
                 Options {
                     cols,
@@ -66,14 +165,59 @@ impl Engine {
             ));
         }
         NonNull::new(raw)
-            .map(|handle| Self(Some(handle)))
+            .map(|handle| {
+                Self(
+                    Some(handle),
+                    #[cfg(feature = "process-per-user")]
+                    Some(memory),
+                )
+            })
             .ok_or_else(|| io::Error::other("Ghostty returned a null terminal"))
+    }
+    #[cfg(feature = "process-per-user")]
+    pub fn memory(&self) -> (usize, usize, bool) {
+        self.1.as_ref().map_or((0, 0, false), |m| m.stats())
+    }
+    #[cfg(feature = "process-per-user")]
+    pub fn allocation_classes(&self) -> (usize, usize, usize) {
+        self.1
+            .as_ref()
+            .map_or((0, 0, 0), |m| m.allocation_classes())
+    }
+    #[cfg(feature = "process-per-user")]
+    pub fn resident_pages(&self) -> io::Result<usize> {
+        self.1.as_ref().map_or(Ok(0), |m| m.resident_pages())
+    }
+    #[cfg(all(test, feature = "compact-history"))]
+    pub(super) fn mapped_blocks(&self) -> usize {
+        self.1.as_ref().map_or(0, |m| m.mapped_blocks())
+    }
+    /// This terminal's floor in its host budget, for accounting tests.
+    #[cfg(all(test, feature = "process-per-user"))]
+    pub(super) fn host_floor(&self) -> usize {
+        self.1.as_ref().map_or(0, |m| m.floor())
+    }
+    #[cfg(feature = "process-per-user")]
+    pub(super) fn encoded_bytes(&self) -> usize {
+        self.1.as_ref().map_or(0, |m| m.encoded_bytes())
     }
     pub fn process(&mut self, data: &[u8]) {
         let Some(handle) = self.0 else { return };
         // SAFETY: uniquely owned terminal; Ghostty consumes the borrowed slice
         // synchronously and retains parser state, never the input pointer.
         unsafe { ghostty_terminal_vt_write(handle.as_ptr(), data.as_ptr(), data.len()) }
+        #[cfg(feature = "compact-history")]
+        if !data.is_empty() {
+            self.compact(false);
+        }
+    }
+    #[cfg(feature = "compact-history")]
+    pub(super) fn compact(&self, full: bool) {
+        if let Some(handle) = self.0 {
+            // SAFETY: the reactor owns the terminal exclusively. Only its
+            // internal cold-page representation changes; no input is emitted.
+            unsafe { infraternal_vt_compact(handle.as_ptr(), full) }
+        }
     }
     pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
         // SAFETY: uniquely owned live terminal; zero pixel dimensions are valid.
@@ -82,11 +226,21 @@ impl Engine {
         let handle = self
             .0
             .ok_or_else(|| io::Error::other("retired Ghostty engine"))?;
+        // Floor first: the new screen's pages are this terminal's own, not
+        // the pool's. A failed resize retires the engine and its memory.
+        #[cfg(feature = "process-per-user")]
+        if let Some(memory) = self.1.as_mut() {
+            reserve_screens(memory, cols, rows);
+        }
         let result = unsafe { ghostty_terminal_resize(handle.as_ptr(), cols, rows, 0, 0) };
         if result == 0 {
             Ok(())
         } else {
             self.0 = None;
+            #[cfg(feature = "process-per-user")]
+            {
+                self.1 = None;
+            }
             Err(io::Error::new(
                 if result == -2 {
                     io::ErrorKind::InvalidInput
@@ -114,7 +268,7 @@ impl Engine {
         // SAFETY: read-only oracle borrows live handles synchronously and retains nothing.
         unsafe { infraternal_vt_compare(left.as_ptr(), right.as_ptr(), true) }
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "process-per-user"))]
     pub fn history_rows(&self) -> usize {
         let Some(handle) = self.0 else { return 0 };
         let mut rows: usize = 0;
@@ -167,3 +321,58 @@ impl Drop for Engine {
 #[cfg(test)]
 #[path = "../tests/unit/allocation.rs"]
 pub(crate) mod allocation;
+
+#[cfg(all(test, feature = "process-per-user"))]
+mod owned_memory_tests {
+    //! Resize refusal releases the allocation owner without traversing damaged state.
+    use super::*;
+    #[test]
+    fn refused_resize_reclaims_every_owned_native_allocation() {
+        let mut engine = Engine::new(80, 24, 65536).unwrap();
+        engine.process(allocation::PREFIX);
+        assert!(engine.memory().0 > 0);
+        engine.1.as_mut().unwrap().refuse_new_allocations();
+        assert!(engine.resize(20_000, 2).is_err());
+        assert!(engine.0.is_none());
+        assert!(engine.1.is_none());
+        assert_eq!(engine.memory().0, 0);
+        engine.process(b"later output");
+    }
+
+    /// PPU-R3-1 (#205): a refusal in the middle of a widening reflow leaves
+    /// the native page list half rebuilt, with the cursor still pinned to a
+    /// page the reflow already freed. The engine must report the error
+    /// without touching that page, so the caller can retire it; reading it
+    /// decoded freed memory as a compressed page and wrote out of bounds.
+    /// Refusal points step through the reflow, so several land mid-reflow.
+    #[test]
+    fn refusal_inside_reflow_never_touches_freed_pages() {
+        let mut history = Vec::new();
+        for n in 0..3000_usize {
+            let line = match n % 3 {
+                0 => format!("\x1b[3{}m{n:08} plain\x1b[0m\r\n", n % 7 + 1),
+                1 => format!("{n:08} {}\r\n", "wrap-".repeat(30)),
+                _ => format!("{n:08} 漢字かな{}\r\n", "é".repeat(20)),
+            };
+            history.extend_from_slice(line.as_bytes());
+        }
+        let mut failed = 0;
+        for step in 0..24_usize {
+            let mut engine = Engine::new(80, 24, 17 * 1024 * 1024).unwrap();
+            engine.process(b"\x1bc");
+            engine.process(&history);
+            // A styled cursor makes the resize reload its style afterwards.
+            engine.process(b"\x1b[1;4;35mstyled");
+            engine.1.as_mut().unwrap().refuse_beyond(step * 32 * 1024);
+            if engine.resize(133, 40).is_err() {
+                failed += 1;
+                assert!(engine.0.is_none() && engine.1.is_none());
+                assert_eq!(engine.memory().0, 0);
+            }
+        }
+        assert!(
+            failed >= 8,
+            "only {failed} refusal points landed in the reflow"
+        );
+    }
+}

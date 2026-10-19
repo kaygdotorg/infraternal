@@ -259,6 +259,9 @@ rust_verify_fast() {
     rust_run_gate "SSH runtime test helper" cargo build --locked -p infraternal-plugin-ssh --example recovery-helper
     rust_run_gate "test" cargo test --workspace --locked
     rust_run_gate "SSH inode reuse fixture" scripts/test-ssh-inode-reuse
+    # The shared host (#205) patches the native engine and its allocator;
+    # the workspace run builds neither. Its shim lib tests are the gate.
+    rust_run_gate "shim process-per-user" cargo test --locked --package infraternal-shim --features process-per-user --lib
     rust_run_gate "cargo-deny" cargo deny check
     if [[ "$mode" == final ]]; then
         rust_run_gate "static builds" rust_static_build_check

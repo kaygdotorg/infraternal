@@ -4,6 +4,50 @@ use super::*;
 mod budgets {
     //! Exercises session invariants against real data and frozen expectations.
     use super::*;
+    #[cfg(feature = "process-per-user")]
+    #[test]
+    fn bounded_flush_keeps_partial_frame_and_wire_order() {
+        let (stream, mut remote) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let mut peer = Peer {
+            stream,
+            decoder: Decoder::default(),
+            trailing: Vec::new(),
+            deferred: None,
+            attached: true,
+            caps: 0,
+            input_reply: None,
+            writer: Some(0),
+            shared_writer: false,
+            ack_queued: 0,
+            size: (80, 24, 0, 0),
+            cursor: None,
+            pending: Vec::new(),
+            written: 0,
+            exited_sent: false,
+            request: None,
+        };
+        let frame = Frame::Output(13, vec![b'x'; 4096]);
+        let expected = frame.encode().unwrap();
+        peer.queue(&frame).unwrap();
+        let mut bytes = 17;
+        let mut attempts = 1;
+        peer.flush_bounded(&mut bytes, &mut attempts).unwrap();
+        assert_eq!((bytes, attempts, peer.written), (0, 0, 17));
+        assert_eq!(peer.pending, expected);
+        let mut received = vec![0; 17];
+        remote.read_exact(&mut received).unwrap();
+        attempts = 4;
+        peer.flush_bounded(&mut bytes, &mut attempts).unwrap();
+        assert_eq!((attempts, peer.written), (4, 17));
+        peer.flush().unwrap();
+        let mut rest = vec![0; expected.len() - received.len()];
+        remote.read_exact(&mut rest).unwrap();
+        received.extend(rest);
+        assert_eq!(received, expected);
+        assert_eq!(peer.pending, [] as [u8; 0]);
+        assert_eq!(peer.written, 0);
+    }
     #[test]
     fn allowlisted_signal_after_real_pty_exit_keeps_exit_ack_available() {
         let mut pty = Pty::spawn(Uid::effective().as_raw(), 20, 4).unwrap();
