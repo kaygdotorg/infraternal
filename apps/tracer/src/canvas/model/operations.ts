@@ -13,7 +13,7 @@ export type Intent =
   | { type: "close"; window_id: string }
   | { type: "move" | "membership.add"; view_id: string; column_id: string; window_id: string; after?: string; column_after?: string | null }
   | { type: "membership.remove"; view_id: string; window_id: string }
-  | { type: "resize"; window_id: string; height?: number; span?: number; rows?: number; row?: number }
+  | { type: "resize"; window_id: string; height?: number | null; span?: number | null; rows?: number | null; row?: number | null }
   | { type: "weight"; view_id: string; column_id: string; weight: number }
   | { type: "pin"; view_id: string; node_id: string; position?: { x: number; y: number } };
 export interface MoveEdit { windowId: string; move: true }

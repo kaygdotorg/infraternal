@@ -15,7 +15,7 @@ function apply(doc: CanvasDocument, intent: Intent): void {
   if (intent.type === "view.add") { if (!doc.views.some((v) => v.id === intent.view.id)) doc.views.push(structuredClone(intent.view)); return; }
   if (intent.type === "view.remove") { doc.views = doc.views.filter((v) => v.id !== intent.view_id); return; }
   if (intent.type === "close") { for (const v of doc.views) for (const c of cols(v)) c.windows = c.windows.filter((w) => w.id !== intent.window_id); return; }
-  if (intent.type === "resize") { for (const w of windows(doc)) if (w.id === intent.window_id) for (const k of ["height", "span", "rows", "row"] as const) if (intent[k] !== undefined) w[k] = intent[k]; return; }
+  if (intent.type === "resize") { for (const w of windows(doc)) if (w.id === intent.window_id) for (const k of ["height", "span", "rows", "row"] as const) if (intent[k] != null) w[k] = intent[k]; return; }
   if (intent.type === "target") { for (const w of windows(doc)) if (w.id === intent.window_id) w.target = structuredClone(intent.target); return; }
   const view = doc.views.find((v) => v.id === intent.view_id); if (!view) return;
   if (intent.type === "view.update") { if (intent.cell) view.cell = { ...intent.cell }; if (intent.name) view.name = intent.name; return; }
