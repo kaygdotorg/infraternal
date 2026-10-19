@@ -466,6 +466,10 @@ mod host_budget;
 #[path = "../tests/unit/review_r3.rs"]
 mod review_r3;
 
+#[cfg(all(test, feature = "process-per-user"))]
+#[path = "../tests/unit/user_screen_pool_resize.rs"]
+mod user_screen_pool_resize;
+
 #[cfg(test)]
 #[path = "../tests/unit/review_r3_default.rs"]
 mod review_r3_default;

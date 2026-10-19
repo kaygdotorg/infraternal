@@ -180,14 +180,16 @@ screen.write_text(source)
 pages = root / 'src/terminal/PageList.zig'
 source = pages.read_text()
 call_before = '    self.page_compression.reset();\n    self.page_compression.markActivity();\n\n    if (comptime std.debug.runtime_safety) {\n'
-call_after = '    self.page_compression.reset();\n    self.page_compression.markActivity();\n    if (opts.cols) |cols| self.trimHistoryForCols(cols, opts.reflow);\n\n    if (comptime std.debug.runtime_safety) {\n'
+call_after = '    self.page_compression.reset();\n    self.page_compression.markActivity();\n    if (opts.cols) |cols| self.trimHistoryForCols(cols, opts.rows orelse self.rows, opts.reflow);\n\n    if (comptime std.debug.runtime_safety) {\n'
 anchor = '/// Resize the pagelist with reflow by adding or removing columns.\nfn resizeCols(\n'
 trim = '''/// Shared-host history bound for a wider geometry [D270, #205]. Whole
 /// pages from the oldest end only, never a page with active rows, so
 /// tracked pins and the cursor keep their rows.
-fn trimHistoryForCols(self: *PageList, cols: size.CellCountInt, reflow: bool) void {
+fn trimHistoryForCols(self: *PageList, cols: size.CellCountInt, new_rows: size.CellCountInt, reflow: bool) void {
     if (cols <= self.cols) return;
-    const max = self.maxSize();
+    // The destination viewport can pull its newest rows out of history before
+    // the upstream resize recomputes min_max_size, so size against its geometry.
+    const max = @max(self.explicit_max_size, minMaxSize(cols, new_rows));
     // Cheap metadata bound first: every row kept, none unwrapped. It holds
     // for most resizes, which then read no page memory at all.
     var bound: usize = 0;
@@ -195,12 +197,16 @@ fn trimHistoryForCols(self: *PageList, cols: size.CellCountInt, reflow: bool) vo
     while (it) |node| : (it = node.next) bound +|= widenedNodeBytes(node, cols);
     if (bound <= max) return;
     const history = self.total_rows - self.rows;
+    // A taller viewport consumes the newest history rows. They are part of
+    // the visible screen after resize and are never eligible for trimming.
+    const keep_history = if (new_rows > self.rows) new_rows - self.rows else 0;
+    const droppable_history = history -| keep_history;
     var erase: usize = 0;
     if (!reflow) {
         // Without reflow every page is copied on its own, as the bound counts.
         it = self.pages.first;
         while (it) |node| : (it = node.next) {
-            if (bound <= max or erase + node.rows() > history) break;
+            if (bound <= max or erase + node.rows() > droppable_history) break;
             erase += node.rows();
             bound -|= widenedNodeBytes(node, cols);
         }
@@ -216,21 +222,37 @@ fn trimHistoryForCols(self: *PageList, cols: size.CellCountInt, reflow: bool) vo
         it = self.pages.first;
         while (it) |node| : (it = node.next) {
             const bytes = (std.math.divCeil(usize, rows, shape.rows) catch unreachable) * shape.bytes;
-            if (bytes <= max or erase + node.rows() > history) break;
+            if (bytes <= max or erase + node.rows() > droppable_history) break;
             erase += node.rows();
             rows -|= reflowedRows(node, cols, &line);
         }
     }
     if (erase == 0) return;
     // Never keep the tail of a line whose head is gone: the orphaned rows
-    // would reflow as a line of their own.
+    // would reflow as a line of their own. If completing that line would
+    // consume rows reserved for the new viewport, keep the whole line.
     if (self.pin(.{ .history = .{ .y = @intCast(erase - 1) } })) |last| {
-        var next = last.down(1);
-        while (next) |p| : (next = p.down(1)) {
-            if (erase >= history or !p.rowAndCell().row.wrap_continuation) break;
+        var boundary = last;
+        var next = boundary.down(1);
+        while (next) |p| {
+            if (!p.rowAndCell().row.wrap_continuation) break;
+            if (erase >= droppable_history) {
+                var line_start = boundary;
+                var line_rows: usize = 1;
+                while (line_start.rowAndCell().row.wrap_continuation) {
+                    const previous = line_start.up(1) orelse break;
+                    line_start = previous;
+                    line_rows += 1;
+                }
+                erase -|= line_rows;
+                break;
+            }
             erase += 1;
+            boundary = p;
+            next = p.down(1);
         }
     }
+    if (erase == 0) return;
     self.eraseHistory(.{ .history = .{ .y = @intCast(erase - 1) } });
 }
 
