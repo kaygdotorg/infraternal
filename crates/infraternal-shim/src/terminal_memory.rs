@@ -4,8 +4,9 @@
 //! Retiring a nontransactional resize releases allocations directly without
 //! walking the potentially damaged native graph. Callbacks run synchronously
 //! on the reactor thread; the boxed ABI and context never move while borrowed.
-//! Terminals of one host may also share a [`HostBudget`], so the sum of their
-//! reservations cannot exceed the host's native byte budget.
+//! Terminals of one host share a [`HostBudget`], including reserved session
+//! floors and the allocated replay rings, so screens and scrollback stay
+//! inside one per-user byte cap.
 #![allow(unsafe_code)]
 use nix::libc;
 use std::{
@@ -30,71 +31,163 @@ const STRUCTURE: usize = usize::MAX - 3;
 
 /// Native bytes shared by every terminal of one host [D270, #205].
 ///
-/// Each terminal keeps its own reservation, and its first `floor` bytes are
-/// its own: never taken by a neighbour. A terminal's floor covers its
-/// current screens (primary and alternate at its geometry, plus pages to
-/// recycle history), never less than `floor` here and never more than
-/// [`MAX_FLOOR`]. Screens therefore never draw on the pool; history above
-/// the floor does, from one shared pool of `limit` bytes, so all terminals
-/// together stay under `sum(floors) + limit`. When the pool is empty,
-/// history growth recycles the terminal's own oldest page (exact); other
-/// requests are refused like a full per-terminal reservation. The reactor is
-/// single-threaded; the atomic only keeps terminals `Send` without a lock.
+/// Floors, native allocations above those floors and allocated replay rings
+/// all fit inside `limit`. A terminal's floor protects its current screens
+/// and may grow with geometry up to [`MAX_FLOOR`], subject to the same cap.
+/// Session shares are equal, and when native history reaches its share the
+/// terminal recycles its oldest page before refusing other growth. The reactor
+/// is single-threaded; atomics keep its shared owners `Send` without a lock.
 pub(crate) struct HostBudget {
+    /// Allocations above each terminal's protected screen floor, plus rings.
     used: AtomicUsize,
+    /// Floors reserved by admitted sessions; these are part of `limit`.
+    floors: AtomicUsize,
     limit: usize,
     floor: usize,
 }
-/// A floor never exceeds two 250x180 screens: past that, the pool pays for
-/// the rest, and the host bound stays `MAX_SESSIONS * MAX_FLOOR + limit`.
+/// One admitted session's protected screen reservation, shared with its VT.
+pub(crate) struct HostFloor {
+    host: Arc<HostBudget>,
+    bytes: AtomicUsize,
+}
+/// Per-session protected bytes stop at two 250x180 screens; larger geometry
+/// uses the shared remainder, still inside the total user pool.
 pub(crate) const MAX_FLOOR: usize = 2 * 1024 * 1024;
 impl HostBudget {
     pub(crate) fn new(limit: usize, floor: usize) -> Arc<Self> {
         Arc::new(Self {
             used: AtomicUsize::new(0),
+            floors: AtomicUsize::new(0),
             limit,
             floor,
         })
+    }
+    /// Reserves the session floor before its PTY starts. The floor is inside
+    /// the same hard cap as history and ring allocations.
+    pub(crate) fn reserve_session(
+        self: &Arc<Self>,
+        requested_floor: usize,
+    ) -> std::io::Result<Arc<HostFloor>> {
+        let floor = requested_floor.clamp(self.floor, MAX_FLOOR.max(self.floor));
+        let current = self.used.load(Ordering::Relaxed) + self.floors.load(Ordering::Relaxed);
+        if floor > self.limit.saturating_sub(current) {
+            return Err(self.full_error());
+        }
+        self.floors.fetch_add(floor, Ordering::Relaxed);
+        Ok(Arc::new(HostFloor {
+            host: self.clone(),
+            bytes: AtomicUsize::new(floor),
+        }))
+    }
+    pub(crate) fn minimum_floor(&self) -> usize {
+        self.floor
+    }
+    fn full_error(&self) -> std::io::Error {
+        let mib = 1024 * 1024;
+        let kib = 1024;
+        let capacity = if self.limit.is_multiple_of(mib) {
+            format!("{} MiB", self.limit / mib)
+        } else if self.limit.is_multiple_of(kib) {
+            format!("{} KiB", self.limit / kib)
+        } else {
+            format!("{} bytes", self.limit)
+        };
+        std::io::Error::new(
+            std::io::ErrorKind::OutOfMemory,
+            format!("terminal memory for this user is full ({capacity}); close a session"),
+        )
+    }
+    /// Total bytes committed against the user's pool, including idle floors.
+    pub(crate) fn total_used(&self) -> usize {
+        self.used.load(Ordering::Relaxed) + self.floors.load(Ordering::Relaxed)
+    }
+    pub(crate) fn limit_bytes(&self) -> usize {
+        self.limit
+    }
+    pub(crate) fn try_charge(&self, bytes: usize) -> bool {
+        if bytes == 0 {
+            return true;
+        }
+        self.used
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(bytes).filter(|next| {
+                    *next
+                        <= self
+                            .limit
+                            .saturating_sub(self.floors.load(Ordering::Relaxed))
+                })
+            })
+            .is_ok()
+    }
+    pub(crate) fn release_charge(&self, bytes: usize) {
+        self.used.fetch_sub(bytes, Ordering::Relaxed);
     }
     /// Pool bytes a terminal at `used` with `floor` needs to grow by `bytes`.
     fn excess(used: usize, bytes: usize, floor: usize) -> usize {
         used.saturating_add(bytes).saturating_sub(floor) - used.saturating_sub(floor)
     }
-    /// Pool bytes charged now. `charge` keeps it under the limit; a floor
-    /// that shrinks may move a terminal's existing bytes above it.
+    /// Pool bytes charged above floors. The total cap also includes floors.
     #[cfg(test)]
     pub(crate) fn used(&self) -> usize {
         self.used.load(Ordering::Relaxed)
     }
     fn fits(&self, used: usize, bytes: usize, floor: usize) -> bool {
-        Self::excess(used, bytes, floor)
-            <= self.limit.saturating_sub(self.used.load(Ordering::Relaxed))
+        let extra = Self::excess(used, bytes, floor);
+        extra <= self.limit.saturating_sub(self.total_used())
     }
     fn charge(&self, used: usize, bytes: usize, floor: usize) -> bool {
-        let bytes = Self::excess(used, bytes, floor);
-        bytes == 0
-            || self
-                .used
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |pool| {
-                    pool.checked_add(bytes).filter(|total| *total <= self.limit)
-                })
-                .is_ok()
+        self.try_charge(Self::excess(used, bytes, floor))
     }
     /// `used` is the terminal's charge after `bytes` were released.
     fn release(&self, used: usize, bytes: usize, floor: usize) {
-        self.used
-            .fetch_sub(Self::excess(used, bytes, floor), Ordering::Relaxed);
+        self.release_charge(Self::excess(used, bytes, floor));
     }
-    /// Moves a terminal's already allocated bytes between its floor and the
-    /// pool when its floor changes. Never refused: nothing is allocated, and
-    /// refusing would leave the charge out of step with `used`.
-    fn refloor(&self, used: usize, from: usize, to: usize) {
+    /// Moves a terminal's existing bytes between its protected floor and the
+    /// shared remainder. A floor increase is refused if it would exceed the
+    /// total cap; native allocation accounting then stays unchanged.
+    fn refloor(&self, used: usize, from: usize, to: usize) -> bool {
         let (before, after) = (used.saturating_sub(from), used.saturating_sub(to));
-        if after > before {
-            self.used.fetch_add(after - before, Ordering::Relaxed);
-        } else {
-            self.used.fetch_sub(before - after, Ordering::Relaxed);
+        let total_before = self.total_used();
+        let total_after = total_before
+            .saturating_sub(from)
+            .saturating_sub(before)
+            .saturating_add(to)
+            .saturating_add(after);
+        if total_after > self.limit {
+            return false;
         }
+        if to > from {
+            if before > after {
+                self.used.fetch_sub(before - after, Ordering::Relaxed);
+            }
+            self.floors.fetch_add(to - from, Ordering::Relaxed);
+        } else {
+            self.floors.fetch_sub(from - to, Ordering::Relaxed);
+            if after > before {
+                self.used.fetch_add(after - before, Ordering::Relaxed);
+            }
+        }
+        true
+    }
+}
+impl HostFloor {
+    fn resize(&self, used: usize, to: usize) -> bool {
+        let from = self.bytes.load(Ordering::Relaxed);
+        if !self.host.refloor(used, from, to) {
+            return false;
+        }
+        self.bytes.store(to, Ordering::Relaxed);
+        true
+    }
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes.load(Ordering::Relaxed)
+    }
+}
+impl Drop for HostFloor {
+    fn drop(&mut self) {
+        self.host
+            .floors
+            .fetch_sub(self.bytes.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 }
 
@@ -139,6 +232,7 @@ struct State {
     encoded_limit: usize,
     page_size: usize,
     host: Option<Arc<HostBudget>>,
+    floor_reservation: Option<Arc<HostFloor>>,
     /// This terminal's share of `host` that no neighbour can take.
     floor: usize,
 }
@@ -148,18 +242,19 @@ impl Memory {
     #[allow(clippy::unnecessary_box_returns)]
     #[cfg(test)]
     pub(super) fn new(limit: usize) -> Box<Self> {
-        Self::with_host(limit, 0, None)
+        Self::with_host(limit, 0, None, None)
     }
     #[allow(clippy::unnecessary_box_returns)]
     #[cfg(all(test, feature = "compact-history"))]
     pub(super) fn with_history(limit: usize, encoded_limit: usize) -> Box<Self> {
-        Self::with_host(limit, encoded_limit, None)
+        Self::with_host(limit, encoded_limit, None, None)
     }
     #[allow(clippy::unnecessary_box_returns)]
     pub(super) fn with_host(
         limit: usize,
         encoded_limit: usize,
         host: Option<Arc<HostBudget>>,
+        floor_reservation: Option<Arc<HostFloor>>,
     ) -> Box<Self> {
         let mut memory = Box::new(Self {
             abi: Abi {
@@ -177,8 +272,9 @@ impl Memory {
                 encoded_used: 0,
                 encoded_limit,
                 page_size: page_size(),
-                floor: host.as_ref().map_or(0, |host| host.floor),
+                floor: floor_reservation.as_ref().map_or(0, |floor| floor.bytes()),
                 host,
+                floor_reservation,
             }),
         });
         memory.abi.context = memory.state.get().cast();
@@ -283,16 +379,22 @@ impl Memory {
     /// still covers parser and style data of an idle terminal.
     pub(super) fn reserve_screens(&mut self, pages: usize, page_len: usize) {
         let state = self.state.get_mut();
-        let Some(host) = &state.host else { return };
-        let charge = mapping_charge(page_len, state.page_size);
-        let floor = pages
+        let Some(floor_reservation) = &state.floor_reservation else {
+            return;
+        };
+        let floor = Self::screen_floor(pages, page_len, floor_reservation.host.floor);
+        if floor_reservation.resize(state.used, floor) {
+            state.floor = floor;
+        }
+    }
+    pub(crate) fn screen_floor(pages: usize, page_len: usize, minimum: usize) -> usize {
+        let charge = mapping_charge(page_len, page_size());
+        pages
             .saturating_mul(2)
             .saturating_add(2)
             .saturating_mul(charge)
             .saturating_add(SCREEN_OVERHEAD)
-            .clamp(host.floor, MAX_FLOOR.max(host.floor));
-        host.refloor(state.used, state.floor, floor);
-        state.floor = floor;
+            .clamp(minimum, MAX_FLOOR.max(minimum))
     }
     #[cfg(test)]
     pub(super) fn floor(&self) -> usize {

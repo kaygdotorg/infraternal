@@ -50,6 +50,15 @@ fn reserve_screens(memory: &mut crate::terminal_memory::Memory, cols: u16, rows:
     let pages = unsafe { infraternal_vt_screen_pages(cols, rows, &raw mut page_len) };
     memory.reserve_screens(pages, page_len);
 }
+/// Computes and reserves the startup screen floor before its PTY is spawned.
+#[cfg(feature = "process-per-user")]
+pub(crate) fn floor_for_geometry(cols: u16, rows: u16, minimum: usize) -> usize {
+    let mut page_len = 0;
+    // SAFETY: this native helper performs layout arithmetic only and writes
+    // one scalar to the provided local; it creates no terminal state.
+    let pages = unsafe { infraternal_vt_screen_pages(cols, rows, &raw mut page_len) };
+    crate::terminal_memory::Memory::screen_floor(pages, page_len, minimum)
+}
 // A failed resize can partially mutate Ghostty page ownership. None is a
 // permanent tombstone: even destruction would inspect invalid native state.
 // Default builds retain retired allocations until shim exit (#37). The
@@ -97,6 +106,7 @@ impl Engine {
         rows: u16,
         bytes: usize,
         host: Option<std::sync::Arc<crate::terminal_memory::HostBudget>>,
+        floor_reservation: Option<std::sync::Arc<crate::terminal_memory::HostFloor>>,
     ) -> io::Result<Self> {
         #[cfg(not(feature = "compact-history"))]
         let limit = SCREEN_RESERVATION
@@ -106,7 +116,7 @@ impl Engine {
         // Their encoded allocations still obey the configured history share.
         #[cfg(feature = "compact-history")]
         let limit = SCREEN_RESERVATION + bytes.saturating_mul(2);
-        Self::build(cols, rows, bytes, limit, host)
+        Self::build(cols, rows, bytes, limit, host, floor_reservation)
     }
     pub fn new(cols: u16, rows: u16, bytes: usize) -> io::Result<Self> {
         Self::build(
@@ -114,6 +124,8 @@ impl Engine {
             rows,
             bytes,
             8 * 1024 * 1024 + bytes.saturating_mul(2) + usize::from(cols) * usize::from(rows) * 32,
+            #[cfg(feature = "process-per-user")]
+            None,
             #[cfg(feature = "process-per-user")]
             None,
         )
@@ -126,14 +138,19 @@ impl Engine {
         #[cfg(feature = "process-per-user")] host: Option<
             std::sync::Arc<crate::terminal_memory::HostBudget>,
         >,
+        #[cfg(feature = "process-per-user")] floor_reservation: Option<
+            std::sync::Arc<crate::terminal_memory::HostFloor>,
+        >,
     ) -> io::Result<Self> {
         #[cfg(not(feature = "process-per-user"))]
         let _ = limit;
         let mut raw = std::ptr::null_mut();
         #[cfg(all(feature = "process-per-user", not(feature = "compact-history")))]
-        let mut memory = crate::terminal_memory::Memory::with_host(limit, 0, host);
+        let mut memory =
+            crate::terminal_memory::Memory::with_host(limit, 0, host, floor_reservation);
         #[cfg(feature = "compact-history")]
-        let mut memory = crate::terminal_memory::Memory::with_host(limit, bytes, host);
+        let mut memory =
+            crate::terminal_memory::Memory::with_host(limit, bytes, host, floor_reservation);
         // The first screen comes from the floor, so it is sized first.
         #[cfg(feature = "process-per-user")]
         reserve_screens(&mut memory, cols, rows);

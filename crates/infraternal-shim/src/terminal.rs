@@ -48,6 +48,8 @@ pub struct Terminal {
     #[cfg(feature = "process-per-user")]
     host: Option<std::sync::Arc<crate::terminal_memory::HostBudget>>,
     #[cfg(feature = "process-per-user")]
+    host_floor: Option<std::sync::Arc<crate::terminal_memory::HostFloor>>,
+    #[cfg(feature = "process-per-user")]
     limits: crate::terminal_limits::Limits,
     observer: Observer,
     parser: vte::Parser,
@@ -88,6 +90,8 @@ impl Terminal {
             false,
             #[cfg(feature = "process-per-user")]
             None,
+            #[cfg(feature = "process-per-user")]
+            None,
         )
     }
     /// Reuse the selected VT engine with an explicit research retention budget.
@@ -103,8 +107,35 @@ impl Terminal {
         history: usize,
         host: Option<std::sync::Arc<crate::terminal_memory::HostBudget>>,
     ) -> io::Result<Self> {
-        let mut terminal = Self::build(cols, rows, history, true, host.clone())?;
+        let floor_reservation = host
+            .as_ref()
+            .map(|host| {
+                let floor =
+                    crate::terminal_native::floor_for_geometry(cols, rows, host.minimum_floor());
+                host.reserve_session(floor)
+            })
+            .transpose()?;
+        Self::with_host_floor(cols, rows, history, host, floor_reservation)
+    }
+    /// Uses a session floor reserved before its PTY was created [D310].
+    #[cfg(feature = "process-per-user")]
+    pub(super) fn with_host_floor(
+        cols: u16,
+        rows: u16,
+        history: usize,
+        host: Option<std::sync::Arc<crate::terminal_memory::HostBudget>>,
+        floor_reservation: Option<std::sync::Arc<crate::terminal_memory::HostFloor>>,
+    ) -> io::Result<Self> {
+        let mut terminal = Self::build(
+            cols,
+            rows,
+            history,
+            true,
+            host.clone(),
+            floor_reservation.clone(),
+        )?;
         terminal.host = host;
+        terminal.host_floor = floor_reservation;
         Ok(terminal)
     }
     fn build(
@@ -115,10 +146,13 @@ impl Terminal {
         #[cfg(feature = "process-per-user")] host: Option<
             std::sync::Arc<crate::terminal_memory::HostBudget>,
         >,
+        #[cfg(feature = "process-per-user")] floor_reservation: Option<
+            std::sync::Arc<crate::terminal_memory::HostFloor>,
+        >,
     ) -> io::Result<Self> {
         #[cfg(feature = "process-per-user")]
         let engine = if bounded {
-            Engine::bounded(cols, rows, history, host)?
+            Engine::bounded(cols, rows, history, host, floor_reservation)?
         } else {
             Engine::new(cols, rows, history)?
         };
@@ -135,6 +169,8 @@ impl Terminal {
             bounded,
             #[cfg(feature = "process-per-user")]
             host: None,
+            #[cfg(feature = "process-per-user")]
+            host_floor: None,
             #[cfg(feature = "process-per-user")]
             limits: crate::terminal_limits::Limits::default(),
             observer: Observer::default(),
@@ -262,11 +298,13 @@ impl Terminal {
             self.history_budget,
             self.bounded,
             self.host.clone(),
+            self.host_floor.clone(),
         )?;
         // Clone, not take: a later error below leaves `self` in place.
         #[cfg(feature = "process-per-user")]
         {
             restored.host.clone_from(&self.host);
+            restored.host_floor.clone_from(&self.host_floor);
         }
         #[cfg(not(feature = "process-per-user"))]
         let mut restored = Self::new(self.dimensions.0, self.dimensions.1)?;
