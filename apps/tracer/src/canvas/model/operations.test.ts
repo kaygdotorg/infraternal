@@ -56,3 +56,17 @@ test("a drop sends the moved membership once, without derived neighbour geometry
   const changes = edits(before, after, new Map([["a", { windowId: "a", move: true as const }]]));
   expect(changes).toEqual([{ type: "move", view_id: "console", window_id: "a", column_id: "c", after: "c", column_after: null }]);
 });
+
+test("a narrow right split widens first so both halves remain valid", () => {
+  const before = doc(); reduce(before, open("anchor"));
+  const layout = before.views[0]!.layout; if (layout.type !== "tiled") throw Error("tiled");
+  layout.columns[0]!.weight = 0.125;
+  const after = structuredClone(before);
+  const split: Intent = { type: "split", view_id: "console", anchor_id: "anchor", axis: "right", column_id: "right", window: { id: "child", target: { type: "settings", section: "appearance" } } };
+  reduce(after, split);
+  const changes = edits(before, after, new Map([["child", { windowId: "child", anchorId: "anchor", axis: "right" }]]));
+  const replay = structuredClone(before); for (const change of changes) reduce(replay, change);
+  const result = replay.views[0]!.layout; if (result.type !== "tiled") throw Error("tiled");
+  expect(result.columns.map((c) => c.weight)).toEqual([0.1, 0.1]);
+  expect(changes.map((i) => i.type)).toEqual(["weight", "split"]);
+});

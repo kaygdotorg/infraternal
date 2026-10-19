@@ -2,6 +2,8 @@
 import { isCanonicalUuid } from "../../identifiers";
 export const FORMAT = "infraternal.canvas";
 export const VERSION = 1;
+/** Smallest canonical column share accepted by the server. */
+export const MIN_COLUMN_WEIGHT = 0.1;
 
 /** What a window shows, by stable reference. */
 export type DocTarget =
@@ -76,7 +78,7 @@ export function parseDocument(input: unknown): CanvasDocument | undefined {
     const columns: DocColumn[] = [];
     let count = 0;
     for (const c of raw.layout.columns) {
-      if (!isObject(c) || !text(c.id) || !finite(c.weight, 0.1, 10) || !Array.isArray(c.windows)) return undefined;
+      if (!isObject(c) || !text(c.id) || !finite(c.weight, MIN_COLUMN_WEIGHT, 10) || !Array.isArray(c.windows)) return undefined;
       const windows: DocWindow[] = [];
       for (const w of c.windows) {
         const target = isObject(w) ? parseTarget(w.target) : undefined;

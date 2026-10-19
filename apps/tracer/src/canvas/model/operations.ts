@@ -1,7 +1,7 @@
 /** Stable-ID intents and optimistic reduction for account layouts (D180, D183, #243). */
 import { reduce } from "./reducer";
 export { reduce } from "./reducer";
-import { documentWindows as windows } from "./schema";
+import { MIN_COLUMN_WEIGHT, documentWindows as windows } from "./schema";
 import type { CanvasDocument, DocColumn, DocTarget, DocView, DocWindow } from "./schema";
 export type Intent =
   | { type: "view.add"; view: DocView }
@@ -83,6 +83,17 @@ export function edits(before: CanvasDocument, after: CanvasDocument, splits: Rea
   const working = structuredClone(before), compact: Intent[] = [];
   // Earlier insertions already move their following neighbours. Do not turn one drag into redundant moves.
   for (const intent of [...result.filter((i) => i.type !== "membership.remove"), ...result.filter((i) => i.type === "membership.remove")]) {
+    if (intent.type === "split" && intent.axis === "right") {
+      const view = working.views.find((v) => v.id === intent.view_id), columns = view ? cols(view) : [];
+      const at = columns.findIndex((c) => c.windows.some((w) => w.id === intent.anchor_id));
+      const column = columns[at], anchor = column?.windows.find((w) => w.id === intent.anchor_id);
+      // Widen before dividing a narrow column: both new windows must meet the wire bound.
+      // This uses the existing ordered weight intent and never waits for its receipt.
+      if (column && anchor && Math.min(anchor.span ?? 1, columns.length - at) === 1 && column.weight < MIN_COLUMN_WEIGHT * 2) {
+        const grow: Intent = { type: "weight", view_id: intent.view_id, column_id: column.id, weight: MIN_COLUMN_WEIGHT * 2 };
+        compact.push(grow); reduce(working, grow);
+      }
+    }
     if (intent.type === "move") {
       const view = working.views.find((v) => v.id === intent.view_id);
       const col = view && cols(view).find((c) => c.id === intent.column_id);
