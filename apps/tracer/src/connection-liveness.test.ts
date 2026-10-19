@@ -95,15 +95,12 @@ test("a retained unresponsive route loses readiness, resumes automatically and i
     connection.streamAttached(true, 1);
     connection.sampleRoundTrip();
     // A suspended renderer may deliver a queued old Pong before its overdue timer.
-    // That delay is not a new network RTT and cannot redeem an expired route.
+    // That delay is not a new network RTT or evidence of a broken route (#245).
     now += 60_000;
     const pong = encodeMuxedFrame(0, { type: "Pong", nonce: latestProbe, sentUs: latestStamp });
-    const batch = new Uint8Array(pong.byteLength + welcome.byteLength);
-    batch.set(pong);
-    batch.set(welcome, pong.byteLength);
-    sockets[2]!.receive(batch);
-    expect(disconnected).toBe(3);
-    expect(connection.isWelcomed).toBe(false);
+    sockets[2]!.receive(pong);
+    expect(disconnected).toBe(2);
+    expect(connection.isWelcomed).toBe(true);
     expect(welcomes).toBe(3);
   } finally {
     connection?.dispose();

@@ -11,6 +11,7 @@ import { PredictiveEcho, type PredictionPosition, type PredictiveEchoState } fro
 import { CLOSE_SESSION_GONE, type WireFrame } from "../../../packages/protocol/src/codec";
 import { MuxConnection, reconnectDelay, STABLE_CONNECTION_MS, type StreamHandler } from "./connection";
 import { onDemand } from "./on-demand";
+import { captureFocusIntent } from "../../../packages/ui/src/focus-intent";
 import type { TerminalLink, TerminalLinkController, TerminalLinkRow } from "./terminal-links.on-demand";
 
 const INITIAL_CREDIT = 1024 * 1024;
@@ -122,6 +123,8 @@ export type TerminalTraceHop =
   | "prediction";
 
 export interface TerminalConfig {
+  /** The owning window still wants initial desktop focus when initialization finishes. */
+  shouldFocusOnOpen?: () => boolean;
   /** Readable label for refusal guidance; hostId remains the routing authority. */
   hostName?: string;
   host: HTMLElement;
@@ -305,7 +308,6 @@ export class TerminalClient {
    * phone the keyboard needs a tap: until the terminal's input has focus the cursor waits (steady, an underline) and
    * after the keyboard goes away it waits again; a blinking cursor never promises a keyboard that will not come (D191).
    */
-  private openingFocus = false;
   private typingReady = !matchMedia("(pointer: coarse)").matches;
   private predictionCursorHidden = false;
   private lastThemeColorsMs = 0;
@@ -324,7 +326,12 @@ export class TerminalClient {
     this.font = font;
     this.ghostty = terminal as unknown as GhosttyActivityControls;
     this.screen = config.screen ?? config.host.parentElement ?? config.host;
-    this.terminal.open(config.host);
+    // Opening a renderer must never choose the page's input destination. Its
+    // default focus also schedules another focus task, after user input can run.
+    // Suppress both at their source; open() below applies the owner's intent.
+    const rendererFocus = terminal.focus;
+    terminal.focus = () => {};
+    try { terminal.open(config.host); } finally { terminal.focus = rendererFocus; }
     // Keep Ghostty's scrollbar drag handler, but let the on-demand controller own link scanning and activation.
     (terminal as unknown as { linkDetector?: unknown }).linkDetector = undefined;
     const write = terminal.write.bind(terminal);
@@ -332,13 +339,7 @@ export class TerminalClient {
       this.linkRowsArmed = true;
       write(data, callback);
     };
-    // Ghostty focuses its input as it opens, and again on the next task. On a phone that focus is not a tap: no keyboard
-    // follows, yet the cursor would look live. The terminal starts unfocused there (after Ghostty's own second focus)
-    // and the first tap focuses it (D191).
-    if (matchMedia("(pointer: coarse)").matches) {
-      this.openingFocus = true;
-      window.setTimeout(() => { this.openingFocus = false; if (config.host.contains(document.activeElement)) (document.activeElement as HTMLElement).blur(); }, 0);
-    }
+    // Phones wait for a real tap before opening the keyboard (D191).
     this.disposeTouch = terminalTouch(config.host, terminal, () => this.cellMetrics(), () => this.scheduleFit(), () => this.wakeTerminal());
     this.pauseTerminal(); // Ghostty opens with one live loop; the client owns its activity window.
     this.terminal.options.scrollback = config.scrollbackLimit ?? 10_000;
@@ -422,12 +423,11 @@ export class TerminalClient {
       if (config.hooks?.onSessionGone) config.hooks.onSessionGone(ended.status);
       else this.setStatus("This session has ended. Open a new shell to continue.");
     }
-    if (!matchMedia("(pointer: coarse)").matches) this.terminal.focus();
-    config.host.addEventListener("focusin", () => { if (!this.openingFocus) this.setTypingReady(true); this.restartCursorBlink(); });
+    config.host.addEventListener("focusin", () => { this.setTypingReady(true); this.restartCursorBlink(); });
     config.host.addEventListener("focusout", (event) => {
       if (!config.host.contains(event.relatedTarget as Node | null)) this.cursorLayer?.stopBlink();
       // Focus moving between the host's own elements (its input and the host) keeps the terminal ready.
-      if (!this.openingFocus && !config.host.contains(event.relatedTarget as Node | null) && matchMedia("(pointer: coarse)").matches) this.setTypingReady(false);
+      if (!config.host.contains(event.relatedTarget as Node | null) && matchMedia("(pointer: coarse)").matches) this.setTypingReady(false);
     });
     this.paintTypingState();
   }
@@ -438,20 +438,36 @@ export class TerminalClient {
    * grid is measured from them; italic and Nerd Font faces load afterwards.
    */
   static async open(config: TerminalConfig): Promise<TerminalClient> {
-    const font = config.font ?? fontById(DEFAULT_FONT_ID)!;
-    await TerminalClient.prepareResources(font);
-    const terminal = TerminalClient.createRenderer(font, config);
-    const client = new TerminalClient(config, terminal, font);
-    // Weights go in before the first measurement so the grid is measured from the face it draws.
-    client.installFontWeights();
-    client.remeasureFont();
-    client.keepLigaturesOff();
-    client.installCursorLayerHook();
-    client.loadStyledFaces();
-    // An already opened terminal has paid the same first-renderer cost. Also
-    // supersede an optional warm-up still waiting for resources on this font.
-    TerminalClient.rendererWarmups.set(font.id, Promise.resolve());
-    return client;
+    // Initialization yields to input. Any focus or input activity during that
+    // wait supersedes automatic focus, even if focus later returns to the body.
+    const focusIntent = captureFocusIntent(document);
+    try {
+      const font = config.font ?? fontById(DEFAULT_FONT_ID)!;
+      await TerminalClient.prepareResources(font);
+      // Restored windows share the resource promise. Give each renderer its own
+      // task so dozens of initializations cannot hold queued socket replies in
+      // one microtask batch (#245); the first window pays only one task turn.
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      const terminal = TerminalClient.createRenderer(font, config);
+      const client = new TerminalClient(config, terminal, font);
+      // Weights go in before the first measurement so the grid is measured from the face it draws.
+      client.installFontWeights();
+      client.remeasureFont();
+      client.keepLigaturesOff();
+      client.installCursorLayerHook();
+      client.loadStyledFaces();
+      // An already opened terminal has paid the same first-renderer cost. Also
+      // supersede an optional warm-up still waiting for resources on this font.
+      TerminalClient.rendererWarmups.set(font.id, Promise.resolve());
+      if (focusIntent.isCurrent() && (config.shouldFocusOnOpen?.() ?? true) && !matchMedia("(pointer: coarse)").matches) {
+        // Automatic focus is immediate, with no deferred renderer callback that
+        // could take focus back after the person has moved to another surface.
+        (terminal.textarea ?? config.host).focus();
+      }
+      return client;
+    } finally {
+      focusIntent.dispose();
+    }
   }
 
   private static createRenderer(font: MonoFont, config: Pick<TerminalConfig, "scrollbackLimit" | "theme">): Terminal {

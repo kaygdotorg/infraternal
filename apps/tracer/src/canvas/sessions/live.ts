@@ -18,6 +18,7 @@
  * - The first window uses the screen's own terminal host element, so the page still has one `#terminal-host`.
  */
 import { isCanonicalUuid, randomUuid } from "../../identifiers";
+import { captureFocusIntent } from "../../../../../packages/ui/src/focus-intent";
 import type { CoreScreen } from "../../core-screen";
 import type { ConnectionPool, MuxConnection } from "../../connection";
 import type { TerminalClient, TerminalHooks } from "../../terminal";
@@ -91,7 +92,6 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     private readonly status = createStatusRelay(core.toast);
     private unregister: (() => void) | undefined;
     private disposed = false;
-    private wantsFocus = false;
     private visible = true;
     private activeNow = false;
     private painted = false;
@@ -225,10 +225,16 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       };
       // Reserved before the module loads: windows restored together all ask now, and each must count against its socket.
       const conn = this.conn = pool && !this.disposed ? pool.acquire() : connection;
+      // Capture before the dynamic import too: typing into another surface
+      // while the terminal module loads must cancel restore focus permanently.
+      const focusIntent = captureFocusIntent(document);
       try {
         const { TerminalClient } = await import("../../terminal");
         if (this.disposed) return;
         const client = await TerminalClient.open({
+          // Only the currently selected window may take initial focus. open()
+          // also cancels this intent if the person interacts during its waits.
+          shouldFocusOnOpen: () => focusIntent.isCurrent() && this.activeNow && !this.disposed,
           host: hostEl,
           hostName: this.model.host,
           screen: core.stage,
@@ -257,17 +263,18 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         this.unregister = core.registerTerminal(client);
         if (this.activeNow) core.setActiveTerminal(client);
         if (!this.visible) client.setSuspended(true);
-        if (this.wantsFocus) client.focus();
         if (this.retired) { client.markSessionGone(this.retired.status); if (first) settle(); }
         if (first) options.onFirstClient?.(client);
       } catch {
         if (first && !this.disposed) settle();
         if (!this.disposed) core.toast.show({ message: "Could not open the terminal. Try again.", tone: "error", duration: 5000 });
+      } finally {
+        focusIntent.dispose();
       }
     }
 
     focus(): void {
-      if (this.client) this.client.focus(); else this.wantsFocus = true;
+      this.client?.focus();
     }
 
     markGone(host: string, sessionId: string, status?: number): void {
