@@ -143,11 +143,17 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,225,872 bytes |
-  | `aarch64-unknown-linux-musl` | 19,427,688 bytes |
+  | `x86_64-unknown-linux-musl` | 21,223,696 bytes |
+  | `aarch64-unknown-linux-musl` | 19,415,776 bytes |
 
-  These are the release-5 measurements, adding the Mesh view (#236) to the
-  release-4 measurements below: +81,760 / +56,992 bytes. The x86_64 increase
+  D307's bounded query-reply lane and package-only host-orchestration `s` to
+  `z` profile trim ratchet these ceilings down by 2,176 / 11,912 bytes from
+  release 5 (#160, #206). Transport, protocol, VT and cryptographic crates keep
+  their speed profiles. The measured typing tradeoff and size receipts are on
+  [#160](https://git.kayg.org/kayg/infraternal/issues/160).
+
+  The release-5 measurements were 21,225,872 / 19,427,688 bytes, adding the
+  Mesh view (#236) to the release-4 measurements below: +81,760 / +56,992 bytes. The x86_64 increase
   follows D306's accepted Mesh view size and stays below this task's +90 KB
   stop line. Each cap stays at its exact measured size until a later measured
   reduction ratchets it down. Release 4's one-off D243 exception was accepted
