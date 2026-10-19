@@ -33,7 +33,7 @@ async function pendingTyping(page: Page, theme = "ink"): Promise<string[]> {
     });
     if (routes === 1) { initial = socket; initialUpstream = upstream; }
   });
-  await page.goto(`/?theme=${theme}&bg=none`);
+  await page.goto(`/?mock=1&proto=product&theme=${theme}&bg=none`);
   const card = page.locator('.cl[data-view="console"] .ui-window').first();
   await expect(card).toHaveAttribute("data-status", "live", { timeout: 30_000 });
   await card.locator(".terminal-host textarea").focus();
