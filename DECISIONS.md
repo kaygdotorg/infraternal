@@ -3249,3 +3249,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      per query to the PTY and drops later or expired ones. Rejected: a
      browser-only rule (only the focused viewer answers, late replies
      dropped), which still lets two focused devices both answer.
+308. **Shared layout ships at its measured size, trim later (owner,
+     2026-10-19, #243; like D306):** "yes that is fine". The server-held
+     canvas layout (store, op log, snapshots, browser sync) measures about
+     +117 KB x86_64 over the current caps after a first trim (−13.9 KB),
+     above the 64 KB band of D243. It ships at the measured size once its
+     reviews and the phone pass are clean; trimming continues and the caps
+     ratchet down with it. Rejected: holding the feature for a deeper trim.
