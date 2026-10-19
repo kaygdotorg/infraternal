@@ -20,6 +20,30 @@ describe("synchronized terminal output", () => {
     output.dispose();
   });
 
+  test("preserves mode transitions for every pair of input chunk boundaries", () => {
+    const enable = "\u001b[?2026h";
+    const body = "frame";
+    const reset = "\u001b[?2026l";
+    const sample = `${enable}${body}${reset}`;
+    const enabledThrough = enable.length + body.length;
+
+    for (let firstBoundary = 0; firstBoundary <= sample.length; firstBoundary += 1) {
+      for (let secondBoundary = firstBoundary; secondBoundary <= sample.length; secondBoundary += 1) {
+        const output = new SynchronizedOutput(() => undefined, 10_000);
+        let offset = 0;
+        for (const chunk of [sample.slice(0, firstBoundary), sample.slice(firstBoundary, secondBoundary), sample.slice(secondBoundary)]) {
+          output.feed(chunk);
+          offset += chunk.length;
+          expect(output.holdsPaint).toBe(offset >= enable.length && offset < enabledThrough + reset.length);
+        }
+        expect(output.requiresAtomicPaint).toBe(true);
+        output.finishAtomicPaint();
+        expect(output.requiresAtomicPaint).toBe(false);
+        output.dispose();
+      }
+    }
+  });
+
   test("ignores CSI-looking bytes inside control strings and other mode numbers", () => {
     const output = new SynchronizedOutput(() => undefined);
     output.feed("\u001b]title \u001b[?2026h\u0007");
