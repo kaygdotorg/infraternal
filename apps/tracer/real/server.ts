@@ -57,7 +57,7 @@ export interface Bridge {
   /** Close frames the client sent (stream detaches). */
   detached: number[];
   /** Control-stream actions and subscriptions: what the browser asked (`up`) and what the server answered (`down`). */
-  control: Array<{ dir: "up" | "down"; type: "Call" | "Result" | "Subscribe"; /** Action id, subscription topic, or result status. */ detail: string; callId?: number; /** Optional VM benchmark timestamp; never includes frame bodies. */ at?: number }>;
+  control: Array<{ dir: "up" | "down"; type: "Call" | "Result" | "Subscribe" | "Event"; /** Action id, subscription topic, or result status. */ detail: string; callId?: number; /** Optional VM benchmark timestamp; never includes frame bodies. */ at?: number }>;
   cookie: string;
 }
 
