@@ -1,4 +1,4 @@
-//! Accumulates Credit and skips probes at capacity while preserving bounded Input/Resize recovery order [130], #78, #234.
+//! Accumulates Credit and skips best-effort probes/replies at capacity, preserving Input/Resize order [130, 307].
 use super::Command;
 use tokio::sync::{mpsc, watch};
 
@@ -74,11 +74,11 @@ impl Sender {
                 command,
                 credit_before,
             }) {
-                // A probe cannot displace accepted input or retire its writer
-                // under local pressure. Its caller retains the reply deadline.
+                // Best-effort probes and renderer replies cannot displace accepted
+                // typing or retire its writer under local queue pressure.
                 Ok(())
                 | Err(mpsc::error::TrySendError::Full(Ordered {
-                    command: Command::Ping(..),
+                    command: Command::Ping(..) | Command::Reply(..),
                     ..
                 })) => Ok(()),
                 Err(mpsc::error::TrySendError::Full(ordered)) => {
