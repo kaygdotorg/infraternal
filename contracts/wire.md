@@ -624,7 +624,9 @@ INTENT is one of (optional fields may be omitted):
   means append (including a neighbour concurrently closed); null/omitted means
   prepend. No array indexes are accepted.
 - `{type:"resize",window_id,height?,span?,rows?,row?}`: update only supplied
-  sizing fields in every membership.
+  non-null sizing fields in every membership. Null means omitted, preserving the
+  existing value (or its absence), on both server and browser. Canonical document
+  sizing fields are always numbers when present; they never contain null.
 - `{type:"weight",view_id,column_id,weight}`: set one column's relative weight.
 - `{type:"membership.add",view_id,column_id,window_id,after?:WINDOW_ID}`:
   reference an existing window in another view, preserving its stable ID.
