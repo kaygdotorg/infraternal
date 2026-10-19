@@ -477,3 +477,31 @@ fn hex(value: &Value, key: &str) -> Vec<u8> {
         })
         .collect()
 }
+
+#[test]
+fn marked_input_preserves_legacy_bytes_and_bounds_reply_body() {
+    let legacy = Frame::Input {
+        in_seq: 9,
+        bytes: b"typing",
+    };
+    let marked = Frame::InputReply {
+        query_seq: 42,
+        bytes: b"\x1b[1;1R",
+    };
+    for frame in [legacy, marked] {
+        let mut encoded = Vec::new();
+        encode_frame_into(&frame, &mut encoded).unwrap();
+        assert_eq!(decode_frame(&encoded).unwrap().frame, frame);
+    }
+    let oversized = vec![b'x'; 1025];
+    assert!(
+        encode_frame_into(
+            &Frame::InputReply {
+                query_seq: 0,
+                bytes: &oversized
+            },
+            &mut Vec::new()
+        )
+        .is_err()
+    );
+}

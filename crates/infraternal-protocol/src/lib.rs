@@ -76,6 +76,13 @@ pub enum Frame<'a> {
         /// Keystroke or paste bytes.
         bytes: &'a [u8],
     },
+    /// Reply-marked Input extension [307], independent of the typing cursor.
+    InputReply {
+        /// Session output offset of the query opening escape byte.
+        query_seq: u64,
+        /// One complete renderer response, bounded to 1024 bytes.
+        bytes: &'a [u8],
+    },
     /// Bytes written by the PTY, beginning at `out_seq`.
     Output {
         /// Shim byte offset of the first payload byte.
@@ -678,7 +685,7 @@ fn read_varint(input: &[u8], offset: usize) -> Result<(u32, usize), DecodeError>
 fn decode_body(frame_type: u8, body: &[u8]) -> Result<Frame<'_>, DecodeError> {
     match frame_type {
         0x00 | 0x01 | 0x02 | 0x08 | 0x09 | 0x0f => decode_connection_body(frame_type, body),
-        0x10..=0x16 => decode_terminal_body(frame_type, body),
+        0x10..=0x17 => decode_terminal_body(frame_type, body),
         0x30..=0x33 => decode_control_body(frame_type, body),
         _ => Err(DecodeError::UnknownType(frame_type)),
     }
@@ -739,6 +746,14 @@ fn decode_connection_body(frame_type: u8, body: &[u8]) -> Result<Frame<'_>, Deco
 #[inline]
 fn decode_terminal_body(frame_type: u8, body: &[u8]) -> Result<Frame<'_>, DecodeError> {
     match frame_type {
+        0x17 => {
+            let query_seq = body_u64(frame_type, body, 0)?;
+            let bytes = &body[8..];
+            if bytes.is_empty() || bytes.len() > 1024 {
+                return Err(invalid_body(frame_type, "reply size"));
+            }
+            Ok(Frame::InputReply { query_seq, bytes })
+        }
         0x10 | 0x11 | 0x15 => {
             let sequence = body_u64(frame_type, body, 0)?;
             let bytes = body
@@ -932,6 +947,12 @@ fn body_len(frame: &Frame<'_>) -> Result<usize, EncodeError> {
             .len()
             .checked_add(2)
             .ok_or(EncodeError::LengthOverflow),
+        Frame::InputReply { bytes, .. } => {
+            if bytes.is_empty() || bytes.len() > 1024 {
+                return Err(EncodeError::LengthOverflow);
+            }
+            Ok(8 + bytes.len())
+        }
         Frame::Input { bytes, .. }
         | Frame::Output { bytes, .. }
         | Frame::Snapshot { bytes, .. } => 8_usize
@@ -993,6 +1014,7 @@ fn frame_type(frame: &Frame<'_>) -> u8 {
         Frame::Ping { .. } => 0x08,
         Frame::Pong { .. } => 0x09,
         Frame::Close { .. } => 0x0f,
+        Frame::InputReply { .. } => 0x17,
         Frame::Input { .. } => 0x10,
         Frame::Output { .. } => 0x11,
         Frame::Resize { .. } => 0x12,
@@ -1015,7 +1037,8 @@ fn append_frame_body(frame: &Frame<'_>, output: &mut Vec<u8>) -> Result<(), Enco
         | Frame::Ping { .. }
         | Frame::Pong { .. }
         | Frame::Close { .. } => append_connection_body(frame, output),
-        Frame::Input { .. }
+        Frame::InputReply { .. }
+        | Frame::Input { .. }
         | Frame::Output { .. }
         | Frame::Resize { .. }
         | Frame::Ack { .. }
@@ -1071,6 +1094,10 @@ fn append_connection_body(frame: &Frame<'_>, output: &mut Vec<u8>) -> Result<(),
 
 fn append_terminal_body(frame: &Frame<'_>, output: &mut Vec<u8>) -> Result<(), EncodeError> {
     match frame {
+        Frame::InputReply { query_seq, bytes } => {
+            output.extend_from_slice(&query_seq.to_le_bytes());
+            output.extend_from_slice(bytes);
+        }
         Frame::Input { in_seq, bytes } => {
             output.extend_from_slice(&in_seq.to_le_bytes());
             output.extend_from_slice(bytes);

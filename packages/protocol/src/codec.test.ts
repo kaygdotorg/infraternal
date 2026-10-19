@@ -281,3 +281,16 @@ test("split mux header preserves trailing Close", () => {
   ]);
   expect(decoder.bufferedLength).toBe(0);
 });
+
+test("reply-marked Input uses an additive bounded layout without changing legacy input", () => {
+  const bytes = new TextEncoder().encode("\u001b[1;1R");
+  const marked: WireFrame = { type: "Input", inSeq: 0n, replyTo: 42n, bytes };
+  expect(decodeFrame(encodeFrame(marked)).frame).toEqual(marked);
+  const legacy: WireFrame = { type: "Input", inSeq: 9n, bytes };
+  expect(decodeFrame(encodeFrame(legacy)).frame).toEqual(legacy);
+  expect(() => encodeFrame({ ...marked, bytes: new Uint8Array(1025) })).toThrow();
+  expect(() => encodeFrame({ ...marked, bytes: new Uint8Array() })).toThrow();
+  for (let length = 0; length < encodeFrame(marked).length; length++) {
+    expect(() => decodeFrame(encodeFrame(marked).subarray(0, length))).toThrow();
+  }
+});

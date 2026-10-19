@@ -25,7 +25,7 @@ export type WireFrame =
   | { type: "Resume"; connectionId: Uint8Array; resumeToken: Uint8Array }
   | { type: "Ping" | "Pong"; nonce: bigint; sentUs: bigint }
   | { type: "Close"; code: number; reason: string }
-  | { type: "Input"; inSeq: bigint; bytes: Uint8Array }
+  | { type: "Input"; inSeq: bigint; bytes: Uint8Array; replyTo?: bigint }
   | { type: "Output"; outSeq: bigint; bytes: Uint8Array }
   | { type: "Resize"; cols: number; rows: number; pxW: number; pxH: number }
   | { type: "Ack"; inSeqAcked: bigint }
@@ -307,6 +307,12 @@ function decodeBody(type: number, body: Uint8Array): WireFrame {
     }
     case 0x10:
       return { type: "Input", inSeq: reader.u64(), bytes: reader.rest() };
+    case 0x17: {
+      const replyTo = reader.u64();
+      const bytes = reader.rest();
+      if (bytes.length === 0 || bytes.length > 1024) throw new Error("invalid reply size");
+      return { type: "Input", inSeq: 0n, replyTo, bytes };
+    }
     case 0x11:
       return { type: "Output", outSeq: reader.u64(), bytes: reader.rest() };
     case 0x12: {
@@ -499,7 +505,11 @@ function measureFrame(frame: WireFrame): FrameMeasure {
     case "Input":
       checkedU64(frame.inSeq, "input sequence");
       bodyLength = checkedAdd(8, frame.bytes.byteLength);
-      type = 0x10;
+      if (frame.replyTo !== undefined) {
+        checkedU64(frame.replyTo, "query sequence");
+        if (frame.bytes.length === 0 || frame.bytes.length > 1024) throw new Error("invalid reply size");
+      }
+      type = frame.replyTo === undefined ? 0x10 : 0x17;
       break;
     case "Output":
       checkedU64(frame.outSeq, "output sequence");
@@ -604,7 +614,7 @@ function writeFrameAt(frame: WireFrame, output: Uint8Array, offset: number, meas
       output.set(textEncoder.encode(frame.reason), cursor);
       break;
     case "Input":
-      view.setBigUint64(cursor, frame.inSeq, true);
+      view.setBigUint64(cursor, frame.replyTo ?? frame.inSeq, true);
       cursor += 8;
       output.set(frame.bytes, cursor);
       break;
