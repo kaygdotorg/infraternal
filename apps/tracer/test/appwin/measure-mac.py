@@ -88,6 +88,24 @@ def compositor_pixel(target, metadata, image_width, image_height):
  if not 0<=x<width or not 0<=y<height:raise RuntimeError('compositor target outside device')
  return min(image_width-1,round(x*image_width/width)),min(image_height-1,round(y*image_height/height))
 
+def first_picture(previous=None):
+ # Observe a terminal refusal as soon as it appears. Waiting only for live
+ # would keep native capture alive until timeout even after permission failed.
+ try:
+  state=page.wait_for_function("""(old)=>{
+   const cards=[...document.querySelectorAll('.ui-window[data-kind="app"]')].filter(n=>n.dataset.windowId!==old);
+   for(const card of cards){
+    const state=card.querySelector('.aw-card[data-shown="true"]')?.dataset.signature?.split(':')[0];
+    if(['permission','failed','closed','unsupported'].includes(state))return state;
+    if(card.querySelector('.aw-stage[data-picture="live"]'))return 'live';
+   }
+   return false;
+  }""",arg=previous,timeout=10000).json_value()
+  if state!='live':raise RuntimeError('capture refused before first picture')
+ except Exception:
+  stop_capture()
+  raise
+
 def consent_check():
  # Inspect metadata before requesting any screenshot; never retain an unrelated window inventory.
  inventory=cua('list_windows',{'on_screen_only':True})
@@ -358,7 +376,7 @@ try:
  terminals=page.locator('.ui-window[data-kind="terminal"] [data-action="close"]')
  if terminals.count():terminals.first.evaluate('(b)=>b.click()')
  page.get_by_role('button',name='New window',exact=True).click();page.get_by_role('option',name='App window measurement',exact=False).click()
- page.locator('.aw-stage[data-picture="live"]').wait_for(timeout=10000)
+ first_picture()
  consent_check()
  emit({'kind':'canvas_context','receipts':page.evaluate('window.__appWindowBench.take()')})
  page.screenshot(path=str(E/'canvas-native-before.png'))
@@ -517,7 +535,7 @@ try:
     if ack.get('kind')!='network_restored':raise RuntimeError('private route restoration unavailable')
     try:
      page.wait_for_function('(prior)=>window.__appWindowBench.sockets.opened>prior.opened&&window.__appWindowBench.sockets.closed>prior.closed',arg=prior_sockets,timeout=10000)
-     page.locator('.aw-stage[data-picture="live"]').wait_for(timeout=10000);counts['reconnects']+=1
+     first_picture();counts['reconnects']+=1
      emit({'kind':'soak_reconnect','before':prior_sockets,'after':page.evaluate('window.__appWindowBench.sockets')})
     except Exception:counts['stuck_frames']+=1
    if iteration==36:
@@ -528,7 +546,7 @@ try:
     page.get_by_role('button',name='New window',exact=True).click();page.get_by_role('option',name='App window measurement',exact=False).click()
     replacement=page.locator('.ui-window[data-kind="app"]').filter(has=page.locator('.aw-stage[data-picture="live"]'))
     try:
-     page.wait_for_function("""(old)=>[...document.querySelectorAll('.ui-window[data-kind="app"]')].some(node=>node.dataset.windowId!==old&&node.querySelector('.aw-stage[data-picture="live"]'))""",arg=previous_id,timeout=10000)
+     first_picture(previous_id)
      counts['reopens']+=1
      emit({'kind':'soak_reopen','previous_id':previous_id,'replacement_id':replacement.last.get_attribute('data-window-id')})
     except Exception:counts['stuck_frames']+=1

@@ -8,6 +8,40 @@ import signal
 from types import SimpleNamespace
 
 
+class FirstPictureTests(unittest.TestCase):
+    """Capture refusal and the first-picture deadline stop capture before cleanup."""
+
+    def wait(self, result=None, error=None):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'first_picture')
+        calls = []
+        def wait_for_function(expression, **kwargs):
+            calls.append(kwargs)
+            if error: raise error
+            return SimpleNamespace(json_value=lambda: result)
+        namespace = {'page': SimpleNamespace(wait_for_function=wait_for_function), 'stop_capture': lambda: calls.append('stopped')}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        return namespace['first_picture'], calls
+
+    def test_live_picture_keeps_capture(self):
+        wait, calls = self.wait('live')
+        wait('old-window')
+        self.assertEqual(calls, [{'arg': 'old-window', 'timeout': 10000}])
+
+    def test_refusal_never_retries_or_waits_for_another_picture(self):
+        for state in ('permission', 'failed', 'closed', 'unsupported'):
+            with self.subTest(state=state):
+                wait, calls = self.wait(state)
+                with self.assertRaises(RuntimeError): wait()
+                self.assertEqual(calls, [{'arg': None, 'timeout': 10000}, 'stopped'])
+
+    def test_deadline_stops_capture_before_propagating(self):
+        wait, calls = self.wait(error=TimeoutError())
+        with self.assertRaises(TimeoutError): wait()
+        self.assertEqual(calls, [{'arg': None, 'timeout': 10000}, 'stopped'])
+
+
 class CaptureRetirementTests(unittest.TestCase):
     """Refusal seals new launches before signals and never signals a reused PID."""
 
