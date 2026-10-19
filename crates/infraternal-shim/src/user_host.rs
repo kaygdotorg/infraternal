@@ -1105,6 +1105,57 @@ mod tests {
         Ok(advanced)
     }
 
+    /// Attach an in-memory viewer at the current replay head for snapshot tests.
+    fn snapshot_peer(session: &mut Session) -> io::Result<std::os::unix::net::UnixStream> {
+        let (server, client) = std::os::unix::net::UnixStream::pair()?;
+        server.set_nonblocking(true)?;
+        client.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+        session
+            .peers
+            .try_reserve_exact(1)
+            .map_err(io::Error::other)?;
+        session.peers.push(Peer {
+            stream: server,
+            decoder: Decoder::default(),
+            trailing: Vec::new(),
+            deferred: None,
+            attached: true,
+            caps: APPROXIMATE_SNAPSHOT,
+            input_reply: None,
+            writer: Some(0),
+            shared_writer: false,
+            ack_queued: 0,
+            size: (session.config.cols, session.config.rows, 0, 0),
+            cursor: Some(session.ring.head()),
+            request: None,
+            pending: Vec::new(),
+            written: 0,
+            exited_sent: false,
+        });
+        Ok(client)
+    }
+
+    /// Read one bounded frame and return its absolute snapshot head.
+    fn snapshot_head(client: &mut std::os::unix::net::UnixStream) -> io::Result<u64> {
+        let mut length = [0; 4];
+        client.read_exact(&mut length)?;
+        let length = usize::try_from(u32::from_le_bytes(length)).map_err(io::Error::other)?;
+        if length == 0 || length > crate::frame::MAX_FRAME {
+            return Err(io::Error::other(
+                "snapshot frame length is outside protocol bounds",
+            ));
+        }
+        let mut frame = vec![0; length];
+        client.read_exact(&mut frame)?;
+        match Frame::decode(&frame).map_err(io::Error::other)? {
+            Frame::Snapshot(head, _) | Frame::SnapshotWithFlags(head, _, _) => Ok(head),
+            Frame::Error(_, message) => Err(io::Error::other(message)),
+            _ => Err(io::Error::other(
+                "replay gap did not produce a screen snapshot",
+            )),
+        }
+    }
+
     /// PPU-R3-2 (#205): the host pool follows the machine within its bounds.
     #[test]
     fn host_pool_scales_with_machine_memory_within_bounds() {
@@ -1465,8 +1516,10 @@ mod tests {
             Session::new_host(config, 64 * 1024, host.clone())
         };
         let mut session = open(0x7511).unwrap();
+        session.terminal.process(b"\x1bcpool ready\r\n").unwrap();
         let neighbor = open(0x7512).unwrap();
         assert_eq!(host.total_used(), cap);
+        let mut viewer = snapshot_peer(&mut session).unwrap();
         let refusal = match open(0x7513) {
             Ok(session) => {
                 drop(session);
@@ -1482,8 +1535,12 @@ mod tests {
             let key = b"abcdefghijklmnopqrstuvwxyz"[index % 26];
             let started = Instant::now();
             assert_eq!(type_and_drain(&mut session, &[key]).unwrap(), 1);
+            session.housekeeping().unwrap();
+            assert_eq!(snapshot_head(&mut viewer).unwrap(), session.ring.head());
             samples.push(started.elapsed().as_secs_f64() * 1000.0);
             type_and_drain(&mut session, b"\x7f").unwrap();
+            session.housekeeping().unwrap();
+            assert_eq!(snapshot_head(&mut viewer).unwrap(), session.ring.head());
         }
         samples.sort_unstable_by(f64::total_cmp);
         let p50 = samples[(SAMPLES - 1) * 50 / 100];
