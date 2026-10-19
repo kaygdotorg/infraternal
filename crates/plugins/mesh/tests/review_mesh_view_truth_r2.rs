@@ -165,6 +165,33 @@ async fn evidence_migrations_0026_and_0028_upgrade_a_realistic_database_without_
             ("unnamed-4".into(), "placeholder".into(), Some(C.into())),
         ]
     );
+    let migration_revision: i64 =
+        sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let migration_audits = automatic_renames(&pool).await;
+    sqlx::migrate!("../../infraternal-server/migrations")
+        .run(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        name_rows(&pool).await,
+        [
+            ("server".into(), "placeholder".into(), Some("server".into())),
+            ("unnamed-2".into(), "placeholder".into(), Some(A.into())),
+            ("minipc01".into(), "hand".into(), Some(B.into())),
+            ("unnamed-4".into(), "placeholder".into(), Some(C.into())),
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM mesh_state WHERE singleton=1")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        migration_revision
+    );
+    assert_eq!(automatic_renames(&pool).await, migration_audits);
     let service = MeshService::new(pool.clone());
     let store = service.dataplane();
     let round = |order: [(&'static str, u8, Option<&'static str>); 4]| {
