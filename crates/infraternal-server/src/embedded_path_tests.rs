@@ -411,6 +411,40 @@ async fn review_pending_input_limit_retires_only_its_attachment() {
 }
 
 #[tokio::test]
+async fn review_typing_enqueued_before_a_reply_keeps_its_host_wire_order() {
+    let (commands, mut received) = mpsc::channel(8);
+    let (input, input_rx) = mpsc::channel(8);
+    let (_credit, input_acked) = watch::channel(0);
+    let handle = AttachmentHandle(Arc::new(AttachmentHandleInner {
+        id: 1,
+        stream_id: 2,
+        input,
+        input_acked,
+        commands: commands.clone(),
+    }));
+    let forwarding = tokio::spawn(forward_inputs(1, input_rx, commands));
+    let (output, _events) = mpsc::channel(8);
+    let queue = crate::websocket_input::InputQueue::new(handle.clone(), 1, output);
+    let Command::Input { frame, .. } = input_command(0, b"A") else {
+        unreachable!();
+    };
+    // Both admissions can occur in one receive turn. No scheduler yield is
+    // required between two complete frames buffered in a WebSocket message.
+    queue.enqueue(frame).unwrap();
+    assert!(handle.reply(
+        42,
+        Bytes::from_static(b"renderer reply"),
+        std::time::Instant::now() + Duration::from_secs(10)
+    ));
+    let first = received.recv().await.unwrap();
+    forwarding.abort();
+    assert!(
+        matches!(first, Command::Input { .. }),
+        "a later renderer reply overtook previously admitted typing"
+    );
+}
+
+#[tokio::test]
 async fn reply_queue_deadline_and_live_reply_do_not_change_typing_offsets() {
     let (mut connection, mut peer) = connection();
     let (tx, _output) = mpsc::channel(8);
