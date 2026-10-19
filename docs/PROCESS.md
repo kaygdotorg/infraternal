@@ -143,12 +143,14 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,225,872 bytes |
-  | `aarch64-unknown-linux-musl` | 19,427,688 bytes |
+  | `x86_64-unknown-linux-musl` | 21,231,280 bytes |
+  | `aarch64-unknown-linux-musl` | 19,436,360 bytes |
 
-  These are the release-5 measurements, adding the Mesh view (#236) to the
-  release-4 measurements below: +81,760 / +56,992 bytes. The x86_64 increase
-  follows D306's accepted Mesh view size and stays below this task's +90 KB
+  These ceilings include #146's shared-stream integration over release-5;
+  desktop support stays excluded from default builds. The release-5 ceilings
+  were 21,225,872 / 19,427,688 bytes, adding the Mesh view (#236) to the
+  release-4 measurements below: +81,760 / +56,992 bytes. That release-5
+  x86_64 increase follows D306's accepted Mesh view size and stays below this task's +90 KB
   stop line. Each cap stays at its exact measured size until a later measured
   reduction ratchets it down. Release 4's one-off D243 exception was accepted
   within the task's +64 KB ceiling for D299's versioned `--json` envelope and
