@@ -63,7 +63,7 @@ def run_logged(name: str, command: list[str], cwd: Path, env: dict[str, str], lo
 def make_sccache_observer(path: Path) -> None:
     path.write_text(
         "#!/usr/bin/env python3\n"
-        '"""Capture compiler flags before forwarding compilation to sccache."""\n'
+        '"""Capture remapped compile flags before forwarding to sccache."""\n'
         "import json, os, sys\n"
         "args = sys.argv[1:]\n"
         "compiler = args[0] if args else ''\n"
@@ -75,6 +75,12 @@ def make_sccache_observer(path: Path) -> None:
         "    capture = os.environ['INFRATER_SCCACHE_CAPTURE_NATIVE_AARCH64']\n"
         "else:\n"
         "    capture = None\n"
+        "if capture is not None:\n"
+        "    # Cargo and native compiler probes run before build flags are available.\n"
+        "    prefix = ('--remap-path-prefix=' if compiler.endswith('.cargo/rustc.sh')\n"
+        "              else '-ffile-prefix-map=')\n"
+        "    if not any(argument.startswith(prefix) for argument in args):\n"
+        "        capture = None\n"
         "if capture is not None:\n"
         "    try:\n"
         "        fd = os.open(capture, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)\n"
