@@ -469,6 +469,21 @@ mod tests {
     //! Exercises fan-out, reconnect, late fragments, byte validation and bounded retained state.
     use super::*;
     #[test]
+    fn review_renderer_supported_query_forms_are_admitted() {
+        for (request, response) in [
+            (b"\x1bZ".as_slice(), b"\x1b[?62;22c".as_slice()),
+            (b"\x1b[06n", b"\x1b[1;1R"),
+            (b"\x1b[\x006n", b"\x1b[1;1R"),
+        ] {
+            let mut state = Registry::default();
+            let now = Instant::now();
+            state.output([1; 16], 0, request, now);
+            // The shipping VT engine answers these equivalent control forms;
+            // admission must agree with its grammar before deduplicating replies.
+            assert!(state.accept([1; 16], 0, response, now));
+        }
+    }
+    #[test]
     fn only_one_reply_across_viewers_and_replay() {
         let mut state = Registry::default();
         let now = Instant::now();

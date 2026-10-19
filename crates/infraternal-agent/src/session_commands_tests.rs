@@ -133,3 +133,23 @@ async fn probe_at_full_command_capacity_preserves_accepted_input() {
         Err(mpsc::error::TrySendError::Closed(_))
     ));
 }
+
+#[tokio::test]
+async fn review_reply_at_full_command_capacity_preserves_accepted_input() {
+    let (mut sender, mut receiver) = channel();
+    for seq in 0..8 {
+        sender.try_send(Command::Input(seq, vec![b'x'])).unwrap();
+    }
+    // Dispatch interprets Full as a reason to retire the stream and cancel its
+    // terminal task. Best-effort replies must not trigger that path while
+    // previously accepted typing is still waiting for the shim.
+    assert!(
+        sender
+            .try_send(Command::Reply(b"\x1b[1;1R".to_vec()))
+            .is_ok(),
+        "reply overload must not retire the terminal carrying accepted typing"
+    );
+    for seq in 0..8 {
+        assert!(matches!(receiver.next().await, Some(Command::Input(actual, _)) if actual == seq));
+    }
+}

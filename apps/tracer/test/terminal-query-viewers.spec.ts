@@ -195,3 +195,20 @@ test("typing continues while another viewer answers a terminal query", async ({ 
     await expect.poll(async () => (await mockState(request)).accepted_input_bytes - before.accepted_input_bytes).toBe(16);
   } finally { await other.page.close(); }
 });
+
+for (const [name, query] of [
+  ["DECID", "\u001bZ"],
+  ["zero-padded CPR", "\u001b[06n"],
+  ["CPR with an ignored NUL", "\u001b[\u00006n"],
+] as const) {
+  test(`review: renderer-supported ${name} retains its live response`, async ({ page }) => {
+    const { request } = await openFirstViewer(page);
+    const before = await mockState(request);
+    await sendLiveOutput(request, query);
+    await waitForOutput(page, request);
+    // Each form already produces a response in the shipping VT engine. The
+    // new identity scanner must preserve that response rather than suppress it.
+    await expect.poll(async () => (await mockState(request)).accepted_input_bytes,
+      { timeout: 5_000 }).toBeGreaterThan(before.accepted_input_bytes);
+  });
+}
