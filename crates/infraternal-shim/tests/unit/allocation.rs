@@ -22,7 +22,7 @@ unsafe extern "C" fn allocate(
     ctx: *mut c_void,
     len: usize,
     alignment: u8,
-    _: usize,
+    return_address: usize,
 ) -> *mut c_void {
     // SAFETY: the boxed fixture context outlives every synchronous engine call.
     let context = unsafe { &mut *ctx.cast::<Context>() };
@@ -37,11 +37,18 @@ unsafe extern "C" fn allocate(
     if unsafe {
         libc::posix_memalign(
             &raw mut out,
-            usize::from(alignment).max(std::mem::size_of::<usize>()),
+            (1_usize << alignment).max(std::mem::size_of::<usize>()),
             len,
         )
     } == 0
     {
+        if return_address == usize::MAX {
+            // Page pools rely on fresh zero-filled storage, including arena
+            // backing whose requested alignment is less than a page.
+            unsafe {
+                out.cast::<u8>().write_bytes(0, len);
+            }
+        }
         out
     } else {
         std::ptr::null_mut()
@@ -108,7 +115,11 @@ pub(crate) fn with_refusing_engine(step: usize, run: impl FnOnce(Engine)) {
         },
         0
     );
-    let mut engine = Engine(Some(NonNull::new(raw).unwrap()));
+    let mut engine = Engine(
+        Some(NonNull::new(raw).unwrap()),
+        #[cfg(feature = "process-per-user")]
+        None,
+    );
     engine.process(PREFIX);
     context.refusing = true;
     context.remaining = step;

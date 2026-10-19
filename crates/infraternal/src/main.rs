@@ -10,6 +10,8 @@ mod embedded_cli;
 mod host_remove;
 #[cfg(feature = "release")]
 mod release_cli;
+#[cfg(feature = "process-per-user")]
+mod user_host_cli;
 
 #[cfg(any(
     feature = "remote",
@@ -1148,6 +1150,15 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    #[cfg(feature = "process-per-user")]
+    if matches.get_one::<i64>("host_sessions").is_some() {
+        return user_host_cli::run(matches);
+    }
+    #[cfg(feature = "process-per-user")]
+    if matches.get_one::<String>("host_accounting").is_some() {
+        eprintln!("--host-accounting requires --host-sessions");
+        return ExitCode::from(2);
+    }
     match options.run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

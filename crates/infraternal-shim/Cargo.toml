@@ -30,6 +30,12 @@ vt100 = { workspace = true, optional = true }
 cli = ["dep:clap"]
 # Executable images expose the callback-free Rust VT boundary only (D243).
 session-image = []
+# Research-only shared-process reactor; never selected by production defaults.
+process-per-user = ["nix/uio", "nix/event"]
+# Numeric stage tracing changes scheduling; excluded from all admission builds.
+host-diagnostics = ["process-per-user"]
+# Research-only exact cold-history representation; measured before adoption.
+compact-history = ["process-per-user"]
 # Audited transient process-transfer buffers are removed with the remote plugin.
 ca-handoff = ["dep:openssl"]
 bench-vt = ["dep:alacritty_terminal", "dep:vt100"]
@@ -43,3 +49,13 @@ optional = true
 [[example]]
 name = "vt_compare"
 required-features = ["bench-vt"]
+
+# Real lifecycle fixtures need a single-threaded main, not the test harness.
+[[example]]
+name = "ppu_host_fixture"
+required-features = ["process-per-user"]
+
+# Native observers keep probe CPU independent of the workload driver.
+[[example]]
+name = "ppu_wire_probe"
+required-features = ["process-per-user"]
