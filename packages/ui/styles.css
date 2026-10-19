@@ -432,6 +432,12 @@
   .ui-window-action::after { content: ""; position: absolute; inset: -7px; } /* 44 px square around the 30 px button */
 }
 .ui-window-action:active { transform: scale(var(--ui-press-scale)); }
+/* A column at the weight floor is only a few dozen pixels wide (a layout drawn on a wide screen, shown on a phone).
+   Chrome never overlaps or clips there: the title text goes first, then the whole title pill, then the actions. The
+   window itself stays reachable through the canvas row and the search palette. */
+@container (max-width: 150px) { .ui-window-title, .ui-window-dot { display: none; } }
+@container (max-width: 84px) { .ui-window-pill { display: none; } }
+@container (max-width: 40px) { .ui-window-actions { display: none; } }
 .ui-window-action svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 /* Title first (TASTE): in a header this narrow the actions give way to one ⋯, so the title keeps its room. A card with one
    action never collapses (the actions container says so with data-collapsible). The ⋯ opens the same actions in a menu. */
