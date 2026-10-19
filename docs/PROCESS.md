@@ -143,11 +143,12 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,101,136 bytes |
-  | `aarch64-unknown-linux-musl` | 19,328,928 bytes |
+  | `x86_64-unknown-linux-musl` | 21,104,688 bytes |
+  | `aarch64-unknown-linux-musl` | 19,332,224 bytes |
 
-  These include the #230 event-driven readiness wait: +4,992 / +3,408 B
-  over the release-3 ceilings. The matched comparison and live-link checks
+  These round-4 measurements include the connected host-facts and terminal-proof
+  allowances in #230's bounded SSH commit timeout: +128 / +128 bytes over the
+  matched round-3 base `2ca16e6fb`. The matched comparison and live Retry checks
   are recorded on #230; no dependency, feature or profile changed.
 
   The previous ceilings were the release-3 measurements (release-2 plus #230 same-server
