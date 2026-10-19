@@ -2986,3 +2986,7 @@ pub(crate) static TEST_CLOSE_LINES: std::sync::Mutex<Vec<u32>> = std::sync::Mute
 pub(crate) fn test_control_queue_state(peer: std::net::SocketAddr) -> Option<(bool, usize)> {
     writes::test_control_queue_state(peer)
 }
+
+#[cfg(test)]
+#[path = "embedded_reply_order_tests.rs"]
+mod reply_order_tests;

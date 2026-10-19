@@ -192,3 +192,7 @@ mod tests;
 #[allow(clippy::unwrap_used)]
 #[path = "session_commands_bench.rs"]
 mod measurements;
+
+#[cfg(test)]
+#[path = "session_command_reply_tests.rs"]
+mod reply_capacity_tests;
