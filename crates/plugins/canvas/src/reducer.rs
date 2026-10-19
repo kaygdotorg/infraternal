@@ -658,6 +658,30 @@ mod tests {
         assert_eq!(doc.0["views"][0]["layout"]["columns"], json!([]));
     }
     #[test]
+    fn nullable_resize_preserves_existing_values_and_absent_fields() {
+        let mut doc = document();
+        reduce(&mut doc, &open("a"), &[]).unwrap();
+        reduce(
+            &mut doc,
+            &json!({"type":"resize","window_id":"a","height":null,"rows":2}),
+            &[],
+        )
+        .unwrap();
+        let window = doc.windows().next().unwrap();
+        assert!(window.get("height").is_none());
+        assert_eq!(window["rows"], 2);
+        reduce(
+            &mut doc,
+            &json!({"type":"resize","window_id":"a","height":3,"span":2,"row":1}),
+            &[],
+        )
+        .unwrap();
+        let before = doc.clone();
+        reduce(&mut doc, &json!({"type":"resize","window_id":"a","height":null,"span":null,"rows":null,"row":null}), &[]).unwrap();
+        assert_eq!(doc, before);
+        assert!(doc.valid());
+    }
+    #[test]
     fn sample_corpus_preserves_strict_variant_fields_and_round_trips() {
         for value in [
             json!({"type":"resize","window_id":"w","height":2.0,"rows":2}),
