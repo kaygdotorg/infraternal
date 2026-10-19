@@ -5,58 +5,22 @@
  * - Views have a kind and a layout. Tiled: columns of windows with relative weights. Graph: the nodes the
  *   person pinned (the rest are laid out automatically). Views sit on a coarse grid, stored in cells.
  * - Windows reference their target by a stable id plus a readable name (the same ids back deep links, #86).
- * - Edges and grants are never stored here; the Mesh owns them.
- * - Sync (#98) works by small server-applied operations with a revision number. Until then the whole document is
- *   saved locally, and `revision` counts saves so the two paths agree on order.
+ * - Network access rules are never stored here; the Mesh owns them.
+ * - Shared revisions come from server-applied semantic operations. Browser storage holds only a drawing cache.
  *
  * `toDocument` and `fromDocument` convert between this and the runtime model (`types.ts`). `parseDocument` is the
  * only way untrusted JSON (storage, an import, the server) becomes a document: it checks shape and bounds and
  * returns nothing when the input is not a document of this format, so a damaged store can never break the canvas.
  */
-import { isCanonicalUuid } from "../../identifiers";
 import { CELL, type Metrics } from "../layout/geometry";
 import type { ColumnModel, ViewModel, WindowModel } from "./types";
 
-export const FORMAT = "infraternal.canvas";
-export const VERSION = 1;
-
-/** What a window shows, by stable reference. */
-export type DocTarget =
-  | { type: "session"; id: string; host: string; hostId?: string; user?: string; address?: string; name?: string }
-  | { type: "settings"; section: string }
-  | { type: "containers" | "logs"; host: string };
-
-export interface DocWindow {
-  /** Stable id of the window (not of its session). */
-  id: string;
-  target: DocTarget;
-  /** The window's height as a share of its column; absent when the column shares equally. */
-  height?: number;
-  /** Columns covered from its own column (D212); absent means one. Old documents never have it. */
-  span?: number;
-  /** Row bands covered (D212); absent means one. */
-  rows?: number;
-  /** The band it starts in, saved only for a window in a group (D212); a plain column stacks by list order. */
-  row?: number;
-}
-export interface DocColumn { id: string; weight: number; windows: DocWindow[] }
-export type DocLayout =
-  | { type: "tiled"; columns: DocColumn[] }
-  | { type: "graph"; pinned: Record<string, { x: number; y: number }> };
-export interface DocView { id: string; kind: string; name: string; cell: { x: number; y: number }; layout: DocLayout }
-
-export interface CanvasDocument {
-  format: typeof FORMAT;
-  version: typeof VERSION;
-  revision: number;
-  views: DocView[];
-}
-
-const MAX_VIEWS = 64, MAX_COLUMNS = 64, MAX_WINDOWS = 256, MAX_TEXT = 200, MAX_BANDS = 64;
+import { FORMAT, VERSION, type CanvasDocument, type DocTarget, type DocColumn, type DocWindow, type DocLayout, type DocView } from "./schema";
+export * from "./schema";
 
 /** Turns a runtime window into its stable reference. Windows that cannot be referenced (node cards) are left out. */
-function targetOf(w: WindowModel): DocTarget | undefined {
-  if (w.kind === "terminal") return w.sessionId ? { type: "session", id: w.sessionId, host: w.host, ...(w.hostId ? { hostId: w.hostId, ...(w.user ? { user: w.user } : {}), ...(w.address ? { address: w.address } : {}) } : {}), ...(w.session ? { name: w.session } : {}) } : undefined;
+function targetOf(w: WindowModel, pending: boolean): DocTarget | undefined {
+  if (w.kind === "terminal") return w.sessionId || pending ? { type: "session", id: w.sessionId ?? w.id, host: w.host, ...(w.hostId ? { hostId: w.hostId, ...(w.user ? { user: w.user } : {}), ...(w.address ? { address: w.address } : {}) } : {}), ...(w.session ? { name: w.session } : {}) } : undefined;
   if (w.kind === "settings") return { type: "settings", section: w.id.slice(2) };
   if (w.kind === "containers" || w.kind === "logs") return { type: w.kind, host: w.host };
   return undefined;
@@ -68,11 +32,11 @@ function targetOf(w: WindowModel): DocTarget | undefined {
  * group window's band when it arranges it), so the windows are written as they stand. `row` exists only for a window in a
  * group, where the list order alone cannot place a window that spans columns.
  */
-function docColumns(cols: readonly ColumnModel[], metrics: Metrics): DocColumn[] {
+function docColumns(cols: readonly ColumnModel[], metrics: Metrics, pending: boolean): DocColumn[] {
   return cols.map((c): DocColumn => ({
     id: c.id, weight: Number((c.w / metrics.colW).toFixed(3)),
     windows: c.wins.flatMap((w): DocWindow[] => {
-      const target = targetOf(w);
+      const target = targetOf(w, pending);
       if (!target) return [];
       return [{
         id: w.id, target, ...(w.h ? { height: w.h } : {}),
@@ -87,16 +51,16 @@ export function docHasGroups(doc: CanvasDocument): boolean {
   return doc.views.some((v) => v.layout.type === "tiled" && v.layout.columns.some((c) => c.windows.some((w) => (w.span ?? 1) > 1 || (w.rows ?? 1) > 1 || w.row !== undefined)));
 }
 
-export function toDocument(views: readonly ViewModel[], metrics: Metrics, revision: number): CanvasDocument {
+export function toDocument(views: readonly ViewModel[], metrics: Metrics, revision: number, pending = false): CanvasDocument {
   return {
     format: FORMAT, version: VERSION, revision,
     views: views.map((v): DocView => ({
       id: v.id, kind: v.id, name: v.name, cell: { x: Math.round(v.x / CELL), y: Math.round(v.y / CELL) },
       layout: v.layout === "graph"
-        ? { type: "graph", pinned: Object.fromEntries(v.nodes.filter((n) => n.pinned).map((n) => [n.id, { x: Math.round(n.x), y: Math.round(n.y) }])) }
+        ? { type: "graph", pinned: v.graphPins ? structuredClone(v.graphPins) : Object.fromEntries(v.nodes.filter((n) => n.pinned).map((n) => [n.id, { x: Math.round(n.x), y: Math.round(n.y) }])) }
         : {
           type: "tiled",
-          columns: docColumns(v.cols, metrics),
+          columns: docColumns(v.cols, metrics, pending),
         },
     })),
   };
@@ -107,12 +71,12 @@ export function toDocument(views: readonly ViewModel[], metrics: Metrics, revisi
  * live fields (host, user, system, name); it returns nothing for a target that no longer exists, and that window
  * is dropped rather than shown broken.
  */
-export function columnsFromDocument(layout: Extract<DocLayout, { type: "tiled" }>, metrics: Metrics, resolve: (target: DocTarget) => Partial<WindowModel> | undefined): ColumnModel[] {
+export function columnsFromDocument(layout: Extract<DocLayout, { type: "tiled" }>, metrics: Metrics, resolve: (target: DocTarget, windowId: string) => Partial<WindowModel> | undefined): ColumnModel[] {
   const cols: ColumnModel[] = [];
   for (const c of layout.columns) {
     const wins: WindowModel[] = [];
     for (const w of c.windows) {
-      const live = resolve(w.target);
+      const live = resolve(w.target, w.id);
       if (!live) continue;
       const base: WindowModel = {
         id: w.id, kind: w.target.type === "session" ? "terminal" : w.target.type, host: "host" in w.target ? w.target.host : "", ...(w.height ? { h: w.height } : {}),
@@ -125,55 +89,8 @@ export function columnsFromDocument(layout: Extract<DocLayout, { type: "tiled" }
   return cols;
 }
 
-const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-const text = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= MAX_TEXT;
-const finite = (v: unknown, lo: number, hi: number): v is number => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
 
-function parseTarget(v: unknown): DocTarget | undefined {
-  if (!isObject(v)) return undefined;
-  if (v.type === "session" && text(v.id) && text(v.host) && (v.hostId === undefined || isCanonicalUuid(v.hostId))) return { type: "session", id: v.id, host: v.host, ...(isCanonicalUuid(v.hostId) ? { hostId: v.hostId, ...(text(v.user) ? { user: v.user } : {}), ...(text(v.address) ? { address: v.address } : {}) } : {}), ...(text(v.name) ? { name: v.name } : {}) };
-  if (v.type === "settings" && text(v.section)) return { type: "settings", section: v.section };
-  if ((v.type === "containers" || v.type === "logs") && text(v.host)) return { type: v.type, host: v.host };
-  return undefined;
-}
-
-/** Checks untrusted JSON and returns a document, or nothing. */
-export function parseDocument(input: unknown): CanvasDocument | undefined {
-  if (!isObject(input) || input.format !== FORMAT || input.version !== VERSION || !finite(input.revision, 0, Number.MAX_SAFE_INTEGER)) return undefined;
-  if (!Array.isArray(input.views) || input.views.length > MAX_VIEWS) return undefined;
-  const views: DocView[] = [];
-  for (const raw of input.views) {
-    if (!isObject(raw) || !text(raw.id) || !text(raw.kind) || !text(raw.name) || !isObject(raw.cell) || !finite(raw.cell.x, -1000, 1000) || !finite(raw.cell.y, -1000, 1000) || !isObject(raw.layout)) return undefined;
-    const cell = { x: Math.round(raw.cell.x), y: Math.round(raw.cell.y) };
-    if (raw.layout.type === "graph") {
-      if (!isObject(raw.layout.pinned)) return undefined;
-      const pinned: Record<string, { x: number; y: number }> = {};
-      for (const [k, p] of Object.entries(raw.layout.pinned)) {
-        if (!isObject(p) || !finite(p.x, -100000, 100000) || !finite(p.y, -100000, 100000)) return undefined;
-        pinned[k] = { x: p.x, y: p.y };
-      }
-      views.push({ id: raw.id, kind: raw.kind, name: raw.name, cell, layout: { type: "graph", pinned } });
-      continue;
-    }
-    if (raw.layout.type !== "tiled" || !Array.isArray(raw.layout.columns) || raw.layout.columns.length > MAX_COLUMNS) return undefined;
-    const columns: DocColumn[] = [];
-    let count = 0;
-    for (const c of raw.layout.columns) {
-      if (!isObject(c) || !text(c.id) || !finite(c.weight, 0.1, 10) || !Array.isArray(c.windows)) return undefined;
-      const windows: DocWindow[] = [];
-      for (const w of c.windows) {
-        const target = isObject(w) ? parseTarget(w.target) : undefined;
-        if (!isObject(w) || !text(w.id) || !target || (w.height !== undefined && !finite(w.height, 0.05, 10000))) return undefined;
-        if (++count > MAX_WINDOWS) return undefined;
-        if ((w.span !== undefined && !finite(w.span, 1, MAX_COLUMNS)) || (w.rows !== undefined && !finite(w.rows, 1, MAX_BANDS)) || (w.row !== undefined && !finite(w.row, 0, MAX_BANDS))) return undefined;
-        windows.push({
-          id: w.id, target, ...(typeof w.height === "number" ? { height: w.height } : {}),
-          ...(typeof w.span === "number" ? { span: Math.floor(w.span) } : {}), ...(typeof w.rows === "number" ? { rows: Math.floor(w.rows) } : {}), ...(typeof w.row === "number" ? { row: Math.floor(w.row) } : {}),
-        });
-      }
-      columns.push({ id: c.id, weight: c.weight, windows });
-    }
-    views.push({ id: raw.id, kind: raw.kind, name: raw.name, cell, layout: { type: "tiled", columns } });
-  }
-  return { format: FORMAT, version: VERSION, revision: input.revision as number, views };
+/** Build shared view metadata once for startup and later server projections. */
+export function viewFromDocument(view: DocView, cols: ColumnModel[] = []): ViewModel {
+  return { id: view.id, name: view.name, layout: view.layout.type, cols, nodes: [], x: view.cell.x * CELL, y: view.cell.y * CELL, ...(view.layout.type === "graph" ? { graphPins: view.layout.pinned } : {}) };
 }

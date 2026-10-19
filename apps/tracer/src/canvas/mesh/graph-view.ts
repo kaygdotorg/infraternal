@@ -44,7 +44,12 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
   const toWorld = (x: number, y: number): Pt => camera.toWorld(x, y);
   const toClient = (p: Pt): Pt => camera.toClient(p);
   const worldRect = (n: Element): Rect => camera.worldRect(n);
-  const layoutOf = createLayoutModel(source);
+  const layouts = new WeakMap<ViewRec, ReturnType<typeof createLayoutModel>>();
+  const layoutOf = (c: ViewRec, metrics: Ctx["state"]["metrics"]) => {
+    let model = layouts.get(c);
+    if (!model) { model = createLayoutModel(source, () => c.view.graphPins); layouts.set(c, model); }
+    return model(metrics);
+  };
   const headSize = (): number => clamp(7 / cam.z, 7, 16);
   // ---- mesh arrows -----------------------------------------------------------------------------------
   const nodeRect = (c: ViewRec, id: string): Rect | undefined => {
@@ -209,7 +214,9 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       n.x = clamp(d.nx + (d.at.x - d.x) / cam.z, 0, size.w - state.metrics.nodeW);
       n.y = clamp(d.ny + (d.at.y - d.y) / cam.z, 0, size.h - state.metrics.nodeH);
       n.pinned = true; // a node the person moved stays where it is (D180); the canvas document keeps it
-      source.pin(n.id, n.x, n.y);
+      const pins = rec.owner.view.graphPins ??= Object.fromEntries(source.data().pins);
+      pins[n.id] = { x: Math.round(n.x), y: Math.round(n.y) };
+      if (rec.owner.view.id === "mesh") source.pin(n.id, n.x, n.y);
       rec.card.root.style.transform = `translate(${n.x}px, ${n.y}px)`;
       // Arrows stay attached to the card they belong to while it moves.
       for (const t of topoOf(rec.owner)) if (t.grant.from === n.id || t.grant.to === n.id) drawTopoArrow(rec.owner, t);
@@ -441,17 +448,17 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
   const graphOf = (c: ViewRec): GraphController | undefined => graphs.get(c);
   const topoOf = (c: ViewRec): TopoArrow[] => graphOf(c)?.arrows() ?? [];
   /** Re-reads the mesh into a graph view: its nodes, its size, what is drawn, what the sidebar counts. */
-  let sized = "";
+  const sizes = new WeakMap<ViewRec, string>();
   const refreshGraph = (c: ViewRec): void => {
     const graph = graphOf(c);
     if (!graph) return;
-    const layout = layoutOf(state.metrics);
+    const layout = layoutOf(c, state.metrics);
     c.view.nodes = layout.nodes;
     c.view.graph = layout.size;
     graph.sync();
     cx.view.geometry(c);
     const size = `${layout.size.w}x${layout.size.h}`;
-    if (size !== sized) { sized = size; cx.view.settle(c.view.id); }
+    if (size !== sizes.get(c)) { sizes.set(c, size); cx.view.settle(c.view.id); }
     cx.tree.render();
     cx.pill.paint(); // the top pill counts the nodes
   };
@@ -471,7 +478,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       e.stopPropagation(); e.preventDefault();
       beginEdit(c, entry, handle.dataset.end === "tail" ? "tail" : "head", e, handle);
     }, { signal });
-    const graph = createGraph(cx, c, source, layoutOf, {
+    const graph = createGraph(cx, c, source, (metrics) => layoutOf(c, metrics), {
       makeCard: (n) => makeNode(c, n),
       dropCard: dropNode,
       makeArrow: makeTopoArrow,
@@ -502,7 +509,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       if (rightsChanged) for (const c of views.values()) graphOf(c)?.reset();
       for (const c of views.values()) if (c.view.layout === "graph") refreshGraph(c);
     },
-    cull() { const c = views.get("mesh"); if (c) graphOf(c)?.cull(); },
+    cull() { for (const c of views.values()) if (c.view.layout === "graph") graphOf(c)?.cull(); },
     rest() { redrawMesh(); },
     stats() { const c = views.get("mesh"); const g = c && graphOf(c); if (!g) return undefined; return { level: g.level(), ...g.stats() }; },
   };

@@ -211,23 +211,29 @@ fn write_public(path: &Path, body: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    //! Provides isolated filesystem state for node persistence tests.
     #![allow(clippy::expect_used)]
     use super::*;
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::{
+        os::unix::fs::{PermissionsExt, symlink},
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    // Tests run concurrently; this counter keeps their temporary paths distinct.
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
     pub(super) struct Directory(pub(super) PathBuf);
     impl Directory {
         pub(super) fn new() -> Self {
-            let base = std::env::var_os("CARGO_TARGET_DIR")
-                .map_or_else(
-                    || std::env::current_dir().map(|path| path.join("target")),
-                    |path| Ok(PathBuf::from(path)),
-                )
-                .expect("test target directory");
             let nonce = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("test clock")
                 .as_nanos();
-            let path = base.join(format!("mesh-state-{}-{nonce}", std::process::id()));
+            let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "infraternal-mesh-state-{}-{nonce}-{sequence}",
+                std::process::id()
+            ));
             fs::create_dir(&path).expect("test directory");
             fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("test mode");
             Self(path)

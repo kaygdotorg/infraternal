@@ -10,6 +10,7 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
+infraternal-plugin-canvas = { version = "0.1.0", path = "../crates/plugins/canvas" }
 infraternal-plugin-remote = { version = "0.1.0", path = "../crates/plugins/remote", default-features = false, features = ["agent", "test-support"] }
 infraternal-plugin-release = { version = "0.1.0", path = "../crates/plugins/release", default-features = false }
 infraternal-plugin-desktop = { version = "0.1.0", path = "../crates/plugins/desktop", features = ["source", "server"] }
@@ -260,6 +261,13 @@ bench = false
 [[bin]]
 name = "runtime_diag"
 path = "fuzz_targets/runtime_diag.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "canvas_layout_json"
+path = "fuzz_targets/canvas_layout_json.rs"
 test = false
 doc = false
 bench = false

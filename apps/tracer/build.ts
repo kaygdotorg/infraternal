@@ -22,7 +22,7 @@ const commit = Bun.spawnSync(["git", "rev-parse", "HEAD"], { stderr: "ignore" })
 const build = await Bun.build({
   // The app-window decode worker is an on-demand entry: its file name ends in `.on-demand.ts`, so the transfer gate counts it
   // with the other on-demand code and not with the first screen (chunk-classes.ts).
-  entrypoints: ["src/main.ts", "../../packages/ui/src/backdrop.worker.ts", "../../packages/ui/src/faulty-terminal.worker.ts", "src/canvas/appwin/decode.worker.on-demand.ts"],
+  entrypoints: ["src/main.ts", "src/offline.worker.ts", "../../packages/ui/src/backdrop.worker.ts", "../../packages/ui/src/faulty-terminal.worker.ts", "src/canvas/appwin/decode.worker.on-demand.ts"],
   outdir: dist,
   naming: { entry: "[name].js" },
   // TRACER_NO_MINIFY=1 or TRACER_BUILD_READABLE=1 keeps function names, so a CPU profile can be read.

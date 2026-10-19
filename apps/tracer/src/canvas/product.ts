@@ -1,7 +1,7 @@
 /**
  * The product canvas: the canvas on real sessions. After sign-in the screen shows the Console view, whose windows
  * are terminal sessions on the embedded host or admitted remote hosts, several at once over the one
- * WebSocket. The layout persists through the store adapter (local storage until the server sync of #98).
+ * WebSocket. The server owns the shared layout; the browser caches it for first draw (D245, D248).
  *
  * Only real things are offered: the Console view, and the Settings view with the sections that exist today
  * (appearance, toolbar, shortcuts, about). Containers, sharing and add-host appear when their adapters do.
@@ -25,9 +25,10 @@ import type { ProvisioningService } from "./addhost/service";
 import { createWindowFlowHost } from "./addhost/window-host";
 import { createCanvas, type CanvasController } from "./create";
 import { CELL, boxOf } from "./layout/geometry";
-import { columnsFromDocument, docHasGroups, type DocTarget } from "./model/document";
+import { columnsFromDocument, viewFromDocument, docHasGroups, type DocTarget } from "./model/document";
 import { loadGroups } from "./layout/groups-handle";
-import { LocalCanvasStore } from "./model/store";
+import { ServerCanvasStore } from "./model/server-store";
+import { reconcile } from "./model/reconcile";
 import type { ViewModel, WindowModel } from "./model/types";
 import { createLazyMeshApi } from "./mesh/lazy";
 import { connectionTransport } from "./mesh/transport";
@@ -40,7 +41,11 @@ import { teachOnce } from "../hints";
 import type { DetailsSourceLoader } from "./windows/details-source";
 import { BUILTIN_SECTIONS, buildSettingsView } from "./views/settings";
 
+import type { CanvasStore } from "./model/store";
+
 export interface ProductCanvasOptions {
+  /** Isolated preview documents never use the production transport. */
+  previewStore?: CanvasStore;
   /** The embedded host's name and the person's login. */
   host: { name: string; user?: string };
   /** Layouts are kept per account. */
@@ -124,7 +129,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       }
     }
   });
-  const store = new LocalCanvasStore(options.accountId);
+  const store = options.previewStore ?? new ServerCanvasStore(connection, options.accountId, (definitive) => { if (!disposed) core.toast.show({ message: definitive ? "That layout change was not saved. The saved layout is back." : "Layout changes are waiting to sync. Reconnect to try again.", tone: "error", duration: 5000 }); });
   const details: DetailsSourceLoader = () => onDemand(() => import("./sessions/details-live.on-demand"))
     .then((m) => m.createLiveDetails({ host: embedded, connection, inventory, roundTrip: () => roundTrip }));
   // A ready result carries the admitted UUID; labels are only presentation.
@@ -182,34 +187,60 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const canvas = createCanvas(core, {
     adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => { warmSetup(); addHost.open(); }, authority, appWindows: createAppWindowsAdapter(connection) },
     float: false,
-    persisted: (id) => id === "console" || id === "mesh",
+    persisted: (id) => id !== "settings",
   });
   canvasReady = () => canvas.cx.win.setHostIdentity({ host: embedded.name }, { ...(embedded.os ? { os: embedded.os } : {}), ...(embedded.user ? { user: embedded.user } : {}) });
   // Remote hosts: every open window of a host takes what the list says, whenever the list says it.
   const applyIdentities = (hosts: readonly { id: string; name: string; user?: string; os?: HostPlatform }[]): void => {
     for (const h of hosts) canvas.cx.win.setHostIdentity({ host: h.name, hostId: h.id }, { ...(h.os ? { os: h.os } : {}), user: h.user });
   };
+  const resolve = (target: DocTarget, windowId: string): Partial<WindowModel> | undefined => {
+    if (target.type !== "session") return undefined;
+    const reference = { host: target.host, ...(!store.unresolvedWindow?.(windowId) ? { sessionId: target.id } : {}), ...(target.name ? { session: target.name } : {}) };
+    if (target.hostId) {
+      const identity = { ...(target.user ? { user: target.user } : {}), ...(target.address ? { address: target.address } : {}) };
+      sessions.registerHost({ id: target.hostId, name: target.host, ...identity });
+      return { ...reference, hostId: target.hostId, ...identity };
+    }
+    // Historical references can select the known embedded host only.
+    return target.host === options.host.name ? { ...reference, ...(embedded.user ? { user: embedded.user } : {}), ...(embedded.os ? { os: embedded.os } : {}) } : undefined;
+  };
   canvas.setViews((m) => {
     const doc = saved?.views.find((v) => v.id === "console");
-    const resolve = (target: DocTarget): Partial<WindowModel> | undefined => {
-      if (target.type !== "session") return undefined;
-      if (target.hostId) {
-        sessions.registerHost({ id: target.hostId, name: target.host, ...(target.user ? { user: target.user } : {}), ...(target.address ? { address: target.address } : {}) });
-        return { host: target.host, hostId: target.hostId, sessionId: target.id, ...(target.name ? { session: target.name } : {}), ...(target.user ? { user: target.user } : {}), ...(target.address ? { address: target.address } : {}) };
-      }
-      // Historical documents represent only the embedded host. Unknown labels are never rebound locally.
-      return target.host === options.host.name ? { host: options.host.name, sessionId: target.id, ...(target.name ? { session: target.name } : {}), ...(embedded.user ? { user: embedded.user } : {}), ...(embedded.os ? { os: embedded.os } : {}) } : undefined;
-    };
     let cols = doc && doc.layout.type === "tiled" ? columnsFromDocument(doc.layout, m, resolve) : [];
     // First run, or nothing left to restore: one new shell.
-    if (!cols.length) cols = [{ id: "c1", w: m.colW, wins: [sessions.open(options.host.name)] }];
-    const console_: ViewModel = { id: "console", name: "Console", layout: "tiled", cols, nodes: [], x: 0, y: 0 };
+    if (!doc && !saved) cols = [{ id: "c1", w: m.colW, wins: [sessions.open(options.host.name)] }];
+    const console_: ViewModel = { id: "console", name: "Console", layout: "tiled", cols, nodes: [], x: (doc?.cell.x ?? 0) * CELL, y: (doc?.cell.y ?? 0) * CELL };
     const settings = buildSettingsView(false, m, BUILTIN_SECTIONS);
     settings.x = boxOf(console_, m).w + CELL;
-    return [console_, settings];
+    const recovered = (saved?.views ?? []).filter((v) => v.id !== "console" && v.id !== "mesh").map((v) => viewFromDocument(v, v.layout.type === "tiled" ? columnsFromDocument(v.layout, m, resolve) : []));
+    return [console_, ...recovered, settings];
   });
   // The Mesh view follows the server's answer (D187).
   const offMeshView = offerMeshView(canvas.cx, mesh, { keep: Boolean(savedMesh) });
+  if (savedMesh) {
+    const view = canvas.cx.views.get("mesh");
+    if (view) { if (savedMesh.layout.type === "graph") view.view.graphPins = savedMesh.layout.pinned; view.view.x = savedMesh.cell.x * CELL; view.view.y = savedMesh.cell.y * CELL; view.sx.set(view.view.x, true); view.sy.set(view.view.y, true); }
+  }
+  // Capture initial structure once; subsequent server paints reset the comparison baseline.
+  if (saved?.views.some((view) => view.id === "console")) canvas.cx.store.reset(); else canvas.cx.store.changed();
+  let paintRevision = 0, paintAfterDrop = false;
+  const paintLayout = (): void => {
+    if (canvas.cx.state.movingWindow) { paintAfterDrop = true; return; }
+    const revision = ++paintRevision;
+    void reconcile(canvas.cx, () => {
+      canvas.flush();
+      return { document: store.current!(), protectedIds: canvas.cx.store.uncommittedWindows(), protectedViews: canvas.cx.store.uncommittedViews() };
+    }, resolve, () => !disposed && revision === paintRevision);
+  };
+  // A canonical update cannot reparent a lifted window in the middle of its gesture.
+  const dropped = (): void => { if (paintAfterDrop) { paintAfterDrop = false; queueMicrotask(paintLayout); } };
+  window.addEventListener("pointerup", dropped);
+  window.addEventListener("pointercancel", dropped);
+  const offLayout = store.current ? store.subscribe(paintLayout) : () => {};
+  // Changes can arrive while grouped-layout code loads during mount.
+  if (store.current) paintLayout();
+  if (saved) inventory.setLayout(saved);
   canvas.cx.nav.flyView("console", true);
   canvasReady();
   const first = [...(canvas.cx.views.get("console")?.wins.values() ?? [])][0];
@@ -234,6 +265,9 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     canvas, sessions, connection,
     dispose() {
       canvas.flush();
+      offLayout();
+      window.removeEventListener("pointerup", dropped);
+      window.removeEventListener("pointercancel", dropped);
       offRoundTrip();
       disposed = true;
       offHosts?.();

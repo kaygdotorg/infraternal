@@ -1,14 +1,16 @@
-/** Deterministic idle probe counts and unchanged directional recovery bounds [D81,D265,D267,#199]. */
+/** Deterministic browser lease timing, idle probe counts, and directional recovery bounds [D81,D265,D267,D300,#199]. */
 import { expect, test } from "bun:test";
 import { MuxConnection } from "./connection";
 import { encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 
-function fixture(rtt: number, streams: number) {
+function fixture(rtt: number, streams: number, caps = 4n, subscription = false) {
   const globals = globalThis as unknown as Record<string, unknown>;
-  const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, performance: globals.performance };
+  const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, performance: globals.performance, document: globals.document };
   let now = 0, timerId = 0, probes = 0, wakeups = 0, disconnects = 0;
+  let online = () => {};
   let forwarding = true;
   let latestProbe = { nonce: 0n, sentUs: 0n };
+  let replyProfile: ((probe: number) => number) | undefined;
   const timers = new Map<number, { at: number; callback(): void }>();
   const browserTimers = new Set<number>();
   const schedule = (callback: () => void, delay: number) => { const id = ++timerId; timers.set(id, { at: now + delay, callback }); return id; };
@@ -20,6 +22,7 @@ function fixture(rtt: number, streams: number) {
     return next[1].callback;
   };
   const sockets: Socket[] = [];
+  const notices: boolean[] = [];
   class Socket {
     static OPEN = 1;
     readyState = 1;
@@ -31,30 +34,49 @@ function fixture(rtt: number, streams: number) {
     constructor() { sockets.push(this); }
     send(bytes: Uint8Array) {
       new WebSocketFrameDecoder().feed(bytes, (stream, frame) => {
+        if (frame.type === "Event" && frame.subId === 0) notices.push((JSON.parse(new TextDecoder().decode(frame.eventJson)) as { hidden: boolean }).hidden);
         if (frame.type === "Ping") {
           latestProbe = { nonce: frame.nonce, sentUs: frame.sentUs };
           probes++;
-          if (forwarding) schedule(() => this.receive(stream, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs }), rtt);
+          if (forwarding) schedule(() => this.receive(stream, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs }), replyProfile?.(probes) ?? rtt);
         }
       });
     }
     receive(stream: number, frame: WireFrame) { this.onmessage?.({ data: encodeMuxedFrame(stream, frame).slice().buffer as ArrayBuffer }); }
     close() {}
   }
-  globals.window = { setTimeout: (callback: () => void, delay: number) => { const id = schedule(() => { browserTimers.delete(id); wakeups++; callback(); }, delay); browserTimers.add(id); return id; }, clearTimeout: (id: number) => { browserTimers.delete(id); timers.delete(id); } };
+  globals.window = {
+    setTimeout: (callback: () => void, delay: number) => {
+      const id = schedule(() => { browserTimers.delete(id); wakeups++; callback(); }, delay);
+      browserTimers.add(id);
+      return id;
+    },
+    clearTimeout: (id: number) => { browserTimers.delete(id); timers.delete(id); },
+    addEventListener: (type: string, callback: () => void) => { if (type === "online") online = callback; },
+    removeEventListener: (type: string) => { if (type === "online") online = () => {}; },
+  };
   globals.location = { protocol: "https:", host: "idle.example.test" };
   globals.WebSocket = Socket;
   globals.performance = { now: () => now };
+  const visibilityListeners = new Set<() => void>();
+  let hidden = false;
+  globals.document = { get hidden() { return hidden; }, get visibilityState() { return hidden ? "hidden" : "visible"; }, addEventListener: (_: string, callback: () => void) => visibilityListeners.add(callback), removeEventListener: (_: string, callback: () => void) => visibilityListeners.delete(callback) };
   const connection = new MuxConnection();
+  if (subscription) connection.subscribe({ topic: "canvas.layout" }, () => {});
   for (let i = 0; i < streams; i++) connection.openStream({ onSocketOpen() {}, onWelcome() {}, onFrame() {}, onDisconnected() { disconnects++; }, hasSession: () => true, onStatus() {} });
   sockets[0]!.onopen?.();
+  sockets[0]!.receive(0, { type: "Hello", version: 1, caps, clientInfo: "visibility-fixture" });
   sockets[0]!.receive(0, { type: "Welcome", connectionId: new Uint8Array(16), resumeToken: new Uint8Array(32), resumeWindowSeconds: 120 });
   connection.streamAttached(true, 1);
   return {
     connection,
+    notices,
+    get now() { return now; },
+    get responseAllowance() { return (connection as unknown as { responseAllowance(): number }).responseAllowance(); },
+    online() { online(); },
     get latestProbe() { return { ...latestProbe }; },
     get confirmationPending() { return (connection as unknown as { livenessConfirmationPending: boolean }).livenessConfirmationPending; },
-    get probes() { return probes; }, get wakeups() { return wakeups; }, get disconnects() { return disconnects; },
+    get probes() { return probes; }, get wakeups() { return wakeups; }, get disconnects() { return disconnects; }, get sockets() { return sockets.length; },
     receive(stream: number, frame: WireFrame) { sockets[0]!.receive(stream, frame); },
     captureLatestReply() {
       const socket = sockets.at(-1)!;
@@ -69,6 +91,8 @@ function fixture(rtt: number, streams: number) {
       socket.receive(0, { type: "Welcome", connectionId: new Uint8Array(16), resumeToken: new Uint8Array(32), resumeWindowSeconds: 120 });
     },
     setRoundTrip(ms: number) { rtt = ms; },
+    setReplyProfile(profile: (probe: number) => number) { replyProfile = profile; },
+    setHidden(value: boolean, dispatch = true) { hidden = value; if (dispatch) for (const listener of visibilityListeners) listener(); },
     suspend(ms: number) { now += ms; },
     runBrowserTimer(onTime = false) {
       takeBrowserTimer(onTime)();
@@ -105,7 +129,7 @@ for (const rtt of [1, 150]) for (const streams of [1, 28]) test(`healthy idle pr
     f.stopForwarding();
     // Drain replies already in flight before starting the silence oracle.
     f.advance(rtt);
-    f.advance(Math.max(250, rtt + 50) + 26);
+    f.advance(2 * Math.max(250, 2 * rtt + 75) + 26);
     expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
@@ -138,7 +162,7 @@ for (const rtt of [1, 30, 150]) for (const phase of [0, 7, 20, 39]) test(`idle s
     f.advance(1000 + phase);
     f.stopForwarding();
     f.advance(rtt); // Allow only the already issued exact replies to drain.
-    f.advance(Math.max(250, rtt + 50) + 26);
+    f.advance(2 * Math.max(250, 2 * rtt + 75) + 26);
     expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
@@ -194,7 +218,7 @@ for (const streams of [1, 28]) test(`a late timer on a fully answered route pres
     expect(f.connection.isWelcomed).toBe(true);
     f.stopForwarding();
     f.advance(20);
-    f.advance(276);
+    f.advance(526);
     expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
@@ -210,14 +234,14 @@ for (const streams of [1, 28]) test(`a healthy browser route survives 150ms sche
   } finally { f.dispose(); }
 });
 
-test("a quiet dead browser peer is detected within 250ms plus one probe interval", () => {
+test("a quiet dead browser peer is detected within two 250ms allowances plus one probe interval", () => {
   const f = fixture(1, 1);
   try {
     f.advance(1001);
     f.stopForwarding();
     f.advance(200);
     expect(f.connection.isWelcomed).toBe(true);
-    f.advance(76);
+    f.advance(326);
     expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
@@ -232,7 +256,7 @@ test("browser jitter allowance decays after a stable link returns", () => {
     f.advance(10_000);
     f.stopForwarding();
     f.advance(1); // Drain an already issued correlated reply.
-    f.advance(276);
+    f.advance(526);
     expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
@@ -250,10 +274,14 @@ for (const timerFirst of [false, true]) for (const stall of [150, 1000, 60_000])
     f.advance(0);
     expect(f.disconnects).toBe(0);
     expect(f.connection.isWelcomed).toBe(true);
-    // The renderer delay must not train a slower network deadline. A later
-    // real outage still consumes the original allowance on a responsive page.
+    const allowance = f.responseAllowance;
+    // A correlated late reply may train the estimator; D300 still gives the
+    // recovered route both learned miss intervals before a later outage retires it.
     f.stopForwarding();
-    f.advance(276);
+    const firstMiss = Math.ceil(allowance / 2);
+    f.advance(firstMiss + 1);
+    expect(f.connection.isWelcomed).toBe(true);
+    f.advance(allowance - firstMiss + 25);
     expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
@@ -268,7 +296,7 @@ test("a late timer without a reply counts subsequent responsive silence", () => 
     f.runBrowserTimer();
     // No timer may retire synchronously on waking a blocked page.
     expect(f.connection.isWelcomed).toBe(true);
-    f.advance(276);
+    f.advance(f.responseAllowance + 26);
     expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
@@ -441,20 +469,21 @@ test("continuous typing cannot cancel every silent-route confirmation turn", () 
     f.stopForwarding();
     f.advance(30);
     // Model an input task queued between each overdue liveness callback and
-    // its zero-delay confirmation. Liveness callbacks still run every 75ms.
-    // A = 250ms and G = 75ms give the claimed 2*A + 3*G bound of 725 virtual ms.
+    // its zero-delay confirmation. D300 gives two A=250ms misses; one local
+    // stall observation and at most three G=75ms task gaps bound retirement.
     const allowance = 250, gap = 75;
-    const bound = 2 * allowance + 3 * gap;
+    const bound = 3 * allowance + 3 * gap;
     let elapsed = 0;
-    while (elapsed < bound && f.connection.isWelcomed) {
+    const startedAt = f.now;
+    while (f.now - startedAt < bound && f.connection.isWelcomed) {
       elapsed += gap;
-      f.suspend(75);
+      f.suspend(gap);
       f.runBrowserTimer(true);
       f.connection.sampleRoundTrip();
       f.connection.send(1, { type: "Input", inSeq: BigInt(elapsed / 75), bytes: new Uint8Array([120]) });
     }
     expect(f.connection.isWelcomed).toBe(false);
-    expect(elapsed).toBeLessThanOrEqual(bound);
+    expect(f.now - startedAt).toBeLessThanOrEqual(bound);
   } finally { f.dispose(); }
 });
 
@@ -529,4 +558,93 @@ test("a stale confirmation from before reconnect cannot close the replacement ro
     expect(f.confirmationPending).toBe(false);
     expect(f.disconnects).toBe(disconnectsBeforeStaleCallback);
   } finally { f.dispose(); }
+});
+
+for (const suspension of [5000, 30_000]) test(`a hidden page resumes its lease after ${suspension}ms without retiring queued replies`, () => {
+  const f = fixture(150, 28);
+  try {
+    f.advance(3000);
+    f.setHidden(true);
+    f.suspend(suspension);
+    f.advance(0);
+    expect(f.disconnects).toBe(0);
+    f.setHidden(false);
+    f.setRoundTrip(600);
+    f.advance(3000);
+    expect(f.disconnects).toBe(0);
+    expect(f.connection.isWelcomed).toBe(true);
+  } finally { f.dispose(); }
+});
+
+test("a socket lost while hidden waits for visibility before reconnecting", () => {
+  const f = fixture(150, 1);
+  try {
+    f.advance(3000);
+    f.setHidden(true);
+    f.connection.forceDrop();
+    f.online();
+    f.advance(60_000);
+    expect(f.sockets).toBe(1);
+    f.setHidden(false);
+    expect(f.sockets).toBe(2);
+  } finally { f.dispose(); }
+});
+
+test("mobile jitter and one retransmission keep a foreground browser lease", () => {
+  const f = fixture(150, 28);
+  try {
+    f.advance(10_000);
+    // Ordered delivery on a lossy reliable transport: a lost packet delays its
+    // reply by another RTT. This is a reply-delay model, not packet-level loss.
+    f.setReplyProfile(probe => [150, 300, 600, 450][probe % 4]! * (probe % 100 === 0 ? 2 : 1));
+    f.advance(60_000);
+    expect(f.disconnects).toBe(0);
+  } finally { f.dispose(); }
+});
+
+for (const supported of [false, true]) test(`visibility notices require both peers to support them: ${supported}`, () => {
+  const f = fixture(150, 1, supported ? 4n : 0n);
+  try {
+    f.setHidden(true);
+    f.setHidden(false);
+    expect(f.notices).toEqual(supported ? [true, false] : []);
+  } finally { f.dispose(); }
+});
+
+test("hiding a page cancels a retry scheduled while it was visible", () => {
+  const f = fixture(150, 1);
+  try {
+    f.advance(3000);
+    f.connection.forceDrop();
+    f.setHidden(true);
+    f.advance(1000);
+    expect(f.sockets).toBe(1);
+    f.setHidden(false);
+    expect(f.sockets).toBe(2);
+  } finally { f.dispose(); }
+});
+
+for (const dispatchVisibleBeforeReplies of [true, false]) test(`review: queued replies cannot retire a restored hidden page when visibility dispatch precedes replies: ${dispatchVisibleBeforeReplies}`, () => {
+  const f = fixture(150, 28);
+  try {
+    f.advance(3000);
+    f.setHidden(true);
+    f.suspend(30_000);
+    // Restore the property separately from dispatching visibilitychange, so
+    // already queued socket tasks can run on either side of that notification.
+    f.setHidden(false, dispatchVisibleBeforeReplies);
+    f.advance(0);
+    if (!dispatchVisibleBeforeReplies) f.setHidden(false);
+    f.advance(3000);
+    expect(f.disconnects).toBe(0);
+    expect(f.sockets).toBe(1);
+    expect(f.connection.isWelcomed).toBe(true);
+    expect(f.notices).toEqual([true, false]);
+  } finally { f.dispose(); }
+});
+
+
+test("a layout subscription starts the connection before any terminal exists", () => {
+  const f = fixture(30, 0, 4n, true);
+  try { expect(f.connection.isWelcomed).toBe(true); } finally { f.dispose(); }
 });

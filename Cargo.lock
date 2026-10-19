@@ -1412,6 +1412,7 @@ dependencies = [
  "axum",
  "infraternal-agent",
  "infraternal-plugin-api",
+ "infraternal-plugin-canvas",
  "infraternal-plugin-desktop",
  "infraternal-plugin-host-facts",
  "infraternal-plugin-mesh",
@@ -1452,6 +1453,19 @@ name = "infraternal-plugin-backup"
 version = "0.1.0"
 dependencies = [
  "infraternal-plugin-api",
+]
+
+[[package]]
+name = "infraternal-plugin-canvas"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "infraternal-plugin-api",
+ "infraternal-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -1593,6 +1607,7 @@ dependencies = [
  "hyper-util",
  "infraternal-agent",
  "infraternal-plugin-api",
+ "infraternal-plugin-canvas",
  "infraternal-plugin-desktop",
  "infraternal-plugin-mesh",
  "infraternal-plugin-release",

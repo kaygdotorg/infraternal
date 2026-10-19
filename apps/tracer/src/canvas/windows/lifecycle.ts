@@ -26,6 +26,7 @@ import { columnEls, freshColumnId, topItem } from "../layout/columns";
 import type { Col } from "../layout/grid";
 import { groupsLoaded, loadGroups, type Groups } from "../layout/groups-handle";
 import type { ViewId, WindowModel } from "../model/types";
+import { MIN_COLUMN_WEIGHT } from "../model/schema";
 import { coarse, reduced } from "../dom";
 import { endActivity, setActivity } from "../../perf-activity";
 import { makeWindow, setActive } from "./frame";
@@ -145,6 +146,7 @@ export function createWindows(cx: Ctx): WindowsModule {
   };
   /** Undo of a close: the window comes back where it was (under its upper neighbour, or in its own column). */
   const reopen = (at: Placed): void => {
+    at = { ...at, model: { ...at.model, id: `w-${randomUuid()}` } };
     const c = views.get(at.view);
     const inv = cx.adapters.inventory;
     if (!c || c.wins.has(at.model.id)) return;
@@ -350,6 +352,7 @@ export function createWindows(cx: Ctx): WindowsModule {
    * no nesting, and the total footprint does not change.
    */
   const splitInto = async (rec: WinRec, direction: "down" | "right", nm: WindowModel, instant = false): Promise<void> => {
+    cx.store.changed({ windowId: nm.id, anchorId: rec.model.id, axis: direction });
     const c = rec.owner;
     const root = rec.card.root;
     const b = makeWindow(cx, c, nm);
@@ -369,10 +372,11 @@ export function createWindows(cx: Ctx): WindowsModule {
       } else {
         // The column's width splits into two columns with the gap between them: the pair is exactly the old width.
         const w = Number(colEl.dataset.w) || state.metrics.colW;
-        const first = Math.round((w - COLUMN_GAP) / 2);
+        const minimum = Math.ceil(state.metrics.colW * MIN_COLUMN_WEIGHT);
+        const first = Math.max(minimum, Math.round((w - COLUMN_GAP) / 2));
         colEl.dataset.w = String(first);
         colEl.style.setProperty("--w", `${first}px`);
-        const next = cx.view.newCol({ id: freshColumnId(cx, c), w: w - COLUMN_GAP - first, wins: [nm] });
+        const next = cx.view.newCol({ id: freshColumnId(cx, c), w: Math.max(minimum, w - COLUMN_GAP - first), wins: [nm] });
         // The two halves name each other: closing one of them gives its width back to the other (see `close`).
         const pair = `p${++state.serial}`;
         colEl.dataset.half = pair; next.dataset.half = pair;
@@ -384,7 +388,7 @@ export function createWindows(cx: Ctx): WindowsModule {
     } else {
       reshape(g!, c, instant, () => {
         const cols = g!.readColumns(cx, c);
-        if (direction === "right") return g!.splitRight(cols, rec.model.id, { id: nm.id, colId: freshColumnId(cx, c), pair: `p${++state.serial}` }, COLUMN_GAP);
+        if (direction === "right") return g!.splitRight(cols, rec.model.id, { id: nm.id, colId: freshColumnId(cx, c), pair: `p${++state.serial}` }, COLUMN_GAP, Math.ceil(state.metrics.colW * MIN_COLUMN_WEIGHT));
         const half = Math.round((h0 - COLUMN_GAP) / 2);
         return g!.splitDown(cols, rec.model.id, { id: nm.id }, half, half);
       });

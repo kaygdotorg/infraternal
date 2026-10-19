@@ -12,6 +12,20 @@ import time
 import deploy_remote as deploy
 
 
+def staging_root_is_allowed(root):
+    """Permit normalized legacy or per-job roots within the VM scratch tree."""
+    bench = Path("/root/infraternal-bench").resolve(strict=True)
+    try:
+        parts = root.resolve(strict=True).relative_to(bench).parts
+    except (OSError, ValueError):
+        return False
+    if any(part in ("", ".", "..") for part in parts):
+        return False
+    if len(parts) >= 2 and parts[0] == "deploy":
+        return True
+    return len(parts) >= 3 and parts[0] != "deploy" and parts[1] == "signed"
+
+
 def run(config):
     operation = config.pop("operation")
     before = deploy.endpoint(Path(config["data"]))
@@ -94,7 +108,7 @@ if __name__ == "__main__":
     try:
         config = json.loads(sys.stdin.buffer.read(16385))
         root = Path(config["root"])
-        if os.geteuid() != 0 or not str(root).startswith("/root/infraternal-bench/deploy/"):
+        if os.geteuid() != 0 or not staging_root_is_allowed(root):
             raise ValueError("exclusive staging root required")
         print(json.dumps(run(config)))
     except Exception:

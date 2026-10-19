@@ -25,6 +25,8 @@ const root = resolve(import.meta.dirname, "../../..");
 export interface Bridge {
   id: number;
   closed: boolean;
+  /** Whether this socket requested resume in Hello; no capability bytes are retained. */
+  helloResume?: boolean;
   /** Which side ended the socket first, and its close code. */
   closedBy?: string;
   /** UTF-8 close reason from the first socket close event. */
@@ -57,7 +59,7 @@ export interface Bridge {
   /** Close frames the client sent (stream detaches). */
   detached: number[];
   /** Control-stream actions and subscriptions: what the browser asked (`up`) and what the server answered (`down`). */
-  control: Array<{ dir: "up" | "down"; type: "Call" | "Result" | "Subscribe"; /** Action id, subscription topic, or result status. */ detail: string; callId?: number; /** Optional VM benchmark timestamp; never includes frame bodies. */ at?: number }>;
+  control: Array<{ dir: "up" | "down"; type: "Call" | "Result" | "Subscribe" | "Event"; /** Action id, subscription topic, or result status. */ detail: string; callId?: number; /** Optional VM benchmark timestamp; never includes frame bodies. */ at?: number }>;
   cookie: string;
 }
 
@@ -223,6 +225,13 @@ export async function startRealServer(options: {
       const outbound = new WebSocketFrameDecoder();
       const desktopDecoder = options.onDesktopStage && protocol ? new WebSocketFrameDecoder() : undefined;
       const queued: Array<{ bytes: Buffer; binary: boolean }> = [];
+      let pendingUpstreamMessages = 0;
+      let closeBrowserWhenDrained = false;
+      const closeBrowserAfterDrain = (): void => {
+        if (!closeBrowserWhenDrained || pendingUpstreamMessages !== 0 || retainedBrowsers.has(browser)) return;
+        closeBrowserWhenDrained = false;
+        if (browser.readyState === WebSocket.OPEN) browser.close();
+      };
       browser.on("message", (data, binary) => {
         const bytes = Buffer.from(data as Buffer);
         if (protocol && binary) inbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
@@ -233,6 +242,7 @@ export async function startRealServer(options: {
                 : f.type === "Resize" ? ` cols=${f.cols} rows=${f.rows}` : "";
             console.error(`FRAME ${Date.now() % 100000} b${bridge.id} up s${stream} ${f.type}${detail}`);
           }
+          if (f.type === "Hello" && stream === 0) bridge.helloResume = (f.caps & 1n) !== 0n;
           if (f.type === "AttachTerm") {
             bridge.attached.set(stream, [...(bridge.attached.get(stream) ?? []), Buffer.from(f.sessionId).toString("hex")]);
             bridge.attachTimes?.push({ stream, at: Date.now() });
@@ -247,6 +257,7 @@ export async function startRealServer(options: {
       upstream.on("open", () => { for (const q of queued.splice(0)) { if (!bridge.closed) upstream.send(q.bytes, { binary: q.binary }); } });
       upstream.on("message", (data, binary) => {
         const receivedAt = desktopDecoder ? performance.timeOrigin + performance.now() : 0;
+        pendingUpstreamMessages++;
         const bytes = Buffer.from(data as Buffer);
         const desktop: Omit<DesktopStage, "stage" | "at">[] | undefined = desktopDecoder ? [] : undefined;
         if (desktopDecoder && binary && desktop) desktopDecoder.feed(new Uint8Array(bytes), (_stream, frame) => {
@@ -279,6 +290,12 @@ export async function startRealServer(options: {
               if (typeof event.type === "string" && event.type.startsWith("terminal.")) bridge.terminalEvents.push({ stream, type: event.type, at: Date.now() });
             } catch { /* Invalid notices are handled by the browser protocol parser. */ }
           }
+          if (options.timedControls && f.type === "Event") {
+            try {
+              const event = JSON.parse(text.decode(f.eventJson)) as { type?: unknown };
+              if (typeof event.type === "string" && event.type.startsWith("canvas.layout.")) bridge.control.push({ dir: "down", type: "Event", detail: event.type, at: Date.now() });
+            } catch { /* The browser validates event contents. Diagnostics retain only fixed event names. */ }
+          }
           if (f.type === "Close") {
             const close = f as { code?: unknown; reason?: unknown };
             bridge.serverClose = `s${stream === 0 ? 0 : "n"} ${typeof close.reason === "string" ? close.reason : JSON.stringify(close.reason)}`;
@@ -288,18 +305,22 @@ export async function startRealServer(options: {
               if (process.env.REAL_EVENT_TIMES === "1") console.error(`SERVER_CLOSE_FRAME b${bridge.id} stream=${stream} code=${close.code} reason=${JSON.stringify(reason)}`);
             }
           }
-          if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId });
+          if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId, ...(options.timedControls ? { at: Date.now() } : {}) });
         });
+        // Drain messages already received before closing the browser side of a failed upstream route.
         later(() => {
-          if (bridge.closed || browser.readyState !== WebSocket.OPEN) return;
-          if (!desktop?.length) { browser.send(bytes, { binary }); return; }
-          const began = performance.timeOrigin + performance.now();
-          for (const identity of desktop) options.onDesktopStage?.({ ...identity, stage: "fixture_send_begin", at: began });
-          browser.send(bytes, { binary }, (error) => {
-            if (error) return;
-            const ended = performance.timeOrigin + performance.now();
-            for (const identity of desktop) options.onDesktopStage?.({ ...identity, stage: "fixture_send_end", at: ended });
-          });
+          pendingUpstreamMessages--;
+          try {
+            if (browser.readyState !== WebSocket.OPEN) return;
+            if (!desktop?.length) { browser.send(bytes, { binary }); return; }
+            const began = performance.timeOrigin + performance.now();
+            for (const identity of desktop) options.onDesktopStage?.({ ...identity, stage: "fixture_send_begin", at: began });
+            browser.send(bytes, { binary }, (error) => {
+              if (error) return;
+              const ended = performance.timeOrigin + performance.now();
+              for (const identity of desktop) options.onDesktopStage?.({ ...identity, stage: "fixture_send_end", at: ended });
+            });
+          } finally { closeBrowserAfterDrain(); }
         });
       });
       const eraseQueue = (): void => { for (const entry of queued.splice(0)) entry.bytes.fill(0); };
@@ -310,9 +331,13 @@ export async function startRealServer(options: {
         bridge.closedBy ??= `server ${code}`;
         bridge.closedReason ??= reason.toString("utf8");
         if (process.env.REAL_EVENT_TIMES === "1") console.error(`SERVER_SOCKET_CLOSE b${bridge.id} side=upstream code=${code} reason=${JSON.stringify(reason.toString("utf8"))}`);
-        if (!retainedBrowsers.has(browser)) browser.close();
+        closeBrowserWhenDrained = true;
+        closeBrowserAfterDrain();
       });
-      upstream.on("error", () => { if (!retainedBrowsers.has(browser)) browser.close(); });
+      upstream.on("error", () => {
+        closeBrowserWhenDrained = true;
+        closeBrowserAfterDrain();
+      });
       browser.on("close", (code, reason) => {
         activeBrowsers.delete(browser);
         retainedBrowsers.delete(browser);

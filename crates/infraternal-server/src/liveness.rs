@@ -4,8 +4,8 @@
 //! packet on the ordered stream is retransmitted after about one more round
 //! trip, so their allowance spans two smoothed round trips. The primary host
 //! link only reports doubt on its first miss and retires on the second
-//! consecutive one; terminal routes and browser routes end their lease on the
-//! first miss, because their consumers rebind without cutting a shared link.
+//! consecutive one. Browser routes likewise doubt one missed allowance; terminal
+//! routes still rebind on the first miss. Hidden viewers park their probe lease.
 
 use std::{collections::VecDeque, time::Duration};
 use tokio::time::Instant;
@@ -17,7 +17,6 @@ const SERIAL_GAP: Duration = Duration::from_millis(26);
 // The floor covers a 150ms local stall plus reply dispatch, without waiting for
 // transport timeouts. Slow routes instead follow their measured RTT and jitter.
 const RESPONSE_FLOOR: Duration = Duration::from_millis(250);
-const RESPONSE_MARGIN: Duration = Duration::from_millis(50);
 // Covers the peer's acknowledgement delay on top of one retransmission [D300].
 const HOST_MARGIN: Duration = Duration::from_millis(75);
 // Bounds dead-host detection on slow or jittery paths; also the startup grace.
@@ -26,7 +25,7 @@ const RESPONSE_CEILING: Duration = Duration::from_secs(2);
 /// Which reply allowance and miss policy a route follows.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Allowance {
-    /// Browser routes: approximately one round trip [D265, #199].
+    /// Browser routes: two round trips and first-miss doubt [D300, #244].
     Browser,
     /// Host terminal routes: two round trips; the first miss ends the lease.
     Terminal,
@@ -49,6 +48,7 @@ pub(crate) struct Liveness {
     answer_paced: bool,
     allowance: Allowance,
     issued: VecDeque<u64>,
+    suspended: bool,
 }
 
 impl Liveness {
@@ -60,6 +60,7 @@ impl Liveness {
             sent: 0,
             acked: 0,
             issued: VecDeque::new(),
+            suspended: false,
             answer_paced: false,
             allowance: Allowance::Terminal,
             srtt: None,
@@ -89,6 +90,15 @@ impl Liveness {
         }
     }
 
+    /// A hidden viewer may stop executing altogether. Keep its socket and writer
+    /// ownership, but discard old correlations so visibility starts a fresh lease.
+    pub(crate) fn set_suspended(&mut self, suspended: bool) {
+        if self.suspended != suspended {
+            self.restart();
+            self.suspended = suspended;
+        }
+    }
+
     /// Restart monitoring on the same transport without reusing a prior probe ID.
     /// Clearing issued requests disarms the lease; the clock and counter survive.
     pub(crate) fn restart(&mut self) {
@@ -102,6 +112,9 @@ impl Liveness {
 
     /// Startup pipelines samples; a sampled route waits for its actual answer.
     pub(crate) fn next_probe_due(&self, fast: bool) -> Option<Instant> {
+        if self.suspended {
+            return None;
+        }
         if self.acked == 0 {
             Some(
                 self.origin
@@ -124,14 +137,21 @@ impl Liveness {
 
     /// An already-ready reply may pull the next probe forward, never amplify it.
     pub(crate) fn can_piggyback(&self) -> bool {
-        self.acked != 0
+        !self.suspended
+            && self.acked != 0
             && self.issued.is_empty()
             && self.origin.elapsed() >= Duration::from_micros(self.sent) + TICK
     }
 
     /// Wake independently of the next probe; preserve the strict expiry boundary.
     pub(crate) fn response_deadline(&self) -> Option<Instant> {
-        (!self.issued.is_empty()).then(|| self.answered + self.budget + Duration::from_nanos(1))
+        let allowance = if self.allowance == Allowance::Browser && self.acked != 0 {
+            self.budget * 2
+        } else {
+            self.budget
+        };
+        (!self.suspended && !self.issued.is_empty())
+            .then(|| self.answered + allowance + Duration::from_nanos(1))
     }
 
     pub(crate) fn ping(&mut self) -> (u64, u64) {
@@ -157,7 +177,8 @@ impl Liveness {
     pub(crate) fn pong(&mut self, nonce: u64, sent_us: u64) -> bool {
         // Only a new reply to this route's issued probes renews its lease.
         // Delayed/duplicate replies, ordinary traffic and another stream cannot do so.
-        if nonce != sent_us
+        if self.suspended
+            || nonce != sent_us
             || nonce <= self.acked
             || !self.issued.contains(&nonce)
             || self.retired()
@@ -183,11 +204,8 @@ impl Liveness {
             rtt
         };
         self.srtt = Some(srtt);
-        self.budget = if self.allowance == Allowance::Browser {
-            (srtt + self.rttvar * 4 + RESPONSE_MARGIN).max(RESPONSE_FLOOR)
-        } else {
-            (srtt * 2 + self.rttvar * 4 + HOST_MARGIN).clamp(RESPONSE_FLOOR, RESPONSE_CEILING)
-        };
+        self.budget =
+            (srtt * 2 + self.rttvar * 4 + HOST_MARGIN).clamp(RESPONSE_FLOOR, RESPONSE_CEILING);
         if let Allowance::HostLink { doubt, pinned } = &mut self.allowance {
             // Below the ceiling the estimator widens on its own and a late reply
             // cannot recur at the same delay; at the ceiling it would, forever.
@@ -198,7 +216,7 @@ impl Liveness {
     }
 
     pub(crate) fn expired(&self) -> bool {
-        !self.issued.is_empty() && self.answered.elapsed() > self.budget
+        !self.suspended && !self.issued.is_empty() && self.answered.elapsed() > self.budget
     }
 
     /// True once per episode when a proven host link misses its first reply.
@@ -219,10 +237,14 @@ impl Liveness {
     }
 
     /// The lease is over: a host link after its second consecutive allowance,
-    /// every other route after its first. No reply can renew it afterwards.
+    /// browser routes also after two, terminal routes after one. No reply can renew it afterwards.
     pub(crate) fn retired(&self) -> bool {
-        if matches!(self.allowance, Allowance::HostLink { .. }) && self.acked != 0 {
-            !self.issued.is_empty() && self.answered.elapsed() > self.budget * 2
+        if matches!(
+            self.allowance,
+            Allowance::HostLink { .. } | Allowance::Browser
+        ) && self.acked != 0
+        {
+            !self.suspended && !self.issued.is_empty() && self.answered.elapsed() > self.budget * 2
         } else {
             self.expired()
         }
@@ -232,6 +254,45 @@ impl Liveness {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn browser_doubts_one_mobile_delay_and_retires_only_after_two_allowances() {
+        let mut route = Liveness::answer_paced();
+        for _ in 0..100 {
+            let probe = route.ping();
+            tokio::time::advance(Duration::from_millis(150)).await;
+            assert!(route.pong(probe.0, probe.1));
+        }
+        let probe = route.ping();
+        tokio::time::advance(Duration::from_millis(600)).await;
+        assert!(route.expired(), "first allowance is doubt");
+        assert!(!route.retired());
+        assert!(route.pong(probe.0, probe.1));
+        route.ping();
+        let retirement = route.response_deadline().unwrap();
+        tokio::time::advance(retirement - Instant::now()).await;
+        assert!(route.retired(), "silence is still bounded while visible");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn suspended_browser_keeps_its_lease_and_relearns_the_mobile_path() {
+        let mut route = Liveness::answer_paced();
+        let old = route.ping();
+        tokio::time::advance(Duration::from_millis(150)).await;
+        assert!(route.pong(old.0, old.1));
+        let queued = route.ping();
+        route.set_suspended(true);
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(!route.retired());
+        assert!(route.response_deadline().is_none());
+        assert!(route.next_probe_due(false).is_none());
+        route.set_suspended(false);
+        assert!(!route.pong(queued.0, queued.1));
+        let fresh = route.ping();
+        tokio::time::advance(Duration::from_millis(600)).await;
+        assert!(route.pong(fresh.0, fresh.1));
+        assert!(!route.retired());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn healthy_reply_survives_a_150ms_server_stall() {
@@ -250,7 +311,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn quiet_dead_peer_expires_within_floor_plus_one_interval() {
+    async fn quiet_dead_browser_retires_within_two_floors_plus_one_interval() {
         let mut route = Liveness::answer_paced();
         let (nonce, stamp) = route.ping();
         tokio::time::advance(Duration::from_millis(1)).await;
@@ -261,9 +322,9 @@ mod tests {
         let deadline = route.response_deadline().expect("issued probe deadline");
         assert_eq!(
             deadline - Instant::now(),
-            Duration::from_millis(250) + Duration::from_nanos(1)
+            Duration::from_millis(500) + Duration::from_nanos(1)
         );
-        assert!(deadline - broken <= Duration::from_millis(277));
+        assert!(deadline - broken <= Duration::from_millis(527));
         tokio::time::advance(deadline - Instant::now()).await;
         assert!(route.expired());
     }
@@ -280,7 +341,7 @@ mod tests {
         }
         assert_eq!(route.srtt, Some(Duration::from_micros(112_500)));
         assert_eq!(route.rttvar, Duration::from_micros(62_500));
-        assert_eq!(route.budget, Duration::from_micros(412_500));
+        assert_eq!(route.budget, Duration::from_millis(550));
     }
 
     #[tokio::test(start_paused = true)]
@@ -405,7 +466,9 @@ mod tests {
                 let Some(deadline) = route.response_deadline() else {
                     panic!("issued probe needs a deadline");
                 };
-                assert!(deadline - broken <= route.budget + SERIAL_GAP + Duration::from_nanos(1));
+                assert!(
+                    deadline - broken <= route.budget * 2 + SERIAL_GAP + Duration::from_nanos(1)
+                );
                 tokio::time::advance(deadline - Instant::now()).await;
                 assert!(route.expired());
             }
@@ -491,7 +554,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn host_allowance_covers_one_loss_recovery_and_browser_routes_keep_theirs() {
+    async fn host_and_browser_allowance_cover_one_loss_recovery() {
         let mut host = Liveness::new();
         let mut browser = Liveness::answer_paced();
         tokio::time::advance(TICK).await;
@@ -504,7 +567,7 @@ mod tests {
         }
         // srtt 112.5 ms, rttvar 62.5 ms: 2 x 112.5 + 4 x 62.5 + 75 = 550 ms [D300].
         assert_eq!(host.budget, Duration::from_millis(550));
-        assert_eq!(browser.budget, Duration::from_micros(412_500));
+        assert_eq!(browser.budget, Duration::from_millis(550));
     }
 
     #[tokio::test(start_paused = true)]

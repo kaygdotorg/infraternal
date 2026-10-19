@@ -22,6 +22,8 @@ pub mod ca_http;
 pub mod ca_membership;
 #[cfg(feature = "remote")]
 pub mod ca_memory;
+#[cfg(feature = "canvas")]
+pub mod canvas_store;
 #[cfg(feature = "cli-plugin")]
 pub mod cli;
 #[cfg(feature = "remote")]
@@ -126,6 +128,8 @@ static COMPILED_PLUGINS: &[&infraternal_plugin_api::PluginDescriptor] = &[
     &infraternal_plugin_mesh::descriptor::DESCRIPTOR,
     #[cfg(feature = "release")]
     &infraternal_plugin_release::descriptor::DESCRIPTOR,
+    #[cfg(feature = "canvas")]
+    &infraternal_plugin_canvas::socket::DESCRIPTOR,
 ];
 
 #[cfg(feature = "remote")]

@@ -20,10 +20,54 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { WebSocket } from "ws";
 import { encodeMuxedFrame, type WireFrame } from "../../../packages/protocol/src/codec";
 import type { VideoInput } from "../../../packages/protocol/src/desktop";
+import { FORMAT, VERSION, parseDocument, type CanvasDocument } from "../src/canvas/model/schema";
+import { reduce } from "../src/canvas/model/reducer";
+import type { Intent } from "../src/canvas/model/operations";
 
 export const appwinEnabled = process.env.TRACER_DOUBLE_APPWIN === "1";
 const FIXTURES = process.env.APPWIN_FIXTURE_DIR ?? join(homedir(), ".cache/codex-scratch/ui-app-windows/fixtures");
 const text = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
+
+// A production canvas requires its ordinary account layout subscription. Reuse
+// the actual reducer; this fixture supplies receipts, never a second layout engine.
+let layout: CanvasDocument = { format: FORMAT, version: VERSION, revision: 0, views: [] };
+let layoutInitialized = false;
+const layoutSubscribers = new Map<WebSocket, Set<number>>();
+const layoutReceipts = new Map<string, number>();
+function layoutSnapshot(): Record<string, unknown> {
+  return { type: "canvas.layout.snapshot", initialized: layoutInitialized, revision: layout.revision, document: layout };
+}
+function publishLayout(event: Record<string, unknown>): void {
+  for (const [socket, subscriptions] of layoutSubscribers) for (const subId of subscriptions) {
+    if (socket.readyState === 1) socket.send(encodeMuxedFrame(0, { type: "Event", subId, eventJson: text(event) }));
+  }
+}
+export function appwinLayoutFrame(socket: WebSocket, frame: WireFrame): boolean {
+  if (!appwinEnabled) return false;
+  if (frame.type === "Subscribe" && JSON.parse(new TextDecoder().decode(frame.filterJson))?.topic === "canvas.layout") {
+    const subscriptions = layoutSubscribers.get(socket) ?? new Set<number>();
+    subscriptions.add(frame.subId); layoutSubscribers.set(socket, subscriptions);
+    socket.send(encodeMuxedFrame(0, { type: "Event", subId: frame.subId, eventJson: text(layoutSnapshot()) }));
+    return true;
+  }
+  if (frame.type !== "Call" || !["canvas.layout.initialize", "canvas.layout.apply"].includes(frame.actionId)) return false;
+  const input = JSON.parse(new TextDecoder().decode(frame.inputJson)) as { op_id: string; document?: unknown; intent: Intent };
+  let revision = layoutReceipts.get(input.op_id);
+  if (revision === undefined) {
+    if (frame.actionId === "canvas.layout.initialize") {
+      const document = parseDocument(input.document);
+      if (!document) throw Error("invalid test canvas document");
+      layout = { ...document, revision: layout.revision + 1 }; layoutInitialized = true;
+      publishLayout(layoutSnapshot());
+    } else {
+      reduce(layout, input.intent); layout.revision++;
+      publishLayout({ type: "canvas.layout.operation", revision: layout.revision, op_id: input.op_id, intent: input.intent, noop: false });
+    }
+    revision = layout.revision; layoutReceipts.set(input.op_id, revision);
+  }
+  socket.send(encodeMuxedFrame(0, { type: "Result", callId: frame.callId, ok: true, json: text({ revision }) }));
+  return true;
+}
 
 export const MAC_HOST_ID = "11111111-1111-4111-8111-111111111111";
 const LINUX_HOST_ID = "22222222-2222-4222-8222-222222222222";
@@ -137,6 +181,7 @@ function detach(v: Viewer): void { stopTimer(v); v.session.viewers.delete(v); if
 
 /** Every viewer on a closed socket goes with it. */
 export function appwinSocketClosed(socket: WebSocket): void {
+  layoutSubscribers.delete(socket);
   for (const s of sessions.values()) for (const v of [...s.viewers]) if (v.socket === socket) detach(v);
 }
 
@@ -261,7 +306,11 @@ export async function appwinHttp(request: IncomingMessage, response: ServerRespo
     if (!body || typeof body !== "object") { sendJson(response, 400, { error: "invalid request" }); return true; }
     // A reset is a new test source: prior pages may leave server-held sessions
     // intentionally alive, so retire their timers and registrations as well.
-    if (body.reset) { for (const session of sessions.values()) for (const viewer of [...session.viewers]) detach(viewer); sessions.clear(); }
+    if (body.reset) {
+      for (const session of sessions.values()) for (const viewer of [...session.viewers]) detach(viewer);
+      sessions.clear(); layout = { format: FORMAT, version: VERSION, revision: 0, views: [] };
+      layoutInitialized = false; layoutSubscribers.clear(); layoutReceipts.clear();
+    }
     if (body.reset) { Object.assign(config, { fps: 60, windows: defaults(), screenRecording: true, accessibility: true, viewOnly: false, controlContract: true, inputPauseMs: 0, refuseNextStart: false, windowsDelayMs: 0, startDelayMs: 0, windowShape: undefined }); inputs.length = 0; sizes.length = 0; starts.length = 0; attaches = 0; repairs = 0; }
     for (const key of ["controlContract", "fps", "screenRecording", "accessibility", "viewOnly", "inputPauseMs", "refuseNextStart", "windowsDelayMs", "startDelayMs", "windowShape"] as const) if (key in body) (config as Record<string, unknown>)[key] = body[key];
     if (Array.isArray(body.windows)) config.windows = body.windows as Win[];

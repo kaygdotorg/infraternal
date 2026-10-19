@@ -160,3 +160,9 @@ test("a band inserted between two bands of one column grows the windows beside i
   expect(cols[0]!.wins.map((w) => [w.id, w.row, w.rows])).toEqual([["A", 0, 1], ["B", 1, 1], ["T", 2, 1], ["C", 3, 1]]);
   expect(cols[1]!.wins.map((w) => [w.id, w.row, w.rows])).toEqual([["B2", 1, 2]]);
 });
+
+test("a narrow right split grows both drawn tracks to the canonical minimum", () => {
+  const cols = splitRight([{ id: "c", w: 125, wins: [{ id: "a" }] }], "a", { id: "b", colId: "right", pair: "p" }, GAP, 100);
+  expect(cols.map((c) => c.w)).toEqual([100, 100]);
+  expect(cols.flatMap((c) => c.wins.map((w) => w.id))).toEqual(["a", "b"]);
+});

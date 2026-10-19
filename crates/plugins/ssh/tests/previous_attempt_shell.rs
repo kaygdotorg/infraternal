@@ -12,9 +12,8 @@ mod common;
 #[test]
 fn shared_ownership_shell_preserves_recovery_and_refusal_invariants() {
     let output = Command::new("python3")
-        // Use the same compiled guard as the native fixtures without relying
-        // on an environment variable supplied by a particular job runner.
         .env("INFRATERNAL_TEST_RUNTIME_HELPER", common::runtime_helper())
+        .env("INFRATERNAL_TEST_STATE_ROOT", common::scratch())
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/previous_attempt_shell.py"

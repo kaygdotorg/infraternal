@@ -14,7 +14,8 @@ global-work = ["infraternal-plugin-api/global-work"]
 # Generic plugin media lanes are absent from terminal-only production builds (#146).
 native-streams = ["global-work", "remote", "infraternal-agent/native-streams", "infraternal-plugin-remote/native-streams"]
 staging-trust = []
-default = ["mesh", "cli-plugin", "ssh", "release"]
+default = ["mesh", "cli-plugin", "ssh", "release", "canvas"]
+canvas = ["dep:infraternal-plugin-canvas"]
 cli-plugin = []
 # App-window routing reuses the existing enrolled-host transport [D198,D232].
 desktop = ["native-streams", "remote", "dep:infraternal-plugin-desktop", "infraternal-plugin-desktop/server"]
@@ -30,6 +31,8 @@ release = ["dep:infraternal-plugin-release", "dep:hyper", "dep:hyper-util", "dep
 
 [dependencies]
 infraternal-plugin-desktop = { path = "../plugins/desktop", version = "0.1.0", default-features = false, optional = true }
+
+infraternal-plugin-canvas = { path = "../plugins/canvas", version = "0.1.0", optional = true }
 infraternal-shim = { path = "../infraternal-shim", version = "0.1.0", default-features = false }
 infraternal-plugin-release = { path = "../plugins/release", version = "0.1.0", optional = true, default-features = false, features = ["server"] }
 # The release downloader reuses the HTTP/TLS engines already used by server tests.
@@ -94,3 +97,7 @@ required-features = ["remote"]
 [[example]]
 name = "mesh_revocation_fixture"
 required-features = ["remote", "mesh"]
+
+[[example]]
+name = "layout_bench"
+required-features = ["canvas"]

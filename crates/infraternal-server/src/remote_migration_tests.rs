@@ -1,4 +1,6 @@
-//! Proves remote identity and session routing extend deployed recovery without version collisions or host retargeting [9][19][64][133], #78.
+//! Proves deployed schema upgrades preserve remote identity and route data, and
+//! that the release migration chain stays contiguous through shared canvas storage
+//! and wire writer identities [9][19][64][133], #78, #146, #243.
 
 use sqlx::sqlite::SqlitePoolOptions;
 
@@ -89,4 +91,70 @@ async fn remote_identity_and_sessions_upgrade_dev_v11_and_remain_idempotent() {
             .max()
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_order() {
+    let migrations = sqlx::migrate!("./migrations");
+    let expected: Vec<i64> = (1..=29).collect();
+    let versions: Vec<i64> = migrations
+        .iter()
+        .map(|migration| migration.version)
+        .collect();
+    assert_eq!(versions, expected, "fresh releases apply 0001 through 0029");
+
+    let production = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let mut deployed = sqlx::migrate!("./migrations");
+    deployed
+        .migrations
+        .to_mut()
+        .retain(|migration| migration.version <= 27);
+    deployed.run(&production).await.unwrap();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES ('legacy','Legacy',1,'fixture','legacy','Legacy')")
+        .execute(&production)
+        .await
+        .unwrap();
+    // This row exercises the two already-shipped Mesh migrations before 0028 is applied.
+    sqlx::query("INSERT INTO mesh_nodes(id,name,public_key,last_seen,last_rtt_us,dataplane_host,endpoint) VALUES (42,'production-node',zeroblob(32),123,456,'server','https://mesh.example.test')")
+        .execute(&production)
+        .await
+        .unwrap();
+
+    migrations.run(&production).await.unwrap();
+    migrations.run(&production).await.unwrap();
+    let (version, applied): (i64, i64) =
+        sqlx::query_as("SELECT max(version), count(*) FROM _sqlx_migrations")
+            .fetch_one(&production)
+            .await
+            .unwrap();
+    assert_eq!((version, applied), (29, 29));
+    let mesh: (String, Option<String>, Option<String>) =
+        sqlx::query_as("SELECT name, name_source, name_claim FROM mesh_nodes WHERE id=42")
+            .fetch_one(&production)
+            .await
+            .unwrap();
+    assert_eq!(mesh, ("production-node".into(), Some("hand".into()), None));
+    sqlx::query(
+        "INSERT INTO canvas_heads(account,revision,document,initialized) VALUES ('legacy',0,'{}',0)",
+    )
+    .execute(&production)
+    .await
+    .unwrap();
+
+    let fresh = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    migrations.run(&fresh).await.unwrap();
+    let fresh_versions: Vec<i64> =
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&fresh)
+            .await
+            .unwrap();
+    assert_eq!(fresh_versions, expected);
 }

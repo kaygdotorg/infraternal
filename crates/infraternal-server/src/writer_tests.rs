@@ -236,3 +236,47 @@ async fn terminal_sequence_survives_deletion_and_native_build_transitions() {
         next
     );
 }
+
+#[tokio::test]
+async fn resume_refusals_distinguish_connection_state_and_lost_token_rotation() {
+    let (pool, user, _) = database().await;
+    let welcome = new_connection(&pool, &user, 0, None, None).await.unwrap();
+    let id = welcome.connection_id;
+    let token = welcome.resume_token;
+    let refused = resume_connection(&pool, &user, id, token, 0, None, None)
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(refused, sqlx::Error::Protocol(ref check) if check == "connection_active"));
+    sqlx::query("UPDATE websocket_connections SET active=0,expires_at=120")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (owner, requested_id, requested_token, now, expected) in [
+        ("another-person", id, token, 0, "connection_owner"),
+        (user.as_str(), [9; 16], token, 0, "connection_missing"),
+        (user.as_str(), id, token, 121, "resume_expired"),
+        (user.as_str(), id, [0; 32], 0, "token_mismatch"),
+    ] {
+        let refused =
+            resume_connection(&pool, owner, requested_id, requested_token, now, None, None)
+                .await
+                .err()
+                .unwrap();
+        assert!(matches!(refused, sqlx::Error::Protocol(ref check) if check == expected));
+    }
+    // Rotation committed but the transport lost Welcome: the browser still has
+    // its old token. Diagnose the mismatch without weakening token validation.
+    resume_connection(&pool, &user, id, token, 0, None, None)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE websocket_connections SET active=0,expires_at=120")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let refused = resume_connection(&pool, &user, id, token, 0, None, None)
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(refused, sqlx::Error::Protocol(ref check) if check == "token_mismatch"));
+}

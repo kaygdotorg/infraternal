@@ -83,6 +83,8 @@ export interface ViewModel {
   layout: "tiled" | "graph";
   cols: ColumnModel[];
   nodes: NodeModel[];
+  /** Shared pins exist even before this view has rendered its nodes (D180/D245). */
+  graphPins?: Record<string, { x: number; y: number }>;
   /** Content size of a graph view. */
   graph?: { w: number; h: number };
   /** Position on the coarse cell grid, in pixels (always a multiple of `CELL`). */

@@ -15,7 +15,7 @@ async function open(page: Page, theme: string): Promise<void> {
   const dismiss = page.locator(".ui-toast").getByRole("button", { name: "Dismiss" });
   if (await dismiss.count()) await dismiss.click({ timeout: 8000 }).catch(() => {});
   await page.locator("#sidebar-toggle").click();
-  await expect(page.locator("#tree .bm-leaf")).toHaveCount(await page.locator("#tree .bm-leaf").count());
+  // Wait for the populated tree, not a transient count captured while the inventory is still arriving.
   await expect.poll(() => page.locator("#tree .bm-leaf").count()).toBeGreaterThan(30);
   await page.waitForTimeout(700);
 }

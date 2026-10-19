@@ -1336,6 +1336,11 @@ pub(crate) async fn compiled_with_hosts(
                 hosts,
             }),
         )),
+        // Append features so existing discovery positions remain stable.
+        #[cfg(feature = "canvas")]
+        Arc::new(infraternal_plugin_canvas::socket::CanvasPlugin(Arc::new(
+            crate::canvas_store::Store::new(pool.clone()),
+        ))),
         #[cfg(feature = "desktop")]
         Arc::new(infraternal_plugin_desktop::server::DesktopServer::new(50)),
     ];

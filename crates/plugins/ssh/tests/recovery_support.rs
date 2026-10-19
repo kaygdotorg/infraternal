@@ -1,4 +1,5 @@
-//! Verify retained setup recovery on a minimal host without an extra interpreter.
+//! Verify retained setup recovery on a minimal host without an extra interpreter. The private
+//! SSH root can be shorter than the workspace scratch root so socket fixture names fit `sun_path`.
 #![allow(clippy::unwrap_used)]
 
 use std::{
@@ -27,10 +28,25 @@ struct MinimalHost {
 impl MinimalHost {
     fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let scratch = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
-            || PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/ar3"),
-            PathBuf::from,
-        );
+        // Only these ownership fixtures need the short alias: the rest of the
+        // workspace keeps the canonical cache root for rename and execution tests.
+        let scratch = std::env::var_os("INFRATERNAL_SSH_TEST_STATE_ROOT")
+            .or_else(|| std::env::var_os("INFRATERNAL_TEST_STATE_ROOT"))
+            .map_or_else(
+                || {
+                    // Absolute kernel socket names must fit sun_path, including
+                    // the newline-home case. Use the private runtime directory
+                    // for these short-lived fixtures; build artifacts stay cached.
+                    std::env::var_os("XDG_RUNTIME_DIR").map_or_else(
+                        || {
+                            PathBuf::from(std::env::var_os("HOME").unwrap())
+                                .join(".cache/codex-scratch/ar3")
+                        },
+                        PathBuf::from,
+                    )
+                },
+                PathBuf::from,
+            );
         fs::create_dir_all(&scratch).unwrap();
         let root = scratch.join(format!(
             "r{}-{}",
@@ -440,8 +456,8 @@ fn review_live_session_socket_in_plain_home_blocks_cleanup() {
 }
 
 /// Review R10 (#230): a newline in the home path splits the session endpoint's
-/// kernel table row; the live endpoint must still block cleanup. Run with a
-/// short `INFRATERNAL_TEST_STATE_ROOT` so the absolute name fits `sun_path`.
+/// kernel table row; the live endpoint must still block cleanup. The runtime
+/// fixture root keeps the absolute name within `sun_path`.
 #[test]
 fn review_live_session_socket_in_newline_home_blocks_cleanup() {
     live_session_socket_blocks_cleanup(Some("\nn"));
