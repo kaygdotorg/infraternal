@@ -411,7 +411,7 @@ async fn review_pending_input_limit_retires_only_its_attachment() {
 }
 
 #[tokio::test]
-async fn review_typing_enqueued_before_a_reply_keeps_its_host_wire_order() {
+async fn review_reply_bypasses_queued_typing_without_losing_its_cursor_or_bytes() {
     let (commands, mut received) = mpsc::channel(8);
     let (input, input_rx) = mpsc::channel(8);
     let (_credit, input_acked) = watch::channel(0);
@@ -428,8 +428,9 @@ async fn review_typing_enqueued_before_a_reply_keeps_its_host_wire_order() {
     let Command::Input { frame, .. } = input_command(0, b"A") else {
         unreachable!();
     };
-    // Both admissions can occur in one receive turn. No scheduler yield is
-    // required between two complete frames buffered in a WebSocket message.
+    // The unsequenced reply lane intentionally bypasses typing credit [307].
+    // Both admissions can occur before the ordinary forwarding tasks run;
+    // taking the reply must leave the typing frame and its cursor intact.
     queue.enqueue(frame).unwrap();
     assert!(handle.reply(
         42,
@@ -437,11 +438,21 @@ async fn review_typing_enqueued_before_a_reply_keeps_its_host_wire_order() {
         std::time::Instant::now() + Duration::from_secs(10)
     ));
     let first = received.recv().await.unwrap();
-    forwarding.abort();
     assert!(
-        matches!(first, Command::Input { .. }),
-        "a later renderer reply overtook previously admitted typing"
+        matches!(first, Command::Reply { query_seq: 42, .. }),
+        "the independent reply lane must not wait for typing forwarding"
     );
+    let Command::Input { frame, .. } = received.recv().await.unwrap() else {
+        panic!("queued typing must remain available after the reply");
+    };
+    forwarding.abort();
+    assert!(matches!(
+        decode_muxed_frame(&frame).unwrap().frame,
+        Frame::Input {
+            in_seq: 0,
+            bytes: b"A"
+        }
+    ));
 }
 
 #[tokio::test]
