@@ -131,6 +131,7 @@ leg B only, contracts/bootstrap.md §4).
 | 0x14 | `Credit` | u32 bytes | client → server: permission to send more output |
 | 0x15 | `Snapshot` | u64 out_seq, bytes | screen repaint valid at out_seq |
 | 0x16 | `AttachTerm` | 16-byte session id, u64 last_out_seq, u64 last_in_seq | opens or resumes a terminal stream |
+| 0x17 | reply-marked `Input` | u64 query_seq, bytes (1–1024) | additive D307 extension; no typing cursor |
 | 0x30 | `Call` | u32 call_id, varint+utf8 action id, JSON input | contracts/plugin.md §3 |
 | 0x31 | `Result` | u32 call_id, u8 ok, JSON output or error | |
 | 0x32 | `Subscribe` | u32 sub_id, JSON filter | events (contracts/plugin.md §5) |
@@ -572,3 +573,25 @@ reused/resumed paths against RTT + 50 ms, and fresh TCP/TLS/upgrade paths agains
 4 × RTT + 50 ms (D267), through real TLS on the pinned VM. Preserve the last screen and
 keep input typed during recovery. Logs, screenshots and measurements belong on
 the issue [D262].
+
+### Reply-marked Input [D307, #160, #206]
+
+Hello capability bit 2 (`TERMINAL_QUERY_REPLIES`) advertises the v1 reply
+extension. A browser sends 0x17 only to a server advertising it; legacy 0x10
+Input is unchanged and always means ordinary input. The TypeScript Input model
+adds optional `replyTo`; Rust names the distinct layout `InputReply`.
+
+`query_seq` identifies the opening ESC byte in the session's absolute Output
+cursor. It is not a typing offset. Replies consume no typing credit or cursor,
+are not replayed by browsers, and are never reclassified as typing. The server
+observes queries before delivering output, accepts the first matching response
+within one second of the opening ESC, and drops duplicate, unknown, expired or
+structurally invalid responses with content-free diagnostics. This window
+covers more than three default 300 ms round trips and bounds stale responses,
+including queries split across output frames. A new query has a new identity,
+even when its bytes match an older query. Query state survives viewer reconnect.
+
+Only the output parser creates query records; marked input never allocates one.
+The parser and retained query table have fixed bounds. Overflow fails closed.
+Replies take a separate bounded lane to the shim so discarded replies cannot
+leave gaps in keyboard input cursors or select the answering viewer's geometry.
