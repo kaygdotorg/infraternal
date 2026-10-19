@@ -68,3 +68,12 @@ test("centred stops (a phone's strip) rest every column mid-screen, the first an
   expect(st.lefts).toHaveLength(3);
   st.lefts.forEach((left, i) => expect(Math.abs(left + st.view / 2 - (r.x + i * (w + 12) + w / 2))).toBeLessThanOrEqual(0.5));
 });
+
+test("D309: with a floor, a narrow column gets a stop of its drawn width and each column is reachable", () => {
+  const floor = 340, r = { x: 48, y: 0, w: 2 * floor + 393 + 24, h: 700 };
+  const st = stopsFor(view([39, 39, 393]), r, 393, 700, true, floor);
+  expect(st.lefts).toHaveLength(3);
+  // The columns' drawn centres: the first two are floor wide, the third is as saved.
+  const centres = [48 + 170, 48 + 352 + 170, 48 + 704 + 196.5];
+  st.lefts.forEach((left, i) => expect(Math.abs(left + st.view / 2 - centres[i]!)).toBeLessThanOrEqual(0.5));
+});

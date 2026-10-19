@@ -18,7 +18,23 @@ export const CELL = 120;
 /** Space inside a box around the content: left, top (room for the view label), right, bottom. */
 export const MARGIN = { l: 48, t: 96, r: 48, b: 48 };
 
-export interface Metrics { colW: number; /** A column's width in a strip of several on a phone (neighbours peek in); equal to `colW` elsewhere. */ peekW: number; clh: number; narrow: boolean; nodeW: number; nodeH: number }
+export interface Metrics {
+  colW: number;
+  /** A column's width in a strip of several on a phone (neighbours peek in); equal to `colW` elsewhere. */
+  peekW: number;
+  /** The narrowest a column is ever drawn (px); 0 where there is no floor. Display only: see `drawnWidth`. */
+  minW: number;
+  clh: number; narrow: boolean; nodeW: number; nodeH: number;
+}
+
+/**
+ * The widest floor on a touch screen (D309, #243): room for a usable terminal of 40 monospace cells. Measured on a
+ * 390 px phone at the touch terminal size: a 344 px terminal holds 39 cells, so a cell is about 8.8 px, and 40 cells with
+ * the window's 2 px of border need 355 px. The canvas's own sideways pan reaches the columns that do not fit. Without a
+ * floor a column the desktop set to the weight floor (a tenth of a column) is about 39 px wide on a phone, too narrow to
+ * type in.
+ */
+export const MIN_TOUCH_COLUMN = 355;
 
 /**
  * Sizes follow the viewport so a snapped view fills it: on a phone a lone column is the safe-area width and a column in a
@@ -31,14 +47,24 @@ export const metricsFor = (width: number, height: number, coarse: boolean, sizes
   // A view is as tall as the canvas area. It may get short (the on-screen keyboard is up): only the height changes,
   // never the width or a column count, so nothing rewraps and the camera does not scale the window down (D191).
   const clh = Math.max(120, Math.round(height));
-  return { colW, peekW: peekWidth(width, narrow, colW, COLUMN_GAP, sizes), clh, narrow, nodeW: narrow ? 200 : 208, nodeH: 104 };
+  const peekW = peekWidth(width, narrow, colW, COLUMN_GAP, sizes);
+  // The floor is never wider than a column of a default strip (`peekW`): a small phone's screen cannot show 40 cells with
+  // a neighbour's slice beside them, and the floor must not change how a default layout looks there.
+  return { colW, peekW, minW: coarse ? Math.min(MIN_TOUCH_COLUMN, peekW) : 0, clh, narrow, nodeW: narrow ? 200 : 208, nodeH: 104 };
 };
+
+/**
+ * The width a column of saved width `w` is drawn at. The saved width (the weight times `colW`) is the layout; the drawn
+ * width is only how this device shows it. Only drawing, the camera's stops and the content size read this; everything
+ * that is saved reads the saved width (`ColumnModel.w`, `data-w`), so a phone never rewrites the layout it displays.
+ */
+export const drawnWidth = (w: number, m: Pick<Metrics, "minW">): number => Math.max(w, m.minW);
 
 /** Size of the content (the tiled columns, or the graph canvas). */
 export function contentSize(view: ViewModel, m: Metrics): { w: number; h: number } {
   if (view.layout === "graph") return view.graph ?? { w: 880, h: 400 };
   const n = Math.max(1, view.cols.length);
-  const w = view.cols.length ? view.cols.reduce((sum, c) => sum + c.w, 0) + COLUMN_GAP * (n - 1) : m.colW;
+  const w = view.cols.length ? view.cols.reduce((sum, c) => sum + drawnWidth(c.w, m), 0) + COLUMN_GAP * (n - 1) : m.colW;
   return { w, h: view.cols.length ? m.clh : Math.round(m.clh * 0.7) };
 }
 

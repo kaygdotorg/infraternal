@@ -10,6 +10,8 @@ import type { WindowModel } from "./types";
 function place(view: ViewRec, document: DocView): void {
   if (view.view.name !== document.name) { view.view.name = document.name; const label = view.label.querySelector(".cl-label-name"); if (label) label.textContent = document.name; }
   const x = document.cell.x * CELL, y = document.cell.y * CELL;
+  // The shared layout is the truth: a position this device pushed for display (`home`) gives way to it.
+  delete view.view.home;
   if (view.view.x !== x || view.view.y !== y) { view.view.x = x; view.view.y = y; view.sx.set(x, true); view.sy.set(y, true); }
 }
 export interface SharedPaint { document: CanvasDocument; protectedIds: ReadonlySet<string>; protectedViews: ReadonlySet<string> }
@@ -69,6 +71,8 @@ export async function reconcile(cx: Ctx, read: () => SharedPaint, resolve: (targ
     place(c, view);
     cx.view.geometry(c); cx.view.paintEmpty(c);
   }
+  // The layout just put every view at its saved cell; a touch screen draws wider columns and moves the views they now overlap.
+  if (cx.state.metrics.minW > 0) cx.view.settle(cx.state.currentView);
   if (!cx.state.activeWin) { const first = cx.views.get(cx.state.currentView)?.wins.values().next().value; if (first) cx.win.setActive(first); }
   cx.store.reset(protectedIds, new Set([...protectedViews].filter((id) => !document.views.some((v) => v.id === id))));
   cx.adapters.inventory?.setLayout?.(document);

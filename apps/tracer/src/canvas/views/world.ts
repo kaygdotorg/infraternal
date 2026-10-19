@@ -15,7 +15,7 @@
 import { Spring } from "../../../../../packages/ui/src/spring";
 import { clamp } from "../camera/camera";
 import type { Ctx, ViewRec, WinRec } from "../context";
-import { columnEls } from "../layout/column-els";
+import { columnEls, setColumnWidth } from "../layout/column-els";
 import { MARGIN, boxOf, contentSize, defaultWidth, isDefaultWidth, resolve, snapToGrid, type Box, type Metrics, type Rect } from "../layout/geometry";
 import type { ColumnModel, ViewId, ViewModel, WindowModel } from "../model/types";
 import { el } from "../dom";
@@ -83,8 +83,7 @@ export function createViews(cx: Ctx): ViewsModule {
   const newCol = (col: ColumnModel): HTMLElement => {
     const colEl = el("div", "cl-col");
     colEl.dataset.id = col.id;
-    colEl.dataset.w = String(col.w);
-    colEl.style.setProperty("--w", `${col.w}px`);
+    setColumnWidth(colEl, col.w, state.metrics);
     return colEl;
   };
 
@@ -223,7 +222,10 @@ export function createViews(cx: Ctx): ViewsModule {
       // Commit: the dragged view lands on the grid and the others settle where it pushed them.
       c.sx.set(d.snapX); c.sy.set(d.snapY);
       c.view.x = d.snapX; c.view.y = d.snapY;
-      settle(c.view.id);
+      // `at` makes the dragged view the one that stays, on a touch screen too. A person placed it, so it and what it pushed
+      // are saved where they are: no view keeps a `home` from before.
+      settle(c.view.id, { x: d.snapX, y: d.snapY });
+      for (const other of views.values()) delete other.view.home;
       cx.store.changed();
     };
     c.label.addEventListener("pointerup", end, { signal });
@@ -285,10 +287,9 @@ export function createViews(cx: Ctx): ViewsModule {
     const target = defaultWidth(state.metrics, cols.length);
     for (const colEl of cols) {
       // A column the person resized keeps its width (`user`), and so does one whose width is none of the defaults.
-      if (colEl.dataset.user || !isDefaultWidth(Number(colEl.dataset.w), was) || colEl.dataset.half) continue;
-      if (colEl.dataset.w === String(target)) continue;
-      colEl.dataset.w = String(target);
-      colEl.style.setProperty("--w", `${target}px`);
+      if (!colEl.dataset.user && isDefaultWidth(Number(colEl.dataset.w), was) && !colEl.dataset.half) { setColumnWidth(colEl, target, state.metrics); continue; }
+      // The floor can change with the screen (rotation, a keyboard) while the saved width stays: redraw at the new floor.
+      if (Number(colEl.dataset.w)) setColumnWidth(colEl, Number(colEl.dataset.w), state.metrics);
     }
   }
 
@@ -324,14 +325,28 @@ export function createViews(cx: Ctx): ViewsModule {
     if (c.view.published) cx.sharing?.schedulePublish(c);
   }
 
+  /**
+   * Pushes the views that overlap the one that stays put clear of it, along the axis of least travel (D119).
+   *
+   * A touch screen draws columns wider than the layout saved (D309), so a console that grew past its saved footprint can sit
+   * under a neighbour that a desktop placed right beside it. There the view on screen stays put (the camera is looking at it)
+   * and the others move, at once and never animated: this runs when a layout arrives, and a view must not slide in from
+   * where the desktop had it. How this device draws is not what the layout says. The saved position stays in `home`, which
+   * is what a save writes (`toDocument`), so a phone never moves a view in the shared layout.
+   */
   function settle(fixedId: ViewId, at?: { x: number; y: number }): void {
+    const touch = state.metrics.minW > 0 && !at;
     const trial = boxes().map((b) => (at && b.id === fixedId ? { ...b, x: at.x, y: at.y } : b));
-    const next = resolve(trial, fixedId);
+    const next = resolve(trial, touch && views.has(state.currentView) ? state.currentView : fixedId);
     for (const c of views.values()) {
       const p = next.get(c.view.id);
       if (!p || (p.x === c.view.x && p.y === c.view.y)) continue;
+      if (touch) {
+        c.view.home ??= { x: c.view.x, y: c.view.y };
+        if (c.view.home.x === p.x && c.view.home.y === p.y) delete c.view.home;
+      }
       c.view.x = p.x; c.view.y = p.y;
-      c.sx.set(p.x); c.sy.set(p.y);
+      c.sx.set(p.x, touch); c.sy.set(p.y, touch);
     }
   }
 

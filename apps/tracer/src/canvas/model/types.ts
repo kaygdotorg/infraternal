@@ -78,6 +78,12 @@ export interface ViewModel {
   /** Position on the coarse cell grid, in pixels (always a multiple of `CELL`). */
   x: number;
   y: number;
+  /**
+   * Where the saved layout has this view (D309), set only while this device draws it somewhere else: a touch screen that
+   * draws columns wider than the layout saved can push a neighbour clear. The push is display only, so saving reads this
+   * (`toDocument`) and a phone never moves a view in the shared layout.
+   */
+  home?: { x: number; y: number };
   /** Arrived from someone: a copy that is yours (`from` only names where it came from). */
   from?: string;
   /** A published team layout you follow: read-only until you unlink it. */

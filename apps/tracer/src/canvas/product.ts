@@ -218,6 +218,8 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     const view = canvas.cx.views.get("mesh");
     if (view) { if (savedMesh.layout.type === "graph") view.view.graphPins = savedMesh.layout.pinned; view.view.x = savedMesh.cell.x * CELL; view.view.y = savedMesh.cell.y * CELL; view.sx.set(view.view.x, true); view.sy.set(view.view.y, true); }
   }
+  // A touch screen draws wider columns than the layout saved (D309): views they now overlap move clear, for display only.
+  if (canvas.cx.state.metrics.minW > 0) canvas.cx.view.settle(canvas.cx.state.currentView);
   // Capture initial structure once; subsequent server paints reset the comparison baseline.
   if (saved?.views.some((view) => view.id === "console")) canvas.cx.store.reset(); else canvas.cx.store.changed();
   let paintRevision = 0, paintAfterDrop = false;
