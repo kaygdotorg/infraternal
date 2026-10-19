@@ -54,3 +54,7 @@ fn is_unnamed_label(name: &str) -> bool {
             .strip_prefix("unnamed-")
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|byte| byte.is_ascii_digit()))
 }
+
+#[cfg(test)]
+#[path = "host_name_tests.rs"]
+mod tests;

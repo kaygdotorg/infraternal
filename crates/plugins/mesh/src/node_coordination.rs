@@ -268,6 +268,7 @@ mod tests {
     }
     struct Channel {
         server: bool,
+        legacy_host_facts: bool,
         path_capable: AtomicBool,
         leases: Arc<AtomicUsize>,
         refuse_listener: AtomicBool,
@@ -291,6 +292,7 @@ mod tests {
             let (notices, _) = tokio::sync::watch::channel(());
             Arc::new(Self {
                 server,
+                legacy_host_facts: false,
                 path_capable: AtomicBool::new(server),
                 leases: Arc::default(),
                 refuse_listener: AtomicBool::new(false),
@@ -303,6 +305,13 @@ mod tests {
                 frames: Mutex::new(Vec::new()),
                 hostname,
             })
+        }
+        fn legacy() -> Arc<Self> {
+            let mut channel = Self::named(false, None);
+            Arc::get_mut(&mut channel)
+                .expect("new test channel is uniquely owned")
+                .legacy_host_facts = true;
+            channel
         }
         fn changed(&self) {
             self.notices
@@ -395,6 +404,10 @@ mod tests {
                     return Ok(br#"{"server_link":{"source_port":43210}}"#.to_vec());
                 }
                 if action == "host.facts.read" {
+                    if self.legacy_host_facts {
+                        // A release-4-era infraternal agent returns the old shape without `hostname`.
+                        return Ok(br#"{"os":"Linux"}"#.to_vec());
+                    }
                     return self
                         .hostname
                         .map(|name| format!(r#"{{"hostname":"{name}"}}"#).into_bytes())
@@ -508,6 +521,37 @@ mod tests {
         attach_once(&service, Channel::named(true, Some("monitor01"))).await;
         assert_eq!(names(&service).await, ["monitor01", "minipc01"]);
     }
+    /// A release-4-era host added by IP provides no usable name; a migrated UUID placeholder must become `unnamed`.
+    #[tokio::test]
+    async fn legacy_host_daemon_and_ip_record_do_not_leave_a_uuid_mesh_name() {
+        let service = service().await;
+        let host = "00000000-0000-4000-8000-000000000001";
+        service
+            .dataplane()
+            .attach(host, PublicKey([2; 32]), None, false)
+            .await
+            .unwrap();
+        let pool = service.pool_for_tests();
+        sqlx::query(
+            "UPDATE mesh_nodes SET name=?,name_source='placeholder',name_claim=NULL WHERE dataplane_host=?",
+        )
+        .bind(format!("mesh-{host}"))
+        .bind(host)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO remote_host_bootstrap(host_id,address) VALUES(?,'root@10.69.69.217')",
+        )
+        .bind(uuid::Uuid::parse_str(host).unwrap().as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        attach_once(&service, Channel::legacy()).await;
+
+        assert_eq!(names(&service).await, ["server", "unnamed"]);
+    }
     #[tokio::test]
     async fn a_reported_hostname_names_a_host_added_by_address() {
         let service = service().await;
@@ -521,6 +565,57 @@ mod tests {
         .unwrap();
         attach_once(&service, Channel::named(false, Some("minipc01"))).await;
         assert_eq!(names(&service).await, ["server", "minipc01"]);
+    }
+    #[tokio::test]
+    async fn two_hosts_reporting_the_same_hostname_receive_distinct_names() {
+        let service = service().await;
+        let first = uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
+        let second = uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap();
+        let pool = service.pool_for_tests();
+        sqlx::query(
+            "INSERT INTO remote_host_bootstrap(host_id,address) VALUES(?,'root@10.69.69.217')",
+        )
+        .bind(first.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootful',0,1)")
+            .bind(second.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO remote_host_bootstrap(host_id,address) VALUES(?,'root@10.69.69.218')",
+        )
+        .bind(second.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        service
+            .dataplane()
+            .attach_named(
+                &first.to_string(),
+                PublicKey([2; 32]),
+                None,
+                false,
+                Some("minipc01"),
+            )
+            .await
+            .unwrap();
+        service
+            .dataplane()
+            .attach_named(
+                &second.to_string(),
+                PublicKey([3; 32]),
+                None,
+                false,
+                Some("minipc01"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(names(&service).await, ["server", "minipc01", "minipc01-2"]);
     }
     #[tokio::test]
     async fn a_name_a_person_chose_is_kept() {

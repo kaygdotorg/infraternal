@@ -6,6 +6,10 @@ use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+#[cfg(test)]
+#[path = "remote_inventory_name_tests.rs"]
+mod name_tests;
+
 pub(crate) struct Source {
     pub pool: SqlitePool,
     pub hosts: RemoteHosts,
