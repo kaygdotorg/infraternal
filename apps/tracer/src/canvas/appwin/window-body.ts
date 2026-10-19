@@ -264,8 +264,10 @@ export class AppBinding implements SessionBinding {
     if (this.stream.sendInput(input)) return;
     const c = this.stream.controlState;
     if (c.kind === "view-only" || c.kind === "paused") return;
-    if (this.queued.length < 32) this.queued.push(input);
     if (c.kind === "none") void this.stream.takeControl();
+    // A cooldown or detached stream can decline before announcing requesting.
+    // Such input must not survive for an unrelated later lease.
+    if (this.stream.controlState.kind === "requesting" && this.queued.length < 32) this.queued.push(input);
   }
 
   private endControl(): void {

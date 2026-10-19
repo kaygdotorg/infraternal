@@ -24,16 +24,23 @@ interface PendingBinding {
   send(input: VideoInput): void;
   paintControl(control: ControlState): void;
 }
-function pending() {
+function pending(admit = false) {
   const sent: VideoInput[] = [];
   let control: ControlState = { kind: "requesting" };
   let requests = 0;
+  let finishRequest: ((ok: boolean) => void) | undefined;
   const label = { textContent: "" };
   const badge = { dataset: {}, hasAttribute: () => false, setAttribute() {}, removeAttribute() {}, querySelector: () => label };
   const stream = {
     get controlState() { return control; },
     sendInput(input: VideoInput) { if (control.kind !== "controlled") return false; sent.push(input); return true; },
-    async takeControl() { requests++; return false; },
+    takeControl(): Promise<boolean> {
+      requests++;
+      if (!admit) return Promise.resolve(false);
+      control = { kind: "requesting" };
+      binding.paintControl(control);
+      return new Promise((resolve) => { finishRequest = resolve; });
+    },
   };
   // Exercise the existing binding's actual input/control methods. Its renderer
   // needs only an already mounted badge; no stream or desktop is created here.
@@ -42,8 +49,24 @@ function pending() {
     lastState: { kind: "live" }, o: { machine: "fixture" },
     root: { querySelector: (selector: string) => selector === ".aw-control" ? badge : undefined },
   }) as PendingBinding;
-  return { binding, sent, requests: () => requests, state(next: ControlState) { control = next; binding.paintControl(next); } };
+  return { binding, sent, requests: () => requests, state(next: ControlState) {
+    control = next;
+    binding.paintControl(next);
+    if (next.kind !== "requesting") finishRequest?.(next.kind === "controlled");
+  } };
 }
+
+test("the first key that admits a control request also waits for approval", async () => {
+  const f = pending(true);
+  f.state({ kind: "none" });
+  f.binding.send({ kind: "text", scalar: 97 });
+  expect(f.requests()).toBe(1);
+  expect(f.binding.queued).toHaveLength(1);
+  expect(f.sent).toHaveLength(0);
+  f.state({ kind: "controlled" });
+  await Promise.resolve();
+  expect(f.sent).toEqual([{ kind: "text", scalar: 97 }]);
+});
 
 test("a burst during automatic control reacquisition drains once after approval", async () => {
   const f = pending();
@@ -84,6 +107,18 @@ test("automatic control keeps the existing 32-event queue bound", async () => {
   f.state({ kind: "controlled" });
   await Promise.resolve();
   expect(f.sent).toHaveLength(32);
+});
+
+test("a control request declined before admission cannot retain input for a later lease", async () => {
+  const f = pending();
+  f.state({ kind: "none" });
+  f.binding.send({ kind: "text", scalar: 97 });
+  await Promise.resolve();
+  expect(f.requests()).toBe(1);
+  expect(f.binding.queued).toHaveLength(0);
+  f.state({ kind: "controlled" });
+  await Promise.resolve();
+  expect(f.sent).toHaveLength(0);
 });
 
 for (const state of [{ kind: "none" }, { kind: "view-only", why: "rights" }, { kind: "paused", untilMs: 2000 }] as const) {
