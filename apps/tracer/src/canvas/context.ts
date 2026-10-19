@@ -48,6 +48,8 @@ import type { AppWindowsHook } from "./appwin/hook";
 
 /** One window on the canvas: its card, its model and the things that must be undone when it goes. */
 export interface WinRec {
+  /** Closing animation may retain the card, but it must no longer be reused. */
+  closing?: boolean;
   model: WindowModel;
   card: WindowCard;
   /** The view this window sits in. */

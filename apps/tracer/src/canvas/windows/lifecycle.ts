@@ -160,6 +160,9 @@ export function createWindows(cx: Ctx): WindowsModule {
   };
 
   const close = (rec: WinRec, instant = false): void => {
+    // The card stays in the view until its exit animation finishes. Withdraw it
+    // from target reuse immediately, so a quick reopen creates a fresh window.
+    rec.closing = true;
     const c = rec.owner;
     // Closing never ends the session (D178): it keeps running, detached. The toast says so once, early on (TASTE: teach once).
     const inv = cx.adapters.inventory;

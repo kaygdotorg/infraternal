@@ -469,6 +469,7 @@ try:
    result=subprocess.run(['ps','-p',','.join(map(str,ids)),'-o','pid='],capture_output=True,text=True)
    return {int(value) for value in result.stdout.split()}
   previous_helpers=live_helper_pids();previous_expected_retirement=False
+  soak_sockets_before=page.evaluate('window.__appWindowBench.sockets')
   while time.monotonic()-soak_start<600:
    consent_guard();battery()
    if source.poll() is not None or window.poll() is not None or not browser.is_connected():
@@ -532,7 +533,7 @@ try:
    emit({'kind':'soak_step','iteration':iteration,'elapsed_seconds':time.monotonic()-soak_start,'counts':counts.copy()})
    iteration+=1
    page.wait_for_timeout(max(0,int((soak_start+iteration*10-time.monotonic())*1000)))
-  emit({'kind':'soak_result','seconds':time.monotonic()-soak_start,'counts':counts})
+  emit({'kind':'soak_result','seconds':time.monotonic()-soak_start,'counts':counts,'sockets_before':soak_sockets_before,'sockets_after':page.evaluate('window.__appWindowBench.sockets')})
   if counts['crashes'] or counts['stuck_frames'] or counts['unexpected_helper_exits'] or counts['reconnects']!=1 or counts['reopens']!=1:raise RuntimeError('stability soak did not pass')
  source_round_trips('after')
  emit({'kind':'network_rtt_after','raw':command(['ping','-n','-c','5','-W','1000','10.69.69.125'])})

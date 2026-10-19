@@ -70,7 +70,7 @@ export function createAppWindowsPart(cx: Ctx, adapter: AppWindowsAdapter): AppWi
   const existing = (machine: HostEntry, entry: Entry): WinRec | undefined => {
     for (const c of cx.views.values()) for (const rec of c.wins.values()) {
       const s = rec.model.stream;
-      if (!s || rec.model.hostId !== machine.id) continue;
+      if (rec.closing || !s || rec.model.hostId !== machine.id) continue;
       if (s.target.type === entry.target.type && JSON.stringify(s.target) === JSON.stringify(entry.target)) return rec;
     }
     return undefined;
