@@ -126,6 +126,8 @@ export class MuxConnection {
   private readonly rttListeners = new Set<(ms: number | undefined) => void>();
   private readonly pendingPings = new Map<bigint, number>();
   private livenessTimer = 0;
+  /** Keep the socket-task confirmation alive while input or probe activity reschedules liveness. */
+  private livenessConfirmationPending = false;
   /** A delayed browser task is local uncertainty, never evidence that the peer stopped answering (#245). */
   private livenessDueAt = Infinity;
   private lastLivenessStallAt = -Infinity;
@@ -539,6 +541,10 @@ export class MuxConnection {
   }
 
   private checkLiveness(confirm = false): void {
+    if (confirm) {
+      if (!this.livenessConfirmationPending) return;
+      this.livenessConfirmationPending = false;
+    }
     const now = performance.now();
     this.accountLivenessDelay(now);
     this.livenessTimer = 0;
@@ -551,6 +557,7 @@ export class MuxConnection {
       if (confirm) this.retireUnresponsiveSocket();
       else {
         this.livenessDueAt = now;
+        this.livenessConfirmationPending = true;
         this.livenessTimer = window.setTimeout(() => this.checkLiveness(true), 0);
       }
       return;
@@ -569,6 +576,8 @@ export class MuxConnection {
 
   private scheduleLiveness(): void {
     if (!this.isWelcomed || this.closed) return;
+    // A zero-delay confirmation gets one socket-task turn even if input or a Pong arrives first.
+    if (this.livenessConfirmationPending) return;
     window.clearTimeout(this.livenessTimer);
     // Input or a server Ping may have sampled between timer ticks. Schedule at that probe's next due time,
     // rather than skipping a tick and then expiring a healthy low-RTT route before another probe is sent.
@@ -736,6 +745,7 @@ export class MuxConnection {
   private resetPings(): void {
     window.clearTimeout(this.livenessTimer);
     this.livenessTimer = 0;
+    this.livenessConfirmationPending = false;
     this.livenessDueAt = Infinity;
     this.lastLivenessStallAt = -Infinity;
     this.stallGraceUsed = false;
