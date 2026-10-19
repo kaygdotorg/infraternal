@@ -331,6 +331,25 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     appendEchoOutput(session, bytes);
     return sendJson(response, 200, { bytes: bytes.byteLength, output_sequence: String(session.outputLength) });
   }
+  if (request.method === "POST" && url.pathname === "/__mock/synchronized-output") {
+    const body = await readJson(request);
+    if (!Array.isArray(body?.parts) || body.parts.length < 2 || body.parts.length > 8 || body.parts.some((part) => typeof part !== "string")) {
+      return sendJson(response, 400, { error: "synchronized output needs two to eight text parts" });
+    }
+    const parts = body.parts.map((part: string) => new TextEncoder().encode(part));
+    if (parts.some((part: Uint8Array) => part.byteLength === 0 || part.byteLength > MAX_MESSAGE)) {
+      return sendJson(response, 413, { error: "each synchronized output part must fit one frame" });
+    }
+    session.echoMode = "none";
+    const outputSequences: string[] = [];
+    for (let index = 0; index < parts.length; index += 1) {
+      appendEchoOutput(session, parts[index]!);
+      outputSequences.push(String(session.outputLength));
+      // Let the browser's frame loop run between Output frames while keeping the test batch within its hold bound.
+      if (index + 1 < parts.length) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return sendJson(response, 200, { output_sequences: outputSequences });
+  }
   if (request.method === "POST" && url.pathname === "/__mock/query-snapshot") {
     const body = await readJson(request);
     if (typeof body?.text !== "string") return sendJson(response, 400, { error: "snapshot text must be a string" });
