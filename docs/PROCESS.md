@@ -143,10 +143,13 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,344,304 bytes |
-  | `aarch64-unknown-linux-musl` | 19,535,600 bytes |
+  | `x86_64-unknown-linux-musl` | 21,348,496 bytes |
+  | `aarch64-unknown-linux-musl` | 19,544,816 bytes |
 
-  These are the release-6 measurements. From release 5, #244 adds 3,776 /
+  The #146 integration adds 4,192 / 9,216 bytes over release 6's measured
+  21,344,304 / 19,535,600 bytes. The x86_64 comparison rebuilds merge base
+  `8f8c84e37` with the same locked static release recipe (D243, D264).
+  From release 5, #244 adds 3,776 /
   3,320 bytes and #243 adds 114,656 / 104,592 bytes, totaling 118,432 /
   107,912 bytes. D308 accepts the shared-layout increase after its first
   trim; x86_64 remains 24,928 bytes below this task's +140 KiB stop line.
