@@ -62,6 +62,9 @@ interface MockSession {
 }
 
 interface Connection {
+  /** Test-only identity used to attribute input bytes to one attached browser. */
+  clientId: number;
+  acceptedInputBytes: number;
   socket: WebSocket;
   decoder: WebSocketFrameDecoder;
   traceEnabled: boolean;
@@ -126,6 +129,7 @@ const retiredSessions = new Map<string, { status: number; finalSeq: number }>();
 /** Interrupt exactly the first final answer to test recovery between its two ordered frames. */
 const interruptedRetirements = new Set<string>();
 let attachCount = 0;
+let nextClientId = 0;
 const attachHistory: Array<{ last_out_seq: string; output_sequence: string }> = [];
 const traceEvents: TraceEvent[] = [];
 
@@ -171,6 +175,8 @@ webSockets.on("connection", (socket, request) => {
     return;
   }
   const connection: Connection = {
+    clientId: ++nextClientId,
+    acceptedInputBytes: 0,
     socket,
     decoder: new WebSocketFrameDecoder(),
     traceEnabled: new URL(request.url ?? "/", `http://${request.headers.host ?? `${HOST}:${PORT}`}`).searchParams.get("trace") === "1",
@@ -483,6 +489,11 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
       attach_count: attachCount,
       attach_history: attachHistory,
       attached_stream_ids: [...connections].filter((connection) => connection.attached).map((connection) => connection.stream),
+      viewer_input_bytes: [...connections].map((connection) => ({
+        client_id: connection.clientId,
+        attached: connection.attached,
+        accepted_input_bytes: connection.acceptedInputBytes,
+      })),
       session_id: session.sessionIdText,
       active_socket_count: connections.size,
     });
@@ -959,6 +970,7 @@ function acceptInput(connection: Connection, sequence: bigint, bytes: Uint8Array
     connection.inputCursor += BigInt(fresh.byteLength);
     connection.session.writtenInput = connection.inputCursor;
     connection.session.acceptedInputBytes += fresh.byteLength;
+    connection.acceptedInputBytes += fresh.byteLength;
     connection.session.echoedText += new TextDecoder().decode(fresh);
     const echoed = echoBytes(connection.session, fresh);
     if (echoed && connection.session.echoDelayMs > 0) {
