@@ -64,6 +64,8 @@ const RESUME_NEXT: u64 = 1;
 const LINK_DOUBT_NOTICES: u64 = 1 << 1;
 /// Browser Hello bit 2 enables bounded control-stream visibility notices (#244).
 const VIEWER_VISIBILITY: u64 = 1 << 2;
+/// Reply-marked Input is independent of shipped viewer visibility.
+const TERMINAL_QUERY_REPLIES: u64 = 1 << 3;
 const RESUME_WINDOW_SECONDS: u32 = 120;
 // Reject upgrades immediately when the process is at this fixed socket limit.
 const MAX_CONNECTIONS: usize = 256;
@@ -160,6 +162,7 @@ pub(crate) struct WebSocketState {
     users: Arc<std::sync::Mutex<HashMap<String, std::sync::Weak<Semaphore>>>>,
     session_changes: watch::Sender<u64>,
     close_logs: StreamCloseLog,
+    queries: Arc<std::sync::Mutex<crate::terminal_queries::Registry>>,
 }
 
 impl WebSocketState {
@@ -202,6 +205,11 @@ impl WebSocketState {
         .await?;
         let (session_changes, _) = watch::channel(0_u64);
         let close_logs = StreamCloseLog::new();
+        #[cfg(feature = "remote")]
+        let queries = hosts.6.clone();
+        #[cfg(not(feature = "remote"))]
+        let queries: Arc<std::sync::Mutex<crate::terminal_queries::Registry>> = Arc::default();
+        let inventory_queries = queries.clone();
         let mut inventory = agent.session_inventory();
         let inventory_pool = pool.clone();
         let inventory_changes = session_changes.clone();
@@ -218,6 +226,15 @@ impl WebSocketState {
                             .await
                             .is_ok()
                         {
+                            {
+                                let mut queries = inventory_queries
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                if let SessionInventoryState::Available(ids) = &*inventory.borrow()
+                                {
+                                    queries.reconcile(None, ids);
+                                }
+                            }
                             inventory_changes
                                 .send_modify(|version| *version = version.wrapping_add(1));
                         } else {
@@ -252,6 +269,7 @@ impl WebSocketState {
             users: Arc::default(),
             session_changes,
             close_logs,
+            queries,
         })
     }
 
@@ -483,7 +501,7 @@ async fn run_socket(
                     CONTROL_STREAM,
                     &Frame::Hello {
                         version: 1,
-                        caps: VIEWER_VISIBILITY,
+                        caps: VIEWER_VISIBILITY | TERMINAL_QUERY_REPLIES,
                         client_info: "infraternal-server/0.1",
                     },
                     &mut encode,
@@ -1167,6 +1185,17 @@ where
                 attachment.needs_snapshot = true;
                 return Ok(());
             }
+            state
+                .queries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .observe(
+                    attachment.session_id,
+                    attachment.host_id,
+                    out_seq,
+                    &bytes,
+                    std::time::Instant::now(),
+                );
             attachment.credit -= length;
             attachment.last_out_seq = end;
             send_frame(
@@ -1215,6 +1244,11 @@ where
             )
             .await?;
             if ended {
+                state
+                    .queries
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .retire(attachment.session_id);
                 state.sessions_changed();
             }
             send_frame(
@@ -1318,6 +1352,13 @@ where
             // The host's infraternal agent found no shim for the session: a final
             // answer, distinct from every transient close (wire §4, #158).
             let gone = code == CLOSE_SESSION_GONE;
+            if gone {
+                state
+                    .queries
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .retire(attachment.session_id);
+            }
             let reason = if gone { SESSION_GONE_REASON } else { reason };
             let close_reason = classify_terminal_close(reason);
             let mut close = attachment.close_record(stream_id, who, close_reason);
@@ -2089,6 +2130,27 @@ where
             state.close_logs.record(&close);
             Ok(())
         }
+        Frame::InputReply { query_seq, bytes } if stream_id != 0 && stream_id % 2 == 1 => {
+            let attachment = attachments.get(&stream_id).ok_or(())?;
+            let expires = state
+                .queries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .claim(
+                    attachment.session_id,
+                    query_seq,
+                    bytes,
+                    std::time::Instant::now(),
+                );
+            if let Some(expires) = expires
+                && !attachment
+                    .input
+                    .reply(query_seq, Bytes::copy_from_slice(bytes), expires)
+            {
+                crate::terminal_queries::record_drop();
+            }
+            Ok(())
+        }
         Frame::Input { in_seq, bytes } if stream_id != 0 && stream_id % 2 == 1 => {
             let attachment = attachments.get_mut(&stream_id).ok_or(())?;
             let end = in_seq
@@ -2177,6 +2239,13 @@ async fn close_terminal_stream<K>(
 where
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
+    if close.code == CLOSE_SESSION_GONE {
+        state
+            .queries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retire(close.record.session_id);
+    }
     let stream_id = close.record.browser_stream_id;
     let reason = close.record.reason.client_text;
     attachments.remove(&stream_id);
@@ -2664,7 +2733,10 @@ impl EndedStreams {
                 self.0.remove(&stream_id);
                 Ok(true)
             }
-            Frame::Input { .. } | Frame::Credit { .. } | Frame::Resize { .. } => Ok(true),
+            Frame::Input { .. }
+            | Frame::InputReply { .. }
+            | Frame::Credit { .. }
+            | Frame::Resize { .. } => Ok(true),
             Frame::AttachTerm { .. } => {
                 self.0.remove(&stream_id);
                 Ok(false)

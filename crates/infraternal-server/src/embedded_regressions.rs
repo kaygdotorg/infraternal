@@ -1522,3 +1522,14 @@ async fn saturated_control_pong_does_not_retire_connection() {
 
 #[path = "liveness_doubt_breakit_r2_tests.rs"]
 mod liveness_doubt_breakit_r2_tests;
+
+#[test]
+fn query_reply_compatibility_notice_is_strict_and_session_bound() {
+    let id = uuid::Uuid::from_bytes([1; 16]).to_string();
+    let json = serde_json::json!({"type":"terminal.query_replies_unavailable", "session_id":id});
+    let notice: TerminalNotice = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(notice.session_id(), id);
+    let mut extra = json;
+    extra["bytes"] = serde_json::json!("unexpected");
+    assert!(serde_json::from_value::<TerminalNotice>(extra).is_err());
+}

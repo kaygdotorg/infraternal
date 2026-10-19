@@ -3158,6 +3158,97 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        each piece ships in the app.
      - Still open: which commands live at the root versus under
        `infraternal canvas` (C3), and the exit-code table (C7).
+300. **When the server gives up on a quiet host (owner, 2026-10-17, #234;
+     amends D265):** a missed liveness reply no longer cuts a healthy link.
+     (A) The reply deadline follows the measured path: about twice the
+     smoothed round trip plus four times its variation plus a small margin,
+     so one lost packet's recovery fits (measured at 150 ms with 1% loss:
+     12 cut links in 10 minutes down to 1). (B) One miss only marks the
+     route doubtful and the window shows reconnecting; the link is retired
+     after a second consecutive miss. A dead host is noticed after about
+     0.4 s at 150 ms instead of 0.25 s; LAN is unchanged. (C) sending probes
+     outside the ordered stream is a later, separate design question.
+301. **Size exceptions accepted, trim later (owner, 2026-10-17; one-off
+     D243 exceptions like D298):** replacing a stuck agent (#231/#235,
+     about +53 KB), the honest Mesh view (#236, about +37 KB),
+     connection-close logging (#227, about +37 KB) and edge auto-update
+     (#211, about +636 KB x86_64 / ~800 KB aarch64) ship at their measured
+     sizes; each keeps a trim follow-up and the caps ratchet down with it.
+302. **Remote control rules, completing D297 (owner, 2026-10-17, #170):**
+     1. Plain SSH is not covered by the per-machine switch; the switch says
+        "SSH is separate" (SSH keeps D235/D289 login rules).
+     2. Typing into another person's session needs both an admin's
+        approval for the automation and the session owner's consent (D187).
+     3. Another account on the same machine always asks an admin, whatever
+        the global setting.
+     4. An approval covers what that shell can do, said plainly; opening a
+        new root session or falling back to root needs a fresh approval; AI
+        tools never supply the D274 password.
+     5. "Allow when a rule permits" counts as standing approval for
+        unattended jobs; "Off" means automation is off.
+     6. "A rule permits" means a named "Automate" action in Roles plus Login
+        access and the session's sharing rights; the prompt shows which rule
+        allowed it.
+     7. The per-machine switch needs an admin covering all of the machine's
+        tags (D211); widening the global setting needs an instance-wide admin
+        and a fresh passkey.
+     8. People handing Remote Desktop control follow D294; the switch covers
+        AI tools and `infraternal sessions` only; idle handover never gives
+        control to an AI tool.
+     9. One approval is one described action on one session; a watch lasts
+        until stopped; broader standing permission comes from Roles.
+     10. Automation runs only while the target is connected to the server;
+        losing the link stops it; a cold server restart ends approvals (shells
+        stay); the UI shows "stop requested" apart from "stopped on the
+        machine".
+     The mesh default stays as D216 decided: the community edition allows
+     members to reach each other by default, the enterprise edition starts
+     with no rules (deny).
+303. **CLI layout and exit codes (owner, 2026-10-17, #239; completes D299):**
+     - **Where things happen (C3):** root commands act here, in this
+       terminal: `status`, `machines`, `open <machine>` (a shell right here),
+       `sessions` (list, attach, send, read, close: the D288 automation lives
+       here), `logs`, `mesh`, `access`, `update`, `sign-in`, `up`, `skill`.
+       `infraternal canvas …` acts on the person's screens in the app:
+       `canvas open`, `canvas windows`, `canvas focus`, `canvas close`, and
+       it is how AI tools put something in front of the person.
+     - **Exit codes (C7, POSIX-safe):** 0 ok, 1 failed, 2 usage, 3 not
+       allowed, 4 not found, 5 off or unreachable, 6 partly done, 130
+       interrupted; `status` exits 5 when something that should run is down.
+       The JSON envelope only ever gains fields; a removal bumps its version.
+304. **Session automation and canvas commands, as shown to the owner
+     (owner, 2026-10-17, #239; extends D303):** "i love it". `infraternal
+     sessions [machine]`, `sessions read <machine>:<session> --last N`,
+     `sessions send <machine>:<session> '<text>'`, `sessions watch`,
+     `sessions open <machine> --name …`, `sessions close`; `infraternal
+     canvas open|windows|focus|close`, with `--note` so an AI tool can say why
+     it put something in front of the person. A refused request says why and
+     what to do, and exits 3; a request waiting for approval says who must
+     approve. Every command, including these, has `--json` (D299).
+305. **Ctrl-C stops the calling script too (owner, 2026-10-18, #239; refines
+     D303):** "this!" When the person presses Ctrl-C, `infraternal` finishes
+     its `--json` envelope (`interrupted`), restores the default SIGINT action
+     and re-raises the signal, the way most command-line tools end. A shell
+     loop or script that runs `infraternal` then stops as well, and `$?`
+     still reads 130. Programs that call `infraternal` directly see "killed
+     by signal 2" instead of a plain exit code 130; that is accepted.
+     Rejected: exiting with plain code 130, which let a shell loop carry on
+     after Ctrl-C.
+306. **Mesh view ships at its measured size, trim later (owner, 2026-10-18,
+     #236; amends D301):** "sure yes". Merged onto production the honest Mesh
+     view measures +74,368 B x86_64, double the ~37 KB D301 accepted,
+     because its earlier figure was taken against an older, larger base. It
+     ships now at the measured size, like real logins (D298); the trim job
+     (#236) continues and the caps ratchet down with it.
+307. **One answer per terminal query, marked on the wire (owner, 2026-10-19,
+     #160, #206):** "a is fine". Every attached browser answers terminal
+     queries (cursor position, device attributes, colours), so with three
+     viewers three answers reached the shell and a late answer still
+     arrived. The browser marks a renderer's reply as a reply, not typing,
+     with an additive field on Input; the server forwards exactly one reply
+     per query to the PTY and drops later or expired ones. Rejected: a
+     browser-only rule (only the focused viewer answers, late replies
+     dropped), which still lets two focused devices both answer.
 308. **Shared layout ships at its measured size, trim later (owner,
      2026-10-19, #243; like D306):** "yes that is fine". The server-held
      canvas layout (store, op log, snapshots, browser sync) measures about

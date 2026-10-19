@@ -20,7 +20,9 @@ async fn credit_bursts_do_not_consume_ordered_input_capacity() {
         match receiver.next().await.unwrap() {
             Command::Input(seq, _) => inputs.push(seq),
             Command::Credit(bytes) => granted += bytes,
-            Command::Resize(..) | Command::Ping(..) => panic!("unexpected command"),
+            Command::Reply(_) | Command::Resize(..) | Command::Ping(..) => {
+                panic!("unexpected command")
+            }
             #[cfg(feature = "remote")]
             Command::Cursor(_) => panic!("unexpected native cursor"),
         }
@@ -83,7 +85,9 @@ async fn input_and_resize_keep_their_shared_fifo_order_around_credit() {
             Command::Input(seq, _) => ordered.push(seq),
             Command::Resize(80, 24, 0, 0) => ordered.push(100),
             Command::Credit(bytes) => credit += bytes,
-            Command::Resize(..) | Command::Ping(..) => panic!("unexpected command"),
+            Command::Reply(_) | Command::Resize(..) | Command::Ping(..) => {
+                panic!("unexpected command")
+            }
             #[cfg(feature = "remote")]
             Command::Cursor(_) => panic!("unexpected native cursor"),
         }
@@ -128,4 +132,24 @@ async fn probe_at_full_command_capacity_preserves_accepted_input() {
         sender.try_send(Command::Ping(43, 75)),
         Err(mpsc::error::TrySendError::Closed(_))
     ));
+}
+
+#[tokio::test]
+async fn review_reply_at_full_command_capacity_preserves_accepted_input() {
+    let (mut sender, mut receiver) = channel();
+    for seq in 0..8 {
+        sender.try_send(Command::Input(seq, vec![b'x'])).unwrap();
+    }
+    // Dispatch interprets Full as a reason to retire the stream and cancel its
+    // terminal task. Best-effort replies must not trigger that path while
+    // previously accepted typing is still waiting for the shim.
+    assert!(
+        sender
+            .try_send(Command::Reply(b"\x1b[1;1R".to_vec()))
+            .is_ok(),
+        "reply overload must not retire the terminal carrying accepted typing"
+    );
+    for seq in 0..8 {
+        assert!(matches!(receiver.next().await, Some(Command::Input(actual, _)) if actual == seq));
+    }
 }

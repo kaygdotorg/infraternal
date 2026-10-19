@@ -1,10 +1,16 @@
-//! Accumulates Credit and skips probes at capacity while preserving bounded Input/Resize recovery order [130], #78, #234.
+//! Accumulates Credit and reserves reply capacity while preserving one Input/Resize/reply FIFO [130, 307].
 use super::Command;
-use tokio::sync::{mpsc, watch};
+use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
+
+const COMMAND_SLOTS: usize = 8;
+const REPLY_SLOTS: usize = 64;
 
 pub(super) struct Ordered {
     command: Command,
     credit_before: u64,
+    // Keep admission reserved while a pending command waits for its credit fence.
+    _slot: OwnedSemaphorePermit,
 }
 
 // One shared dispatcher owns this sender; exposing no Clone keeps the credit
@@ -14,6 +20,8 @@ pub(super) struct Ordered {
 pub(super) struct Sender {
     raw: mpsc::Sender<Ordered>,
     credits: watch::Sender<u64>,
+    slots: Arc<Semaphore>,
+    reply_slots: Arc<Semaphore>,
 }
 pub(super) enum Receiver {
     #[cfg(feature = "remote")]
@@ -26,10 +34,15 @@ pub(super) enum Receiver {
     },
 }
 pub(super) fn channel() -> (Sender, Receiver) {
-    let (tx, rx) = mpsc::channel(8);
+    let (tx, rx) = mpsc::channel(COMMAND_SLOTS + REPLY_SLOTS);
     let (credits, reader) = watch::channel(0);
     (
-        Sender { raw: tx, credits },
+        Sender {
+            raw: tx,
+            credits,
+            slots: Arc::new(Semaphore::new(COMMAND_SLOTS)),
+            reply_slots: Arc::new(Semaphore::new(REPLY_SLOTS)),
+        },
         Receiver::Shared {
             raw: rx,
             credits: reader,
@@ -69,16 +82,34 @@ impl Sender {
                 Ok(())
             }
         } else {
+            if self.raw.is_closed() {
+                return Err(mpsc::error::TrySendError::Closed(command));
+            }
+            // Replies cannot spend the eight ordinary command reservations.
+            // One FIFO still orders them with Input/Resize and accumulated Credit.
+            let slots = if matches!(command, Command::Reply(_)) {
+                &self.reply_slots
+            } else {
+                &self.slots
+            };
+            let Ok(slot) = slots.clone().try_acquire_owned() else {
+                return if matches!(command, Command::Ping(..) | Command::Reply(_)) {
+                    Ok(())
+                } else {
+                    Err(mpsc::error::TrySendError::Full(command))
+                };
+            };
             let credit_before = *self.credits.borrow();
             match self.raw.try_send(Ordered {
                 command,
                 credit_before,
+                _slot: slot,
             }) {
-                // A probe cannot displace accepted input or retire its writer
-                // under local pressure. Its caller retains the reply deadline.
+                // Best-effort probes and renderer replies cannot displace accepted
+                // typing or retire its writer under local queue pressure.
                 Ok(())
                 | Err(mpsc::error::TrySendError::Full(Ordered {
-                    command: Command::Ping(..),
+                    command: Command::Ping(..) | Command::Reply(..),
                     ..
                 })) => Ok(()),
                 Err(mpsc::error::TrySendError::Full(ordered)) => {

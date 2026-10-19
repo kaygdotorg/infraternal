@@ -9,6 +9,8 @@ license.workspace = true
 workspace = true
 
 [features]
+# Development-only bounded parser corpus entrypoint; absent from shipping builds.
+parser-checks = []
 staging-trust = []
 default = ["mesh", "cli-plugin", "ssh", "release", "canvas"]
 canvas = ["dep:infraternal-plugin-canvas"]

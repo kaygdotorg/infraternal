@@ -16,7 +16,7 @@ infraternal-plugin-release = { version = "0.1.0", path = "../crates/plugins/rele
 serde_json.workspace = true
 infraternal-plugin-ssh = { version = "0.1.0", path = "../crates/plugins/ssh", features = ["session-bridge"] }
 infraternal-agent = { version = "0.1.0", path = "../crates/infraternal-agent", default-features = false, features = ["remote"] }
-infraternal-server = { version = "0.1.0", path = "../crates/infraternal-server", default-features = false, features = ["remote"] }
+infraternal-server = { version = "0.1.0", path = "../crates/infraternal-server", default-features = false, features = ["remote", "parser-checks"] }
 axum.workspace = true
 libfuzzer-sys.workspace = true
 infraternal-plugin-api.workspace = true
@@ -239,6 +239,13 @@ bench = false
 [[bin]]
 name = "canvas_layout_json"
 path = "fuzz_targets/canvas_layout_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "terminal_query_decode"
+path = "fuzz_targets/terminal_query_decode.rs"
 test = false
 doc = false
 bench = false

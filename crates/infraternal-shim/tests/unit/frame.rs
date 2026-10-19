@@ -351,3 +351,22 @@ fn shared_writer_selector_is_fixed_length_and_fragment_safe() {
         assert!(FrameRef::decode(body).is_err());
     }
 }
+
+#[test]
+fn query_reply_extension_is_bounded_and_fragment_safe() {
+    let frame = Frame::QueryReply(b"\x1b[1;1R".to_vec());
+    let wire = frame.encode().unwrap();
+    assert_eq!(wire, [7, 0, 0, 0, 0x1e, 27, b'[', b'1', b';', b'1', b'R']);
+    assert_eq!(FrameRef::decode(&wire[4..]).unwrap().into_owned(), frame);
+    for split in 0..=wire.len() {
+        let mut decoder = Decoder::default();
+        let mut frames = decoder.feed(&wire[..split]).unwrap();
+        frames.extend(decoder.feed(&wire[split..]).unwrap());
+        assert_eq!(frames, vec![frame.clone()]);
+    }
+    assert!(Frame::QueryReply(Vec::new()).encode().is_err());
+    assert!(Frame::QueryReply(vec![0; 1025]).encode().is_err());
+    assert!(Frame::decode(&[0x1e]).is_err());
+    assert!(FrameRef::decode(&[vec![0x1e], vec![0; 1025]].concat()).is_err());
+    assert!(Frame::QueryReply(vec![0; 1024]).encode().is_ok());
+}

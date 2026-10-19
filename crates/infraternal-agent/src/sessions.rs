@@ -222,7 +222,11 @@ pub async fn connect_writer(path: PathBuf, id: [u8; 16], writer: u32) -> io::Res
     let mut session = connect_with(
         path,
         id,
-        SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT | SHARED_WRITER,
+        SEQUENCED_INPUT
+            | MULTI_WRITER
+            | APPROXIMATE_SNAPSHOT
+            | SHARED_WRITER
+            | infraternal_shim::frame::QUERY_REPLIES,
     )
     .await?;
     if session.caps & MULTI_WRITER == 0 || writer == 0 {
@@ -266,7 +270,11 @@ pub async fn connect_shared_writer(
     let mut session = connect_with(
         path,
         id,
-        SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT | SHARED_WRITER,
+        SEQUENCED_INPUT
+            | MULTI_WRITER
+            | APPROXIMATE_SNAPSHOT
+            | SHARED_WRITER
+            | infraternal_shim::frame::QUERY_REPLIES,
     )
     .await?;
     let required = SEQUENCED_INPUT | MULTI_WRITER | SHARED_WRITER;
