@@ -17,6 +17,9 @@ use std::{collections::HashMap, sync::Mutex, time::Duration};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
+const CONNECTED_FACTS_TIMEOUT: Duration = Duration::from_secs(10);
+const TERMINAL_CANARY_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Preserve the original per-phase startup allowance and add eight authenticated
 /// exchanges for TLS fallback, greeting and actor admission. This is a failure
 /// bound, never a delay: route notifications release a healthy host immediately.
@@ -24,13 +27,24 @@ fn installed_actor_budget(round_trip: Duration) -> Duration {
     Duration::from_secs(30).saturating_add(round_trip.saturating_mul(8))
 }
 
-/// Cover both sequential route phases plus SSH command admission and its exit receipt.
-/// Bootstrap caps the SSH child at its 180-second attempt limit. Below that
-/// ceiling, readiness reports its route-specific timeout before SSH cancels it.
+/// Cover the entire SSH command: installed-actor and active-route waits,
+/// connected facts and terminal proof, plus admission and exit round trips.
+/// Proof terms reuse the operation timeouts below; RTT terms use the measured
+/// link. Bootstrap caps this derived duration at its 180-second setup deadline.
 fn setup_commit_budget(round_trip: Duration) -> Duration {
-    installed_actor_budget(round_trip)
-        .saturating_mul(2)
-        .saturating_add(round_trip.saturating_mul(2))
+    let installed_actor_admission = installed_actor_budget(round_trip);
+    let active_route_admission = installed_actor_budget(round_trip);
+    let connected_facts = CONNECTED_FACTS_TIMEOUT;
+    let terminal_canary = TERMINAL_CANARY_TIMEOUT;
+    let ssh_command_admission = round_trip;
+    let ssh_exit_receipt = round_trip;
+
+    installed_actor_admission
+        .saturating_add(active_route_admission)
+        .saturating_add(connected_facts)
+        .saturating_add(terminal_canary)
+        .saturating_add(ssh_command_admission)
+        .saturating_add(ssh_exit_receipt)
 }
 
 /// Fresh identities are owned by one batch until installation commits or rolls back.
@@ -495,7 +509,7 @@ impl Backend for RemoteBackend {
         Box::pin(async move {
             let actor = self.actor(authority, host).await?;
             let response = tokio::time::timeout(
-                Duration::from_secs(10),
+                CONNECTED_FACTS_TIMEOUT,
                 actor.call(
                     "host.facts.read".into(),
                     br#"{"includeLive":false}"#.to_vec(),
@@ -1001,7 +1015,7 @@ async fn canary_registered(
         return Err(error.at(InstallStep::Readiness));
     }
     let result = tokio::time::timeout(
-        Duration::from_secs(10),
+        TERMINAL_CANARY_TIMEOUT,
         canary_output(actor, session, writers[0]),
     )
     .await

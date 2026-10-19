@@ -51,7 +51,7 @@ pub trait Backend: Send + Sync {
     /// Bound readiness using an authenticated command exchange on this connection.
     /// Command execution is included, so the observation conservatively exceeds link RTT.
     fn observe_link(&self, _: &Authority, _: uuid::Uuid, _: Duration) {}
-    /// Extend the SSH commit command through this attempt's bounded route proof.
+    /// Extend the SSH commit command through this attempt's route and final proof.
     /// Older adapters keep their transport's configured command deadline.
     fn setup_commit_timeout(&self, _: &Authority, _: uuid::Uuid) -> Option<Duration> {
         None
