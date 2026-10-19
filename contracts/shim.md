@@ -314,3 +314,19 @@ peer waits. A legacy peer requesting new input against reserved capacity keeps
 its existing refusal behavior. Completing a deferred request releases its FIFO
 ticket; a trailing request that must wait receives a new ticket behind existing
 waiters.
+
+## Reply input extension [D307, #160]
+
+Capability bit 5 (`QUERY_REPLIES`) permits additive frame `0x1E QueryReply`,
+whose body is 1–1024 server-arbitrated reply bytes. It has no typing offset.
+Existing v1 layouts and input cursors are unchanged. The infraternal agent
+selects this capability only when advertised by the surviving shim; otherwise
+it drops marked replies rather than sending them as typing.
+
+The shim admits replies to the existing bounded PTY queue under a reserved
+internal writer (`u64::MAX`, outside the u32 peer-writer namespace). Queue segments retain
+that ownership through partial PTY writes. Reply bytes never advance a
+viewer's typing cursor, select the active writer or change terminal geometry.
+The trusted server arbitrates identity, syntax and expiry before forwarding;
+the shim validates capability and size before queue admission. Replies are
+best effort and never replayed after link replacement.
