@@ -50,6 +50,34 @@ test("the production setting enables viewing, control and releasing its native l
   await expect(page.locator(".aw-stage")).toHaveAttribute("data-picture", "live");
 });
 
+test("reopening during the closing animation creates a different live window", async ({ page }) => {
+  await open(page);
+  await enable(page);
+  const card = page.locator('.ui-window[data-kind="app"]');
+  const previous = await card.getAttribute("data-window-id");
+  expect(previous).toBeTruthy();
+  // Hold the exit spring while selecting, so host load cannot let the old
+  // record disappear before this regression exercises target reuse.
+  await page.clock.install();
+  await page.clock.pauseAt(Date.now() + 100);
+  try {
+    await card.evaluate((node) => {
+      (node.querySelector('[data-action="close"]') as HTMLButtonElement).click();
+      (document.querySelector('button[aria-label="New window"]') as HTMLButtonElement).click();
+    });
+    const option = page.getByRole("option", { name: /Editor, stream\.ts/ });
+    await expect.poll(() => option.count()).toBe(1);
+    await option.evaluate((node) => (node as HTMLElement).click());
+    await expect(page.locator(`.ui-window[data-window-id="${previous}"]`)).toHaveCount(1);
+  } finally {
+    await page.clock.resume();
+  }
+  const replacement = page.locator(`.ui-window[data-kind="app"]:not([data-window-id="${previous}"])`);
+  await expect(replacement.locator(".aw-stage")).toHaveAttribute("data-picture", "live", { timeout: 20_000 });
+  await expect(page.locator(`.ui-window[data-window-id="${previous}"]`)).toHaveCount(0);
+  await expect(replacement).toHaveCount(1);
+});
+
 test.describe("phone production surface", () => {
   test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   test("the same setting and picker open a live window", async ({ page }) => {

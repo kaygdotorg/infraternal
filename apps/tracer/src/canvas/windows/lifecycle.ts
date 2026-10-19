@@ -162,6 +162,7 @@ export function createWindows(cx: Ctx): WindowsModule {
   };
 
   const close = (rec: WinRec, instant = false): void => {
+    if (rec.closing && !instant) return;
     // The card stays in the view until its exit animation finishes. Withdraw it
     // from target reuse immediately, so a quick reopen creates a fresh window.
     rec.closing = true;
@@ -177,6 +178,9 @@ export function createWindows(cx: Ctx): WindowsModule {
     if (state.activeWin === rec) setActive(cx, undefined);
     const root = rec.card.root;
     const finish = (): void => {
+      // Immediate withdrawal may finish while the original exit spring still
+      // owns a callback. Binding retirement belongs to the retained record once.
+      if (c.wins.get(rec.model.id) !== rec) return;
       // The model as it stands with this window in it: a window in a group (or one that spans) re-tiles through the grid.
       const colEl = root.parentElement as HTMLElement | null;
       // A plain window (no group, no span) closes exactly as before; only a grouped one reads the view (D212).
