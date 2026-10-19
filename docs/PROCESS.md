@@ -146,7 +146,8 @@ Reviews and fixes run at the same time as the next lane's build.
   | `x86_64-unknown-linux-musl` | 21,225,872 bytes |
   | `aarch64-unknown-linux-musl` | 19,427,688 bytes |
 
-  The same gate builds both targets again from a detached checkout with separate
+  Release jobs (not `scripts/verify fast`, which every job runs) also run
+  `scripts/test-static-reproducibility.py`. It builds both targets again from a detached checkout with separate
   Cargo registry, Rustup and target roots. It forces compilation through the
   shared sccache server, compares the shipping bytes and checks that the cache
   wrapper receives Rust and native C path-remap flags before compilation. Rust

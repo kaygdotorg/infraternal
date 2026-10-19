@@ -236,7 +236,6 @@ rust_static_build_check() {
     CARGO_TARGET_DIR="$target_dir" python3 scripts/test-static-size.py || failed=1
     # Inspect both freshly built images; iterate never qualifies stale artifacts.
     CARGO_TARGET_DIR="$target_dir" bun test scripts/release/static-metadata-review.test.ts || failed=1
-    CARGO_TARGET_DIR="$target_dir" python3 scripts/test-static-reproducibility.py || failed=1
     rust_check_cli_stub "$x86_binary" "server" || failed=1
     rust_check_cli_group "$x86_binary" "agent" || failed=1
     return "$failed"
