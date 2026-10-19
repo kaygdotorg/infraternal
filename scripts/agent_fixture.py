@@ -44,15 +44,27 @@ def fixture_state(label):
         'INFRATERNAL_TEST_STATE_ROOT',
         Path.home() / '.cache/codex-scratch/infraternal',
     ))
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    state = root / f'{label}{os.getpid()}'
-    socket_path = state / 'sessions' / ('a' * 32 + '.sock')
+    fallback = Path.home() / '.cache/codex-scratch/infraternal'
+
+    def paths_for(candidate):
+        state = candidate / f'{label}{os.getpid()}'
+        socket_path = state / 'sessions' / ('a' * 32 + '.sock')
+        paths = (socket_path, socket_path.with_suffix('.upstream'))
+        return state, paths
+
     # Linux sockaddr_un.sun_path includes the trailing NUL in its 108-byte bound.
     # AckBarrier also connects through a sibling .upstream socket with a longer suffix.
-    paths = (socket_path, socket_path.with_suffix('.upstream'))
+    state, paths = paths_for(root)
     longest = max(len(os.fsencode(path)) for path in paths)
     if longest >= 108:
-        raise ValueError(f'test state path is too long for an AF_UNIX socket: {longest} bytes')
+        root = fallback
+        state, paths = paths_for(root)
+        longest = max(len(os.fsencode(path)) for path in paths)
+    if longest >= 108:
+        raise ValueError(
+            f'test state path is too long for an AF_UNIX socket after fallback: {longest} bytes'
+        )
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
     return state
 
 
