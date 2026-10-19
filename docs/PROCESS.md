@@ -143,13 +143,17 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,344,304 bytes |
-  | `aarch64-unknown-linux-musl` | 19,535,600 bytes |
+  | `x86_64-unknown-linux-musl` | 21,341,552 bytes |
+  | `aarch64-unknown-linux-musl` | 19,523,944 bytes |
 
-  These are the release-6 measurements. From release 5, #244 adds 3,776 /
-  3,320 bytes and #243 adds 114,656 / 104,592 bytes, totaling 118,432 /
+  D307 re-integrated on release 6 lowers these ceilings by 2,752 /
+  11,656 bytes (#24). The release-6 baseline was 21,344,304 /
+  19,535,600 bytes, using the same static recipe. The reviewed host-orchestration
+  size trim is retained; transport, VT and cryptographic speed profiles stay
+  unchanged (D243, D307). From release 5, #244 added 3,776 /
+  3,320 bytes and #243 added 114,656 / 104,592 bytes, totaling 118,432 /
   107,912 bytes. D308 accepts the shared-layout increase after its first
-  trim; x86_64 remains 24,928 bytes below this task's +140 KiB stop line.
+  trim; release 6 remained 24,928 bytes below its +140 KiB stop line.
   Release 5 added the Mesh view (#236) at +81,760 / +56,992 over release 4;
   D306 accepted that increase. Each cap stays at its exact measured size
   until a later measured reduction ratchets it down. Release 4's one-off D243 exception was accepted
