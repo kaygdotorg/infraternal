@@ -256,7 +256,9 @@ rust_verify_fast() {
     rust_run_gate "VT native fmt" zig fmt --check crates/infraternal-shim/native/*.zig
     rust_run_gate "CLI plugin compile-out" rust_check_cli_plugin_compile_out
     rust_run_gate "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
+    rust_run_gate "SSH runtime test helper" cargo build --locked -p infraternal-plugin-ssh --example recovery-helper
     rust_run_gate "test" cargo test --workspace --locked
+    rust_run_gate "SSH inode reuse fixture" scripts/test-ssh-inode-reuse
     rust_run_gate "cargo-deny" cargo deny check
     if [[ "$mode" == final ]]; then
         rust_run_gate "static builds" rust_static_build_check
