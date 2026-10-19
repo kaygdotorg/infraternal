@@ -12,8 +12,8 @@ const MAX_WRITERS: usize = 512;
 /// the writers whose bytes were actually written. Identity zero preserves v1.
 pub(super) struct Inputs {
     pub(super) active_writer: Option<u32>,
-    cursors: HashMap<u32, InputCursors>,
-    segments: VecDeque<(u32, usize)>,
+    cursors: HashMap<u64, InputCursors>,
+    segments: VecDeque<(u64, usize)>,
 }
 impl Default for Inputs {
     fn default() -> Self {
@@ -36,14 +36,14 @@ impl Inputs {
         }
     }
     pub(super) fn select(&mut self, writer: u32, size: (u16, u16, u16, u16)) -> io::Result<()> {
-        if self.cursors.contains_key(&writer) {
+        if self.cursors.contains_key(&u64::from(writer)) {
             return Ok(());
         }
-        if self.cursors.len() > MAX_WRITERS {
+        if self.cursors.len() > MAX_WRITERS + usize::from(self.cursors.contains_key(&u64::MAX)) {
             return Err(super::invalid_input());
         }
         self.cursors.insert(
-            writer,
+            u64::from(writer),
             InputCursors {
                 requested_size: size,
                 accepted_size: size,
@@ -58,7 +58,7 @@ impl Inputs {
         size: (u16, u16, u16, u16),
     ) -> io::Result<()> {
         self.cursors
-            .get_mut(&writer.ok_or_else(super::invalid_input)?)
+            .get_mut(&u64::from(writer.ok_or_else(super::invalid_input)?))
             .ok_or_else(super::invalid_input)?
             .requested_size = size;
         Ok(())
@@ -70,7 +70,7 @@ impl Inputs {
     ) -> io::Result<(u16, u16, u16, u16)> {
         let state = self
             .cursors
-            .get_mut(&writer.ok_or_else(super::invalid_input)?)
+            .get_mut(&u64::from(writer.ok_or_else(super::invalid_input)?))
             .ok_or_else(super::invalid_input)?;
         if applied {
             state.accepted_size = state.requested_size;
@@ -81,12 +81,21 @@ impl Inputs {
     }
     pub(super) fn get(&self, writer: Option<u32>) -> io::Result<&InputCursors> {
         self.cursors
-            .get(&writer.ok_or_else(super::invalid_input)?)
+            .get(&u64::from(writer.ok_or_else(super::invalid_input)?))
             .ok_or_else(super::invalid_input)
     }
     pub(super) fn accept(
         &mut self,
         writer: u32,
+        seq: u64,
+        bytes: &[u8],
+        queue: &mut VecDeque<u8>,
+    ) -> io::Result<()> {
+        self.accept_owned(u64::from(writer), seq, bytes, queue)
+    }
+    fn accept_owned(
+        &mut self,
+        writer: u64,
         seq: u64,
         bytes: &[u8],
         queue: &mut VecDeque<u8>,
@@ -111,6 +120,21 @@ impl Inputs {
             }
         }
         Ok(())
+    }
+    /// Reply queue ownership is separate from every selected writer. It never
+    /// updates active geometry or publishes an input acknowledgement [307].
+    pub(super) fn reply(&mut self, bytes: &[u8], queue: &mut VecDeque<u8>) -> io::Result<()> {
+        if bytes.is_empty()
+            || bytes.len() > 1024
+            || queue.len().saturating_add(bytes.len()) > MAX_FRAME
+        {
+            return Err(super::invalid_input());
+        }
+        // The internal key is outside the full u32 peer-writer namespace.
+        // Widening keys leaves the aligned segment layout unchanged.
+        let state = self.cursors.entry(u64::MAX).or_default();
+        let seq = state.accepted;
+        self.accept_owned(u64::MAX, seq, bytes, queue)
     }
     pub(super) fn advance(&mut self, mut bytes: usize) -> io::Result<()> {
         while bytes > 0 {
@@ -172,5 +196,29 @@ mod tests {
         inputs.select(512, (80, 24, 0, 0)).unwrap();
         assert!(inputs.get(Some(513)).is_err());
         assert_eq!(inputs.get(Some(512)).unwrap().written, 0);
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    //! Replies share the bounded PTY queue while leaving keyboard offsets and geometry intact.
+    use super::*;
+    #[test]
+    fn replies_preserve_selected_writer_cursor_and_geometry() {
+        let mut cursors = Inputs::default();
+        let mut queue = VecDeque::new();
+        cursors.select(7, (120, 40, 0, 0)).unwrap();
+        cursors.active_writer = Some(7);
+        cursors.accept(7, 0, b"typed", &mut queue).unwrap();
+        cursors.reply(b"\x1b[1;1R", &mut queue).unwrap();
+        assert_eq!(cursors.get(Some(7)).unwrap().accepted, 5);
+        assert_eq!(cursors.active_writer, Some(7));
+        cursors.advance(queue.len()).unwrap();
+        assert_eq!(cursors.get(Some(7)).unwrap().written, 5);
+        assert_eq!(
+            cursors.get(Some(7)).unwrap().requested_size,
+            (120, 40, 0, 0)
+        );
+        assert!(cursors.reply(&vec![b'x'; 1025], &mut queue).is_err());
     }
 }

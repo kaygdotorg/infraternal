@@ -2,8 +2,8 @@
 #![forbid(unsafe_code)]
 use crate::{
     frame::{
-        APPROXIMATE_SNAPSHOT, Decoder, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT,
-        SESSION_OWNER, SHARED_WRITER,
+        APPROXIMATE_SNAPSHOT, Decoder, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, QUERY_REPLIES,
+        SEQUENCED_INPUT, SESSION_OWNER, SHARED_WRITER,
     },
     pty::Pty,
     ring::{DEFAULT_CAPACITY, Ring},
@@ -142,7 +142,8 @@ impl Peer {
                 | MULTI_WRITER
                 | APPROXIMATE_SNAPSHOT
                 | SESSION_OWNER
-                | SHARED_WRITER);
+                | SHARED_WRITER
+                | QUERY_REPLIES);
         if self.caps & SESSION_OWNER != 0 {
             if self.caps != SESSION_OWNER {
                 return Err(invalid_input());
@@ -600,7 +601,8 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
                                 | MULTI_WRITER
                                 | APPROXIMATE_SNAPSHOT
                                 | SESSION_OWNER
-                                | SHARED_WRITER,
+                                | SHARED_WRITER
+                                | QUERY_REPLIES,
                             session: config.session,
                             pid: std::process::id(),
                             cols: config.cols,
@@ -884,6 +886,9 @@ fn handle<'a>(
         return Err(invalid());
     };
     match frame {
+        Frame::QueryReply(bytes) if p.caps & QUERY_REPLIES != 0 && !exited => {
+            cursors.reply(&bytes, input)?;
+        }
         Frame::SelectWriter(id) if p.caps & MULTI_WRITER != 0 && p.writer.is_none() && id != 0 => {
             cursors.select(id, p.size)?;
             p.writer = Some(id);
