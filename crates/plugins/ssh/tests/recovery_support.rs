@@ -31,6 +31,7 @@ impl MinimalHost {
         // Only these ownership fixtures need the short alias: the rest of the
         // workspace keeps the canonical cache root for rename and execution tests.
         let scratch = std::env::var_os("INFRATERNAL_SSH_TEST_STATE_ROOT")
+            .or_else(|| std::env::var_os("INFRATERNAL_TEST_SOCKET_ROOT"))
             .or_else(|| std::env::var_os("INFRATERNAL_TEST_STATE_ROOT"))
             .map_or_else(
                 || {
