@@ -6,6 +6,9 @@ set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
 [[ "$target_dir" = /* ]] || target_dir="$repo_root/$target_dir"
+# Exported so unit tests that place private fixtures under the target folder
+# (release staging tests) find it whether or not the caller set it.
+export CARGO_TARGET_DIR="$target_dir"
 "$repo_root/scripts/auth-toolchain"
 export PATH="$target_dir/auth-tools/zig:$PATH"
 
