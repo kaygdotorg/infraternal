@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Compile vendored C with the same pinned musl sysroot for both Rust targets [7,20].
 set -euo pipefail
-root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+source "$root/.cargo/rust-remap-flags.sh"
+cargo_root="${CARGO_HOME:-$HOME/.cargo}"
 target_root="${CARGO_TARGET_DIR:-$root/target}"
+[[ "$cargo_root" = /* ]] || cargo_root="$root/$cargo_root"
 [[ "$target_root" = /* ]] || target_root="$root/$target_root"
 case "${TARGET:?Cargo must supply the build target}" in
     x86_64-unknown-linux-musl) zig_target=x86_64-linux-musl ;;
@@ -20,7 +23,19 @@ for arg in "$@"; do
         python3 "$root/scripts/normalize-native-metadata.py" crypto/buildinf.h
     fi
 done
-args=("-ffile-prefix-map=$root=/infraternal" "-ffile-prefix-map=$target_root=/build")
+args=()
+native_remap_flags=()
+infraternal_append_path_remap_flags native_remap_flags "-ffile-prefix-map=" "$root" "$cargo_root" "$target_root" ""
+for flag in "${native_remap_flags[@]}"; do
+    already_present=false
+    for argument in "$@"; do
+        if [[ "$argument" == "$flag" ]]; then
+            already_present=true
+            break
+        fi
+    done
+    [[ "$already_present" == true ]] || args+=("$flag")
+done
 for arg in "$@"; do
     case "$arg" in
         # openssl-src adds this historical musl workaround. Our pinned Zig

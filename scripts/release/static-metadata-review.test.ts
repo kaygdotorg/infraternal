@@ -1,4 +1,4 @@
-/** Checks checkout-independent compiler metadata in shipping static artifacts (D243, #229). */
+/** Checks environment-dependent paths are absent from shipping static artifacts (D243, #246). */
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -6,7 +6,14 @@ import { resolve } from "node:path";
 const repository = resolve(import.meta.dir, "../..");
 const source = process.env.INFRATERNAL_STATIC_SOURCE_ROOT ?? repository;
 const targetRoot = process.env.CARGO_TARGET_DIR ?? resolve(repository, "target");
-const registryRoot = resolve(process.env.CARGO_HOME ?? resolve(process.env.HOME!, ".cargo"), "registry/src");
+const cargoHome = resolve(process.env.CARGO_HOME ?? resolve(process.env.HOME!, ".cargo"));
+const rustupHome = resolve(process.env.RUSTUP_HOME ?? resolve(process.env.HOME!, ".rustup"));
+const registryRoot = resolve(cargoHome, "registry/src");
+const rustcWrapper = process.env.RUSTC_WRAPPER?.split(/\s+/, 1)[0];
+const cacheRoots = [
+  rustcWrapper?.startsWith("/") ? resolve(rustcWrapper) : undefined,
+  process.env.SCCACHE_DIR ? resolve(process.env.SCCACHE_DIR) : undefined,
+].filter((path): path is string => path !== undefined);
 
 for (const [target, compiler] of [
   ["x86_64-unknown-linux-musl", "musl-cc-avx512.sh"],
@@ -22,6 +29,9 @@ for (const [target, compiler] of [
     expect(bytes.includes(Buffer.from(`/.cargo/${compiler}`))).toBe(false);
     expect(bytes.includes(Buffer.from(`${source}/`))).toBe(false);
     expect(bytes.includes(Buffer.from(`${resolve(targetRoot)}/`))).toBe(false);
+    expect(bytes.includes(Buffer.from(`${cargoHome}/`))).toBe(false);
     expect(bytes.includes(Buffer.from(`${registryRoot}/`))).toBe(false);
+    expect(bytes.includes(Buffer.from(`${rustupHome}/`))).toBe(false);
+    for (const cacheRoot of cacheRoots) expect(bytes.includes(Buffer.from(cacheRoot))).toBe(false);
   });
 }
