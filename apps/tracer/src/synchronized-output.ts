@@ -4,6 +4,21 @@ const SYNCHRONIZED_OUTPUT_MODE = 2026;
 const PAINT_HOLD_MS = 150;
 const MAX_CSI_BYTES = 4096;
 
+/** Clock and frame hooks keep release scheduling deterministic in tests. */
+export interface SynchronizedOutputScheduler {
+  setTimeout(callback: () => void, delayMs: number): unknown;
+  clearTimeout(timer: unknown): void;
+  requestAnimationFrame(callback: () => void): number;
+  cancelAnimationFrame(frame: number): void;
+}
+
+const browserScheduler: SynchronizedOutputScheduler = {
+  setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+  clearTimeout: (timer) => globalThis.clearTimeout(timer as ReturnType<typeof setTimeout>),
+  requestAnimationFrame: (callback) => globalThis.requestAnimationFrame(callback),
+  cancelAnimationFrame: (frame) => globalThis.cancelAnimationFrame(frame),
+};
+
 const enum SequenceState {
   Ground,
   Escape,
@@ -27,9 +42,15 @@ export class SynchronizedOutput {
   private enabled = false;
   private paintHeld = false;
   private atomicPaintPending = false;
-  private holdTimer: ReturnType<typeof setTimeout> | undefined;
+  private holdTimer: unknown;
+  private releaseFrame: number | undefined;
 
-  constructor(private readonly onTimeout: () => void, private readonly timeoutMs = PAINT_HOLD_MS) {}
+  constructor(
+    private readonly onTimeout: () => void,
+    private readonly onReleaseFrame: () => void,
+    private readonly timeoutMs = PAINT_HOLD_MS,
+    private readonly scheduler: SynchronizedOutputScheduler = browserScheduler,
+  ) {}
 
   get holdsPaint(): boolean {
     return this.paintHeld;
@@ -116,8 +137,10 @@ export class SynchronizedOutput {
   }
 
   dispose(): void {
-    if (this.holdTimer !== undefined) clearTimeout(this.holdTimer);
+    if (this.holdTimer !== undefined) this.scheduler.clearTimeout(this.holdTimer);
     this.holdTimer = undefined;
+    if (this.releaseFrame !== undefined) this.scheduler.cancelAnimationFrame(this.releaseFrame);
+    this.releaseFrame = undefined;
     this.enabled = false;
     this.paintHeld = false;
     this.atomicPaintPending = false;
@@ -197,19 +220,31 @@ export class SynchronizedOutput {
     if (enabled === this.enabled) return;
     this.enabled = enabled;
     if (!enabled) {
-      if (this.holdTimer !== undefined) clearTimeout(this.holdTimer);
+      if (this.holdTimer !== undefined) this.scheduler.clearTimeout(this.holdTimer);
       this.holdTimer = undefined;
+      const released = this.paintHeld;
       this.paintHeld = false;
+      if (released) this.scheduleReleaseFrame();
       return;
     }
 
     this.atomicPaintPending = true;
     this.paintHeld = true;
-    this.holdTimer = setTimeout(() => {
+    this.holdTimer = this.scheduler.setTimeout(() => {
       this.holdTimer = undefined;
       if (!this.enabled || !this.paintHeld) return;
       this.paintHeld = false;
+      this.scheduleReleaseFrame();
       this.onTimeout();
     }, this.timeoutMs);
+  }
+
+  /** Queue the paint after parser state is released, so the next frame sees the complete output. */
+  private scheduleReleaseFrame(): void {
+    if (this.releaseFrame !== undefined) return;
+    this.releaseFrame = this.scheduler.requestAnimationFrame(() => {
+      this.releaseFrame = undefined;
+      if (!this.paintHeld) this.onReleaseFrame();
+    });
   }
 }
