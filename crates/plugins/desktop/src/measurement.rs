@@ -57,7 +57,6 @@ pub(crate) fn frame(stage: &'static str, frame: &crate::media::Video) {
     record(stage, frame.capture_ns, frame.sequence, frame.bytes.len());
 }
 
-#[cfg(feature = "source")]
 pub(crate) fn control(stage: &'static str, kind: crate::protocol::Kind) {
     if let Some(clock) = clock() {
         let at = clock.origin.elapsed().as_nanos();

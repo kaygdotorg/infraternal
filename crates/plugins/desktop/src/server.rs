@@ -469,6 +469,9 @@ impl Plugin for DesktopServer {
                                 } else if matches!(decoded.frame, Frame::Close { .. }) {
                                     viewers.remove(&stream);
                                 } else if let Some(sender) = viewers.get(&stream) {
+                                    if matches!(decoded.frame, Frame::Desktop(Message::Input(_))) {
+                                        crate::measurement::control("server_input_receive", crate::protocol::Kind::Input);
+                                    }
                                     if wire.len() > 64 || !matches!(decoded.frame, Frame::Desktop(Message::Input(_) | Message::Size { .. } | Message::Repair { .. }))
                                         || sender.requests.try_send(ViewerCommand::Wire(wire.clone())).is_err() { viewers.remove(&stream); }
                                 } else { send_viewer_close(&replies, stream).await; }

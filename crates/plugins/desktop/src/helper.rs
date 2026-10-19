@@ -381,6 +381,9 @@ pub fn session(
         loop {
             reader.deadline = None;
             let message = protocol::read(&mut reader);
+            if let Ok((kind, _)) = &message {
+                crate::measurement::control("helper_control_receive", *kind);
+            }
             let failed = message.is_err();
             let sent = sender.send(message);
             reader_wake.notify();
@@ -432,7 +435,10 @@ fn run(
                     let (reply, body) = if matches!(kind, Kind::Keyframe | Kind::Congested) {
                         capture_request(stream.as_ref(), kind)
                     } else {
-                        native.call(kind, &payload)?
+                        crate::measurement::control("helper_native_begin", kind);
+                        let reply = native.call(kind, &payload)?;
+                        crate::measurement::control("helper_native_end", kind);
+                        reply
                     };
                     if kind == Kind::Stop {
                         stream.take();

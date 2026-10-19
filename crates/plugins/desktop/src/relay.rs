@@ -172,9 +172,21 @@ async fn send(
                 if !session.command_allowed(command).map_err(|_| ())? {
                     return Ok(());
                 }
+                if matches!(command, HostCommand::Input { .. }) {
+                    crate::measurement::control(
+                        "server_input_write_begin",
+                        crate::protocol::Kind::Input,
+                    );
+                }
                 tokio::time::timeout(ASSEMBLY_TIMEOUT, lane.send(wire))
                     .await
                     .map_err(|_| ())??;
+                if matches!(command, HostCommand::Input { .. }) {
+                    crate::measurement::control(
+                        "server_input_write_end",
+                        crate::protocol::Kind::Input,
+                    );
+                }
                 forwarded = true;
                 Ok(())
             }))),
