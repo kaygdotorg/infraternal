@@ -10,6 +10,58 @@ use infraternal_agent::{
 use infraternal_protocol::Frame;
 use std::path::PathBuf;
 
+/// Link observations include remote execution stalls. Arithmetic must remain
+/// monotonic without overflow even when the observation is an extreme outlier.
+#[test]
+fn review_commit_budget_is_monotonic_for_zero_and_outlier_samples() {
+    let mut previous = Duration::ZERO;
+    for sample in [
+        Duration::ZERO,
+        Duration::from_secs(3),
+        Duration::from_secs(6),
+        Duration::from_secs(7),
+        Duration::MAX,
+    ] {
+        let budget = setup_commit_budget(sample);
+        assert!(
+            budget >= previous,
+            "larger observations shortened the commit allowance"
+        );
+        assert!(budget >= installed_actor_budget(sample).min(Duration::from_secs(180)));
+        previous = budget;
+    }
+    assert_eq!(installed_actor_budget(Duration::MAX), Duration::MAX);
+}
+
+/// Readiness includes final facts and terminal work after both route phases.
+/// The zero/absent observation must preserve that healthy final proof.
+#[tokio::test(start_paused = true)]
+async fn review_commit_budget_allows_final_proof_after_both_route_phases() {
+    final_proof_fits_commit_budget(Duration::ZERO, 29, 3).await;
+}
+
+/// A real slow-link observation also needs the final proof allowance; two SSH
+/// round trips alone do not cover facts and terminal work after route admission.
+#[tokio::test(start_paused = true)]
+async fn review_commit_budget_allows_final_proof_at_600_ms() {
+    final_proof_fits_commit_budget(Duration::from_millis(600), 34, 4).await;
+}
+
+async fn final_proof_fits_commit_budget(sample: Duration, route_seconds: u64, proof_seconds: u64) {
+    let operation = async {
+        // Each phase remains strictly inside installed_actor_budget(sample).
+        for _ in 0..2 {
+            tokio::time::sleep(Duration::from_secs(route_seconds)).await;
+        }
+        // Both final proofs run concurrently after route admission and
+        // each permits ten seconds; this healthy result uses less than half.
+        tokio::time::sleep(Duration::from_secs(proof_seconds)).await;
+    };
+    tokio::time::timeout(setup_commit_budget(sample), operation)
+        .await
+        .expect("SSH commit cancelled healthy final proof inside the readiness allowances");
+}
+
 struct Directory(PathBuf);
 impl Drop for Directory {
     fn drop(&mut self) {
