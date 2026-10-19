@@ -286,3 +286,89 @@ async fn hostname_migration_upgrades_release6_copy_without_changing_canvas_or_ch
         "RELEASE7_MIGRATION before=28 after=29 preserved_checksums=28 canvas_revision=7 placeholder=unnamed-42 integrity=ok"
     );
 }
+
+/// Existing names reserve every case-insensitive candidate before legacy placeholders receive labels.
+#[tokio::test]
+async fn hostname_migration_allocates_around_retained_names() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let mut deployed = sqlx::migrate!("./migrations");
+    deployed
+        .migrations
+        .to_mut()
+        .retain(|migration| migration.version <= 28);
+    deployed.run(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES ('owner','Owner',1,'fixture','owner','Owner')")
+        .execute(&pool).await.unwrap();
+    for (id, name, source) in [
+        (
+            42_i64,
+            format!("mesh-{}", uuid::Uuid::from_u128(42)),
+            "placeholder",
+        ),
+        (43, "UnNaMeD-42".to_owned(), "hand"),
+        (44, "unnamed-42-1".to_owned(), "reported"),
+        (45, "unnamed-42-2".to_owned(), "record"),
+        (
+            46,
+            format!("mesh-{}", uuid::Uuid::from_u128(46)),
+            "placeholder",
+        ),
+    ] {
+        let key = [u8::try_from(id).unwrap(); 32];
+        sqlx::query("INSERT INTO mesh_nodes(id,name,public_key,dataplane_host,name_source) VALUES (?,?,?,?,?)")
+            .bind(id).bind(name).bind(key.as_slice())
+            .bind(uuid::Uuid::from_u128(u128::try_from(id).unwrap()).to_string())
+            .bind(source).execute(&pool).await.unwrap();
+    }
+    sqlx::query("UPDATE mesh_state SET revision=9,node_id_high_water=46")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let migrations = sqlx::migrate!("./migrations");
+    migrations
+        .run(&pool)
+        .await
+        .expect("retained names must not block the production upgrade");
+    migrations.run(&pool).await.unwrap();
+    let names: Vec<(i64, String, String)> =
+        sqlx::query_as("SELECT id,name,name_source FROM mesh_nodes ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        names,
+        [
+            (42, "unnamed-42-3".to_owned(), "placeholder".to_owned()),
+            (43, "UnNaMeD-42".to_owned(), "hand".to_owned()),
+            (44, "unnamed-42-1".to_owned(), "reported".to_owned()),
+            (45, "unnamed-42-2".to_owned(), "record".to_owned()),
+            (46, "unnamed-46".to_owned(), "placeholder".to_owned()),
+        ]
+    );
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(revision, 10);
+    let audit: Vec<(String, String)> = sqlx::query_as(
+        "SELECT resource,detail_json FROM mesh_audit WHERE action='mesh.node.name' ORDER BY resource",
+    ).fetch_all(&pool).await.unwrap();
+    assert_eq!(audit.len(), 2);
+    for ((resource, detail), expected) in audit.into_iter().zip(["unnamed-42-3", "unnamed-46"]) {
+        let detail: serde_json::Value = serde_json::from_str(&detail).unwrap();
+        assert_eq!(detail["name"], expected);
+        assert_eq!(detail["node_id"].as_i64().unwrap().to_string(), resource);
+        assert_eq!(detail["automatic"], true);
+    }
+    let temporary_tables: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM sqlite_temp_master WHERE name='_hostname_labels'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(temporary_tables, 0);
+}
