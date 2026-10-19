@@ -160,8 +160,15 @@ fn ownership_receipt_is_private_numeric_and_never_overwritten() {
         assert_eq!(row["kind"], "ownership");
         assert_eq!(row["session"], index);
         assert!(
-            row.iter()
-                .all(|(key, value)| key == "kind" || value.is_u64())
+            row.iter().all(|(key, value)| {
+                key == "kind"
+                    || value.is_u64()
+                    || (key == "reactor"
+                        && value
+                            .as_object()
+                            .is_some_and(|fields| fields.values().all(serde_json::Value::is_u64)))
+            }),
+            "ownership row has a non-numeric field: {row:?}"
         );
         assert!(row["total_bytes"].as_u64().unwrap() > 0);
     }
