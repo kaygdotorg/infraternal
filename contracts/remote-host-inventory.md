@@ -16,11 +16,14 @@ Certificate expiry does not hide a host that is offline.
 
 The result is `{ hosts: [...], next: UUID | null }`. Each host has `id`, `name`,
 `online`, and nullable `user`, `os`, `address`. UUIDs are routing authority; names
-are presentation. Existing bootstrap destinations supply names, users and
-addresses; a rootful installation uses `root`. A host enrolled without bootstrap
-coordinates uses its UUID as the label and does not invent a login or address.
-The last collected public OS is retained on the bootstrap row; missing facts
-remain absent. Online means the admitted actor has a complete live session
+are presentation. Existing bootstrap destinations supply users and addresses;
+a rootful installation uses `root`. The first valid hostname reported by an
+admitted host is retained on its inventory row. A valid machine name from the
+bootstrap destination takes precedence; an IP-only destination uses the
+retained hostname. When neither source gives a name, the display name is
+`unnamed`. The name and address fields keep their existing shape. The last
+collected public OS is retained on the bootstrap row; missing facts do not clear
+retained hostnames or OS values. Online means the admitted actor has a complete live session
 census; it is never inferred from a saved browser window or a certificate alone.
 
 Pages are ordered by UUID, contain at most 128 hosts, and reserve a 60 KiB JSON
@@ -34,7 +37,7 @@ the complete inventory.
 `Subscribe { topic: "remote.hosts" }` receives `{ type: "changed" }`, including
 one initial invalidation that closes the read/subscribe race. Notification is
 coalesced after durable admission and revocation, and after connectivity or cached
-OS changes. The event carries no host or account data. The existing plugin
+hostname and OS changes. The event carries no host or account data. The existing plugin
 subscription slots, generation stamps, socket authority watchdog and cancellation
 apply. Read and outbound queue admission stay inside one live-authority operation.
 There is no polling timer.

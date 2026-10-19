@@ -94,6 +94,16 @@ single label. Node IDs are monotonically allocated and never reused after
 deletion or restart (D180); the allocation high-water mark is persisted apart
 from live inventory. Tag and grant names are stable references in layout documents.
 
+For an automatically named bound host, the source order is a person's name,
+the server name, a valid machine name from the host's bootstrap destination,
+the last valid hostname from admitted-host inventory, then an unnamed label.
+An IP address is not a machine name. The reported hostname yields to every
+other host's bootstrap name, including hosts without a Mesh node. When
+inventory learns a hostname after attach, the node is renamed and its new
+revision is sent to live subscribers without another attach. Existing
+`mesh-<host UUID>` placeholders are migrated to unnamed labels. The API shape
+and `host` field remain unchanged (#236).
+
 The only assignable Mesh role actions are `mesh.manage_nodes`,
 `mesh.manage_tags`, `mesh.manage_grants` and `mesh.manage_roles`. A role has a
 nonempty `actions` array and optional nonempty `scopes` array of existing tag

@@ -143,11 +143,14 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,352,208 bytes |
-  | `aarch64-unknown-linux-musl` | 19,542,304 bytes |
+  | `x86_64-unknown-linux-musl` | 21,385,264 bytes |
+  | `aarch64-unknown-linux-musl` | 19,570,256 bytes |
 
-  These are the release-7 measurements after the #230 Retry merge: +7,904 /
-  +6,704 bytes over release 6. The exact caps retain no growth allowance (D243).
+  These are the release-7 measurements after the reviewed #230 Retry and #236
+  Mesh name merges: +40,960 / +34,656 bytes over release 6.
+  Retry measured 21,352,208 / 19,542,304 bytes; Mesh adds
+  33,056 / 27,952 bytes for retained hostnames and live audited reconciliation,
+  without new dependencies. The exact caps retain no growth allowance (D243).
   Release 6 measured 21,344,304 / 19,535,600 bytes. From release 5, #244 adds 3,776 /
   3,320 bytes and #243 adds 114,656 / 104,592 bytes, totaling 118,432 /
   107,912 bytes. D308 accepts the shared-layout increase after its first

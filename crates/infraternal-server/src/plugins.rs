@@ -932,9 +932,13 @@ pub(crate) async fn compiled_with_hosts(
     pool: &sqlx::SqlitePool,
     #[cfg(feature = "remote")] hosts: crate::remote_runtime::RemoteHosts,
 ) -> Result<PluginRuntime, PluginError> {
+    #[cfg(feature = "mesh")]
+    let mesh_plugin = Arc::new(infraternal_plugin_mesh::MeshPlugin::new(pool.clone()));
+    #[cfg(all(feature = "mesh", feature = "remote"))]
+    let mesh_service = mesh_plugin.service();
     let plugins: Vec<Arc<dyn Plugin>> = vec![
         #[cfg(feature = "mesh")]
-        Arc::new(infraternal_plugin_mesh::MeshPlugin::new(pool.clone())),
+        mesh_plugin,
         #[cfg(feature = "release")]
         Arc::new(crate::release_latest::plugin(pool.clone()).await?),
         #[cfg(feature = "remote")]
@@ -942,6 +946,8 @@ pub(crate) async fn compiled_with_hosts(
             Arc::new(crate::remote_inventory::Source {
                 pool: pool.clone(),
                 hosts,
+                #[cfg(feature = "mesh")]
+                mesh: Some(mesh_service),
             }),
         )),
         // Append features so existing discovery positions remain stable.
