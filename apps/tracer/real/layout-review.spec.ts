@@ -248,9 +248,28 @@ test("nullable resize fields cannot diverge the live projection from a snapshot"
   } finally { await fixture.dispose(); }
 });
 
-test("sixty memberships, stale edits and checkpoint compaction preserve the same account canvas", async ({ browser }) => {
+test("sixty memberships, stale edits and checkpoint compaction preserve the same account canvas", async ({ browser }, info) => {
   const fixture = await pair(browser);
   const { server, desktop, phone, page, mobile } = fixture;
+  const errors: string[] = [];
+  const received: Record<string, Array<{ type: unknown; revision: unknown }>> = { desktop: [], phone: [] };
+  for (const [name, device] of [["desktop", page], ["phone", mobile]] as const) {
+    const cdp = await device.context().newCDPSession(device);
+    await cdp.send("Network.enable");
+    const decoders = new Map<string, WebSocketFrameDecoder>();
+    cdp.on("Network.webSocketFrameReceived", ({ requestId, response }) => {
+      if (response.opcode !== 2) return;
+      let decoder = decoders.get(requestId);
+      if (!decoder) { decoder = new WebSocketFrameDecoder(); decoders.set(requestId, decoder); }
+      decoder.feed(new Uint8Array(Buffer.from(response.payloadData, "base64")), (_stream, frame) => {
+        if (frame.type !== "Event") return;
+        const event = JSON.parse(new TextDecoder().decode(frame.eventJson)) as Record<string, unknown>;
+        if (String(event.type).startsWith("canvas.layout.")) received[name]!.push({ type: event.type, revision: event.revision });
+      });
+    });
+  }
+  page.on("pageerror", (error) => errors.push(`desktop: ${error.message}`));
+  mobile.on("pageerror", (error) => errors.push(`phone: ${error.message}`));
   try {
     const initial = (await cache(page)).canonical;
     const console = initial.views.find((v) => v.id === "console")!;
@@ -294,7 +313,10 @@ with sqlite3.connect(sys.argv[1]) as db:
     await writeFile(tracerEvidencePath("review-scale.json"), JSON.stringify({ windows: ws.length, snapshotBytes: Buffer.byteLength(JSON.stringify(head)), ...counts }, null, 2));
     await page.screenshot({ path: tracerEvidencePath("review-sixty-desktop.png") });
     await mobile.screenshot({ path: tracerEvidencePath("review-sixty-phone.png") });
-  } finally { await fixture.dispose(); }
+  } finally {
+    try { await writeFile(tracerEvidencePath(`review-r2-scale-final-${info.repeatEachIndex}.json`), JSON.stringify({ errors, received, connections: server.bridges.map((b) => ({ closed: b.closed, closedBy: b.closedBy, closedReason: b.closedReason, serverClose: b.serverClose })), desktop: await cache(page), phone: await cache(mobile), calls: server.bridges.map((b) => b.control) }, null, 2)); }
+    finally { await fixture.dispose(); }
+  }
 });
 
 for (const reconnect of [false, true]) test(`review r2: a raced split refusal preserves later writes${reconnect ? " across reconnect" : " in the pipeline"}`, async ({ browser }) => {
