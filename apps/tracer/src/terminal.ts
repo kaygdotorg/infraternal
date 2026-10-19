@@ -425,19 +425,24 @@ export class TerminalClient {
       this.linkController?.invalidateBuffer();
     });
     this.terminal.onData((data) => {
-      this.wakeTerminal();
       // Replayed parser replies are not typing: they neither reach the shell nor restart the blink.
-      if (this.suppressTerminalResponses) return;
+      if (this.suppressTerminalResponses) {
+        this.wakeTerminal();
+        return;
+      }
       if (this.parserReplies) {
         this.parserReplyLength += data.length;
         if (this.parserReplyLength <= 1024) {
           if (this.parserReplies === EMPTY_PARSER_REPLIES) this.parserReplies = [data];
           else this.parserReplies.push(data);
         }
+        this.wakeTerminal();
         return;
       }
-      this.restartCursorBlink();
+      // Starting the render loop may run a frame synchronously, so send typed bytes first.
       this.handleInput(data);
+      this.restartCursorBlink();
+      this.wakeTerminal();
     });
     this.terminal.onScroll((offset) => {
       this.wakeTerminal();
