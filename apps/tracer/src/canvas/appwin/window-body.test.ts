@@ -24,8 +24,9 @@ interface PendingBinding {
   send(input: VideoInput): void;
   paintControl(control: ControlState): void;
 }
-function pending(admit = false) {
+function pending(admit = false, afterSend?: (input: VideoInput, count: number) => void) {
   const sent: VideoInput[] = [];
+  const order: string[] = [];
   let control: ControlState = { kind: "requesting" };
   let requests = 0;
   let finishRequest: ((ok: boolean) => void) | undefined;
@@ -33,7 +34,13 @@ function pending(admit = false) {
   const badge = { dataset: {}, hasAttribute: () => false, setAttribute() {}, removeAttribute() {}, querySelector: () => label };
   const stream = {
     get controlState() { return control; },
-    sendInput(input: VideoInput) { if (control.kind !== "controlled") return false; sent.push(input); return true; },
+    sendInput(input: VideoInput) {
+      if (control.kind !== "controlled") return false;
+      sent.push(input);
+      order.push("input");
+      afterSend?.(input, sent.length);
+      return true;
+    },
     takeControl(): Promise<boolean> {
       requests++;
       if (!admit) return Promise.resolve(false);
@@ -49,7 +56,7 @@ function pending(admit = false) {
     lastState: { kind: "live" }, o: { machine: "fixture" },
     root: { querySelector: (selector: string) => selector === ".aw-control" ? badge : undefined },
   }) as PendingBinding;
-  return { binding, sent, requests: () => requests, state(next: ControlState) {
+  return { binding, sent, order, resize() { order.push("size"); }, requests: () => requests, state(next: ControlState) {
     control = next;
     binding.paintControl(next);
     if (next.kind !== "requesting") finishRequest?.(next.kind === "controlled");
@@ -98,6 +105,94 @@ test("a lease lost before the pending drain cannot replay its input", async () =
   expect(f.sent).toEqual([{ kind: "text", scalar: 98 }]);
   await Promise.resolve();
   expect(f.sent).toHaveLength(1);
+});
+
+test("lease flaps discard each old batch and drain only the new request once", async () => {
+  const f = pending(true);
+  f.binding.send({ kind: "text", scalar: 97 });
+  f.binding.send({ kind: "text", scalar: 98 });
+  f.state({ kind: "controlled" });
+  f.state({ kind: "none" });
+  await Promise.resolve();
+  expect(f.sent).toHaveLength(0);
+
+  f.state({ kind: "requesting" });
+  f.binding.send({ kind: "text", scalar: 99 });
+  f.state({ kind: "controlled" });
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(f.sent).toEqual([{ kind: "text", scalar: 99 }]);
+  expect(f.binding.queued).toHaveLength(0);
+});
+
+test("a lease lost during a pending-input drain drops the rest of that batch", async () => {
+  let f!: ReturnType<typeof pending>;
+  let lost = false;
+  f = pending(true, (_input, count) => {
+    if (count === 1 && !lost) {
+      lost = true;
+      f.state({ kind: "none" });
+    }
+  });
+  const oldBatch: [VideoInput, VideoInput, VideoInput] = [
+    { kind: "text", scalar: 97 }, { kind: "text", scalar: 98 }, { kind: "text", scalar: 99 },
+  ];
+  for (const input of oldBatch) f.binding.send(input);
+  f.state({ kind: "controlled" });
+  await Promise.resolve();
+  expect(f.sent).toEqual([oldBatch[0]]);
+  expect(f.binding.queued).toHaveLength(0);
+
+  f.state({ kind: "requesting" });
+  f.binding.send({ kind: "text", scalar: 100 });
+  f.state({ kind: "controlled" });
+  await Promise.resolve();
+  expect(f.sent).toEqual([oldBatch[0], { kind: "text", scalar: 100 }]);
+});
+
+test("a resize arriving before the queued drain sends Size before Input", async () => {
+  const f = pending();
+  f.binding.send({ kind: "text", scalar: 97 });
+  f.state({ kind: "controlled" });
+  f.resize();
+  await Promise.resolve();
+  expect(f.order).toEqual(["size", "input"]);
+});
+
+test("two windows for one app keep their pending input in separate streams", async () => {
+  const first = pending();
+  const second = pending();
+  const firstInput = { kind: "text", scalar: 97 } as const;
+  const secondInput = { kind: "text", scalar: 98 } as const;
+  first.binding.send(firstInput);
+  second.binding.send(secondInput);
+
+  first.state({ kind: "controlled" });
+  await Promise.resolve();
+  expect(first.sent).toEqual([firstInput]);
+  expect(second.sent).toHaveLength(0);
+  expect(second.binding.queued).toEqual([secondInput]);
+
+  second.state({ kind: "controlled" });
+  await Promise.resolve();
+  expect(first.sent).toEqual([firstInput]);
+  expect(second.sent).toEqual([secondInput]);
+});
+
+test("automatic reacquisition after a reconnect never replays the lost lease's queue", async () => {
+  const f = pending(true);
+  f.binding.send({ kind: "text", scalar: 97 });
+  f.state({ kind: "controlled" });
+  f.state({ kind: "none" });
+  await Promise.resolve();
+  expect(f.sent).toHaveLength(0);
+
+  f.state({ kind: "requesting" });
+  f.binding.send({ kind: "text", scalar: 98 });
+  f.state({ kind: "controlled" });
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(f.sent).toEqual([{ kind: "text", scalar: 98 }]);
 });
 
 test("automatic control keeps the existing 32-event queue bound", async () => {
