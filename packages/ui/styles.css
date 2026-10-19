@@ -510,8 +510,13 @@
   background: none; color: var(--fg-2); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; text-align: left; cursor: pointer;
 }
 .ui-window-menu-item svg { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-window-menu-rule { height: 1px; margin: 0.1875rem 0.375rem; background: var(--line); }
+.ui-window-menu-item.is-danger { color: var(--danger); }
+/* A menu opened from the keyboard lands on its first row without a ring (rings are for Tab, TASTE 1); a quiet fill shows where it is. */
+.ui-window-menu-item:focus-visible { background: var(--hover); color: var(--fg); }
+.ui-window-menu-item.is-danger:focus-visible { color: var(--danger); }
 @media (pointer: coarse) { .ui-window-menu-item { height: 2.75rem; } }
-@media (hover: hover) and (pointer: fine) { .ui-window-menu-item:hover { background: var(--hover); color: var(--fg); } }
+@media (hover: hover) and (pointer: fine) { .ui-window-menu-item:hover { background: var(--hover); color: var(--fg); } .ui-window-menu-item.is-danger:hover { color: var(--danger); } }
 .ui-window-body { position: relative; flex: 1; min-height: 0; overflow: hidden; border-radius: 0 0 calc(var(--r-lg, 1.125rem) - 1px) calc(var(--r-lg, 1.125rem) - 1px); }
 @media (hover: hover) and (pointer: fine) {
   .ui-window-pill:hover { background: var(--hover); }

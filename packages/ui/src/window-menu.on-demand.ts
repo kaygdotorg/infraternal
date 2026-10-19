@@ -9,7 +9,11 @@
  */
 import { openAnchoredPopover, type AnchoredPopover, type PopoverSource } from "./anchored-popover";
 
-export interface WindowMenuItem { id: string; label: string; icon: string; run(event: MouseEvent): void }
+export interface WindowMenuItem {
+  id: string; label: string; icon: string; run(event: MouseEvent): void;
+  /** A destructive row: drawn in the danger colour, after a hairline that sets it apart from the rows above. */
+  danger?: boolean;
+}
 
 export interface WindowMenuOptions {
   /** The dialog's accessible name. Default "Window actions". */
@@ -19,6 +23,8 @@ export interface WindowMenuOptions {
   /** Size to the rows instead of the full width (a short menu). */
   hug?: boolean;
   maxWidth?: number;
+  /** Opens at a pointer position (a right-click) instead of under the anchor; see anchored-popover.ts. */
+  at?: { x: number; y: number };
 }
 
 /** Opens a menu of actions next to `anchor`, one row per action (icon and label). */
@@ -27,14 +33,22 @@ export function openWindowMenu(stage: HTMLElement, anchor: HTMLElement, items: W
     stage, anchor, label: options.label ?? "Window actions", className: "ui-window-menu",
     align: options.align ?? "end", maxWidth: options.maxWidth ?? 240,
     ...(options.side ? { side: options.side } : {}), ...(options.hug ? { hug: true } : {}),
+    ...(options.at ? { at: options.at } : {}),
   }, source, onClosed);
   menu.root.setAttribute("role", "menu");
   const rows: HTMLButtonElement[] = [];
   for (const item of items) {
+    if (item.danger && rows.length) {
+      const rule = document.createElement("div");
+      rule.className = "ui-window-menu-rule";
+      rule.setAttribute("role", "separator");
+      menu.root.append(rule);
+    }
     const row = document.createElement("button");
     row.type = "button";
     row.className = "ui-window-menu-item";
     row.dataset.action = item.id;
+    if (item.danger) row.classList.add("is-danger");
     row.setAttribute("role", "menuitem");
     row.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${item.icon}</svg><span></span>`;
     row.querySelector("span")!.textContent = item.label;
