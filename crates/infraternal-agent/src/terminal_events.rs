@@ -19,6 +19,8 @@ pub(super) enum Notice<'a> {
         #[serde(serialize_with = "cursor")]
         out_seq: u64,
     },
+    #[serde(rename = "terminal.query_replies_unavailable")]
+    QueryRepliesUnavailable { session_id: Uuid },
     #[serde(rename = "terminal.exited")]
     Exited {
         session_id: Uuid,
@@ -89,6 +91,18 @@ mod tests {
         assert_eq!(replay["type"], "terminal.replay_complete");
         assert_eq!(replay["session_id"], id.to_string());
         assert_eq!(replay["out_seq"], "18446744073709551615");
+    }
+
+    #[test]
+    fn reply_compatibility_notice_contains_only_session_identity() {
+        let id = Uuid::from_bytes([1; 16]);
+        let event = Notice::QueryRepliesUnavailable { session_id: id }
+            .json()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&event).unwrap(),
+            serde_json::json!({"type":"terminal.query_replies_unavailable", "session_id":id.to_string()})
+        );
     }
 
     #[test]
