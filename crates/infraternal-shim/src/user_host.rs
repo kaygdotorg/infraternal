@@ -56,9 +56,9 @@ const HOST_NATIVE_POOL_MIN: usize = HOST_HISTORY_BYTES + HOST_HISTORY_BYTES / 8 
 const HOST_NATIVE_POOL_MAX: usize = 512 * 1024 * 1024;
 /// The host pool's share of the memory this host may use.
 const HOST_NATIVE_POOL_FRACTION: usize = 32;
-/// Least native bytes each session owns outright: an idle 80x24 terminal
-/// and a few history pages to recycle, so output never fails when the pool
-/// is empty. A session's floor grows to cover its screens at its geometry.
+/// Chosen D310 floor: 256 KiB covers the ordinary 80x24 screen and parser
+/// state while keeping the per-session reservation small at hundreds of
+/// sessions. Larger active geometries may raise it, up to 2 MiB.
 const SESSION_SCREEN_BYTES: usize = 256 * 1024;
 const MAX_SESSIONS: usize = 1000;
 const PEER_BYTES: usize = 4 * 1024 * 1024;
@@ -72,6 +72,8 @@ struct LazyTerminal {
     history: usize,
     /// The host-wide native ceiling this terminal charges once materialized.
     host: Option<std::sync::Arc<crate::terminal_memory::HostBudget>>,
+    /// Reserved when the session opens, even while terminal state is lazy.
+    floor_reservation: Option<std::sync::Arc<crate::terminal_memory::HostFloor>>,
 }
 struct LazyState {
     terminal: Option<Box<Terminal>>,
@@ -98,16 +100,18 @@ impl LazyTerminal {
             rows,
             history,
             host: None,
+            floor_reservation: None,
         }
     }
     fn materialize(&self) -> io::Result<()> {
         let mut state = self.state.borrow_mut();
         if state.terminal.is_none() {
-            let mut terminal = Box::new(Terminal::with_host_budget(
+            let mut terminal = Box::new(Terminal::with_host_floor(
                 state.origin.0,
                 state.origin.1,
                 self.history,
                 self.host.clone(),
+                self.floor_reservation.clone(),
             )?);
             let mut start = 0;
             for &(end, cols, rows) in &state.resizes {
@@ -130,6 +134,21 @@ impl LazyTerminal {
                 .terminal
                 .as_ref()
                 .map_or(0, |t| t.memory().0 + 8192 + std::mem::size_of::<Terminal>())
+    }
+    fn pool_bytes(&self) -> usize {
+        let state = self.state.borrow();
+        let floor = self
+            .floor_reservation
+            .as_ref()
+            .map_or(0, |reservation| reservation.bytes());
+        let native = state
+            .terminal
+            .as_ref()
+            .map_or(0, |terminal| terminal.memory().0);
+        floor.max(native)
+    }
+    fn pool_limit_bytes(&self) -> usize {
+        self.host.as_ref().map_or(0, |host| host.limit_bytes())
     }
     fn process(&mut self, bytes: &[u8]) -> io::Result<()> {
         #[cfg(test)]
@@ -291,6 +310,25 @@ impl Session {
             deadline: None,
         })
     }
+    /// Opens a host session only after its protected floor fits the same cap
+    /// as native history and the output ring [D310].
+    fn new_host(
+        config: Config,
+        history: usize,
+        host: std::sync::Arc<crate::terminal_memory::HostBudget>,
+    ) -> io::Result<Self> {
+        let floor_bytes = crate::terminal_native::floor_for_geometry(
+            config.cols,
+            config.rows,
+            host.minimum_floor(),
+        );
+        let floor = host.reserve_session(floor_bytes)?;
+        let mut session = Self::new(config, history)?;
+        session.terminal.host = Some(host.clone());
+        session.terminal.floor_reservation = Some(floor);
+        session.ring.set_budget(host);
+        Ok(session)
+    }
     fn peer_bytes(&self) -> usize {
         self.peers.iter().map(Peer::buffer_bytes).sum()
     }
@@ -326,8 +364,10 @@ impl Session {
             .map_or(0, |t| t.retained_history_rows());
         write!(
             writer,
-            "{{\"kind\":\"ownership\",\"session\":{index},\"total_bytes\":{},\"native_ordinary_bytes\":{ordinary},\"native_page_bytes\":{pages},\"native_resident_bytes\":{resident},\"native_encoded_bytes\":{encoded},\"native_history_rows\":{history_rows},\"carry_bytes\":{carry},\"struct_bytes\":{},\"path_bytes\":{},\"config_path_bytes\":{},\"prefix_bytes\":{},\"geometry_bytes\":{},\"ring_bytes\":{},\"input_bytes\":{},\"writer_bytes\":{},\"peer_bytes\":{},\"peer_slots_bytes\":{}",
+            "{{\"kind\":\"ownership\",\"session\":{index},\"total_bytes\":{},\"pool_bytes\":{},\"pool_limit_bytes\":{},\"native_ordinary_bytes\":{ordinary},\"native_page_bytes\":{pages},\"native_resident_bytes\":{resident},\"native_encoded_bytes\":{encoded},\"native_history_rows\":{history_rows},\"carry_bytes\":{carry},\"struct_bytes\":{},\"path_bytes\":{},\"config_path_bytes\":{},\"prefix_bytes\":{},\"geometry_bytes\":{},\"ring_bytes\":{},\"input_bytes\":{},\"writer_bytes\":{},\"peer_bytes\":{},\"peer_slots_bytes\":{}",
             self.allocated_bytes(),
+            self.terminal.pool_bytes() + self.ring.allocated_bytes(),
+            self.terminal.pool_limit_bytes(),
             std::mem::size_of::<Self>(),
             self.path.0.capacity(),
             self.config
@@ -823,6 +863,37 @@ impl Session {
     }
 }
 
+/// Admits sessions one at a time so a full pool refuses only the new opens.
+fn open_host_sessions(
+    configs: Vec<Config>,
+    history: usize,
+    host: std::sync::Arc<crate::terminal_memory::HostBudget>,
+) -> io::Result<(Vec<Session>, Vec<io::Error>)> {
+    let mut sessions = Vec::with_capacity(configs.len());
+    let mut refusals = Vec::new();
+    for config in configs {
+        match Session::new_host(config, history, host.clone()) {
+            Ok(session) => sessions.push(session),
+            Err(error) if pool_full_error(&error) => refusals.push(error),
+            Err(error) => return Err(error),
+        }
+    }
+    if sessions.is_empty() {
+        return Err(refusals
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| io::Error::other("no user sessions were admitted")));
+    }
+    Ok((sessions, refusals))
+}
+
+fn pool_full_error(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::OutOfMemory
+        && error
+            .to_string()
+            .starts_with("terminal memory for this user is full (")
+}
+
 /// Host an explicitly supplied batch inside one existing person's login [D240/D247].
 ///
 /// Per-session Rust panics retire that session. Native faults and process OOM
@@ -830,7 +901,9 @@ impl Session {
 /// Call during single-threaded startup: process-directed SIGCHLD must remain
 /// blocked in every thread while this reactor owns its children.
 /// # Errors
-/// Rejects foreign UIDs, duplicate IDs, invalid geometry, threaded startup and other startup failures.
+/// Rejects foreign UIDs, duplicate IDs, invalid geometry, threaded startup and
+/// other startup failures. Pool-full opens use the existing stderr error path;
+/// already admitted sessions keep running when later opens are refused.
 #[allow(clippy::too_many_lines)]
 pub fn run_host(configs: Vec<Config>) -> io::Result<()> {
     run_host_accounted(configs, None)
@@ -889,59 +962,99 @@ pub fn run_host_accounted(
     crate::pty::reset_host_child_notifications()?;
     let signals = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC)
         .map_err(io::Error::from)?;
-    let history = (HOST_HISTORY_BYTES / configs.len()).min(17 * 1024 * 1024);
-    let ring_budget = HOST_HISTORY_BYTES / configs.len();
+    let pool = host_native_pool_bytes();
+    let native = crate::terminal_memory::HostBudget::new(pool, SESSION_SCREEN_BYTES);
+    let floor_total = configs.iter().fold(0_usize, |total, config| {
+        total.saturating_add(crate::terminal_native::floor_for_geometry(
+            config.cols,
+            config.rows,
+            SESSION_SCREEN_BYTES,
+        ))
+    });
+    let shareable = pool.saturating_sub(floor_total);
+    // Equal per-session shares leave one eighth for geometry growth. The
+    // rest is split between native scrollback and output replay retention.
+    let content = shareable.saturating_mul(7) / 8;
+    let history_total = (content * 3 / 4).min(HOST_HISTORY_BYTES);
+    let ring_total = content.saturating_sub(history_total);
+    let history = (history_total / configs.len()).min(17 * 1024 * 1024);
+    let ring_budget = ring_total / configs.len();
     for config in &mut configs {
         config.ring_capacity = config.ring_capacity.min(ring_budget);
     }
-    let native =
-        crate::terminal_memory::HostBudget::new(host_native_pool_bytes(), SESSION_SCREEN_BYTES);
-    let sessions = configs
-        .into_iter()
-        .map(|config| {
-            let mut session = Session::new(config, history)?;
-            session.terminal.host = Some(native.clone());
-            Ok(session)
-        })
-        .collect::<io::Result<Vec<_>>>()?;
+    let (sessions, refusals) = open_host_sessions(configs, history, native)?;
+    for error in refusals {
+        eprintln!("session open failed: {error}");
+    }
     reactor::run(sessions, &signals, accounting)
 }
 
-/// Host pool for this machine: 1/32 of the memory the host may use, never
-/// below [`HOST_NATIVE_POOL_MIN`] or above [`HOST_NATIVE_POOL_MAX`]. All
-/// sessions together stay under the sum of their floors plus this pool.
+/// Host pool for this machine: 1/32 of available memory, or the tighter
+/// cgroup limit, clamped to 80–512 MiB. Session floors are inside this cap.
 fn host_native_pool_bytes() -> usize {
-    usable_memory().map_or(HOST_NATIVE_POOL_MIN, |bytes| {
-        (bytes / HOST_NATIVE_POOL_FRACTION).clamp(HOST_NATIVE_POOL_MIN, HOST_NATIVE_POOL_MAX)
-    })
+    let available = usable_memory().unwrap_or(HOST_NATIVE_POOL_MIN);
+    host_pool_bytes(available, None)
 }
 
-/// Physical memory, or the host's cgroup limit when that is lower. Read once
+fn host_pool_bytes(available: usize, cgroup_limit: Option<usize>) -> usize {
+    let usable = cgroup_limit.map_or(available, |limit| available.min(limit));
+    (usable / HOST_NATIVE_POOL_FRACTION).clamp(HOST_NATIVE_POOL_MIN, HOST_NATIVE_POOL_MAX)
+}
+
+/// MemAvailable, or the tightest cgroup limit when that is lower. Read once
 /// at host start; a missing or unreadable source falls back to the minimum.
 fn usable_memory() -> Option<usize> {
-    let total = std::fs::read_to_string("/proc/meminfo")
+    let available = std::fs::read_to_string("/proc/meminfo")
         .ok()
-        .and_then(|info| meminfo_total(&info))?;
+        .and_then(|info| meminfo_available(&info))?;
     let limit = std::fs::read_to_string("/proc/self/cgroup")
         .ok()
-        .and_then(|groups| {
-            let path = groups.lines().find_map(|line| line.strip_prefix("0::"))?;
-            std::fs::read_to_string(format!("/sys/fs/cgroup{}/memory.max", path.trim())).ok()
-        })
-        .and_then(|max| max.trim().parse::<usize>().ok());
-    Some(limit.map_or(total, |limit| limit.min(total)))
+        .and_then(|groups| cgroup_v2_limit(&groups, std::path::Path::new("/sys/fs/cgroup")));
+    Some(limit.map_or(available, |limit| limit.min(available)))
 }
 
-fn meminfo_total(info: &str) -> Option<usize> {
+fn meminfo_available(info: &str) -> Option<usize> {
     let kib = info
         .lines()
-        .find_map(|line| line.strip_prefix("MemTotal:"))?
+        .find_map(|line| line.strip_prefix("MemAvailable:"))?
         .trim()
         .strip_suffix("kB")?
         .trim()
         .parse::<usize>()
         .ok()?;
     kib.checked_mul(1024)
+}
+
+/// Walks cgroup-v2 ancestors because an ancestor can impose a tighter cap.
+fn cgroup_v2_limit(groups: &str, root: &std::path::Path) -> Option<usize> {
+    let relative = groups
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))?
+        .trim_start_matches('/');
+    let relative = std::path::Path::new(relative);
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir | std::path::Component::RootDir
+        )
+    }) {
+        return None;
+    }
+    let mut current = root.join(relative);
+    let mut tightest = None;
+    loop {
+        let value = std::fs::read_to_string(current.join("memory.max")).ok()?;
+        if let Ok(limit) = value.trim().parse::<usize>() {
+            tightest = Some(tightest.map_or(limit, |old: usize| old.min(limit)));
+        }
+        if current == root {
+            break;
+        }
+        if !current.pop() || !current.starts_with(root) {
+            return None;
+        }
+    }
+    tightest
 }
 
 #[path = "user_host_reactor.rs"]
@@ -964,27 +1077,151 @@ mod tests {
     #[test]
     fn host_pool_scales_with_machine_memory_within_bounds() {
         assert_eq!(
-            meminfo_total("MemTotal:       16303428 kB\nMemFree: 1 kB\n"),
+            meminfo_available("MemAvailable:   16303428 kB\nMemFree: 1 kB\n"),
             Some(16_303_428 * 1024)
         );
-        assert_eq!(meminfo_total("MemFree: 1 kB\n"), None);
+        assert_eq!(meminfo_available("MemFree: 1 kB\n"), None);
         let pool = host_native_pool_bytes();
         eprintln!(
             "host pool {pool} B for usable memory {:?} B",
             usable_memory()
         );
         assert!((HOST_NATIVE_POOL_MIN..=HOST_NATIVE_POOL_MAX).contains(&pool));
-        for (memory, expected) in [
-            (1_usize << 30, HOST_NATIVE_POOL_MIN),
-            (8 << 30, 256 << 20),
-            (64 << 30, HOST_NATIVE_POOL_MAX),
+        for (available, cgroup, expected) in [
+            (32_usize << 30, None, HOST_NATIVE_POOL_MAX),
+            (1_usize << 30, None, HOST_NATIVE_POOL_MIN),
+            (32_usize << 30, Some(1_usize << 30), HOST_NATIVE_POOL_MIN),
+            (32_usize << 30, Some(4_usize << 30), 128 << 20),
+            (8_usize << 30, None, 256 << 20),
         ] {
-            assert_eq!(
-                (memory / HOST_NATIVE_POOL_FRACTION)
-                    .clamp(HOST_NATIVE_POOL_MIN, HOST_NATIVE_POOL_MAX),
-                expected
+            assert_eq!(host_pool_bytes(available, cgroup), expected);
+        }
+    }
+
+    /// D310: deterministic property sequence over session admission, output
+    /// growth and close operations. The committed total always stays in cap.
+    #[test]
+    fn pool_usage_never_exceeds_cap_under_open_write_close_sequences() {
+        const CAP: usize = 4 * 1024 * 1024;
+        struct SampleSession {
+            ring: Ring,
+            terminal: Terminal,
+        }
+        fn next(seed: &mut u64) -> u64 {
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            *seed
+        }
+
+        let host = crate::terminal_memory::HostBudget::new(CAP, SESSION_SCREEN_BYTES);
+        let mut sessions: Vec<Option<SampleSession>> = Vec::new();
+        let mut seed = 0x7a11_0c5e_55aa_0913;
+        let mut output = [b'x'; 8192];
+        for line in (79..output.len()).step_by(81) {
+            output[line] = b'\r';
+            output[line + 1] = b'\n';
+        }
+        for _ in 0..20_000 {
+            match next(&mut seed) % 3 {
+                0 if sessions.len() < 24 || sessions.iter().any(Option::is_none) => {
+                    if let Ok(mut terminal) =
+                        Terminal::with_host_budget(80, 24, 128 * 1024, Some(host.clone()))
+                    {
+                        terminal.process(b"\x1bc");
+                        let mut ring = Ring::new(384 * 1024);
+                        ring.set_budget(host.clone());
+                        let session = SampleSession { ring, terminal };
+                        if let Some(slot) = sessions.iter_mut().find(|slot| slot.is_none()) {
+                            *slot = Some(session);
+                        } else {
+                            sessions.push(Some(session));
+                        }
+                    }
+                }
+                1 if !sessions.is_empty() => {
+                    let index = next(&mut seed) as usize % sessions.len();
+                    if let Some(session) = sessions[index].as_mut() {
+                        let length = 1 + next(&mut seed) as usize % output.len();
+                        session.terminal.process(&output[..length]);
+                        session.ring.append(&output[..length]).unwrap();
+                    }
+                }
+                _ if !sessions.is_empty() => {
+                    let index = next(&mut seed) as usize % sessions.len();
+                    sessions[index] = None;
+                }
+                _ => {}
+            }
+            assert!(
+                host.total_used() <= CAP,
+                "pool {} exceeded {CAP}",
+                host.total_used()
             );
         }
+        drop(sessions);
+        assert_eq!(host.total_used(), 0, "closed sessions left pool charges");
+    }
+
+    /// Ring pressure drops the oldest retained output while preserving the
+    /// absolute offset of the new tail.
+    #[test]
+    fn full_pool_reuses_ring_storage_for_newest_output() {
+        let host = crate::terminal_memory::HostBudget::new(1024, SESSION_SCREEN_BYTES);
+        let mut ring = Ring::new(4);
+        ring.set_budget(host.clone());
+        ring.append(b"abcd").unwrap();
+        assert_eq!(ring.allocated_bytes(), 4);
+        assert!(host.try_charge(1020));
+        ring.append(b"efgh").unwrap();
+        assert_eq!(ring.start(), 4);
+        assert_eq!(ring.read(4, 4).unwrap(), b"efgh");
+        assert_eq!(host.total_used(), 1024);
+        drop(ring);
+        assert_eq!(host.total_used(), 1020);
+        host.release_charge(1020);
+        assert_eq!(host.total_used(), 0);
+    }
+
+    /// D310: a refused open uses the session-open error and leaves a live
+    /// sibling's terminal and replay history usable.
+    #[test]
+    fn full_pool_refuses_new_session_and_keeps_existing_session_working() {
+        let floor = crate::terminal_native::floor_for_geometry(80, 24, SESSION_SCREEN_BYTES);
+        let cap = floor + 1024;
+        let host = crate::terminal_memory::HostBudget::new(cap, SESSION_SCREEN_BYTES);
+        let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(format!(".cache/codex-scratch/usp-{}", std::process::id()));
+        let mut config = Config::new([0x71; 16], Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.ring_capacity = 64 * 1024;
+        let mut refused_config = config.clone();
+        refused_config.session = [0x72; 16];
+        let (mut sessions, mut refusals) =
+            open_host_sessions(vec![config, refused_config], 64 * 1024, host.clone()).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(refusals.len(), 1);
+        let error = refusals.pop().unwrap();
+        let existing = &mut sessions[0];
+        existing
+            .terminal
+            .process(b"\x1bcexisting session\r\n")
+            .unwrap();
+        existing.ring.append(b"existing output").unwrap();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "terminal memory for this user is full ({} KiB); close a session",
+                cap / 1024
+            )
+        );
+        assert!(existing.terminal.snapshot().is_ok());
+        assert_eq!(existing.ring.read(0, 64).unwrap(), b"existing output");
+        assert!(existing.pty.child.try_wait().unwrap().is_none());
+        assert!(host.total_used() <= cap);
+        drop(sessions);
+        assert_eq!(host.total_used(), 0);
+        std::fs::remove_dir_all(state).unwrap();
     }
 
     pub(super) fn ack_fixture(tag: u8) -> (Session, std::os::unix::net::UnixStream, PathBuf) {
