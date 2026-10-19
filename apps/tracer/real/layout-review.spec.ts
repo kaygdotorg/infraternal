@@ -1,6 +1,7 @@
 /** Independent real-server review of split admission, offline journals and durable account layouts (D178, D183, D248; #243). */
 import { devices, expect, test, type Page, type BrowserContext, type Browser } from "playwright/test";
 import { WebSocket } from "ws";
+import { isMacPlatform } from "../../../packages/ui/src/platform";
 import { encodeMuxedFrame, WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
 import { startRealServer, type RealServer } from "./server";
 import { tracerEvidencePath } from "../test/evidence-path";
@@ -293,5 +294,84 @@ with sqlite3.connect(sys.argv[1]) as db:
     await writeFile(tracerEvidencePath("review-scale.json"), JSON.stringify({ windows: ws.length, snapshotBytes: Buffer.byteLength(JSON.stringify(head)), ...counts }, null, 2));
     await page.screenshot({ path: tracerEvidencePath("review-sixty-desktop.png") });
     await mobile.screenshot({ path: tracerEvidencePath("review-sixty-phone.png") });
+  } finally { await fixture.dispose(); }
+});
+
+for (const reconnect of [false, true]) test(`review r2: a raced split refusal preserves later writes${reconnect ? " across reconnect" : " in the pipeline"}`, async ({ browser }) => {
+  const fixture = await pair(browser);
+  const { page, mobile, server, desktop, phone } = fixture;
+  try {
+    await page.keyboard.press("Control+Shift+E");
+    await expect(windows(page)).toHaveCount(2); await settled(page); await expect(windows(mobile)).toHaveCount(2);
+    const baseline = (await cache(page)).canonical;
+    const view = baseline.views.find((v) => v.id === "console")!;
+    if (view.layout.type !== "tiled") throw Error("expected tiled console");
+    const column = view.layout.columns[0]!;
+    expect((await request(server, desktop, "canvas.layout.apply", { op_id: randomUUID(), base_revision: baseline.revision, intent: { type: "weight", view_id: view.id, column_id: column.id, weight: 0.2 } })).ok).toBe(true);
+    await expect.poll(async () => (await cache(page)).canonical.revision).toBe(baseline.revision + 1);
+    let held = false, armed = true;
+    const queued: Array<string | Buffer> = [];
+    let release = (): void => {};
+    let disconnect = (): void => {};
+    // Hold the real split and its ordered suffix while the other device changes
+    // the column. This creates a valid stale split without rewriting wire input.
+    await page.routeWebSocket("**/v1/ws", (route) => {
+      const upstream = route.connectToServer();
+      const decoder = new WebSocketFrameDecoder();
+      disconnect = () => route.close();
+      release = () => { armed = false; held = false; for (const bytes of queued.splice(0)) upstream.send(bytes); };
+      route.onMessage((bytes) => {
+        if (armed && typeof bytes !== "string") decoder.feed(new Uint8Array(bytes), (_stream, frame) => {
+          if (frame.type !== "Call" || frame.actionId !== "canvas.layout.apply") return;
+          const input = JSON.parse(new TextDecoder().decode(frame.inputJson)) as { intent?: { type?: string } };
+          if (input.intent?.type === "split") held = true;
+        });
+        if (held) queued.push(bytes); else upstream.send(bytes);
+      });
+    });
+    await page.reload(); await expect(windows(page)).toHaveCount(2); await settled(page);
+    await page.keyboard.press("Control+Shift+D"); await expect(windows(page)).toHaveCount(3);
+    await expect.poll(() => held).toBe(true);
+    await windows(page).first().locator('[data-action="close"]').evaluate((el) => (el as HTMLElement).click());
+    await expect(windows(page)).toHaveCount(2);
+    await expect.poll(async () => (await cache(page)).pending.length).toBeGreaterThanOrEqual(2);
+    const pending = await cache(page);
+    expect((await request(server, phone, "canvas.layout.apply", { op_id: randomUUID(), base_revision: baseline.revision, intent: { type: "weight", view_id: view.id, column_id: column.id, weight: 0.1 } })).ok).toBe(true);
+    const notice = page.getByText("The server could not save that layout change. The saved layout has been restored.", { exact: true }).waitFor({ state: "visible" });
+    void notice.catch(() => undefined);
+    if (reconnect) { armed = false; held = false; queued.length = 0; disconnect(); }
+    else release();
+    await settled(page); await settled(mobile);
+    await expect(windows(page)).toHaveCount(1); await expect(windows(mobile)).toHaveCount(1);
+    await notice;
+    const head = (await request(server, desktop, "", {}, true)).value.document;
+    expect((await cache(page)).canonical).toEqual(head); expect((await cache(mobile)).canonical).toEqual(head);
+    await writeFile(tracerEvidencePath(`review-r2-refusal-${reconnect ? "reconnect" : "pipeline"}.json`), JSON.stringify({ pending, desktop: await cache(page), phone: await cache(mobile) }, null, 2));
+    await page.screenshot({ path: tracerEvidencePath(`review-r2-refusal-${reconnect ? "reconnect" : "pipeline"}.png`) });
+    await page.reload(); await settled(page); await expect(windows(page)).toHaveCount(1);
+    expect((await cache(page)).canonical).toEqual(head);
+  } finally { await fixture.dispose(); }
+});
+
+test("review r2: narrow and wide device splits converge without refused windows", async ({ browser }) => {
+  const fixture = await pair(browser);
+  const { page, mobile, server, desktop } = fixture;
+  try {
+    await page.keyboard.press("Control+Shift+D");
+    await expect(windows(page)).toHaveCount(2); await settled(page); await expect(windows(mobile)).toHaveCount(2);
+    const baseline = (await cache(page)).canonical;
+    const view = baseline.views.find((v) => v.id === "console")!;
+    if (view.layout.type !== "tiled") throw Error("expected tiled console");
+    const [narrow, wide] = view.layout.columns;
+    for (const [column, weight] of [[narrow!, 0.1], [wide!, 1]] as const) expect((await request(server, desktop, "canvas.layout.apply", { op_id: randomUUID(), base_revision: baseline.revision, intent: { type: "weight", view_id: view.id, column_id: column.id, weight } })).ok).toBe(true);
+    await expect.poll(async () => (await cache(page)).canonical.revision).toBe(baseline.revision + 2);
+    await expect.poll(async () => (await cache(mobile)).canonical.revision).toBe(baseline.revision + 2);
+    for (const [device, id] of [[page, narrow!.windows[0]!.id], [mobile, wide!.windows[0]!.id]] as const) await device.locator(`.ui-window[data-window-id="${id}"]`).evaluate((el) => el.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 })));
+    await Promise.all([page.keyboard.press("Control+Shift+D"), mobile.keyboard.press(await mobile.evaluate(isMacPlatform) ? "Meta+D" : "Control+Shift+D")]);
+    await expect(windows(page)).toHaveCount(4); await expect(windows(mobile)).toHaveCount(4); await settled(page); await settled(mobile);
+    const head = (await request(server, desktop, "", {}, true)).value.document;
+    expect((await cache(page)).canonical).toEqual(head); expect((await cache(mobile)).canonical).toEqual(head);
+    await writeFile(tracerEvidencePath("review-r2-two-bounds.json"), JSON.stringify({ desktop: await cache(page), phone: await cache(mobile) }, null, 2));
+    await page.reload(); await mobile.reload(); await expect(windows(page)).toHaveCount(4); await expect(windows(mobile)).toHaveCount(4);
   } finally { await fixture.dispose(); }
 });
