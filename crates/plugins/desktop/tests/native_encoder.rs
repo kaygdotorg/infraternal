@@ -102,6 +102,23 @@ fn delivered_pixels_are_owned_and_raw_drops_never_confirm_new_content() {
 }
 
 #[test]
+fn identical_surface_callbacks_preserve_one_refresh_and_static_repair() {
+    run_swift_fixture(
+        "surface-delivery",
+        &[
+            "native/CaptureState.swift",
+            "native/FrameDamage.swift",
+            "native/FramePixels.swift",
+            "native/LowDelaySPS.swift",
+            "native/Encoder.swift",
+            "native/SurfaceCapture.swift",
+            "tests/fixtures/surface-delivery-test.swift",
+        ],
+        true,
+    );
+}
+
+#[test]
 fn empty_native_damage_rectangles_do_not_schedule_unchanged_pictures() {
     run_swift_fixture(
         "frame-damage",

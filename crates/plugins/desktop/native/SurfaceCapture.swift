@@ -6,6 +6,7 @@ import VideoToolbox
 
 final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let mailbox = NSLock()
+    private let measure = ProcessInfo.processInfo.environment["INFRATERNAL_DESKTOP_MEASURE"] != nil
     private let encodingQueue = DispatchQueue(label: "infraternal.desktop.surface.encode", qos: .userInteractive)
     private let callbacks = DispatchQueue(label: "infraternal.desktop.surface.capture", qos: .userInteractive)
     private let encoder = Encoder()
@@ -17,6 +18,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var repairing = false
     private var congested = false
     private var damageState = DamageEncodingState()
+    private let pixels = FramePixels()
     private var bitrate: AdaptiveBitrate
     private var refresh: DispatchSourceTimer?
     private let size: CGSize
@@ -74,23 +76,30 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
+        let callback = measure ? nanos(mach_absolute_time()) : 0
         guard type == .screen, CMSampleBufferDataIsReady(sample),
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let info = attachments.first, info[.status] as? Int == SCFrameStatus.complete.rawValue,
               let pixel = CMSampleBufferGetImageBuffer(sample) else { return }
         let ticks = info[.displayTime] as? UInt64 ?? mach_absolute_time()
+        receiveFrame(pixel, ticks: ticks, damage: info[.dirtyRects], callback: callback)
+    }
+
+    /// The framework validates readiness/status above. Real-buffer fixtures use
+    /// this same handoff to exercise mailbox and hardware delivery without a GUI.
+    func receiveFrame(_ pixel: CVPixelBuffer, ticks: UInt64, damage: Any?, callback: UInt64 = 0) {
         mailbox.lock()
         guard !stopped else { mailbox.unlock(); return }
         // Missing/unknown damage remains conservative. A nonempty list of empty
         // rectangles must not replace the retained picture or reset its refresh.
-        let damaged = captureFrameHasDamage(info[.dirtyRects], initial: retained == nil)
+        let damaged = captureFrameHasDamage(damage, initial: retained == nil)
         if damaged { latest = (pixel, ticks) }
         let schedule = damaged && !active
         if schedule { active = true }
         mailbox.unlock()
-        if ProcessInfo.processInfo.environment["INFRATERNAL_DESKTOP_MEASURE"] != nil {
-            let entries = (info[.dirtyRects] as? [Any])?.count ?? -1
-            fputs("METRIC source_frame capture_ns=\(nanos(ticks)) damaged=\(damaged) damage_entries=\(entries)\n", stderr)
+        if measure {
+            let entries = (damage as? [Any])?.count ?? -1
+            fputs("METRIC source_frame capture_ns=\(nanos(ticks)) callback_ns=\(callback) damaged=\(damaged) damage_entries=\(entries)\n", stderr)
         }
         if schedule { encodingQueue.async { [weak self] in self?.drain() } }
     }
@@ -110,16 +119,19 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 mailbox.unlock()
                 if retired { break }
                 if pressure { _ = bitrate.feedback(at:ProcessInfo.processInfo.systemUptime, congested:true) }
-                if frame != nil { damageState.changed(at: ProcessInfo.processInfo.systemUptime) }
+                if let frame, pixels.prepare(frame.0) { damageState.changed(at: ProcessInfo.processInfo.systemUptime) }
                 if repair { damageState.repair() }
                 guard let current, let decision = damageState.next(at: ProcessInfo.processInfo.systemUptime) else { break }
+                if frame == nil { _ = pixels.prepare(current.0) }
                 let budget = decision == .refresh ? min(bitrate.maximum * 4, bitrate.current * 4) : bitrate.current
                 guard let body = try encoder.encodeSurface(current.0, ticks: current.1, force: decision.keyframe, bitrate: budget) else {
+                    pixels.dropped()
                     retryDroppedFrame = damageState.encoderDropped(decision)
                     break
                 }
                 let began = ProcessInfo.processInfo.systemUptime
                 try output(70, body)
+                pixels.delivered()
                 damageState.completed(delivered: true)
                 _ = bitrate.feedback(at: ProcessInfo.processInfo.systemUptime, congested: ProcessInfo.processInfo.systemUptime - began > 0.1)
             }
@@ -167,7 +179,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         if let captured { Task { try? await captured.stopCapture() } }
         // Stop does not block the GUI behind an output write. The private process
         // owner closes the pipes and joins it at retirement; callbacks cannot restart.
-        encodingQueue.async { [weak self] in self?.refresh?.cancel(); self?.refresh = nil; self?.encoder.stop() }
+        encodingQueue.async { [weak self] in self?.refresh?.cancel(); self?.refresh = nil; self?.pixels.reset(); self?.encoder.stop() }
         return true
     }
 }
