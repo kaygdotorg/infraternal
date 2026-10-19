@@ -748,7 +748,10 @@ impl Session {
             && (master.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) || self.exit.is_some())
         {
             let mut bytes = [0; BULK_READ_BYTES];
-            let limit = read_budget.min(bytes.len()).min(self.config.ring_capacity);
+            // Retention limits how much history the ring keeps, not how much
+            // PTY output the live screen can process. A zero-share ring still
+            // advances its absolute head while dropping the old byte history.
+            let limit = read_budget.min(bytes.len());
             let mut used = 0;
             // One rotating bulk turn may amortize four short kernel reads.
             // Input and promoted small replies keep the smaller byte quantum;
@@ -1260,6 +1263,9 @@ mod tests {
         );
         assert!(refusal.to_string().ends_with("; close a session"));
 
+        let before_head = session.ring.head();
+        session.terminal.process(b"\x1bcpool ready\r\n").unwrap();
+        let before_screen = session.terminal.snapshot().unwrap();
         session.pty.master.write_all(b"continue\n").unwrap();
         let response_bytes = b"infraternal-ready\n".len();
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
@@ -1272,7 +1278,14 @@ mod tests {
             .step(PollFlags::empty(), PollFlags::POLLIN, &[], true)
             .unwrap();
         let unread = crate::pty::available_output(&session.pty.master).unwrap();
+        let after_screen = session.terminal.snapshot().unwrap();
         eprintln!("full_pool_pty_bytes_before={ready} after_session_step={unread}");
+        assert_eq!(session.ring.head() - before_head, ready as u64);
+        assert_eq!(session.ring.start(), session.ring.head());
+        assert_ne!(
+            before_screen, after_screen,
+            "the visible screen did not advance"
+        );
 
         drop(session);
         assert_eq!(
