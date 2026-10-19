@@ -4,7 +4,7 @@ use crate::{
     auth_order::{AuthProvider, Authentication},
     model::{Destination, Failure, MeshEvidence},
 };
-use std::{future::Future, path::Path, pin::Pin, sync::Arc};
+use std::{future::Future, path::Path, pin::Pin, sync::Arc, time::Duration};
 
 /// Object-safe asynchronous boundary without adding an async-trait dependency.
 pub type Operation<'a, T> = Pin<Box<dyn Future<Output = Result<T, Failure>> + Send + 'a>>;
@@ -176,6 +176,16 @@ pub trait SshSession: Send + Sync {
         None
     }
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput>;
+    /// Run one command under a caller-derived deadline when the adapter supports it.
+    /// Adapters without per-command deadlines retain their configured bound.
+    fn run_with_timeout<'a>(
+        &'a self,
+        script: &'a str,
+        input: Input<'a>,
+        _timeout: Duration,
+    ) -> Operation<'a, CommandOutput> {
+        self.run(script, input)
+    }
 }
 
 /// Shell quote trusted generated values; destinations are passed as SSH arguments separately.

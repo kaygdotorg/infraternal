@@ -49,15 +49,17 @@ impl Drop for CleanupMany {
     }
 }
 
-/// Runtime fixtures share the short state root and create its parent independently of Cargo output.
+/// Session fixtures prefer the agent-specific root when the shared root is too long for socket names.
 fn fixture_root() -> PathBuf {
-    let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
-        || {
-            PathBuf::from(std::env::var_os("HOME").expect("test requires HOME"))
-                .join(".cache/codex-scratch/infraternal")
-        },
-        PathBuf::from,
-    );
+    let root = std::env::var_os("INFRATERNAL_AGENT_TEST_STATE_ROOT")
+        .or_else(|| std::env::var_os("INFRATERNAL_TEST_STATE_ROOT"))
+        .map_or_else(
+            || {
+                PathBuf::from(std::env::var_os("HOME").expect("test requires HOME"))
+                    .join(".cache/codex-scratch/infraternal")
+            },
+            PathBuf::from,
+        );
     fs::create_dir_all(&root).unwrap();
     root
 }

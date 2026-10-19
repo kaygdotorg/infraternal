@@ -387,6 +387,7 @@ impl RemoteHosts {
         {
             self.attach(&runtime, id, host).await?;
         }
+        self.5.publish();
         Ok(())
     }
 
@@ -435,6 +436,7 @@ impl RemoteHosts {
         host.caps = caps;
         host.retirement = self.retirement(id, generation, authority.clone(), actor);
         host.authority = authority;
+        self.5.publish();
         // A parked underlay is a path replacement, not a new discovery source.
         // The existing remote registry retains the authoritative observed IP.
         if let Some(runtime) = runtime {

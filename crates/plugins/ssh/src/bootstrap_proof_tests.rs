@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Default)]
 struct Proofs {
+    commit_budget: Mutex<Option<Duration>>,
+    observed_commit_timeout: Mutex<Option<Duration>>,
     facts_started: tokio::sync::Notify,
     canary_started: tokio::sync::Notify,
     facts_release: tokio::sync::Notify,
@@ -16,6 +18,9 @@ struct Proofs {
     commit_failure: tokio::sync::Notify,
 }
 impl Backend for Proofs {
+    fn setup_commit_timeout(&self, _: &Authority, _: uuid::Uuid) -> Option<Duration> {
+        *self.commit_budget.lock().unwrap()
+    }
     fn resolve<'a>(
         &'a self,
         _: &'a Authority,
@@ -88,6 +93,67 @@ impl SshSession for Commit {
             Ok(CommandOutput { stdout: Vec::new() })
         })
     }
+    fn run_with_timeout<'a>(
+        &'a self,
+        script: &'a str,
+        input: Input<'a>,
+        timeout: Duration,
+    ) -> Operation<'a, CommandOutput> {
+        Box::pin(async move {
+            *self.0.observed_commit_timeout.lock().unwrap() = Some(timeout);
+            tokio::time::timeout(timeout, self.run(script, input))
+                .await
+                .map_err(|_| Failure::install("The SSH commit command exceeded its time limit."))?
+        })
+    }
+}
+
+/// A caller's anomalous observation cannot create a command timer past the
+/// setup limit, and the timer must not impose any minimum successful duration.
+#[tokio::test(start_paused = true)]
+async fn review_commit_clamps_outliers_and_releases_immediately() {
+    for budget in [
+        Duration::from_secs(60),
+        Duration::from_secs(114),
+        Duration::from_secs(186),
+        Duration::MAX,
+    ] {
+        let (runner, authority, installation, proofs, host) = context();
+        *proofs.commit_budget.lock().unwrap() = Some(budget);
+        proofs.facts_release.notify_one();
+        proofs.canary_release.notify_one();
+        let started = tokio::time::Instant::now();
+        runner
+            .complete_setup(&authority, host, &installation, true)
+            .await
+            .unwrap();
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(
+            *proofs.observed_commit_timeout.lock().unwrap(),
+            Some(budget.min(Duration::from_secs(180)))
+        );
+        assert!(proofs.committed.load(Ordering::SeqCst));
+    }
+}
+
+/// An outlier must not leave a stalled command or its private proof alive
+/// beyond the attempt cap, even when no readiness notification arrives.
+#[tokio::test(start_paused = true)]
+async fn review_stalled_commit_cannot_outlive_attempt_cap() {
+    let (runner, authority, installation, proofs, host) = context();
+    *proofs.commit_budget.lock().unwrap() = Some(Duration::MAX);
+    let started = tokio::time::Instant::now();
+    let error = runner
+        .complete_setup(&authority, host, &installation, true)
+        .await
+        .unwrap_err();
+    assert_eq!(started.elapsed(), Duration::from_secs(180));
+    assert!(matches!(
+        error.failed_step,
+        Some(crate::model::InstallStep::Install)
+    ));
+    assert!(proofs.cleaned.load(Ordering::SeqCst));
+    assert!(!proofs.committed.load(Ordering::SeqCst));
 }
 
 fn context() -> (Bootstrap, Authority, Installation, Arc<Proofs>, uuid::Uuid) {

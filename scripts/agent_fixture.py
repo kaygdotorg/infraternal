@@ -41,8 +41,11 @@ def replay_complete_cursor(event, session_id):
 def fixture_state(label):
     """Return a short per-process private state path for real Unix-socket fixtures."""
     root = Path(os.environ.get(
-        'INFRATERNAL_TEST_STATE_ROOT',
-        Path.home() / '.cache/codex-scratch/infraternal',
+        'INFRATERNAL_AGENT_TEST_STATE_ROOT',
+        os.environ.get(
+            'INFRATERNAL_TEST_STATE_ROOT',
+            Path.home() / '.cache/codex-scratch/infraternal',
+        ),
     ))
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     state = root / f'{label}{os.getpid()}'
