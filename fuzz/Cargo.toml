@@ -53,6 +53,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "host_name_parse"
+path = "fuzz_targets/host_name_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "mesh_api_json"
 path = "fuzz_targets/mesh_api_json.rs"
 test = false

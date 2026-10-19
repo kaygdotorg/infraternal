@@ -33,3 +33,11 @@ fn numeric_invalid_and_unnamed_inputs_give_no_name() {
         assert_eq!(machine_name(source), None, "{source}");
     }
 }
+
+#[test]
+fn odd_and_overlong_hostnames_give_no_name() {
+    let too_long = "n".repeat(200);
+    for source in ["host!name", "two words", "münchen", too_long.as_str()] {
+        assert_eq!(machine_name(source), None, "{source}");
+    }
+}
