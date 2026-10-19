@@ -38,6 +38,8 @@ const THEME_COLOR_KEYS: readonly (keyof ITheme)[] = [
   "background", "foreground", "cursor", "cursorAccent", "selectionBackground", "selectionForeground", ...ANSI_THEME_KEYS,
 ];
 const encoder = new TextEncoder();
+/** Never append to this shared sentinel: the first answer gets a private collector. */
+const EMPTY_PARSER_REPLIES: string[] = [];
 
 /** Private hooks on the pinned Ghostty build, kept at the renderer boundary for idle parking. */
 interface GhosttyActivityControls {
@@ -291,7 +293,7 @@ export class TerminalClient {
   /** Scoped only around synchronous renderer writes; keyboard input arrives in later event tasks. */
   private suppressTerminalResponses = false;
   private readonly terminalQueries = new TerminalQueries();
-  private parserReplies: string | undefined;
+  private parserReplies: string[] | undefined;
   private parserReplyLength = 0;
   private renderIdleTimer = 0;
   /** Set by writes and consumed by the next renderer pass; link parsing itself waits for an idle callback. */
@@ -384,9 +386,12 @@ export class TerminalClient {
       this.wakeTerminal();
       // Replayed parser replies are not typing: they neither reach the shell nor restart the blink.
       if (this.suppressTerminalResponses) return;
-      if (this.parserReplies !== undefined) {
+      if (this.parserReplies) {
         this.parserReplyLength += data.length;
-        if (this.parserReplyLength <= 1024) this.parserReplies += data;
+        if (this.parserReplyLength <= 1024) {
+          if (this.parserReplies === EMPTY_PARSER_REPLIES) this.parserReplies = [data];
+          else this.parserReplies.push(data);
+        }
         return;
       }
       this.restartCursorBlink();
@@ -1414,11 +1419,11 @@ export class TerminalClient {
     if (!this.conn.terminalQueryReplies) { this.terminal.write(bytes, callback); return; }
     let start = 0;
     const write = (end: number, replyTo: bigint): void => {
-      this.parserReplies = "";
+      this.parserReplies = EMPTY_PARSER_REPLIES;
       this.parserReplyLength = 0;
       try {
         this.terminal.write(bytes.subarray(start, end), end === bytes.length ? callback : undefined);
-        const response = this.parserReplies;
+        const response = this.parserReplies.join("");
         if (response && this.parserReplyLength <= 1024) {
           const encoded = encoder.encode(response);
           if (encoded.length <= 1024) this.sendFrame(this.streamId, { type: "Input", inSeq: 0n, replyTo, bytes: encoded });
