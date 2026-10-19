@@ -584,15 +584,29 @@ adds optional `replyTo`; Rust names the distinct layout `InputReply`.
 `query_seq` identifies the opening ESC byte in the session's absolute Output
 cursor. It is not a typing offset. Replies consume no typing credit or cursor,
 are not replayed by browsers, and are never reclassified as typing. The server
-observes queries before delivering output, accepts the first matching response
+timestamps output ranges before delivering them, accepts the first renderer response
 within one second of the opening ESC, and drops duplicate, unknown, expired or
-structurally invalid responses with content-free diagnostics. This window
+empty or oversized responses with content-free diagnostics. This window
 covers more than three default 300 ms round trips and bounds stale responses,
 including queries split across output frames. A new query has a new identity,
 even when its bytes match an older query. Query state survives viewer reconnect.
 
-Only the output parser creates query records; marked input never allocates one.
-The parser and retained query table have fixed bounds. Overflow fails closed.
+The renderer is authoritative about which output produces a response. Neither
+side matches request kinds or response contents. Generic control boundaries
+split browser renderer writes so identities survive different viewers' paint/credit
+chunking, including multiple requests in one transport frame. They classify no
+request kinds and retain no control contents. A string interrupted by another
+ESC sequence uses the newer opening ESC identity. The server parses no terminal
+grammar: the timestamp of the output byte identified by `query_seq` determines
+the deadline, even when the request completes in a later output frame. Replay
+and fan-out never renew that timestamp.
+
+Only output creates timestamped ranges (at most 64 per session); accepted replies
+create bounded claims (at most 64 live positions per session, 4,096 sessions).
+Unknown marked input creates neither. Evicting the oldest output range refuses
+replies to its positions. A full claim table refuses new replies until expiry;
+it never evicts a live claim and thereby reopens an accepted position. Styling
+controls consume no claims, so they cannot displace a pending query.
 Replies take a separate bounded lane to the shim so discarded replies cannot
 leave gaps in keyboard input cursors or select the answering viewer's geometry.
 
