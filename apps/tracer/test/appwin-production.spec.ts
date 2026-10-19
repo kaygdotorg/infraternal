@@ -42,7 +42,7 @@ test("the production setting enables viewing, control and releasing its native l
   await enable(page);
   await expect(page.locator(".aw-control")).toHaveCount(0);
   await page.screenshot({ path: tracerEvidencePath("production-app-viewing.png") });
-  await page.locator(".aw-stage").click({ position: { x: 120, y: 100 } });
+  await page.locator(".aw-stage").click();
   await expect(page.locator(".aw-control")).toContainText("Controlled from infraternal");
   await page.screenshot({ path: tracerEvidencePath("production-app-control.png") });
   await page.locator(".aw-control").click();
