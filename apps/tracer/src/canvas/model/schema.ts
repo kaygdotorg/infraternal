@@ -4,6 +4,8 @@ export const FORMAT = "infraternal.canvas";
 export const VERSION = 1;
 /** Smallest canonical column share accepted by the server. */
 export const MIN_COLUMN_WEIGHT = 0.1;
+/** The smallest height ratio a window may carry on the wire (matches the server's sizing bound). */
+export const MIN_WINDOW_HEIGHT = 0.05;
 
 /** What a window shows, by stable reference. */
 export type DocTarget =
@@ -82,7 +84,7 @@ export function parseDocument(input: unknown): CanvasDocument | undefined {
       const windows: DocWindow[] = [];
       for (const w of c.windows) {
         const target = isObject(w) ? parseTarget(w.target) : undefined;
-        if (!isObject(w) || !text(w.id) || !target || (w.height !== undefined && !finite(w.height, 0.05, 10000))) return undefined;
+        if (!isObject(w) || !text(w.id) || !target || (w.height !== undefined && !finite(w.height, MIN_WINDOW_HEIGHT, 10000))) return undefined;
         if (++count > MAX_WINDOWS) return undefined;
         if ((w.span !== undefined && !finite(w.span, 1, MAX_COLUMNS)) || (w.rows !== undefined && !finite(w.rows, 1, MAX_BANDS)) || (w.row !== undefined && !finite(w.row, 0, MAX_BANDS))) return undefined;
         windows.push({

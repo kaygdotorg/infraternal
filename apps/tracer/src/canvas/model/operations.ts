@@ -1,7 +1,7 @@
 /** Stable-ID intents and optimistic reduction for account layouts (D180, D183, #243). */
 import { reduce } from "./reducer";
 export { reduce } from "./reducer";
-import { MIN_COLUMN_WEIGHT, documentWindows as windows } from "./schema";
+import { MIN_COLUMN_WEIGHT, MIN_WINDOW_HEIGHT, documentWindows as windows } from "./schema";
 import type { CanvasDocument, DocColumn, DocTarget, DocView, DocWindow } from "./schema";
 export type Intent =
   | { type: "view.add"; view: DocView }
@@ -21,6 +21,24 @@ export type LayoutEdit = SplitEdit | MoveEdit;
 export interface SplitEdit { windowId: string; anchorId: string; axis: "right" | "down" }
 const cols = (v: DocView): DocColumn[] => v.layout.type === "tiled" ? v.layout.columns : [];
 const equal = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+/**
+ * The one bound check for every split. The server halves the anchor's width (right) or height (down) and refuses a
+ * result under its sizing floor, so a narrow or short anchor is first grown, with the ordinary ordered sizing intent,
+ * to exactly twice the floor: both new windows then stay valid and the offered split always lands. The grow intent is
+ * pipelined with the split and never waits for its receipt.
+ */
+function widenForSplit(working: CanvasDocument, intent: Extract<Intent, { type: "split" }>): Intent | undefined {
+  const view = working.views.find((v) => v.id === intent.view_id), columns = view ? cols(view) : [];
+  const at = columns.findIndex((c) => c.windows.some((w) => w.id === intent.anchor_id));
+  const column = columns[at], anchor = column?.windows.find((w) => w.id === intent.anchor_id);
+  if (!column || !anchor) return undefined;
+  if (intent.axis === "down") {
+    return anchor.height !== undefined && anchor.height < MIN_WINDOW_HEIGHT * 2 ? { type: "resize", window_id: anchor.id, height: MIN_WINDOW_HEIGHT * 2 } : undefined;
+  }
+  // Only a window that owns its column divides the column's weight; a spanning one shares the next column instead.
+  if (Math.min(anchor.span ?? 1, columns.length - at) === 1 && column.weight < MIN_COLUMN_WEIGHT * 2) return { type: "weight", view_id: intent.view_id, column_id: column.id, weight: MIN_COLUMN_WEIGHT * 2 };
+  return undefined;
+}
 /** Compare completed changes using stable neighbours, never numeric placement indexes. */
 export function edits(before: CanvasDocument, after: CanvasDocument, splits: ReadonlyMap<string, LayoutEdit> = new Map()): Intent[] {
   const result: Intent[] = [];
@@ -82,16 +100,13 @@ export function edits(before: CanvasDocument, after: CanvasDocument, splits: Rea
   }
   const working = structuredClone(before), compact: Intent[] = [];
   // Earlier insertions already move their following neighbours. Do not turn one drag into redundant moves.
-  for (const intent of [...result.filter((i) => i.type !== "membership.remove"), ...result.filter((i) => i.type === "membership.remove")]) {
-    if (intent.type === "split" && intent.axis === "right") {
-      const view = working.views.find((v) => v.id === intent.view_id), columns = view ? cols(view) : [];
-      const at = columns.findIndex((c) => c.windows.some((w) => w.id === intent.anchor_id));
-      const column = columns[at], anchor = column?.windows.find((w) => w.id === intent.anchor_id);
-      // Widen before dividing a narrow column: both new windows must meet the wire bound.
-      // This uses the existing ordered weight intent and never waits for its receipt.
-      if (column && anchor && Math.min(anchor.span ?? 1, columns.length - at) === 1 && column.weight < MIN_COLUMN_WEIGHT * 2) {
-        const grow: Intent = { type: "weight", view_id: intent.view_id, column_id: column.id, weight: MIN_COLUMN_WEIGHT * 2 };
+  for (let intent of [...result.filter((i) => i.type !== "membership.remove"), ...result.filter((i) => i.type === "membership.remove")]) {
+    if (intent.type === "split") {
+      const grow = widenForSplit(working, intent);
+      if (grow) {
         compact.push(grow); reduce(working, grow);
+        // The drawn half was measured before the grow; the grown anchor divides evenly, so the server's own half is right.
+        if (grow.type === "resize") { const { height: _drawn, ...window } = intent.window; intent = { ...intent, window }; }
       }
     }
     if (intent.type === "move") {

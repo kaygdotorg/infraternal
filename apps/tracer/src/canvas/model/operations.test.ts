@@ -70,3 +70,16 @@ test("a narrow right split widens first so both halves remain valid", () => {
   expect(result.columns.map((c) => c.weight)).toEqual([0.1, 0.1]);
   expect(changes.map((i) => i.type)).toEqual(["weight", "split"]);
 });
+
+test("a short down split grows the anchor first so both halves meet the height floor", () => {
+  const before = doc(); reduce(before, open("anchor"));
+  reduce(before, { type: "resize", window_id: "anchor", height: 0.05 });
+  const after = structuredClone(before);
+  const split: Intent = { type: "split", view_id: "console", anchor_id: "anchor", axis: "down", column_id: "c", window: { id: "child", target: { type: "settings", section: "appearance" } } };
+  reduce(after, split);
+  const changes = edits(before, after, new Map([["child", { windowId: "child", anchorId: "anchor", axis: "down" }]]));
+  const replay = structuredClone(before); for (const change of changes) reduce(replay, change);
+  const result = replay.views[0]!.layout; if (result.type !== "tiled") throw Error("tiled");
+  expect(result.columns[0]!.windows.map((w) => w.height)).toEqual([0.05, 0.05]);
+  expect(changes.map((i) => i.type)).toEqual(["resize", "split"]);
+});
