@@ -8,8 +8,17 @@ function fixture(rtt: number, streams: number) {
   const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, performance: globals.performance };
   let now = 0, timerId = 0, probes = 0, wakeups = 0, disconnects = 0;
   let forwarding = true;
+  let latestProbe = { nonce: 0n, sentUs: 0n };
   const timers = new Map<number, { at: number; callback(): void }>();
+  const browserTimers = new Set<number>();
   const schedule = (callback: () => void, delay: number) => { const id = ++timerId; timers.set(id, { at: now + delay, callback }); return id; };
+  const takeBrowserTimer = (onTime = false) => {
+    const next = [...timers].filter(([id]) => browserTimers.has(id)).sort((a, b) => a[1].at - b[1].at)[0]!;
+    if (onTime) now = Math.max(now, next[1].at);
+    browserTimers.delete(next[0]);
+    timers.delete(next[0]);
+    return next[1].callback;
+  };
   const sockets: Socket[] = [];
   class Socket {
     static OPEN = 1;
@@ -23,6 +32,7 @@ function fixture(rtt: number, streams: number) {
     send(bytes: Uint8Array) {
       new WebSocketFrameDecoder().feed(bytes, (stream, frame) => {
         if (frame.type === "Ping") {
+          latestProbe = { nonce: frame.nonce, sentUs: frame.sentUs };
           probes++;
           if (forwarding) schedule(() => this.receive(stream, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs }), rtt);
         }
@@ -31,7 +41,7 @@ function fixture(rtt: number, streams: number) {
     receive(stream: number, frame: WireFrame) { this.onmessage?.({ data: encodeMuxedFrame(stream, frame).slice().buffer as ArrayBuffer }); }
     close() {}
   }
-  globals.window = { setTimeout: (callback: () => void, delay: number) => schedule(() => { wakeups++; callback(); }, delay), clearTimeout: (id: number) => timers.delete(id) };
+  globals.window = { setTimeout: (callback: () => void, delay: number) => { const id = schedule(() => { browserTimers.delete(id); wakeups++; callback(); }, delay); browserTimers.add(id); return id; }, clearTimeout: (id: number) => { browserTimers.delete(id); timers.delete(id); } };
   globals.location = { protocol: "https:", host: "idle.example.test" };
   globals.WebSocket = Socket;
   globals.performance = { now: () => now };
@@ -42,11 +52,29 @@ function fixture(rtt: number, streams: number) {
   connection.streamAttached(true, 1);
   return {
     connection,
+    get latestProbe() { return { ...latestProbe }; },
+    get confirmationPending() { return (connection as unknown as { livenessConfirmationPending: boolean }).livenessConfirmationPending; },
     get probes() { return probes; }, get wakeups() { return wakeups; }, get disconnects() { return disconnects; },
     receive(stream: number, frame: WireFrame) { sockets[0]!.receive(stream, frame); },
+    captureLatestReply() {
+      const socket = sockets.at(-1)!;
+      const probe = { ...latestProbe };
+      // Keep the task callable so a stale timer can be ordered ahead of this queued socket message.
+      return () => socket.receive(0, { type: "Pong", ...probe });
+    },
     stopForwarding() { forwarding = false; },
+    welcomeLatest() {
+      const socket = sockets.at(-1)!;
+      socket.onopen?.();
+      socket.receive(0, { type: "Welcome", connectionId: new Uint8Array(16), resumeToken: new Uint8Array(32), resumeWindowSeconds: 120 });
+    },
     setRoundTrip(ms: number) { rtt = ms; },
     suspend(ms: number) { now += ms; },
+    runBrowserTimer(onTime = false) {
+      takeBrowserTimer(onTime)();
+    },
+    captureBrowserTimer(onTime = false) { return takeBrowserTimer(onTime); },
+    replyLatest(valid = true) { sockets.at(-1)!.receive(0, { type: "Pong", nonce: latestProbe.nonce, sentUs: latestProbe.sentUs + (valid ? 0n : 1n) }); },
     advance(ms: number) {
       const until = now + ms;
       for (;;) {
@@ -209,7 +237,7 @@ test("browser jitter allowance decays after a stable link returns", () => {
   } finally { f.dispose(); }
 });
 
-test("a queued healthy reply survives a 150ms browser event-loop stall", () => {
+for (const timerFirst of [false, true]) for (const stall of [150, 1000, 60_000]) test(`a queued healthy reply survives a ${stall}ms browser event-loop stall with ${timerFirst ? "timer" : "reply"} first`, () => {
   const f = fixture(1, 1);
   try {
     f.advance(1000);
@@ -217,9 +245,288 @@ test("a queued healthy reply survives a 150ms browser event-loop stall", () => {
     while (f.probes === issued) f.advance(1);
     // A request is outstanding; only local callbacks are held. The queued
     // correlated reply may precede the delayed liveness timer on resume.
-    f.suspend(150);
+    f.suspend(stall);
+    if (timerFirst) f.runBrowserTimer();
     f.advance(0);
     expect(f.disconnects).toBe(0);
     expect(f.connection.isWelcomed).toBe(true);
+    // The renderer delay must not train a slower network deadline. A later
+    // real outage still consumes the original allowance on a responsive page.
+    f.stopForwarding();
+    f.advance(276);
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+test("a late timer without a reply counts subsequent responsive silence", () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1000);
+    f.stopForwarding();
+    f.advance(2);
+    f.suspend(1000);
+    f.runBrowserTimer();
+    // No timer may retire synchronously on waking a blocked page.
+    expect(f.connection.isWelcomed).toBe(true);
+    f.advance(276);
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+test("an outstanding probe gets responsive observation after a renderer stall", () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1000);
+    f.stopForwarding();
+    f.advance(30); // A probe is now outstanding, with most of its allowance left.
+    f.suspend(1000);
+    f.runBrowserTimer();
+    // The stall may have started before the timer's due time. Merely removing
+    // lateness after that due time would consume the whole allowance on wake.
+    f.advance(200);
+    expect(f.connection.isWelcomed).toBe(true);
+    f.advance(76);
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+for (const valid of [false, true]) test(`retirement gives a queued ${valid ? "correlated" : "mismatched"} pong one task turn`, () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1000);
+    f.stopForwarding();
+    f.advance(200);
+    // Deliver the expiry timer exactly on time: this exercises the final task
+    // yield independently of any scheduling-lag credit.
+    f.runBrowserTimer(true);
+    expect(f.connection.isWelcomed).toBe(true);
+    f.replyLatest(valid);
+    f.advance(1);
+    expect(f.connection.isWelcomed).toBe(valid);
+  } finally { f.dispose(); }
+});
+
+for (const { interval, typing } of [{ interval: 75, typing: true }, { interval: 1000, typing: false }, { interval: 60_000, typing: false }]) test(`a dead ${typing ? "typing" : "idle"} route eventually retires when browser tasks run every ${interval}ms`, () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1001);
+    f.stopForwarding();
+    // Unacknowledged typing keeps the existing 25ms probe cadence active.
+    // The browser still executes tasks and sends probes, but no peer replies.
+    if (typing) f.connection.send(1, { type: "Input", inSeq: 0n, bytes: new Uint8Array([1]) });
+    const probes = f.probes;
+    // These are virtual-clock schedules, not host timing measurements. Repeated
+    // busy-page tasks and background timer batches must not renew peer proof.
+    for (let elapsed = 0; elapsed < 600_000; elapsed += interval) {
+      f.suspend(interval);
+      f.runBrowserTimer(true);
+      if (!f.connection.isWelcomed) break;
+    }
+    expect(f.probes).toBeGreaterThan(probes);
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+for (const gap of [75, 1000, 60_000]) test(`dead-route stall grace is bounded by two allowances and three ${gap}ms task gaps`, () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1001);
+    f.stopForwarding();
+    f.advance(30); // An issued probe is already outstanding; A = 250ms.
+    const bound = 2 * 250 + 3 * gap;
+    for (let elapsed = gap; elapsed <= bound && f.connection.isWelcomed; elapsed += gap) {
+      f.suspend(gap);
+      f.runBrowserTimer(true);
+    }
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+test("correlated queued replies replenish stall grace across successive healthy stalls", () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1001);
+    f.stopForwarding();
+    for (let cycle = 0; cycle < 10; cycle++) {
+      f.advance(30);
+      f.suspend(1000);
+      f.runBrowserTimer(true);
+      f.replyLatest();
+      expect(f.connection.isWelcomed).toBe(true);
+    }
+    f.advance(30);
+    // With replies gone, subsequent late callbacks still consume the bound.
+    for (let tick = 0; tick < 3 && f.connection.isWelcomed; tick++) {
+      f.suspend(1000);
+      f.runBrowserTimer(true);
+    }
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+// These schedules model browser task order; they do not measure host latency.
+for (const kind of ["duplicate", "wrong timestamp", "unknown nonce"] as const) test(`${kind} replies cannot replenish consumed stall grace`, () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1001);
+    const answered = f.latestProbe;
+    f.stopForwarding();
+    f.advance(30);
+    for (let cycle = 0; cycle < 10 && f.connection.isWelcomed; cycle++) {
+      f.suspend(cycle % 2 === 0 ? 100 : 25);
+      f.runBrowserTimer(true);
+      if (kind === "duplicate") f.receive(0, { type: "Pong", ...answered });
+      else {
+        const probe = f.latestProbe;
+        f.receive(0, { type: "Pong", nonce: probe.nonce + (kind === "unknown nonce" ? 1000n : 0n), sentUs: probe.sentUs + (kind === "wrong timestamp" ? 1n : 0n) });
+      }
+    }
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+test("a queued correlated reply cancels confirmation without letting a duplicate renew it", () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1001);
+    f.stopForwarding();
+    f.advance(30);
+    f.suspend(1000);
+    f.runBrowserTimer(true); // Consume local grace.
+    f.suspend(250);
+    f.runBrowserTimer(true); // Arm confirmation before the socket task.
+    const answered = f.latestProbe;
+    f.replyLatest();
+    expect(f.connection.isWelcomed).toBe(true);
+    expect(f.disconnects).toBe(0);
+    f.advance(30);
+    expect(f.confirmationPending).toBe(false);
+    for (let cycle = 0; cycle < 5 && f.connection.isWelcomed; cycle++) {
+      f.suspend(1000);
+      f.receive(0, { type: "Pong", ...answered });
+      f.runBrowserTimer(true);
+    }
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+test("a replacement route receives its own one-shot local stall grace", () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1001);
+    f.stopForwarding();
+    f.advance(30);
+    f.suspend(1000);
+    f.runBrowserTimer(true); // Consume the old route's grace.
+    f.connection.forceDrop();
+    f.advance(1000);
+    f.welcomeLatest();
+    f.advance(25); // First probe on the replacement route, A = 2000ms.
+    f.suspend(3000);
+    f.runBrowserTimer(true);
+    f.runBrowserTimer(true);
+    expect(f.connection.isWelcomed).toBe(true);
+    // The replacement receives one grace, never unlimited callback credit.
+    f.suspend(2000);
+    f.runBrowserTimer(true);
+    f.runBrowserTimer(true);
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+test("continuous typing cannot cancel every silent-route confirmation turn", () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1001);
+    f.stopForwarding();
+    f.advance(30);
+    // Model an input task queued between each overdue liveness callback and
+    // its zero-delay confirmation. Liveness callbacks still run every 75ms.
+    // A = 250ms and G = 75ms give the claimed 2*A + 3*G bound of 725 virtual ms.
+    const allowance = 250, gap = 75;
+    const bound = 2 * allowance + 3 * gap;
+    let elapsed = 0;
+    while (elapsed < bound && f.connection.isWelcomed) {
+      elapsed += gap;
+      f.suspend(75);
+      f.runBrowserTimer(true);
+      f.connection.sampleRoundTrip();
+      f.connection.send(1, { type: "Input", inSeq: BigInt(elapsed / 75), bytes: new Uint8Array([120]) });
+    }
+    expect(f.connection.isWelcomed).toBe(false);
+    expect(elapsed).toBeLessThanOrEqual(bound);
+  } finally { f.dispose(); }
+});
+
+function armConfirmation(f: ReturnType<typeof fixture>): () => void {
+  f.advance(1001);
+  f.stopForwarding();
+  f.advance(30);
+  f.suspend(1000);
+  f.runBrowserTimer(true); // Consume the one local-stall grace.
+  f.suspend(250);
+  f.runBrowserTimer(true); // Expiry queues a zero-delay confirmation.
+  expect(f.confirmationPending).toBe(true);
+  return f.captureBrowserTimer();
+}
+
+for (const reset of ["reconnect", "close", "dispose"] as const) test(`a pending confirmation is reset by ${reset}`, () => {
+  const f = fixture(1, 1);
+  try {
+    const staleConfirmation = armConfirmation(f);
+    const disconnectsBeforeReset = f.disconnects;
+    if (reset === "reconnect") f.connection.forceDrop();
+    else if (reset === "close") f.connection.forceClose(1001, "review close");
+    else f.connection.dispose();
+    expect(f.confirmationPending).toBe(false);
+
+    if (reset === "dispose") {
+      staleConfirmation();
+      expect(f.confirmationPending).toBe(false);
+      expect(f.disconnects).toBe(disconnectsBeforeReset);
+      return;
+    }
+
+    f.advance(100);
+    f.welcomeLatest();
+    expect(f.connection.isWelcomed).toBe(true);
+    staleConfirmation();
+    expect(f.connection.isWelcomed).toBe(true);
+    expect(f.confirmationPending).toBe(false);
+    expect(f.disconnects).toBe(disconnectsBeforeReset + 1);
+  } finally { f.dispose(); }
+});
+
+test("a stale confirmation from before reconnect cannot close the replacement route", () => {
+  const f = fixture(1, 1);
+  try {
+    const staleConfirmation = armConfirmation(f);
+    f.connection.forceDrop();
+    expect(f.confirmationPending).toBe(false);
+    f.advance(100);
+    f.welcomeLatest();
+    f.advance(25); // Issue the replacement route's first probe.
+    f.replyLatest(); // Learn its short response allowance while it is healthy.
+    f.connection.sampleRoundTrip(); // Restore fast probing for the silence control.
+    f.advance(25); // Issue a fresh unanswered probe.
+    f.suspend(1000);
+    f.runBrowserTimer(true); // Consume the replacement route's local-stall grace.
+    f.suspend(250);
+    f.runBrowserTimer(true); // Arm the replacement route's own confirmation.
+    expect(f.confirmationPending).toBe(true);
+    const disconnectsBeforeStaleCallback = f.disconnects;
+    const currentConfirmation = f.captureBrowserTimer();
+    const queuedReply = f.captureLatestReply();
+
+    // The old queued timer must not stand in for the replacement route's task turn.
+    staleConfirmation();
+    expect(f.connection.isWelcomed).toBe(true);
+    expect(f.confirmationPending).toBe(true);
+    queuedReply();
+    currentConfirmation();
+
+    expect(f.connection.isWelcomed).toBe(true);
+    expect(f.confirmationPending).toBe(false);
+    expect(f.disconnects).toBe(disconnectsBeforeStaleCallback);
   } finally { f.dispose(); }
 });

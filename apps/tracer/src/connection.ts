@@ -126,6 +126,15 @@ export class MuxConnection {
   private readonly rttListeners = new Set<(ms: number | undefined) => void>();
   private readonly pendingPings = new Map<bigint, number>();
   private livenessTimer = 0;
+  /** Keep the socket-task confirmation alive while input or probe activity reschedules liveness. */
+  private livenessConfirmationPending = false;
+  /** Identify its arming route; a cleared timer may already be queued when a replacement route starts. */
+  private livenessConfirmationToken = 0;
+  /** A delayed browser task is local uncertainty, never evidence that the peer stopped answering (#245). */
+  private livenessDueAt = Infinity;
+  private lastLivenessStallAt = -Infinity;
+  /** One local-stall grace per peer reply; callbacks alone cannot renew it (#245). */
+  private stallGraceUsed = false;
   private lastPongAt = 0;
   private fastProbeUntil = 0;
   private readonly unacknowledgedInput = new Map<number, bigint>();
@@ -294,6 +303,7 @@ export class MuxConnection {
   sampleRoundTrip(urgent = true): void {
     const startedAt = performance.now();
     if (!this.isWelcomed || this.closed) return;
+    this.accountLivenessDelay(startedAt);
     if (urgent) {
       this.fastProbeUntil = startedAt + 250;
       this.scheduleLiveness();
@@ -323,15 +333,15 @@ export class MuxConnection {
     const startedAt = this.pendingPings.get(nonce);
     if (startedAt === undefined || sentUs !== BigInt(Math.round(startedAt * 1000))) return;
     const now = performance.now();
-    // A renderer can wake with an old reply queued ahead of its timer. Enforce the
-    // existing lease first; suspension must not become an hours-long learned RTT.
-    if (this.pendingPings.size > 0 && now - this.lastPongAt >= this.responseAllowance()) {
-      this.retireUnresponsiveSocket();
-      return;
-    }
+    this.accountLivenessDelay(now);
+    // Either task source can run first after a stall. A correlated queued reply
+    // still proves the route works, but its renderer wait must not train RTT.
+    const delayed = startedAt <= this.lastLivenessStallAt || now - this.lastPongAt >= this.responseAllowance();
     // A reply proves this direction works; discard older unanswered probes too.
     for (const key of this.pendingPings.keys()) { if (key <= nonce) this.pendingPings.delete(key); }
     this.lastPongAt = now;
+    this.stallGraceUsed = false;
+    if (delayed) { this.scheduleLiveness(); return; }
     const ms = Math.max(1, now - startedAt);
     if (this.livenessRtt !== undefined && ms > this.livenessRtt + 5) this.fastProbeUntil = now + Math.max(250, ms * 2);
     // Variation uses the previous smoothed RTT; only correlated replies train it.
@@ -433,7 +443,7 @@ export class MuxConnection {
       try {
         const message = new Uint8Array(event.data);
         this.decoder?.feed(message, (streamId, frame) => {
-          // A Close or overdue Pong may retire this route midway through one message.
+          // A Close may retire this route midway through one message.
           if (this.socket === socket && !this.closed) this.dispatch(streamId, frame, message, receivedAt);
         });
       } catch {
@@ -513,12 +523,52 @@ export class MuxConnection {
     return this.livenessSrtt === undefined ? 2000 : Math.max(250, this.livenessSrtt + 4 * this.livenessRttvar + 50);
   }
 
-  private checkLiveness(): void {
-    this.livenessTimer = 0;
-    if (!this.isWelcomed || this.closed) return;
+  /** A late task cannot prove the page was responsive during its scheduled wait. */
+  private accountLivenessDelay(now: number): boolean {
+    const late = now - this.livenessDueAt;
+    if (late <= LIVENESS_TICK_MS) return false;
+    // The first stall may include the scheduled wait too. Allow one fresh
+    // observation interval, but only a correlated peer reply can replenish it.
+    // With callback gaps bounded by G and allowance A, retirement takes at most
+    // 2*A + 3*G after issuance (including the final socket-task turn). No wall
+    // clock bound is possible while the browser executes no tasks at all.
+    if (this.pendingPings.size > 0 && !this.stallGraceUsed) {
+      this.lastPongAt = now;
+      this.stallGraceUsed = true;
+    }
+    this.lastLivenessStallAt = now;
+    // Consume the credit once even if a socket task runs before the timer.
+    this.livenessDueAt = now;
+    return true;
+  }
+
+  private checkLiveness(confirm = false, confirmationToken?: number, confirmationSocket?: WebSocket): void {
+    if (confirm) {
+      if (!this.livenessConfirmationPending || confirmationToken !== this.livenessConfirmationToken || confirmationSocket !== this.socket) return;
+      this.livenessConfirmationPending = false;
+      this.livenessConfirmationToken += 1;
+    } else if (this.livenessConfirmationPending) {
+      // A timer from an earlier liveness schedule must not replace the confirmation's handle.
+      return;
+    }
     const now = performance.now();
+    this.accountLivenessDelay(now);
+    this.livenessTimer = 0;
+    this.livenessDueAt = Infinity;
+    if (!this.isWelcomed || this.closed) return;
     if (this.pendingPings.size > 0 && now - this.lastPongAt >= this.responseAllowance()) {
-      this.retireUnresponsiveSocket();
+      // Timer and socket tasks have different queues. Give already-arrived
+      // replies one task turn before closing. Repeated local stalls cannot
+      // renew that turn: only an actual correlated reply redeems the route.
+      if (confirm) this.retireUnresponsiveSocket();
+      else {
+        this.livenessDueAt = now;
+        const socket = this.socket;
+        if (!socket) return;
+        const confirmationToken = ++this.livenessConfirmationToken;
+        this.livenessConfirmationPending = true;
+        this.livenessTimer = window.setTimeout(() => this.checkLiveness(true, confirmationToken, socket), 0);
+      }
       return;
     }
     this.sampleRoundTrip(false);
@@ -535,13 +585,18 @@ export class MuxConnection {
 
   private scheduleLiveness(): void {
     if (!this.isWelcomed || this.closed) return;
+    // A zero-delay confirmation gets one socket-task turn even if input or a Pong arrives first.
+    if (this.livenessConfirmationPending) return;
     window.clearTimeout(this.livenessTimer);
     // Input or a server Ping may have sampled between timer ticks. Schedule at that probe's next due time,
     // rather than skipping a tick and then expiring a healthy low-RTT route before another probe is sent.
     const clock = performance.now();
+    this.accountLivenessDelay(clock);
     const nextProbe = this.nextProbeAt() - clock;
     const remaining = this.pendingPings.size > 0 ? this.lastPongAt + this.responseAllowance() - clock : Infinity;
-    this.livenessTimer = window.setTimeout(() => this.checkLiveness(), Math.max(1, Math.min(nextProbe, remaining)));
+    const delay = Math.max(1, Math.min(nextProbe, remaining));
+    this.livenessDueAt = clock + delay;
+    this.livenessTimer = window.setTimeout(() => this.checkLiveness(), delay);
   }
 
   private retireUnresponsiveSocket(): void {
@@ -593,7 +648,10 @@ export class MuxConnection {
         this.livenessRtt = undefined;
         this.livenessSrtt = undefined;
         this.livenessRttvar = 0;
-        this.livenessTimer = window.setTimeout(() => this.checkLiveness(), LIVENESS_TICK_MS);
+        if (!this.livenessConfirmationPending) {
+          this.livenessDueAt = this.welcomedAt + LIVENESS_TICK_MS;
+          this.livenessTimer = window.setTimeout(() => this.checkLiveness(), LIVENESS_TICK_MS);
+        }
         for (const subId of [...this.subscriptions.keys()]) this.openSubscription(subId);
         for (const l of [...this.welcomeListeners]) l();
         if (!this.resumeSent) this.writersUsed.clear();
@@ -696,8 +754,14 @@ export class MuxConnection {
   }
 
   private resetPings(): void {
+    // Clearing a timer cannot remove its callback if the browser already queued it.
+    this.livenessConfirmationToken += 1;
     window.clearTimeout(this.livenessTimer);
     this.livenessTimer = 0;
+    this.livenessConfirmationPending = false;
+    this.livenessDueAt = Infinity;
+    this.lastLivenessStallAt = -Infinity;
+    this.stallGraceUsed = false;
     this.lastPingAt = -Infinity;
     this.lastRttReportAt = -Infinity;
     this.pendingPings.clear();
