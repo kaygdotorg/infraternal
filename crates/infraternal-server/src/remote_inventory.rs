@@ -1,6 +1,6 @@
 //! Adapts the existing enrollment ledger and transport registry to the removable admitted-host inventory [198], #194.
 use crate::remote_runtime::RemoteHosts;
-use infraternal_plugin_api::Operation;
+use infraternal_plugin_api::{Operation, host_name::machine_name};
 use infraternal_plugin_remote::inventory::{Changes, Inventory};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -9,6 +9,62 @@ use uuid::Uuid;
 pub(crate) struct Source {
     pub pool: SqlitePool,
     pub hosts: RemoteHosts,
+    #[cfg(feature = "mesh")]
+    pub mesh: Option<infraternal_plugin_mesh::api::MeshService>,
+}
+impl Source {
+    /// Retain valid machine facts without allowing an older host to erase a name it cannot report.
+    async fn save_facts(&self, id: Uuid, facts: &Value) -> bool {
+        let hostname = facts
+            .get("hostname")
+            .and_then(Value::as_str)
+            .and_then(machine_name);
+        let os = facts
+            .get("os")
+            .and_then(Value::as_str)
+            .filter(|os| !os.is_empty() && os.len() <= 256);
+        let Ok(mut tx) = self.pool.begin().await else {
+            return false;
+        };
+        let mut changed = false;
+        if let Some(hostname) = hostname
+            && let Ok(result) = sqlx::query("UPDATE remote_hosts SET hostname=? WHERE id=? AND revoked_at IS NULL AND hostname IS NOT ?")
+                .bind(&hostname)
+                .bind(id.as_bytes().as_slice())
+                .bind(&hostname)
+                .execute(&mut *tx)
+                .await
+        {
+            changed |= result.rows_affected() > 0;
+        }
+        if let Some(os) = os
+            && let Ok(result) = sqlx::query("UPDATE remote_host_bootstrap SET os=? WHERE host_id=? AND os IS NOT ? AND EXISTS(SELECT 1 FROM remote_hosts WHERE id=host_id AND revoked_at IS NULL)")
+                .bind(os)
+                .bind(id.as_bytes().as_slice())
+                .bind(os)
+                .execute(&mut *tx)
+                .await
+        {
+            changed |= result.rows_affected() > 0;
+        }
+        if tx.commit().await.is_err() {
+            return false;
+        }
+        changed
+    }
+
+    /// Publish retained facts and reconcile on every availability edge; older hosts may omit a cached hostname.
+    async fn apply_facts(&self, id: Uuid, facts: &Value) -> bool {
+        let changed = self.save_facts(id, facts).await;
+        if changed {
+            self.hosts.5.publish();
+        }
+        #[cfg(feature = "mesh")]
+        if let Some(mesh) = &self.mesh {
+            mesh.refresh_host_name(&id.to_string()).await;
+        }
+        changed
+    }
 }
 impl Inventory for Source {
     fn observe(
@@ -38,16 +94,8 @@ impl Inventory for Source {
                             .await
                             .ok()
                             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-                        if let Some(os) = facts
-                            .as_ref()
-                            .and_then(|facts| facts["os"].as_str())
-                            .filter(|os| !os.is_empty() && os.len() <= 256)
-                        {
-                            let saved = sqlx::query("UPDATE remote_host_bootstrap SET os=? WHERE host_id=? AND EXISTS(SELECT 1 FROM remote_hosts WHERE id=host_id AND revoked_at IS NULL)")
-                                .bind(os).bind(id.as_bytes().as_slice()).execute(&self.pool).await;
-                            if saved.is_ok() {
-                                self.hosts.5.publish();
-                            }
+                        if let Some(facts) = facts {
+                            self.apply_facts(id, &facts).await;
                         }
                     }
                 }
@@ -78,8 +126,8 @@ impl Inventory for Source {
                 })
                 .transpose()?;
             // Same authority predicate as websocket::terminal_actor. Unredeemed invitations are not admitted hosts.
-            let rows: Vec<(Vec<u8>, String, Option<String>, String)> = sqlx::query_as(
-                "SELECT h.id,COALESCE(b.address,''),b.os,h.mode FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.owner_id=? AND h.revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id) AND (? IS NULL OR h.id>?) ORDER BY h.id LIMIT 129")
+            let rows: Vec<(Vec<u8>, String, Option<String>, Option<String>, String)> = sqlx::query_as(
+                "SELECT h.id,COALESCE(b.address,''),b.os,h.hostname,h.mode FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.owner_id=? AND h.revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id) AND (? IS NULL OR h.id>?) ORDER BY h.id LIMIT 129")
                 .bind(account).bind(after.map(|id| id.as_bytes().to_vec())).bind(after.map(|id| id.as_bytes().to_vec())).fetch_all(&self.pool).await.map_err(|_| ())?;
             let mut next = if rows.len() > 128 {
                 Some(Uuid::from_slice(&rows[127].0).map_err(|_| ())?.to_string())
@@ -88,16 +136,12 @@ impl Inventory for Source {
             };
             let mut hosts = Vec::with_capacity(rows.len().min(128));
             let mut bytes = 1024;
-            for (id, address, os, mode) in rows.into_iter().take(128) {
+            for (id, address, os, hostname, mode) in rows.into_iter().take(128) {
                 let id = Uuid::from_slice(&id).map_err(|_| ())?;
-                let (user, name) = address
-                    .split_once('@')
-                    .map_or((None, address.as_str()), |(user, name)| (Some(user), name));
-                let name = if name.is_empty() {
-                    id.to_string()
-                } else {
-                    name.to_owned()
-                };
+                let user = address.split_once('@').map(|(user, _)| user);
+                let name = machine_name(&address)
+                    .or(hostname)
+                    .unwrap_or_else(|| "unnamed".to_owned());
                 let online = self.hosts.online(id).await;
                 let value = json!({"id":id,"name":name,"user":if mode == "rootful" {Some("root")} else {user},"os":os,"address":if address.is_empty(){None}else{Some(&address)},"online":online});
                 let size = serde_json::to_vec(&value).map_err(|_| ())?.len();
@@ -132,6 +176,8 @@ mod tests {
         let source = Source {
             pool,
             hosts: RemoteHosts::default(),
+            #[cfg(feature = "mesh")]
+            mesh: None,
         };
         let owner = source.list("owner", None).await.unwrap();
         assert_eq!(owner["hosts"][0]["id"], host.to_string());
@@ -160,6 +206,8 @@ mod tests {
         let source = Source {
             pool,
             hosts: RemoteHosts::default(),
+            #[cfg(feature = "mesh")]
+            mesh: None,
         };
         assert_eq!(
             source.list("owner", None).await.unwrap()["hosts"],
@@ -199,6 +247,8 @@ mod pagination_tests {
         let source = Source {
             pool,
             hosts: RemoteHosts::default(),
+            #[cfg(feature = "mesh")]
+            mesh: None,
         };
         let mut cursor = None;
         let mut found = std::collections::HashSet::new();
