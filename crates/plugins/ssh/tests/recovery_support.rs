@@ -4,6 +4,7 @@
 use std::{
     fs,
     io::{Read, Write},
+    os::fd::AsRawFd,
     os::unix::{
         fs::{MetadataExt, PermissionsExt},
         net::UnixListener,
@@ -113,6 +114,12 @@ impl MinimalHost {
             .unwrap();
         child.wait_with_output().unwrap()
     }
+}
+
+fn bind_short_session_socket(directory: &std::path::Path, name: &str) -> UnixListener {
+    let directory_fd = fs::File::open(directory).unwrap();
+    // Keep the AF_UNIX address short while placing the stale socket in its real fixture directory.
+    UnixListener::bind(format!("/proc/self/fd/{}/{name}", directory_fd.as_raw_fd())).unwrap()
 }
 
 impl Drop for MinimalHost {
@@ -461,10 +468,14 @@ fn live_session_socket_blocks_cleanup(home_suffix: Option<&str>) {
     } else {
         "sessions/33333333333333333333333333333333.sock"
     });
+    let relative_session = PathBuf::from(host.root.file_name().unwrap())
+        .join(".local/share/infraternal/sessions")
+        .join(session.file_name().unwrap());
     let program = "import ctypes,os,socket,sys; os.umask(0o177); s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(); os.chdir('/'); assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; print('ready',flush=True); sys.stdin.read()";
     let mut holder = Command::new("python3")
         .args(["-u", "-c", program])
-        .arg(&session)
+        .arg(relative_session)
+        .current_dir(host.root.parent().unwrap())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -536,13 +547,10 @@ fn review_cached_helper_without_session_mode_asks_for_a_refresh() {
     .unwrap();
     fs::set_permissions(&payload, fs::Permissions::from_mode(0o700)).unwrap();
     // A shim that died and left its endpoint behind.
-    drop(
-        UnixListener::bind(
-            host.base()
-                .join("sessions/55555555555555555555555555555555.sock"),
-        )
-        .unwrap(),
-    );
+    drop(bind_short_session_socket(
+        &host.base().join("sessions"),
+        "55555555555555555555555555555555.sock",
+    ));
     let (inspect, _) = recovery_scripts();
     let output = Command::new("/bin/sh")
         .args(["-c", &inspect.replace("$HOME", host.root.to_str().unwrap())])
