@@ -5,6 +5,57 @@ use crate::ca_handoff::shipping_tests::{
 };
 use std::net::SocketAddr;
 
+/// Keeps staging fixtures inside normalized throwaway roots intended for the perf VM.
+fn staging_root_is_allowed(root: &std::path::Path) -> bool {
+    let Ok(relative) = root.strip_prefix("/root/infraternal-bench") else {
+        return false;
+    };
+    let components: Vec<_> = relative.components().collect();
+    if components
+        .iter()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return false;
+    }
+    let Some(job) = components
+        .first()
+        .and_then(|component| component.as_os_str().to_str())
+    else {
+        return false;
+    };
+    if job == "deploy" {
+        return components.len() >= 2;
+    }
+    components.len() >= 3
+        && components
+            .get(1)
+            .and_then(|component| component.as_os_str().to_str())
+            == Some("signed")
+}
+
+#[test]
+fn staging_root_accepts_legacy_and_job_scoped_roots() {
+    assert!(staging_root_is_allowed(std::path::Path::new(
+        "/root/infraternal-bench/release-6/signed/r12345678"
+    )));
+    assert!(staging_root_is_allowed(std::path::Path::new(
+        "/root/infraternal-bench/deploy/r12345678"
+    )));
+}
+
+#[test]
+fn staging_root_rejects_unscoped_and_escaping_paths() {
+    assert!(!staging_root_is_allowed(std::path::Path::new(
+        "/root/infraternal-bench/release-6/data/r12345678"
+    )));
+    assert!(!staging_root_is_allowed(std::path::Path::new(
+        "/root/infraternal-bench/../tmp/r12345678"
+    )));
+    assert!(!staging_root_is_allowed(std::path::Path::new(
+        "/tmp/release-6/signed/r12345678"
+    )));
+}
+
 struct Unit(String);
 impl Drop for Unit {
     fn drop(&mut self) {
@@ -93,8 +144,10 @@ async fn signed_deploy_preserves_passkey_ca_and_live_sessions() {
         }
     }));
     assert!(nix::unistd::Uid::effective().is_root());
-    let root = PathBuf::from(std::env::var_os("INFRATERNAL_DEPLOY_TEST_ROOT").unwrap());
-    assert!(root.starts_with("/root/infraternal-bench/deploy"));
+    let root = PathBuf::from(std::env::var_os("INFRATERNAL_DEPLOY_TEST_ROOT").unwrap())
+        .canonicalize()
+        .unwrap();
+    assert!(staging_root_is_allowed(&root));
     let mut f = shipping_auth_fixture().await;
     let data = f.root.join("db");
     // Keep the physical shim path below sun_path as well as its /run mount.
