@@ -120,6 +120,8 @@ let pendingLogin: { ceremony: string } | undefined;
 let dropNextAck = false;
 /** Closes each newly attached stream after a controlled delay for reconnect regressions. */
 let closeAfterAttachMs: number | undefined;
+/** A program that repaints after the next reattach (`/__mock/redraw-on-attach`): its bytes follow the replay once, after a delay. */
+let redrawOnAttach: { bytes: Uint8Array; delayMs: number } | undefined;
 let selectedFixture: Uint8Array | undefined;
 const liveSessionIds = new Set<string>();
 let sessionInventoryAvailable = true;
@@ -632,6 +634,21 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     for (const connection of connections) connection.socket.close(1011, "test-double link dropped");
     return sendJson(response, 200, {});
   }
+  if (request.method === "POST" && url.pathname === "/__mock/live-output") {
+    const body = await readJson(request);
+    if (typeof body?.text !== "string") return sendJson(response, 400, { error: "text output must be a string" });
+    appendEchoOutput(session, new TextEncoder().encode(body.text));
+    return sendJson(response, 200, { output_sequence: String(session.outputLength) });
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/redraw-on-attach") {
+    const body = await readJson(request);
+    if (body?.text === null) { redrawOnAttach = undefined; return sendJson(response, 200, {}); }
+    if (typeof body?.text !== "string" || typeof body.delay_ms !== "number" || !(body.delay_ms >= 0 && body.delay_ms <= 5000)) {
+      return sendJson(response, 400, { error: "redraw needs text and a delay up to 5000 ms" });
+    }
+    redrawOnAttach = { bytes: new TextEncoder().encode(body.text), delayMs: body.delay_ms };
+    return sendJson(response, 200, {});
+  }
   if (request.method === "POST" && url.pathname === "/__mock/close-after-attach") {
     const body = await readJson(request);
     if (body?.delay_ms === null) {
@@ -963,6 +980,12 @@ function handleTerminalFrame(connection: Connection, streamId: number, frame: Wi
       connection.replayUntil = BigInt(connection.session.outputLength);
       sendFrame(connection.socket, connection.stream, { type: "Ack", inSeqAcked: connection.inputCursor });
       flushOutput(connection);
+      if (redrawOnAttach) {
+        const redraw = redrawOnAttach;
+        redrawOnAttach = undefined;
+        const target = connection.session;
+        setTimeout(() => appendEchoOutput(target, redraw.bytes), redraw.delayMs);
+      }
       if (closeAfterAttachMs !== undefined) {
         setTimeout(() => {
           if (!isSocketOpen(connection.socket)) return;
@@ -1281,6 +1304,7 @@ function resetMockState(): void {
   pendingLogin = undefined;
   dropNextAck = false;
   closeAfterAttachMs = undefined;
+  redrawOnAttach = undefined;
   selectedFixture = undefined;
   socketOpenCount = 0;
   socketCloseCount = 0;

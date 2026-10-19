@@ -8,6 +8,8 @@ import { isCanonicalUuid } from "./identifiers";
 import { reattachReason, recoveringReason } from "./close-reasons";
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
 import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../packages/ui/src/terminal-cursor-layer";
+import { mountTerminalNote, type TerminalNote } from "../../../packages/ui/src/terminal-note";
+import { StaleScreenWatch, staleWaitMs } from "./stale-screen";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { terminalTouch } from "./terminal-touch";
 import { pulseActivity } from "./perf-activity";
@@ -340,6 +342,10 @@ export class TerminalClient {
   private readonly forcedLinkRows = new Set<number>();
   /** D249: the live cursor, a layer of its own that the compositor blinks; the renderer never draws it while this shows. */
   private cursorLayer: TerminalCursorLayer | undefined;
+  /** D309: after a reattach, silence from the program means its screen may be out of date; see stale-screen.ts. */
+  private staleNote: TerminalNote | undefined;
+  private staleWatch: StaleScreenWatch | undefined;
+  private roundTripMs: number | undefined;
   private rendererCursorHidden = false;
   /**
    * Whether typing would reach this terminal now. A desktop terminal focuses itself, so it is always ready. On a
@@ -400,6 +406,12 @@ export class TerminalClient {
       })
       : undefined;
     this.cursorLayer = mountTerminalCursorLayer(config.host);
+    this.staleNote = mountTerminalNote(config.host, "screen may be out of date");
+    this.staleWatch = new StaleScreenWatch((shown) => {
+      if (!shown) { this.staleNote?.hide(); return; }
+      const cursorRow = this.terminal.wasmTerm?.getCursor().y ?? 0;
+      this.staleNote?.show(cursorRow, this.terminal.rows);
+    }, { after: (ms, run) => window.setTimeout(run, ms), cancel: (handle) => window.clearTimeout(handle as number) });
     config.host.addEventListener("pointerdown", this.onTerminalActivity, { passive: true });
     config.host.addEventListener("pointerdown", this.onBlinkInput, { passive: true });
     document.addEventListener("visibilitychange", this.onBlinkEnvironment);
@@ -475,6 +487,7 @@ export class TerminalClient {
     });
     // The round trip is the connection's; every terminal on it reads it (prediction needs it, the pill shows it).
     this.offRoundTrip = this.conn.onRoundTrip((ms) => {
+      this.roundTripMs = ms;
       this.prediction?.setRoundTrip(ms);
       config.onRoundTrip?.(ms);
     });
@@ -926,6 +939,10 @@ export class TerminalClient {
     window.removeEventListener("focus", this.onBlinkEnvironment);
     this.cursorLayer?.dispose();
     this.cursorLayer = undefined;
+    this.staleWatch?.reset();
+    this.staleWatch = undefined;
+    this.staleNote?.dispose();
+    this.staleNote = undefined;
     this.config.host.removeEventListener("pointermove", this.onTerminalActivity);
     this.config.host.removeEventListener("wheel", this.onTerminalActivity);
     if (this.attachmentConfirmed) this.conn.streamAttached(false);
@@ -980,6 +997,7 @@ export class TerminalClient {
         this.attachmentConfirmed = false;
         this.attachRequested = false;
         this.openCallSent = false;
+        this.staleWatch?.reset();
         this.config.hooks?.onDisconnected?.(forced);
         this.setStatus("Connection lost. Reconnecting…");
       },
@@ -1027,6 +1045,7 @@ export class TerminalClient {
               this.config.hooks?.onDisconnected?.(false);
             }
             this.attachmentConfirmed = false;
+            this.staleWatch?.reset();
             this.connectionIsResume = true;
             this.replayResponseFence = undefined;
             this.suppressReplayResponses = true;
@@ -1252,6 +1271,7 @@ export class TerminalClient {
     this.attached = false;
     this.attachmentConfirmed = false;
     this.attachRequested = false;
+    this.staleWatch?.reset();
     // The server keeps absorbing this stream's in-flight frames until this Close (contracts/wire.md §4).
     this.conn.closeStream(this.streamId);
     if (this.config.hooks?.onSessionGone) { this.setStatus(""); this.config.hooks.onSessionGone(this.sessionGoneStatus); }
@@ -1300,6 +1320,7 @@ export class TerminalClient {
       this.inputResendNoticeVisible = false;
     }
     this.outputQueue.clear();
+    this.staleWatch?.reset();
     this.replayResponseFence = undefined;
     this.suppressReplayResponses = this.sessionId !== undefined;
     this.pendingSnapshot?.bytes.fill(0);
@@ -1487,6 +1508,7 @@ export class TerminalClient {
     }
     this.creditAvailable -= bytes.byteLength;
     this.receivedOutSeq += BigInt(bytes.byteLength);
+    this.staleWatch?.output(this.receivedOutSeq);
     this.synchronizedOutput.feed(bytes);
     if (this.synchronizedOutput.requiresAtomicPaint) this.synchronizedOutputBatchPending = true;
     // `message` keeps an unfragmented decoder view alive; fragment scratch is copied by the ring.
@@ -1503,6 +1525,7 @@ export class TerminalClient {
     }
     this.creditAvailable -= bytes.byteLength;
     this.receivedOutSeq = sequence;
+    this.staleWatch?.reset();
 
     // A snapshot replaces the parser's prior mode state before later live bytes are scanned.
     this.synchronizedOutput.reset();
@@ -1763,9 +1786,12 @@ export class TerminalClient {
   /** A replay fence takes effect only after the renderer has parsed and painted every byte before it. */
   private releaseReplayResponsesAfterPaint(): void {
     if (this.replayResponseFence !== undefined && this.lastOutSeq >= this.replayResponseFence) {
+      const fence = this.replayResponseFence;
       this.suppressReplayResponses = false;
       this.replayResponseFence = undefined;
       if (this.attached && !this.attachmentConfirmed) {
+        // A reattached session is waiting for its program to repaint; a new shell has nothing to be out of date.
+        if (this.connectionIsResume) this.staleWatch?.begin(fence, this.receivedOutSeq, staleWaitMs(this.roundTripMs));
         this.attachmentConfirmed = true;
         this.resendUnacknowledgedInput();
         if (this.inputNeedsResend) this.showInputResendNotice();
