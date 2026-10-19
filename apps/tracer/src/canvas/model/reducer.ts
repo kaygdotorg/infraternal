@@ -66,8 +66,15 @@ function split(columns: DocColumn[], intent: Extract<Intent, { type: "split" }>)
       column.weight /= 2; added.span = 1; columns.splice(index + 1, 0, { id: intent.column_id, weight: column.weight, windows: [added] });
     }
   } else {
-    let from = index, to = index + span - 1;
-    for (let i = 0; i < columns.length; i++) for (const w of columns[i]!.windows) if (i <= to && i + (w.span ?? 1) - 1 >= from) { from = Math.min(from, i); to = Math.max(to, i + (w.span ?? 1) - 1); }
+    // Scan runs from the left. Extending the frontier also visits every newly reached column,
+    // so transitive members to the left of the anchor cannot be missed (same closure as storage).
+    let from = 0, to = 0;
+    while (from < columns.length) {
+      to = from;
+      for (let cursor = from; cursor <= to; cursor++) for (const w of columns[cursor]!.windows) to = Math.max(to, cursor + (w.span ?? 1) - 1);
+      if (index <= to) break;
+      from = to + 1;
+    }
     const boundary = row + rows;
     for (let i = from; i <= to; i++) for (const w of columns[i]?.windows ?? []) {
       const start = w.row ?? 0, height = w.rows ?? 1;
