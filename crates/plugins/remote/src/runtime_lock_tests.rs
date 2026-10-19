@@ -209,6 +209,19 @@ fn kernel_holds(path: &Path) -> Option<bool> {
     kernel_bound(&[(path.to_path_buf(), fs::metadata(path).unwrap())])
 }
 
+/// Waits briefly for the kernel socket dump to forget a just-closed endpoint.
+fn sessions_after_close(runtime: &File) -> Result<(), u8> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+    loop {
+        match sessions(runtime) {
+            Err(73) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Kernel ownership remains observable when a runtime makes descriptors private.
 #[test]
 fn legacy_inspection_finds_a_real_bound_socket() {
@@ -263,7 +276,7 @@ fn session_inspection_finds_bound_endpoints_by_identity() {
     let bound = std::os::unix::net::UnixDatagram::bind(nested.join("live.sock")).unwrap();
     assert_eq!(sessions(&runtime), Err(73));
     drop(bound);
-    assert_eq!(sessions(&runtime), Ok(()));
+    assert_eq!(sessions_after_close(&runtime), Ok(()));
     drop(control);
 }
 
