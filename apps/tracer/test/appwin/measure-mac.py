@@ -5,9 +5,10 @@ from PIL import Image
 ROOT=pathlib.Path.home()/'infraternal-bench/app-windows-latency'
 args=json.loads(sys.stdin.readline())
 job=args.get('job','app-windows-latency')
+ledger_job=args.get('screen_ledger_job',job)
 os.environ['TRACER_TEST_PORT']=str(args.get('port',4346))
 import re
-if not re.fullmatch(r'[a-z0-9-]{1,48}',job) or not re.fullmatch(r'[a-z0-9-]{1,48}',args['label']):raise SystemExit(2)
+if not re.fullmatch(r'[a-z0-9-]{1,48}',ledger_job) or not re.fullmatch(r'[a-z0-9-]{1,48}',job) or not re.fullmatch(r'[a-z0-9-]{1,48}',args['label']):raise SystemExit(2)
 E=ROOT/'evidence'/args['label'];E.mkdir(parents=True,exist_ok=False)
 BIN=ROOT/'bin'
 class PhaseComplete(Exception):
@@ -96,7 +97,8 @@ def consent_check():
    for x in v.values():yield from walk(x)
   elif isinstance(v,list):
    for x in v:yield from walk(x)
- matches=[v for v in walk(inventory) if any(name in str(v.get('title',''))+' '+str(v.get('app_name','')) for name in ['InfraternalCaptureHelper','infraternal-desktop-helper'])]
+ privacy_titles={'screen & system audio recording','screen and system audio recording','screen recording'}
+ matches=[v for v in walk(inventory) if str(v.get('title','')).strip().lower() in privacy_titles or any(name in (str(v.get('title',''))+' '+str(v.get('app_name',''))).lower() for name in ['infraternalcapturehelper','infraternal-desktop-helper','netbird','requesting to bypass'])]
  for v in matches:
   if not v.get('pid') or not v.get('window_id'):continue
   session='app-windows-latency-consent'
@@ -126,8 +128,9 @@ try:
  args.update(readiness)
  def screen_deadline(signum,frame):raise TimeoutError('owned on-screen deadline')
  ledger=ROOT/'evidence/on-screen-ledger.json';used=json.loads(ledger.read_text()).get('seconds',0) if ledger.exists() else 0
- job_ledger=ROOT/'evidence'/(job+'-screen-ledger.json');job_used=json.loads(job_ledger.read_text()).get('seconds',0) if job_ledger.exists() else 0
- # Each owner-authorized round has its own allowance; the shared ledger is historical.
+ job_ledger=ROOT/'evidence'/(ledger_job+'-screen-ledger.json');job_used=json.loads(job_ledger.read_text()).get('seconds',0) if job_ledger.exists() else 0
+ # Continuations explicitly retain the prior round ledger; changing the job
+ # identity for locking never creates a fresh screen allowance.
  screen_budget=args.get('screen_budget',18*60)
  if not isinstance(screen_budget,int) or not 60<=screen_budget<=43*60:raise RuntimeError('invalid on-screen allowance')
  if job_used>=screen_budget:raise RuntimeError('owned on-screen allowance exhausted')
@@ -157,6 +160,7 @@ try:
    samples.append({'before_ns':before,'after_ns':after,**v,'lower':before-v['after_ticks']*timebase,'upper':after-v['before_ticks']*timebase})
   best=min(samples,key=lambda x:x['upper']-x['lower']);return {'samples':samples,'lower':best['lower'],'upper':best['upper']}
  native_mapping=native_clock()
+ emit({'kind':'runtime_artifacts','sha256':{name:command(['shasum','-a','256',str(BIN/name)]).split()[0] for name in ('source','helper','clock-bridge')}})
  stage='helper wrappers'
  consent_errors=[]
  runtime=pathlib.Path.home()/'infraternal-bench'/('wl-'+uuid.uuid4().hex[:4]);runtime.mkdir(mode=0o700);runtime_owned=True
@@ -166,25 +170,49 @@ try:
  emit({'kind':'native_helper','hash':helper_hash})
  command(['codesign','--verify','--strict',str(native.parent.parent.parent)])
  if helper_hash!=(args.get('native_hash') or '7b7ad2bcbc18f4f390f00d001b59984b1998665c8ddae9846520b83875001dc5'):raise RuntimeError('approved companion version changed')
- pidlog=E/'helper-pids.txt';pidlog.write_text('');(E/'helper-metrics.log').write_text('');helper_births={}
- for name,target in [('helper',BIN/'helper'),('native',native)]:
+ pidlog=E/'helper-pids.txt';pidlog.write_text('');(E/'helper-metrics.log').write_text('');helper_births={};capture_helpers=set()
+ for name,target in [('helper',BIN/'helper')]:
   wrapper=runtime/name
-  codec_argument=' --hevc' if name=='native' and args.get('codec')=='hevc' else ''
-  wrapper.write_text('#!/bin/sh\n# Role: record only an owned helper PID before preserving its pipes and process identity.\nprintf "'+name+' %s\\n" "$$" >> "'+str(pidlog)+'"\nexec "'+str(target)+'" "$@"'+codec_argument+' 2>> "'+str(E/'helper-metrics.log')+'"\n');wrapper.chmod(0o700)
+  wrapper.write_text('#!/bin/sh\n# Role: record only an owned helper PID before preserving its pipes and process identity.\nprintf "'+name+' %s\\n" "$$" >> "'+str(pidlog)+'"\nexec "'+str(target)+'" "$@" 2>> "'+str(E/'helper-metrics.log')+'"\n');wrapper.chmod(0o700)
+ # Native capture must be a LaunchServices app, never an exec in this SSH tree.
+ import shlex
+ bridge=ROOT/'launch-companion.py'
+ argv=[sys.executable,str(bridge),str(native),str(runtime),str(E/'helper-metrics.log'),str(pidlog)]
+ (runtime/'native').write_text('#!/bin/sh\n# Role: bridge to an independently launched signed app.\ntest ! -e '+shlex.quote(str(runtime/'capture-refused'))+' || exit 1\nexec '+shlex.join(argv)+' "$@"'+(' --hevc' if args.get('codec')=='hevc' else '')+'\n')
+ (runtime/'native').chmod(0o700)
+ def stop_capture():
+  # Seal new launches before stopping existing native capture, on either the
+  # consent monitor or the main failure path. Never await browser cleanup first.
+  (runtime/'capture-refused').touch()
+  if 'source' in globals():
+   try:source.send_signal(signal.SIGINT)
+   except ProcessLookupError:pass
+  for pid in list(capture_helpers):
+   birth=helper_births.get(pid)
+   if birth is None:continue
+   current=subprocess.run(['ps','-p',str(pid),'-o','lstart='],capture_output=True,text=True)
+   if current.returncode==0 and current.stdout.strip()==birth:
+    try:os.kill(pid,signal.SIGTERM)
+    except ProcessLookupError:pass
  stop_monitor=threading.Event()
  def watch_launches():
   seen=set()
-  while not stop_monitor.wait(.1):
+  while not stop_monitor.wait(.5):
    try:
     rows=pidlog.read_text().splitlines()
     if any(row not in seen for row in rows):
      for row in rows:
       if row in seen:continue
-      pid=int(row.split()[1]);birth=subprocess.run(['ps','-p',str(pid),'-o','lstart='],capture_output=True,text=True)
+      pid=int(row.split()[1])
+      if row.split()[0].startswith('capture'):capture_helpers.add(pid)
+      birth=subprocess.run(['ps','-p',str(pid),'-o','lstart='],capture_output=True,text=True)
       if birth.returncode==0:helper_births[pid]=birth.stdout.strip()
-     seen.update(rows);consent_check();time.sleep(.3);consent_check()
+     seen.update(rows)
+    consent_check()
    except Exception as e:
     consent_errors.append(type(e).__name__)
+    stop_capture()
+    return
  monitor=threading.Thread(target=watch_launches,daemon=True);monitor.start()
  def consent_guard():
   # The watcher cannot raise on the browser thread. Refuse its next operation
@@ -269,9 +297,17 @@ try:
   page.wait_for_timeout(200)
  else:raise RuntimeError('source never became online')
  browser_ids=descendants({play._impl_obj._connection._transport._proc.pid})-{play._impl_obj._connection._transport._proc.pid};owned.update(browser_ids)
+ def live_helpers():
+  # LaunchServices companions are not source descendants. Include their exact
+  # recorded identities, or resource receipts would silently omit native capture.
+  live=set()
+  for pid,birth in list(helper_births.items()):
+   current=subprocess.run(['ps','-p',str(pid),'-o','lstart='],capture_output=True,text=True)
+   if current.returncode==0 and current.stdout.strip()==birth:live.add(pid)
+  return live
  def resource_sample(label):
   consent_guard()
-  source_ids=descendants({source.pid});owned.update(source_ids);ids=source_ids|browser_ids|({window.pid} if 'window' in globals() else set())
+  source_ids=descendants({source.pid})|live_helpers();owned.update(source_ids);ids=source_ids|browser_ids|({window.pid} if 'window' in globals() else set())
   begin=time.perf_counter_ns();worker_before=page.evaluate('window.__appWindowBench.stats()');draw_before=len(all_draws)
   rows=[];sample_times=[]
   for i in range(5):
@@ -322,7 +358,7 @@ try:
  terminals=page.locator('.ui-window[data-kind="terminal"] [data-action="close"]')
  if terminals.count():terminals.first.evaluate('(b)=>b.click()')
  page.get_by_role('button',name='New window',exact=True).click();page.get_by_role('option',name='App window measurement',exact=False).click()
- page.locator('.aw-stage[data-picture="live"]').wait_for(timeout=45000)
+ page.locator('.aw-stage[data-picture="live"]').wait_for(timeout=10000)
  consent_check()
  emit({'kind':'canvas_context','receipts':page.evaluate('window.__appWindowBench.take()')})
  page.screenshot(path=str(E/'canvas-native-before.png'))
@@ -480,8 +516,8 @@ try:
     ack=json.loads(sys.stdin.readline())
     if ack.get('kind')!='network_restored':raise RuntimeError('private route restoration unavailable')
     try:
-     page.wait_for_function('(prior)=>window.__appWindowBench.sockets.opened>prior.opened&&window.__appWindowBench.sockets.closed>prior.closed',arg=prior_sockets,timeout=45000)
-     page.locator('.aw-stage[data-picture="live"]').wait_for(timeout=45000);counts['reconnects']+=1
+     page.wait_for_function('(prior)=>window.__appWindowBench.sockets.opened>prior.opened&&window.__appWindowBench.sockets.closed>prior.closed',arg=prior_sockets,timeout=10000)
+     page.locator('.aw-stage[data-picture="live"]').wait_for(timeout=10000);counts['reconnects']+=1
      emit({'kind':'soak_reconnect','before':prior_sockets,'after':page.evaluate('window.__appWindowBench.sockets')})
     except Exception:counts['stuck_frames']+=1
    if iteration==36:
@@ -492,7 +528,7 @@ try:
     page.get_by_role('button',name='New window',exact=True).click();page.get_by_role('option',name='App window measurement',exact=False).click()
     replacement=page.locator('.ui-window[data-kind="app"]').filter(has=page.locator('.aw-stage[data-picture="live"]'))
     try:
-     page.wait_for_function("""(old)=>[...document.querySelectorAll('.ui-window[data-kind="app"]')].some(node=>node.dataset.windowId!==old&&node.querySelector('.aw-stage[data-picture="live"]'))""",arg=previous_id,timeout=45000)
+     page.wait_for_function("""(old)=>[...document.querySelectorAll('.ui-window[data-kind="app"]')].some(node=>node.dataset.windowId!==old&&node.querySelector('.aw-stage[data-picture="live"]'))""",arg=previous_id,timeout=10000)
      counts['reopens']+=1
      emit({'kind':'soak_reopen','previous_id':previous_id,'replacement_id':replacement.last.get_attribute('data-window-id')})
     except Exception:counts['stuck_frames']+=1
@@ -545,6 +581,7 @@ try:
 except PhaseComplete:
  pass
 except Exception as error:
+ if 'stop_capture' in globals():stop_capture()
  if stage in ['open canvas window','change samples','input samples','shape','resources','recording','stability soak'] and browser:
   try:
    page.screenshot(path=str(E/'canvas-failure.png'))
@@ -612,7 +649,7 @@ finally:
   if 'screen_start' in locals():
    elapsed=time.monotonic()-screen_start;total=used+elapsed;job_total=job_used+elapsed
    ledger.write_text(json.dumps({'seconds':total}));job_ledger.write_text(json.dumps({'seconds':job_total}))
-   emit({'kind':'on_screen_ledger','seconds':total,'job':job,'job_seconds':job_total})
+   emit({'kind':'on_screen_ledger','seconds':total,'job':job,'ledger_job':ledger_job,'job_seconds':job_total})
   if (lock/'owner').read_text().strip()==job and (lock/'pid').read_text().strip()==str(args['controller_pid']):
    for name in ['owner','pid','started']:(lock/name).unlink()
    lock.rmdir();emit({'kind':'lock_released'})

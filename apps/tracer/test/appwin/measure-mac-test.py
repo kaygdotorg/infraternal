@@ -4,12 +4,49 @@ import json
 import pathlib
 import sys
 import unittest
+import signal
+from types import SimpleNamespace
+
+
+class CaptureRetirementTests(unittest.TestCase):
+    """Refusal seals new launches before signals and never signals a reused PID."""
+
+    def test_refusal_stops_only_recorded_live_helpers(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        function = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'stop_capture')
+        actions = []
+        class Marker:
+            def __truediv__(self, name): return self
+            def touch(self): actions.append('sealed')
+        namespace = {
+            'runtime': Marker(), 'signal': signal,
+            'source': SimpleNamespace(send_signal=lambda value: actions.append(('source', value))),
+            'helper_births': {101: 'current', 202: 'previous', 303: 'current'},
+            'capture_helpers': {101, 202},
+            'subprocess': SimpleNamespace(run=lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout='current')),
+            'os': SimpleNamespace(kill=lambda pid, value: actions.append((pid, value))),
+        }
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        namespace['stop_capture']()
+        self.assertEqual(actions, ['sealed', ('source', signal.SIGINT), (101, signal.SIGTERM)])
+
+    def test_resource_collection_includes_independent_helpers_by_identity(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        function = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'live_helpers')
+        namespace = {
+            'helper_births': {101: 'current', 202: 'previous'},
+            'subprocess': SimpleNamespace(run=lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout='current')),
+        }
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        self.assertEqual(namespace['live_helpers'](), {101})
 
 
 class ConsentTests(unittest.TestCase):
     """Execute only the consent guard, without importing or launching the browser driver."""
 
-    def check_prompt(self, controls, *, own_helper=True):
+    def check_prompt(self, controls, *, own_helper=True, title=None):
         source = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path(__file__).with_name('measure-mac.py')
         tree = ast.parse(source.read_text())
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'consent_check')
@@ -18,7 +55,7 @@ class ConsentTests(unittest.TestCase):
         def cua(name, params):
             calls.append(name)
             if name == 'list_windows':
-                return {'windows': [{'title': 'InfraternalCaptureHelper' if own_helper else 'Unrelated application', 'pid': 101, 'window_id': 202}]}
+                return {'windows': [{'title': title or ('InfraternalCaptureHelper' if own_helper else 'Unrelated application'), 'pid': 101, 'window_id': 202}]}
             if name == 'get_window_state':
                 return {'text': 'requesting to bypass', 'controls': controls}
             if name == 'get_desktop_state':
@@ -43,6 +80,24 @@ class ConsentTests(unittest.TestCase):
         refused, calls = self.check_prompt([{'role': 'secure text field'}, {'role': 'button', 'title': 'Cancel', 'element_token': 'cancel'}])
         self.assertTrue(refused)
         self.assertNotIn('click', calls)
+
+    def test_foreign_capture_prompt_stops_without_clicking(self):
+        refused, calls = self.check_prompt([{'role': 'button', 'title': 'Allow'}],
+                                          title='netbird is requesting to bypass the system private window picker')
+        self.assertTrue(refused)
+        self.assertNotIn('click', calls)
+
+    def test_system_capture_consent_title_is_refused_for_other_identities(self):
+        refused, calls = self.check_prompt([{'role': 'button', 'title': 'Allow'}],
+                                          own_helper=False, title='Screen & System Audio Recording')
+        self.assertTrue(refused)
+        self.assertNotIn('click', calls)
+
+    def test_a_document_title_about_recording_is_not_inspected(self):
+        refused, calls = self.check_prompt([{'role': 'button', 'title': 'Allow'}],
+                                          own_helper=False, title='Notes about screen recording')
+        self.assertFalse(refused)
+        self.assertEqual(calls, ['list_windows'])
 
     def test_another_application_prompt_is_ignored(self):
         refused, calls = self.check_prompt([{'role': 'button', 'title': 'Allow', 'element_token': 'allow'}], own_helper=False)
