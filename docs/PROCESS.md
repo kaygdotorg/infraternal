@@ -146,6 +146,14 @@ Reviews and fixes run at the same time as the next lane's build.
   | `x86_64-unknown-linux-musl` | 21,225,872 bytes |
   | `aarch64-unknown-linux-musl` | 19,427,688 bytes |
 
+  The same gate builds both targets again from a detached checkout with separate
+  Cargo registry, Rustup and target roots. It forces compilation through the
+  shared sccache server, compares the shipping bytes and checks that the cache
+  wrapper receives Rust and native C path-remap flags before compilation. Rust
+  flags keep registry source mappings after the enclosing `CARGO_HOME` mapping;
+  rustc applies the later match, which keeps sources under `/cargo/<crate>`.
+  This catches release output that depends on a job's build locations.
+
   These are the release-5 measurements, adding the Mesh view (#236) to the
   release-4 measurements below: +81,760 / +56,992 bytes. The x86_64 increase
   follows D306's accepted Mesh view size and stays below this task's +90 KB
