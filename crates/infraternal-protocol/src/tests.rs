@@ -48,6 +48,10 @@ enum OwnedFrame {
         in_seq: u64,
         bytes: Vec<u8>,
     },
+    InputReply {
+        query_seq: u64,
+        bytes: Vec<u8>,
+    },
     Output {
         out_seq: u64,
         bytes: Vec<u8>,
@@ -137,6 +141,10 @@ impl OwnedFrame {
             },
             Self::Input { in_seq, bytes } => Frame::Input {
                 in_seq: *in_seq,
+                bytes,
+            },
+            Self::InputReply { query_seq, bytes } => Frame::InputReply {
+                query_seq: *query_seq,
                 bytes,
             },
             Self::Output { out_seq, bytes } => Frame::Output {
@@ -396,6 +404,10 @@ fn read_frame(frame: &Value) -> OwnedFrame {
         "Close" => OwnedFrame::Close {
             code: number(frame, "code"),
             reason: string(frame, "reason").to_owned(),
+        },
+        "Input" if frame.get("replyTo").is_some() => OwnedFrame::InputReply {
+            query_seq: decimal(frame, "replyTo"),
+            bytes: hex(frame, "bytesHex"),
         },
         "Input" => OwnedFrame::Input {
             in_seq: decimal(frame, "inSeq"),

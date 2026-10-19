@@ -310,7 +310,7 @@ function decodeBody(type: number, body: Uint8Array): WireFrame {
     case 0x17: {
       const replyTo = reader.u64();
       const bytes = reader.rest();
-      if (bytes.length === 0 || bytes.length > 1024) throw new Error("invalid reply size");
+      if (bytes.length === 0 || bytes.length > 1024) throw new WireDecodeError("invalid-body", "invalid reply size");
       return { type: "Input", inSeq: 0n, replyTo, bytes };
     }
     case 0x11:
@@ -507,7 +507,7 @@ function measureFrame(frame: WireFrame): FrameMeasure {
       bodyLength = checkedAdd(8, frame.bytes.byteLength);
       if (frame.replyTo !== undefined) {
         checkedU64(frame.replyTo, "query sequence");
-        if (frame.bytes.length === 0 || frame.bytes.length > 1024) throw new Error("invalid reply size");
+        if (frame.bytes.length === 0 || frame.bytes.length > 1024) throw new WireEncodeError("length-overflow", "invalid reply size");
       }
       type = frame.replyTo === undefined ? 0x10 : 0x17;
       break;
