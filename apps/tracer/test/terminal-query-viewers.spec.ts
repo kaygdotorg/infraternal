@@ -100,8 +100,10 @@ test("three attached viewers deliver one copy of live query replies", async ({ p
     knownIds.add(third.clientId);
     viewers.push(third.page);
 
-    await third.page.keyboard.type("last-typist");
-    await expect.poll(async () => (await mockState(request)).accepted_input_bytes, { timeout: 15_000 }).toBeGreaterThan(afterReference.accepted_input_bytes);
+    const typing = "last-typist";
+    await third.page.keyboard.type(typing);
+    // A first-byte fence can leave trailing typing inside the query-only delta.
+    await expect.poll(async () => (await mockState(request)).accepted_input_bytes, { timeout: 15_000 }).toBe(afterReference.accepted_input_bytes + typing.length);
     const beforeQuery = await mockState(request);
     await Promise.all([page, second.page, third.page].map((viewer) => waitForOutput(viewer, request)));
     await sendLiveOutput(request, QUERY_OUTPUT);
