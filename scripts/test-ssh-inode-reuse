@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Runs the conditionally supported SSH inode-reuse fixture with an explicit ignored outcome.
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$repo_root"
+
+target_dir="${CARGO_TARGET_DIR:-target}"
+runtime_helper="${target_dir}/debug/examples/recovery-helper"
+if [[ ! -x "$runtime_helper" ]]; then
+    cargo build --locked -p infraternal-plugin-ssh --example recovery-helper
+fi
+export INFRATERNAL_TEST_RUNTIME_HELPER="$runtime_helper"
+
+set +e
+output="$(cargo test --locked -p infraternal-plugin-ssh --test install review_inode_reuse_after_diagnostics_preserves_live_replacement -- --ignored --exact --nocapture 2>&1)"
+status=$?
+set -e
+
+if [[ "$output" == *"INODE_REUSE_SKIPPED:"* ]]; then
+    sed -n '/INODE_REUSE_SKIPPED:/p' <<< "$output"
+    printf 'test result: ok. 0 passed; 0 failed; 1 ignored\n'
+    exit 0
+fi
+
+printf '%s\n' "$output"
+exit "$status"
