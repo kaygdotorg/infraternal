@@ -1,15 +1,59 @@
-//! Gives every SSH fixture one job-specific HOME-cache root without changing HOME or using the shared RAM tmpfs.
+//! Gives SSH fixtures cache roots short enough for their longest Linux Unix-socket path.
 #![allow(clippy::expect_used)]
 
-use std::path::PathBuf;
+use std::{os::unix::ffi::OsStrExt, path::PathBuf};
+
+const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
+const RECOVERY_SOCKET_SUFFIX_BYTES: usize = 72;
 
 pub fn scratch() -> PathBuf {
-    let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
-        || {
-            PathBuf::from(std::env::var_os("HOME").expect("HOME for test scratch"))
-                .join(".cache/codex-scratch/ssh-bootstrap")
-        },
-        PathBuf::from,
+    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME for test scratch"));
+    let process_id = format!("{:x}", std::process::id());
+    let fallback = home.join(".cache").join(&process_id);
+    let requested = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map(PathBuf::from);
+    scratch_root(requested, fallback)
+}
+
+/// Gives the ownership fixtures a short runtime root while honoring their
+/// dedicated override before the workspace-wide test root.
+#[allow(
+    dead_code,
+    reason = "Used by the recovery-support integration fixture."
+)]
+pub fn recovery_scratch() -> PathBuf {
+    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME for test scratch"));
+    let process_id = format!("{:x}", std::process::id());
+    let fallback = home.join(".cache").join(&process_id);
+    let requested = std::env::var_os("INFRATERNAL_SSH_TEST_STATE_ROOT")
+        .or_else(|| std::env::var_os("INFRATERNAL_TEST_STATE_ROOT"))
+        .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
+        .map(PathBuf::from);
+    scratch_root(requested, fallback)
+}
+
+fn scratch_root(requested: Option<PathBuf>, fallback: PathBuf) -> PathBuf {
+    let process_id = format!("{:x}", std::process::id());
+    // The recovery socket adds a 72-byte suffix and a process-id/sequence
+    // directory of at most eight bytes. Reserve one separator before the
+    // Linux 107-byte pathname limit; the kernel adds the terminating NUL.
+    let max_root_bytes =
+        MAX_UNIX_SOCKET_PATH_BYTES - RECOVERY_SOCKET_SUFFIX_BYTES - 1 - process_id.len() - 2;
+    let requested = requested.unwrap_or_else(|| fallback.clone());
+    let root = if requested.as_os_str().as_bytes().len() <= max_root_bytes {
+        requested
+    } else {
+        static LONG_ROOT_WARNING: std::sync::Once = std::sync::Once::new();
+        LONG_ROOT_WARNING.call_once(|| {
+            eprintln!(
+                "SSH test state root exceeds {max_root_bytes} bytes; using {}",
+                fallback.display()
+            );
+        });
+        fallback
+    };
+    assert!(
+        root.as_os_str().as_bytes().len() <= max_root_bytes,
+        "SSH test fallback root exceeds the Unix socket path budget"
     );
     std::fs::create_dir_all(&root).expect("prepare job scratch");
     root
