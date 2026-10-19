@@ -17,6 +17,7 @@ import { MuxConnection, reconnectDelay, STABLE_CONNECTION_MS, type StreamHandler
 import { onDemand } from "./on-demand";
 import { captureFocusIntent } from "../../../packages/ui/src/focus-intent";
 import type { TerminalLink, TerminalLinkController, TerminalLinkRow } from "./terminal-links.on-demand";
+import { SynchronizedOutput } from "./synchronized-output";
 
 const INITIAL_CREDIT = 1024 * 1024;
 const INPUT_QUEUE_LIMIT = 1024 * 1024;
@@ -200,6 +201,13 @@ class ByteQueue {
     return this.bytes.subarray(this.head, this.head + Math.min(this.used, this.capacity - this.head));
   }
 
+  /** Returns one of the at most two contiguous views that make up the queued bytes. */
+  peekAt(offset: number): Uint8Array {
+    if (offset < 0 || offset >= this.used) return this.bytes.subarray(0, 0);
+    const start = (this.head + offset) % this.capacity;
+    return this.bytes.subarray(start, start + Math.min(this.used - offset, this.capacity - start));
+  }
+
   consume(length: number): void {
     if (length < 0 || length > this.used) throw new Error("queue consume exceeds queued bytes");
     this.fillRange(this.head, length);
@@ -243,6 +251,8 @@ export class TerminalClient {
   private static readonly rendererWarmups = new Map<string, Promise<void>>();
   private readonly terminal: Terminal;
   private readonly ghostty: GhosttyActivityControls;
+  private readonly synchronizedOutput: SynchronizedOutput;
+  private synchronizedOutputBatchPending = false;
   private readonly inputQueue = new ByteQueue(INPUT_QUEUE_LIMIT);
   /** Uncertain bytes from an old writer stay separate from input typed into the live fresh writer. */
   private retainedInput: Uint8Array | undefined;
@@ -341,6 +351,11 @@ export class TerminalClient {
     this.terminal = terminal;
     this.font = font;
     this.ghostty = terminal as unknown as GhosttyActivityControls;
+    this.synchronizedOutput = new SynchronizedOutput(() => {
+      this.synchronizedOutputBatchPending = this.synchronizedOutput.requiresAtomicPaint;
+      this.wakeTerminal();
+      this.drainOutput();
+    });
     this.screen = config.screen ?? config.host.parentElement ?? config.host;
     // Opening a renderer must never choose the page's input destination. Its
     // default focus also schedules another focus task, after user input can run.
@@ -594,6 +609,7 @@ export class TerminalClient {
     rendererAccentColor: string;
     themeColorsMs: number;
     themeRenderMs: number;
+    synchronizedOutputHoldsPaint: boolean;
     terminalColors?: { background: { r: number; g: number; b: number }; foreground: { r: number; g: number; b: number } };
     receivedSequence: string;
     outputSequence: string;
@@ -626,6 +642,7 @@ export class TerminalClient {
       rendererAccentColor: this.ghostty.renderer?.theme?.cursor ?? "",
       themeColorsMs: this.lastThemeColorsMs,
       themeRenderMs: this.lastThemeRenderMs,
+      synchronizedOutputHoldsPaint: this.synchronizedOutput.holdsPaint,
       ...(colors ? { terminalColors: { background: colors.background, foreground: colors.foreground } } : {}),
       receivedSequence: this.receivedOutSeq.toString(),
       outputSequence: this.lastOutSeq.toString(),
@@ -869,6 +886,7 @@ export class TerminalClient {
     this.cursorEpoch += 1;
     this.terminalQueries?.reset();
     this.terminalQueries = undefined;
+    this.synchronizedOutput.dispose();
     this.cancelStreamRetry();
     this.linkController?.dispose();
     this.linkController = undefined;
@@ -1262,6 +1280,8 @@ export class TerminalClient {
     this.pendingSnapshot = undefined;
     this.prediction?.resetForSnapshot();
     this.terminalQueries?.reset();
+    this.synchronizedOutput.reset();
+    this.synchronizedOutputBatchPending = false;
     this.terminal.reset();
     this.resumeInputIfRoom();
   }
@@ -1439,6 +1459,8 @@ export class TerminalClient {
     }
     this.creditAvailable -= bytes.byteLength;
     this.receivedOutSeq += BigInt(bytes.byteLength);
+    this.synchronizedOutput.feed(bytes);
+    if (this.synchronizedOutput.requiresAtomicPaint) this.synchronizedOutputBatchPending = true;
     // `message` keeps an unfragmented decoder view alive; fragment scratch is copied by the ring.
     void message;
     this.drainOutput();
@@ -1454,6 +1476,10 @@ export class TerminalClient {
     this.creditAvailable -= bytes.byteLength;
     this.receivedOutSeq = sequence;
 
+    // A snapshot replaces the parser's prior mode state before later live bytes are scanned.
+    this.synchronizedOutput.reset();
+    this.synchronizedOutputBatchPending = false;
+
     if (this.pendingSnapshot) this.returnCredit(this.pendingSnapshot.bytes.byteLength);
     this.pendingSnapshot?.bytes.fill(0);
     this.pendingSnapshot = { outSeq: sequence, bytes: bytes.slice() };
@@ -1468,6 +1494,7 @@ export class TerminalClient {
 
   private drainOutput(): void {
     this.wakeTerminal();
+    if (this.synchronizedOutput.holdsPaint) return;
     // Received bytes remain owned after disconnect. Finish painting them before Attach
     // advertises lastOutSeq; returnCredit sends nothing on a detached transport.
     if (this.outputWriteInFlight || this.snapshotWriteInFlight || this.closed) return;
@@ -1501,24 +1528,48 @@ export class TerminalClient {
     }
 
     if (this.outputQueue.length > 0) {
-      let region = this.outputQueue.peek();
-      if (region.byteLength === 0) {
-        this.protocolFailure("output queue has no contiguous data");
-        return;
-      }
-      if (this.suppressReplayResponses && this.replayResponseFence !== undefined) {
-        // The ring can coalesce replay and live frames while a write awaits paint.
-        // Paint exactly to the fence before parsing live bytes with replies enabled.
-        const remaining = this.replayResponseFence - this.lastOutSeq;
-        if (remaining > 0n && remaining < BigInt(region.byteLength)) region = region.subarray(0, Number(remaining));
+      const synchronizedBatch = this.synchronizedOutputBatchPending;
+      let region: Uint8Array | undefined;
+      let regions: Uint8Array[] | undefined;
+      let writeLength: number;
+      if (synchronizedBatch) {
+        regions = [];
+        let offset = 0;
+        const queuedLength = this.outputQueue.length;
+        while (offset < queuedLength) {
+          const next = this.outputQueue.peekAt(offset);
+          if (next.byteLength === 0) {
+            this.protocolFailure("synchronized output queue is inconsistent");
+            return;
+          }
+          regions.push(next);
+          offset += next.byteLength;
+        }
+        writeLength = queuedLength;
+      } else {
+        region = this.outputQueue.peek();
+        if (region.byteLength === 0) {
+          this.protocolFailure("output queue has no contiguous data");
+          return;
+        }
+        if (this.suppressReplayResponses && this.replayResponseFence !== undefined) {
+          // The ring can coalesce replay and live frames while a write awaits paint.
+          // Paint exactly to the fence before parsing live bytes with replies enabled.
+          const remaining = this.replayResponseFence - this.lastOutSeq;
+          if (remaining > 0n && remaining < BigInt(region.byteLength)) region = region.subarray(0, Number(remaining));
+        }
+        writeLength = region.byteLength;
       }
       pulseActivity("output", 300);
       this.outputWriteInFlight = true;
-      this.outputWriteLength = region.byteLength;
-      this.requestSymbolsIfNeeded(region);
+      this.outputWriteLength = writeLength;
       const writeSequence = this.lastOutSeq;
-      this.traceRange(writeSequence, region.byteLength, "termWrite", performance.now());
+      this.traceRange(writeSequence, writeLength, "termWrite", performance.now());
       const epoch = this.cursorEpoch;
+      if (synchronizedBatch) {
+        this.synchronizedOutputBatchPending = false;
+        this.synchronizedOutput.finishAtomicPaint();
+      }
       const onWritten = (): void => {
         if (epoch !== this.cursorEpoch) { this.outputWriteLength = 0; this.outputWriteInFlight = false; this.drainOutput(); this.tryAttach(); return; }
         const callbackAt = performance.now();
@@ -1534,7 +1585,17 @@ export class TerminalClient {
           this.prediction?.rendererPainted();
           this.prediction?.paintedOutput();
         }
-        this.config.hooks?.onPaintedOutput?.(region.subarray(0, consumed), paintedAt, writeSequence);
+        if (synchronizedBatch) {
+          let hookOffset = 0;
+          for (const segment of regions!) {
+            const length = Math.min(segment.byteLength, consumed - hookOffset);
+            if (length <= 0) break;
+            this.config.hooks?.onPaintedOutput?.(segment.subarray(0, length), paintedAt, writeSequence + BigInt(hookOffset));
+            hookOffset += length;
+          }
+        } else {
+          this.config.hooks?.onPaintedOutput?.(region!.subarray(0, consumed), paintedAt, writeSequence);
+        }
         this.outputQueue.consume(consumed);
         this.outputWriteLength = 0;
         this.outputWriteInFlight = false;
@@ -1542,12 +1603,48 @@ export class TerminalClient {
         this.drainOutput();
         this.tryAttach();
       };
-      if (this.suppressReplayResponses) this.writeSuppressingTerminalResponses(region, onWritten, writeSequence);
-      else this.writeQueryResponses(region, writeSequence, onWritten);
-      // The terminal state includes these bytes now; only their paint is a frame away. Reconcile the
-      // prediction against them at once, so a key typed in that frame is placed from a consistent cursor.
-      if (this.predictionUnsafe()) this.prediction?.unsafeScreen();
-      else this.prediction?.hostWritten(region.subarray(0, region.byteLength));
+      if (synchronizedBatch) {
+        const segments = regions!;
+        // Feed every ring segment in this task; only the final callback crosses the shared paint barrier.
+        let batchOffset = 0;
+        for (let index = 0; index < segments.length; index += 1) {
+          const segment = segments[index]!;
+          let segmentOffset = 0;
+          while (segmentOffset < segment.byteLength) {
+            const sequence = writeSequence + BigInt(batchOffset);
+            let fragment = segment.subarray(segmentOffset);
+            if (this.suppressReplayResponses && this.replayResponseFence !== undefined) {
+              const bytesToFence = this.replayResponseFence - sequence;
+              if (bytesToFence <= 0n) this.suppressReplayResponses = false;
+              else if (bytesToFence < BigInt(fragment.byteLength)) fragment = fragment.subarray(0, Number(bytesToFence));
+            }
+            this.requestSymbolsIfNeeded(fragment);
+            const callback = batchOffset + fragment.byteLength === writeLength ? onWritten : undefined;
+            if (this.suppressReplayResponses) this.writeSuppressingTerminalResponses(fragment, callback, sequence);
+            else this.writeQueryResponses(fragment, sequence, callback);
+            // The parser consumes this region synchronously. Reconcile prediction before the next animation frame.
+            if (this.predictionUnsafe()) this.prediction?.unsafeScreen();
+            else this.prediction?.hostWritten(fragment);
+            segmentOffset += fragment.byteLength;
+            batchOffset += fragment.byteLength;
+            if (
+              this.suppressReplayResponses
+              && this.replayResponseFence !== undefined
+              && sequence + BigInt(fragment.byteLength) >= this.replayResponseFence
+            ) {
+              // Parser replies switch at the replay fence; attachment still waits for the batch paint callback.
+              this.suppressReplayResponses = false;
+            }
+          }
+        }
+      } else {
+        this.requestSymbolsIfNeeded(region!);
+        if (this.suppressReplayResponses) this.writeSuppressingTerminalResponses(region!, onWritten, writeSequence);
+        else this.writeQueryResponses(region!, writeSequence, onWritten);
+        // The terminal state includes these bytes now; only their paint is a frame away. Reconcile prediction.
+        if (this.predictionUnsafe()) this.prediction?.unsafeScreen();
+        else this.prediction?.hostWritten(region!);
+      }
       return;
     }
     this.finishExit();
@@ -1557,7 +1654,7 @@ export class TerminalClient {
   /** Write through generic control boundaries and mark every synchronous renderer answer.
    * Keyboard callbacks run in later tasks and always use the unchanged typing path.
    */
-  private writeQueryResponses(bytes: Uint8Array, offset: bigint, callback: () => void): void {
+  private writeQueryResponses(bytes: Uint8Array, offset: bigint, callback?: () => void): void {
     if (!this.conn.terminalQueryReplies) { this.terminal.write(bytes, callback); return; }
     this.linkRowsArmed = true;
     this.terminal.writeSlices(bytes, (writeSlice) => {
@@ -1585,7 +1682,7 @@ export class TerminalClient {
    * onData event used for keyboard input. This scoped gate drops only those
    * write-time replies; real key events run in a later task and remain enabled.
    */
-  private writeSuppressingTerminalResponses(bytes: Uint8Array, callback: () => void, queryOffset?: bigint): void {
+  private writeSuppressingTerminalResponses(bytes: Uint8Array, callback?: () => void, queryOffset?: bigint): void {
     const previous = this.suppressTerminalResponses;
     this.suppressTerminalResponses = true;
     if (queryOffset !== undefined) (this.terminalQueries ??= new TerminalQueries()).scan(bytes, queryOffset, () => undefined);
@@ -2057,6 +2154,7 @@ export class TerminalClient {
    * layer follows cursor moves, scrolling, resizes and font changes with no frame of its own.
    */
   private syncCursorLayer(): void {
+    if (this.synchronizedOutput.holdsPaint) return;
     const layer = this.cursorLayer;
     const renderer = this.ghostty.renderer;
     const buffer = this.terminal.wasmTerm;
@@ -2093,7 +2191,7 @@ export class TerminalClient {
 
   /** Skips the renderer's cursor draw, and repaints the cursor row once so the cursor it drew is gone (or back). */
   private setRendererCursorHidden(hidden: boolean): void {
-    if (hidden === this.rendererCursorHidden) return;
+    if (this.synchronizedOutput.holdsPaint || hidden === this.rendererCursorHidden) return;
     this.rendererCursorHidden = hidden;
     const renderer = this.ghostty.renderer;
     const buffer = this.terminal.wasmTerm;
@@ -2111,10 +2209,11 @@ export class TerminalClient {
     if (!renderer) return;
     const draw = renderer.renderCursor.bind(renderer);
     renderer.renderCursor = (x, y, line) => {
-      if (!this.rendererCursorHidden) draw(x, y, line);
+      if (!this.synchronizedOutput.holdsPaint && !this.rendererCursorHidden) draw(x, y, line);
     };
     const render = renderer.render.bind(renderer);
     renderer.render = (...args) => {
+      if (this.synchronizedOutput.holdsPaint) return;
       const changedRows = this.takeChangedLinkRows(args[0], args[1] === true);
       render(...args);
       if (changedRows) this.queueLinkRows(changedRows.rows, changedRows.force);

@@ -35,6 +35,7 @@ function fixture() {
     },
   };
   const client = Object.assign(Object.create(TerminalClient.prototype), {
+    synchronizedOutput: { reset() {}, dispose() {} },
     closed: false, attachmentConfirmed: false, inputNeedsResend: false, retainedInput: undefined,
     inputQueue: queue, inputScratch: new Uint8Array(16 * 1024),
     inputModifiers: { ctrl: "off", alt: "off" }, cursorEpoch: 0,

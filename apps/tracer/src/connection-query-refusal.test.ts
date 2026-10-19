@@ -75,6 +75,7 @@ for (const sentBeforeDrop of [false, true]) test(`pending query stays reply-mark
     connection = new MuxConnection();
     const conn = connection;
     const terminal = Object.assign(Object.create(TerminalClient.prototype), {
+    synchronizedOutput: { reset() {}, dispose() {} },
       closed: false, attached: false, attachmentConfirmed: false, sessionGone: false,
       hasAttached: false, sessionId: new Uint8Array(16), streamId: 1,
       inputModifiers: { ctrl: "off", alt: "off" }, inputQueue: queue,
