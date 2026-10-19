@@ -146,13 +146,13 @@ Reviews and fixes run at the same time as the next lane's build.
   | `x86_64-unknown-linux-musl` | 21,385,264 bytes |
   | `aarch64-unknown-linux-musl` | 19,570,256 bytes |
 
-  These are the release-7 measurements after the reviewed #230 Retry and #236
-  Mesh merges and #246 build-path normalization: +40,960 /
-  +34,656 bytes over release 6. Retry measured 21,352,208 /
-  19,542,304 bytes; the Mesh merge measured 21,385,264 / 19,570,256.
-  The build-tooling delta is +0 / +0 bytes. The exact caps
-  retain no growth allowance (D243). Release jobs separately run the cross-root
-  reproducibility check after `scripts/verify fast` (#246).
+  These are the release-7 measurements after the reviewed Retry and Mesh merges,
+  #246 source-path normalization, and the #236 migration collision correction:
+  +40,960 / +34,656 bytes over release 6. Retry measured 21,352,208 /
+  19,542,304 bytes; Mesh measured 21,385,264 / 19,570,256. Build normalization
+  preserved those sizes. Reserving existing names in unshipped migration 0029
+  adds +0 / +0 bytes. The exact caps retain no growth allowance (D243).
+  Release jobs run the cross-root reproducibility check after `scripts/verify fast`.
   Release 6 measured 21,344,304 / 19,535,600 bytes. From release 5, #244 adds 3,776 /
   3,320 bytes and #243 adds 114,656 / 104,592 bytes, totaling 118,432 /
   107,912 bytes. D308 accepts the shared-layout increase after its first
