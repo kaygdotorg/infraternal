@@ -321,7 +321,8 @@ Capability bit 5 (`QUERY_REPLIES`) permits additive frame `0x1E QueryReply`,
 whose body is 1–1024 server-arbitrated reply bytes. It has no typing offset.
 Existing v1 layouts and input cursors are unchanged. The infraternal agent
 selects this capability only when advertised by the surviving shim; otherwise
-it drops marked replies rather than sending them as typing.
+it refuses marked replies rather than sending them as typing and emits the
+once-per-attachment `terminal.query_replies_unavailable` notice (wire.md).
 
 The shim admits replies to the existing bounded PTY queue under a reserved
 internal writer (`u64::MAX`, outside the u32 peer-writer namespace). Queue segments retain

@@ -595,3 +595,10 @@ Only the output parser creates query records; marked input never allocates one.
 The parser and retained query table have fixed bounds. Overflow fails closed.
 Replies take a separate bounded lane to the shim so discarded replies cannot
 leave gaps in keyboard input cursors or select the answering viewer's geometry.
+
+A surviving pre-extension shim cannot accept reply bytes without changing typing
+cursors or geometry. On the first marked reply to such a session the infraternal
+agent sends `terminal.query_replies_unavailable` with its `session_id`; the
+server validates and forwards it only in response to marked input, so an old
+browser never receives this new notice. The browser says to open a new shell.
+Ordinary legacy Input remains available. No session is automatically ended.
