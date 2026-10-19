@@ -66,6 +66,27 @@ def battery():
 def cua(name,params):
  return json.loads(command([str(pathlib.Path.home()/'.local/bin/cua-driver'),'call',name,json.dumps(params)],timeout=20))
 
+def compositor_target(surface, viewport):
+ # Opening/following can change the canvas shape after its first picture. Read
+ # bounds for each stimulus; never retain that startup rectangle for sampling.
+ rectangle=surface.bounding_box()
+ if not rectangle or not viewport:raise RuntimeError('viewer target unavailable')
+ x=(rectangle['x']+rectangle['width']/2)/viewport['width']
+ y=(rectangle['y']+rectangle['height']/2)/viewport['height']
+ if not 0<=x<1 or not 0<=y<1:raise RuntimeError('viewer target outside viewport')
+ return {'x':x,'y':y,'rectangle':rectangle,'viewport':viewport}
+
+def compositor_pixel(target, metadata, image_width, image_height):
+ # A managed browser window can exceed its emulated viewport. CDP copies the
+ # whole device surface, including the surrounding area outside that viewport.
+ width=metadata['deviceWidth'];height=metadata['deviceHeight']
+ scale=metadata['pageScaleFactor'];top=metadata['offsetTop']
+ if not 0<width<=32768 or not 0<height<=32768 or not 0<scale<=10:raise RuntimeError('invalid compositor dimensions')
+ x=target['x']*target['viewport']['width']*scale
+ y=target['y']*target['viewport']['height']*scale+top
+ if not 0<=x<width or not 0<=y<height:raise RuntimeError('compositor target outside device')
+ return min(image_width-1,round(x*image_width/width)),min(image_height-1,round(y*image_height/height))
+
 def consent_check():
  # Inspect metadata before requesting any screenshot; never retain an unrelated window inventory.
  inventory=cua('list_windows',{'on_screen_only':True})
@@ -327,13 +348,17 @@ try:
  # Actual compositor pixels are sampled separately below; worker readback is not presentation.
  composites=[]
  palette=[[38,89,204],[38,191,89],[204,64,51],[179,64,191],[38,179,191],[204,166,38],[102,64,204],[191,102,51]]
- rectangle=surface.bounding_box()
+ copy_target=None
  def observe_compositor(event):
   cdp.send('Page.screencastFrameAck',{'sessionId':event['sessionId']})
   image=Image.open(io.BytesIO(base64.b64decode(event['data']))).convert('RGB')
-  x=round((rectangle['x']+rectangle['width']/2)*image.width/832);y=round((rectangle['y']+rectangle['height']/2)*image.height/720)
+  if not composites:
+   (E/'compositor-first.jpg').write_bytes(base64.b64decode(event['data']))
+   (E/'compositor-first-metadata.json').write_text(json.dumps({'metadata':event['metadata'],'image_width':image.width,'image_height':image.height,'target':copy_target}))
+  if copy_target is None:return
+  x,y=compositor_pixel(copy_target,event['metadata'],image.width,image.height)
   rgb=image.getpixel((x,y));distances=[sum((a-b)**2 for a,b in zip(rgb,p)) for p in palette]
-  composites.append({'timestamp_ms':event['metadata'].get('timestamp',0)*1000,'colour':distances.index(min(distances)),'distance':min(distances),'received_perf_ns':time.perf_counter_ns()})
+  composites.append({'timestamp_ms':event['metadata'].get('timestamp',0)*1000,'colour':distances.index(min(distances)),'distance':min(distances),'received_perf_ns':time.perf_counter_ns(),'rgb':list(rgb),'target':copy_target,'metadata':event['metadata'],'image_width':image.width,'image_height':image.height})
  emit({'kind':'network_rtt_before','raw':command(['ping','-n','-c','5','-W','1000','10.69.69.125'])})
  if not console_state()['ready']:raise RuntimeError('console changed before sampling')
  own_windows=cua('list_windows',{'on_screen_only':True}).get('windows',[])
@@ -343,11 +368,13 @@ try:
   stage='change samples'
   for index in range(48):
    if index==24:
+    copy_target=compositor_target(surface,page.viewport_size)
     cdp.on('Page.screencastFrame',observe_compositor)
     cdp.send('Page.startScreencast',{'format':'jpeg','quality':80,'maxWidth':1280,'maxHeight':900,'everyNthFrame':1})
    native_command('idle');page.wait_for_timeout(150+(index*37)%103)
    sequence=max([r['sequence'] for r in all_draws if r['kind']=='draw'] or [0])+1
    drain();page.evaluate('([id,colour])=>window.__appWindowBench.arm(id,{colour})',[index,sequence%8])
+   if index>=24:copy_target=compositor_target(surface,page.viewport_size)
    composite_begin=len(composites)
    native_command('next');deadline=time.monotonic()+5;effect=None;events=[]
    while time.monotonic()<deadline:
@@ -369,13 +396,19 @@ try:
   stage='input samples'
   for index in range(16):
    page.wait_for_timeout(150+(index*37)%103);sequence=max(r['sequence'] for r in all_draws if r['kind']=='draw')+1
-   drain();page.evaluate('([id,colour])=>window.__appWindowBench.arm(id,{colour})',[100+index,sequence%8]);page.keyboard.type('x');deadline=time.monotonic()+5;events=[];effect=None
+   drain();page.evaluate('([id,colour])=>window.__appWindowBench.arm(id,{colour})',[100+index,sequence%8]);copy_target=compositor_target(surface,page.viewport_size);composite_begin=len(composites);page.keyboard.type('x');deadline=time.monotonic()+5;events=[];effect=None
    while time.monotonic()<deadline:
     receipt=drain();events.append(receipt);effect=next((e for e in receipt['probe']['events'] if e.get('t')=='bench-effect' and e['id']==100+index),None)
     if effect:break
     page.wait_for_timeout(5)
    if not effect:raise RuntimeError('input change not observed')
-   result={'kind':'input_sample','index':index,'effect':effect,'events':events};results.append(result);emit(result)
+   compositor=None
+   for attempt in range(100):
+    compositor=next((c for c in composites[composite_begin:] if c['colour']==sequence%8 and c['distance']<2500),None)
+    if compositor:break
+    page.wait_for_timeout(5)
+   if not compositor:raise RuntimeError('input change absent from compositor copies')
+   result={'kind':'input_sample','index':index,'effect':effect,'events':events,'compositor':compositor};results.append(result);emit(result)
   cdp.send('Page.stopScreencast');cdp.remove_listener('Page.screencastFrame',observe_compositor)
  stage='shape'
  if not args.get('resources_only'):emit({'kind':'source_geometry_before','state':call('desktop.session.clock',{'session_id':page.evaluate('window.__appWindowBench.session')})})
@@ -390,10 +423,10 @@ try:
   battery();emit({'kind':'result','status':'resources_measured'});raise PhaseComplete()
  # Save a short recording of compositor output after authentication, containing only this isolated canvas.
  stage='recording'
- cdp.send('Page.startScreencast',{'format':'jpeg','quality':75,'maxWidth':1280,'maxHeight':900,'everyNthFrame':1})
+ cdp.send('Page.startScreencast',{'format':'jpeg','quality':75,'maxWidth':2560,'maxHeight':1800,'everyNthFrame':1})
  frames=[]
  def screencast(event):
-  frames.append({'timestamp':event['metadata'].get('timestamp'),'data':event['data']});cdp.send('Page.screencastFrameAck',{'sessionId':event['sessionId']})
+  frames.append({'timestamp':event['metadata'].get('timestamp'),'metadata':event['metadata'],'data':event['data']});cdp.send('Page.screencastFrameAck',{'sessionId':event['sessionId']})
  cdp.on('Page.screencastFrame',screencast)
  surface.click(position={'x':150,'y':120});page.wait_for_timeout(2500)
  page.keyboard.type('infraternal demo',delay=120);page.wait_for_timeout(2000)
@@ -474,6 +507,7 @@ finally:
   cleanup_remaining=sum(c['ps_exit']==0 for c in checks)
   emit({'kind':'cleanup','checks':checks,'remaining':cleanup_remaining})
   emit({'kind':'consent_monitor','errors':consent_errors if 'consent_errors' in locals() else []})
+  if 'composites' in locals():(E/'compositor-copies.json').write_text(json.dumps(composites))
   (E/'native-metrics.log').write_text('\n'.join(native_metrics)+'\n');(E/'source-draws.json').write_text(json.dumps(all_draws));(E/'samples.json').write_text(json.dumps(results))
   if runtime_owned:
    import shutil
