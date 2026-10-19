@@ -210,6 +210,13 @@ export async function startRealServer(options: {
       const inbound = new WebSocketFrameDecoder();
       const outbound = new WebSocketFrameDecoder();
       const queued: Array<{ bytes: Buffer; binary: boolean }> = [];
+      let pendingUpstreamMessages = 0;
+      let closeBrowserWhenDrained = false;
+      const closeBrowserAfterDrain = (): void => {
+        if (!closeBrowserWhenDrained || pendingUpstreamMessages !== 0 || retainedBrowsers.has(browser)) return;
+        closeBrowserWhenDrained = false;
+        if (browser.readyState === WebSocket.OPEN) browser.close();
+      };
       browser.on("message", (data, binary) => {
         const bytes = Buffer.from(data as Buffer);
         if (protocol && binary) inbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
@@ -234,6 +241,7 @@ export async function startRealServer(options: {
       });
       upstream.on("open", () => { for (const q of queued.splice(0)) { if (!bridge.closed) upstream.send(q.bytes, { binary: q.binary }); } });
       upstream.on("message", (data, binary) => {
+        pendingUpstreamMessages++;
         const bytes = Buffer.from(data as Buffer);
         if (!lean && protocol && binary) outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
           if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Output" && f.type !== "Ack") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} down s${stream} ${f.type}`);
@@ -276,7 +284,12 @@ export async function startRealServer(options: {
           }
           if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId, ...(options.timedControls ? { at: Date.now() } : {}) });
         });
-        later(() => { if (!bridge.closed && browser.readyState === WebSocket.OPEN) browser.send(bytes, { binary }); });
+        // Drain messages already received before closing the browser side of a failed upstream route.
+        later(() => {
+          if (browser.readyState === WebSocket.OPEN) browser.send(bytes, { binary });
+          pendingUpstreamMessages--;
+          closeBrowserAfterDrain();
+        });
       });
       const eraseQueue = (): void => { for (const entry of queued.splice(0)) entry.bytes.fill(0); };
       upstream.on("close", (code, reason) => {
@@ -286,9 +299,13 @@ export async function startRealServer(options: {
         bridge.closedBy ??= `server ${code}`;
         bridge.closedReason ??= reason.toString("utf8");
         if (process.env.REAL_EVENT_TIMES === "1") console.error(`SERVER_SOCKET_CLOSE b${bridge.id} side=upstream code=${code} reason=${JSON.stringify(reason.toString("utf8"))}`);
-        if (!retainedBrowsers.has(browser)) browser.close();
+        closeBrowserWhenDrained = true;
+        closeBrowserAfterDrain();
       });
-      upstream.on("error", () => { if (!retainedBrowsers.has(browser)) browser.close(); });
+      upstream.on("error", () => {
+        closeBrowserWhenDrained = true;
+        closeBrowserAfterDrain();
+      });
       browser.on("close", (code, reason) => {
         activeBrowsers.delete(browser);
         retainedBrowsers.delete(browser);
