@@ -1,93 +1,150 @@
 //! Applies stable-ID semantic intents to the existing JSON representation; storage supplies permanent close IDs [183,243].
 use crate::model::{self, Document};
-use serde_json::{Value, json};
+use serde_json::Value;
 fn is_closed(closed: &[String], id: &str) -> bool {
     closed.iter().any(|seen| seen == id)
 }
 fn s<'a>(value: &'a Value, key: &str) -> Result<&'a str, ()> {
     model::string(value, key).ok_or(())
 }
-#[must_use]
-pub fn valid_intent(value: &Value) -> bool {
-    let Some(kind) = model::string(value, "type") else {
-        return false;
-    };
-    let fields = match kind {
-        "view.add" => &["type", "view"][..],
-        "view.remove" => &["type", "view_id"][..],
-        "view.update" => &["type", "view_id", "cell", "name"][..],
-        "target" => &["type", "window_id", "target"][..],
-        "open" => &[
-            "type",
-            "view_id",
-            "column_id",
-            "window",
-            "after",
-            "column_after",
-        ][..],
-        "split" => &[
-            "type",
-            "view_id",
-            "anchor_id",
-            "axis",
-            "column_id",
-            "window",
-        ][..],
-        "close" => &["type", "window_id"][..],
-        "move" | "membership.add" => &[
-            "type",
-            "view_id",
-            "window_id",
-            "column_id",
-            "after",
-            "column_after",
-        ][..],
-        "resize" => &["type", "window_id", "height", "span", "rows", "row"][..],
-        "weight" => &["type", "view_id", "column_id", "weight"][..],
-        "membership.remove" => &["type", "view_id", "window_id"][..],
-        "pin" => &["type", "view_id", "node_id", "position"][..],
-        _ => return false,
-    };
-    if !model::shape(value, fields) {
-        return false;
-    }
-    let strings = match kind {
-        "view.add" => &[][..],
-        "view.remove" | "view.update" => &["view_id"][..],
-        "open" | "weight" => &["view_id", "column_id"][..],
-        "split" => &["view_id", "anchor_id", "axis", "column_id"][..],
-        "close" | "resize" | "target" => &["window_id"][..],
-        "move" | "membership.add" => &["view_id", "window_id", "column_id"][..],
-        "membership.remove" => &["view_id", "window_id"][..],
-        "pin" => &["view_id", "node_id"][..],
-        _ => return false,
-    };
-    if !strings
-        .iter()
-        .all(|key| model::string(value, key).is_some())
-        || ["after", "column_after"].iter().any(|key| {
-            value
-                .get(key)
-                .is_some_and(|v| !v.is_null() && !v.as_str().is_some_and(model::text))
-        })
-    {
-        return false;
-    }
+/// Carries the validated type into reduction without reparsing its JSON string.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IntentKind {
+    ViewAdd,
+    ViewRemove,
+    ViewUpdate,
+    Target,
+    Open,
+    Split,
+    Close,
+    Move,
+    MembershipAdd,
+    Resize,
+    Weight,
+    MembershipRemove,
+    Pin,
+}
+struct IntentRule {
+    kind: IntentKind,
+    fields: &'static [&'static str],
+    strings: &'static [&'static str],
+}
+fn intent_rule(kind: &str) -> Option<IntentRule> {
+    // Keep shape and value checks in one kind dispatch so each intent has one
+    // authoritative list of accepted and required keys.
+    Some(match kind {
+        "view.add" => IntentRule {
+            kind: IntentKind::ViewAdd,
+            fields: &["type", "view"],
+            strings: &[],
+        },
+        "view.remove" => IntentRule {
+            kind: IntentKind::ViewRemove,
+            fields: &["type", "view_id"],
+            strings: &["view_id"],
+        },
+        "view.update" => IntentRule {
+            kind: IntentKind::ViewUpdate,
+            fields: &["type", "view_id", "cell", "name"],
+            strings: &["view_id"],
+        },
+        "target" => IntentRule {
+            kind: IntentKind::Target,
+            fields: &["type", "window_id", "target"],
+            strings: &["window_id"],
+        },
+        "open" => IntentRule {
+            kind: IntentKind::Open,
+            fields: &[
+                "type",
+                "view_id",
+                "column_id",
+                "window",
+                "after",
+                "column_after",
+            ],
+            strings: &["view_id", "column_id"],
+        },
+        "split" => IntentRule {
+            kind: IntentKind::Split,
+            fields: &[
+                "type",
+                "view_id",
+                "anchor_id",
+                "axis",
+                "column_id",
+                "window",
+            ],
+            strings: &["view_id", "anchor_id", "axis", "column_id"],
+        },
+        "close" => IntentRule {
+            kind: IntentKind::Close,
+            fields: &["type", "window_id"],
+            strings: &["window_id"],
+        },
+        "move" => IntentRule {
+            kind: IntentKind::Move,
+            fields: &[
+                "type",
+                "view_id",
+                "window_id",
+                "column_id",
+                "after",
+                "column_after",
+            ],
+            strings: &["view_id", "window_id", "column_id"],
+        },
+        "membership.add" => IntentRule {
+            kind: IntentKind::MembershipAdd,
+            fields: &[
+                "type",
+                "view_id",
+                "window_id",
+                "column_id",
+                "after",
+                "column_after",
+            ],
+            strings: &["view_id", "window_id", "column_id"],
+        },
+        "resize" => IntentRule {
+            kind: IntentKind::Resize,
+            fields: &["type", "window_id", "height", "span", "rows", "row"],
+            strings: &["window_id"],
+        },
+        "weight" => IntentRule {
+            kind: IntentKind::Weight,
+            fields: &["type", "view_id", "column_id", "weight"],
+            strings: &["view_id", "column_id"],
+        },
+        "membership.remove" => IntentRule {
+            kind: IntentKind::MembershipRemove,
+            fields: &["type", "view_id", "window_id"],
+            strings: &["view_id", "window_id"],
+        },
+        "pin" => IntentRule {
+            kind: IntentKind::Pin,
+            fields: &["type", "view_id", "node_id", "position"],
+            strings: &["view_id", "node_id"],
+        },
+        _ => return None,
+    })
+}
+fn check_intent(value: &Value, kind: IntentKind) -> bool {
     match kind {
-        "view.add" => value.get("view").is_some_and(model::view),
-        "view.update" => {
+        IntentKind::ViewAdd => value.get("view").is_some_and(model::view),
+        IntentKind::ViewUpdate => {
             value.get("cell").is_none_or(|p| model::point(p, 1000.0))
                 && value
                     .get("name")
                     .is_none_or(|v| v.as_str().is_some_and(model::text))
         }
-        "target" => value.get("target").is_some_and(model::target),
-        "open" | "split" => {
+        IntentKind::Target => value.get("target").is_some_and(model::target),
+        IntentKind::Open | IntentKind::Split => {
             value.get("window").is_some_and(model::window)
-                && (kind != "split"
+                && (matches!(kind, IntentKind::Open)
                     || matches!(model::string(value, "axis"), Some("right" | "down")))
         }
-        "resize" => [
+        IntentKind::Resize => [
             ("height", 0.05, 10_000.0, false),
             ("span", 1.0, 64.0, true),
             ("rows", 1.0, 64.0, true),
@@ -101,12 +158,33 @@ pub fn valid_intent(value: &Value) -> bool {
                         .is_some_and(|n| model::finite(n, *lo, *hi) && (!whole || n.fract() == 0.0))
             })
         }),
-        "weight" => model::numeric(value, "weight", 0.1, 10.0),
-        "pin" => value
+        IntentKind::Weight => model::numeric(value, "weight", 0.1, 10.0),
+        IntentKind::Pin => value
             .get("position")
             .is_none_or(|p| p.is_null() || model::point(p, 100_000.0)),
         _ => true,
     }
+}
+fn validated_intent(value: &Value) -> Option<IntentRule> {
+    let rule = intent_rule(model::string(value, "type")?)?;
+    if !model::shape(value, rule.fields)
+        || !rule
+            .strings
+            .iter()
+            .all(|key| model::string(value, key).is_some())
+        || ["after", "column_after"].iter().any(|key| {
+            value
+                .get(key)
+                .is_some_and(|v| !v.is_null() && !v.as_str().is_some_and(model::text))
+        })
+    {
+        return None;
+    }
+    check_intent(value, rule.kind).then_some(rule)
+}
+#[must_use]
+pub fn valid_intent(value: &Value) -> bool {
+    validated_intent(value).is_some()
 }
 fn columns<'a>(doc: &'a mut Document, id: &str) -> Result<&'a mut Vec<Value>, ()> {
     let view = doc
@@ -147,7 +225,7 @@ fn insert(
                     .map_or(cols.len(), |i| i + 1)
             })
         });
-        cols.insert(at, json!({"id":column_id,"weight":1.0,"windows":[]}));
+        cols.insert(at, model::column(column_id, 1.0, Vec::new()));
     }
     let col = cols
         .iter_mut()
@@ -193,12 +271,12 @@ fn prune(columns: &mut Vec<Value>) {
 /// Refuses invalid bounds, missing destinations and reuse of stable IDs.
 #[allow(clippy::result_unit_err, clippy::too_many_lines)]
 pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(), ()> {
-    if !doc.valid() || !valid_intent(intent) {
+    if !doc.valid() {
         return Err(());
     }
-    let kind = s(intent, "type")?;
+    let kind = validated_intent(intent).ok_or(())?.kind;
     match kind {
-        "view.add" => {
+        IntentKind::ViewAdd => {
             let view = intent.get("view").ok_or(())?;
             let empty = view
                 .get("layout")
@@ -232,7 +310,7 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
                 .ok_or(())?
                 .push(view.clone());
         }
-        "view.update" => {
+        IntentKind::ViewUpdate => {
             let id = s(intent, "view_id")?;
             if let Some(view) = doc
                 .0
@@ -249,7 +327,7 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
                 }
             }
         }
-        "target" => {
+        IntentKind::Target => {
             let id = s(intent, "window_id")?;
             if !is_closed(closed, id) {
                 for view in doc
@@ -278,7 +356,7 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
                 }
             }
         }
-        "view.remove" => {
+        IntentKind::ViewRemove => {
             let id = s(intent, "view_id")?;
             doc.0
                 .get_mut("views")
@@ -286,17 +364,17 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
                 .ok_or(())?
                 .retain(|v| model::string(v, "id") != Some(id));
         }
-        "open" | "split" => {
+        IntentKind::Open | IntentKind::Split => {
             let window = intent.get("window").ok_or(())?;
             let id = s(window, "id")?;
             if is_closed(closed, id) || doc.windows().any(|w| model::string(w, "id") == Some(id)) {
                 return Err(());
             }
-            if kind == "split" && is_closed(closed, s(intent, "anchor_id")?) {
+            if kind == IntentKind::Split && is_closed(closed, s(intent, "anchor_id")?) {
                 return Ok(());
             }
             let cols = columns(doc, s(intent, "view_id")?)?;
-            if kind == "open" {
+            if kind == IntentKind::Open {
                 insert(
                     cols,
                     s(intent, "column_id")?,
@@ -314,7 +392,7 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
                 )?;
             }
         }
-        "close" => {
+        IntentKind::Close => {
             let id = s(intent, "window_id")?;
             for view in doc
                 .0
@@ -331,7 +409,7 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
                 }
             }
         }
-        "move" => {
+        IntentKind::Move => {
             let id = s(intent, "window_id")?;
             if is_closed(closed, id) {
                 return Ok(());
@@ -347,7 +425,7 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
                 )?;
             }
         }
-        "resize" => {
+        IntentKind::Resize => {
             let id = s(intent, "window_id")?;
             if is_closed(closed, id) {
                 return Ok(());
@@ -382,7 +460,7 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
                 }
             }
         }
-        "weight" => {
+        IntentKind::Weight => {
             let cols = columns(doc, s(intent, "view_id")?)?;
             if let Some(col) = cols
                 .iter_mut()
@@ -391,7 +469,7 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
                 col["weight"] = intent["weight"].clone();
             }
         }
-        "membership.add" => {
+        IntentKind::MembershipAdd => {
             let id = s(intent, "window_id")?;
             if is_closed(closed, id) {
                 return Ok(());
@@ -409,13 +487,13 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
                 intent.get("column_after"),
             )?;
         }
-        "membership.remove" => {
+        IntentKind::MembershipRemove => {
             remove(
                 columns(doc, s(intent, "view_id")?)?,
                 s(intent, "window_id")?,
             );
         }
-        "pin" => {
+        IntentKind::Pin => {
             let view = doc
                 .0
                 .get_mut("views")
@@ -436,9 +514,11 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
                 pins.remove(id);
             }
         }
-        _ => return Err(()),
     }
-    if matches!(kind, "close" | "move" | "membership.remove") {
+    if matches!(
+        kind,
+        IntentKind::Close | IntentKind::Move | IntentKind::MembershipRemove
+    ) {
         for view in doc
             .0
             .get_mut("views")
@@ -460,6 +540,7 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     fn document() -> Document {
         Document(
             json!({"format":"infraternal.canvas","version":1,"revision":0,"views":[{"id":"console","kind":"console","name":"Console","cell":{"x":0,"y":0},"layout":{"type":"tiled","columns":[]}}]}),

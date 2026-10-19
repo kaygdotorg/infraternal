@@ -64,14 +64,13 @@ impl Store {
             && after <= revision
             && i64::try_from(rows.len() - 1).ok() == Some(revision - after)
         {
-            return rows
-                .iter()
-                .skip(1)
-                .map(|r| {
-                    serde_json::from_slice(r.get::<&str, _>("event").as_bytes())
-                        .map_err(Error::from)
-                })
-                .collect();
+            let mut events = Vec::with_capacity(rows.len() - 1);
+            for row in &rows[1..] {
+                events.push(serde_json::from_slice(
+                    row.get::<&str, _>("event").as_bytes(),
+                )?);
+            }
+            return Ok(events);
         }
         let document = Document(serde_json::from_slice(
             head.get::<&str, _>("document").as_bytes(),
@@ -140,7 +139,7 @@ impl Store {
                 return Err(Error);
             }
             incoming.normalize();
-            ownership(&mut tx, account, incoming.windows()).await?;
+            ownership(&mut tx, account, OwnershipWindows::Document(&incoming)).await?;
             let initialized: bool =
                 sqlx::query("SELECT initialized FROM canvas_heads WHERE account=?")
                     .bind(account)
@@ -190,14 +189,14 @@ impl Store {
                 ownership(
                     &mut tx,
                     account,
-                    std::iter::once(intent.get("window").ok_or(Error)?),
+                    OwnershipWindows::One(intent.get("window").ok_or(Error)?),
                 )
                 .await?;
             }
             if model::string(intent, "type") == Some("target") {
                 // Retargeting introduces a reference just as opening does; close must never bypass admission.
                 let window = json!({"target": intent.get("target").ok_or(Error)?});
-                ownership(&mut tx, account, std::iter::once(&window)).await?;
+                ownership(&mut tx, account, OwnershipWindows::One(&window)).await?;
             }
             if model::string(intent, "type") == Some("close") {
                 let id = model::string(intent, "window_id").ok_or(Error)?;
@@ -376,32 +375,51 @@ async fn receipt(
     }
     Ok(None)
 }
-async fn ownership<'a>(
+/// Chooses between bootstrap traversal and one operation window without generic iterator copies.
+enum OwnershipWindows<'a> {
+    Document(&'a Document),
+    One(&'a Value),
+}
+async fn ownership(
     tx: &mut Transaction<'_, Sqlite>,
     account: &str,
-    windows: impl Iterator<Item = &'a Value>,
+    windows: OwnershipWindows<'_>,
 ) -> Result<(), Error> {
     let mut seen = Vec::new();
-    for window in windows {
-        let target = window.get("target").ok_or(Error)?;
-        if model::string(target, "type") == Some("session") {
-            let id = model::string(target, "id").ok_or(Error)?;
-            if seen.contains(&id) {
-                continue;
+    match windows {
+        OwnershipWindows::Document(document) => {
+            for window in document.windows() {
+                ownership_window(tx, account, window, &mut seen).await?;
             }
-            seen.push(id);
-            let uuid = uuid::Uuid::parse_str(id).map_err(|_| Error)?;
-            let owned: bool = sqlx::query(
-                "SELECT EXISTS(SELECT 1 FROM terminal_sessions WHERE id=? AND user_id=?)",
-            )
-            .bind(uuid.as_bytes().as_slice())
-            .bind(account)
-            .fetch_one(&mut **tx)
-            .await?
-            .get(0);
-            if !owned {
-                return Err(Error);
-            }
+        }
+        OwnershipWindows::One(window) => ownership_window(tx, account, window, &mut seen).await?,
+    }
+    Ok(())
+}
+/// Checks a session target once per input ID and keeps the account predicate in the SQL query.
+async fn ownership_window<'a>(
+    tx: &mut Transaction<'_, Sqlite>,
+    account: &str,
+    window: &'a Value,
+    seen: &mut Vec<&'a str>,
+) -> Result<(), Error> {
+    let target = window.get("target").ok_or(Error)?;
+    if model::string(target, "type") == Some("session") {
+        let id = model::string(target, "id").ok_or(Error)?;
+        if seen.contains(&id) {
+            return Ok(());
+        }
+        seen.push(id);
+        let uuid = uuid::Uuid::parse_str(id).map_err(|_| Error)?;
+        let owned: bool =
+            sqlx::query("SELECT EXISTS(SELECT 1 FROM terminal_sessions WHERE id=? AND user_id=?)")
+                .bind(uuid.as_bytes().as_slice())
+                .bind(account)
+                .fetch_one(&mut **tx)
+                .await?
+                .get(0);
+        if !owned {
+            return Err(Error);
         }
     }
     Ok(())

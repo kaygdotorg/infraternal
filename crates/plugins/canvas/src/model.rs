@@ -58,7 +58,11 @@ pub(crate) fn target(value: &Value) -> bool {
                 && string(value, "host").is_some()
                 && value.get("hostId").is_none_or(|v| {
                     v.as_str().is_some_and(|id| {
-                        uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id)
+                        uuid::Uuid::parse_str(id).is_ok_and(|uuid| {
+                            uuid.hyphenated()
+                                .encode_lower(&mut uuid::Uuid::encode_buffer())
+                                == id
+                        })
                     })
                 })
                 && ["user", "address", "name"]
@@ -146,6 +150,14 @@ pub fn object(fields: Vec<(&str, Value)>) -> Value {
     for (key, value) in fields {
         object.insert(key.into(), value);
     }
+    Value::Object(object)
+}
+/// Builds the shared JSON shape for a newly created tiled column.
+pub(crate) fn column(id: &str, weight: f64, windows: Vec<Value>) -> Value {
+    let mut object = serde_json::Map::new();
+    object.insert("id".into(), Value::String(id.into()));
+    object.insert("weight".into(), Value::from(weight));
+    object.insert("windows".into(), Value::Array(windows));
     Value::Object(object)
 }
 impl Document {
@@ -259,6 +271,7 @@ impl Document {
     }
 }
 
+/// Checks document bounds and canonical reference spellings.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,5 +292,15 @@ mod tests {
         doc.0["views"][0]["cell"]["x"] = json!(2000);
         assert!(!doc.valid());
         assert!(!text(&"x".repeat(201)));
+    }
+    #[test]
+    fn host_id_requires_canonical_lowercase_hyphenated_text() {
+        let mut value = json!({"type":"session","id":"session","host":"host"});
+        value["hostId"] = json!("550e8400-e29b-41d4-a716-446655440000");
+        assert!(target(&value));
+        value["hostId"] = json!("550E8400-E29B-41D4-A716-446655440000");
+        assert!(!target(&value));
+        value["hostId"] = json!("550e8400e29b41d4a716446655440000");
+        assert!(!target(&value));
     }
 }
