@@ -1030,14 +1030,15 @@ mod tests {
             "retained runtime work lost its lifetime lock"
         );
         drop(retained);
+        // Listener completion alone does not observe the lock's release. Keep
+        // the existing bound around the externally visible cleanup condition.
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while !stopped.is_finished() {
+            while !stopped.is_finished() || probe.try_lock().is_err() {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         })
         .await
-        .unwrap();
-        assert!(probe.try_lock().is_ok());
+        .expect("runtime owner did not release its lifetime lock");
     }
     #[tokio::test]
     async fn synchronous_plugin_work_does_not_park_the_current_thread_reactor() {

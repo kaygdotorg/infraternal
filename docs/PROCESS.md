@@ -143,8 +143,8 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,225,872 bytes |
-  | `aarch64-unknown-linux-musl` | 19,427,688 bytes |
+  | `x86_64-unknown-linux-musl` | 21,344,304 bytes |
+  | `aarch64-unknown-linux-musl` | 19,535,600 bytes |
 
   Release jobs (not `scripts/verify fast`, which every job runs) also run
   `scripts/test-static-reproducibility.py`. It builds both targets again from a detached checkout with separate
@@ -155,11 +155,13 @@ Reviews and fixes run at the same time as the next lane's build.
   rustc applies the later match, which keeps sources under `/cargo/<crate>`.
   This catches release output that depends on a job's build locations.
 
-  These are the release-5 measurements, adding the Mesh view (#236) to the
-  release-4 measurements below: +81,760 / +56,992 bytes. The x86_64 increase
-  follows D306's accepted Mesh view size and stays below this task's +90 KB
-  stop line. Each cap stays at its exact measured size until a later measured
-  reduction ratchets it down. Release 4's one-off D243 exception was accepted
+  These are the release-6 measurements. From release 5, #244 adds 3,776 /
+  3,320 bytes and #243 adds 114,656 / 104,592 bytes, totaling 118,432 /
+  107,912 bytes. D308 accepts the shared-layout increase after its first
+  trim; x86_64 remains 24,928 bytes below this task's +140 KiB stop line.
+  Release 5 added the Mesh view (#236) at +81,760 / +56,992 over release 4;
+  D306 accepted that increase. Each cap stays at its exact measured size
+  until a later measured reduction ratchets it down. Release 4's one-off D243 exception was accepted
   within the task's +64 KB ceiling for D299's versioned `--json` envelope and
   D303–D305 command behavior, together with #237's status truth (+17 KB).
   The trim follow-up is owed.

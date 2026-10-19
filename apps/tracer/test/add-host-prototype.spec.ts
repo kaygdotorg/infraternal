@@ -228,7 +228,7 @@ test("ten hosts install together; failures stay listed and the rest open as wind
     expect(overlaps).toBe(0);
     // The canvas's own pan brought the first new window into view.
     await expect.poll(() => page.evaluate(() => { const r = document.querySelector(".ui-window[data-active]")!.getBoundingClientRect(); return `${r.left >= 0 && r.right <= innerWidth} ${Math.round(r.left)}..${Math.round(r.right)} of ${innerWidth}`; })).toMatch(/^true/);
-    await page.locator(".ui-toast-action").click();
+    await page.getByRole("button", { name: "Review", exact: true }).click();
     await expect(page.locator(".ah .ah-job[data-state='failed']")).toHaveCount(2);
   } finally {
     await context.close();

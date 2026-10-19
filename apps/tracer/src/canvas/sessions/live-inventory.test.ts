@@ -153,3 +153,21 @@ for (const event of ["census", "close"] as const) test(`another host's ${event} 
   expect(inventory.get("server", "new-id")?.gone).not.toBe(true);
   inventory.dispose();
 });
+
+test("shared membership marks windows open without any local attachment", () => {
+  const prior = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { localStorage: { getItem: () => "[]", setItem() {} } } });
+  try {
+    const inventory = createLiveInventory({ accountId: "shared", host: "server" });
+    const document = { format: "infraternal.canvas" as const, version: 1 as const, revision: 10, views: [{ id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 }, layout: { type: "tiled" as const, columns: [{ id: "c", weight: 1, windows: [{ id: "w", target: { type: "session" as const, host: "server", id: "shared-session" } }] }] } }] };
+    inventory.setLayout(document);
+    inventory.reconcile("server", ["shared-session", "detached-session"]);
+    expect(inventory.get("server", "shared-session")?.state).toBe("open");
+    expect(inventory.get("server", "detached-session")?.state).toBe("detached");
+    inventory.detach("server", "shared-session");
+    expect(inventory.get("server", "shared-session")?.state).toBe("open");
+    inventory.setLayout({ ...document, views: [] });
+    expect(inventory.get("server", "shared-session")?.state).toBe("detached");
+    inventory.dispose();
+  } finally { if (prior) Object.defineProperty(globalThis, "window", prior); else Reflect.deleteProperty(globalThis, "window"); }
+});

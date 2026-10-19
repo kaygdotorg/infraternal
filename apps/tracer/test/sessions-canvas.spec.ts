@@ -157,10 +157,10 @@ test("closing a window never ends its session: a gentle toast, and Reopen brings
     await expect(consoleWindows(page)).toHaveCount(3);
     const toast = page.locator(".ui-toast");
     await expect(toast.locator(".ui-toast-message")).toHaveText("Session keeps running");
-    await expect(toast.locator(".ui-toast-action")).toHaveText("Reopen");
+    await expect(toast.getByRole("button", { name: "Reopen", exact: true })).toHaveText("Reopen");
     expect(await stateOf(page, "build-01", "deploy")).toBe("detached");
     await page.screenshot({ path: process.env.TOAST_SHOT ?? tracerEvidencePath("close-toast.png") });
-    await toast.locator(".ui-toast-action").click();
+    await toast.getByRole("button", { name: "Reopen", exact: true }).click();
     await expect(consoleWindows(page)).toHaveCount(4);
     expect(await stateOf(page, "build-01", "deploy")).toBe("open");
     await expect(consoleWindows(page).first().locator(".ui-window-host")).toHaveText("build-01");

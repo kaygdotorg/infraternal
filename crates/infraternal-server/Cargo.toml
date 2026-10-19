@@ -10,7 +10,8 @@ workspace = true
 
 [features]
 staging-trust = []
-default = ["mesh", "cli-plugin", "ssh", "release"]
+default = ["mesh", "cli-plugin", "ssh", "release", "canvas"]
+canvas = ["dep:infraternal-plugin-canvas"]
 cli-plugin = []
 mesh = ["dep:infraternal-plugin-mesh"]
 # Opt-in namespace proof compiles the existing node engine in this test process.
@@ -23,6 +24,7 @@ ssh = ["dep:infraternal-plugin-ssh", "dep:hyper", "dep:hyper-util", "dep:tokio-o
 release = ["dep:infraternal-plugin-release", "dep:hyper", "dep:hyper-util", "dep:tokio-openssl", "dep:http-body-util"]
 
 [dependencies]
+infraternal-plugin-canvas = { path = "../plugins/canvas", version = "0.1.0", optional = true }
 infraternal-shim = { path = "../infraternal-shim", version = "0.1.0", default-features = false }
 infraternal-plugin-release = { path = "../plugins/release", version = "0.1.0", optional = true, default-features = false, features = ["server"] }
 # The release downloader reuses the HTTP/TLS engines already used by server tests.
@@ -83,3 +85,7 @@ required-features = ["remote"]
 [[example]]
 name = "mesh_revocation_fixture"
 required-features = ["remote", "mesh"]
+
+[[example]]
+name = "layout_bench"
+required-features = ["canvas"]

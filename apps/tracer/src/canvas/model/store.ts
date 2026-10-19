@@ -1,25 +1,24 @@
 /**
  * The canvas store adapter: where the canvas document lives (D178, D180, D183).
  *
- * Today: the browser's local storage, per account (`LocalCanvasStore`). Tomorrow: the server, which keeps the
- * document in SQLite as an operation log plus snapshots and syncs it over the same WebSocket (#98). The canvas
- * only ever talks to this interface, so that change replaces one class.
- *
- * The contract:
- * - `load` returns the last saved document, or nothing (first run, cleared storage, damaged data).
- * - `save` stores the whole document; the server implementation will turn successive saves into operations that
- *   carry their base revision (the later edit of a window wins, a close beats a move or a resize).
- * - `subscribe` delivers changes that came from elsewhere (another device); the local store never calls it.
- * - Each device keeps only its own camera; the camera is not part of the document.
- * Storage may be unavailable (private mode, blocked): every method then behaves as an empty store.
+ * Product uses ServerCanvasStore: revisions and semantic intents over the existing connection.
+ * LocalCanvasStore remains for isolated previews. Local storage is only a drawing cache in production.
+ * Cameras and focus belong to each device and never enter this interface.
  */
-import { parseDocument, type CanvasDocument } from "./document";
+import { parseDocument, type CanvasDocument } from "./schema";
+import type { LayoutEdit } from "./operations";
 import { canvasKey } from "../../account-storage";
 
 export interface CanvasStore {
+  readonly acceptsPendingReferences?: boolean;
   load(): Promise<CanvasDocument | undefined>;
-  save(doc: CanvasDocument): Promise<void>;
-  subscribe(listener: (doc: CanvasDocument) => void): () => void;
+  save(doc: CanvasDocument, splits?: ReadonlyMap<string, LayoutEdit>, before?: CanvasDocument, unresolved?: ReadonlySet<string>): Promise<void>;
+  current?(): CanvasDocument;
+  unresolvedWindow?(id: string): boolean;
+  flush?(): void;
+  dispose?(): void;
+  /** Read the latest projection after asynchronous work instead of retaining an obsolete event snapshot. */
+  subscribe(listener: () => void): () => void;
 }
 
 export class LocalCanvasStore implements CanvasStore {

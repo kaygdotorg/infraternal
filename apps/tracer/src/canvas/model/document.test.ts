@@ -130,3 +130,15 @@ test("a plain view is saved without spans or bands, exactly as before D212", () 
   expect(json).not.toContain("\"rows\"");
   expect(json).not.toContain("\"row\"");
 });
+
+test("an offscreen graph keeps its shared pins before any nodes are rendered", () => {
+  const graph: ViewModel & { graphPins: Record<string, { x: number; y: number }> } = { id: "mesh", name: "Mesh", layout: "graph", cols: [], nodes: [], x: 0, y: 0, graphPins: { host: { x: 40, y: 80 } } };
+  expect(toDocument([graph], m, 2).views[0]?.layout).toEqual({ type: "graph", pinned: graph.graphPins });
+});
+
+test("a captured graph document is independent of the next pin drag", () => {
+  const graph: ViewModel = { id: "mesh", name: "Mesh", layout: "graph", cols: [], nodes: [], x: 0, y: 0, graphPins: { host: { x: 40, y: 80 } } };
+  const before = toDocument([graph], m, 2);
+  graph.graphPins!.host!.x = 200;
+  expect(before.views[0]?.layout).toEqual({ type: "graph", pinned: { host: { x: 40, y: 80 } } });
+});

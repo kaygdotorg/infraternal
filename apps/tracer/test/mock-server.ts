@@ -80,6 +80,8 @@ interface Connection {
   welcomed: boolean;
   resumeAccepted: boolean;
   resumeExpected: boolean;
+  viewerVisibility: boolean;
+  hidden: boolean;
   welcomeTimer: ReturnType<typeof setTimeout> | undefined;
   livenessTimer: ReturnType<typeof setTimeout> | undefined;
   pendingPings: Map<bigint, number>;
@@ -186,6 +188,8 @@ webSockets.on("connection", (socket, request) => {
     welcomed: false,
     resumeAccepted: false,
     resumeExpected: false,
+    viewerVisibility: false,
+    hidden: false,
     welcomeTimer: undefined,
     livenessTimer: undefined, pendingPings: new Map(), nextPing: 0n, lastPongAt: performance.now(), rtt: 1000,
   };
@@ -786,13 +790,14 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
   switch (frame.type) {
     case "Hello":
       connection.resumeExpected = (frame.caps & 1n) !== 0n;
+      connection.viewerVisibility = (frame.caps & 4n) !== 0n;
       if (!connection.resumeExpected) {
         // A connection without Resume creates a fresh writer; its input cursor
         // starts at zero even though accepted_input_bytes remains cumulative.
         connection.inputCursor = 0n;
         connection.session.writtenInput = 0n;
       }
-      sendFrame(connection.socket, 0, { type: "Hello", version: 1, caps: 0n, clientInfo: "infraternal-mock-test-double/0.1" });
+      sendFrame(connection.socket, 0, { type: "Hello", version: 1, caps: 4n, clientInfo: "infraternal-mock-test-double/0.1" });
       connection.welcomeTimer = setTimeout(() => sendWelcome(connection), 0);
       return;
     case "Resume":
@@ -860,6 +865,18 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
       }
       connection.socket.close(1002, "unexpected test-double subscription");
       return;
+    case "Event": {
+      if (!connection.viewerVisibility || frame.subId !== 0 || frame.eventJson.byteLength > 128) { connection.socket.close(1002, "invalid visibility notice"); return; }
+      const notice = JSON.parse(new TextDecoder().decode(frame.eventJson)) as { topic?: unknown; hidden?: unknown };
+      if (notice.topic !== "connection.visibility" || typeof notice.hidden !== "boolean") { connection.socket.close(1002, "invalid visibility notice"); return; }
+      connection.hidden = notice.hidden;
+      if (connection.livenessTimer) clearTimeout(connection.livenessTimer);
+      connection.pendingPings.clear();
+      connection.lastPongAt = performance.now();
+      connection.rtt = 1000;
+      if (!connection.hidden) connection.livenessTimer = setTimeout(() => probeConnection(connection), 25);
+      return;
+    }
     case "Ping":
       sendFrame(connection.socket, 0, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
       return;
@@ -1072,9 +1089,9 @@ function sendWelcome(connection: Connection): void {
 
 /** Mirror production server-driven liveness: an offline viewer must retire even if its Close cannot reach us. */
 function probeConnection(connection: Connection): void {
-  if (!isSocketOpen(connection.socket)) return;
+  if (!isSocketOpen(connection.socket) || connection.hidden) return;
   const now = performance.now();
-  if (now - connection.lastPongAt >= connection.rtt + 50) {
+  if (now - connection.lastPongAt >= 2 * Math.min(2000, Math.max(250, 2 * connection.rtt + 75))) {
     connection.socket.close(4000, "connection unresponsive");
     return;
   }

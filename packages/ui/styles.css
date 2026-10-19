@@ -162,12 +162,19 @@
 .ui-toast[data-open="false"] { opacity: 0; transform: translateY(8px) scale(0.97); pointer-events: none; }
 /* One type scale per platform (docs/design/TASTE.md): desktop 13 px body, touch 16 px. */
 .ui-toast { min-height: 44px; gap: 10px; padding: 6px 8px 6px 12px; border-radius: 14px; }
+/* A long message with actions stacks them under it (toast.ts sets data-stacked) instead of squeezing the text beside them. */
+.ui-toast[data-stacked="true"] { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; column-gap: 10px; row-gap: 2px; }
+.ui-toast[data-stacked="true"] .ui-toast-message { padding-top: 5px; }
+.ui-toast[data-stacked="true"] .ui-toast-actions { grid-column: 1 / -1; justify-self: end; }
 .ui-toast-message { min-width: 0; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.4; }
 .ui-toast-marker { display: grid; width: 22px; height: 22px; flex: none; place-items: center; }
 .ui-toast-marker .tick { width: 20px; height: 20px; }
 .ui-toast-marker .tick-fill { background: var(--ok); }
 .ui-toast-marker .tick svg { width: 14px; height: 14px; stroke: var(--bg); }
+.ui-toast-actions { display: flex; flex: none; align-items: center; gap: 2px; }
+.ui-toast-actions[hidden] { display: none !important; }
 .ui-toast-action { min-height: 32px; flex: none; padding: 0 8px; border-radius: 8px; color: var(--accent) !important; font-size: var(--text-body); font-weight: var(--fw-label); white-space: nowrap; }
+.ui-toast-action[hidden] { display: none !important; }
 .ui-toast-marker .tick { width: 18px; height: 18px; }
 /* A glyph in place of the tick (toast icon): neutral, so a waiting state never reads as success. */
 .ui-toast-glyph { display: grid; width: 22px; height: 22px; flex: none; place-items: center; color: var(--fg-2); }
@@ -426,12 +433,21 @@
      36 px tall, and the 44 px touch target comes from invisible padding around each (::after), never from a bigger pill. */
   .ui-window-pill, .ui-window-actions { height: 36px; }
   .ui-window-pill { position: relative; }
-  .ui-window-pill::after { content: ""; position: absolute; inset: -4px 0; }
+  /* The header is a container (layout containment makes it its own stacking level), so it must sit above the body itself:
+     otherwise the body covers the 4 px of hit area below the pill and the pill is a 40 px target, not 44. */
+  .ui-window-head { position: relative; z-index: 1; }
+  .ui-window-pill::after { content: ""; position: absolute; inset: -6px -3px; }
   .ui-window-actions { gap: 0; padding: 0 3px; position: relative; z-index: 1; } /* above the body, so the hit area below the pill is not covered by it */
   .ui-window-action { width: 30px; height: 30px; }
   .ui-window-action::after { content: ""; position: absolute; inset: -7px; } /* 44 px square around the 30 px button */
 }
 .ui-window-action:active { transform: scale(var(--ui-press-scale)); }
+/* A column at the weight floor is only a few dozen pixels wide (a layout drawn on a wide screen, shown on a phone).
+   Chrome never overlaps or clips there: the title text goes first, then the whole title pill, then the actions. The
+   window itself stays reachable through the canvas row and the search palette. */
+@container (max-width: 150px) { .ui-window-title, .ui-window-dot { display: none; } }
+@container (max-width: 84px) { .ui-window-pill { display: none; } }
+@container (max-width: 40px) { .ui-window-actions { display: none; } }
 .ui-window-action svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 /* Title first (TASTE): in a header this narrow the actions give way to one ⋯, so the title keeps its room. A card with one
    action never collapses (the actions container says so with data-collapsible). The ⋯ opens the same actions in a menu. */

@@ -18,9 +18,9 @@ const dist = process.env.TRACER_DIST ?? "dist";
 const KIB = 1024;
 const limits = {
   critical: { gzip: 300 * KIB, brotli: 250 * KIB },
-  // Measured when the canvas product module landed (D188): 46,738 B gzip / 40,526 B brotli. The limit is that size
-  // rounded up to a whole KiB plus a 4 KiB margin, so ordinary canvas work fits and a library pulled in by accident does not.
-  deferred: { gzip: 50 * KIB, brotli: 44 * KIB },
+  // Release-6 shared layout and offline drawing measured 56,712 B gzip / 50,322 B brotli. D188 sets each cap to
+  // the measured size rounded up to a whole KiB plus a 4 KiB margin: 60 KiB gzip / 54 KiB brotli.
+  deferred: { gzip: 60 * KIB, brotli: 54 * KIB },
   // On demand (D188): the limit is per chunk, not for the class. A module named `*.on-demand.ts` costs nothing until the
   // person asks for it (the Mesh view, the session manager, a Settings window, the add-host wizard), so adding another
   // such feature must not take budget from the others; what the gate guards is that no single one grows without

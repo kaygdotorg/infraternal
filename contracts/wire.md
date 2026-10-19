@@ -490,6 +490,19 @@ control replies defer their producers until bounded FIFO capacity returns,
 preserving ordering, including the census-before-open-result fence. Actual
 transport errors and closed writers still retire their connections.
 
+When both peers advertise Hello caps bit 2 (`VIEWER_VISIBILITY`), the viewer
+may send a control-stream
+`Event` with `sub_id = 0` and at most 128 JSON bytes:
+`{"topic":"connection.visibility","hidden":true}` (or `false`). This is a
+transport notice, not a subscription or plugin action. A hidden page may be
+suspended indefinitely: pause browser probes and discard outstanding probe
+correlations, retaining the socket, terminal streams and writers. Authentication
+expiry, revocation and resource bounds still apply. When visible, restart the
+unknown-RTT lease without reusing probe IDs; old replies cannot train its RTT.
+If the transport ended during suspension, wait until visible before reconnecting.
+The notice cannot preserve a socket when the operating system closes it; use the
+ordinary resume window, then a fresh attach if that capability is refused (#244).
+
 Probe replies echo nonce and timestamp. Only a new correlated reply renews a
 route deadline; ordinary traffic, unsolicited replies and stale sockets do not.
 Startup, pending input and recent link doubt keep browser probes pipelined
@@ -501,7 +514,9 @@ unknown and retains the bounded two-second startup grace. Correlated replies
 initialize `srtt = RTT`, `rttvar = RTT / 2`; subsequent samples update
 `rttvar = 3/4 × rttvar + 1/4 × abs(srtt − RTT)` before
 `srtt = 7/8 × srtt + 1/8 × RTT` ([RFC 6298 §2](https://www.rfc-editor.org/rfc/rfc6298.html#section-2) estimator).
-The browser response allowance is `max(srtt + 4 × rttvar + 50 ms, 250 ms)`.
+The browser response allowance follows the host formula below (#244). A proven
+foreground browser route doubts its first miss and retires after two consecutive
+allowances without a correlated reply; startup still has a two-second grace.
 Host routes (the primary host link and its terminal streams) carry ordered
 replies that one lost packet holds back for about one more round trip, so
 their allowance is `clamp(2 × srtt + 4 × rttvar + 75 ms, 250 ms, 2 s)` [D300].
@@ -527,8 +542,9 @@ still retires after two allowances. Viewers ignore terminal notice types they
 do not know.
 The floor tolerates a 150 ms scheduler/main-thread stall on a healthy low-RTT
 route, rather than confusing local load with peer loss. A settled quiet link
-therefore detects silence within that floor plus one probe interval (at most
-26 ms); above the floor it follows measured RTT and jitter. This is the
+therefore doubts silence at that floor; browser and primary host links retire
+after two allowances, plus at most one probe interval (26 ms). Above the floor
+they follow measured RTT and jitter. This extends the
 owner-approved #199 scheduling exception to D265's approximate one-RTT detection;
 reusable/fresh connection recovery budgets remain D265/D267. Renewed monitoring
 on a replacement route relearns both estimates; jitter decays with healthy
@@ -572,3 +588,96 @@ reused/resumed paths against RTT + 50 ms, and fresh TCP/TLS/upgrade paths agains
 4 × RTT + 50 ms (D267), through real TLS on the pinned VM. Preserve the last screen and
 keep input typed during recovery. Logs, screenshots and measurements belong on
 the issue [D262].
+
+## Account canvas layout [178,180,183,245,248] (#243)
+
+The `canvas` server plugin uses control stream 0 only. Account identity always
+comes from the authenticated socket, never from JSON. Disabling the plugin
+withdraws its subscriptions and cancels its workers. It needs an existing server.
+
+`Subscribe {"topic":"canvas.layout"}` sends
+`{"type":"canvas.layout.snapshot","revision":N,"initialized":true|false,"document":DOC}`
+then ordered `{"type":"canvas.layout.operation","revision":N,"op_id":ID,"intent":INTENT,"noop":false}`
+events, using the requested subscription ID. When `noop:true`, advance the
+revision without applying the intent; a reconnect snapshot need not carry
+historical close tombstones. DOC is exactly the v1
+`infraternal.canvas` document (`apps/tracer/src/canvas/model/document.ts`), with
+its revision set to N. Cameras, focus, terminal content and credentials are
+excluded. Reconnect resubscribes and receives a fresh canonical snapshot.
+A reader overtaken by compaction gets another snapshot rather than a partial
+history. Apply Results and events may interleave; deduplicate by revision.
+
+`Call canvas.layout.apply` input is `{op_id,base_revision,intent}`. IDs are
+nonempty strings of at most 200 UTF-16 code units; op_id is unique per account
+across both actions. Reusing it with different input returns an error. An exact
+retry returns its original `{revision}` even after log compaction. Future base
+revisions fail; stale revisions are reduced against current state. Each accepted
+intent (including a no-op against a closed window) consumes one revision.
+Server commit order decides edits of the same field; unrelated window fields
+survive. No client clocks are consulted. Stable window IDs cannot be reused
+after close. Close removes every membership and permanently beats move/resize.
+
+INTENT is one of (optional fields may be omitted):
+
+- `{type:"view.add",view:VIEW}`: add an empty v1 view (tiled or graph). An existing
+  ID of the same kind/layout type is a no-op, preserving its metadata and contents.
+- `{type:"view.update",view_id,cell?:{x,y},name?}`: update only supplied view metadata.
+- `{type:"target",window_id,target:TARGET}`: change the reference in every membership;
+  newly referenced sessions must belong to the account, exactly as for open. A closed
+  window stays closed.
+- `{type:"view.remove",view_id}`: remove a view; its windows stay in other views.
+- `{type:"open",view_id,column_id,window:WINDOW,after?:WINDOW_ID}`: add a v1
+  window reference; create a missing column at the end with weight 1.
+- `{type:"split",view_id,anchor_id,axis:"right"|"down",column_id,window:WINDOW}`:
+  divide the anchor's occupied bands (D212), preserving neighbours above and
+  below. Right halves an existing span or adds a half-weight column; down
+  inserts a shared row band. New IDs are client chosen.
+  This action never opens a terminal: first obtain a session reference using
+  the existing terminal action. Retry that action separately as its contract allows.
+- `{type:"close",window_id}`: close all memberships without ending the session.
+- `{type:"move",view_id,window_id,column_id,after?:WINDOW_ID}`: move the existing
+  membership; a missing destination column is appended. A missing neighbour
+  means append (including a neighbour concurrently closed); null/omitted means
+  prepend. No array indexes are accepted.
+- `{type:"resize",window_id,height?,span?,rows?,row?}`: update only supplied
+  non-null sizing fields in every membership. Null means omitted, preserving the
+  existing value (or its absence), on both server and browser. Canonical document
+  sizing fields are always numbers when present; they never contain null.
+- `{type:"weight",view_id,column_id,weight}`: set one column's relative weight.
+- `{type:"membership.add",view_id,column_id,window_id,after?:WINDOW_ID}`:
+  reference an existing window in another view, preserving its stable ID.
+- `{type:"membership.remove",view_id,window_id}`: remove only this membership.
+- `{type:"pin",view_id,node_id,position?:{x,y}}`: set a graph pin; omit position
+  to unpin. Graph references reveal no host configuration.
+
+Open, move and membership.add may include `column_after: COLUMN_ID | null`.
+It affects only a missing destination column: null inserts at the beginning, a
+known ID inserts after that column, and an omitted or missing ID appends. Existing
+columns retain their position. This lets a drag create a column at either edge
+without publishing array indexes.
+
+Session targets must name a terminal session owned by this account (including
+ended sessions); references confer no host or session access. Duplicate window
+IDs in a view and differing targets for the same ID are rejected. Documents
+and intents reject unknown fields. Bounds: 64 views, 64 columns per view, 256
+window memberships total, 256 graph pins per view, 200 UTF-16 code units per string;
+cell coordinates ±1000, graph coordinates ±100000, column weights 0.1–10,
+height 0.05–10000, span/rows 1–64, row 0–64. Snapshot documents are at most
+48 KiB; apply inputs at most 8 KiB. Log checkpoints occur every 128 revisions,
+retaining only the latest checkpoint and at most 127 following operations.
+Durable receipts and closed IDs are limited to 65536 each per account; reaching
+a limit refuses new writes without losing existing idempotence or tombstones.
+
+`Call canvas.layout.initialize {op_id,document:DOC}` is the sole whole-document
+exception: a one-time migration from old local storage, never a save method.
+The first transaction initializes the account's head. A later identical layout
+(ignoring revision) is acknowledged without duplicating views. A differing
+layout is preserved as extra views named `Recovered: <name>` with server-generated
+IDs for views, columns and windows, keeping target references and geometry.
+The result is `{revision}`. Retrying the same op_id is idempotent; if bounds or
+ownership checks fail the transaction rolls back and the browser must keep its
+local document for a later retry/export. Initialization events use a canonical
+snapshot, since recovered IDs are assigned by the server. The client must keep
+its original local document until success, then treat it only as a drawing cache.
+Errors are Result `ok:false` with `{"error":"invalid canvas operation"}`;
+no account existence or foreign ownership detail is exposed.

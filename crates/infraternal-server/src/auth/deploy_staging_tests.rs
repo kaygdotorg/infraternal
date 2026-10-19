@@ -1,9 +1,109 @@
 //! Proves signed deployment, real passkey CA custody and 128 live PTYs in an isolated perf-VM unit [217,250], #188.
 use super::*;
-use crate::ca_handoff::shipping_tests::{
-    attach_all, shim_pids_at, terminals, wire_read, wire_send,
-};
+use crate::ca_handoff::shipping_tests::{attach_all, terminals, wire_read, wire_send};
 use std::net::SocketAddr;
+
+/// Keeps staging fixtures inside normalized throwaway roots intended for the perf VM.
+fn staging_root_is_allowed(root: &std::path::Path) -> bool {
+    let Ok(relative) = root.strip_prefix("/root/infraternal-bench") else {
+        return false;
+    };
+    let components: Vec<_> = relative.components().collect();
+    if components
+        .iter()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return false;
+    }
+    let Some(job) = components
+        .first()
+        .and_then(|component| component.as_os_str().to_str())
+    else {
+        return false;
+    };
+    if job == "deploy" {
+        return components.len() >= 2;
+    }
+    components.len() >= 3
+        && components
+            .get(1)
+            .and_then(|component| component.as_os_str().to_str())
+            == Some("signed")
+}
+
+/// Reads session shim PIDs from the staging server's cgroup without crossing its private `/run` mount.
+/// That bind mount hides the system manager socket, so session startup uses detached shims in this unit.
+fn staging_shim_pids(unit: &str, sessions: &[[u8; 16]]) -> Vec<i32> {
+    let output = std::process::Command::new("systemctl")
+        .args(["show", unit, "--property=ControlGroup", "--value"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "staging server cgroup unavailable");
+    let group = String::from_utf8(output.stdout).unwrap();
+    let group = group.trim();
+    assert!(!group.is_empty(), "staging server unit has no cgroup");
+    let relative = group.strip_prefix('/').unwrap();
+    let processes = std::fs::read_to_string(
+        std::path::Path::new("/sys/fs/cgroup")
+            .join(relative)
+            .join("cgroup.procs"),
+    )
+    .unwrap();
+    let expected: Vec<_> = sessions
+        .iter()
+        .map(|id| uuid::Uuid::from_bytes(*id).simple().to_string())
+        .collect();
+    let mut found: Vec<Vec<i32>> = vec![Vec::new(); sessions.len()];
+    for pid in processes.lines().filter_map(|pid| pid.parse::<i32>().ok()) {
+        let Ok(command_line) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+            continue;
+        };
+        let args: Vec<_> = command_line.split(|byte| *byte == 0).collect();
+        if !args.iter().any(|arg| *arg == b"__shim") {
+            continue;
+        }
+        let Some(session) = args
+            .windows(2)
+            .find(|pair| pair[0] == b"--session")
+            .map(|pair| pair[1])
+        else {
+            continue;
+        };
+        if let Some(index) = expected.iter().position(|id| id.as_bytes() == session) {
+            found[index].push(pid);
+        }
+    }
+    found
+        .into_iter()
+        .map(|pids| {
+            assert_eq!(pids.len(), 1, "staging session shim count changed");
+            pids[0]
+        })
+        .collect()
+}
+
+#[test]
+fn staging_root_accepts_legacy_and_job_scoped_roots() {
+    assert!(staging_root_is_allowed(std::path::Path::new(
+        "/root/infraternal-bench/release-6/signed/r12345678"
+    )));
+    assert!(staging_root_is_allowed(std::path::Path::new(
+        "/root/infraternal-bench/deploy/r12345678"
+    )));
+}
+
+#[test]
+fn staging_root_rejects_unscoped_and_escaping_paths() {
+    assert!(!staging_root_is_allowed(std::path::Path::new(
+        "/root/infraternal-bench/release-6/data/r12345678"
+    )));
+    assert!(!staging_root_is_allowed(std::path::Path::new(
+        "/root/infraternal-bench/../tmp/r12345678"
+    )));
+    assert!(!staging_root_is_allowed(std::path::Path::new(
+        "/tmp/release-6/signed/r12345678"
+    )));
+}
 
 struct Unit(String);
 impl Drop for Unit {
@@ -93,8 +193,10 @@ async fn signed_deploy_preserves_passkey_ca_and_live_sessions() {
         }
     }));
     assert!(nix::unistd::Uid::effective().is_root());
-    let root = PathBuf::from(std::env::var_os("INFRATERNAL_DEPLOY_TEST_ROOT").unwrap());
-    assert!(root.starts_with("/root/infraternal-bench/deploy"));
+    let root = PathBuf::from(std::env::var_os("INFRATERNAL_DEPLOY_TEST_ROOT").unwrap())
+        .canonicalize()
+        .unwrap();
+    assert!(staging_root_is_allowed(&root));
     let mut f = shipping_auth_fixture().await;
     let data = f.root.join("db");
     // Keep the physical shim path below sun_path as well as its /run mount.
@@ -254,7 +356,7 @@ async fn signed_deploy_preserves_passkey_ca_and_live_sessions() {
     // explicit parameter keeps passkey and terminal origins identical.
     let sessions = terminals(address, &f.auth.session, ORIGIN).await;
     println!("STAGING real_pty_sessions_created={}", sessions.len());
-    let pids = shim_pids_at(&runtime.join("infraternal/sessions"), &sessions);
+    let pids = staging_shim_pids(&unit.0, &sessions);
     let mut attached = attach_all(address, &f.auth.session, &sessions, ORIGIN).await;
     let config = json!({"root":root,"data":data,"binary":binary,"web":root.join("web"),"pid":pid,
         "health":format!("http://{address}"),"origin":ORIGIN,"session":f.auth.session,"web_only":false});
@@ -267,10 +369,7 @@ async fn signed_deploy_preserves_passkey_ca_and_live_sessions() {
         request["port"] = json!(address.port());
         let result = driver(&root, request).await;
         assert_eq!(result["ca_unlocked"], true);
-        assert_eq!(
-            shim_pids_at(&runtime.join("infraternal/sessions"), &sessions),
-            pids
-        );
+        assert_eq!(staging_shim_pids(&unit.0, &sessions), pids);
         gaps.push(result["listener_gap_bracket_ms"].as_f64().unwrap());
         intervals.push(result["probe_max_interval_ms"].as_f64().unwrap());
         println!("STAGING handoff={} {}", index + 1, result);
@@ -296,10 +395,7 @@ async fn signed_deploy_preserves_passkey_ca_and_live_sessions() {
         }
         println!("STAGING operation={operation} {result}");
     }
-    assert_eq!(
-        shim_pids_at(&runtime.join("infraternal/sessions"), &sessions),
-        pids
-    );
+    assert_eq!(staging_shim_pids(&unit.0, &sessions), pids);
     attached = attach_all(address, &f.auth.session, &sessions, ORIGIN).await;
     println!(
         "STAGING retained_browser_ordinals={:?}",

@@ -64,8 +64,8 @@ rust_check_static_binary() {
     fi
 
     case "$target" in
-        x86_64-unknown-linux-musl) max_size_bytes=21225872 ;;
-        aarch64-unknown-linux-musl) max_size_bytes=19427688 ;;
+        x86_64-unknown-linux-musl) max_size_bytes=21344304 ;;
+        aarch64-unknown-linux-musl) max_size_bytes=19535600 ;;
         *)
             printf 'no static binary size baseline configured for target: %s\n' "$target" >&2
             return 1
@@ -151,6 +151,7 @@ rust_check_cli_plugin_compile_out() {
         infraternal-agent
         infraternal-mesh
         infraternal-plugin-backup
+        infraternal-plugin-canvas
         infraternal-plugin-host-facts
         infraternal-plugin-mesh
         infraternal-plugin-relay
