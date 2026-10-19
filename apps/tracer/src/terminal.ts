@@ -1417,22 +1417,25 @@ export class TerminalClient {
    */
   private writeQueryResponses(bytes: Uint8Array, offset: bigint, callback: () => void): void {
     if (!this.conn.terminalQueryReplies) { this.terminal.write(bytes, callback); return; }
-    let start = 0;
-    const write = (end: number, replyTo: bigint): void => {
-      this.parserReplies = EMPTY_PARSER_REPLIES;
-      this.parserReplyLength = 0;
-      try {
-        this.terminal.write(bytes.subarray(start, end), end === bytes.length ? callback : undefined);
-        const response = this.parserReplies.join("");
-        if (response && this.parserReplyLength <= 1024) {
-          const encoded = encoder.encode(response);
-          if (encoded.length <= 1024) this.sendFrame(this.streamId, { type: "Input", inSeq: 0n, replyTo, bytes: encoded });
-        }
-      } finally { this.parserReplies = undefined; }
-      start = end;
-    };
-    this.terminalQueries.scan(bytes, offset, (end, sequence) => write(end, sequence));
-    if (start < bytes.length) write(bytes.length, offset + BigInt(start));
+    this.linkRowsArmed = true;
+    this.terminal.writeSlices(bytes, (writeSlice) => {
+      let start = 0;
+      const write = (end: number, replyTo: bigint): void => {
+        this.parserReplies = EMPTY_PARSER_REPLIES;
+        this.parserReplyLength = 0;
+        try {
+          writeSlice(end);
+          const response = this.parserReplies.join("");
+          if (response && this.parserReplyLength <= 1024) {
+            const encoded = encoder.encode(response);
+            if (encoded.length <= 1024) this.sendFrame(this.streamId, { type: "Input", inSeq: 0n, replyTo, bytes: encoded });
+          }
+        } finally { this.parserReplies = undefined; }
+        start = end;
+      };
+      this.terminalQueries.scan(bytes, offset, (end, sequence) => write(end, sequence));
+      if (start < bytes.length) write(bytes.length, offset + BigInt(start));
+    }, callback);
   }
 
   /**
