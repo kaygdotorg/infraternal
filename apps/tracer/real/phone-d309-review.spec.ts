@@ -106,6 +106,8 @@ test("phone: 1 to 8 columns, rotation, pinch, reload, and desktop edits preserve
     await f.mobile.screenshot({ path: tracerEvidencePath("phone-review-8-columns-landscape.png") });
     expect(stored(f.server)).toEqual(phoneTruth);
 
+    await f.mobile.getByRole("button", { name: /Canvas lock on/ }).click();
+    await expect(f.mobile.getByRole("button", { name: /Canvas lock off/ })).toBeVisible();
     const cdp = await f.mobile.context().newCDPSession(f.mobile);
     const zoom = async () => f.mobile.evaluate(() => {
       const transform = document.querySelector<HTMLElement>(".cl-world")!.style.transform;
@@ -116,8 +118,10 @@ test("phone: 1 to 8 columns, rotation, pinch, reload, and desktop edits preserve
     for (let step = 1; step <= 6; step++) await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: 380 - step * 3, y: 190, id: 1 }, { x: 460 + step * 3, y: 190, id: 2 }] });
     await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
     await cdp.detach();
-    await f.mobile.waitForTimeout(300);
-    expect(await zoom()).toBe(beforePinch);
+    await expect.poll(zoom, { timeout: 5_000 }).toBeGreaterThan(beforePinch + 0.2);
+    const afterPinch = await zoom();
+    await f.mobile.screenshot({ path: tracerEvidencePath("phone-review-after-pinch.png") });
+    await writeFile(tracerEvidencePath("phone-review-pinch.json"), JSON.stringify({ beforeZoom: beforePinch, afterZoom: afterPinch, serverRevision: phoneTruth.revision }, null, 2));
     expect(stored(f.server)).toEqual(phoneTruth);
 
     await f.mobile.reload();
