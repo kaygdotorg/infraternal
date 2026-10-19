@@ -359,7 +359,7 @@ for (const reconnect of [false, true]) test(`review r2: a raced split refusal pr
     await expect.poll(async () => (await cache(page)).pending.length).toBeGreaterThanOrEqual(2);
     const pending = await cache(page);
     expect((await request(server, phone, "canvas.layout.apply", { op_id: randomUUID(), base_revision: baseline.revision, intent: { type: "weight", view_id: view.id, column_id: column.id, weight: 0.1 } })).ok).toBe(true);
-    const notice = page.getByText("The server could not save that layout change. The saved layout has been restored.", { exact: true }).waitFor({ state: "visible" });
+    const notice = page.getByText("That layout change was not saved. The saved layout is back.", { exact: true }).waitFor({ state: "visible" });
     void notice.catch(() => undefined);
     if (reconnect) { armed = false; held = false; queued.length = 0; disconnect(); }
     else release();
