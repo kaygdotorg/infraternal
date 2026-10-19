@@ -2,10 +2,10 @@
 import base64,io,json,os,pathlib,queue,signal,subprocess,sys,threading,time,traceback,uuid
 from playwright.sync_api import sync_playwright
 from PIL import Image
-os.environ['TRACER_TEST_PORT']='4346'
 ROOT=pathlib.Path.home()/'infraternal-bench/app-windows-latency'
 args=json.loads(sys.stdin.readline())
 job=args.get('job','app-windows-latency')
+os.environ['TRACER_TEST_PORT']=str(args.get('port',4346))
 import re
 if not re.fullmatch(r'[a-z0-9-]{1,48}',job) or not re.fullmatch(r'[a-z0-9-]{1,48}',args['label']):raise SystemExit(2)
 E=ROOT/'evidence'/args['label'];E.mkdir(parents=True,exist_ok=False)
@@ -109,6 +109,8 @@ def consent_check():
    raise RuntimeError('helper permission changed; owner intervention required')
  emit({'kind':'consent','checked':True,'our_windows':len(matches)})
 
+def retire_signal(signum,frame):raise KeyboardInterrupt()
+signal.signal(signal.SIGTERM,retire_signal);signal.signal(signal.SIGHUP,retire_signal)
 emit({'kind':'runner','pid':os.getpid()})
 try:
  for attempt in range(90):
@@ -125,9 +127,12 @@ try:
  def screen_deadline(signum,frame):raise TimeoutError('owned on-screen deadline')
  ledger=ROOT/'evidence/on-screen-ledger.json';used=json.loads(ledger.read_text()).get('seconds',0) if ledger.exists() else 0
  job_ledger=ROOT/'evidence'/(job+'-screen-ledger.json');job_used=json.loads(job_ledger.read_text()).get('seconds',0) if job_ledger.exists() else 0
- if used>=43*60 or job_used>=18*60:raise RuntimeError('owned on-screen allowance exhausted')
+ # Each owner-authorized round has its own allowance; the shared ledger is historical.
+ screen_budget=args.get('screen_budget',18*60)
+ if not isinstance(screen_budget,int) or not 60<=screen_budget<=43*60:raise RuntimeError('invalid on-screen allowance')
+ if job_used>=screen_budget:raise RuntimeError('owned on-screen allowance exhausted')
  screen_start=time.monotonic()
- signal.signal(signal.SIGALRM,screen_deadline);signal.alarm(max(1,int(min(18*60-job_used,43*60-used))))
+ signal.signal(signal.SIGALRM,screen_deadline);signal.alarm(max(1,int(screen_budget-job_used)))
  battery();emit({'kind':'environment','text':command(['sw_vers'])+command(['sysctl','-n','hw.model','hw.ncpu','hw.memsize'])+command(['uptime'])})
  console=console_state();emit({'kind':'console','state':console})
  if not console['ready']:raise RuntimeError('console is locked or secure input is active')
@@ -324,6 +329,21 @@ try:
  surface=page.locator('.aw-surface');surface.click(position={'x':200,'y':170})
  # Every capture helper launch is followed by a consent check, including inventory helpers.
  consent_check()
+ if args.get('owner_preview'):
+  stage='owner preview'
+  # Authority remains in this private browser context. Closing it or the bounded
+  # allowance runs the same per-PID cleanup as an automated measurement.
+  duration=min(args.get('owner_preview_seconds',900),max(1,screen_budget-job_used-(time.monotonic()-screen_start)-15))
+  emit({'kind':'owner_preview_ready','origin':args['origin'],'seconds':duration,'host':'App window measurement','window':'App window measurement'})
+  deadline=time.monotonic()+duration
+  while time.monotonic()<deadline and browser.is_connected() and context.pages:
+   consent_guard()
+   if source.poll() is not None or window.poll() is not None:raise RuntimeError('owner preview source exited')
+   try:page.wait_for_timeout(1000)
+   except Exception:
+    if not browser.is_connected() or not context.pages:break
+    raise
+  emit({'kind':'owner_preview_finished'});raise PhaseComplete()
  def browser_clock():
   samples=[]
   for i in range(16):
@@ -438,7 +458,82 @@ try:
  page.screenshot(path=str(E/'canvas-demo-after.png'))
  for i,frame in enumerate(frames):(E/('record-%04d.jpg'%i)).write_bytes(base64.b64decode(frame['data']))
  (E/'recording-timestamps.json').write_text(json.dumps([f['timestamp'] for f in frames]))
+ (E/'recording-metadata.json').write_text(json.dumps({'viewport':page.viewport_size,'frames':[f['metadata'] for f in frames]}))
  emit({'kind':'recording','frames':len(frames),'typed_count':typed_count,'canvas_after':page.locator('.ui-window[data-kind="app"]').bounding_box()})
+ if args.get('soak'):
+  stage='stability soak'
+  soak_start=time.monotonic();counts={'crashes':0,'stuck_frames':0,'requested_drops':0,'reconnects':0,'reopens':0,'typed':0,'resizes':0,'idle_checks':0,'unexpected_helper_exits':0,'slow_worker_updates':0};iteration=0
+  def live_helper_pids():
+   ids={int(line.split()[1]) for line in pidlog.read_text().splitlines()}
+   if not ids:return set()
+   result=subprocess.run(['ps','-p',','.join(map(str,ids)),'-o','pid='],capture_output=True,text=True)
+   return {int(value) for value in result.stdout.split()}
+  previous_helpers=live_helper_pids();previous_expected_retirement=False
+  while time.monotonic()-soak_start<600:
+   consent_guard();battery()
+   if source.poll() is not None or window.poll() is not None or not browser.is_connected():
+    counts['crashes']+=1;break
+   if iteration==18:
+    prior_sockets=page.evaluate('window.__appWindowBench.sockets')
+    emit({'kind':'network_drop_request'});counts['requested_drops']+=1
+    ack=json.loads(sys.stdin.readline())
+    if ack.get('kind')!='network_restored':raise RuntimeError('private route restoration unavailable')
+    try:
+     page.wait_for_function('(prior)=>window.__appWindowBench.sockets.opened>prior.opened&&window.__appWindowBench.sockets.closed>prior.closed',arg=prior_sockets,timeout=45000)
+     page.locator('.aw-stage[data-picture="live"]').wait_for(timeout=45000);counts['reconnects']+=1
+     emit({'kind':'soak_reconnect','before':prior_sockets,'after':page.evaluate('window.__appWindowBench.sockets')})
+    except Exception:counts['stuck_frames']+=1
+   if iteration==36:
+    previous=page.locator('.ui-window[data-kind="app"]').first
+    previous_id=previous.get_attribute('data-window-id')
+    if not previous_id:raise RuntimeError('app window identity unavailable')
+    previous.locator('[data-action="close"]').evaluate('(button)=>button.click()')
+    page.get_by_role('button',name='New window',exact=True).click();page.get_by_role('option',name='App window measurement',exact=False).click()
+    replacement=page.locator('.ui-window[data-kind="app"]').filter(has=page.locator('.aw-stage[data-picture="live"]'))
+    try:
+     page.wait_for_function("""(old)=>[...document.querySelectorAll('.ui-window[data-kind="app"]')].some(node=>node.dataset.windowId!==old&&node.querySelector('.aw-stage[data-picture="live"]'))""",arg=previous_id,timeout=45000)
+     counts['reopens']+=1
+     emit({'kind':'soak_reopen','previous_id':previous_id,'replacement_id':replacement.last.get_attribute('data-window-id')})
+    except Exception:counts['stuck_frames']+=1
+   if iteration%6==2:
+    native_command('shape' if iteration%12==2 else 'wide');counts['resizes']+=1
+   if iteration%6 in (3,4):
+    native_command('idle');page.wait_for_timeout(1500)
+    before=page.evaluate('window.__appWindowBench.stats()');page.wait_for_timeout(2500);after=page.evaluate('window.__appWindowBench.stats()')
+    emit({'kind':'soak_idle','before':before,'after':after});counts['idle_checks']+=1
+   else:
+    surface=page.locator('.aw-surface');surface.click(position={'x':150,'y':120});page.wait_for_timeout(2200)
+    sequence=max(r['sequence'] for r in all_draws if r['kind']=='draw')+6
+    prior_inputs=sum(r.get('kind')=='input' for r in all_draws)
+    drain();page.evaluate('([id,colour])=>window.__appWindowBench.arm(id,{colour})',[1000+iteration,sequence%8]);page.keyboard.type('typing',delay=90)
+    deadline=time.monotonic()+5;observed=False;effect=None;dom_inputs=[]
+    while time.monotonic()<deadline:
+     receipt=drain();dom_inputs.extend(receipt['probe']['domInputs'])
+     effect=effect or next((e for e in receipt['probe']['events'] if e.get('t')=='bench-effect' and e['id']==1000+iteration),None)
+     draw=next((r for r in all_draws if r.get('kind')=='draw' and r['sequence']==sequence),None)
+     received_inputs=sum(r.get('kind')=='input' for r in all_draws)-prior_inputs
+     if effect and draw and received_inputs>=6 and int(effect['frame']['captureNs'])>=draw['end_ticks']*timebase:observed=True;break
+     page.wait_for_timeout(10)
+    if observed:
+     counts['typed']+=6
+     delay=effect['begin']-dom_inputs[-1]['at'] if dom_inputs else None
+     if delay is not None and delay>=1000:counts['slow_worker_updates']+=1
+     emit({'kind':'soak_typing','iteration':iteration,'characters':6,'last_key_to_worker_ms':delay})
+    else:counts['stuck_frames']+=1
+   current_helpers=live_helper_pids();retired=previous_helpers-current_helpers
+   # Resize notifications retire capture asynchronously; keep that attribution
+   # through the next observation, while unexplained exits still fail the soak.
+   initiated_retirement=iteration in (18,36) or iteration%6==2
+   expected_retirement=initiated_retirement or previous_expected_retirement
+   if retired:
+    emit({'kind':'soak_helper_retirement','iteration':iteration,'expected':expected_retirement,'pids':sorted(retired)})
+    if not expected_retirement:counts['unexpected_helper_exits']+=len(retired)
+   previous_helpers=current_helpers;previous_expected_retirement=initiated_retirement
+   emit({'kind':'soak_step','iteration':iteration,'elapsed_seconds':time.monotonic()-soak_start,'counts':counts.copy()})
+   iteration+=1
+   page.wait_for_timeout(max(0,int((soak_start+iteration*10-time.monotonic())*1000)))
+  emit({'kind':'soak_result','seconds':time.monotonic()-soak_start,'counts':counts})
+  if counts['crashes'] or counts['stuck_frames'] or counts['unexpected_helper_exits'] or counts['reconnects']!=1 or counts['reopens']!=1:raise RuntimeError('stability soak did not pass')
  source_round_trips('after')
  emit({'kind':'network_rtt_after','raw':command(['ping','-n','-c','5','-W','1000','10.69.69.125'])})
  console=console_state();emit({'kind':'console_after','state':console})
@@ -449,7 +544,7 @@ try:
 except PhaseComplete:
  pass
 except Exception as error:
- if stage in ['open canvas window','change samples','input samples','shape','resources','recording'] and browser:
+ if stage in ['open canvas window','change samples','input samples','shape','resources','recording','stability soak'] and browser:
   try:
    page.screenshot(path=str(E/'canvas-failure.png'))
    emit({'kind':'canvas_failure_state','states':page.locator('.aw-stage').evaluate_all('(nodes)=>nodes.map(n=>({picture:n.dataset.picture,text:n.innerText.slice(0,300)}))')})

@@ -77,6 +77,8 @@ export interface RealServer {
   retainBrowserRoutes(): void;
   /** Pause only the selected private upstream, preserving the browser/server connection. */
   pauseUpstream(component: "daemon" | "shim", whilePaused: () => Promise<void>, selectedSession?: string): Promise<void>;
+  /** Interrupt only this fixture's browser routes; fresh upgrades fail during the bounded drop. */
+  interruptBrowserRoutes(durationMs: number): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -195,7 +197,9 @@ export async function startRealServer(options: {
   const retainedBrowsers = new Set<WebSocket>();
   const activeBrowsers = new Set<WebSocket>();
   const front = new WebSocketServer({ noServer: true });
+  let browserOfflineUntil = 0;
   tls.on("upgrade", (request, socket, head) => {
+    if (Date.now() < browserOfflineUntil) { socket.destroy(); return; }
     front.handleUpgrade(request, socket, head, (browser) => {
       activeBrowsers.add(browser);
       const upstream = new WebSocket(backend.replace("http:", "ws:") + (request.url ?? "/v1/ws"), { headers: { Origin: origin, Cookie: request.headers.cookie ?? "" } });
@@ -444,6 +448,12 @@ export async function startRealServer(options: {
           await exited;
           await replacement;
         }
+      },
+      async interruptBrowserRoutes(durationMs) {
+        if (!Number.isInteger(durationMs) || durationMs < 1 || durationMs > 10_000) throw new Error("invalid fixture drop duration");
+        browserOfflineUntil = Date.now() + durationMs;
+        for (const browser of activeBrowsers) browser.terminate();
+        await new Promise((resolve) => setTimeout(resolve, durationMs));
       },
       dispose,
     };

@@ -14,12 +14,16 @@ const events: unknown[] = [];
 const roundTrips: Array<{ at: number; ms: number }> = [];
 let activeWorker: Worker | undefined;
 let session: string | undefined;
+let openedSockets = 0;
+let closedSockets = 0;
 
 if (!window.__benchResourcesOnly) globalThis.WebSocket = class extends NativeSocket {
   private readonly outgoing = new WebSocketFrameDecoder();
   private readonly probes = new Map<bigint, { at: number; sentUs: bigint }>();
   constructor(...args: ConstructorParameters<typeof WebSocket>) {
     super(...args);
+    this.addEventListener("open", () => { openedSockets++; });
+    this.addEventListener("close", () => { closedSockets++; });
     const incoming = new WebSocketFrameDecoder();
     this.addEventListener("message", (event) => {
       if (!(event.data instanceof ArrayBuffer)) return;
@@ -120,6 +124,7 @@ const probe = {
   stats: workerStats,
   workerClock,
   get session(): string | undefined { return session; },
+  get sockets(): { opened: number; closed: number } { return { opened: openedSockets, closed: closedSockets }; },
   take: () => ({ domInputs: domInputs.splice(0), inputs: inputs.splice(0), videos: videos.splice(0), events: events.splice(0), roundTrips: roundTrips.splice(0) }),
   arm: (id: number, crop: { colour: number }): void => { activeWorker?.postMessage({ t: "bench-arm", id, crop }); },
   close: (): void => { fixture?.dispose(); },
