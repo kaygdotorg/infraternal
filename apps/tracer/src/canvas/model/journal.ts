@@ -56,6 +56,15 @@ export class LayoutJournal {
     if (!this.release(entry, epoch)) return false;
     this.#ready = false; return true;
   }
+  /** A definitive refusal has no server revision and must never be replayed as an optimistic success. */
+  refuse(entry: Pending | Migration, epoch: number): boolean {
+    if (!this.release(entry, epoch)) return false;
+    if ("document" in entry) { if (this.migration === entry) this.migration = undefined; }
+    else this.pending = this.pending.filter((p) => p.op_id !== entry.op_id);
+    const live = new Set(windows(this.current()).map((w) => w.id));
+    this.unresolved = new Set([...this.unresolved].filter((id) => live.has(id)));
+    return true;
+  }
   acknowledge(operation: Pending | Migration, revision: number, migration: boolean): boolean {
     operation.revision = revision;
     if (migration) this.initialized = true;

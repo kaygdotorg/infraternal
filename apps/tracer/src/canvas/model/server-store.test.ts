@@ -162,3 +162,32 @@ test("review: a refused structural edit cannot strand later valid edits", async 
     expect(transport.calls.some((call) => (call.input.intent as Intent).type === "view.update")).toBe(true);
   } finally { store.dispose(); }
 });
+
+test("a definitive refusal paints rollback, persists it and never retries after reconnect", async () => {
+  const transport = new Transport(), notices: boolean[] = [];
+  const store = new ServerCanvasStore(transport, "a", (definitive) => notices.push(definitive === true)); transport.snapshot();
+  try {
+    const baseline = store.current(), next = structuredClone(baseline); reduce(next, opened);
+    let painted = store.current(); store.subscribe(() => { painted = store.current(); });
+    await store.save(next);
+    expect(painted).toEqual(next);
+    transport.calls[0]!.reject(new ActionRefused(undefined, "invalid")); await tick(); store.flush();
+    expect(painted).toEqual(baseline); expect(notices).toEqual([true]);
+    const saved = JSON.parse(localStorage.getItem(canvasKey("a"))!);
+    expect(saved.pending).toHaveLength(0); expect(saved.document).toEqual(baseline);
+    transport.open(); transport.snapshot(); await tick();
+    expect(transport.calls).toHaveLength(1);
+  } finally { store.dispose(); }
+});
+
+test("a stale refusal cannot discard a new-connection retry", async () => {
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
+  try {
+    const next = document(); reduce(next, opened); await store.save(next);
+    transport.open(); transport.snapshot(); await tick();
+    expect(transport.calls).toHaveLength(2);
+    transport.calls[0]!.reject(new ActionRefused(undefined, "invalid")); await tick();
+    store.flush(); expect(JSON.parse(localStorage.getItem(canvasKey("a"))!).pending).toHaveLength(1);
+    expect(transport.calls[1]!.input).toEqual(transport.calls[0]!.input);
+  } finally { store.dispose(); }
+});

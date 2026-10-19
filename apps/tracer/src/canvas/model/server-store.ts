@@ -3,6 +3,7 @@ import { canvasKey, readStoredJson, createStoredJsonCache } from "../../account-
 import type { CanvasDocument } from "./schema";
 import type { LayoutEdit } from "./operations";
 import { layoutCacheValue, readLayoutCache } from "./cache";
+import { ActionRefused } from "../../connection";
 import { LayoutJournal } from "./journal";
 import type { CanvasStore } from "./store";
 
@@ -20,7 +21,7 @@ export class ServerCanvasStore implements CanvasStore {
   #loaded: (() => void) | undefined;
   readonly #first: Promise<void>;
 
-  constructor(private readonly transport: LayoutTransport, account: string, private readonly refused: () => void = () => {}) {
+  constructor(private readonly transport: LayoutTransport, account: string, private readonly refused: (definitive?: boolean) => void = () => {}) {
     const key = canvasKey(account);
     const cache = readLayoutCache(readStoredJson(key));
     this.#first = cache ? Promise.resolve() : new Promise<void>((resolve) => { this.#loaded = resolve; });
@@ -63,8 +64,14 @@ export class ServerCanvasStore implements CanvasStore {
       // The ordered event usually paints first. Its receipt changes journal metadata only.
       if (this.#journal.acknowledge(entry, Number(result.revision), migration)) this.#publish(); else this.#cache.schedule();
       this.#pump();
-    }, () => {
-      if (this.#disposed || !this.#journal.fail(entry, epoch)) return;
+    }, (error: unknown) => {
+      if (this.#disposed) return;
+      if (error instanceof ActionRefused) {
+        if (!this.#journal.refuse(entry, epoch)) return;
+        // Roll back this overlay immediately; the subscription remains ready for independent edits.
+        this.#publish(); this.refused(true); this.#pump(); return;
+      }
+      if (!this.#journal.fail(entry, epoch)) return;
       // Keep the identical input for retry after the next snapshot, including its original base revision.
       this.#cache.schedule(); this.refused();
     });

@@ -125,7 +125,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       }
     }
   });
-  const store = options.previewStore ?? new ServerCanvasStore(connection, options.accountId, () => { if (!disposed) core.toast.show({ message: "Layout changes are waiting to sync. Reconnect to try again.", tone: "error", duration: 5000 }); });
+  const store = options.previewStore ?? new ServerCanvasStore(connection, options.accountId, (definitive) => { if (!disposed) core.toast.show({ message: definitive ? "The server could not save that layout change. The saved layout has been restored. Try the change again." : "Layout changes are waiting to sync. Reconnect to try again.", tone: "error", duration: 5000 }); });
   const details: DetailsSourceLoader = () => onDemand(() => import("./sessions/details-live.on-demand"))
     .then((m) => m.createLiveDetails({ host: embedded, connection, inventory, roundTrip: () => roundTrip }));
   // A ready result carries the admitted UUID; labels are only presentation.
