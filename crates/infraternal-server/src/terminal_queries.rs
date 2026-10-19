@@ -1,14 +1,13 @@
-//! Recognises bounded terminal queries and arbitrates one reply per output identity [307].
-//! Output offsets deduplicate fan-out and replay; marked input never creates query state.
+//! Arbitrates renderer replies by observed output positions without parsing terminal grammar [307].
+//! Output ranges retain original deadlines across fan-out and replay; bounded claims prevent duplicates.
 use std::{
     collections::{HashMap, VecDeque},
     time::{Duration, Instant},
 };
 
 const WINDOW: Duration = Duration::from_secs(1);
-const QUERIES: usize = 64;
+const POSITIONS: usize = 64;
 const SESSIONS: usize = 4096;
-const CONTROL: usize = 256;
 
 #[derive(Default)]
 pub(crate) struct Registry {
@@ -18,22 +17,17 @@ pub(crate) struct Registry {
 struct Session {
     host: Option<uuid::Uuid>,
     next: u64,
-    scanner: Scanner,
-    pending: VecDeque<Query>,
+    output: VecDeque<Output>,
+    claimed: VecDeque<Claim>,
 }
-struct Query {
-    seq: u64,
+struct Output {
+    start: u64,
+    end: u64,
     started: Instant,
-    request: Vec<u8>,
 }
-#[derive(Default)]
-struct Scanner {
-    state: u8,
+struct Claim {
     seq: u64,
-    started: Option<Instant>,
-    bytes: Vec<u8>,
-    escaped: bool,
-    overflow: bool,
+    expires: Instant,
 }
 impl Registry {
     /// Session UUIDs are never reused. Ordered final events release their retained state.
@@ -68,39 +62,30 @@ impl Registry {
             host,
             ..Session::default()
         });
-        let Some(skip) = state
-            .next
-            .checked_sub(seq)
-            .and_then(|v| usize::try_from(v).ok())
-        else {
-            // A missing output span cannot be interpreted as a continuation.
-            state.scanner = Scanner::default();
-            state.next = seq;
-            return self.observe(session, host, seq, bytes, now);
-        };
-        if skip >= bytes.len() {
+        let start = seq.max(state.next);
+        if start >= end {
             return;
         }
+        // Replay/fan-out cannot renew timestamps. Each newly observed byte
+        // belongs to exactly one range, irrespective of its terminal meaning.
         state
-            .pending
-            .retain(|query| now.duration_since(query.started) < WINDOW);
-        let mut index = skip;
-        while index < bytes.len() {
-            // Plain output needs only an escape-byte search; the state machine
-            // runs for control sequences rather than every byte in a flood.
-            if state.scanner.state == 0 {
-                let Some(escape) = bytes[index..].iter().position(|byte| *byte == 0x1b) else {
-                    break;
-                };
-                index += escape;
+            .output
+            .retain(|span| now.duration_since(span.started) < WINDOW);
+        if let Some(last) = state
+            .output
+            .back_mut()
+            .filter(|span| span.end == start && span.started == now)
+        {
+            last.end = end;
+        } else {
+            if state.output.len() == POSITIONS {
+                state.output.pop_front();
             }
-            if let Some(query) = state.scanner.feed(bytes[index], seq + index as u64, now) {
-                if state.pending.len() == QUERIES {
-                    state.pending.pop_front();
-                }
-                state.pending.push_back(query);
-            }
-            index += 1;
+            state.output.push_back(Output {
+                start,
+                end,
+                started: now,
+            });
         }
         state.next = end;
     }
@@ -112,14 +97,26 @@ impl Registry {
         now: Instant,
     ) -> Option<Instant> {
         let accepted = self.sessions.get_mut(&session).and_then(|state| {
-            let index = state.pending.iter().position(|query| query.seq == seq)?;
-            let query = &state.pending[index];
-            if now.duration_since(query.started) >= WINDOW || !matches_reply(&query.request, bytes)
+            if bytes.is_empty() || bytes.len() > 1024 {
+                return None;
+            }
+            let span = state
+                .output
+                .iter()
+                .find(|span| span.start <= seq && seq < span.end)?;
+            if now.duration_since(span.started) >= WINDOW {
+                return None;
+            }
+            let expires = span.started + WINDOW;
+            state.claimed.retain(|claim| now < claim.expires);
+            // Never evict a live claim: it would let another viewer repeat an
+            // accepted reply. A full table refuses new replies until expiry.
+            if state.claimed.len() == POSITIONS
+                || state.claimed.iter().any(|claim| claim.seq == seq)
             {
                 return None;
             }
-            let expires = query.started + WINDOW;
-            state.pending.remove(index);
+            state.claimed.push_back(Claim { seq, expires });
             Some(expires)
         });
         if accepted.is_none() {
@@ -142,331 +139,9 @@ pub(crate) fn record_drop() {
     }
 }
 
-impl Scanner {
-    fn feed(&mut self, byte: u8, seq: u64, now: Instant) -> Option<Query> {
-        if self.state == 0 {
-            if byte == 0x1b {
-                self.state = 1;
-                self.seq = seq;
-                self.started = Some(now);
-                self.overflow = false;
-                self.bytes.clear();
-                self.bytes.push(byte);
-            }
-            return None;
-        }
-        if byte == 0x18 || byte == 0x1a {
-            self.state = 0;
-            return None;
-        }
-        if self.state == 2 && byte == 0x1b {
-            self.state = 1;
-            self.seq = seq;
-            self.started = Some(now);
-            self.bytes.clear();
-            self.bytes.push(byte);
-            self.overflow = false;
-            return None;
-        }
-        if self.state == 1 {
-            self.state = match byte {
-                b'[' => 2,
-                b']' => 3,
-                b'P' => 4,
-                b'X' | b'^' | b'_' => 5,
-                0x1b => {
-                    self.seq = seq;
-                    self.started = Some(now);
-                    return None;
-                }
-                _ => 0,
-            };
-            self.bytes.push(byte);
-            self.escaped = false;
-            return None;
-        }
-        let end = if self.state == 2 {
-            (0x40..=0x7e).contains(&byte)
-        } else {
-            (self.state == 3 && byte == 7) || (self.escaped && byte == b'\\')
-        };
-        if self.bytes.len() < CONTROL {
-            self.bytes.push(byte);
-        } else {
-            self.overflow = true;
-            if self.state == 2 {
-                self.state = 0;
-            }
-        }
-        self.escaped = byte == 0x1b;
-        if !end {
-            return None;
-        }
-        self.state = 0;
-        if self.overflow || !is_query(&self.bytes) {
-            return None;
-        }
-        Some(Query {
-            seq: self.seq,
-            started: self.started?,
-            request: self.bytes.clone(),
-        })
-    }
-}
-fn is_query(q: &[u8]) -> bool {
-    matches!(
-        q,
-        b"\x1b[c"
-            | b"\x1b[0c"
-            | b"\x1b[>c"
-            | b"\x1b[>0c"
-            | b"\x1b[=c"
-            | b"\x1b[=0c"
-            | b"\x1b[5n"
-            | b"\x1b[6n"
-            | b"\x1b[?6n"
-            | b"\x1b[>q"
-            | b"\x1b[>0q"
-            | b"\x1b[?u"
-    ) || (q.starts_with(b"\x1b[")
-        && q.ends_with(b"$p")
-        && digits(
-            q[2..q.len() - 2]
-                .strip_prefix(b"?")
-                .unwrap_or(&q[2..q.len() - 2]),
-        ))
-        || ((q.starts_with(b"\x1b]10;")
-            || q.starts_with(b"\x1b]11;")
-            || q.starts_with(b"\x1b]12;")
-            || q.starts_with(b"\x1b]4;"))
-            && q.contains(&b'?'))
-        || q.starts_with(b"\x1bP$q")
-        || q.starts_with(b"\x1bP+q")
-        || matches!(q, b"\x1b[14t" | b"\x1b[16t" | b"\x1b[18t" | b"\x1b[19t")
-}
-fn digits(s: &[u8]) -> bool {
-    !s.is_empty() && s.len() <= 6 && s.iter().all(u8::is_ascii_digit)
-}
-fn parameters(s: &[u8]) -> bool {
-    !s.is_empty() && s.split(|b| *b == b';').all(digits)
-}
-fn string_body(bytes: &[u8]) -> Option<&[u8]> {
-    bytes
-        .strip_suffix(b"\x1b\\")
-        .or_else(|| bytes.strip_suffix(b"\x07"))
-}
-fn matches_reply(q: &[u8], r: &[u8]) -> bool {
-    if r.is_empty() || r.len() > 1024 {
-        return false;
-    }
-    if matches!(q, b"\x1b[6n" | b"\x1b[?6n") {
-        let prefix: &[u8] = if q == b"\x1b[?6n" {
-            b"\x1b[?"
-        } else {
-            b"\x1b["
-        };
-        return r
-            .strip_prefix(prefix)
-            .and_then(|b| b.strip_suffix(b"R"))
-            .is_some_and(|b| b.split(|v| *v == b';').count() == 2 && parameters(b));
-    }
-    if q == b"\x1b[5n" {
-        return r == b"\x1b[0n";
-    }
-    if matches!(q, b"\x1b[=c" | b"\x1b[=0c") {
-        return r
-            .strip_prefix(b"\x1bP!|")
-            .and_then(|b| b.strip_suffix(b"\x1b\\"))
-            .is_some_and(|b| b.len() == 8 && b.iter().all(u8::is_ascii_hexdigit));
-    }
-    if q.ends_with(b"c") {
-        let prefix: &[u8] = if q.get(2) == Some(&b'>') {
-            b"\x1b[>"
-        } else {
-            b"\x1b[?"
-        };
-        return r
-            .strip_prefix(prefix)
-            .and_then(|b| b.strip_suffix(b"c"))
-            .is_some_and(parameters);
-    }
-    if q.ends_with(b"$p") {
-        let mode = &q[2..q.len() - 2];
-        return r
-            .strip_prefix(b"\x1b[")
-            .and_then(|b| b.strip_prefix(mode))
-            .and_then(|b| b.strip_prefix(b";"))
-            .is_some_and(|b| matches!(b, b"0$y" | b"1$y" | b"2$y" | b"3$y" | b"4$y"));
-    }
-    if q.ends_with(b"q") && q.starts_with(b"\x1b[") {
-        return r
-            .strip_prefix(b"\x1bP>|")
-            .and_then(|b| b.strip_suffix(b"\x1b\\"))
-            .is_some_and(|b| !b.is_empty() && b.iter().all(|v| (0x20..=0x7e).contains(v)));
-    }
-    if q == b"\x1b[?u" {
-        return r
-            .strip_prefix(b"\x1b[?")
-            .and_then(|b| b.strip_suffix(b"u"))
-            .is_some_and(digits);
-    }
-    if q.starts_with(b"\x1b]") {
-        return matches_colors(q, r);
-    }
-    if q.ends_with(b"t") {
-        let expected: &[u8] = match q {
-            b"\x1b[14t" => b"4;",
-            b"\x1b[16t" => b"6;",
-            b"\x1b[18t" => b"8;",
-            b"\x1b[19t" => b"9;",
-            _ => return false,
-        };
-        return r
-            .strip_prefix(b"\x1b[")
-            .and_then(|b| b.strip_suffix(b"t"))
-            .and_then(|b| b.strip_prefix(expected))
-            .is_some_and(|b| b.split(|v| *v == b';').count() == 2 && parameters(b));
-    }
-    matches_dcs(q, r)
-}
-
-fn matches_dcs(q: &[u8], r: &[u8]) -> bool {
-    if q.starts_with(b"\x1bP$q") {
-        let Some(wanted) = q
-            .strip_prefix(b"\x1bP$q")
-            .and_then(|b| b.strip_suffix(b"\x1b\\"))
-        else {
-            return false;
-        };
-        return r
-            .strip_prefix(b"\x1bP")
-            .and_then(|b| b.strip_suffix(b"\x1b\\"))
-            .is_some_and(|b| {
-                b == b"0$r"
-                    || (b.starts_with(b"1$r")
-                        && b.len() > 3
-                        && b.ends_with(wanted)
-                        && b.iter().all(|v| (0x20..=0x7e).contains(v)))
-            });
-    }
-    if q.starts_with(b"\x1bP+q") {
-        let Some(wanted) = q
-            .strip_prefix(b"\x1bP+q")
-            .and_then(|b| b.strip_suffix(b"\x1b\\"))
-        else {
-            return false;
-        };
-        let mut remaining = r;
-        for key in wanted.split(|b| *b == b';') {
-            if key.is_empty() || !key.iter().all(u8::is_ascii_hexdigit) {
-                return false;
-            }
-            let Some(body) = remaining.strip_prefix(b"\x1bP") else {
-                return false;
-            };
-            let Some(end) = body.windows(2).position(|b| b == b"\x1b\\") else {
-                return false;
-            };
-            let response = &body[..end];
-            let valid = if let Some(value) = response.strip_prefix(b"0+r") {
-                value == key
-            } else {
-                response
-                    .strip_prefix(b"1+r")
-                    .and_then(|b| b.strip_prefix(key))
-                    .and_then(|b| b.strip_prefix(b"="))
-                    .is_some_and(|b| b.len() % 2 == 0 && b.iter().all(u8::is_ascii_hexdigit))
-            };
-            if !valid {
-                return false;
-            }
-            remaining = &body[end + 2..];
-        }
-        return remaining.is_empty();
-    }
-    false
-}
-
-/// OSC 4 may request several palette entries in one query. Validate each
-/// response against its requested index before consuming the single identity.
-fn number(bytes: &[u8]) -> Option<u16> {
-    if !digits(bytes) {
-        return None;
-    }
-    bytes.iter().try_fold(0_u16, |n, b| {
-        n.checked_mul(10)?.checked_add(u16::from(b - b'0'))
-    })
-}
-fn matches_colors(q: &[u8], mut replies: &[u8]) -> bool {
-    let Some(request) = string_body(q).and_then(|b| b.strip_prefix(b"\x1b]")) else {
-        return false;
-    };
-    let mut fields = request.split(|b| *b == b';');
-    let Some(code) = fields.next().and_then(number) else {
-        return false;
-    };
-    let mut dynamic = code;
-    let mut count = 0;
-    while let Some(field) = fields.next() {
-        let (index, value, expected) = if code == 4 {
-            let Some(index) = number(field) else {
-                return false;
-            };
-            let Some(value) = fields.next() else {
-                return false;
-            };
-            (Some(index), value, code)
-        } else {
-            let expected = dynamic;
-            let Some(next) = dynamic.checked_add(1) else {
-                return false;
-            };
-            dynamic = next;
-            (None, field, expected)
-        };
-        // Set operations produce no response but may precede or follow queries.
-        if value != b"?" {
-            continue;
-        }
-        count += 1;
-        let Some(body) = replies.strip_prefix(b"\x1b]") else {
-            return false;
-        };
-        let Some(end) = body.iter().position(|b| *b == 7 || *b == 27) else {
-            return false;
-        };
-        let terminator = if body[end] == 7 {
-            1
-        } else if body.get(end..end + 2) == Some(&b"\x1b\\"[..]) {
-            2
-        } else {
-            return false;
-        };
-        let mut response = body[..end].split(|b| *b == b';');
-        if response.next().and_then(number) != Some(expected)
-            || (index.is_some() && response.next().and_then(number) != index)
-        {
-            return false;
-        }
-        let Some(rgb) = response.next().and_then(|b| b.strip_prefix(b"rgb:")) else {
-            return false;
-        };
-        if response.next().is_some()
-            || rgb.split(|b| *b == b'/').count() != 3
-            || !rgb
-                .split(|b| *b == b'/')
-                .all(|b| !b.is_empty() && b.len() <= 4 && b.iter().all(u8::is_ascii_hexdigit))
-        {
-            return false;
-        }
-        replies = &body[end + terminator..];
-    }
-    count > 0 && replies.is_empty()
-}
-
 #[cfg(test)]
 mod tests {
-    //! Exercises fan-out, reconnect, late fragments, byte validation and bounded retained state.
+    //! Exercises fan-out, reconnect, late fragments, reply bounds and bounded retained state.
     use super::*;
     #[test]
     fn review_renderer_supported_query_forms_are_admitted() {
@@ -490,7 +165,6 @@ mod tests {
         state.output([1; 16], 0, b"\x1b[6", now);
         state.output([1; 16], 0, b"\x1b[6", now);
         state.output([1; 16], 3, b"n", now);
-        assert!(!state.accept([1; 16], 0, b"typing", now));
         assert!(state.accept([1; 16], 0, b"\x1b[1;1R", now));
         assert!(!state.accept([1; 16], 0, b"\x1b[1;1R", now));
         state.output([1; 16], 0, b"\x1b[6n", now);
@@ -513,23 +187,84 @@ mod tests {
         }
         assert!(state.sessions.is_empty());
         for seq in 0..1000 {
-            state.output([1; 16], seq * 4, b"\x1b[6n", now);
+            state.output(
+                [1; 16],
+                seq * 4,
+                b"\x1b[6n",
+                now + Duration::from_nanos(seq),
+            );
         }
-        assert_eq!(state.sessions[&[1; 16]].pending.len(), QUERIES);
+        assert_eq!(state.sessions[&[1; 16]].output.len(), POSITIONS);
     }
     #[test]
-    fn response_grammars_refuse_trailing_typing_and_wrong_kind() {
-        for (q, r) in [
-            (&b"\x1b[c"[..], &b"\x1b[?1;2c"[..]),
-            (b"\x1b[>c", b"\x1b[>1;2;3c"),
-            (b"\x1b]11;?\x07", b"\x1b]11;rgb:ffff/ffff/ffff\x07"),
-            (b"\x1b[?2004$p", b"\x1b[?2004;1$y"),
-            (b"\x1b[?u", b"\x1b[?0u"),
+    fn gaps_and_replay_never_authorize_unobserved_or_expired_positions() {
+        let now = Instant::now();
+        let mut state = Registry::default();
+        state.output([1; 16], 0, b"ab", now);
+        state.output([1; 16], 4, b"cd", now);
+        assert!(!state.accept([1; 16], 2, b"renderer reply", now));
+        assert!(!state.accept([1; 16], 3, b"renderer reply", now));
+        state.output([1; 16], 0, b"ab", now + WINDOW);
+        assert!(!state.accept([1; 16], 0, b"renderer reply", now + WINDOW));
+        state.output([1; 16], 6, b"ef", now + WINDOW);
+        assert!(state.accept([1; 16], 6, b"renderer reply", now + WINDOW));
+        state.output([2; 16], u64::MAX, b"overflow", now);
+        assert!(!state.accept([2; 16], u64::MAX, b"renderer reply", now));
+    }
+    #[test]
+    fn every_observed_output_position_can_identify_a_renderer_answer() {
+        let now = Instant::now();
+        for request in [
+            b"\x1bZ".as_slice(),
+            b"\x1b[31m",
+            b"\x1b(B",
+            b"\x1b]0;title\x07",
+            b"\x1bPanything\x1b\\",
+            b"\x1b_ignored\x1b\\",
         ] {
-            assert!(matches_reply(q, r));
-            assert!(!matches_reply(q, &[r, b"typed"].concat()));
-            assert!(!matches_reply(q, b"\x1b[1;1R"));
+            let mut state = Registry::default();
+            state.output([1; 16], 0, request, now);
+            assert!(state.accept([1; 16], 0, b"renderer answer", now));
         }
+        let request = [b"\x1b[".as_slice(), &vec![0; 100_000], b"6n"].concat();
+        let mut state = Registry::default();
+        state.output([1; 16], 0, &request, now);
+        assert!(state.accept([1; 16], 0, b"renderer answer", now));
+        // No terminal text is retained, including text that contains no controls.
+        state.output([2; 16], 0, b"ordinary output", now);
+        assert!(state.accept([2; 16], 4, b"renderer answer", now));
+    }
+    #[test]
+    fn style_controls_cannot_evict_queries_and_live_claims_never_reopen() {
+        let now = Instant::now();
+        let mut state = Registry::default();
+        let output = [b"\x1b[6n".as_slice(), &b"\x1b[31m".repeat(100)].concat();
+        state.output([1; 16], 0, &output, now);
+        assert!(state.accept([1; 16], 0, b"renderer reply", now));
+        for seq in 1..POSITIONS as u64 {
+            assert!(state.accept([1; 16], seq, b"renderer reply", now));
+        }
+        assert!(!state.accept([1; 16], POSITIONS as u64, b"renderer reply", now));
+        assert!(!state.accept([1; 16], 0, b"renderer reply", now));
+        assert_eq!(state.sessions[&[1; 16]].claimed.len(), POSITIONS);
+        state.output([1; 16], output.len() as u64, b"next output", now + WINDOW);
+        assert!(state.accept(
+            [1; 16],
+            output.len() as u64,
+            b"renderer reply",
+            now + WINDOW
+        ));
+    }
+    #[test]
+    fn renderer_owns_reply_contents_but_size_and_identity_are_bounded() {
+        let now = Instant::now();
+        let mut state = Registry::default();
+        state.output([1; 16], 0, b"\x1b[6n", now);
+        assert!(!state.accept([1; 16], 4, b"future renderer answer", now));
+        assert!(!state.accept([1; 16], 0, b"", now));
+        assert!(!state.accept([1; 16], 0, &[0; 1025], now));
+        assert!(state.accept([1; 16], 0, b"future renderer answer", now));
+        assert!(!state.accept([1; 16], 0, b"future renderer answer", now));
     }
 }
 
@@ -556,35 +291,6 @@ mod lifecycle_tests {
 }
 
 #[cfg(test)]
-mod grammar_tests {
-    //! A wrong response kind cannot consume an outstanding query.
-    use super::*;
-    #[test]
-    fn binds_reply_kind_and_all_color_query_fields() {
-        assert!(!matches_reply(b"\x1bP$qm\x1b\\", b"\x1bP1+r\x1b\\"));
-        assert!(matches_reply(b"\x1bP$qm\x1b\\", b"\x1bP0$r\x1b\\"));
-        assert!(matches_reply(
-            b"\x1bP+q436f;5463\x1b\\",
-            b"\x1bP1+r436f=323536\x1b\\\x1bP0+r5463\x1b\\"
-        ));
-        assert!(!matches_reply(b"\x1b[14t", b"\x1b[8;24;80t"));
-        assert!(matches_reply(b"\x1b[14t", b"\x1b[4;600;800t"));
-        assert!(matches_reply(
-            b"\x1b]10;?;?\x07",
-            b"\x1b]10;rgb:f/f/f\x07\x1b]11;rgb:0/0/0\x07"
-        ));
-        assert!(matches_reply(
-            b"\x1b]4;1;rgb:ff/00/00;2;?\x07",
-            b"\x1b]4;2;rgb:0/f/0\x07"
-        ));
-        assert!(matches_reply(
-            b"\x1b]4;2;?;1;rgb:ff/00/00\x07",
-            b"\x1b]4;2;rgb:0/f/0\x07"
-        ));
-    }
-}
-
-#[cfg(test)]
 mod overflow_tests {
     //! Oversized OSC titles retain their BEL terminator while their content is discarded.
     use super::*;
@@ -602,8 +308,8 @@ mod overflow_tests {
     }
 }
 
-/// Development-only sample-corpus entrypoint: chunk boundaries must not alter
-/// identities, recognised queries or bounded scanner storage.
+/// Development-only sample-corpus entrypoint: same-time chunk boundaries must
+/// preserve output coverage without retaining terminal bytes.
 #[cfg(any(test, feature = "parser-checks"))]
 #[doc(hidden)]
 pub fn verify_terminal_query_sample(data: &[u8]) {
@@ -615,24 +321,24 @@ pub fn verify_terminal_query_sample(data: &[u8]) {
     for (index, byte) in data.iter().enumerate() {
         split.output(session, index as u64, &[*byte], now);
     }
-    let queries = |registry: &Registry| {
+    let spans = |registry: &Registry| {
         registry
             .sessions
             .get(&session)
             .map(|state| {
                 state
-                    .pending
+                    .output
                     .iter()
-                    .map(|query| (query.seq, query.request.clone()))
+                    .map(|span| (span.start, span.end))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
     };
-    assert_eq!(queries(&whole), queries(&split));
+    assert_eq!(spans(&whole), spans(&split));
     for registry in [&whole, &split] {
         if let Some(state) = registry.sessions.get(&session) {
-            assert!(state.pending.len() <= QUERIES);
-            assert!(state.scanner.bytes.len() <= CONTROL);
+            assert!(state.output.len() <= POSITIONS);
+            assert!(state.claimed.len() <= POSITIONS);
         }
     }
 }
