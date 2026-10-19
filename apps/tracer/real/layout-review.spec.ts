@@ -375,3 +375,22 @@ test("review r2: narrow and wide device splits converge without refused windows"
     await page.reload(); await mobile.reload(); await expect(windows(page)).toHaveCount(4); await expect(windows(mobile)).toHaveCount(4);
   } finally { await fixture.dispose(); }
 });
+
+test("review r2: down split admission respects the canonical height floor", async ({ browser }) => {
+  const fixture = await pair(browser);
+  const { page, mobile, server, desktop } = fixture;
+  try {
+    const baseline = (await cache(page)).canonical;
+    const view = baseline.views.find((v) => v.id === "console")!;
+    if (view.layout.type !== "tiled") throw Error("expected tiled console");
+    const id = view.layout.columns[0]!.windows[0]!.id;
+    expect((await request(server, desktop, "canvas.layout.apply", { op_id: randomUUID(), base_revision: baseline.revision, intent: { type: "resize", window_id: id, height: 0.05 } })).ok).toBe(true);
+    await expect.poll(async () => (await cache(page)).canonical.revision).toBe(baseline.revision + 1);
+    await page.keyboard.press("Control+Shift+E");
+    await expect(windows(page)).toHaveCount(2);
+    await settled(page); await settled(mobile);
+    await writeFile(tracerEvidencePath("review-r2-height-floor.json"), JSON.stringify({ desktop: await cache(page), phone: await cache(mobile), calls: server.bridges.map((b) => b.control) }, null, 2));
+    await page.screenshot({ path: tracerEvidencePath("review-r2-height-floor.png") });
+    await expect(windows(page)).toHaveCount(2); await expect(windows(mobile)).toHaveCount(2);
+  } finally { await fixture.dispose(); }
+});
