@@ -291,7 +291,7 @@ export class TerminalClient {
   /** Scoped only around synchronous renderer writes; keyboard input arrives in later event tasks. */
   private suppressTerminalResponses = false;
   private readonly terminalQueries = new TerminalQueries();
-  private parserReplies: string[] | undefined;
+  private parserReplies: string | undefined;
   private parserReplyLength = 0;
   private renderIdleTimer = 0;
   /** Set by writes and consumed by the next renderer pass; link parsing itself waits for an idle callback. */
@@ -384,9 +384,9 @@ export class TerminalClient {
       this.wakeTerminal();
       // Replayed parser replies are not typing: they neither reach the shell nor restart the blink.
       if (this.suppressTerminalResponses) return;
-      if (this.parserReplies) {
+      if (this.parserReplies !== undefined) {
         this.parserReplyLength += data.length;
-        if (this.parserReplyLength <= 1024) this.parserReplies.push(data);
+        if (this.parserReplyLength <= 1024) this.parserReplies += data;
         return;
       }
       this.restartCursorBlink();
@@ -1407,18 +1407,18 @@ export class TerminalClient {
     this.tryAttach();
   }
 
-  /** Write exactly through each query before collecting its synchronous renderer response.
+  /** Write through generic control boundaries and mark every synchronous renderer answer.
    * Keyboard callbacks run in later tasks and always use the unchanged typing path.
    */
   private writeQueryResponses(bytes: Uint8Array, offset: bigint, callback: () => void): void {
     if (!this.conn.terminalQueryReplies) { this.terminal.write(bytes, callback); return; }
     let start = 0;
     const write = (end: number, replyTo: bigint): void => {
-      this.parserReplies = [];
+      this.parserReplies = "";
       this.parserReplyLength = 0;
       try {
         this.terminal.write(bytes.subarray(start, end), end === bytes.length ? callback : undefined);
-        const response = this.parserReplies.join("");
+        const response = this.parserReplies;
         if (response && this.parserReplyLength <= 1024) {
           const encoded = encoder.encode(response);
           if (encoded.length <= 1024) this.sendFrame(this.streamId, { type: "Input", inSeq: 0n, replyTo, bytes: encoded });
@@ -1427,7 +1427,7 @@ export class TerminalClient {
       start = end;
     };
     this.terminalQueries.scan(bytes, offset, (end, sequence) => write(end, sequence));
-    if (start < bytes.length) this.writeSuppressingTerminalResponses(bytes.subarray(start), callback);
+    if (start < bytes.length) write(bytes.length, offset + BigInt(start));
   }
 
   /**
