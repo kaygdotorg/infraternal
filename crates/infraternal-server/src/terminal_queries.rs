@@ -9,6 +9,10 @@ const WINDOW: Duration = Duration::from_secs(1);
 const POSITIONS: usize = 64;
 const SESSIONS: usize = 4096;
 
+#[cfg(test)]
+#[path = "terminal_queries_review_tests.rs"]
+mod review_tests;
+
 #[derive(Default)]
 pub(crate) struct Registry {
     sessions: HashMap<[u8; 16], Session>,
