@@ -11,6 +11,8 @@ use std::os::{fd::AsRawFd, unix::process::CommandExt};
 struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {
+        const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
+        let socket_directory = format!("c{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
         let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
             || {
                 PathBuf::from(std::env::var_os("HOME").unwrap())
@@ -18,13 +20,31 @@ impl Directory {
             },
             PathBuf::from,
         );
-        let path = root.join("restart-tests").join(format!(
-            "c{}",
-            &uuid::Uuid::new_v4().simple().to_string()[..8]
-        ));
+        let fallback = PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(".cache/codex-scratch/infraternal");
+        let socket_path = |root: &Path| {
+            root.join("restart-tests")
+                .join(&socket_directory)
+                .join("restart/control.sock")
+        };
+        let root = if socket_path(&root).as_os_str().as_encoded_bytes().len()
+            <= MAX_UNIX_SOCKET_PATH_BYTES
+        {
+            root
+        } else {
+            static LONG_ROOT_WARNING: std::sync::Once = std::sync::Once::new();
+            LONG_ROOT_WARNING.call_once(|| {
+                eprintln!(
+                    "restart test state root exceeds the Linux socket path limit; using {}",
+                    fallback.display()
+                );
+            });
+            fallback
+        };
+        let path = root.join("restart-tests").join(socket_directory);
         let socket = path.join("restart/control.sock");
         assert!(
-            socket.as_os_str().as_encoded_bytes().len() < 108,
+            socket.as_os_str().as_encoded_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES,
             "restart fixture socket path exceeds Linux sun_path: {} bytes",
             socket.as_os_str().as_encoded_bytes().len()
         );
