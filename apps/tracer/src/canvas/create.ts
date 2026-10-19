@@ -149,7 +149,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     backdrop?.measure();
     const previous = state.metrics;
     const next = metricsFor(w, h, coarse.matches, sizes);
-    if (next.colW === previous.colW && next.peekW === previous.peekW && next.clh === previous.clh && next.narrow === previous.narrow) {
+    if (next.colW === previous.colW && next.peekW === previous.peekW && next.clh === previous.clh && next.narrow === previous.narrow && next.minW === previous.minW) {
       // Nothing about the windows changed (the area did): keep the framing centred, unless a flight is under way.
       if (performance.now() >= animatingUntil) { if (cx.camera.target && cx.views.size) cx.camera.set(cx.camera.target()); else cx.camera.apply(true); }
       return;
@@ -172,6 +172,9 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     relayout(false);
   });
   window.addEventListener(SIZE_EVENT, () => relayout(true), { signal: events.signal });
+  // Attaching or removing a trackpad or mouse flips the pointer kind without a resize; the touch minimum
+  // column (D309) must follow it, or a fine pointer keeps the wide touch columns.
+  coarse.addEventListener("change", () => relayout(true), { signal: events.signal });
   ro.observe(viewport);
   cx.camera.start();
   warmDroplet();
