@@ -23,13 +23,13 @@ async fn an_ip_added_host_uses_its_cached_hostname_and_old_facts_do_not_clear_it
     let changes = source
         .save_facts(host, &json!({"hostname":"MiniPC01.lan", "os":"Linux"}))
         .await;
-    assert!(changes);
+    assert!(changes.hostname && changes.any);
     let saved = source.list("owner", None).await.unwrap();
     assert_eq!(saved["hosts"][0]["name"], "minipc01");
     assert_eq!(saved["hosts"][0]["address"], "root@10.69.69.217");
 
     let old_agent = source.save_facts(host, &json!({"os":"Linux"})).await;
-    assert!(!old_agent);
+    assert!(!old_agent.hostname);
     assert_eq!(
         source.list("owner", None).await.unwrap()["hosts"][0]["name"],
         "minipc01"

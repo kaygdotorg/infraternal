@@ -16,9 +16,14 @@ pub(crate) struct Source {
     #[cfg(feature = "mesh")]
     pub mesh: Option<infraternal_plugin_mesh::api::MeshService>,
 }
+#[derive(Default)]
+struct FactChanges {
+    hostname: bool,
+    any: bool,
+}
 impl Source {
     /// Retain valid machine facts without allowing an older host to erase a name it cannot report.
-    async fn save_facts(&self, id: Uuid, facts: &Value) -> bool {
+    async fn save_facts(&self, id: Uuid, facts: &Value) -> FactChanges {
         let hostname = facts
             .get("hostname")
             .and_then(Value::as_str)
@@ -28,9 +33,9 @@ impl Source {
             .and_then(Value::as_str)
             .filter(|os| !os.is_empty() && os.len() <= 256);
         let Ok(mut tx) = self.pool.begin().await else {
-            return false;
+            return FactChanges::default();
         };
-        let mut changed = false;
+        let mut changed = FactChanges::default();
         if let Some(hostname) = hostname
             && let Ok(result) = sqlx::query("UPDATE remote_hosts SET hostname=? WHERE id=? AND revoked_at IS NULL AND hostname IS NOT ?")
                 .bind(&hostname)
@@ -39,7 +44,8 @@ impl Source {
                 .execute(&mut *tx)
                 .await
         {
-            changed |= result.rows_affected() > 0;
+            changed.hostname = result.rows_affected() > 0;
+            changed.any |= changed.hostname;
         }
         if let Some(os) = os
             && let Ok(result) = sqlx::query("UPDATE remote_host_bootstrap SET os=? WHERE host_id=? AND os IS NOT ? AND EXISTS(SELECT 1 FROM remote_hosts WHERE id=host_id AND revoked_at IS NULL)")
@@ -49,25 +55,27 @@ impl Source {
                 .execute(&mut *tx)
                 .await
         {
-            changed |= result.rows_affected() > 0;
+            changed.any |= result.rows_affected() > 0;
         }
         if tx.commit().await.is_err() {
-            return false;
+            return FactChanges::default();
         }
         changed
     }
 
-    /// Publish retained facts and reconcile on every availability edge; older hosts may omit a cached hostname.
+    /// Publish retained facts and reconcile only when a hostname changes; old hosts may omit the field.
     async fn apply_facts(&self, id: Uuid, facts: &Value) -> bool {
         let changed = self.save_facts(id, facts).await;
-        if changed {
+        if changed.any {
             self.hosts.5.publish();
         }
         #[cfg(feature = "mesh")]
-        if let Some(mesh) = &self.mesh {
+        if changed.hostname
+            && let Some(mesh) = &self.mesh
+        {
             mesh.refresh_host_name(&id.to_string()).await;
         }
-        changed
+        changed.any
     }
 }
 impl Inventory for Source {
