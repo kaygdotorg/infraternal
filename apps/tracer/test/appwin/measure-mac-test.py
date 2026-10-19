@@ -8,6 +8,27 @@ import signal
 from types import SimpleNamespace
 
 
+class RecordingTypingTests(unittest.TestCase):
+    """Earlier latency samples cannot conceal missing letters in the recording."""
+
+    def incomplete(self, count, frames=True):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        guard = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                     and any(isinstance(child, ast.Raise) and 'demo typing or recording incomplete' in ast.unparse(child) for child in node.body))
+        return eval(compile(ast.Expression(body=guard.test), str(source), 'eval'),
+                    {'typed_count': count, 'typed_before': 16,
+                     'demo_text': ('infraternal demo', ' typing'), 'frames': [1] if frames else []})
+
+    def test_only_the_complete_recorded_burst_passes(self):
+        for count in (16, 22, 38, 40):
+            with self.subTest(count=count): self.assertTrue(self.incomplete(count))
+        self.assertFalse(self.incomplete(39))
+
+    def test_no_recording_is_not_a_pass(self):
+        self.assertTrue(self.incomplete(39, frames=False))
+
+
 class FirstPictureTests(unittest.TestCase):
     """Capture refusal and the first-picture deadline stop capture before cleanup."""
 

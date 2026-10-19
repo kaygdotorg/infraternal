@@ -497,23 +497,26 @@ try:
   battery();emit({'kind':'result','status':'resources_measured'});raise PhaseComplete()
  # Save a short recording of compositor output after authentication, containing only this isolated canvas.
  stage='recording'
+ # Earlier input samples must not make an incomplete demo look successful.
+ typed_before=max((r.get('typed_count',0) for r in all_draws),default=0)
+ demo_text=('infraternal demo',' typing')
  cdp.send('Page.startScreencast',{'format':'jpeg','quality':75,'maxWidth':2560,'maxHeight':1800,'everyNthFrame':1})
  frames=[]
  def screencast(event):
   frames.append({'timestamp':event['metadata'].get('timestamp'),'metadata':event['metadata'],'data':event['data']});cdp.send('Page.screencastFrameAck',{'sessionId':event['sessionId']})
  cdp.on('Page.screencastFrame',screencast)
  surface.click(position={'x':150,'y':120});page.wait_for_timeout(2500)
- page.keyboard.type('infraternal demo',delay=120);page.wait_for_timeout(2000)
+ page.keyboard.type(demo_text[0],delay=120);page.wait_for_timeout(2000)
  native_command('wide');page.wait_for_timeout(2500)
- page.keyboard.type(' typing',delay=120);page.wait_for_timeout(2000)
+ page.keyboard.type(demo_text[1],delay=120);page.wait_for_timeout(2000)
  cdp.send('Page.stopScreencast')
  typed_count=max((r.get('typed_count',0) for r in all_draws),default=0)
- if typed_count<22 or not frames:raise RuntimeError('demo typing or recording incomplete')
+ if typed_count-typed_before!=sum(map(len,demo_text)) or not frames:raise RuntimeError('demo typing or recording incomplete')
  page.screenshot(path=str(E/'canvas-demo-after.png'))
  for i,frame in enumerate(frames):(E/('record-%04d.jpg'%i)).write_bytes(base64.b64decode(frame['data']))
  (E/'recording-timestamps.json').write_text(json.dumps([f['timestamp'] for f in frames]))
  (E/'recording-metadata.json').write_text(json.dumps({'viewport':page.viewport_size,'frames':[f['metadata'] for f in frames]}))
- emit({'kind':'recording','frames':len(frames),'typed_count':typed_count,'canvas_after':page.locator('.ui-window[data-kind="app"]').bounding_box()})
+ emit({'kind':'recording','frames':len(frames),'typed_before':typed_before,'typed_count':typed_count,'typed_expected':sum(map(len,demo_text)),'canvas_after':page.locator('.ui-window[data-kind="app"]').bounding_box()})
  if args.get('soak'):
   stage='stability soak'
   soak_start=time.monotonic();counts={'crashes':0,'stuck_frames':0,'requested_drops':0,'reconnects':0,'reopens':0,'typed':0,'resizes':0,'idle_checks':0,'unexpected_helper_exits':0,'slow_worker_updates':0};iteration=0
