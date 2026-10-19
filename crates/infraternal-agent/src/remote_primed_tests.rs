@@ -19,8 +19,8 @@ impl Drop for Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let state = PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(".cache/codex-scratch/mc")
+        let state = crate::test_state_root()
+            .join("mc")
             .join(&uuid::Uuid::new_v4().simple().to_string()[..8]);
         std::fs::DirBuilder::new()
             .recursive(true)

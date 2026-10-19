@@ -32,7 +32,7 @@ impl crate::channel::Channel for BlockedNative {
 #[tokio::test]
 async fn vanished_native_session_bounds_final_reply_drain_for_a_stuck_peer() {
     let id = uuid::Uuid::new_v4();
-    let base = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/fds");
+    let base = crate::test_state_root().join("fds");
     std::fs::create_dir_all(&base).unwrap();
     let state = State {
         path: sessions::state(Some(
@@ -68,7 +68,7 @@ async fn vanished_native_session_bounds_final_reply_drain_for_a_stuck_peer() {
 #[tokio::test]
 async fn vanished_native_session_delivers_final_close_before_stream_retirement() {
     let id = uuid::Uuid::new_v4();
-    let base = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/fds");
+    let base = crate::test_state_root().join("fds");
     std::fs::create_dir_all(&base).unwrap();
     let path = sessions::state(Some(
         base.join(format!("n{}", &id.simple().to_string()[..8])),
@@ -122,7 +122,7 @@ async fn vanished_native_session_delivers_final_close_before_stream_retirement()
 #[tokio::test]
 async fn retired_native_session_delivers_saved_status_then_final_close_before_retirement() {
     let id = uuid::Uuid::new_v4();
-    let base = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/fds");
+    let base = crate::test_state_root().join("fds");
     std::fs::create_dir_all(&base).unwrap();
     let state = State {
         path: sessions::state(Some(
@@ -209,7 +209,7 @@ impl crate::channel::Channel for QueuedNative {
 #[tokio::test]
 async fn retiring_native_handshake_preserves_final_answer_with_inflight_commands() {
     let id = uuid::Uuid::new_v4();
-    let base = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/fds");
+    let base = crate::test_state_root().join("fds");
     std::fs::create_dir_all(&base).unwrap();
     let state = State {
         path: sessions::state(Some(
@@ -269,7 +269,7 @@ async fn retiring_native_handshake_preserves_final_answer_with_inflight_commands
 #[tokio::test]
 async fn retired_native_status_bounds_final_reply_drain_for_a_stuck_peer() {
     let id = uuid::Uuid::new_v4();
-    let base = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/fds");
+    let base = crate::test_state_root().join("fds");
     std::fs::create_dir_all(&base).unwrap();
     let state = State {
         path: sessions::state(Some(
