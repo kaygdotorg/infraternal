@@ -6,6 +6,8 @@ use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+type AdmittedHostRow = (Vec<u8>, String, Option<String>, Option<String>, String);
+
 #[cfg(test)]
 #[path = "remote_inventory_name_tests.rs"]
 mod name_tests;
@@ -138,7 +140,7 @@ impl Inventory for Source {
                 })
                 .transpose()?;
             // Same authority predicate as websocket::terminal_actor. Unredeemed invitations are not admitted hosts.
-            let rows: Vec<(Vec<u8>, String, Option<String>, Option<String>, String)> = sqlx::query_as(
+            let rows: Vec<AdmittedHostRow> = sqlx::query_as(
                 "SELECT h.id,COALESCE(b.address,''),b.os,h.hostname,h.mode FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.owner_id=? AND h.revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id) AND (? IS NULL OR h.id>?) ORDER BY h.id LIMIT 129")
                 .bind(account).bind(after.map(|id| id.as_bytes().to_vec())).bind(after.map(|id| id.as_bytes().to_vec())).fetch_all(&self.pool).await.map_err(|_| ())?;
             let mut next = if rows.len() > 128 {
