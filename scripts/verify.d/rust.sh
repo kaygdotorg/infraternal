@@ -64,8 +64,8 @@ rust_check_static_binary() {
     fi
 
     case "$target" in
-        x86_64-unknown-linux-musl) max_size_bytes=21102256 ;;
-        aarch64-unknown-linux-musl) max_size_bytes=19329584 ;;
+        x86_64-unknown-linux-musl) max_size_bytes=21225872 ;;
+        aarch64-unknown-linux-musl) max_size_bytes=19427688 ;;
         *)
             printf 'no static binary size baseline configured for target: %s\n' "$target" >&2
             return 1
@@ -97,12 +97,49 @@ rust_check_cli_stub() {
     local exit_code=0
 
     output="$("$binary" "$mode" --json 2>&1)" || exit_code=$?
-    if [[ "$exit_code" -ne 2 || "$output" != *'"schema_version": 1'* || "$output" != *'"state": "unavailable"'* ]]; then
+    # The envelope is one compact line per result (D299).
+    if [[ "$exit_code" -ne 2 || "$output" != *'"schema_version":1'* || "$output" != *'"state":"unavailable"'* ]]; then
         printf 'unexpected %s stub: exit=%s output=%s\n' "$mode" "$exit_code" "$output" >&2
         return 1
     fi
 
     printf '%s subcommand: exit 2, versioned JSON unavailable result\n' "$mode"
+}
+
+# A group typed alone lists its commands in one envelope and exits 0 (#239): `agent` does too.
+rust_check_cli_group() {
+    local binary="$1"
+    local group="$2"
+    local output
+    local stderr_file
+    local stderr_present=no
+    local exit_code=0
+
+    stderr_file="$(mktemp)" || return 1
+    output="$("$binary" "$group" --json 2>"$stderr_file")" || exit_code=$?
+    [[ ! -s "$stderr_file" ]] || stderr_present=yes
+    rm -f "$stderr_file"
+    if [[ "$exit_code" -ne 0 || "$stderr_present" != no ]] || ! python3 -c '
+import json
+import sys
+
+lines = sys.stdin.read().splitlines()
+if len(lines) != 1:
+    raise SystemExit(1)
+result = json.loads(lines[0])
+if result.get("schema_version") != 1:
+    raise SystemExit(1)
+expected = f"{sys.argv[1]} join"
+commands = result.get("data", {}).get("commands", [])
+if not any(isinstance(command, dict) and command.get("command") == expected for command in commands):
+    raise SystemExit(1)
+' "$group" <<<"$output" 2>/dev/null; then
+        printf 'unexpected %s group: exit=%s, expected one versioned JSON envelope; stderr_present=%s\n' \
+            "$group" "$exit_code" "$stderr_present" >&2
+        return 1
+    fi
+
+    printf '%s group: exit 0, one parsed versioned JSON listing of its commands\n' "$group"
 }
 
 # Disabled CLI plugins must leave both their actions and role crates out of the binary.
@@ -146,6 +183,12 @@ rust_check_cli_plugin_compile_out() {
     fi
     printf 'Mac desktop Linux-only shim dependency: absent from normal dependency graph\n'
     cargo test --locked --package infraternal --bin infraternal --no-default-features
+    # The hidden commands of unbuilt components are compiled out of default builds (D243);
+    # the one-source tests for them (D16) run in the build that keeps them (D299 C5).
+    cargo test --locked --package infraternal --bin infraternal --features placeholders
+    cargo test --locked --package infraternal-agent --package infraternal-mesh \
+        --package infraternal-plugin-backup --package infraternal-plugin-relay \
+        --package infraternal-plugin-ssh --lib --features infraternal-plugin-api/placeholders cli
 }
 
 # D244/#154 checks the shipping provider, never a GNU test executable or C probe.
@@ -204,7 +247,7 @@ rust_static_build_check() {
     # Inspect both freshly built images; iterate never qualifies stale artifacts.
     CARGO_TARGET_DIR="$target_dir" bun test scripts/release/static-metadata-review.test.ts || failed=1
     rust_check_cli_stub "$x86_binary" "server" || failed=1
-    rust_check_cli_stub "$x86_binary" "agent" || failed=1
+    rust_check_cli_group "$x86_binary" "agent" || failed=1
     return "$failed"
 }
 

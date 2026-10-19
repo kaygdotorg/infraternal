@@ -1,5 +1,6 @@
 //! Implements local-owner restart requests and same-PID exec without transporting the CA over a named socket [168][217], #154.
 
+use crate::cli::output::Exit;
 use std::{
     ffi::CString,
     io,
@@ -363,26 +364,23 @@ pub(crate) fn run(
         )
         .await
     }) {
-        Ok(Ok(warm)) => {
-            super::output::report(
-                json,
-                infraternal_plugin_remote::RESTART.id,
-                "requested",
-                if warm {
-                    "Server replacement requested with CA handoff"
-                } else {
-                    "Server replacement requested cold (CA locked)"
-                },
-                "Check health and administrator CA status after startup.",
-            );
-            std::process::ExitCode::SUCCESS
-        }
+        Ok(Ok(warm)) => super::output::done(
+            json,
+            infraternal_plugin_remote::RESTART.id,
+            "requested",
+            if warm {
+                "Server replacement requested with CA handoff"
+            } else {
+                "Server replacement requested cold (CA locked)"
+            },
+            "infraternal status",
+        ),
         _ => super::output::refuse(
             json,
             infraternal_plugin_remote::RESTART.id,
             "Server replacement refused",
-            "Use the running service account, its data directory and an executable binary.",
-            1,
+            "Run this as the account that runs the server, with its --data directory and an executable --binary.",
+            Exit::NotAllowed,
         ),
     }
 }

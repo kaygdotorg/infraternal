@@ -11,11 +11,13 @@ use std::{
     ffi::CString,
     fs::File,
     io,
+    mem::MaybeUninit,
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::process::CommandExt,
     },
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicU8, Ordering},
 };
 
 pub struct Pty {
@@ -202,6 +204,180 @@ fn allowed_signal(number: u8) -> io::Result<Signal> {
         ));
     }
     Ok(signal)
+}
+/// Columns of the terminal behind standard output; `None` for a pipe, a file or a zero-width reply.
+pub fn stdout_columns() -> Option<u16> {
+    let mut size = Winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCGWINSZ writes exactly one Winsize through the pointer, which
+    // outlives the call; descriptor 1 is only inspected and never closed.
+    let status = unsafe { nix::libc::ioctl(1, nix::libc::TIOCGWINSZ, &raw mut size) };
+    (status == 0 && size.ws_col > 0).then_some(size.ws_col)
+}
+/// What the interrupt handler writes to standard output before it exits; set once, read in the handler.
+static INTERRUPT_NOTICE: std::sync::OnceLock<Box<[u8]>> = std::sync::OnceLock::new();
+const OUTPUT_NOT_STARTED: u8 = 0;
+const OUTPUT_WRITING: u8 = 1;
+const INTERRUPT_DURING_OUTPUT: u8 = 2;
+const OUTPUT_FINISHED: u8 = 3;
+const INTERRUPTED_BEFORE_OUTPUT: u8 = 4;
+/// A signal during the final write is deferred until that complete line has been written.
+static FINAL_OUTPUT: AtomicU8 = AtomicU8::new(OUTPUT_NOT_STARTED);
+
+/// Whether a runtime has installed a chaining handler above this one.
+fn handler_is_current() -> bool {
+    let mut current = MaybeUninit::<nix::libc::sigaction>::uninit();
+    // SAFETY: `sigaction` reads the current action into this stack slot and is async-signal-safe.
+    if unsafe { nix::libc::sigaction(nix::libc::SIGINT, std::ptr::null(), current.as_mut_ptr()) }
+        != 0
+    {
+        return false;
+    }
+    // SAFETY: a successful `sigaction` query initialized the action.
+    unsafe { current.assume_init().sa_sigaction == on_interrupt as *const () as usize }
+}
+
+/// Only lock-free atomics, an async-signal-safe `sigaction` query, `write(2)` and SIGINT reset.
+extern "C" fn on_interrupt(_signal: nix::libc::c_int) {
+    if !handler_is_current() {
+        // A later runtime handler chains this handler before dispatching its own notification.
+        return;
+    }
+    loop {
+        let phase = FINAL_OUTPUT.load(Ordering::Relaxed);
+        let next = match phase {
+            OUTPUT_NOT_STARTED => INTERRUPTED_BEFORE_OUTPUT,
+            OUTPUT_WRITING => INTERRUPT_DURING_OUTPUT,
+            INTERRUPT_DURING_OUTPUT => return,
+            // Unknown state cannot be allowed to write beside a result.
+            _ => return_by_sigint(),
+        };
+        if FINAL_OUTPUT
+            .compare_exchange(phase, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            if phase == OUTPUT_NOT_STARTED {
+                if let Some(notice) = INTERRUPT_NOTICE.get() {
+                    // SAFETY: the boxed slice is live and never freed; the process exits next.
+                    unsafe { nix::libc::write(1, notice.as_ptr().cast(), notice.len()) };
+                }
+                return_by_sigint();
+            }
+            return;
+        }
+    }
+}
+
+/// Restore the default action and terminate by SIGINT so calling shells stop their scripts.
+fn return_by_sigint() -> ! {
+    // SAFETY: the signal action and mask are initialized before use. These syscalls are
+    // async-signal-safe, so this also works when called by `on_interrupt`.
+    unsafe {
+        let mut action = MaybeUninit::<nix::libc::sigaction>::zeroed().assume_init();
+        if nix::libc::sigemptyset(&raw mut action.sa_mask) != 0 {
+            nix::libc::_exit(130);
+        }
+        action.sa_sigaction = nix::libc::SIG_DFL;
+        action.sa_flags = 0;
+        if nix::libc::sigaction(nix::libc::SIGINT, &raw const action, std::ptr::null_mut()) != 0 {
+            nix::libc::_exit(130);
+        }
+
+        let mut unblocked = MaybeUninit::<nix::libc::sigset_t>::uninit();
+        if nix::libc::sigemptyset(unblocked.as_mut_ptr()) != 0
+            || nix::libc::sigaddset(unblocked.as_mut_ptr(), nix::libc::SIGINT) != 0
+        {
+            nix::libc::_exit(130);
+        }
+        let unblocked = unblocked.assume_init();
+        if nix::libc::sigprocmask(
+            nix::libc::SIG_UNBLOCK,
+            &raw const unblocked,
+            std::ptr::null_mut(),
+        ) != 0
+            || nix::libc::raise(nix::libc::SIGINT) != 0
+        {
+            nix::libc::_exit(130);
+        }
+        // The default SIGINT action should have ended the process before `raise` returned.
+        nix::libc::_exit(130);
+    }
+}
+
+/// Enter the final output write, preventing a second line from entering it.
+pub fn begin_final_output() {
+    if INTERRUPT_NOTICE.get().is_none() {
+        return;
+    }
+    if FINAL_OUTPUT
+        .compare_exchange(
+            OUTPUT_NOT_STARTED,
+            OUTPUT_WRITING,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        // An earlier interrupt already owns the final result.
+        return_by_sigint();
+    }
+}
+
+/// Finish the final write and honor any interrupt deferred while the line was in progress.
+pub fn finish_final_output() {
+    if INTERRUPT_NOTICE.get().is_none() {
+        return;
+    }
+    match FINAL_OUTPUT.compare_exchange(
+        OUTPUT_WRITING,
+        OUTPUT_FINISHED,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    ) {
+        Ok(_) => {}
+        Err(INTERRUPT_DURING_OUTPUT) => {
+            // The complete result has been written; stop without appending another line.
+            return_by_sigint();
+        }
+        Err(_) => {
+            // SAFETY: an impossible phase cannot be allowed to emit another result.
+            return_by_sigint();
+        }
+    }
+}
+
+/// On SIGINT before final output starts, write the notice and re-raise SIGINT. During the final
+/// write, let that complete line finish and then re-raise without appending another one. A later
+/// runtime handler may chain this handler first; in that case it returns to the runtime's handler.
+/// Only the first call has an effect.
+pub fn exit_on_interrupt(notice: Vec<u8>) {
+    use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, sigaction};
+    let mut inherited = MaybeUninit::<nix::libc::sigaction>::uninit();
+    // SAFETY: a null action reads the current disposition without changing it. If the query
+    // fails, keep the existing policy because installing a handler could change SIG_IGN.
+    if unsafe { nix::libc::sigaction(nix::libc::SIGINT, std::ptr::null(), inherited.as_mut_ptr()) }
+        != 0
+    {
+        return;
+    }
+    // SAFETY: sigaction initialized the previous disposition after returning success.
+    if unsafe { inherited.assume_init() }.sa_sigaction == nix::libc::SIG_IGN {
+        return;
+    }
+    if INTERRUPT_NOTICE.set(notice.into_boxed_slice()).is_err() {
+        return;
+    }
+    let action = SigAction::new(
+        SigHandler::Handler(on_interrupt),
+        SaFlags::empty(),
+        SigSet::empty(),
+    );
+    // SAFETY: the handler uses lock-free atomics and async-signal-safe syscalls, without locks.
+    let _ = unsafe { sigaction(Signal::SIGINT, &action) };
 }
 /// Detach only before threads or PTYs exist. The original process returns;
 /// the grandchild owns the session and redirects inherited standard handles.

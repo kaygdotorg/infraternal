@@ -26,7 +26,7 @@ pub struct SkillCommand {
 pub fn commands(registry: &ActionRegistry) -> Vec<SkillCommand> {
     registry
         .actions()
-        .filter(|registered| registered.action.visible)
+        .filter(|registered| registered.action.is_public())
         .map(|registered| SkillCommand {
             command: registered.action.command.join(" "),
             description: registered.action.description.clone(),
@@ -110,7 +110,7 @@ pub fn render_action(action: &ActionDefinition) -> Result<String, serde_json::Er
 pub fn write_all(registry: &ActionRegistry, directory: &Path) -> io::Result<Vec<String>> {
     let skills = registry
         .actions()
-        .filter(|registered| registered.action.visible)
+        .filter(|registered| registered.action.is_public())
         .map(|registered| {
             let file_name = format!("infraternal-{}.md", file_stem(&registered.action.command));
             (file_name, registered.action)
@@ -257,7 +257,13 @@ mod tests {
         #[cfg(feature = "plugin-agent")]
         assert!(!files.contains(&"infraternal-agent.md".to_owned()));
         #[cfg(feature = "plugin-agent")]
-        assert!(files.contains(&"infraternal-agent-up.md".to_owned()));
+        {
+            // Placeholders are not written (D299 C5); a working agent command is.
+            assert!(!files.contains(&"infraternal-agent-up.md".to_owned()));
+            assert!(!files.contains(&"infraternal-up.md".to_owned()));
+        }
+        #[cfg(feature = "remote")]
+        assert!(files.contains(&"infraternal-agent-join.md".to_owned()));
         for file in files {
             assert!(fs::read_to_string(target.join(file)).is_ok());
         }

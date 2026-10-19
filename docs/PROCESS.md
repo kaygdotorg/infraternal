@@ -143,16 +143,17 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,102,256 bytes |
-  | `aarch64-unknown-linux-musl` | 19,329,584 bytes |
+  | `x86_64-unknown-linux-musl` | 21,225,872 bytes |
+  | `aarch64-unknown-linux-musl` | 19,427,688 bytes |
 
-  These are the #146 app-window integration measurements: +6,112 / +4,064
-  bytes over the frozen release-prod-live baseline (21,096,144 / 19,325,520).
-  The exact ceilings include no growth allowance (D243).
-
-  The release-3 measurements were release-2 plus #230 same-server
-  re-enrollment and #227 close logging: +16,000 / +2,872 bytes over release-2
-  (D243, with the logging growth covered by D301).
+  These are the release-5 measurements, adding the Mesh view (#236) to the
+  release-4 measurements below: +81,760 / +56,992 bytes. The x86_64 increase
+  follows D306's accepted Mesh view size and stays below this task's +90 KB
+  stop line. Each cap stays at its exact measured size until a later measured
+  reduction ratchets it down. Release 4's one-off D243 exception was accepted
+  within the task's +64 KB ceiling for D299's versioned `--json` envelope and
+  D303–D305 command behavior, together with #237's status truth (+17 KB).
+  The trim follow-up is owed.
 
   The release-2 measurements were: the release-retry line (next paragraph,
   21,080,848 / 19,316,360) plus D300 host-link doubt (#234), already-added

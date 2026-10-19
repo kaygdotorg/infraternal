@@ -13,6 +13,8 @@ native-streams = ["native-wire", "global-work"]
 global-work = []
 native-wire = ["dep:bytes", "dep:tokio"]
 socket-host = ["native-wire", "dep:sqlx"]
+# Also compile commands for components that are not built yet (hidden, D299 C5).
+placeholders = []
 
 [dependencies]
 bytes = { workspace = true, optional = true }

@@ -23,11 +23,11 @@ pub const CHANNEL_GET: ActionDef = ActionDef {
 };
 pub const CHANNEL_SET: ActionDef = ActionDef {
     id: "release.channel.set",
-    summary: "Change the server release channel",
+    summary: "Switch the server between the stable and edge release channels.",
     instructions: &[
-        "Choose stable or edge for this existing server.",
+        "Choose stable or edge for the server.",
         EDGE_WARNING,
-        "Confirm edge explicitly; the API requires confirmed=true, the CLI asks on a TTY and requires --yes otherwise.",
+        "Edge needs your confirmation: you are asked in a terminal, and scripts must pass --yes.",
         "Switching back to stable needs no confirmation.",
     ],
     input: SchemaRef(
@@ -42,11 +42,11 @@ pub const CHANNEL_SET: ActionDef = ActionDef {
 };
 pub const LATEST: ActionDef = ActionDef {
     id: "release.latest",
-    summary: "Read the newest verified release in the server channel",
+    summary: "Show the newest verified release on the server's channel.",
     instructions: &[
-        "Read releases/channels/<channel>.json for the selected server channel.",
-        "Verify the signed manifest and VERSION before trusting the release identity.",
-        "If stable is empty, report no stable release yet; never fall back to edge.",
+        "Read the newest release the server has published for its channel.",
+        "Check its signature before trusting it.",
+        "If stable has no release yet the command says so; it never falls back to edge.",
     ],
     input: CHANNEL_GET.input,
     output: SchemaRef("VerifiedRelease"),
@@ -97,24 +97,24 @@ pub fn server_cli_actions() -> Vec<infraternal_plugin_api::ActionDefinition> {
     .map(|(source, path)| {
         let mut fields = vec![(
             "data".to_owned(),
-            JsonSchema::string("Private directory of an existing server."),
+            JsonSchema::string("Data folder of the running server."),
         )];
         if source.id == CHANNEL_SET.id {
             fields.extend([
                 (
                     "channel".to_owned(),
-                    JsonSchema::string("Choose stable or edge; omit to read the current channel."),
+                    JsonSchema::string("Stable or edge. Leave it out to show the current channel."),
                 ),
                 (
                     "yes".to_owned(),
-                    JsonSchema::boolean("Explicitly acknowledge unreviewed edge builds."),
+                    JsonSchema::boolean("Confirm switching to edge without being asked."),
                 ),
             ]);
         }
         let mut action = ActionDefinition::new(
             path,
             source.summary,
-            "Use this command against an existing server owned by the current OS user.",
+            "Use this on the machine that runs the server, as the account that owns its data.",
             source.instructions.iter().copied(),
             JsonSchema::object(fields, std::iter::empty()),
             JsonSchema::command_result_with(JsonSchema::object(

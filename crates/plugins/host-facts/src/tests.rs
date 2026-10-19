@@ -167,3 +167,21 @@ fn configured_memory_floor_refuses_with_current_host_counters() {
         })
     ));
 }
+
+/// The server names a Mesh node by this when the host was added by IP address (#236).
+#[test]
+fn static_facts_report_the_machines_hostname() {
+    let facts = super::collect_static_facts(AgentMode::Remote);
+    let expected = nix::unistd::gethostname()
+        .expect("hostname")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(facts.hostname.as_deref(), Some(expected.as_str()));
+    let wire = serde_json::to_value(&facts).expect("facts encode");
+    assert_eq!(wire["hostname"], expected);
+    // A reader that predates the field still decodes what an older infraternal agent sends.
+    let mut older = wire;
+    older.as_object_mut().expect("object").remove("hostname");
+    let decoded: HostFacts = serde_json::from_value(older).expect("older facts decode");
+    assert_eq!(decoded.hostname, None);
+}

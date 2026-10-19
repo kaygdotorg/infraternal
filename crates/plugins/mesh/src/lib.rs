@@ -60,3 +60,6 @@ pub mod settings;
 
 #[cfg(feature = "server")]
 pub mod node_coordination;
+
+#[cfg(feature = "server")]
+pub mod presence;

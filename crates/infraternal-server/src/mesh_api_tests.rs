@@ -417,7 +417,7 @@ async fn scoped_grant_role_filters_inventory_and_cannot_cross_tags() {
     .await
     .unwrap();
 
-    assert!(
+    assert_eq!(
         call(
             service,
             MEMBER,
@@ -425,8 +425,8 @@ async fn scoped_grant_role_filters_inventory_and_cannot_cross_tags() {
             json!({"node_id":prod_node,"name":"prod-db-scoped"}),
             NOW,
         )
-        .await
-        .is_ok()
+        .await,
+        Err(MeshApiError::Denied),
     );
     assert_eq!(
         call(

@@ -20,9 +20,13 @@
  * "revision": n }` (it invalidates: the canvas lists again, coalesced, so a missed event costs nothing) and
  * `{ "type": "error", "error": "<word>" }` (the subscription is over; `forbidden` means the view is withdrawn).
  *
+ * A node's `live` and `path` come from the server's own device (#236): `live` while the server's Mesh is On (the
+ * server) or a WireGuard session with the node is up (a peer), `path: "direct"` for such a session; neither needs a
+ * stored observation, so `last_seen` may be null on a live node. Its `host` is the machine's name.
+ *
  * What the server does not send yet, and the canvas reads as absent (never invented), is marked PROPOSED and is on
- * the issue: `access` (what the person may do, D187), a node's `os`, `address`, `path`, `via` and `behind`.
- * Without `access` everyone is read-only (least privilege).
+ * the issue: `access` (what the person may do, D187), a node's `os`, `address`, `via`, `behind` and the `relay`
+ * path. Without `access` everyone is read-only (least privilege).
  *
  * Inside the canvas a node is its host name and a tag is `tag:<name>` (D164); this module converts at the edge.
  */

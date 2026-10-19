@@ -1,4 +1,5 @@
 //! Presents declared release actions for an existing server, requiring deliberate edge confirmation [16,201,202,226].
+use crate::cli::output::{Exit, emit};
 use infraternal_plugin_release::descriptor::{CHANNEL_GET, CHANNEL_SET, EDGE_WARNING, LATEST};
 use serde_json::json;
 use std::{
@@ -46,8 +47,9 @@ pub(crate) fn run(
             return refusal(
                 &command,
                 json_output,
-                "Invalid release command",
-                "Choose server channel or server release latest.",
+                "That is not a release command.",
+                "infraternal server release latest",
+                Exit::Usage,
             );
         }
     };
@@ -71,8 +73,9 @@ pub(crate) fn run(
         return refusal(
             &command,
             json_output,
-            "Could not start the async runtime",
-            "Check local runtime resources.",
+            "The command could not start its async runtime.",
+            "Free some memory or threads on this machine, then run it again.",
+            Exit::Failed,
         );
     };
     let input = channel.map_or_else(
@@ -117,16 +120,33 @@ pub(crate) fn run(
     });
     match result {
         Ok(value) => present(value, &command, json_output),
-        Err(error) => refusal(
-            &command,
-            json_output,
+        Err(error) => {
+            let (message, next, exit) = classify(error);
+            refusal(&command, json_output, message, next, exit)
+        }
+    }
+}
+
+/// Each cause of a failed release read gets its own sentence, next step and exit code (D303).
+fn classify(error: &'static str) -> (&'static str, &'static str, Exit) {
+    if error == EDGE_WARNING {
+        (
             error,
-            if channel == Some("edge") && error == EDGE_WARNING {
-                "Confirm explicitly on a TTY or pass --yes to acknowledge unreviewed edge builds."
-            } else {
-                "Check the existing server's --data directory, release settings and verification."
-            },
-        ),
+            "Confirm explicitly on a TTY or pass --yes to acknowledge unreviewed edge builds.",
+            Exit::NotAllowed,
+        )
+    } else if error == "existing server storage is unsafe" {
+        (
+            "The server's data directory is not private to this account.",
+            "Run this as the account that owns the server's data directory.",
+            Exit::NotAllowed,
+        )
+    } else {
+        (
+            "No server was found in that data directory.",
+            "Pass --data with the data directory of the running server.",
+            Exit::NotFound,
+        )
     }
 }
 
@@ -155,10 +175,9 @@ fn present(value: serde_json::Value, command: &str, json_output: bool) -> ExitCo
     ExitCode::SUCCESS
 }
 
-fn refusal(command: &str, json_output: bool, message: &str, next: &str) -> ExitCode {
+fn refusal(command: &str, json_output: bool, message: &str, next: &str, exit: Exit) -> ExitCode {
     use crate::cli::output::{CommandResult, CommandState};
     let result =
         CommandResult::new(command, CommandState::Failed, message, json!({})).with_next_step(next);
-    crate::print_result(&result, json_output, true);
-    ExitCode::from(1)
+    emit(result, json_output, exit)
 }

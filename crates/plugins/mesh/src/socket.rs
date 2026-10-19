@@ -55,9 +55,20 @@ impl Plugin for MeshPlugin {
         let service = self.mesh.clone();
         let store = service.dataplane();
         let work = self.mesh_work.clone();
-        Some(Box::pin(crate::node_coordination::run(
-            store, service, channel, work,
-        )))
+        if !channel.is_server() {
+            return Some(Box::pin(crate::node_coordination::run(
+                store, service, channel, work,
+            )));
+        }
+        // The server's own channel also reads who is online; the two end together (presence.rs, #236).
+        let presence = crate::presence::run(service.clone(), channel.clone());
+        let coordination = crate::node_coordination::run(store, service, channel, work);
+        Some(Box::pin(async move {
+            tokio::select! {
+                () = coordination => {}
+                () = presence => {}
+            }
+        }))
     }
     fn run(
         &self,
@@ -70,6 +81,9 @@ impl Plugin for MeshPlugin {
         let worker_user = host.user_id().to_owned();
         Box::pin(async move {
             let mut mesh_updates = worker_state.mesh.subscribe();
+            let mut presence_updates = worker_state.mesh.subscribe_presence();
+            // The view this worker last compared against; a transition is judged per watch against it.
+            let mut seen_presence = presence_updates.borrow_and_update().clone();
             let mut mesh_subscriptions =
                 Vec::<MeshSubscription>::with_capacity(MAX_MESH_SUBSCRIPTIONS);
             let mut encode = Vec::with_capacity(4096);
@@ -94,11 +108,9 @@ impl Plugin for MeshPlugin {
                     .map(|expiry| Duration::from_secs(expiry).saturating_sub(now));
                 let result = tokio::select! {
                     () = tokio::time::sleep(expiry_wait.unwrap_or_default()), if expiry_wait.is_some() => {
-                        host.authorized(async {
-                                let _permit = worker_state.mesh_work.acquire().await.map_err(|_| ())?;
-                                send_mesh_resync(&worker_state, &worker_user,
-                                    &mut mesh_subscriptions, &mut sink, &mut encode, true).await
-                            }.boxed()
+                        host.authorized(
+                            send_mesh_resync(&worker_state, &worker_user,
+                                &mut mesh_subscriptions, &mut sink, &mut encode, Resync::Expired).boxed()
                         ).await
                     }
                     wire = requests.recv() => {
@@ -115,6 +127,19 @@ impl Plugin for MeshPlugin {
                             }.boxed()
                         ).await
                     }
+                    // Presence moves without a revision: a watch that sees a changed node gets a fresh snapshot.
+                    changed = presence_updates.changed(), if !mesh_subscriptions.is_empty() => {
+                        if changed.is_err() {
+                            Err(())
+                        } else {
+                            let next = presence_updates.borrow_and_update().clone();
+                            let previous = std::mem::replace(&mut seen_presence, next.clone());
+                            host.authorized(
+                                send_mesh_resync(&worker_state, &worker_user, &mut mesh_subscriptions,
+                                    &mut sink, &mut encode, Resync::Presence(&previous, &next)).boxed()
+                            ).await
+                        }
+                    }
                     change = mesh_updates.recv(), if !mesh_subscriptions.is_empty() => {
                         match change {
                             Ok(change) => host.authorized(async {
@@ -124,11 +149,9 @@ impl Plugin for MeshPlugin {
                                 }.boxed()
                             ).await,
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) =>
-                                host.authorized(async {
-                                        let _permit = worker_state.mesh_work.acquire().await.map_err(|_| ())?;
-                                        send_mesh_resync(&worker_state, &worker_user,
-                                            &mut mesh_subscriptions, &mut sink, &mut encode, false).await
-                                    }.boxed()
+                                host.authorized(
+                                    send_mesh_resync(&worker_state, &worker_user,
+                                        &mut mesh_subscriptions, &mut sink, &mut encode, Resync::All).boxed()
                                 ).await,
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => Err(()),
                         }
@@ -173,6 +196,7 @@ fn mesh_error_event(error: MeshApiError) -> Value {
         MeshApiError::FreshRequired => "confirm with your passkey again",
         MeshApiError::NotFound => "not found",
         MeshApiError::Conflict => "conflict",
+        MeshApiError::Reserved => "reserved for the server",
         MeshApiError::Storage => "mesh unavailable",
     };
     json!({"type":"error","error":message})
@@ -258,6 +282,23 @@ where
     Ok(())
 }
 
+/// Which watches a resync goes to.
+#[derive(Clone, Copy)]
+enum Resync<'a> {
+    /// Watches whose stored-liveness deadline has passed.
+    Expired,
+    /// Every watch, after missed change notices.
+    All,
+    /// Watches that see a node whose presence changed between the two views (#236). A watch that sees none of
+    /// the changed nodes is sent nothing, so a tag-scoped viewer learns nothing about nodes outside its view, not
+    /// even when they change.
+    Presence(&'a crate::presence::Live, &'a crate::presence::Live),
+}
+
+/// Sends fresh snapshots to the watches `which` selects.
+///
+/// The snapshots are read under one shared `mesh_work` permit and sent after it is released: a viewer slow to
+/// drain its socket must not hold the permit that host configuration delivery also needs (#236).
 #[allow(clippy::too_many_arguments)]
 async fn send_mesh_resync<K>(
     state: &MeshPlugin,
@@ -265,31 +306,61 @@ async fn send_mesh_resync<K>(
     subscriptions: &mut Vec<MeshSubscription>,
     sink: &mut K,
     encode: &mut Vec<u8>,
-    expired_only: bool,
+    which: Resync<'_>,
 ) -> Result<(), ()>
 where
     K: futures_util::Sink<Bytes, Error = ()> + Unpin,
 {
     let now = unix_seconds()?;
-    let current = subscriptions.clone();
-    for subscription in current {
-        if expired_only
-            && subscription
-                .liveness_deadline
-                .is_none_or(|deadline| deadline > now)
-        {
-            continue;
-        }
-        let sub_id = subscription.sub_id;
-        let (retained, deadline) =
-            send_mesh_snapshot(state, user_id, sub_id, subscription, sink, encode, "resync")
-                .await?;
-        if retained {
-            if let Some(watch) = subscriptions.iter_mut().find(|sub| sub.sub_id == sub_id) {
-                watch.liveness_deadline = deadline;
+    let mut events = Vec::with_capacity(subscriptions.len());
+    {
+        let _permit = state.mesh_work.acquire().await.map_err(|_| ())?;
+        for subscription in subscriptions.iter() {
+            if matches!(which, Resync::Expired)
+                && subscription
+                    .liveness_deadline
+                    .is_none_or(|deadline| deadline > now)
+            {
+                continue;
             }
-        } else {
-            mesh_remove(subscriptions, sub_id);
+            let event = match state
+                .mesh
+                .list_with_deadline(user_id, subscription.filter.clone(), now)
+                .await
+            {
+                Ok((snapshot, deadline)) => {
+                    if let Resync::Presence(previous, next) = which
+                        && !snapshot
+                            .nodes
+                            .iter()
+                            .any(|node| previous.get(&node.node.id) != next.get(&node.node.id))
+                    {
+                        continue;
+                    }
+                    (json!({"type":"resync","snapshot":snapshot}), Some(deadline))
+                }
+                Err(error) => (mesh_error_event(error), None),
+            };
+            events.push((subscription.sub_id, subscription.generation, event));
+        }
+    }
+    for (sub_id, generation, (event, retained)) in events {
+        // The worker carries withdrawal as typed metadata, without inspecting JSON.
+        send_mesh_event(
+            sink,
+            sub_id,
+            &event,
+            encode,
+            (generation << 1) | u32::from(retained.is_none()),
+        )
+        .await?;
+        match retained {
+            Some(deadline) => {
+                if let Some(watch) = subscriptions.iter_mut().find(|sub| sub.sub_id == sub_id) {
+                    watch.liveness_deadline = deadline;
+                }
+            }
+            None => mesh_remove(subscriptions, sub_id),
         }
     }
     Ok(())

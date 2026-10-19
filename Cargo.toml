@@ -11,6 +11,7 @@ members = [
     "crates/infraternal-agent",
     "crates/infraternal-shim",
     "crates/infraternal-session",
+    "crates/infraternal-status",
     "crates/plugins/ssh",
     "crates/plugins/relay",
     "crates/plugins/backup",
@@ -128,3 +129,7 @@ opt-level = "s"
 # recovery fits its measured size only at z (#230).
 [profile.release.package.infraternal-plugin-ssh]
 opt-level = "z"
+
+# `infraternal status` reads unit files once per call: size-optimized [243].
+[profile.release.package.infraternal-status]
+opt-level = "s"

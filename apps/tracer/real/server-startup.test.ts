@@ -7,13 +7,17 @@ import { resolve } from 'node:path';
 const worker = `
 import { startRealServer } from ${JSON.stringify(resolve(import.meta.dirname, 'server.ts'))};
 import { createServer } from 'node:net';
-import { mkdir, mkdtemp, symlink, unlink, rm, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, symlink, unlink, rm, readdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname } from 'node:path';
 const target=process.env.CARGO_TARGET_DIR;
 const parent=target?.startsWith(homedir()+'/.cache/codex-scratch/')?dirname(target):homedir()+'/.cache/codex-scratch/fixture-server-startup';
 await mkdir(parent,{recursive:true});
 const root=await mkdtemp(parent+'/startup-test-');
+// The backend exits before serving a page; this input must not require a prior frontend build.
+const dist=await mkdtemp(parent+'/startup-web-');
+await writeFile(dist+'/index.html','<!-- Role: inert web input for the failed-startup cleanup fixture. -->');
+process.env.TRACER_DIST=dist;
 const alias=homedir()+'/.cache/codex-scratch/u'+process.pid.toString(36);
 await symlink(root,alias);
 process.env.INFRATERNAL_BIN='/bin/false';
@@ -28,7 +32,7 @@ const probe=createServer();
 const released=await new Promise(r=>{probe.once('error',()=>r(false));probe.listen(port,'127.0.0.1',()=>probe.close(()=>r(true)));});
 const remaining=(await readdir(root)).length;
 await fixture?.dispose();
-await unlink(alias);await rm(root,{recursive:true,force:true});
+await unlink(alias);await rm(root,{recursive:true,force:true});await rm(dist,{recursive:true,force:true});
 console.log(JSON.stringify({reason,released,remaining}));
 process.exit(0);
 `;
