@@ -1076,6 +1076,35 @@ mod tests {
     //! Differential state and admission tests for the research-only reactor.
     use super::*;
 
+    /// Type bytes into a real PTY and finish one bounded output turn.
+    ///
+    /// The ring head is the replay position even when the configured ring has
+    /// no retained capacity, so this helper checks both PTY drainage and that
+    /// the replay position advanced with the output.
+    fn type_and_drain(session: &mut Session, input: &[u8]) -> io::Result<u64> {
+        use std::os::fd::AsFd;
+
+        let head = session.ring.head();
+        session.pty.master.write_all(input)?;
+        let mut descriptors = [nix::poll::PollFd::new(
+            session.pty.master.as_fd(),
+            PollFlags::POLLIN,
+        )];
+        let ready = nix::poll::poll(&mut descriptors, 5000_u16)?;
+        assert_ne!(ready, 0, "typed input did not produce PTY echo");
+        let master = descriptors[0].revents().unwrap_or_else(PollFlags::empty);
+        session.step(PollFlags::empty(), master, &[], true)?;
+        let unread = crate::pty::available_output(&session.pty.master)?;
+        assert_eq!(unread, 0, "session step left {unread} PTY bytes unread");
+        let advanced = session.ring.head() - head;
+        assert!(
+            advanced > 0,
+            "drained PTY output did not advance replay head"
+        );
+        assert_eq!(session.ring.start(), session.ring.head());
+        Ok(advanced)
+    }
+
     /// PPU-R3-2 (#205): the host pool follows the machine within its bounds.
     #[test]
     fn host_pool_scales_with_machine_memory_within_bounds() {
@@ -1298,6 +1327,186 @@ mod tests {
             unread, 0,
             "zero ring capacity left {unread} PTY response bytes unread"
         );
+    }
+
+    /// D310 property: random open/write/close churn at a full pool always
+    /// drains each selected live PTY while screen state and replay offsets move.
+    #[test]
+    fn exhausted_pool_drains_live_ptys_during_random_session_churn() {
+        const LIVE_SESSIONS: usize = 2;
+        const OPERATIONS: usize = 128;
+
+        fn next(seed: &mut u64) -> u64 {
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            *seed
+        }
+
+        let floor = crate::terminal_native::floor_for_geometry(80, 24, SESSION_SCREEN_BYTES);
+        let cap = floor * LIVE_SESSIONS;
+        let host = crate::terminal_memory::HostBudget::new(cap, SESSION_SCREEN_BYTES);
+        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
+            || PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch"),
+            PathBuf::from,
+        );
+        std::fs::create_dir_all(&root).unwrap();
+        let state = root.join(format!("pool-churn-{}", std::process::id()));
+        let mut seed = 0x2051_0019_7a11_0c5e;
+        let mut next_id = 0x7510_u128;
+        let mut sessions: Vec<Option<Session>> = (0..LIVE_SESSIONS).map(|_| None).collect();
+
+        let open = |id: u128| {
+            let mut config = Config::new(id.to_le_bytes(), Uid::effective().as_raw());
+            config.state = Some(state.clone());
+            config.readiness = true;
+            // run_host_accounted can set this to zero when all admitted floors
+            // consume the pool; retention must not control PTY read progress.
+            config.ring_capacity = 0;
+            let mut session = Session::new_host(config, 64 * 1024, host.clone())?;
+            session.terminal.process(b"\x1bcpool ready\r\n")?;
+            Ok(session)
+        };
+        for slot in &mut sessions {
+            *slot = Some(open(next_id).unwrap());
+            next_id += 1;
+        }
+        assert_eq!(host.total_used(), cap);
+
+        let mut full_pool_drains = 0;
+        for _ in 0..OPERATIONS {
+            match next(&mut seed) % 5 {
+                0 => {
+                    let index = usize::try_from(next(&mut seed) % 2).unwrap();
+                    if sessions[index].is_none() {
+                        sessions[index] = Some(open(next_id).unwrap());
+                        next_id += 1;
+                    } else if host.total_used() == cap {
+                        let error = match open(next_id) {
+                            Ok(session) => {
+                                drop(session);
+                                panic!("full-pool open unexpectedly succeeded");
+                            }
+                            Err(error) => error,
+                        };
+                        assert!(pool_full_error(&error));
+                    }
+                }
+                1..=3 => {
+                    let index = usize::try_from(next(&mut seed) % 2).unwrap();
+                    if let Some(session) = sessions[index].as_mut() {
+                        let before = session.terminal.snapshot().unwrap();
+                        let key = b"abcdefghijklmnopqrstuvwxyz"
+                            [usize::try_from(next(&mut seed) % 26).unwrap()];
+                        assert_eq!(type_and_drain(session, &[key]).unwrap(), 1);
+                        let after = session.terminal.snapshot().unwrap();
+                        assert_ne!(before, after, "live screen did not display typed input");
+                        type_and_drain(session, b"\x7f").unwrap();
+                        if host.total_used() == cap {
+                            full_pool_drains += 1;
+                        }
+                    }
+                }
+                _ => {
+                    let index = usize::try_from(next(&mut seed) % 2).unwrap();
+                    sessions[index] = None;
+                }
+            }
+
+            if host.total_used() == cap {
+                let index = usize::try_from(next(&mut seed) % 2).unwrap();
+                if let Some(session) = sessions[index].as_mut() {
+                    let key = b"abcdefghijklmnopqrstuvwxyz"
+                        [usize::try_from(next(&mut seed) % 26).unwrap()];
+                    assert_eq!(type_and_drain(session, &[key]).unwrap(), 1);
+                    type_and_drain(session, b"\x7f").unwrap();
+                    full_pool_drains += 1;
+                }
+            }
+            assert!(host.total_used() <= cap);
+        }
+
+        assert!(
+            full_pool_drains > 0,
+            "property sequence never drained at full pool"
+        );
+        drop(sessions);
+        assert_eq!(
+            host.total_used(),
+            0,
+            "closed PTYs kept their floor reservations"
+        );
+        std::fs::remove_dir_all(&state).unwrap();
+    }
+
+    /// Measure a real typed-key echo turn on the perf VM with every pool byte
+    /// reserved by two live screens. This reports shim-path p50/p99 and keeps
+    /// the shell's input line clear between samples.
+    #[test]
+    #[ignore = "timing measurement runs on the perf VM"]
+    fn full_pool_typing_echo_latency() {
+        const SAMPLES: usize = 1000;
+        let floor = crate::terminal_native::floor_for_geometry(80, 24, SESSION_SCREEN_BYTES);
+        let cap = floor * 2;
+        let host = crate::terminal_memory::HostBudget::new(cap, SESSION_SCREEN_BYTES);
+        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
+            || PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch"),
+            PathBuf::from,
+        );
+        std::fs::create_dir_all(&root).unwrap();
+        let state = root.join(format!("pool-echo-{}", std::process::id()));
+        let open = |id: u128| {
+            let mut config = Config::new(id.to_le_bytes(), Uid::effective().as_raw());
+            config.state = Some(state.clone());
+            config.readiness = true;
+            config.ring_capacity = 0;
+            Session::new_host(config, 64 * 1024, host.clone())
+        };
+        let mut session = open(0x7511).unwrap();
+        let neighbor = open(0x7512).unwrap();
+        assert_eq!(host.total_used(), cap);
+        let refusal = match open(0x7513) {
+            Ok(session) => {
+                drop(session);
+                panic!("full-pool open unexpectedly succeeded");
+            }
+            Err(error) => error,
+        };
+        assert!(pool_full_error(&refusal));
+
+        let load_start = std::fs::read_to_string("/proc/loadavg").unwrap();
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for index in 0..SAMPLES {
+            let key = b"abcdefghijklmnopqrstuvwxyz"[index % 26];
+            let started = Instant::now();
+            assert_eq!(type_and_drain(&mut session, &[key]).unwrap(), 1);
+            samples.push(started.elapsed().as_secs_f64() * 1000.0);
+            type_and_drain(&mut session, b"\x7f").unwrap();
+        }
+        samples.sort_unstable_by(f64::total_cmp);
+        let p50 = samples[(SAMPLES - 1) * 50 / 100];
+        let p99 = samples[(SAMPLES - 1) * 99 / 100];
+        let maximum = samples[SAMPLES - 1];
+        let load_end = std::fs::read_to_string("/proc/loadavg").unwrap();
+        eprintln!(
+            "METRIC name=pool_full_typing_echo_ms n={SAMPLES} p50={p50:.4} p99={p99:.4} max={maximum:.4} pool_bytes={}/{} loadavg_start={} loadavg_end={}",
+            host.total_used(),
+            cap,
+            load_start
+                .split_whitespace()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join("/"),
+            load_end
+                .split_whitespace()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        drop(neighbor);
+        drop(session);
+        assert_eq!(host.total_used(), 0);
+        std::fs::remove_dir_all(&state).unwrap();
     }
 
     pub(super) fn ack_fixture(tag: u8) -> (Session, std::os::unix::net::UnixStream, PathBuf) {
