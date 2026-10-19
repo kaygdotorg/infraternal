@@ -12,6 +12,13 @@ function fixture(rtt: number, streams: number) {
   const timers = new Map<number, { at: number; callback(): void }>();
   const browserTimers = new Set<number>();
   const schedule = (callback: () => void, delay: number) => { const id = ++timerId; timers.set(id, { at: now + delay, callback }); return id; };
+  const takeBrowserTimer = (onTime = false) => {
+    const next = [...timers].filter(([id]) => browserTimers.has(id)).sort((a, b) => a[1].at - b[1].at)[0]!;
+    if (onTime) now = Math.max(now, next[1].at);
+    browserTimers.delete(next[0]);
+    timers.delete(next[0]);
+    return next[1].callback;
+  };
   const sockets: Socket[] = [];
   class Socket {
     static OPEN = 1;
@@ -46,8 +53,15 @@ function fixture(rtt: number, streams: number) {
   return {
     connection,
     get latestProbe() { return { ...latestProbe }; },
+    get confirmationPending() { return (connection as unknown as { livenessConfirmationPending: boolean }).livenessConfirmationPending; },
     get probes() { return probes; }, get wakeups() { return wakeups; }, get disconnects() { return disconnects; },
     receive(stream: number, frame: WireFrame) { sockets[0]!.receive(stream, frame); },
+    captureLatestReply() {
+      const socket = sockets.at(-1)!;
+      const probe = { ...latestProbe };
+      // Keep the task callable so a stale timer can be ordered ahead of this queued socket message.
+      return () => socket.receive(0, { type: "Pong", ...probe });
+    },
     stopForwarding() { forwarding = false; },
     welcomeLatest() {
       const socket = sockets.at(-1)!;
@@ -57,12 +71,10 @@ function fixture(rtt: number, streams: number) {
     setRoundTrip(ms: number) { rtt = ms; },
     suspend(ms: number) { now += ms; },
     runBrowserTimer(onTime = false) {
-      const next = [...timers].filter(([id]) => browserTimers.has(id)).sort((a, b) => a[1].at - b[1].at)[0]!;
-      if (onTime) now = Math.max(now, next[1].at);
-      timers.delete(next[0]);
-      next[1].callback();
+      takeBrowserTimer(onTime)();
     },
-    replyLatest(valid = true) { sockets[0]!.receive(0, { type: "Pong", nonce: latestProbe.nonce, sentUs: latestProbe.sentUs + (valid ? 0n : 1n) }); },
+    captureBrowserTimer(onTime = false) { return takeBrowserTimer(onTime); },
+    replyLatest(valid = true) { sockets.at(-1)!.receive(0, { type: "Pong", nonce: latestProbe.nonce, sentUs: latestProbe.sentUs + (valid ? 0n : 1n) }); },
     advance(ms: number) {
       const until = now + ms;
       for (;;) {
@@ -386,7 +398,9 @@ test("a queued correlated reply cancels confirmation without letting a duplicate
     const answered = f.latestProbe;
     f.replyLatest();
     expect(f.connection.isWelcomed).toBe(true);
+    expect(f.disconnects).toBe(0);
     f.advance(30);
+    expect(f.confirmationPending).toBe(false);
     for (let cycle = 0; cycle < 5 && f.connection.isWelcomed; cycle++) {
       f.suspend(1000);
       f.receive(0, { type: "Pong", ...answered });
@@ -428,13 +442,91 @@ test("continuous typing cannot cancel every silent-route confirmation turn", () 
     f.advance(30);
     // Model an input task queued between each overdue liveness callback and
     // its zero-delay confirmation. Liveness callbacks still run every 75ms.
-    // A = 250ms and G = 75ms give the claimed bound of 725 virtual ms.
-    for (let elapsed = 0; elapsed < 600_000 && f.connection.isWelcomed; elapsed += 75) {
+    // A = 250ms and G = 75ms give the claimed 2*A + 3*G bound of 725 virtual ms.
+    const allowance = 250, gap = 75;
+    const bound = 2 * allowance + 3 * gap;
+    let elapsed = 0;
+    while (elapsed < bound && f.connection.isWelcomed) {
+      elapsed += gap;
       f.suspend(75);
       f.runBrowserTimer(true);
       f.connection.sampleRoundTrip();
       f.connection.send(1, { type: "Input", inSeq: BigInt(elapsed / 75), bytes: new Uint8Array([120]) });
     }
     expect(f.connection.isWelcomed).toBe(false);
+    expect(elapsed).toBeLessThanOrEqual(bound);
+  } finally { f.dispose(); }
+});
+
+function armConfirmation(f: ReturnType<typeof fixture>): () => void {
+  f.advance(1001);
+  f.stopForwarding();
+  f.advance(30);
+  f.suspend(1000);
+  f.runBrowserTimer(true); // Consume the one local-stall grace.
+  f.suspend(250);
+  f.runBrowserTimer(true); // Expiry queues a zero-delay confirmation.
+  expect(f.confirmationPending).toBe(true);
+  return f.captureBrowserTimer();
+}
+
+for (const reset of ["reconnect", "close", "dispose"] as const) test(`a pending confirmation is reset by ${reset}`, () => {
+  const f = fixture(1, 1);
+  try {
+    const staleConfirmation = armConfirmation(f);
+    const disconnectsBeforeReset = f.disconnects;
+    if (reset === "reconnect") f.connection.forceDrop();
+    else if (reset === "close") f.connection.forceClose(1001, "review close");
+    else f.connection.dispose();
+    expect(f.confirmationPending).toBe(false);
+
+    if (reset === "dispose") {
+      staleConfirmation();
+      expect(f.confirmationPending).toBe(false);
+      expect(f.disconnects).toBe(disconnectsBeforeReset);
+      return;
+    }
+
+    f.advance(100);
+    f.welcomeLatest();
+    expect(f.connection.isWelcomed).toBe(true);
+    staleConfirmation();
+    expect(f.connection.isWelcomed).toBe(true);
+    expect(f.confirmationPending).toBe(false);
+    expect(f.disconnects).toBe(disconnectsBeforeReset + 1);
+  } finally { f.dispose(); }
+});
+
+test("a stale confirmation from before reconnect cannot close the replacement route", () => {
+  const f = fixture(1, 1);
+  try {
+    const staleConfirmation = armConfirmation(f);
+    f.connection.forceDrop();
+    expect(f.confirmationPending).toBe(false);
+    f.advance(100);
+    f.welcomeLatest();
+    f.advance(25); // Issue the replacement route's first probe.
+    f.replyLatest(); // Learn its short response allowance while it is healthy.
+    f.connection.sampleRoundTrip(); // Restore fast probing for the silence control.
+    f.advance(25); // Issue a fresh unanswered probe.
+    f.suspend(1000);
+    f.runBrowserTimer(true); // Consume the replacement route's local-stall grace.
+    f.suspend(250);
+    f.runBrowserTimer(true); // Arm the replacement route's own confirmation.
+    expect(f.confirmationPending).toBe(true);
+    const disconnectsBeforeStaleCallback = f.disconnects;
+    const currentConfirmation = f.captureBrowserTimer();
+    const queuedReply = f.captureLatestReply();
+
+    // The old queued timer must not stand in for the replacement route's task turn.
+    staleConfirmation();
+    expect(f.connection.isWelcomed).toBe(true);
+    expect(f.confirmationPending).toBe(true);
+    queuedReply();
+    currentConfirmation();
+
+    expect(f.connection.isWelcomed).toBe(true);
+    expect(f.confirmationPending).toBe(false);
+    expect(f.disconnects).toBe(disconnectsBeforeStaleCallback);
   } finally { f.dispose(); }
 });
