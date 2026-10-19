@@ -3256,3 +3256,30 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      above the 64 KB band of D243. It ships at the measured size once its
      reviews and the phone pass are clean; trimming continues and the caps
      ratchet down with it. Rejected: holding the feature for a deeper trim.
+309. **Owner answers 2026-10-19 (#242, #146, #94, D300, #205, #243):**
+     - **Row menu and swipes (#242):** "1a agreed", "1b agreed", "1c yes,
+       one shared component!". Right-click on a row opens our own menu:
+       Open, Open beside, Rename, Copy name, then "End session…" last, which
+       asks before ending. Swipe left reveals End, swipe right reveals Open
+       beside (trackpad, Magic Mouse, touch); a short swipe reveals, a long
+       swipe acts. One shared component for every row list (sessions, hosts,
+       Mesh nodes, windows). Right-click never selects the row's text.
+       Mockup round, then owner approval, then the build.
+     - **Machine view ("infrafetch", #94):** "oh glassy carrds would be sick
+       yes, needs to be mocked up though". Direction C (cards), glassy, with
+       B's dot meters and A's dotted mark; mockup round next.
+     - **App windows order (#146):** "agreed". First cut our own added
+       latency (about 40 ms over the network round trip, target 16 ms),
+       then build the direct browser-to-host path (D185, D192).
+     - **Proxmox lab:** minipc01 may be used: create test guests and delete
+       only those we created; never touch guests with "croit" in the name.
+     - **D300 timings stand:** "sure!". Doubt after 251/376 ms, retire after
+       501/751 ms.
+     - **Revocation while the database is frozen:** "that's fine". The
+       socket closes within about 1 s.
+     - **Shells that cannot redraw:** "agreed". After reattach their screen
+       carries a small "screen may be out of date" note until new output.
+     - **Phone minimum column width (#243):** "agreed". On touch screens a
+       column is drawn at least at a readable minimum width and the canvas
+       scrolls sideways; the saved weights stay exactly what was set, so a
+       phone never rewrites the desktop's layout.
