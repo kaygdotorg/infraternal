@@ -6,11 +6,15 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
-        let root = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/rl230/{}-{}",
-            std::process::id(),
-            uuid_free()
-        ));
+        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT")
+            .map_or_else(
+                || {
+                    PathBuf::from(std::env::var_os("HOME").unwrap())
+                        .join(".cache/codex-scratch/rl230")
+                },
+                PathBuf::from,
+            )
+            .join(format!("rl{}-{}", std::process::id(), uuid_free()));
         fs::create_dir_all(root.join("base/sessions")).unwrap();
         for path in [&root, &root.join("base"), &root.join("base/sessions")] {
             fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
