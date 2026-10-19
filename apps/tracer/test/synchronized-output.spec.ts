@@ -55,7 +55,6 @@ test("synchronized output holds split frame paints and releases within its timeo
   await page.evaluate(() => window.__tracerTestDouble?.freezeCursorForTest());
   await page.waitForTimeout(800);
   const originalPixels = await canvasPixels(page);
-  const originalPasses = await page.evaluate(() => window.__tracerTestDouble?.cursorLayerState()?.renderPasses ?? -1);
   await page.screenshot({ path: tracerEvidencePath("synchronized-output", "before-frame.png") });
 
   const frameParts = [
@@ -69,14 +68,43 @@ test("synchronized output holds split frame paints and releases within its timeo
   const finalFrameSequence = frameSequences.at(-1);
   if (!finalFrameSequence) throw new Error("synchronized output produced no frames");
   await waitForReceivedSequence(page, finalFrameSequence);
-  const heldFrameState = await page.evaluate(() => ({
-    at: performance.now(),
-    holdsPaint: window.__tracerTestDouble?.rendererMetrics()?.synchronizedOutputHoldsPaint ?? false,
-    renderPasses: window.__tracerTestDouble?.cursorLayerState()?.renderPasses ?? -1,
+  const heldFrameSamples = await page.evaluate(() => new Promise<Array<{
+    at: number;
+    holdsPaint: boolean;
+    receivedSequence: string;
+    outputSequence: string;
+    renderPasses: number;
+  }>>((resolve) => {
+    const samples: Array<{
+      at: number;
+      holdsPaint: boolean;
+      receivedSequence: string;
+      outputSequence: string;
+      renderPasses: number;
+    }> = [];
+    const sample = (): void => {
+      const metrics = window.__tracerTestDouble?.rendererMetrics();
+      samples.push({
+        at: performance.now(),
+        holdsPaint: metrics?.synchronizedOutputHoldsPaint ?? false,
+        receivedSequence: metrics?.receivedSequence ?? "0",
+        outputSequence: metrics?.outputSequence ?? "0",
+        renderPasses: window.__tracerTestDouble?.cursorLayerState()?.renderPasses ?? -1,
+      });
+      if (samples.length < 4) requestAnimationFrame(sample);
+      else resolve(samples);
+    };
+    requestAnimationFrame(sample);
   }));
-  console.log(`synchronized_output_frames=${frameSequences.length} elapsed_ms=${(heldFrameState.at - synchronizedStart).toFixed(1)} held=${heldFrameState.holdsPaint}`);
-  expect(heldFrameState.holdsPaint).toBe(true);
-  expect(heldFrameState.renderPasses).toBe(originalPasses);
+  const firstHeldFrame = heldFrameSamples[0];
+  const lastHeldFrame = heldFrameSamples.at(-1);
+  if (!firstHeldFrame || !lastHeldFrame) throw new Error("synchronized output produced no held-frame samples");
+  console.log(`synchronized_output_frames=${frameSequences.length} held_samples=${heldFrameSamples.length} ` +
+    `elapsed_ms=${(lastHeldFrame.at - synchronizedStart).toFixed(1)} held=${lastHeldFrame.holdsPaint}`);
+  expect(heldFrameSamples.every((sample) => sample.holdsPaint)).toBe(true);
+  expect(heldFrameSamples.every((sample) => sample.renderPasses === firstHeldFrame.renderPasses)).toBe(true);
+  expect(heldFrameSamples.every((sample) => sample.outputSequence === baseSequence)).toBe(true);
+  expect(lastHeldFrame.receivedSequence).toBe(finalFrameSequence);
   expect(await canvasPixels(page), "no part of a held frame reaches the canvas").toBe(originalPixels);
 
   const releasedSequence = await sendOutput(page, "\u001b[?2026l");
@@ -86,7 +114,7 @@ test("synchronized output holds split frame paints and releases within its timeo
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? ""))
     .toContain("frame-one\nframe-two\nframe-three");
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.cursorLayerState()?.renderPasses ?? -1))
-    .toBeGreaterThan(originalPasses);
+    .toBeGreaterThan(firstHeldFrame.renderPasses);
   await page.screenshot({ path: tracerEvidencePath("synchronized-output", "complete-frame.png") });
 
   const completePixels = await canvasPixels(page);
@@ -95,6 +123,7 @@ test("synchronized output holds split frame paints and releases within its timeo
   await waitForReceivedSequence(page, timeoutSequence);
   expect(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.synchronizedOutputHoldsPaint ?? false))
     .toBe(true);
+  const timeoutHeldPasses = await page.evaluate(() => window.__tracerTestDouble?.cursorLayerState()?.renderPasses ?? -1);
   expect(await canvasPixels(page), "the timeout case is held before its deadline").toBe(completePixels);
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.synchronizedOutputHoldsPaint ?? true), {
     timeout: 1_000,
@@ -106,7 +135,7 @@ test("synchronized output holds split frame paints and releases within its timeo
   await waitForSequence(page, timeoutSequence);
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.cursorLayerState()?.renderPasses ?? -1), {
     timeout: 1_000,
-  }).toBeGreaterThan(originalPasses + 1);
+  }).toBeGreaterThan(timeoutHeldPasses);
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain("TIMEOUT_FRAME");
   expect(await canvasPixels(page)).not.toBe(completePixels);
 });
