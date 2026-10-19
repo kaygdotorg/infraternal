@@ -89,14 +89,16 @@ fn erased_history_reset_and_geometry_return_native_memory() {
 
 /// Terminals sharing a host pool smaller than the sum of their shares stay
 /// exact: growth recycles their own oldest history instead of being refused,
-/// and the host total never passes its floors plus the pool.
+/// and the host total, including protected floors, stays inside the pool.
 #[test]
 fn shared_host_budget_bounds_the_sum_and_keeps_every_terminal_exact() {
     const TERMINALS: usize = 8;
     const FLOOR: usize = 256 * 1024;
     let history = 2 * 1024 * 1024;
-    // Half of one share for all eight terminals together.
-    let limit = history / 2;
+    // One quarter of one share for all eight terminals together, plus their
+    // protected floors, all inside the total host cap.
+    let extra_limit = history / 4;
+    let limit = extra_limit + TERMINALS * FLOOR;
     let host = HostBudget::new(limit, FLOOR);
     let mut terminals: Vec<_> = (0..TERMINALS)
         .map(|_| {
@@ -115,13 +117,14 @@ fn shared_host_budget_bounds_the_sum_and_keeps_every_terminal_exact() {
         }
     }
     assert!(
-        peak <= limit,
+        peak <= extra_limit,
         "host pool use {peak} passed its limit {limit}"
     );
-    // The pool binds: together the terminals wanted far more than it holds.
+    // Whole native page-pool items can leave an unused tail at the cap. The
+    // shared limit must still see sustained pressure across these terminals.
     assert!(
-        peak + 64 * 1024 > limit,
-        "host pool {limit} never bound (peak {peak})"
+        peak >= extra_limit * 2 / 3,
+        "shared host pool use {peak} did not reach two thirds of {extra_limit}"
     );
     let excess: usize = terminals
         .iter()
@@ -134,7 +137,9 @@ fn shared_host_budget_bounds_the_sum_and_keeps_every_terminal_exact() {
     );
     let total: usize = terminals.iter().map(|t| t.memory().0).sum();
     let floors: usize = terminals.iter().map(|t| t.engine.host_floor()).sum();
-    assert!(total <= floors + limit);
+    assert!(floors <= limit);
+    assert!(total <= limit);
+    assert!(host.total_used() <= limit);
     for (index, terminal) in terminals.iter().enumerate() {
         assert!(!terminal.memory().2, "terminal {index} reached refusal");
         assert!(
@@ -253,16 +258,13 @@ fn widening_a_full_history_stays_inside_its_share() {
     }
 }
 
-/// PPU-R3-2 (#205): the pool is sized for every history share, and each
-/// session's floor covers both of its screens at its own geometry, so a
-/// host full of laptop-sized sessions with full history can still open
-/// full-screen programs and resize. The old 256 KiB floor covered an idle
-/// 80x24 screen only, so these screens spilled into the pool and it ran out.
+/// D310: laptop-sized screen floors and history remain inside the maximum
+/// pool; admission does not rely on floors living outside the user cap.
 #[test]
 fn laptop_screens_come_from_their_floors_not_the_pool() {
     const SESSIONS: usize = 300;
     const HISTORY: usize = 64 * 1024 * 1024;
-    let pool = HISTORY + HISTORY / 8 + 8 * 1024 * 1024;
+    let pool = 512 * 1024 * 1024;
     let share = HISTORY / SESSIONS;
     let host = HostBudget::new(pool, 256 * 1024);
     let mut terminals: Vec<_> = (0..SESSIONS)

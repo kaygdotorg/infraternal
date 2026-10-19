@@ -1,15 +1,15 @@
 //! Break-it review r3 (#205, D270): the host-wide native pool must stay fair
 //! and exact for every session of one host, and its accounting must balance.
 //!
-//! Host constants mirror `user_host.rs`: each session owns a 256 KiB floor,
-//! and all bytes above the floors come from one 80 MiB pool. Shares follow
+//! Host constants mirror `user_host.rs`: each session reserves its 256 KiB
+//! floor inside the maximum 512 MiB pool. Shares follow
 //! `HOST_HISTORY_BYTES / sessions`, capped at 17 MiB.
 use super::*;
 use crate::terminal_memory::HostBudget;
 
 const FLOOR: usize = 256 * 1024;
 const HISTORY: usize = 64 * 1024 * 1024;
-const POOL: usize = HISTORY + HISTORY / 8 + 8 * 1024 * 1024;
+const POOL: usize = 512 * 1024 * 1024;
 
 fn share(sessions: usize) -> usize {
     (HISTORY / sessions).min(17 * 1024 * 1024)
@@ -127,10 +127,9 @@ fn review_r3_noisy_neighbour_does_not_make_quiet_sessions_approximate() {
     );
 }
 
-/// 100 sessions at an ordinary laptop geometry (200x50) fill their 655 KiB
-/// shares, then each opens a full-screen program and resizes a little. The
-/// floors cover only an idle 80x24 screen, so every visible screen draws on
-/// the pool that the history shares already fill.
+/// 100 sessions at an ordinary laptop geometry (200x50) fill their shares,
+/// then each opens a full-screen program and resizes a little. Their floors
+/// and all history remain accounted inside the D310 maximum pool.
 #[test]
 fn review_r3_hundred_laptop_sessions_keep_exact_state() {
     const SESSIONS: usize = 100;
@@ -361,9 +360,8 @@ fn review_r3_recycled_unwrapped_history_keeps_exact_snapshot() {
     }
 }
 
-/// The floor covers an idle 80x24 screen only. 400 sessions at 200x50 (one
-/// person's busy host) each print a few screens of ordinary output; visible
-/// screens alone must not exhaust the pool and refuse later sessions.
+/// 400 sessions at 200x50 each print ordinary output within the maximum user
+/// pool. Screen floors, history and output replay all share that hard cap.
 #[test]
 fn review_r3_four_hundred_laptop_screens_fit_the_host() {
     const SESSIONS: usize = 400;
