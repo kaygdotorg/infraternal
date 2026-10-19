@@ -108,6 +108,10 @@ test("terminal input reaches the host during an unreleased synchronized-output h
     }, { capture: true });
   });
 
+  await expect.poll(() => page.evaluate(() =>
+    (window as InputProbeWindow).__syncHoldInputProbe?.animationFrames.length ?? 0,
+  ), { timeout: 1_000, intervals: [2] }).toBeGreaterThanOrEqual(2);
+
   const held = await retry(() => request.post("/__mock/live-query-output", {
     data: { text: "\u001b[?2026h\u001b[2J\u001b[HHELD" },
   }));
@@ -162,6 +166,10 @@ test("terminal input reaches the host during an unreleased synchronized-output h
     .toContain("HELDz");
   const paintMetrics = await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics());
   if (!paintMetrics) throw new Error("terminal paint metrics disappeared after hold release");
+  const releaseAt = paintMetrics.synchronizedTimeoutReleasedAt;
+  await expect.poll(() => page.evaluate((at) =>
+    (window as InputProbeWindow).__syncHoldInputProbe?.animationFrames.filter((frameAt) => frameAt > at).length ?? 0,
+  releaseAt), { timeout: 1_000, intervals: [2] }).toBeGreaterThanOrEqual(2);
   const animationFrames = await page.evaluate(() => (window as InputProbeWindow).__syncHoldInputProbe?.animationFrames ?? []);
   const echoAfterReleaseMs = paintMetrics.lastPaintedOutputAt - paintMetrics.synchronizedTimeoutReleasedAt;
   const frameAtOrBefore = (at: number): number => animationFrames.filter((frameAt) => frameAt <= at).length;
