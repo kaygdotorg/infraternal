@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { MuxConnection } from "./connection";
 import { encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 
-function fixture(rtt: number, streams: number, caps = 4n) {
+function fixture(rtt: number, streams: number, caps = 4n, subscription = false) {
   const globals = globalThis as unknown as Record<string, unknown>;
   const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, performance: globals.performance, document: globals.document };
   let now = 0, timerId = 0, probes = 0, wakeups = 0, disconnects = 0;
@@ -62,6 +62,7 @@ function fixture(rtt: number, streams: number, caps = 4n) {
   let hidden = false;
   globals.document = { get hidden() { return hidden; }, get visibilityState() { return hidden ? "hidden" : "visible"; }, addEventListener: (_: string, callback: () => void) => visibilityListeners.add(callback), removeEventListener: (_: string, callback: () => void) => visibilityListeners.delete(callback) };
   const connection = new MuxConnection();
+  if (subscription) connection.subscribe({ topic: "canvas.layout" }, () => {});
   for (let i = 0; i < streams; i++) connection.openStream({ onSocketOpen() {}, onWelcome() {}, onFrame() {}, onDisconnected() { disconnects++; }, hasSession: () => true, onStatus() {} });
   sockets[0]!.onopen?.();
   sockets[0]!.receive(0, { type: "Hello", version: 1, caps, clientInfo: "visibility-fixture" });
@@ -640,4 +641,10 @@ for (const dispatchVisibleBeforeReplies of [true, false]) test(`review: queued r
     expect(f.connection.isWelcomed).toBe(true);
     expect(f.notices).toEqual([true, false]);
   } finally { f.dispose(); }
+});
+
+
+test("a layout subscription starts the connection before any terminal exists", () => {
+  const f = fixture(30, 0, 4n, true);
+  try { expect(f.connection.isWelcomed).toBe(true); } finally { f.dispose(); }
 });

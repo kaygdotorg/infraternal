@@ -11,6 +11,7 @@
  */
 
 const CANVAS = "infraternal.canvas.";
+const DRAWING_IDENTITY = "tracer.drawing-identity.";
 const INVENTORY = "tracer.sessions.";
 const TAB_SESSION = "tracer.session.";
 const LAST_ACCOUNT = "tracer.user-id";
@@ -18,6 +19,8 @@ const HINTS = "tracer.hints.";
 
 /** localStorage: the canvas document (windows, columns, views) of one account. */
 export const canvasKey = (account: string): string => CANVAS + account;
+/** localStorage: public identity labels needed to draw a cached layout offline, never authority. */
+export const drawingIdentityKey = (account: string): string => DRAWING_IDENTITY + account;
 /** localStorage: the session names, pins and recency of one account. */
 export const inventoryKey = (account: string): string => INVENTORY + account;
 /** sessionStorage: the public id of the terminal this tab last had open for one account. */
@@ -41,9 +44,34 @@ function sweep(area: Storage, prefix: string, account: string | undefined): void
 export function clearAccountStorage(account: string | undefined): void {
   try {
     sweep(localStorage, CANVAS, account);
+    sweep(localStorage, DRAWING_IDENTITY, account);
     sweep(localStorage, INVENTORY, account);
     sweep(sessionStorage, TAB_SESSION, account);
     // The last-account pointer names a person; it goes unless another account has since replaced it.
     if (account === undefined || localStorage.getItem(LAST_ACCOUNT) === account) localStorage.removeItem(LAST_ACCOUNT);
   } catch { /* storage is blocked: nothing was written either */ }
+}
+
+/** Read an account drawing cache without making storage availability part of the interaction path. */
+export function readStoredJson(key: string, storage?: () => Pick<Storage, "getItem">): unknown {
+  try { return JSON.parse((storage ? storage() : localStorage).getItem(key) ?? "null") as unknown; } catch { return undefined; }
+}
+/** Account cache writes are best effort; unavailable storage never blocks server-owned work. */
+export function writeStoredJson(key: string, value: unknown, storage?: () => Pick<Storage, "setItem">): void {
+  try { (storage ? storage() : localStorage).setItem(key, JSON.stringify(value)); } catch { /* private mode or quota: retain the in-memory drawing */ }
+}
+
+/** Cache notifications and coalesced writes share one disposal boundary, preventing late sign-out writes (D245). */
+export function createStoredJsonCache(key: string, value: () => unknown, storage?: () => Pick<Storage, "setItem">) {
+  let timer: ReturnType<typeof setTimeout> | undefined, disposed = false;
+  const listeners = new Set<() => void>();
+  const flush = (): void => { clearTimeout(timer); timer = undefined; if (!disposed) writeStoredJson(key, value(), storage); };
+  const schedule = (): void => { if (!disposed && timer === undefined) timer = setTimeout(flush, 300); };
+  const notify = (): void => { for (const listener of listeners) listener(); };
+  return {
+    schedule, flush, notify,
+    changed() { schedule(); notify(); },
+    subscribe(listener: () => void) { if (!disposed) listeners.add(listener); return () => { listeners.delete(listener); }; },
+    dispose() { if (timer !== undefined) flush(); disposed = true; listeners.clear(); },
+  };
 }

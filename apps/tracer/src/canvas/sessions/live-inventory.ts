@@ -15,7 +15,8 @@
  * The full snapshot is replayed after every socket welcome, so missed changes during a disconnect cannot revive a
  * stale row. Ended records stay available to their existing window but disappear from every session list.
  */
-import { inventoryKey } from "../../account-storage";
+import { documentWindows, type CanvasDocument } from "../model/schema";
+import { inventoryKey, createStoredJsonCache, readStoredJson } from "../../account-storage";
 import type { DeviceInfo, InventoryCapabilities, InventoryStatus, SessionInventory, SessionRecord } from "./inventory";
 
 interface Stored { host?: string; id: string; name: string; pinned: boolean; frecency: number }
@@ -28,14 +29,14 @@ export interface LiveInventory extends SessionInventory {
   /** Replace one host's cached rows with its full authoritative live-shim set. */
   /** Replaces a host's liveness set and reports newly ended IDs to open terminal streams. */
   reconcile(host: string, ids: readonly string[], ended?: readonly { id: string; status: number }[]): Array<{ id: string; status?: number }>;
+  /** Shared layout membership, independent of this device's terminal attachments. */
+  setLayout(document: CanvasDocument): void;
   dispose(): void;
 }
 
 export function createLiveInventory(options: { accountId: string; host: string }): LiveInventory {
   const key = inventoryKey(options.accountId);
-  let disposed = false;
   const records = new Map<string, SessionRecord>();
-  const listeners = new Set<() => void>();
   const owners = new Map<string, string>();
   // Only windows opened on this device need status after its sidecar is superseded.
   const opened = new Set<string>();
@@ -43,16 +44,13 @@ export function createLiveInventory(options: { accountId: string; host: string }
   const awaitingCensus = new Set<string>();
   const verifiedHosts = new Set<string>();
   let top = 0;
-  const emit = (): void => { for (const l of listeners) l(); };
-  const save = (): void => {
-    // After sign-out a late socket message must not write the account's data back (D245).
-    if (disposed) return;
-    const rows: Stored[] = [...records.values()].filter((s) => !s.gone).map((s) => ({ host: owners.get(s.id) ?? options.host, id: s.id, name: s.name, pinned: s.pinned, frecency: s.frecency }));
-    try { window.localStorage.setItem(key, JSON.stringify(rows)); } catch { /* private mode: the inventory then lasts for this page */ }
-  };
+  let shared: Set<string> | undefined;
+  const storage = () => window.localStorage;
+  const cache = createStoredJsonCache(key, () => [...records.values()].filter((s) => !s.gone).map((s): Stored => ({ host: owners.get(s.id) ?? options.host, id: s.id, name: s.name, pinned: s.pinned, frecency: s.frecency })), storage);
+  const save = cache.flush, emit = cache.notify;
   const blank = (id: string, name: string): SessionRecord => ({ id, name, pinned: false, state: "detached", lastOutput: "", age: "", viewers: 0, size: "", frecency: 0, screen: [] });
   try {
-    const rows = JSON.parse(window.localStorage.getItem(key) ?? "[]") as Stored[];
+    const rows = (readStoredJson(key, storage) ?? []) as Stored[];
     for (const r of rows) if (typeof r.id === "string" && typeof r.name === "string") { owners.set(r.id, typeof r.host === "string" && r.host.length <= 200 ? r.host : options.host); records.set(r.id, { ...blank(r.id, r.name), pinned: Boolean(r.pinned), frecency: Number(r.frecency) || 0 }); top = Math.max(top, Number(r.frecency) || 0); }
   } catch { /* unreadable: start empty */ }
 
@@ -60,6 +58,20 @@ export function createLiveInventory(options: { accountId: string; host: string }
   const only = (host: string, id: string): boolean => owners.get(id) === host;
   return {
     can,
+    setLayout(document) {
+      const targets = documentWindows(document).flatMap((window) => window.target.type === "session" ? [window.target] : []);
+      shared = new Set(targets.map((t) => t.id));
+      let changed = false;
+      for (const s of records.values()) if (!s.gone) {
+        const state = shared.has(s.id) ? "open" : "detached";
+        if (s.state !== state) { s.state = state; changed = true; }
+      }
+      for (const target of targets) {
+        const record = records.get(target.id);
+        if (record && target.name && target.name !== record.name) { record.name = target.name; changed = true; }
+      }
+      if (changed) emit();
+    },
     status: (): InventoryStatus => verifiedHosts.has(options.host) ? "ready" : "loading",
     reload: async () => undefined,
     hosts: () => [...new Set([options.host, ...[...records.values()].filter((record) => !record.gone).map((record) => owners.get(record.id)).filter((host): host is string => Boolean(host))])],
@@ -76,14 +88,14 @@ export function createLiveInventory(options: { accountId: string; host: string }
       if (!s) { s = blank(id, hint?.name ?? "shell"); records.set(id, s); awaitingCensus.add(id); }
       else if (hint?.name && !s.pinned) s.name = hint.name;
       if (s.state === "open") { if (hint?.name && s.name !== hint.name && !s.pinned) emit(); return; }
-      s.state = "open";
+      s.state = shared && !shared.has(id) ? "detached" : "open";
       s.frecency = ++top;
       save();
       emit();
     },
     detach(host, id) {
       const s = only(host, id) ? records.get(id) : undefined;
-      if (!s || s.state !== "open") return;
+      if (!s || s.state !== "open" || shared?.has(id)) return;
       s.state = "detached";
       save();
       emit();
@@ -157,6 +169,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
         // A final close is monotonic: an older in-flight snapshot cannot revive it.
         if (record?.gone) continue;
         if (!record) { record = blank(id, "shell"); records.set(id, record); }
+        if (shared) record.state = shared.has(id) ? "open" : "detached";
       }
       save();
       emit();
@@ -164,7 +177,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
     },
     sizedFor: (): DeviceInfo | undefined => undefined,
     takeOver() { /* every window of this account is this device until #99 */ },
-    onChange(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    dispose() { disposed = true; listeners.clear(); },
+    onChange: cache.subscribe,
+    dispose: cache.dispose,
   };
 }

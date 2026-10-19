@@ -56,3 +56,16 @@ test("post-terminal host inventory entry and its shared canvas imports stay defe
   expect(result.critical).toEqual(["main.js"]);
   expect(result.deferred).toEqual(["hosts.js", "product.js", "sessions.js"]);
 });
+
+test("automatic canonical painting loads after the first canvas draw", () => {
+  const result = classifyChunks({
+    "./main.js": out([["./product.js", "dynamic-import"], ["./offline.js", "dynamic-import"]], ["src/main.ts"], "src/main.ts"),
+    "./product.js": out([["./paint.js", "dynamic-import"]], ["src/canvas/product.ts"], "src/canvas/product.ts"),
+    "./paint.js": out([["./bindings.js", "import-statement"]], ["src/canvas/model/reconcile.ts"], "src/canvas/model/reconcile.ts"),
+    "./offline.js": out([], ["src/offline-drawing.ts"]),
+    "./offline-worker.js": out([], ["src/offline.worker.ts"], "src/offline.worker.ts"),
+    "./bindings.js": out([]),
+  });
+  expect(result.critical).toEqual(["main.js"]);
+  expect(result.deferred).toEqual(["bindings.js", "offline-worker.js", "offline.js", "paint.js", "product.js"]);
+});

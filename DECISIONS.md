@@ -3158,3 +3158,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        each piece ships in the app.
      - Still open: which commands live at the root versus under
        `infraternal canvas` (C3), and the exit-code table (C7).
+308. **Shared layout ships at its measured size, trim later (owner,
+     2026-10-19, #243; like D306):** "yes that is fine". The server-held
+     canvas layout (store, op log, snapshots, browser sync) measures about
+     +117 KB x86_64 over the current caps after a first trim (−13.9 KB),
+     above the 64 KB band of D243. It ships at the measured size once its
+     reviews and the phone pass are clean; trimming continues and the caps
+     ratchet down with it. Rejected: holding the feature for a deeper trim.

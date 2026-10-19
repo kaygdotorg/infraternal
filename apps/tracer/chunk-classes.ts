@@ -2,8 +2,8 @@
  * Classifies the bundle's JavaScript chunks into three transfer classes, from the build graph (D188).
  *
  * - **Critical**: everything needed before the first paint of sign-in and of the first screen. That is every
- *   entry (the app, the workers), everything they import statically, and every chunk they or those chunks load
- *   dynamically, except the roots below. So the terminal, its renderer and the core screen are critical.
+ *   entry (the app and first-screen workers), everything they import statically, and every chunk they or those
+ *   chunks load dynamically, except the roots below. So the terminal, its renderer and the core screen are critical.
  * - **Deferred**: code only the lazily loaded canvas reaches (views, Mesh, the droplet, the toolbar's edit mode).
  *   It loads after the first screen without the person asking for it.
  * - **On demand**: code that loads only when the person takes an action (the add-host wizard, the share studio, a
@@ -11,7 +11,8 @@
  *
  * A chunk that more than one class reaches belongs to the earliest: critical, then deferred, then on demand.
  *
- * The only hand-kept input is the list of deferred root modules (the places the app lazily enters the canvas);
+ * The only hand-kept input is the list of deferred roots (the places the app lazily enters the canvas or
+ * warms its offline drawing cache after sign-in);
  * on-demand roots are found by their file name, and chunk names are never listed, so a rebuild, a split or a merge
  * of chunks cannot make the gate stale.
  */
@@ -21,8 +22,8 @@ export interface MetaOutput {
   inputs: Record<string, unknown>;
 }
 
-/** Canvas and account-data entry points loaded after terminal readiness; their exclusive imports are deferred. */
-export const DEFERRED_ROOTS = ["src/canvas/product.ts", "src/canvas/mock/index.ts", "src/canvas/sessions/hosts.ts"];
+/** Canvas and offline drawing roots load after the first screen; their exclusive imports are deferred. */
+export const DEFERRED_ROOTS = ["src/canvas/product.ts", "src/canvas/mock/index.ts", "src/canvas/sessions/hosts.ts", "src/canvas/model/reconcile.ts", "src/offline-drawing.ts", "src/offline.worker.ts"];
 /** Modules the person's action loads: named `*.on-demand.ts`. */
 export const ON_DEMAND_PATTERN = /\.on-demand\.ts$/;
 

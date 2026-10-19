@@ -1,0 +1,306 @@
+//! Validates the existing v1 JSON document in place, reusing the server's JSON representation [180,243,248].
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+pub const MAX_DOCUMENT: usize = 48 * 1024;
+pub const MAX_INPUT: usize = 8 * 1024;
+pub const MAX_RECEIPTS: i64 = 65_536;
+pub const CHECKPOINT: i64 = 128;
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(transparent)]
+pub struct Document(pub Value);
+impl Default for Document {
+    fn default() -> Self {
+        Self(json!({"format":"infraternal.canvas","version":1,"revision":0,"views":[]}))
+    }
+}
+#[must_use]
+pub fn text(value: &str) -> bool {
+    !value.is_empty() && value.encode_utf16().take(201).count() <= 200
+}
+#[must_use]
+pub fn finite(value: f64, low: f64, high: f64) -> bool {
+    value.is_finite() && (low..=high).contains(&value)
+}
+#[must_use]
+pub fn shape(value: &Value, fields: &[&str]) -> bool {
+    value
+        .as_object()
+        .is_some_and(|v| v.keys().all(|key| fields.contains(&key.as_str())))
+}
+#[must_use]
+pub fn string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key)?.as_str().filter(|s| text(s))
+}
+pub(crate) fn numeric(value: &Value, key: &str, low: f64, high: f64) -> bool {
+    value
+        .get(key)
+        .and_then(Value::as_f64)
+        .is_some_and(|v| finite(v, low, high))
+}
+fn optional_number(value: &Value, key: &str, low: f64, high: f64, whole: bool) -> bool {
+    value.get(key).is_none_or(|n| {
+        n.as_f64()
+            .is_some_and(|v| finite(v, low, high) && (!whole || v.fract() == 0.0))
+    })
+}
+pub(crate) fn point(value: &Value, limit: f64) -> bool {
+    shape(value, &["x", "y"])
+        && numeric(value, "x", -limit, limit)
+        && numeric(value, "y", -limit, limit)
+}
+pub(crate) fn target(value: &Value) -> bool {
+    match string(value, "type") {
+        Some("session") => {
+            shape(
+                value,
+                &["type", "id", "host", "hostId", "user", "address", "name"],
+            ) && string(value, "id").is_some()
+                && string(value, "host").is_some()
+                && value.get("hostId").is_none_or(|v| {
+                    v.as_str().is_some_and(|id| {
+                        uuid::Uuid::parse_str(id).is_ok_and(|uuid| {
+                            uuid.hyphenated()
+                                .encode_lower(&mut uuid::Uuid::encode_buffer())
+                                == id
+                        })
+                    })
+                })
+                && ["user", "address", "name"]
+                    .iter()
+                    .all(|key| value.get(key).is_none() || string(value, key).is_some())
+        }
+        Some("settings") => {
+            shape(value, &["type", "section"]) && string(value, "section").is_some()
+        }
+        Some("containers" | "logs") => {
+            shape(value, &["type", "host"]) && string(value, "host").is_some()
+        }
+        _ => false,
+    }
+}
+pub(crate) fn window(value: &Value) -> bool {
+    shape(value, &["id", "target", "height", "span", "rows", "row"])
+        && string(value, "id").is_some()
+        && value.get("target").is_some_and(target)
+        && optional_number(value, "height", 0.05, 10_000.0, false)
+        && optional_number(value, "span", 1.0, 64.0, true)
+        && optional_number(value, "rows", 1.0, 64.0, true)
+        && optional_number(value, "row", 0.0, 64.0, true)
+}
+pub(crate) fn view(value: &Value) -> bool {
+    shape(value, &["id", "kind", "name", "cell", "layout"])
+        && ["id", "kind", "name"]
+            .iter()
+            .all(|key| string(value, key).is_some())
+        && value.get("cell").is_some_and(|p| point(p, 1000.0))
+        && match value.get("layout") {
+            Some(layout) if string(layout, "type") == Some("tiled") => {
+                shape(layout, &["type", "columns"])
+                    && layout
+                        .get("columns")
+                        .and_then(Value::as_array)
+                        .is_some_and(|cols| {
+                            cols.len() <= 64
+                                && cols.iter().all(|c| {
+                                    shape(c, &["id", "weight", "windows"])
+                                        && string(c, "id").is_some()
+                                        && numeric(c, "weight", 0.1, 10.0)
+                                        && c.get("windows").and_then(Value::as_array).is_some_and(
+                                            |wins| wins.len() <= 256 && wins.iter().all(window),
+                                        )
+                                })
+                        })
+            }
+            Some(layout) if string(layout, "type") == Some("graph") => {
+                shape(layout, &["type", "pinned"])
+                    && layout
+                        .get("pinned")
+                        .and_then(Value::as_object)
+                        .is_some_and(|pins| {
+                            pins.len() <= 256
+                                && pins.iter().all(|(id, p)| text(id) && point(p, 100_000.0))
+                        })
+            }
+            _ => false,
+        }
+}
+pub(crate) fn views(doc: &Value) -> impl Iterator<Item = &Value> {
+    doc.get("views")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+}
+pub(crate) fn columns(view: &Value) -> impl Iterator<Item = &Value> {
+    view.get("layout")
+        .and_then(|l| l.get("columns"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+}
+pub(crate) fn windows(column: &Value) -> impl Iterator<Item = &Value> {
+    column
+        .get("windows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+}
+#[must_use]
+pub fn object(fields: Vec<(&str, Value)>) -> Value {
+    let mut object = serde_json::Map::new();
+    for (key, value) in fields {
+        object.insert(key.into(), value);
+    }
+    Value::Object(object)
+}
+/// Builds the shared JSON shape for a newly created tiled column.
+pub(crate) fn column(id: &str, weight: f64, windows: Vec<Value>) -> Value {
+    let mut object = serde_json::Map::new();
+    object.insert("id".into(), Value::String(id.into()));
+    object.insert("weight".into(), Value::from(weight));
+    object.insert("windows".into(), Value::Array(windows));
+    Value::Object(object)
+}
+impl Document {
+    #[must_use]
+    pub fn revision(&self) -> i64 {
+        self.0.get("revision").and_then(Value::as_i64).unwrap_or(0)
+    }
+    pub fn windows(&self) -> impl Iterator<Item = &Value> {
+        views(&self.0).flat_map(columns).flat_map(windows)
+    }
+    /// Checks reference shape and cardinality; the host checks encoded bytes at commit.
+    #[must_use]
+    pub fn valid(&self) -> bool {
+        let doc = &self.0;
+        if !shape(doc, &["format", "version", "revision", "views"])
+            || string(doc, "format") != Some("infraternal.canvas")
+            || doc.get("version").and_then(Value::as_u64) != Some(1)
+            || !doc
+                .get("revision")
+                .and_then(Value::as_i64)
+                .is_some_and(|v| (0..=9_007_199_254_740_991).contains(&v))
+        {
+            return false;
+        }
+        let Some(views) = doc.get("views").and_then(Value::as_array) else {
+            return false;
+        };
+        if views.len() > 64 || !views.iter().all(view) {
+            return false;
+        }
+        let mut view_ids = Vec::new();
+        let mut targets = Vec::<(&str, &Value)>::new();
+        let mut total = 0;
+        for view in views {
+            let Some(id) = string(view, "id") else {
+                return false;
+            };
+            if view_ids.contains(&id) {
+                return false;
+            }
+            view_ids.push(id);
+            let mut column_ids = Vec::new();
+            let mut window_ids = Vec::new();
+            for column in columns(view) {
+                let Some(id) = string(column, "id") else {
+                    return false;
+                };
+                if column_ids.contains(&id) {
+                    return false;
+                }
+                column_ids.push(id);
+                for window in windows(column) {
+                    total += 1;
+                    let Some(id) = string(window, "id") else {
+                        return false;
+                    };
+                    if total > 256 || window_ids.contains(&id) {
+                        return false;
+                    }
+                    window_ids.push(id);
+                    let Some(target) = window.get("target") else {
+                        return false;
+                    };
+                    if targets
+                        .iter()
+                        .any(|(seen, old)| *seen == id && *old != target)
+                    {
+                        return false;
+                    }
+                    targets.push((id, target));
+                }
+            }
+        }
+        true
+    }
+    /// Numeric spellings do not make identical legacy layouts become different recovery views.
+    pub fn normalize(&mut self) {
+        fn floats(value: &mut Value, keys: &[&str]) {
+            for key in keys {
+                if let Some(number) = value.get(key).and_then(Value::as_f64) {
+                    value[*key] = Value::from(number);
+                }
+            }
+        }
+        if let Some(views) = self.0.get_mut("views").and_then(Value::as_array_mut) {
+            for view in views {
+                if let Some(cell) = view.get_mut("cell") {
+                    floats(cell, &["x", "y"]);
+                }
+                if let Some(layout) = view.get_mut("layout") {
+                    if let Some(columns) = layout.get_mut("columns").and_then(Value::as_array_mut) {
+                        for column in columns {
+                            floats(column, &["weight"]);
+                            if let Some(windows) =
+                                column.get_mut("windows").and_then(Value::as_array_mut)
+                            {
+                                for window in windows {
+                                    floats(window, &["height"]);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(pins) = layout.get_mut("pinned").and_then(Value::as_object_mut) {
+                        for point in pins.values_mut() {
+                            floats(point, &["x", "y"]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Checks document bounds and canonical reference spellings.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn reference_document_has_strict_shape_and_bounds() {
+        let mut doc = Document::default();
+        assert!(doc.valid());
+        doc.0["content"] = json!("unexpected");
+        assert!(!doc.valid());
+        doc.0.as_object_mut().unwrap().remove("content");
+        let view = json!({"id":"console","kind":"console","name":"Console","cell":{"x":0,"y":0},"layout":{"type":"tiled","columns":[]}});
+        doc.0["views"] = json!([view]);
+        assert!(doc.valid());
+        let copied = doc.0["views"][0].clone();
+        doc.0["views"].as_array_mut().unwrap().push(copied);
+        assert!(!doc.valid());
+        doc.0["views"].as_array_mut().unwrap().pop();
+        doc.0["views"][0]["cell"]["x"] = json!(2000);
+        assert!(!doc.valid());
+        assert!(!text(&"x".repeat(201)));
+    }
+    #[test]
+    fn host_id_requires_canonical_lowercase_hyphenated_text() {
+        let mut value = json!({"type":"session","id":"session","host":"host"});
+        value["hostId"] = json!("550e8400-e29b-41d4-a716-446655440000");
+        assert!(target(&value));
+        value["hostId"] = json!("550E8400-E29B-41D4-A716-446655440000");
+        assert!(!target(&value));
+        value["hostId"] = json!("550e8400e29b41d4a716446655440000");
+        assert!(!target(&value));
+    }
+}

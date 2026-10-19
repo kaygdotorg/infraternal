@@ -134,7 +134,7 @@ export const copy = (cols: readonly Col[]): Col[] => cols.map((c) => ({ ...c, wi
  * the total width unchanged); every other window that covers the column is widened to cover the new half, so the
  * windows above and below keep their bands. The new window sits on the band of the window it came from.
  */
-export function splitRight(cols: readonly ColIn[], id: string, next: { id: string; colId: string; pair: string }, gap: number): Col[] {
+export function splitRight(cols: readonly ColIn[], id: string, next: { id: string; colId: string; pair: string }, gap: number, minimumWidth = 0): Col[] {
   const c = copy(settle(cols));
   const at = locate(c, id);
   if (!at) return c;
@@ -149,11 +149,12 @@ export function splitRight(cols: readonly ColIn[], id: string, next: { id: strin
   const X = at.col;
   for (let j = 0; j < c.length; j++) for (const v of c[j]!.wins) if (v.id !== id && j <= X && X < j + v.span) v.span += 1;
   const total = c[X]!.w;
-  const w1 = Math.round((total - gap) / 2);
+  // At the canonical weight floor a split grows the footprint enough to keep both windows.
+  const w1 = Math.max(minimumWidth, Math.round((total - gap) / 2));
   c[X]!.w = w1;
   c[X]!.half = next.pair;
   const N: Win = { id: next.id, span: 1, rows: W.rows, row: W.row, ...(W.h !== undefined ? { h: W.h } : {}) };
-  c.splice(X + 1, 0, { id: next.colId, w: total - gap - w1, half: next.pair, wins: [N] });
+  c.splice(X + 1, 0, { id: next.colId, w: Math.max(minimumWidth, total - gap - w1), half: next.pair, wins: [N] });
   return settle(c);
 }
 

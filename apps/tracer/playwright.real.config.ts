@@ -26,6 +26,8 @@ export default defineConfig({
     launchOptions: {
       args: [
         "--disable-renderer-backgrounding",
+        // The private fixture certificate also covers service-worker fetches.
+        "--ignore-certificate-errors",
         ...(demoHost && demoAddress ? [`--host-resolver-rules=MAP ${demoHost} ${demoAddress}`] : []),
       ],
     },

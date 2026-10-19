@@ -94,28 +94,21 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
       const now = root.getBoundingClientRect();
       // Land: the window springs from where it is to the slot (a little overshoot), then joins the column.
       const gx = (now.left - slotRect.left) / cam.z, gy = (now.top - slotRect.top) / cam.z;
-      const contentNow = c.content.getBoundingClientRect();
-      root.style.left = `${(slotRect.left - contentNow.left) / cam.z}px`;
-      root.style.top = `${(slotRect.top - contentNow.top) / cam.z}px`;
-      root.style.width = `${slotRect.width / cam.z}px`;
-      root.style.height = `${slotRect.height / cam.z}px`;
+      // Commit at drop. The spring presents a completed move and never delays the shared intent (D183).
+      const landedAt = grid0 ? grid0.g.landing({ cols0: grid0.cols, gap: COLUMN_GAP, id: rec.model.id, root, h: grid0.h, w: grid0.w, view: c.colsEl, newId: () => freshColumnId(cx, c), slot }) : undefined;
+      root.style.cssText = fixedH ? `height:${fixedH}` : "";
+      root.classList.remove("is-lifted");
+      slot.replaceWith(root);
+      if (grid0) grid0.g.applyCols(cx, c, grid0.g.fromGrid(c, landedAt ?? grid0.g.settle(grid0.cols)));
+      state.movingWindow = false;
+      cx.view.geometry(c);
+      cx.view.settle(c.view.id);
+      cx.tree.render();
+      cx.store.changed({ windowId: rec.model.id, move: true });
       const land = new Spring(1, (p) => {
-        const s = 1 + 0.025 * Math.max(0, p);
-        root.style.transform = `translate(${gx * p}px, ${gy * p}px) scale(${s})`;
+        root.style.transform = p === 0 ? "" : `translate(${gx * p}px, ${gy * p}px) scale(${1 + 0.025 * Math.max(0, p)})`;
         cx.invalidate();
-        if (p !== 0) return;
-        root.style.cssText = fixedH ? `height:${fixedH}` : "";
-        root.classList.remove("is-lifted");
-        // Through the grid when the window was in one (D212): where it landed is read from the slot and the windows around it.
-        const landedAt = grid0 ? grid0.g.landing({ cols0: grid0.cols, gap: COLUMN_GAP, id: rec.model.id, root, h: grid0.h, w: grid0.w, view: c.colsEl, newId: () => freshColumnId(cx, c), slot }) : undefined;
-        slot.replaceWith(root);
-        if (grid0) grid0.g.applyCols(cx, c, grid0.g.fromGrid(c, landedAt ?? grid0.g.settle(grid0.cols)));
-        state.movingWindow = false;
-        endActivity("drag");
-        cx.view.geometry(c);
-        cx.view.settle(c.view.id);
-        cx.tree.render();
-        cx.store.changed();
+        if (p === 0) endActivity("drag");
       }, { visualDuration: 0.42, bounce: 0.3 });
       restAt(land, Math.min(SCALE_REST, quarterDevicePx() / Math.max(1, Math.abs(gx), Math.abs(gy))));
       land.set(0);

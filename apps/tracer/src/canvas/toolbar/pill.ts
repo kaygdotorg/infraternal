@@ -26,7 +26,12 @@ export function createPill(cx: Ctx): PillModule {
   const capsule = stage.querySelector<HTMLElement>("#capsule")!;
   const conn = createConnectionIndicator({ announce: false });
   stage.querySelector("#capsule-keys")?.before(conn.root);
-  conn.set("connected");
+  // The icon follows the socket the core screen reports (`data-connected`), so a phone that lost its link never shows a
+  // healthy dot beside layout it can no longer sync. It is "connected" until the screen says otherwise.
+  const paintLink = (): void => conn.set(stage.dataset.connected === "false" ? "reconnecting" : "connected");
+  paintLink();
+  const linkWatch = new MutationObserver(() => { paintLink(); paint(); });
+  linkWatch.observe(stage, { attributes: true, attributeFilter: ["data-connected"] });
   // The round-trip time the core screen writes into its own pill is mirrored into the connection icon.
   const rttWatch = new MutationObserver(() => { const m = /(\d+)\s*ms/.exec(stage.querySelector("#rtt")?.textContent ?? ""); conn.setRoundTrip(m ? Number(m[1]) : undefined); });
   const rttEl = stage.querySelector("#rtt");
@@ -51,7 +56,9 @@ export function createPill(cx: Ctx): PillModule {
         ? inventory.hosts().filter((name) => allowedHosts.has(name)).reduce((count, name) => count + inventory.list(name).length, 0)
         : c.wins.size : c.wins.size;
     const noun = !c ? "" : c.view.id === "console" ? "session" : c.view.layout === "graph" ? "host" : "window";
-    if (sess) sess.innerHTML = free || !c ? `· ${views.size}<span class="cl-noun"> views</span>` : `· ${n}<span class="cl-noun"> ${noun}${n === 1 ? "" : "s"}</span>${c.view.team ? " · team" : ""}`;
+    // Without a connection the inventory is unknown, not empty: "0 sessions" would be untrue.
+    if (sess && stage.dataset.connected === "false" && !free && c) sess.innerHTML = '· <span class="cl-noun">offline</span>';
+    else if (sess) sess.innerHTML = free || !c ? `· ${views.size}<span class="cl-noun"> views</span>` : `· ${n}<span class="cl-noun"> ${noun}${n === 1 ? "" : "s"}</span>${c.view.team ? " · team" : ""}`;
     capsule.removeAttribute("data-flow");
     cx.sharing?.paintUnlink();
     if (os) os.innerHTML = lineIcon(free || !c ? ICON.views : viewIcon(c.view.id));
@@ -107,5 +114,5 @@ export function createPill(cx: Ctx): PillModule {
   capsule.addEventListener("pointerup", end, { signal });
   capsule.addEventListener("pointercancel", end, { signal });
 
-  return { capsule, paint, dispose() { conn.dispose(); rttWatch.disconnect(); } };
+  return { capsule, paint, dispose() { conn.dispose(); rttWatch.disconnect(); linkWatch.disconnect(); } };
 }

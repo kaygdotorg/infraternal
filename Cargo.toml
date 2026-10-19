@@ -15,6 +15,7 @@ members = [
     "crates/plugins/ssh",
     "crates/plugins/relay",
     "crates/plugins/backup",
+    "crates/plugins/canvas",
     "crates/plugins/host-facts",
     "crates/plugins/mesh",
     "crates/plugins/remote",
@@ -131,4 +132,8 @@ opt-level = "z"
 
 # `infraternal status` reads unit files once per call: size-optimized [243].
 [profile.release.package.infraternal-status]
+opt-level = "s"
+
+# Layout control intents stay off the terminal data path; bound their new code footprint [243,248].
+[profile.release.package.infraternal-plugin-canvas]
 opt-level = "s"

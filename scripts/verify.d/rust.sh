@@ -151,6 +151,7 @@ rust_check_cli_plugin_compile_out() {
         infraternal-agent
         infraternal-mesh
         infraternal-plugin-backup
+        infraternal-plugin-canvas
         infraternal-plugin-host-facts
         infraternal-plugin-mesh
         infraternal-plugin-relay

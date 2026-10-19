@@ -56,7 +56,10 @@ def changed_paths(base: str) -> set[str]:
 
 
 def is_allowlisted(path: str) -> bool:
-    """Keep source assets intentionally large: fonts, vendored code and fixtures."""
+    """Keep intentional source assets and decisions out of artifact sizing."""
+    # The append-only owner ledger already predates this generic receipt cap.
+    if path == "DECISIONS.md":
+        return True
     parts = set(PurePosixPath(path).parts)
     suffix = PurePosixPath(path).suffix.lower()
     allowed_directories = {

@@ -588,3 +588,96 @@ reused/resumed paths against RTT + 50 ms, and fresh TCP/TLS/upgrade paths agains
 4 × RTT + 50 ms (D267), through real TLS on the pinned VM. Preserve the last screen and
 keep input typed during recovery. Logs, screenshots and measurements belong on
 the issue [D262].
+
+## Account canvas layout [178,180,183,245,248] (#243)
+
+The `canvas` server plugin uses control stream 0 only. Account identity always
+comes from the authenticated socket, never from JSON. Disabling the plugin
+withdraws its subscriptions and cancels its workers. It needs an existing server.
+
+`Subscribe {"topic":"canvas.layout"}` sends
+`{"type":"canvas.layout.snapshot","revision":N,"initialized":true|false,"document":DOC}`
+then ordered `{"type":"canvas.layout.operation","revision":N,"op_id":ID,"intent":INTENT,"noop":false}`
+events, using the requested subscription ID. When `noop:true`, advance the
+revision without applying the intent; a reconnect snapshot need not carry
+historical close tombstones. DOC is exactly the v1
+`infraternal.canvas` document (`apps/tracer/src/canvas/model/document.ts`), with
+its revision set to N. Cameras, focus, terminal content and credentials are
+excluded. Reconnect resubscribes and receives a fresh canonical snapshot.
+A reader overtaken by compaction gets another snapshot rather than a partial
+history. Apply Results and events may interleave; deduplicate by revision.
+
+`Call canvas.layout.apply` input is `{op_id,base_revision,intent}`. IDs are
+nonempty strings of at most 200 UTF-16 code units; op_id is unique per account
+across both actions. Reusing it with different input returns an error. An exact
+retry returns its original `{revision}` even after log compaction. Future base
+revisions fail; stale revisions are reduced against current state. Each accepted
+intent (including a no-op against a closed window) consumes one revision.
+Server commit order decides edits of the same field; unrelated window fields
+survive. No client clocks are consulted. Stable window IDs cannot be reused
+after close. Close removes every membership and permanently beats move/resize.
+
+INTENT is one of (optional fields may be omitted):
+
+- `{type:"view.add",view:VIEW}`: add an empty v1 view (tiled or graph). An existing
+  ID of the same kind/layout type is a no-op, preserving its metadata and contents.
+- `{type:"view.update",view_id,cell?:{x,y},name?}`: update only supplied view metadata.
+- `{type:"target",window_id,target:TARGET}`: change the reference in every membership;
+  newly referenced sessions must belong to the account, exactly as for open. A closed
+  window stays closed.
+- `{type:"view.remove",view_id}`: remove a view; its windows stay in other views.
+- `{type:"open",view_id,column_id,window:WINDOW,after?:WINDOW_ID}`: add a v1
+  window reference; create a missing column at the end with weight 1.
+- `{type:"split",view_id,anchor_id,axis:"right"|"down",column_id,window:WINDOW}`:
+  divide the anchor's occupied bands (D212), preserving neighbours above and
+  below. Right halves an existing span or adds a half-weight column; down
+  inserts a shared row band. New IDs are client chosen.
+  This action never opens a terminal: first obtain a session reference using
+  the existing terminal action. Retry that action separately as its contract allows.
+- `{type:"close",window_id}`: close all memberships without ending the session.
+- `{type:"move",view_id,window_id,column_id,after?:WINDOW_ID}`: move the existing
+  membership; a missing destination column is appended. A missing neighbour
+  means append (including a neighbour concurrently closed); null/omitted means
+  prepend. No array indexes are accepted.
+- `{type:"resize",window_id,height?,span?,rows?,row?}`: update only supplied
+  non-null sizing fields in every membership. Null means omitted, preserving the
+  existing value (or its absence), on both server and browser. Canonical document
+  sizing fields are always numbers when present; they never contain null.
+- `{type:"weight",view_id,column_id,weight}`: set one column's relative weight.
+- `{type:"membership.add",view_id,column_id,window_id,after?:WINDOW_ID}`:
+  reference an existing window in another view, preserving its stable ID.
+- `{type:"membership.remove",view_id,window_id}`: remove only this membership.
+- `{type:"pin",view_id,node_id,position?:{x,y}}`: set a graph pin; omit position
+  to unpin. Graph references reveal no host configuration.
+
+Open, move and membership.add may include `column_after: COLUMN_ID | null`.
+It affects only a missing destination column: null inserts at the beginning, a
+known ID inserts after that column, and an omitted or missing ID appends. Existing
+columns retain their position. This lets a drag create a column at either edge
+without publishing array indexes.
+
+Session targets must name a terminal session owned by this account (including
+ended sessions); references confer no host or session access. Duplicate window
+IDs in a view and differing targets for the same ID are rejected. Documents
+and intents reject unknown fields. Bounds: 64 views, 64 columns per view, 256
+window memberships total, 256 graph pins per view, 200 UTF-16 code units per string;
+cell coordinates ±1000, graph coordinates ±100000, column weights 0.1–10,
+height 0.05–10000, span/rows 1–64, row 0–64. Snapshot documents are at most
+48 KiB; apply inputs at most 8 KiB. Log checkpoints occur every 128 revisions,
+retaining only the latest checkpoint and at most 127 following operations.
+Durable receipts and closed IDs are limited to 65536 each per account; reaching
+a limit refuses new writes without losing existing idempotence or tombstones.
+
+`Call canvas.layout.initialize {op_id,document:DOC}` is the sole whole-document
+exception: a one-time migration from old local storage, never a save method.
+The first transaction initializes the account's head. A later identical layout
+(ignoring revision) is acknowledged without duplicating views. A differing
+layout is preserved as extra views named `Recovered: <name>` with server-generated
+IDs for views, columns and windows, keeping target references and geometry.
+The result is `{revision}`. Retrying the same op_id is idempotent; if bounds or
+ownership checks fail the transaction rolls back and the browser must keep its
+local document for a later retry/export. Initialization events use a canonical
+snapshot, since recovered IDs are assigned by the server. The client must keep
+its original local document until success, then treat it only as a drawing cache.
+Errors are Result `ok:false` with `{"error":"invalid canvas operation"}`;
+no account existence or foreign ownership detail is exposed.
