@@ -11,6 +11,7 @@ pub use action::{
 
 pub mod admission;
 pub mod channel;
+pub mod host_name;
 pub mod node_channel;
 pub mod present;
 pub mod release_version;
