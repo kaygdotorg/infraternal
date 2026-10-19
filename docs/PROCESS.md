@@ -143,13 +143,15 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,223,696 bytes |
-  | `aarch64-unknown-linux-musl` | 19,415,776 bytes |
+  | `x86_64-unknown-linux-musl` | 21,215,664 bytes |
+  | `aarch64-unknown-linux-musl` | 19,408,192 bytes |
 
-  D307's bounded query-reply lane and package-only host-orchestration `s` to
-  `z` profile trim ratchet these ceilings down by 2,176 / 11,912 bytes from
-  release 5 (#160, #206). Transport, protocol, VT and cryptographic crates keep
-  their speed profiles. The measured typing tradeoff and size receipts are on
+  D307's bounded reply lane, package-only host-orchestration `s` to `z` trim,
+  and round-2 renderer-led arbitration ratchet these ceilings down by
+  10,208 / 19,496 bytes from release 5 (#160, #206). Round 2 alone removes
+  8,032 / 7,584 bytes from the previous D307 ceilings of 21,223,696 /
+  19,415,776 bytes. Transport, protocol, VT and cryptographic crates keep their
+  speed profiles. The measured typing comparisons and size receipts are on
   [#160](https://git.kayg.org/kayg/infraternal/issues/160).
 
   The release-5 measurements were 21,225,872 / 19,427,688 bytes, adding the
