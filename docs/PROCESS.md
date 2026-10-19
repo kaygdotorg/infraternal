@@ -143,17 +143,19 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,225,872 bytes |
-  | `aarch64-unknown-linux-musl` | 19,427,688 bytes |
+  | `x86_64-unknown-linux-musl` | 21,254,224 bytes |
+  | `aarch64-unknown-linux-musl` | 19,456,312 bytes |
 
-  These are the release-5 measurements, adding the Mesh view (#236) to the
-  release-4 measurements below: +81,760 / +56,992 bytes. The x86_64 increase
-  follows D306's accepted Mesh view size and stays below this task's +90 KB
-  stop line. Each cap stays at its exact measured size until a later measured
-  reduction ratchets it down. Release 4's one-off D243 exception was accepted
-  within the task's +64 KB ceiling for D299's versioned `--json` envelope and
-  D303–D305 command behavior, together with #237's status truth (+17 KB).
-  The trim follow-up is owed.
+  The release-5 values were 21,225,872 / 19,427,688 bytes. #236's retained
+  hostnames and live Mesh name reconciliation add 28,352 / 28,624 bytes. The
+  increases are below D243's 64 KiB limit and add no dependencies. Each cap
+  stays at its exact measured size until a later measured reduction ratchets
+  it down. Release 5 added the Mesh view (#236) to release 4 by 81,760 / 56,992
+  bytes. Its x86_64 increase followed D306's accepted Mesh view size and stayed
+  below that task's +90 KB stop line. Release 4's one-off D243 exception was
+  accepted within the task's +64 KB ceiling for D299's versioned `--json`
+  envelope and D303–D305 command behavior, together with #237's status truth
+  (+17 KB). The trim follow-up is owed.
 
   The release-2 measurements were: the release-retry line (next paragraph,
   21,080,848 / 19,316,360) plus D300 host-link doubt (#234), already-added
