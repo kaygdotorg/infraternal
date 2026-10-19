@@ -211,7 +211,7 @@ export class MuxConnection {
       const length = encodeMuxedFrameInto(streamId, frame, this.sendScratch);
       // Even an attachment closed before replay completes retains a server writer row.
       if (frame.type === "AttachTerm") this.writersUsed.add(streamId);
-      if (frame.type === "Input" && this.streams.has(streamId)) {
+      if (frame.type === "Input" && frame.replyTo === undefined && this.streams.has(streamId)) {
         const end = frame.inSeq + BigInt(frame.bytes.byteLength);
         const previous = this.unacknowledgedInput.get(streamId) ?? 0n;
         // Replayed earlier bytes cannot lower the outstanding input watermark.
@@ -569,9 +569,13 @@ export class MuxConnection {
     handler.onFrame(frame, message, receivedAt);
   }
 
+  /** Whether this server accepts reply-marked Input [307]. */
+  terminalQueryReplies = false;
+
   private control(frame: WireFrame): void {
     switch (frame.type) {
       case "Hello":
+        this.terminalQueryReplies = (frame.caps & 4n) !== 0n;
         if (frame.version !== VERSION) this.fail("server uses an unsupported wire version");
         return;
       case "Welcome":

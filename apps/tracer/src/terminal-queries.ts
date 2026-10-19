@@ -11,6 +11,9 @@ export class TerminalQueries {
 
   /** Calls back at a recognised query's final byte; no query list or output copy is retained. */
   scan(bytes: Uint8Array, offset: bigint, query: (end: number, sequence: bigint, started: number, request: string) => void): void {
+    // Plain output takes one native search. Control-rich output stays in JS,
+    // avoiding a native-call boundary for every short styled text span.
+    if (this.state === 0 && bytes.indexOf(27) < 0) return;
     for (let index = 0; index < bytes.length; index++) {
       const byte = bytes[index]!;
       if (this.state === 0) {
@@ -24,12 +27,15 @@ export class TerminalQueries {
         if (byte === 27) { this.state = 1; this.sequence = offset + BigInt(index); this.started = performance.now(); continue; }
         this.control += String.fromCharCode(byte); this.escaped = false; continue;
       }
+      const kind = this.state;
       const end = this.state === 2 ? byte >= 0x40 && byte <= 0x7e : (this.state === 3 && byte === 7) || (this.escaped && byte === 92);
       if (this.control.length < 256) this.control += String.fromCharCode(byte);
       else { this.overflow = true; if (this.state === 2) this.state = 0; }
       this.escaped = byte === 27;
       if (!end) continue;
       this.state = 0;
+      // Most CSI ends are drawing/style operations and can never request a reply.
+      if (kind === 2 && byte !== 99 && byte !== 110 && byte !== 112 && byte !== 113 && byte !== 116 && byte !== 117) continue;
       if (!this.overflow && isTerminalQuery(this.control)) query(index + 1, this.sequence, this.started, this.control);
     }
   }
