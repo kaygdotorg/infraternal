@@ -88,6 +88,18 @@ def compositor_pixel(target, metadata, image_width, image_height):
  if not 0<=x<width or not 0<=y<height:raise RuntimeError('compositor target outside device')
  return min(image_width-1,round(x*image_width/width)),min(image_height-1,round(y*image_height/height))
 
+def focus_input(surface):
+ # The first press may only activate the card (D208). Both presses use the
+ # picture centre; sampling starts only after the real lease and DOM focus.
+ consent_guard()
+ surface.click()
+ surface.click()
+ page.locator('.aw-control[data-kind="controlled"]').wait_for(timeout=10000)
+ focused=surface.evaluate('(canvas)=>canvas.parentElement===document.activeElement')
+ if not focused:raise RuntimeError('fixture input did not receive typing focus')
+ consent_guard()
+ emit({'kind':'input_ready','controlled':True,'focused':True})
+
 def first_picture(previous=None):
  # Observe a terminal refusal as soon as it appears. Waiting only for live
  # would keep native capture alive until timeout even after permission failed.
@@ -384,7 +396,7 @@ try:
  consent_check()
  emit({'kind':'canvas_context','receipts':page.evaluate('window.__appWindowBench.take()')})
  page.screenshot(path=str(E/'canvas-native-before.png'))
- surface=page.locator('.aw-surface');surface.click(position={'x':200,'y':170})
+ surface=page.locator('.aw-surface');focus_input(surface)
  # Every capture helper launch is followed by a consent check, including inventory helpers.
  consent_check()
  if args.get('owner_preview'):
@@ -509,7 +521,7 @@ try:
  def screencast(event):
   frames.append({'timestamp':event['metadata'].get('timestamp'),'metadata':event['metadata'],'data':event['data']});cdp.send('Page.screencastFrameAck',{'sessionId':event['sessionId']})
  cdp.on('Page.screencastFrame',screencast)
- surface.click(position={'x':150,'y':120});page.wait_for_timeout(2500)
+ focus_input(surface);page.wait_for_timeout(2500)
  page.keyboard.type(demo_text[0],delay=120);page.wait_for_timeout(2000)
  native_command('wide');page.wait_for_timeout(2500)
  page.keyboard.type(demo_text[1],delay=120);page.wait_for_timeout(2000)
@@ -564,7 +576,7 @@ try:
     before=page.evaluate('window.__appWindowBench.stats()');page.wait_for_timeout(2500);after=page.evaluate('window.__appWindowBench.stats()')
     emit({'kind':'soak_idle','before':before,'after':after});counts['idle_checks']+=1
    else:
-    surface=page.locator('.aw-surface');surface.click(position={'x':150,'y':120});page.wait_for_timeout(2200)
+    surface=page.locator('.aw-surface');focus_input(surface);page.wait_for_timeout(2200)
     sequence=max(r['sequence'] for r in all_draws if r['kind']=='draw')+6
     prior_inputs=sum(r.get('kind')=='input' for r in all_draws)
     drain();page.evaluate('([id,colour])=>window.__appWindowBench.arm(id,{colour})',[1000+iteration,sequence%8]);page.keyboard.type('typing',delay=90)
