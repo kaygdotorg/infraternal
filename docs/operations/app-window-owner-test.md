@@ -1,10 +1,13 @@
 <!-- Role: reproduce the isolated owner app-window test without changing production (#146, D208, D309). -->
 # Try app windows
 
+This is an experimental preview. The latency target and a clean ten-minute
+stability check have not passed.
+
 From the build-host worktree, run:
 
 ```sh
-PATH=/home/kayg/.nix-profile/bin:$PATH scripts/app-window-owner-preview /home/kayg/.cache/codex-scratch/app-windows-latency-r3/bin/infraternal-desktop
+PATH=/home/kayg/.nix-profile/bin:$PATH scripts/app-window-owner-preview /home/kayg/.cache/codex-scratch/app-windows-latency-r3b/bin/infraternal-desktop
 ```
 
 The launcher waits for the physical MacBook lock and an idle guest VM, checks
@@ -13,6 +16,9 @@ battery and existing capture permissions, starts a desktop-enabled server on
 canvas uses an isolated test account and fresh server state. It does not use the
 production account or install a companion. The browser maps its own `localhost`
 address to that preview; use the opened browser, rather than a production tab.
+The signed companion opens as its own app. Existing permission checks must pass;
+if a permission prompt appears, capture is denied, or no first frame arrives
+within ten seconds, the run stops. It never approves a prompt or retries capture.
 
 Keep the MacBook awake and unlocked. Wait for `owner_preview_ready` in the
 terminal. The coloured “App window measurement” window is ours and safe to type
@@ -35,7 +41,9 @@ A window controlled by a desktop window manager retains its native size. The ind
 control. Closing the stream releases held input and restores any size it changed.
 
 Close the test browser to finish. The launcher also stops after 15 minutes or
-when this job's remaining screen allowance ends. It removes its private server
+when this job's remaining screen allowance ends. This continuation retains the
+stopped round's screen ledger: under five minutes remain, not a fresh session.
+It removes its private server
 state and stops its browser, fixture window, source process and helper children.
 No production service, owner fixture, permission entry or trust setting changes.
 
@@ -44,11 +52,15 @@ No production service, owner fixture, permission entry or trust setting changes.
 - The recorded fixture can show clipped text or a black band while
   its native size changes under the desktop window manager. Resize is part of
   the checklist, rather than a claim of finished picture geometry.
-- After a connection drop, the first typing burst can be lost even after the
-  picture returns. Wait for control to settle before retrying; a live picture
-  alone does not establish that input is ready.
 - The ten-minute rehearsal also found occasional slow updates and native child
   exits that need attribution. It did not qualify as a clean stability pass.
+  The first typing burst after the connection drop was lost, and some child
+  retirements had unclassified causes. A browser regression now verifies that
+  pending typing drains after automatic control reacquisition; it does not
+  replace a repeated soak. Close/reopen succeeded after the closing-record fix.
+  The new launch path has a separate functional check;
+  see [#146](https://git.kayg.org/kayg/infraternal/issues/146) for the recorded
+  counts, timings and current validation limits.
 - This is the relayed path. The direct path is separate work after D309's latency
   work; network travel remains visible while typing.
 - The previous measured added latency exceeded the 16 ms target. A responsive
