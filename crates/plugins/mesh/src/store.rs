@@ -10,6 +10,7 @@ use crate::{
         rules::{Arrow, Endpoint, RuleId, TrafficPolicy},
     },
 };
+pub use infraternal_plugin_api::host_name::machine_name;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::{
@@ -51,48 +52,6 @@ impl Snapshot {
         config.version = *revision;
         Ok(config)
     }
-}
-/// The name a machine is called by, from an address (`user@minipc01`, `minipc01.lan:22`) or a reported hostname.
-///
-/// Takes the first DNS label, lowercased. Anything address-like gives nothing, so a numeric address never becomes
-/// a name and the caller falls back to the next source: IPv4 in any spelling (shortened `10.69.69`, hex
-/// `0x0a.0x45`, octal), IPv6 in any spelling (bracketed, with a zone `%eth0` or `%25eth0`), and labels made only
-/// of digits. So does anything that is not a valid Mesh host name.
-#[must_use]
-pub fn machine_name(source: &str) -> Option<String> {
-    let host = source
-        .rsplit_once('@')
-        .map_or(source, |(_, host)| host)
-        .trim();
-    // Two colons, a bracket or a zone mark only occur in IPv6 spellings; one colon separates a port.
-    if host.matches(':').count() > 1 || host.contains(['[', '%']) {
-        return None;
-    }
-    let host = host.split_once(':').map_or(host, |(host, _)| host);
-    if is_ipv4_spelling(host) {
-        return None;
-    }
-    let label = host.split('.').next()?.to_ascii_lowercase();
-    if label.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    crate::api::validate_host(&label).ok()?;
-    // A machine called `unnamed-3` would read as a placeholder, and clash with what hidden viewers see.
-    if crate::api::is_unnamed_label(&label) {
-        return None;
-    }
-    Some(label)
-}
-/// Whether `host` is an IPv4 address in any spelling the C resolver (`inet_aton`, and so ssh) accepts: one to
-/// four dot-separated numbers, each decimal, octal (leading `0`) or hex (`0x`), so `10.69.69`, `0x0a454505` and
-/// `0x7f.1` are addresses too. A trailing dot (the absolute form) changes nothing.
-fn is_ipv4_spelling(host: &str) -> bool {
-    let host = host.strip_suffix('.').unwrap_or(host);
-    let number = |part: &str| match part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
-        Some(hex) => hex.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        None => !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()),
-    };
-    !host.is_empty() && host.split('.').count() <= 4 && host.split('.').all(number)
 }
 /// Who named a node; a higher rank may move a lower one's automatic name aside (migration 0026, #236).
 fn rank(source: &str) -> u8 {
@@ -162,37 +121,32 @@ fn free_name(nodes: &[Named], base: &str, except: i64, skip: bool, taken: &str) 
     }
     suffixed.into_iter().find(|name| available(name))
 }
+/// Finds a free reserved label, extending beyond the short common suffix range when inventory is large.
+fn unnamed_name(nodes: &[Named], except: i64, taken: &str) -> String {
+    if let Some(name) = free_name(nodes, UNNAMED, except, false, taken) {
+        return name;
+    }
+    let mut suffix = 10_u64;
+    loop {
+        let name = format!("{UNNAMED}-{suffix}");
+        if name != taken
+            && !nodes
+                .iter()
+                .any(|node| node.id != except && node.name == name)
+        {
+            return name;
+        }
+        suffix += 1;
+    }
+}
 /// Moves `holder` off `name`, which a stronger claim takes: to the first free suffix of the holder's own claim
-/// (`web-2` claimed `web` goes to `web-3`, not `web-2-2`), else `mesh-<host>` or a free `mesh-<id>-<n>`.
+/// (`web-2` claimed `web` goes to `web-3`, not `web-2-2`), else to an available unnamed label.
 /// Its claim and source stay. A fixed fallback alone can conflict and expose a hidden hostname to a global
 /// manager, so exhaustion must keep searching rather than turn into a different rename result (#236).
 fn move_aside(nodes: &[Named], holder: &Named, name: &str) -> Renamed {
     let base = holder.claim.as_deref().unwrap_or(&holder.name);
-    let to = free_name(nodes, base, holder.id, false, name).unwrap_or_else(|| {
-        // Build the borrowed set only on suffix exhaustion; ordinary naming retains its existing path.
-        // Insert directly so this rare fallback does not pull in bulk sorting code.
-        let mut occupied = BTreeSet::new();
-        occupied.insert(name);
-        for node in nodes {
-            if node.id != holder.id {
-                occupied.insert(node.name.as_str());
-            }
-        }
-        let fallback = format!("mesh-{}", holder.host.as_deref().unwrap_or_default());
-        if !occupied.contains(fallback.as_str()) {
-            return fallback;
-        }
-        let mut suffix = 0_u64;
-        loop {
-            // Decimal signed node IDs and u64 suffixes fit the 63-byte name limit. There are fewer
-            // inventory rows than u64 suffixes, so a free spelling appears before overflow.
-            let fallback = format!("mesh-{}-{suffix}", holder.id);
-            if !occupied.contains(fallback.as_str()) {
-                return fallback;
-            }
-            suffix += 1;
-        }
-    });
+    let to = free_name(nodes, base, holder.id, false, name)
+        .unwrap_or_else(|| unnamed_name(nodes, holder.id, name));
     Renamed {
         id: holder.id,
         from: holder.name.clone(),
@@ -223,14 +177,18 @@ fn naming(
         free_name(nodes, base, except, skip, taken)
     };
     let Some((wanted, source)) = wanted else {
-        if current.is_some() {
+        let stale_placeholder = current.is_some_and(|name| name == format!("mesh-{host}"));
+        if current.is_some() && !stale_placeholder {
             return None;
         }
         let name = if host == SERVER_LABEL {
             SERVER_LABEL.to_owned()
         } else {
-            free(UNNAMED, id, false, "").unwrap_or_else(|| format!("mesh-{host}"))
+            unnamed_name(nodes, id, "")
         };
+        if current == Some(name.as_str()) {
+            return None;
+        }
         return Some(Naming {
             name,
             source: "placeholder",
@@ -258,6 +216,9 @@ fn naming(
             moved,
             claim: Some(claim),
         }),
+        (None, Some(current)) if current == format!("mesh-{host}") => {
+            naming(nodes, id, host, Some(current), None, records)
+        }
         (Some(_), _) | (None, Some(_)) => None,
         (None, None) => naming(nodes, id, host, None, None, records),
     }
@@ -287,6 +248,16 @@ async fn wanted_name(
             records.extend(name);
         }
     }
+    let cached = if let Ok(id) = uuid::Uuid::parse_str(host) {
+        sqlx::query_scalar::<_, Option<String>>("SELECT hostname FROM remote_hosts WHERE id=?")
+            .bind(id.as_bytes().as_slice())
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|_| "Mesh storage unavailable.")?
+            .flatten()
+    } else {
+        None
+    };
     let usable = |name: &String| name != SERVER_LABEL;
     let wanted = if server {
         reported.and_then(machine_name).map(|name| (name, "server"))
@@ -298,6 +269,7 @@ async fn wanted_name(
                 reported
                     .and_then(machine_name)
                     .filter(usable)
+                    .or_else(|| cached.as_deref().and_then(machine_name).filter(usable))
                     .map(|name| (name, "reported"))
             })
     };
@@ -553,6 +525,62 @@ impl Store {
             NodeId(u64::try_from(id).map_err(|_| "Mesh identity invalid.")?),
             true,
         ))
+    }
+    /// Reconcile an attached node after admitted-host inventory learns a name outside the attach path.
+    ///
+    /// Returns whether a name change committed. Its audit row and revision are committed together; callers publish
+    /// the revision only after this method returns.
+    pub(crate) async fn refresh_host_name(&self, host: &str) -> Result<bool, &'static str> {
+        let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
+            .await
+            .map_err(|_| "Mesh storage unavailable.")?;
+        let row = sqlx::query("SELECT id,name,name_source FROM mesh_nodes WHERE dataplane_host=?")
+            .bind(host)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| "Mesh storage unavailable.")?;
+        let Some(row) = row else {
+            tx.rollback()
+                .await
+                .map_err(|_| "Mesh storage unavailable.")?;
+            return Ok(false);
+        };
+        if row.get::<String, _>("name_source") == "hand" {
+            tx.rollback()
+                .await
+                .map_err(|_| "Mesh storage unavailable.")?;
+            return Ok(false);
+        }
+        let id: i64 = row.get("id");
+        let current: String = row.get("name");
+        let (wanted, records) = wanted_name(&mut tx, host, false, None).await?;
+        let nodes = named_nodes(&mut tx)
+            .await
+            .map_err(|_| "Mesh storage unavailable.")?;
+        let Some(naming) = naming(&nodes, id, host, Some(&current), wanted, &records) else {
+            tx.rollback()
+                .await
+                .map_err(|_| "Mesh storage unavailable.")?;
+            return Ok(false);
+        };
+        let mut renamed = naming.moved;
+        renamed.push(Renamed {
+            id,
+            from: current,
+            to: naming.name,
+            source: naming.source.to_owned(),
+            claim: naming.claim,
+        });
+        rename(&mut tx, &renamed).await?;
+        let revision = sqlx::query_scalar::<_, i64>(
+            "UPDATE mesh_state SET revision=revision+1 WHERE singleton=1 AND revision<9223372036854775807 RETURNING revision",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| "Mesh storage unavailable.")?;
+        audit_renames(&mut tx, &renamed, revision, "").await?;
+        tx.commit().await.map_err(|_| "Mesh storage unavailable.")?;
+        Ok(true)
     }
     /// The node bound to an authenticated host (`server` for the server itself), if it is enrolled.
     pub async fn node_for_host(&self, host: &str) -> Option<NodeId> {

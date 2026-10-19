@@ -40,6 +40,12 @@ impl MeshPlugin {
             mesh_work: Arc::new(Semaphore::new(capacity as usize)),
         }
     }
+
+    /// Share the same revision broadcaster with other server inventory features.
+    #[must_use]
+    pub fn service(&self) -> MeshService {
+        self.mesh.clone()
+    }
 }
 impl Plugin for MeshPlugin {
     fn authority_changed(&self) -> Option<Operation<'_, ()>> {
