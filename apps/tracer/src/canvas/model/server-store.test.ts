@@ -191,3 +191,38 @@ test("a stale refusal cannot discard a new-connection retry", async () => {
     expect(transport.calls[1]!.input).toEqual(transport.calls[0]!.input);
   } finally { store.dispose(); }
 });
+
+// A refusal must free a full pipeline slot, including work that has not reached the socket yet.
+test("review r2: refusal drains independent edits waiting behind four in-flight requests", async () => {
+  const transport = new Transport(), notices: boolean[] = [];
+  const store = new ServerCanvasStore(transport, "a", (definitive) => notices.push(definitive === true));
+  transport.snapshot();
+  try {
+    let previous = store.current();
+    const birth = structuredClone(previous); reduce(birth, opened); await store.save(birth, undefined, previous); previous = birth;
+    for (let n = 0; n < 6; n++) {
+      const next = structuredClone(previous); next.views[0]!.name = `Queued ${n}`;
+      await store.save(next, undefined, previous); previous = next;
+    }
+    expect(transport.calls).toHaveLength(4);
+    const first = transport.calls[0]!;
+    first.reject(new ActionRefused(undefined, "invalid")); await tick();
+    expect(transport.calls).toHaveLength(5); expect(notices).toEqual([true]);
+    let revision = 0;
+    // Each accepted event precedes its receipt; receipts release the remaining
+    // queued suffix without another snapshot.
+    for (let index = 1; index < transport.calls.length; index++) {
+      const call = transport.calls[index]!;
+      transport.event({ type: "canvas.layout.operation", revision: ++revision, op_id: call.input.op_id, intent: call.input.intent });
+      call.resolve({ revision }); await tick();
+    }
+    expect(transport.calls).toHaveLength(7); expect(revision).toBe(6);
+    store.flush();
+    const saved = JSON.parse(localStorage.getItem(canvasKey("a"))!);
+    expect(saved.pending).toHaveLength(0);
+    expect(saved.canonical.views[0].name).toBe("Queued 5");
+    expect(saved.canonical).toEqual(saved.document);
+    const final = store.current(); transport.open(); transport.snapshot(final); await tick();
+    expect(transport.calls).toHaveLength(7);
+  } finally { store.dispose(); }
+});
