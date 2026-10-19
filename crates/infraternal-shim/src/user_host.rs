@@ -1224,6 +1224,69 @@ mod tests {
         std::fs::remove_dir_all(state).unwrap();
     }
 
+    /// D310 review: a zero ring share can result when startup floors consume
+    /// the whole host pool. The session must still drain its PTY rather than
+    /// turning a bounded-memory choice into a permanently unread output fd.
+    #[test]
+    fn zero_ring_capacity_does_not_stall_a_live_pty() {
+        let floor = crate::terminal_native::floor_for_geometry(80, 24, SESSION_SCREEN_BYTES);
+        let host = crate::terminal_memory::HostBudget::new(floor, SESSION_SCREEN_BYTES);
+        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
+            || PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch"),
+            PathBuf::from,
+        );
+        std::fs::create_dir_all(&root).unwrap();
+        let state = root.join(format!("zr-{}", std::process::id()));
+        let mut config = Config::new([0x73; 16], Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        // run_host_accounted can reduce a valid requested capacity to zero
+        // when floors consume all remaining pool bytes.
+        config.ring_capacity = 0;
+        let mut session = Session::new_host(config, 64 * 1024, host.clone()).unwrap();
+        assert_eq!(host.total_used(), floor);
+
+        let mut refused_config = Config::new([0x74; 16], Uid::effective().as_raw());
+        refused_config.state = Some(state.clone());
+        refused_config.ring_capacity = 1;
+        let Err(refusal) = Session::new_host(refused_config, 64 * 1024, host.clone()) else {
+            panic!("a full pool admitted another session");
+        };
+        eprintln!("full_pool_refusal={refusal}");
+        assert!(
+            refusal
+                .to_string()
+                .starts_with("terminal memory for this user is full (")
+        );
+        assert!(refusal.to_string().ends_with("; close a session"));
+
+        session.pty.master.write_all(b"continue\n").unwrap();
+        let response_bytes = b"infraternal-ready\n".len();
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while crate::pty::available_output(&session.pty.master).unwrap() < response_bytes {
+            assert!(Instant::now() < deadline, "readiness shell did not answer");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let ready = crate::pty::available_output(&session.pty.master).unwrap();
+        session
+            .step(PollFlags::empty(), PollFlags::POLLIN, &[], true)
+            .unwrap();
+        let unread = crate::pty::available_output(&session.pty.master).unwrap();
+        eprintln!("full_pool_pty_bytes_before={ready} after_session_step={unread}");
+
+        drop(session);
+        assert_eq!(
+            host.total_used(),
+            0,
+            "retired PTY kept its pool reservation"
+        );
+        std::fs::remove_dir_all(state).unwrap();
+        assert_eq!(
+            unread, 0,
+            "zero ring capacity left {unread} PTY response bytes unread"
+        );
+    }
+
     pub(super) fn ack_fixture(tag: u8) -> (Session, std::os::unix::net::UnixStream, PathBuf) {
         let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
             ".cache/codex-scratch/process-per-user/a{tag:x}{}",
