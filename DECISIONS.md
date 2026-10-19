@@ -3240,3 +3240,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      because its earlier figure was taken against an older, larger base. It
      ships now at the measured size, like real logins (D298); the trim job
      (#236) continues and the caps ratchet down with it.
+307. **One answer per terminal query, marked on the wire (owner, 2026-10-19,
+     #160, #206):** "a is fine". Every attached browser answers terminal
+     queries (cursor position, device attributes, colours), so with three
+     viewers three answers reached the shell and a late answer still
+     arrived. The browser marks a renderer's reply as a reply, not typing,
+     with an additive field on Input; the server forwards exactly one reply
+     per query to the PTY and drops later or expired ones. Rejected: a
+     browser-only rule (only the focused viewer answers, late replies
+     dropped), which still lets two focused devices both answer.
