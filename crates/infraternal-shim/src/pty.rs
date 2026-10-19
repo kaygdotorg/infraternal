@@ -112,6 +112,8 @@ impl Pty {
             .env("LOGNAME", &user.name)
             .env("SHELL", &shell)
             .env("TERM", "xterm-256color")
+            // `TERM` stays broadly compatible; this separately tells applications that 24-bit colour is available.
+            .env("COLORTERM", "truecolor")
             .env("PATH", "/usr/local/bin:/usr/bin:/bin")
             .stdin(Stdio::from(slave.try_clone()?))
             .stdout(Stdio::from(slave.try_clone()?))
@@ -623,7 +625,8 @@ mod child_signal_tests {
 }
 
 #[cfg(all(test, target_os = "linux"))]
-mod child_locale_tests {
+/// Checks that spawned login shells receive only the selected locale and terminal variables.
+mod child_environment_tests {
     use super::*;
 
     struct ChildGuard(Child);
@@ -635,7 +638,7 @@ mod child_locale_tests {
     }
 
     #[test]
-    fn spawned_login_shell_receives_selected_locale_without_other_host_variables() {
+    fn spawned_login_shell_receives_selected_environment_without_other_host_variables() {
         let expected = crate::locale::environment();
         let pty = Pty::spawn(Uid::effective().as_raw(), 80, 24).unwrap();
         let child = ChildGuard(pty.child);
@@ -662,12 +665,18 @@ mod child_locale_tests {
                 .iter()
                 .any(|(name, value)| *name == b"TERM" && *value == b"xterm-256color")
         );
+        assert!(
+            actual
+                .iter()
+                .any(|(name, value)| *name == b"COLORTERM" && *value == b"truecolor")
+        );
         assert!(actual.iter().all(|(name, _)| {
             *name == b"HOME"
                 || *name == b"USER"
                 || *name == b"LOGNAME"
                 || *name == b"SHELL"
                 || *name == b"TERM"
+                || *name == b"COLORTERM"
                 || *name == b"PATH"
                 || *name == b"ZDOTDIR"
                 || *name == b"LANG"
