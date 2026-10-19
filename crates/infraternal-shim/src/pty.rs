@@ -16,6 +16,7 @@ use std::{
         fd::{AsRawFd, FromRawFd},
         unix::process::CommandExt,
     },
+    path::Path,
     process::{Child, Command, Stdio},
     sync::atomic::{AtomicU8, Ordering},
 };
@@ -90,11 +91,11 @@ impl Pty {
         let target_uid = user.uid;
         let group = user.gid;
         let shell = if readiness || user.shell.as_os_str().is_empty() {
-            std::path::PathBuf::from("/bin/sh")
+            Path::new("/bin/sh")
         } else {
-            user.shell
+            user.shell.as_path()
         };
-        let mut command = Command::new(&shell);
+        let mut command = Command::new(shell);
         let login_name = format!(
             "-{}",
             shell.file_name().unwrap_or_default().to_string_lossy()
@@ -110,9 +111,9 @@ impl Pty {
             .env("HOME", &user.dir)
             .env("USER", &user.name)
             .env("LOGNAME", &user.name)
-            .env("SHELL", &shell)
+            .env("SHELL", shell)
             .env("TERM", "xterm-256color")
-            // `TERM` stays broadly compatible; this separately tells applications that 24-bit colour is available.
+            // Keep TERM broadly compatible while separately advertising 24-bit colour.
             .env("COLORTERM", "truecolor")
             .env("PATH", "/usr/local/bin:/usr/bin:/bin")
             .stdin(Stdio::from(slave.try_clone()?))
