@@ -2,6 +2,7 @@
 import AppKit
 import ApplicationServices
 
+private let measureInput = ProcessInfo.processInfo.environment["INFRATERNAL_DESKTOP_MEASURE"] != nil
 private let remoteTag: Int64 = 0x696e667261746572
 // Releases restart the local pause even when the preceding press was long ago.
 private let inputTypes: [CGEventType] = [.mouseMoved, .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp,
@@ -84,6 +85,9 @@ final class RemoteControl {
     private func post(_ event: CGEvent, modifiers: UInt8) {
         event.flags = flags(modifiers)
         event.setIntegerValueField(.eventSourceUserData, value: remoteTag)
+        if measureInput {
+            FileHandle.standardError.write(Data("METRIC native_input_post at_ns=\(nanos(mach_absolute_time())) type=\(event.type.rawValue)\n".utf8))
+        }
         // Keyboard delivery is process-specific. Pointer delivery uses the HID tap
         // only after the topmost window owner at that point has been checked.
         if let owner, event.type == .keyDown || event.type == .keyUp || event.type == .flagsChanged {

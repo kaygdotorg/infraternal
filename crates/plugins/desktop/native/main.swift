@@ -38,6 +38,7 @@ if let index = CommandLine.arguments.firstIndex(of: "--capture-still") {
     catch { exit(1) }
 }
 
+private let measureInputCommands = ProcessInfo.processInfo.environment["INFRATERNAL_DESKTOP_MEASURE"] != nil
 let surfaceMode = CommandLine.arguments.contains("--surface-capture")
 private let encoderMode = CommandLine.arguments.contains("--encoder")
 
@@ -172,6 +173,7 @@ DispatchQueue.global(qos:.userInteractive).async {
     do {
         while true {
             let (kind,payload) = try readPacket()
+            let received = kind == 4 && measureInputCommands ? nanos(mach_absolute_time()) : 0
             do {
                 let metadata: Data
                 let pixels: Data
@@ -191,8 +193,15 @@ DispatchQueue.global(qos:.userInteractive).async {
                 } else {
                     var reply: (UInt8,[String: Any])?
                     var failure: Error?
+                    var dispatched: UInt64 = 0
                     DispatchQueue.main.sync {
+                        if received != 0 { dispatched = nanos(mach_absolute_time()) }
                         do { reply = try session.command(kind,body) } catch { failure = error }
+                    }
+                    if received != 0 {
+                        // One content-free write keeps concurrent capture receipts intact.
+                        let finished = nanos(mach_absolute_time())
+                        FileHandle.standardError.write(Data("METRIC native_input receive_ns=\(received) dispatch_ns=\(dispatched) finished_ns=\(finished) accepted=\(reply?.1["accepted"] as? Bool == true)\n".utf8))
                     }
                     if let failure { throw failure }
                     guard let reply else { throw HelperFailure.unavailable }
