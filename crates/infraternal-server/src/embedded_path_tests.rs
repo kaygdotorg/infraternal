@@ -409,3 +409,76 @@ async fn review_pending_input_limit_retires_only_its_attachment() {
     );
     assert_eq!(routes.get(&4), Some(&2));
 }
+
+#[tokio::test]
+async fn reply_queue_deadline_and_live_reply_do_not_change_typing_offsets() {
+    let (mut connection, mut peer) = connection();
+    let (tx, _output) = mpsc::channel(8);
+    let mut attachments = HashMap::from([(1, attachment(tx))]);
+    let mut routes = HashMap::from([(2, 1)]);
+    let mut pending = HashMap::new();
+    assert!(
+        process_command(
+            Command::Reply {
+                attachment_id: 1,
+                query_seq: 42,
+                bytes: Bytes::from_static(b"\x1b[1;1R"),
+                expires: std::time::Instant::now(),
+            },
+            &mut connection,
+            &mut attachments,
+            &mut routes,
+            &mut pending
+        )
+        .await
+    );
+    let mut scratch = [0; 128];
+    assert!(
+        peer.try_read(&mut scratch)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    assert!(
+        process_command(
+            Command::Reply {
+                attachment_id: 1,
+                query_seq: 43,
+                bytes: Bytes::from_static(b"\x1b[1;1R"),
+                expires: std::time::Instant::now() + Duration::from_secs(10),
+            },
+            &mut connection,
+            &mut attachments,
+            &mut routes,
+            &mut pending
+        )
+        .await
+    );
+    let reply = receive(&mut peer).await;
+    assert!(matches!(
+        decode_muxed_frame(&reply).unwrap().frame,
+        Frame::InputReply {
+            query_seq: 43,
+            bytes: b"\x1b[1;1R"
+        }
+    ));
+    assert_eq!(attachments[&1].last_input_end, 0);
+    assert_eq!(attachments[&1].last_in_seq, 0);
+    assert!(attachments[&1].unacknowledged.is_empty());
+    assert!(
+        process_command(
+            input_command(0, b"typed"),
+            &mut connection,
+            &mut attachments,
+            &mut routes,
+            &mut pending
+        )
+        .await
+    );
+    let input = receive(&mut peer).await;
+    assert!(matches!(
+        decode_muxed_frame(&input).unwrap().frame,
+        Frame::Input {
+            in_seq: 0,
+            bytes: b"typed"
+        }
+    ));
+}

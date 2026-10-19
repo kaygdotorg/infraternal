@@ -38,6 +38,7 @@ pub(crate) struct RemoteHosts(
     Arc<std::sync::Mutex<Option<Arc<ListenerFactory>>>>,
     bool,
     pub(crate) crate::remote_inventory::InventoryChanges,
+    pub(crate) Arc<std::sync::Mutex<crate::terminal_queries::Registry>>,
 );
 
 /// Identity and admission limits are shared; this factory never retains its host map.
@@ -119,6 +120,7 @@ impl RemoteHosts {
             Arc::default(),
             false,
             crate::remote_inventory::InventoryChanges::default(),
+            Arc::default(),
         )
     }
     /// Classify the accepted destination, including a pre-existing wildcard listener.

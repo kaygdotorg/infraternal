@@ -158,6 +158,22 @@ impl AttachmentHandle {
             .await
             .map_err(|_| AgentError::Unavailable)
     }
+    /// Replies are best effort, separately bounded, and retain their query deadline
+    /// through the host command queue. They never park a keyboard-credit waiter.
+    pub(crate) fn reply(&self, query_seq: u64, bytes: Bytes, expires: std::time::Instant) -> bool {
+        !bytes.is_empty()
+            && bytes.len() <= 1024
+            && self
+                .0
+                .commands
+                .try_send(Command::Reply {
+                    attachment_id: self.0.id,
+                    query_seq,
+                    bytes,
+                    expires,
+                })
+                .is_ok()
+    }
     /// Rebind only after the browser consumer admits the transition under its authority gate.
     pub async fn reconnect(&self) -> Result<(), AgentError> {
         self.0
@@ -537,6 +553,12 @@ enum Command {
     Input {
         attachment_id: u64,
         frame: Bytes,
+    },
+    Reply {
+        attachment_id: u64,
+        query_seq: u64,
+        bytes: Bytes,
+        expires: std::time::Instant,
     },
     Detach {
         attachment_id: u64,
@@ -1782,6 +1804,40 @@ async fn process_command(
             }
             reattach(connection, attachment).await
         }
+        Command::Reply {
+            attachment_id,
+            query_seq,
+            bytes,
+            expires,
+        } => {
+            let Some(attachment) = attachments.get(&attachment_id) else {
+                crate::terminal_queries::record_drop();
+                return true;
+            };
+            if std::time::Instant::now() >= expires || attachment.replaying {
+                crate::terminal_queries::record_drop();
+                return true;
+            }
+            // A timed-out partial frame retires the link rather than leaving an
+            // ambiguous stream prefix. Accepted replies are never replayed.
+            let delivered = tokio::time::timeout_at(
+                expires.into(),
+                write_frame(
+                    connection,
+                    attachment.stream_id,
+                    &Frame::InputReply {
+                        query_seq,
+                        bytes: &bytes,
+                    },
+                ),
+            )
+            .await
+            .unwrap_or(false);
+            if !delivered {
+                crate::terminal_queries::record_drop();
+            }
+            delivered
+        }
         Command::Input {
             attachment_id,
             frame,
@@ -1998,6 +2054,8 @@ enum TerminalNotice {
         #[serde(deserialize_with = "deserialize_replay_cursor")]
         out_seq: u64,
     },
+    #[serde(rename = "terminal.query_replies_unavailable")]
+    QueryRepliesUnavailable { session_id: String },
     #[serde(rename = "terminal.exited")]
     Exited {
         session_id: String,
@@ -2031,6 +2089,7 @@ impl TerminalNotice {
                 let _ = out_seq;
                 session_id
             }
+            Self::QueryRepliesUnavailable { session_id } => session_id,
             Self::Exited {
                 session_id,
                 status,

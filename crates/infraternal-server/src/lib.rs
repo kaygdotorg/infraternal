@@ -32,8 +32,12 @@ mod node_bridge;
 mod release_http;
 #[cfg(feature = "release")]
 mod release_latest;
+mod terminal_queries;
 #[cfg(feature = "release")]
 pub use release_latest::release_service;
+#[cfg(feature = "parser-checks")]
+#[doc(hidden)]
+pub use terminal_queries::verify_terminal_query_sample;
 mod liveness;
 pub mod release_manifest;
 pub mod release_verify;
