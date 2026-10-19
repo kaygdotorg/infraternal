@@ -26,10 +26,18 @@ struct MinimalHost {
 impl MinimalHost {
     fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let scratch = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
-            || PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/ar3"),
-            PathBuf::from,
-        );
+        // Session sockets add a long fixed suffix, so the runner can provide a
+        // short absolute root for these fixtures while other tests keep the
+        // normal state directory.
+        let scratch = std::env::var_os("INFRATERNAL_SSH_TEST_STATE_ROOT")
+            .or_else(|| std::env::var_os("INFRATERNAL_TEST_STATE_ROOT"))
+            .map_or_else(
+                || {
+                    PathBuf::from(std::env::var_os("HOME").unwrap())
+                        .join(".cache/codex-scratch/ar3")
+                },
+                PathBuf::from,
+            );
         fs::create_dir_all(&scratch).unwrap();
         let root = scratch.join(format!(
             "r{}-{}",
