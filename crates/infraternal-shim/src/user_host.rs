@@ -1414,11 +1414,13 @@ mod tests {
             }
 
             if host.total_used() == cap {
-                let index = usize::try_from(next(&mut seed) % 2).unwrap();
-                if let Some(session) = sessions[index].as_mut() {
+                for session in sessions.iter_mut().flatten() {
+                    let before = session.terminal.snapshot().unwrap();
                     let key = b"abcdefghijklmnopqrstuvwxyz"
                         [usize::try_from(next(&mut seed) % 26).unwrap()];
                     assert_eq!(type_and_drain(session, &[key]).unwrap(), 1);
+                    let after = session.terminal.snapshot().unwrap();
+                    assert_ne!(before, after, "live screen did not display typed input");
                     type_and_drain(session, b"\x7f").unwrap();
                     full_pool_drains += 1;
                 }
