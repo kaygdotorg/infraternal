@@ -1,10 +1,18 @@
 /** Verifies D307 through the real server, infraternal agent, shim and raw PTY with three viewers. */
 import { expect, test, type Page } from "playwright/test";
 import { WebSocket } from "ws";
+import { readFile } from "node:fs/promises";
+import { once } from "node:events";
 import { encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
+import { Ghostty } from "../vendor/ghostty-web/dist/ghostty-web.js";
+import { terminalQueryCorpus } from "../test/terminal-query-corpus";
 import { TerminalQueries } from "../src/terminal-queries";
 import { startRealServer, type RealServer } from "./server";
 import { tracerEvidencePath } from "../test/evidence-path";
+
+// The fixture runs in Node, so use fetchable bytes rather than the browser-only file shim.
+const wasm = await readFile(new URL("../vendor/ghostty-web/dist/ghostty-vt.wasm", import.meta.url));
+const engine = await Ghostty.load(`data:application/wasm;base64,${wasm.toString("base64")}`);
 
 /** Uses the existing real-server enrolment controls; no authentication data enters diagnostics. */
 async function enrol(page: Page, server: RealServer): Promise<void> {
@@ -24,10 +32,12 @@ async function enrol(page: Page, server: RealServer): Promise<void> {
   await page.locator(".cl-viewport").waitFor();
 }
 
-/** Attaches a real protocol viewer, answering CPR with the query's exact output identity. */
+/** Attaches a protocol viewer with the shipping VT engine and absolute output identities. */
 async function viewer(server: RealServer, cookie: string, session: string): Promise<{ socket: WebSocket; send: (frame: WireFrame) => void; replies: () => number }> {
   const socket = new WebSocket(server.backend.replace("http:", "ws:") + "/v1/ws", { headers: { Origin: server.origin, Cookie: cookie } });
   const decoder = new WebSocketFrameDecoder(); const scanner = new TerminalQueries();
+  const terminal = engine.createTerminal(80, 24);
+  socket.on("close", () => terminal.free());
   let replaying = true; let replies = 0;
   const send = (frame: WireFrame): void => { socket.send(encodeMuxedFrame(1, frame)); };
   const attached = new Promise<void>((resolve, reject) => {
@@ -45,8 +55,17 @@ async function viewer(server: RealServer, cookie: string, session: string): Prom
         if (notice.type === "terminal.replay_complete") { replaying = false; resolve(); }
       }
       if (frame.type === "Output") {
-        scanner.scan(frame.bytes, frame.outSeq, (_, replyTo, _started, query) => {
-          if (!replaying && query === "\u001b[6n") { replies++; send({ type: "Input", inSeq: 0n, replyTo, bytes: Buffer.from("ordinary text") }); send({ type: "Input", inSeq: 0n, replyTo, bytes: Buffer.from("\u001b[1;1R") }); }
+        terminal.writeSlices(frame.bytes, (writeSlice) => {
+          let start = 0;
+          const write = (end: number, replyTo: bigint): void => {
+            writeSlice(end);
+            let response = "";
+            for (let next = terminal.readResponse(); next !== null; next = terminal.readResponse()) response += next;
+            if (!replaying && response) { replies++; send({ type: "Input", inSeq: 0n, replyTo, bytes: Buffer.from(response) }); }
+            start = end;
+          };
+          scanner.scan(frame.bytes, frame.outSeq, (end, replyTo) => write(end, replyTo));
+          if (start < frame.bytes.length) write(frame.bytes.length, frame.outSeq + BigInt(start));
         });
         send({ type: "Credit", bytes: frame.bytes.length });
       }
@@ -57,7 +76,7 @@ async function viewer(server: RealServer, cookie: string, session: string): Prom
 }
 
 test("three real viewers produce one PTY reply and refused marked input cannot stall typing", async ({ browser }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(240_000);
   const server = await startRealServer();
   const context = await browser.newContext({ ignoreHTTPSErrors: true });
   const extras: WebSocket[] = [];
@@ -66,19 +85,59 @@ test("three real viewers produce one PTY reply and refused marked input cannot s
     await expect.poll(() => server.bridges.filter((bridge) => !bridge.closed).at(-1)?.attached.size ?? 0, { timeout: 30_000 }).toBe(1);
     const bridge = server.bridges.filter((candidate) => !candidate.closed && candidate.attached.size > 0).at(-1)!;
     const session = [...bridge.attached.values()][0]!.at(-1)!;
+    const browserReplies = (): number => server.bridges.reduce((total, candidate) => total + (candidate.replyAttempts ?? 0), 0);
     const output = (): string => server.bridges.flatMap((candidate) => [...candidate.output.values()]).join("");
-    const second = await viewer(server, bridge.cookie, session); extras.push(second.socket);
-    const third = await viewer(server, bridge.cookie, session); extras.push(third.socket);
     // Unknown identities and marked non-reply bytes must neither write to the
     // shell nor advance the selected viewer's typing cursor.
-    for (let index = 0; index < 10_000; index++) second.send({ type: "Input", inSeq: 0n, replyTo: 0xffff_ffff_ffff_ffffn, bytes: Buffer.from("ordinary text") });
+    const flooded = await viewer(server, bridge.cookie, session); extras.push(flooded.socket);
+    for (let index = 0; index < 10_000; index++) flooded.send({ type: "Input", inSeq: 0n, replyTo: 0xffff_ffff_ffff_ffffn, bytes: Buffer.from("ordinary text") });
+    // Finish the flood transport before establishing the three live renderers.
+    // A bounded socket may retire under the flood; its replacement must still
+    // replay and participate, rather than being counted as a silent viewer.
+    if (flooded.socket.readyState !== WebSocket.CLOSED) {
+      const closed = once(flooded.socket, "close");
+      flooded.socket.close();
+      await closed;
+    }
+    const second = await viewer(server, bridge.cookie, session); extras.push(second.socket);
+    const third = await viewer(server, bridge.cookie, session); extras.push(third.socket);
     const program = 'import os,termios,tty,select,re; old=termios.tcgetattr(0); tty.setraw(0); os.write(1,bytes([27])+b"[6n"); data=os.read(0,1024); ready=select.select([0],[],[],0.4)[0]; data+=os.read(0,1024) if ready else b""; termios.tcsetattr(0,termios.TCSANOW,old); print("QUERY_REPLIES:%d BYTES:%d"%(len(re.findall(rb"\\x1b\\[[0-9]+;[0-9]+R",data)),len(data)),flush=True)';
     const command = Buffer.from(`python3 -c '${program}'\n`);
     third.send({ type: "Input", inSeq: 0n, bytes: command });
     await expect.poll(output, { timeout: 30_000 }).toMatch(/QUERY_REPLIES:1 BYTES:[6-9](?:\D|$)/);
-    expect(second.replies()).toBe(1); expect(third.replies()).toBe(1);
+    await expect.poll(() => [second.replies(), third.replies()]).toEqual([1, 1]);
     third.send({ type: "Input", inSeq: BigInt(command.length), bytes: Buffer.from("printf 'TYPING_%s\\n' OK\n") });
     await expect.poll(output, { timeout: 15_000 }).toContain("TYPING_OK");
+    // Corpus membership is decided by the shipping engine, never by a request
+    // allow-list. Each accepted byte stream must reach the real PTY once even
+    // though three independent renderer instances answer it.
+    // Observe beyond the full expiry window so delayed viewers cannot escape the PTY byte count.
+    let inSeq = BigInt(command.length + Buffer.byteLength("printf 'TYPING_%s\\n' OK\n"));
+    let answered = 0;
+    for (const [index, request] of terminalQueryCorpus.entries()) {
+      const reference = engine.createTerminal(80, 24);
+      reference.write("\u001b[H" + request);
+      const response = reference.readResponse();
+      reference.free();
+      if (response === null) continue;
+      answered++;
+      const attemptsBefore = [browserReplies(), second.replies(), third.replies()] as const;
+      const marker = `CORPUS_${index}`;
+      const encoded = Buffer.from("\u001b[H" + request).toString("hex");
+      const probe = `import os,termios,tty,select; old=termios.tcgetattr(0); tty.setraw(0); os.write(1,bytes.fromhex("${encoded}")); data=os.read(0,4096); ready=select.select([0],[],[],1.1)[0]; data+=os.read(0,4096) if ready else b""; termios.tcsetattr(0,termios.TCSANOW,old); print("${marker}:%s"%data.hex(),flush=True)`;
+      const input = Buffer.from(`python3 -c '${probe}'\n`);
+      third.send({ type: "Input", inSeq, bytes: input });
+      inSeq += BigInt(input.length);
+      await expect.poll(output, { timeout: 15_000 }).toMatch(new RegExp(`${marker}:${Buffer.from(response).toString("hex")}(?:[^0-9a-f]|$)`));
+      console.log(`QUERY_CASE index=${index} request=${Buffer.from(request).toString("hex")}`);
+      await expect.poll(() => [
+        browserReplies() - attemptsBefore[0],
+        second.replies() - attemptsBefore[1],
+        third.replies() - attemptsBefore[2],
+      ], { message: `corpus ${index}, request ${Buffer.from(request).toString("hex")}, live browser bridges ${server.bridges.filter((candidate) => !candidate.closed).length}` }).toEqual([1, 1, 1]);
+    }
+    expect(answered).toBeGreaterThanOrEqual(30);
+    console.log(`QUERY_CORPUS forms=${answered} viewers=3 PTY_copies=1`);
     await page.screenshot({ path: tracerEvidencePath("query-replies-real.png") });
   } finally {
     for (const socket of extras) socket.terminate();
