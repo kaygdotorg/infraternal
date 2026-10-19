@@ -1,5 +1,6 @@
 """Role: verify Mac measurement consent ownership and compositor coordinates without launching the browser (#146)."""
 import ast
+import io
 import json
 import pathlib
 import sys
@@ -72,8 +73,17 @@ class CaptureRetirementTests(unittest.TestCase):
         function = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'stop_capture')
         actions = []
         class Marker:
+            sealed = False
             def __truediv__(self, name): return self
-            def touch(self): actions.append('sealed')
+            def touch(self): self.sealed = True; actions.append('sealed')
+            def open(self, mode):
+                self.assert_mode(mode)
+                if self.sealed: raise FileExistsError()
+                self.sealed = True
+                actions.append('sealed')
+                return io.StringIO()
+            def assert_mode(self, mode):
+                if mode != 'x': raise AssertionError('atomic refusal marker required')
         namespace = {
             'runtime': Marker(), 'signal': signal,
             'source': SimpleNamespace(send_signal=lambda value: actions.append(('source', value))),
@@ -83,6 +93,7 @@ class CaptureRetirementTests(unittest.TestCase):
             'os': SimpleNamespace(kill=lambda pid, value: actions.append((pid, value))),
         }
         exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        namespace['stop_capture']()
         namespace['stop_capture']()
         self.assertEqual(actions, ['sealed', ('source', signal.SIGINT), (101, signal.SIGTERM)])
 

@@ -201,7 +201,11 @@ try:
  def stop_capture():
   # Seal new launches before stopping existing native capture, on either the
   # consent monitor or the main failure path. Never await browser cleanup first.
-  (runtime/'capture-refused').touch()
+  # The watcher and main failure handler may both arrive here. Seal once so
+  # a second SIGINT cannot interrupt the source's orderly control retirement.
+  try:
+   with (runtime/'capture-refused').open('x'):pass
+  except FileExistsError:return
   if 'source' in globals():
    try:source.send_signal(signal.SIGINT)
    except ProcessLookupError:pass
