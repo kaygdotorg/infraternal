@@ -128,6 +128,8 @@ export class MuxConnection {
   private livenessTimer = 0;
   /** Keep the socket-task confirmation alive while input or probe activity reschedules liveness. */
   private livenessConfirmationPending = false;
+  /** Identify its arming route; a cleared timer may already be queued when a replacement route starts. */
+  private livenessConfirmationToken = 0;
   /** A delayed browser task is local uncertainty, never evidence that the peer stopped answering (#245). */
   private livenessDueAt = Infinity;
   private lastLivenessStallAt = -Infinity;
@@ -540,10 +542,14 @@ export class MuxConnection {
     return true;
   }
 
-  private checkLiveness(confirm = false): void {
+  private checkLiveness(confirm = false, confirmationToken?: number, confirmationSocket?: WebSocket): void {
     if (confirm) {
-      if (!this.livenessConfirmationPending) return;
+      if (!this.livenessConfirmationPending || confirmationToken !== this.livenessConfirmationToken || confirmationSocket !== this.socket) return;
       this.livenessConfirmationPending = false;
+      this.livenessConfirmationToken += 1;
+    } else if (this.livenessConfirmationPending) {
+      // A timer from an earlier liveness schedule must not replace the confirmation's handle.
+      return;
     }
     const now = performance.now();
     this.accountLivenessDelay(now);
@@ -557,8 +563,11 @@ export class MuxConnection {
       if (confirm) this.retireUnresponsiveSocket();
       else {
         this.livenessDueAt = now;
+        const socket = this.socket;
+        if (!socket) return;
+        const confirmationToken = ++this.livenessConfirmationToken;
         this.livenessConfirmationPending = true;
-        this.livenessTimer = window.setTimeout(() => this.checkLiveness(true), 0);
+        this.livenessTimer = window.setTimeout(() => this.checkLiveness(true, confirmationToken, socket), 0);
       }
       return;
     }
@@ -639,8 +648,10 @@ export class MuxConnection {
         this.livenessRtt = undefined;
         this.livenessSrtt = undefined;
         this.livenessRttvar = 0;
-        this.livenessTimer = window.setTimeout(() => this.checkLiveness(), LIVENESS_TICK_MS);
-        this.livenessDueAt = this.welcomedAt + LIVENESS_TICK_MS;
+        if (!this.livenessConfirmationPending) {
+          this.livenessDueAt = this.welcomedAt + LIVENESS_TICK_MS;
+          this.livenessTimer = window.setTimeout(() => this.checkLiveness(), LIVENESS_TICK_MS);
+        }
         for (const subId of [...this.subscriptions.keys()]) this.openSubscription(subId);
         for (const l of [...this.welcomeListeners]) l();
         if (!this.resumeSent) this.writersUsed.clear();
@@ -743,6 +754,8 @@ export class MuxConnection {
   }
 
   private resetPings(): void {
+    // Clearing a timer cannot remove its callback if the browser already queued it.
+    this.livenessConfirmationToken += 1;
     window.clearTimeout(this.livenessTimer);
     this.livenessTimer = 0;
     this.livenessConfirmationPending = false;
