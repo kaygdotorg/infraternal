@@ -490,6 +490,19 @@ control replies defer their producers until bounded FIFO capacity returns,
 preserving ordering, including the census-before-open-result fence. Actual
 transport errors and closed writers still retire their connections.
 
+When both peers advertise Hello caps bit 2 (`VIEWER_VISIBILITY`), the viewer
+may send a control-stream
+`Event` with `sub_id = 0` and at most 128 JSON bytes:
+`{"topic":"connection.visibility","hidden":true}` (or `false`). This is a
+transport notice, not a subscription or plugin action. A hidden page may be
+suspended indefinitely: pause browser probes and discard outstanding probe
+correlations, retaining the socket, terminal streams and writers. Authentication
+expiry, revocation and resource bounds still apply. When visible, restart the
+unknown-RTT lease without reusing probe IDs; old replies cannot train its RTT.
+If the transport ended during suspension, wait until visible before reconnecting.
+The notice cannot preserve a socket when the operating system closes it; use the
+ordinary resume window, then a fresh attach if that capability is refused (#244).
+
 Probe replies echo nonce and timestamp. Only a new correlated reply renews a
 route deadline; ordinary traffic, unsolicited replies and stale sockets do not.
 Startup, pending input and recent link doubt keep browser probes pipelined
@@ -501,7 +514,9 @@ unknown and retains the bounded two-second startup grace. Correlated replies
 initialize `srtt = RTT`, `rttvar = RTT / 2`; subsequent samples update
 `rttvar = 3/4 × rttvar + 1/4 × abs(srtt − RTT)` before
 `srtt = 7/8 × srtt + 1/8 × RTT` ([RFC 6298 §2](https://www.rfc-editor.org/rfc/rfc6298.html#section-2) estimator).
-The browser response allowance is `max(srtt + 4 × rttvar + 50 ms, 250 ms)`.
+The browser response allowance follows the host formula below (#244). A proven
+foreground browser route doubts its first miss and retires after two consecutive
+allowances without a correlated reply; startup still has a two-second grace.
 Host routes (the primary host link and its terminal streams) carry ordered
 replies that one lost packet holds back for about one more round trip, so
 their allowance is `clamp(2 × srtt + 4 × rttvar + 75 ms, 250 ms, 2 s)` [D300].
@@ -527,8 +542,9 @@ still retires after two allowances. Viewers ignore terminal notice types they
 do not know.
 The floor tolerates a 150 ms scheduler/main-thread stall on a healthy low-RTT
 route, rather than confusing local load with peer loss. A settled quiet link
-therefore detects silence within that floor plus one probe interval (at most
-26 ms); above the floor it follows measured RTT and jitter. This is the
+therefore doubts silence at that floor; browser and primary host links retire
+after two allowances, plus at most one probe interval (26 ms). Above the floor
+they follow measured RTT and jitter. This extends the
 owner-approved #199 scheduling exception to D265's approximate one-RTT detection;
 reusable/fresh connection recovery budgets remain D265/D267. Renewed monitoring
 on a replacement route relearns both estimates; jitter decays with healthy

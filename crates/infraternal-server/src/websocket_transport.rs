@@ -109,6 +109,7 @@ struct Context {
     token: String,
     writer: Writer,
     lease: LeaseMutex<Liveness>,
+    viewer_visibility: bool,
     fast_until: LeaseMutex<tokio::time::Instant>,
     // The first classified end wins so teardown cannot turn malformed input into an ordinary disconnect.
     ended: AtomicU8,
@@ -207,7 +208,7 @@ impl Context {
                 self.retire(EndReason::ServerWriteFailed);
                 return Err(());
             };
-            if active && lease.expired() {
+            if active && lease.retired() {
                 self.retire(EndReason::IdleTimeout);
                 return Err(());
             }
@@ -249,6 +250,7 @@ impl Drop for Transport {
 }
 
 impl Transport {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn start(
         writer: SplitSink<WebSocket, Message>,
         reader: SplitStream<WebSocket>,
@@ -257,6 +259,7 @@ impl Transport {
         user: String,
         token: String,
         authority: super::websocket::probe_authority::Lease,
+        viewer_visibility: bool,
     ) -> (impl Sink<Message, Error = axum::Error> + Unpin, Self) {
         let writer = Arc::new(Mutex::new(writer));
         let context = Arc::new(Context {
@@ -265,6 +268,7 @@ impl Transport {
             token,
             writer,
             lease: LeaseMutex::new(Liveness::answer_paced()),
+            viewer_visibility,
             fast_until: LeaseMutex::new(tokio::time::Instant::now() + FAST_PROBE_WINDOW),
             ended: AtomicU8::new(0),
             socket_close: LeaseMutex::new(SocketClose::default()),
@@ -433,6 +437,18 @@ fn shutdown_message(message: &Message) -> bool {
     }
 }
 
+/// Only this small transport notice is accepted from a viewer, never arbitrary events.
+fn visibility_notice(json: &[u8]) -> Option<bool> {
+    if json.len() > 128 {
+        return None;
+    }
+    let notice: serde_json::Value = serde_json::from_slice(json).ok()?;
+    (notice.get("topic")?.as_str()? == "connection.visibility")
+        .then(|| notice.get("hidden")?.as_bool())?
+}
+
+// Keep transport controls in one reader turn, ahead of bounded application admission.
+#[allow(clippy::too_many_lines)]
 async fn read(
     context: Arc<Context>,
     mut reader: SplitStream<WebSocket>,
@@ -485,6 +501,27 @@ async fn read(
                     && decoded.stream_id == 0
                 {
                     match decoded.frame {
+                        Frame::Event {
+                            sub_id: 0,
+                            event_json,
+                        } if context.viewer_visibility => {
+                            // The bounded lifecycle notice changes probe scheduling only;
+                            // socket authority, attachment caps and writer ownership stay strict.
+                            let hidden = visibility_notice(event_json);
+                            let updated = hidden.and_then(|hidden| {
+                                context
+                                    .lease
+                                    .lock()
+                                    .ok()
+                                    .map(|mut lease| lease.set_suspended(hidden))
+                            });
+                            if updated.is_none() {
+                                context.retire(EndReason::ProtocolError);
+                                break;
+                            }
+                            context.proof_changed.notify_one();
+                            continue;
+                        }
                         Frame::Pong { nonce, sent_us } => {
                             let updated = context
                                 .lease
@@ -597,7 +634,7 @@ async fn proofs(
             };
             let Ok(idle) = context.lease.lock().map(|lease| {
                 !active
-                    || (!lease.expired()
+                    || (!lease.retired()
                         && lease
                             .next_probe_due(fast)
                             .is_none_or(|at| at > tokio::time::Instant::now()))
@@ -724,6 +761,26 @@ mod queue_tests {
 mod tests {
     //! End conditions stay specific through socket teardown and structured logging.
     use super::*;
+
+    #[test]
+    fn visibility_notices_are_small_typed_transport_messages() {
+        assert_eq!(
+            visibility_notice(br#"{"topic":"connection.visibility","hidden":true}"#),
+            Some(true)
+        );
+        assert_eq!(
+            visibility_notice(br#"{"topic":"connection.visibility","hidden":false}"#),
+            Some(false)
+        );
+        for bytes in [
+            br#"{"topic":"other","hidden":true}"#.as_slice(),
+            br#"{"topic":"connection.visibility","hidden":1}"#,
+            b"null",
+            &[b' '; 129],
+        ] {
+            assert_eq!(visibility_notice(bytes), None);
+        }
+    }
 
     #[test]
     fn no_probe_in_an_active_idle_active_window() {

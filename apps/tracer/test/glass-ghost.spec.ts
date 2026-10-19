@@ -36,7 +36,9 @@ const surfaces: Surface[] = [
     async close(page) { await page.locator("#sidebar-toggle").click(); } },
   { name: "share dialog", async open(page) { await page.keyboard.press("Control+Shift+K"); await page.keyboard.type("share layout"); await page.keyboard.press("Enter"); await page.waitForSelector(".cl-share"); return ".cl-share"; },
     async close(page) { await page.keyboard.press("Escape"); } },
-  { name: "toast", async open(page) { await page.keyboard.press("Control+Shift+K"); await page.keyboard.type("add hosts"); await page.keyboard.press("Enter"); await page.waitForSelector(".ui-toast:not([hidden])"); return ".ui-toast"; } },
+  // Closing a window supplies the real Reopen toast; Add hosts opens a wizard rather than a notification.
+  { name: "toast", async open(page) { await page.locator('[data-window-id="w-build-01"] [data-action="close"]').click(); await page.waitForSelector(".ui-toast:not([hidden])"); return ".ui-toast"; },
+    async close(page) { await page.getByRole("button", { name: "Reopen", exact: true }).click(); } },
   { name: "top pill", async open() { return "#capsule"; } },
   { name: "toolbar tray", phone: true, async open() { return ".keytray"; } },
 ];

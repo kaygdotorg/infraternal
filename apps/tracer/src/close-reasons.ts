@@ -33,7 +33,7 @@ const KNOWN: Record<string, string> = {
   "a terminal frame exceeded the size limit": "This window sent a message that was too large, so the connection was closed.",
   "the terminal stream sent an invalid protocol frame": "This window sent something the server did not understand, so the connection was closed.",
   "the server refused the terminal attachment": "The server would not open this terminal.",
-  "the server refused to resume the connection": "The server would not continue the previous connection.",
+  "the server refused to resume the connection": "The previous connection could not be restored. Your terminals will reconnect automatically.",
   "the server stopped receiving connection replies": "The server stopped hearing from this browser.",
   "the server could not write to the connection": "The server could not send to this browser.",
   "the server could not continue the terminal stream": "The server could not continue this terminal.",

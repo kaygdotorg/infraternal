@@ -24,7 +24,9 @@ async function fixtureWrap(): Promise<{ salt: string; nonce: string; ciphertext:
 async function capture(page: Page, info: TestInfo, name: string): Promise<void> {
   for (const [width, height] of [[393, 852], [1440, 900]] as const) {
     await page.setViewportSize({ width, height });
-    if (await page.locator(".auth-card").count()) await page.locator(".auth-card").evaluate(async card => {
+    // The inactive sign-in card stays mounted; only the active card owns this recovery step's animation.
+    const activeCard = page.locator(".auth-card:not([inert])");
+    if (await activeCard.count()) await activeCard.evaluate(async card => {
       // Measure steady-state targets after the approved 240 ms entrance scale.
       await Promise.all(card.getAnimations().map(animation => animation.finished));
     });

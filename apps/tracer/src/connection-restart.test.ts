@@ -399,7 +399,8 @@ test("online and foreground events cancel delays and preserve handshakes in prog
       removeEventListener: (type: string, callback: () => void) => remove(windowListeners, type, callback),
     };
     globals.document = {
-      visibilityState: "hidden",
+      visibilityState: "visible",
+      get hidden() { return (globals.document as { visibilityState: string }).visibilityState === "hidden"; },
       addEventListener: (type: string, callback: () => void) => add(documentListeners, type, callback),
       removeEventListener: (type: string, callback: () => void) => remove(documentListeners, type, callback),
     };
@@ -436,6 +437,7 @@ test("online and foreground events cancel delays and preserve handshakes in prog
     admit(sockets[2]!);
     sockets[2]!.close();
     expect([...timers.values()][0]?.delay).toBe(5);
+    (globals.document as { visibilityState: string }).visibilityState = "hidden";
     fire(documentListeners, "visibilitychange");
     expect(sockets).toHaveLength(3);
     (globals.document as { visibilityState: string }).visibilityState = "visible";
@@ -454,6 +456,8 @@ test("online and foreground events cancel delays and preserve handshakes in prog
     expect(connection.isWelcomed).toBe(true);
     expect([...timers.values()].map((timer) => timer.delay)).toEqual([25]);
     expect([...windowListeners.values()].every((handlers) => handlers.size === 0)).toBe(true);
+    expect(documentListeners.get("visibilitychange")?.size).toBe(1); // The lifecycle listener survives Welcome.
+    connection.dispose();
     expect([...documentListeners.values()].every((handlers) => handlers.size === 0)).toBe(true);
   } finally {
     connection?.dispose();
@@ -461,5 +465,66 @@ test("online and foreground events cancel delays and preserve handshakes in prog
     for (const key of ["window", "location", "WebSocket", "document"] as const) {
       if (original[key] === undefined) delete globals[key]; else globals[key] = original[key];
     }
+  }
+});
+
+for (const online of [true, false]) for (const hint of [false, true]) for (const resumeFirst of [true, false]) test(`refused handshakes keep growing backoff (online: ${online}, new hint: ${hint}, resume first: ${resumeFirst})`, () => {
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, navigator: globals.navigator, random: Math.random };
+  let retry: (() => void) | undefined;
+  let delay = 0;
+  const sockets: Socket[] = [];
+  const attempts: boolean[] = [];
+  class Socket {
+    static OPEN = 1;
+    readyState = 1;
+    binaryType = "";
+    onopen?: () => void;
+    onclose?: (event: { code: number; reason: string }) => void;
+    onmessage?: (event: { data: ArrayBuffer }) => void;
+    constructor() { sockets.push(this); }
+    send() {}
+    receive(frame: Parameters<typeof encodeMuxedFrame>[1]) { this.onmessage?.({ data: encodeMuxedFrame(0, frame).slice().buffer as ArrayBuffer }); }
+    close() { this.readyState = 3; this.onclose?.({ code: 1008, reason: "the server refused to resume the connection" }); }
+  }
+  let connection: MuxConnection | undefined;
+  try {
+    Math.random = () => 0;
+    globals.window = { setTimeout: (callback: () => void, ms: number) => { retry = callback; delay = ms; return 1; }, clearTimeout() {} };
+    globals.location = { protocol: "https:", host: "resume.example.test" };
+    globals.WebSocket = Socket;
+    // Offline hints can lag a working route; an explicit refusal is a real server response.
+    globals.navigator = { onLine: online };
+    connection = new MuxConnection();
+    connection.openStream({ onSocketOpen: (resume) => attempts.push(resume), onWelcome() {}, onFrame() {}, onDisconnected() {}, hasSession: () => true, onStatus() {} });
+    sockets[0]!.onopen?.();
+    if (resumeFirst) {
+      sockets[0]!.receive({ type: "Welcome", connectionId: new Uint8Array(16).fill(1), resumeToken: new Uint8Array(32).fill(2), resumeWindowSeconds: 120 });
+      connection.streamAttached(true, 1);
+      connection.forceDrop();
+      retry?.();
+      sockets[1]!.onopen?.();
+    }
+    const refused = resumeFirst ? 1 : 0;
+    sockets[refused]!.receive({ type: "Close", code: 1008, reason: "the server refused to resume the connection" });
+    const firstDelay = delay;
+    if (hint) (connection as unknown as { retryNow(): void }).retryNow();
+    else retry?.();
+    sockets[refused + 1]!.onopen?.();
+    // Also exercise a transport Close without an application Close frame.
+    sockets[refused + 1]!.close();
+    expect(delay).toBeGreaterThan(firstDelay);
+    retry?.();
+    sockets[refused + 2]!.onopen?.();
+    expect(attempts).toEqual(resumeFirst ? [false, true, false, false] : [false, false, false]);
+    sockets[refused + 2]!.receive({ type: "Welcome", connectionId: new Uint8Array(16).fill(3), resumeToken: new Uint8Array(32).fill(4), resumeWindowSeconds: 120 });
+    // A deliberate forceDrop resets the counter independently of Welcome and
+    // would hide a missing refusal-state reset. Observe an ordinary close.
+    sockets[refused + 2]!.close();
+    expect(delay).toBe(5); // Real success, rather than a hint, restores prompt recovery.
+  } finally {
+    connection?.dispose();
+    Math.random = original.random;
+    for (const key of ["window", "location", "WebSocket", "navigator"] as const) { if (original[key] === undefined) delete globals[key]; else globals[key] = original[key]; }
   }
 });

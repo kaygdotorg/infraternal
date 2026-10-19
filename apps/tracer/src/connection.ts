@@ -72,6 +72,8 @@ const VERSION = 1;
 const RESUME_NEXT = 1n;
 /** Hello caps bit 1: this viewer understands the kept-link doubt notices (contracts/wire.md, D300). */
 const LINK_DOUBT_NOTICES = 2n;
+/** Hello bit 2: control Event 0 reports page visibility (#244). */
+const VIEWER_VISIBILITY = 4n;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RECOVERY_SUBSCRIPTION = 45;
@@ -135,6 +137,8 @@ export class MuxConnection {
   private lastLivenessStallAt = -Infinity;
   /** One local-stall grace per peer reply; callbacks alone cannot renew it (#245). */
   private stallGraceUsed = false;
+  /** One post-stall miss interval, separate from D300's two-miss deadline. */
+  private livenessStallGraceAt = -Infinity;
   private lastPongAt = 0;
   private fastProbeUntil = 0;
   private readonly unacknowledgedInput = new Map<number, bigint>();
@@ -157,6 +161,8 @@ export class MuxConnection {
   private lastPingAt = -Infinity;
   private retryTimer = 0;
   private retryAttempt = 0;
+  /** Server refusals remain failures even when browser network hints lag. */
+  private refusalBackoff = false;
   private readonly closeNotes = new CloseNotes();
   /** The console summary's timer. It runs on the global timer, apart from the reconnect schedule on `window`. */
   private closeNoteTimer: ReturnType<typeof setTimeout> | undefined;
@@ -172,11 +178,34 @@ export class MuxConnection {
   private closed = false;
   private welcomed = false;
   private resumeSent = false;
+  private serverVisibility = false;
   private attachedCount = 0;
   /** Streams that attached on this server-side connection: the server keeps a writer row for each, up to its cap. */
   private readonly writersUsed = new Set<number>();
 
-  constructor(private readonly config: ConnectionConfig = {}) {}
+  private readonly onVisibility = (): void => this.pageVisibilityChanged();
+
+  constructor(private readonly config: ConnectionConfig = {}) {
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function") document.addEventListener("visibilitychange", this.onVisibility);
+  }
+
+  /** Visibility is transport state, independent of terminal and authentication state. */
+  private pageVisibilityChanged(): void {
+    if (this.closed) return;
+    // A retry armed before hiding must also park; its foreground hint stays installed.
+    if (this.pageHidden()) this.clearRetryTimer();
+    if (!this.isWelcomed) return;
+    this.resetPings(true);
+    this.livenessRtt = undefined;
+    this.livenessSrtt = undefined;
+    this.livenessRttvar = 0;
+    if (this.serverVisibility) this.send(CONTROL_STREAM, { type: "Event", subId: 0, eventJson: encoder.encode(JSON.stringify({ topic: "connection.visibility", hidden: this.pageHidden() })) });
+    this.scheduleLiveness();
+  }
+
+  private pageHidden(): boolean {
+    return typeof document !== "undefined" && document.hidden === true;
+  }
 
   get isOpen(): boolean { return this.socket?.readyState === WebSocket.OPEN; }
   /** True once the server welcomed the current socket. */
@@ -302,7 +331,7 @@ export class MuxConnection {
   /** Probe at the existing cadence; correlated RTT and jitter bound silence [D265, #199]. */
   sampleRoundTrip(urgent = true): void {
     const startedAt = performance.now();
-    if (!this.isWelcomed || this.closed) return;
+    if (!this.isWelcomed || this.closed || this.pageHidden()) return;
     this.accountLivenessDelay(startedAt);
     if (urgent) {
       this.fastProbeUntil = startedAt + 250;
@@ -330,16 +359,18 @@ export class MuxConnection {
 
   /** A pong arrived (on any stream). */
   acceptPong(nonce: bigint, sentUs: bigint): void {
+    if (this.pageHidden()) return;
     const startedAt = this.pendingPings.get(nonce);
     if (startedAt === undefined || sentUs !== BigInt(Math.round(startedAt * 1000))) return;
     const now = performance.now();
     this.accountLivenessDelay(now);
-    // Either task source can run first after a stall. A correlated queued reply
-    // still proves the route works, but its renderer wait must not train RTT.
-    const delayed = startedAt <= this.lastLivenessStallAt || now - this.lastPongAt >= this.responseAllowance();
+    // Either task source can run first after a stall. A known local stall or
+    // expired response deadline keeps the queued reply from training RTT.
+    const delayed = startedAt <= this.lastLivenessStallAt || now >= this.responseDeadline();
     // A reply proves this direction works; discard older unanswered probes too.
     for (const key of this.pendingPings.keys()) { if (key <= nonce) this.pendingPings.delete(key); }
     this.lastPongAt = now;
+    this.livenessStallGraceAt = -Infinity;
     this.stallGraceUsed = false;
     if (delayed) { this.scheduleLiveness(); return; }
     const ms = Math.max(1, now - startedAt);
@@ -371,6 +402,7 @@ export class MuxConnection {
     const socket = this.socket;
     if (!socket) return;
     this.noteClose(code, reason, "the server");
+    this.forgetRefusedResume(code, reason);
     this.disconnect(socket);
     socket.close();
   }
@@ -393,6 +425,7 @@ export class MuxConnection {
     globalThis.clearTimeout(this.closeNoteTimer);
     this.closeNoteTimer = undefined;
     this.stopRetryHintListeners();
+    if (typeof document !== "undefined" && typeof document.removeEventListener === "function") document.removeEventListener("visibilitychange", this.onVisibility);
     this.resetPings();
     for (const call of this.calls.values()) call.reject(new Error("connection closed"));
     this.calls.clear();
@@ -418,6 +451,7 @@ export class MuxConnection {
     socket.binaryType = "arraybuffer";
     this.socket = socket;
     this.decoder = new WebSocketFrameDecoder();
+    this.serverVisibility = false;
     this.welcomed = false;
 
     socket.onopen = () => {
@@ -427,7 +461,7 @@ export class MuxConnection {
       const resumable = sessionsToResume && credentials !== undefined && Date.now() < credentials.deadline;
       this.resumeSent = resumable;
       // RESUME_NEXT tells the server to wait for the adjacent Resume before issuing Welcome.
-      const hello: WireFrame = { type: "Hello", version: VERSION, caps: (resumable ? RESUME_NEXT : 0n) | LINK_DOUBT_NOTICES, clientInfo: "infraternal-tracer/0.1" };
+      const hello: WireFrame = { type: "Hello", version: VERSION, caps: (resumable ? RESUME_NEXT : 0n) | LINK_DOUBT_NOTICES | VIEWER_VISIBILITY, clientInfo: "infraternal-tracer/0.1" };
       let length = encodeMuxedFrameInto(CONTROL_STREAM, hello, this.sendScratch);
       if (resumable && credentials) {
         length += encodeMuxedFrameInto(CONTROL_STREAM, { type: "Resume", connectionId: credentials.connectionId, resumeToken: credentials.resumeToken }, this.sendScratch, length);
@@ -462,9 +496,21 @@ export class MuxConnection {
       if (this.socket !== socket || this.closed) return;
       const internalRotation = event?.code === 4001 && event.reason === "tracer connection rotation";
       if (!internalRotation) this.noteClose(event?.code, event?.reason);
+      this.forgetRefusedResume(event?.code, event?.reason);
       this.disconnect(socket);
       if (!internalRotation) this.status(plainCloseReason(event?.reason || "connection ended"));
     };
+  }
+
+  /** Server refusals retain backoff; a refused resume also forgets its capability before fresh attach (#244). */
+  private forgetRefusedResume(code: number | undefined, reason: string | undefined): void {
+    if (this.welcomed || (code !== 1008 && reason !== "the server refused to resume the connection")) return;
+    this.refusalBackoff = true;
+    this.fastRecovery = false;
+    if (!this.resumeSent) return;
+    this.credentials?.connectionId.fill(0);
+    this.credentials?.resumeToken.fill(0);
+    this.credentials = undefined;
   }
 
   /**
@@ -494,10 +540,9 @@ export class MuxConnection {
       this.fastRecovery = [...this.streams.values()].some((stream) => stream.hasSession());
       if (lived || forced) this.retryAttempt = 0;
     } else {
-      // Keep the prompt path checks while the browser reports the network down.
-      // Once it reports online, a failed handshake consumes the quick recovery
-      // and retains its count so another refused route uses growing backoff.
-      if (typeof navigator !== "undefined" && navigator.onLine === false) this.retryAttempt = 0;
+      // Preserve prompt network-outage checks, but an explicit server refusal
+      // proves the offline hint stale. Its backoff survives until real success.
+      if (!this.refusalBackoff && typeof navigator !== "undefined" && navigator.onLine === false) this.retryAttempt = 0;
       else this.fastRecovery = false;
     }
     // The server retains a live writer indefinitely; its grace starts on disconnect
@@ -518,22 +563,32 @@ export class MuxConnection {
     if (this.streams.size > 0) this.scheduleReconnect();
   }
 
-  /** Match native response estimation without adding timers or changing probe frequency. */
+  /** One D300 miss interval; correlated RTT and jitter do not change probe frequency. */
+  private missAllowance(): number {
+    return this.livenessSrtt === undefined ? 2000 : Math.min(2000, Math.max(250, 2 * this.livenessSrtt + 4 * this.livenessRttvar + 75));
+  }
+
+  /** D300 retires a proven foreground route only after two consecutive misses. */
   private responseAllowance(): number {
-    return this.livenessSrtt === undefined ? 2000 : Math.max(250, this.livenessSrtt + 4 * this.livenessRttvar + 50);
+    return this.livenessSrtt === undefined ? 2000 : 2 * this.missAllowance();
+  }
+
+  private responseDeadline(): number {
+    return Math.max(this.lastPongAt + this.responseAllowance(), this.livenessStallGraceAt);
   }
 
   /** A late task cannot prove the page was responsive during its scheduled wait. */
   private accountLivenessDelay(now: number): boolean {
     const late = now - this.livenessDueAt;
     if (late <= LIVENESS_TICK_MS) return false;
-    // The first stall may include the scheduled wait too. Allow one fresh
-    // observation interval, but only a correlated peer reply can replenish it.
-    // With callback gaps bounded by G and allowance A, retirement takes at most
-    // 2*A + 3*G after issuance (including the final socket-task turn). No wall
-    // clock bound is possible while the browser executes no tasks at all.
+    // The first stall may include the scheduled wait too. Preserve one fresh
+    // miss interval after it; do not renew D300's full two-miss lease. With
+    // callback gaps bounded by G and per-miss allowance A, retirement takes at
+    // most 3*A + 3*G after issuance, including the final socket-task turn. No
+    // wall-clock bound is possible while the browser executes no tasks at all.
     if (this.pendingPings.size > 0 && !this.stallGraceUsed) {
-      this.lastPongAt = now;
+      const grace = this.livenessSrtt === undefined ? this.responseAllowance() : this.missAllowance();
+      this.livenessStallGraceAt = Math.max(this.livenessStallGraceAt, now + grace);
       this.stallGraceUsed = true;
     }
     this.lastLivenessStallAt = now;
@@ -551,12 +606,16 @@ export class MuxConnection {
       // A timer from an earlier liveness schedule must not replace the confirmation's handle.
       return;
     }
+    if (this.pageHidden()) {
+      this.livenessTimer = 0;
+      return;
+    }
     const now = performance.now();
     this.accountLivenessDelay(now);
     this.livenessTimer = 0;
     this.livenessDueAt = Infinity;
     if (!this.isWelcomed || this.closed) return;
-    if (this.pendingPings.size > 0 && now - this.lastPongAt >= this.responseAllowance()) {
+    if (this.pendingPings.size > 0 && now >= this.responseDeadline()) {
       // Timer and socket tasks have different queues. Give already-arrived
       // replies one task turn before closing. Repeated local stalls cannot
       // renew that turn: only an actual correlated reply redeems the route.
@@ -584,7 +643,7 @@ export class MuxConnection {
   }
 
   private scheduleLiveness(): void {
-    if (!this.isWelcomed || this.closed) return;
+    if (!this.isWelcomed || this.closed || this.pageHidden()) return;
     // A zero-delay confirmation gets one socket-task turn even if input or a Pong arrives first.
     if (this.livenessConfirmationPending) return;
     window.clearTimeout(this.livenessTimer);
@@ -593,7 +652,7 @@ export class MuxConnection {
     const clock = performance.now();
     this.accountLivenessDelay(clock);
     const nextProbe = this.nextProbeAt() - clock;
-    const remaining = this.pendingPings.size > 0 ? this.lastPongAt + this.responseAllowance() - clock : Infinity;
+    const remaining = this.pendingPings.size > 0 ? this.responseDeadline() - clock : Infinity;
     const delay = Math.max(1, Math.min(nextProbe, remaining));
     this.livenessDueAt = clock + delay;
     this.livenessTimer = window.setTimeout(() => this.checkLiveness(), delay);
@@ -627,6 +686,7 @@ export class MuxConnection {
   private control(frame: WireFrame): void {
     switch (frame.type) {
       case "Hello":
+        this.serverVisibility = (frame.caps & VIEWER_VISIBILITY) !== 0n;
         if (frame.version !== VERSION) this.fail("server uses an unsupported wire version");
         return;
       case "Welcome":
@@ -640,6 +700,8 @@ export class MuxConnection {
           deadline: Infinity,
           windowMs: frame.resumeWindowSeconds * 1000,
         };
+        if (this.refusalBackoff) this.retryAttempt = 0;
+        this.refusalBackoff = false;
         this.welcomed = true;
         this.welcomedAt = performance.now();
         this.lastPongAt = this.welcomedAt;
@@ -648,7 +710,8 @@ export class MuxConnection {
         this.livenessRtt = undefined;
         this.livenessSrtt = undefined;
         this.livenessRttvar = 0;
-        if (!this.livenessConfirmationPending) {
+        if (this.pageHidden()) this.pageVisibilityChanged();
+        else if (!this.livenessConfirmationPending) {
           this.livenessDueAt = this.welcomedAt + LIVENESS_TICK_MS;
           this.livenessTimer = window.setTimeout(() => this.checkLiveness(), LIVENESS_TICK_MS);
         }
@@ -686,8 +749,8 @@ export class MuxConnection {
       }
       case "Ping":
         this.send(CONTROL_STREAM, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
-        // Incoming probes keep sampling alive when background tabs clamp timers.
-        this.sampleRoundTrip(false);
+        // A hidden page can answer when runnable but must not arm local deadlines.
+        if (!this.pageHidden()) this.sampleRoundTrip(false);
         return;
       case "Pong":
         this.acceptPong(frame.nonce, frame.sentUs);
@@ -703,8 +766,9 @@ export class MuxConnection {
 
   private scheduleReconnect(): void {
     if (this.closed || this.retryTimer !== 0) return;
-    // Only welcomed sockets that close before the stable window add to this loop.
-    // Unwelcomed route failures restart their recovery schedule in disconnect().
+    if (this.pageHidden()) { this.startRetryHintListeners(); return; }
+    // Failed handshakes and short-lived welcomed routes share a growing counter.
+    // Offline path checks stay prompt until a refusal proves the hint stale.
     // Positive jitter spreads retries across pages; first opens retain the ordinary backoff.
     // An ordinary restart must regain typing within RTT + 50 ms [D259]. Once
     // a terminal really worked, check promptly during that bounded recovery
@@ -716,16 +780,16 @@ export class MuxConnection {
     this.startRetryHintListeners();
   }
 
-  /** Online and foreground hints reset retry state while an in-flight handshake remains the active attempt. */
+  /** Hints retry promptly without replacing an in-flight handshake or resetting refusal backoff. */
   private retryNow(): void {
-    if (this.closed) return;
+    if (this.closed || this.pageHidden()) return;
     const socket = this.socket;
     const retryPending = this.retryTimer !== 0;
     const handshakePending = socket !== undefined && !this.welcomed;
-    if (!retryPending && !handshakePending) return;
+    if (!retryPending && !handshakePending && !this.retryHintListeners) return;
     this.clearRetryTimer();
-    this.retryAttempt = 0;
-    this.fastRecovery = this.streams.size > 0;
+    if (!this.refusalBackoff) this.retryAttempt = 0;
+    this.fastRecovery = !this.refusalBackoff && this.streams.size > 0;
     // A WebSocket already opening across the outage is itself the immediate retry. Closing it here
     // discards a handshake the browser can resume when its network returns.
     if (socket && socket.readyState !== WebSocket.CLOSED) return;
@@ -753,7 +817,7 @@ export class MuxConnection {
     this.retryTimer = 0;
   }
 
-  private resetPings(): void {
+  private resetPings(preserveInput = false): void {
     // Clearing a timer cannot remove its callback if the browser already queued it.
     this.livenessConfirmationToken += 1;
     window.clearTimeout(this.livenessTimer);
@@ -762,10 +826,11 @@ export class MuxConnection {
     this.livenessDueAt = Infinity;
     this.lastLivenessStallAt = -Infinity;
     this.stallGraceUsed = false;
+    this.livenessStallGraceAt = -Infinity;
     this.lastPingAt = -Infinity;
     this.lastRttReportAt = -Infinity;
     this.pendingPings.clear();
-    this.unacknowledgedInput.clear();
+    if (!preserveInput) this.unacknowledgedInput.clear();
     this.fastProbeUntil = 0;
     for (const l of this.rttListeners) l(undefined);
   }
