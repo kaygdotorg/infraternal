@@ -54,6 +54,8 @@ export interface Bridge {
   acked: Map<number, bigint>;
   /** Completed real PTY replays, including automatic rebinding on the same browser socket. */
   replays: number;
+  /** Counts marked renderer answers without retaining terminal input. */
+  replyAttempts?: number;
   /** Close frames the client sent (stream detaches). */
   detached: number[];
   /** Control-stream actions and subscriptions: what the browser asked (`up`) and what the server answered (`down`). */
@@ -189,7 +191,7 @@ export async function startRealServer(options: {
     front.handleUpgrade(request, socket, head, (browser) => {
       activeBrowsers.add(browser);
       const upstream = new WebSocket(backend.replace("http:", "ws:") + (request.url ?? "/v1/ws"), { headers: { Origin: origin, Cookie: request.headers.cookie ?? "" } });
-      const bridge: Bridge = { id: bridges.length, closed: false, attached: new Map(), output: new Map(), acked: new Map(), replays: 0, detached: [], control: [], cookie: request.headers.cookie ?? "" };
+      const bridge: Bridge = { id: bridges.length, closed: false, attached: new Map(), output: new Map(), acked: new Map(), replays: 0, replyAttempts: 0, detached: [], control: [], cookie: request.headers.cookie ?? "" };
       // Harness stage markers contain only fixed labels and timestamps, never terminal text.
       bridge.markers = [];
       if (process.env.REAL_OUTPUT_TIMES === "1") {
@@ -218,6 +220,7 @@ export async function startRealServer(options: {
                 : f.type === "Resize" ? ` cols=${f.cols} rows=${f.rows}` : "";
             console.error(`FRAME ${Date.now() % 100000} b${bridge.id} up s${stream} ${f.type}${detail}`);
           }
+          if (f.type === "Input" && f.replyTo !== undefined) bridge.replyAttempts = (bridge.replyAttempts ?? 0) + 1;
           if (f.type === "AttachTerm") {
             bridge.attached.set(stream, [...(bridge.attached.get(stream) ?? []), Buffer.from(f.sessionId).toString("hex")]);
             bridge.attachTimes?.push({ stream, at: Date.now() });
