@@ -201,7 +201,7 @@ DispatchQueue.global(qos:.userInteractive).async {
                     if received != 0 {
                         // One content-free write keeps concurrent capture receipts intact.
                         let finished = nanos(mach_absolute_time())
-                        FileHandle.standardError.write(Data("METRIC native_input receive_ns=\(received) dispatch_ns=\(dispatched) finished_ns=\(finished) accepted=\(reply?.1["accepted"] as? Bool == true)\n".utf8))
+                        FileHandle.standardError.write(Data("METRIC native_input receive_ns=\(received) dispatch_ns=\(dispatched) finished_ns=\(finished) accepted=\(reply?.1["accepted"] as? Bool == true) local_pause=\(reply?.1["reason"] as? String == "local_input") failed=\(failure != nil)\n".utf8))
                     }
                     if let failure { throw failure }
                     guard let reply else { throw HelperFailure.unavailable }
