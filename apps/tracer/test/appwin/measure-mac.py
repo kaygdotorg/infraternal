@@ -12,6 +12,10 @@ E=ROOT/'evidence'/args['label'];E.mkdir(parents=True,exist_ok=False)
 BIN=ROOT/'bin'
 RUN_TIMEOUT_SECONDS=900
 CLEANUP_RESERVE_SECONDS=30
+INPUT_SAMPLE_COUNT=40
+STABILITY_SECONDS=180
+RECONNECT_ITERATION=3
+REOPEN_ITERATION=6
 
 class ProcBsdInfo(ctypes.Structure):
  """Kernel process fields used to identify one PID incarnation."""
@@ -506,8 +510,9 @@ try:
     if not compositor:raise RuntimeError('native change absent from compositor copies')
    result={'kind':'sample','index':index,'source':draw,'effect':effect,'events':events,'compositor':compositor};results.append(result);emit(result)
   stage='input samples'
-  for index in range(16):
-   page.wait_for_timeout(150+(index*37)%103);sequence=max(r['sequence'] for r in all_draws if r['kind']=='draw')+1
+  emit({'kind':'input_sample_plan','count':INPUT_SAMPLE_COUNT,'trigger':'immediate after key event'})
+  for index in range(INPUT_SAMPLE_COUNT):
+   sequence=max(r['sequence'] for r in all_draws if r['kind']=='draw')+1
    drain();page.evaluate('([id,colour])=>window.__appWindowBench.arm(id,{colour})',[100+index,sequence%8]);copy_target=compositor_target(surface,page.viewport_size);composite_begin=len(composites);page.keyboard.type('x');deadline=time.monotonic()+5;events=[];effect=None
    while time.monotonic()<deadline:
     receipt=drain();events.append(receipt);effect=next((e for e in receipt['probe']['events'] if e.get('t')=='bench-effect' and e['id']==100+index),None)
@@ -557,6 +562,7 @@ try:
  emit({'kind':'recording','frames':len(frames),'typed_before':typed_before,'typed_count':typed_count,'typed_expected':sum(map(len,demo_text)),'canvas_after':page.locator('.ui-window[data-kind="app"]').bounding_box()})
  if args.get('soak'):
   stage='stability soak'
+  emit({'kind':'stability_plan','seconds':STABILITY_SECONDS,'reconnect_iteration':RECONNECT_ITERATION,'reopen_iteration':REOPEN_ITERATION})
   soak_start=time.monotonic();counts={'crashes':0,'stuck_frames':0,'requested_drops':0,'reconnects':0,'reopens':0,'typed':0,'resizes':0,'idle_checks':0,'unexpected_helper_exits':0,'slow_worker_updates':0};iteration=0
   def live_helper_pids():
    ids={int(line.split()[1]) for line in pidlog.read_text().splitlines()}
@@ -565,11 +571,11 @@ try:
    return {int(value) for value in result.stdout.split()}
   previous_helpers=live_helper_pids();previous_expected_retirement=False
   soak_sockets_before=page.evaluate('window.__appWindowBench.sockets')
-  while time.monotonic()-soak_start<600:
+  while time.monotonic()-soak_start<STABILITY_SECONDS:
    consent_guard();battery()
    if source.poll() is not None or window.poll() is not None or not browser.is_connected():
     counts['crashes']+=1;break
-   if iteration==18:
+   if iteration==RECONNECT_ITERATION:
     prior_sockets=page.evaluate('window.__appWindowBench.sockets')
     emit({'kind':'network_drop_request'});counts['requested_drops']+=1
     ack=json.loads(sys.stdin.readline())
@@ -579,7 +585,7 @@ try:
      first_picture();counts['reconnects']+=1
      emit({'kind':'soak_reconnect','before':prior_sockets,'after':page.evaluate('window.__appWindowBench.sockets')})
     except Exception:counts['stuck_frames']+=1
-   if iteration==36:
+   if iteration==REOPEN_ITERATION:
     previous=page.locator('.ui-window[data-kind="app"]').first
     previous_id=previous.get_attribute('data-window-id')
     if not previous_id:raise RuntimeError('app window identity unavailable')
@@ -619,7 +625,7 @@ try:
    current_helpers=live_helper_pids();retired=previous_helpers-current_helpers
    # Resize notifications retire capture asynchronously; keep that attribution
    # through the next observation, while unexplained exits still fail the soak.
-   initiated_retirement=iteration in (18,36) or iteration%6==2
+   initiated_retirement=iteration in (RECONNECT_ITERATION,REOPEN_ITERATION) or iteration%6==2
    expected_retirement=initiated_retirement or previous_expected_retirement
    if retired:
     emit({'kind':'soak_helper_retirement','iteration':iteration,'expected':expected_retirement,'pids':sorted(retired)})

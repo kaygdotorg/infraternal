@@ -250,6 +250,24 @@ class RunDeadlineTests(unittest.TestCase):
         launcher = pathlib.Path(__file__).parents[4] / 'scripts/app-window-owner-preview'
         self.assertIn('APP_WINDOW_OWNER_PREVIEW_SECONDS=900', launcher.read_text())
 
+    def test_measurement_plan_collects_forty_inputs_and_three_minutes(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py').read_text()
+        tree = ast.parse(source)
+        constants = {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id in {
+                        'INPUT_SAMPLE_COUNT', 'STABILITY_SECONDS', 'RECONNECT_ITERATION', 'REOPEN_ITERATION',
+                    }:
+                        constants[target.id] = ast.literal_eval(node.value)
+        self.assertEqual(constants, {
+            'INPUT_SAMPLE_COUNT': 40,
+            'STABILITY_SECONDS': 180,
+            'RECONNECT_ITERATION': 3,
+            'REOPEN_ITERATION': 6,
+        })
+
 
 class ConsentTests(unittest.TestCase):
     """Execute only the consent guard, without importing or launching the browser driver."""
