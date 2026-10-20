@@ -25,7 +25,7 @@ import { Database } from 'bun:sqlite';
 import { createInterface } from 'node:readline';
 const ROOT=resolve(process.env.APP_WINDOW_BENCH_DIR??homedir()+'/.cache/codex-scratch/app-windows-latency');
 const pipeline=process.env.APP_WINDOW_PIPELINE??'default';
-if(!['default','surface'].includes(pipeline))throw Error('invalid capture path');
+if(!['default','surface','owned'].includes(pipeline))throw Error('invalid capture path');
 const desynchronized=process.env.APP_WINDOW_DESYNCHRONIZED==='1';
 const resourcesOnly=process.env.APP_WINDOW_RESOURCES_ONLY==='1';
 const pipelineDiagnostics=!resourcesOnly&&process.env.APP_WINDOW_PIPELINE_DIAGNOSTICS!=='0';
@@ -93,7 +93,7 @@ try{
  const [built]=await once(build,'exit');if(built!==0)throw Error('production frontend build failed');
  const bundle=await Bun.build({entrypoints:[worktree+'/apps/tracer/test/appwin/bench-probe.ts'],target:'browser',format:'iife',minify:true});
  if(!bundle.success)throw Error('probe build failed');
- const manifest:Record<string,string|boolean|number>={head:new TextDecoder().decode(Bun.spawnSync(['git','rev-parse','HEAD'],{cwd:worktree}).stdout).trim(),desynchronized,resourcesOnly,pipelineDiagnostics,codec,hardwareHint,job,demoOnly,requireIdle,port,soak,ownerPreview,ownerPreviewSeconds,...(native?{native,nativeHash:nativeHash!}:{})};
+ const manifest:Record<string,string|boolean|number>={head:new TextDecoder().decode(Bun.spawnSync(['git','rev-parse','HEAD'],{cwd:worktree}).stdout).trim(),desynchronized,resourcesOnly,pipeline,capturePath:pipeline==='owned'?'owned-copy':'signed-surface',pipelineDiagnostics,codec,hardwareHint,job,demoOnly,requireIdle,port,soak,ownerPreview,ownerPreviewSeconds,...(native?{native,nativeHash:nativeHash!}:{})};
  for(const [name,path] of Object.entries({binary:process.env.INFRATERNAL_BIN!,controller:import.meta.path,macDriver:import.meta.dirname+'/measure-mac.py',companionLauncher:import.meta.dirname+'/launch-companion.py',processIdentity:import.meta.dirname+'/process_identity.py',pixelObserver:import.meta.dirname+'/worker-pixel-observer.js',probe:import.meta.dirname+'/bench-probe.ts',nativeFixture:worktree+'/crates/plugins/desktop/tests/fixtures/latency-window.swift',worker:workerOverride??worktree+'/apps/tracer/dist/decode.worker.on-demand.js'}))manifest[name]=new Bun.CryptoHasher('sha256').update(await readFile(path)).digest('hex');
  manifest.worktreeDiffSha256=new Bun.CryptoHasher('sha256').update(Bun.spawnSync(['git','diff','HEAD'],{cwd:worktree}).stdout).digest('hex');
  manifest.probeBundle=new Bun.CryptoHasher('sha256').update(await bundle.outputs[0]!.text()).digest('hex');

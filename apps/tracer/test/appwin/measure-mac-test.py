@@ -38,6 +38,36 @@ class RecordingTypingTests(unittest.TestCase):
         self.assertTrue(self.incomplete(39, frames=False))
 
 
+class CapturePipelineTests(unittest.TestCase):
+    """The requested diagnostic route must map to the helper's actual mode."""
+
+    def configure(self, pipeline, inherited):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                        and node.name == 'capture_environment')
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        return namespace['capture_environment'](pipeline, inherited)
+
+    def test_default_clears_stale_overrides_and_uses_the_production_route(self):
+        env = self.configure('default', {'INFRATERNAL_DESKTOP_SURFACE': '1',
+                                         'INFRATERNAL_DESKTOP_OWNED': '1', 'PATH': '/bin'})
+        self.assertEqual(env, {'PATH': '/bin'})
+
+    def test_owned_selects_the_copied_pixel_diagnostic_route(self):
+        env = self.configure('owned', {'INFRATERNAL_DESKTOP_SURFACE': '1', 'PATH': '/bin'})
+        self.assertEqual(env, {'INFRATERNAL_DESKTOP_OWNED': '1', 'PATH': '/bin'})
+
+    def test_surface_alias_uses_the_current_production_route(self):
+        env = self.configure('surface', {'INFRATERNAL_DESKTOP_OWNED': '1', 'PATH': '/bin'})
+        self.assertEqual(env, {'PATH': '/bin'})
+
+    def test_unknown_pipeline_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.configure('other', {})
+
+
 class FirstPictureTests(unittest.TestCase):
     """Capture refusal and the first-picture deadline stop capture before cleanup."""
 

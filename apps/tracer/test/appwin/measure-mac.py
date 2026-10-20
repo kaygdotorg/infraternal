@@ -28,6 +28,16 @@ start=time.monotonic();stage='lock';all_draws=[];native_metrics=[];results=[];fa
 def emit(value): print(json.dumps(value),flush=True)
 def command(argv,**kw):return subprocess.run(argv,capture_output=True,text=True,check=True,**kw).stdout
 
+def capture_environment(pipeline, inherited):
+ """Select the production capture route or its explicit owned-pixel diagnostic."""
+ if pipeline not in ('default','surface','owned'):raise ValueError('invalid capture path')
+ env=dict(inherited)
+ # Since D266, production defaults to same-process IOSurface capture. Keep the
+ # historical surface spelling as an alias; only owned opts into pixel copies.
+ env.pop('INFRATERNAL_DESKTOP_SURFACE',None);env.pop('INFRATERNAL_DESKTOP_OWNED',None)
+ if pipeline=='owned':env['INFRATERNAL_DESKTOP_OWNED']='1'
+ return env
+
 def launch(argv,**kw):
  p=subprocess.Popen(argv,**kw);owned.add(p.pid);children.append(p);return p
 
@@ -271,10 +281,9 @@ try:
   if consent_errors:raise RuntimeError('helper consent monitor refused the run')
  env=dict(os.environ,INFRATERNAL_DESKTOP_COMPANION=str(runtime/'native'),INFRATERNAL_DESKTOP_MEASURE='1',INFRATERNAL_DESKTOP_BENCH_DIR=str(runtime),INFRATERNAL_DESKTOP_BENCH_HELPER=str(runtime/'helper'))
  if args.get('resources_only') or not args.get('pipeline_diagnostics',True):env.pop('INFRATERNAL_DESKTOP_MEASURE',None)
- env.pop('INFRATERNAL_DESKTOP_SURFACE',None);env.pop('INFRATERNAL_DESKTOP_OWNED',None)
- if args.get('pipeline')=='surface':env['INFRATERNAL_DESKTOP_SURFACE']='1'
- if args.get('pipeline')=='owned':env['INFRATERNAL_DESKTOP_OWNED']='1'
- emit({'kind':'pipeline','mode':args.get('pipeline','owned'),'browser_dpr':2})
+ pipeline=args.get('pipeline','default');env=capture_environment(pipeline,env)
+ capture_path='owned-copy' if pipeline=='owned' else 'signed-surface'
+ emit({'kind':'pipeline','mode':pipeline,'capture_path':capture_path,'browser_dpr':2})
  preflight=launch([str(runtime/'helper'),'--check-permissions'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
  consent_check();out,err=preflight.communicate(timeout=20)
  permissions=json.loads(out);emit({'kind':'helper_permissions','pid':preflight.pid,'exit':preflight.returncode,'permissions':permissions})
