@@ -48,15 +48,21 @@ def run(executable, runtime, errors, pidlog, arguments):
     owned = set()
     opened = None
     incoming = outgoing = output_guard = None
+    stdout_blocking = None
+    writer_started = waiter_started = False
     cancelled = threading.Event()
     stopped, stop = os.pipe()
+    os.set_blocking(stop, False)
     def wake():
         try:
             os.write(stop, b'x')
         except OSError:
             pass
     def interrupt(signum, frame):
-        raise InterruptedError('companion bridge cancelled')
+        # Raising inside Thread.start or cleanup can abandon the independent
+        # app. Wake the bounded I/O wait instead; cleanup cannot be interrupted.
+        cancelled.set()
+        wake()
     signal.signal(signal.SIGTERM, interrupt)
     signal.signal(signal.SIGHUP, interrupt)
     with tempfile.TemporaryDirectory(prefix='launch-', dir=runtime) as directory:
@@ -71,6 +77,10 @@ def run(executable, runtime, errors, pidlog, arguments):
         output_guard = os.open(output_path, os.O_RDWR)
         outgoing = os.open(output_path, os.O_RDONLY | os.O_NONBLOCK)
         try:
+            stdout_blocking = os.get_blocking(1)
+            os.set_blocking(1, False)
+            if cancelled.is_set():
+                raise InterruptedError('companion bridge cancelled')
             opened = subprocess.Popen(open_command(executable, pathlib.Path('/dev/null') if '--check-permissions' in arguments else input_path, output_path, errors, arguments),
                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             with open(pidlog, 'a') as log:
@@ -80,6 +90,7 @@ def run(executable, runtime, errors, pidlog, arguments):
                 wake()
             waiter = threading.Thread(target=wait_app, daemon=True)
             waiter.start()
+            waiter_started = True
             deadline = time.monotonic() + 10
             while not owned:
                 owned = app_pids(executable) - before
@@ -94,6 +105,8 @@ def run(executable, runtime, errors, pidlog, arguments):
                     if birth is None:
                         raise ValueError('app process identity unavailable')
                     log.write(f'{app_role} {pid} {birth[1]} {birth[2]}\n')
+            if cancelled.is_set():
+                raise InterruptedError('companion bridge cancelled')
             def forward_input():
                 try:
                     while not cancelled.is_set():
@@ -118,6 +131,7 @@ def run(executable, runtime, errors, pidlog, arguments):
             os.set_blocking(incoming, False)
             writer = threading.Thread(target=forward_input, daemon=True)
             writer.start()
+            writer_started = True
             while True:
                 readable = select.select([outgoing, stopped], [], [])[0]
                 if outgoing in readable:
@@ -130,16 +144,27 @@ def run(executable, runtime, errors, pidlog, arguments):
                         os.close(output_guard)
                         output_guard = None
                     view = memoryview(data)
-                    while view:
-                        view = view[os.write(1, view):]
+                    # A stopped reader must not trap cancellation in write(2).
+                    # Both forwarding directions share the cancellation pipe.
+                    while view and not cancelled.is_set():
+                        ready = select.select([stopped], [1], [])
+                        if stopped in ready[0]:
+                            break
+                        if ready[1]:
+                            try:
+                                view = view[os.write(1, view):]
+                            except BlockingIOError:
+                                continue
                 elif stopped in readable:
                     break
+            if cancelled.is_set():
+                raise InterruptedError('companion bridge cancelled')
             opened.wait(timeout=10)
             return opened.returncode
         finally:
             cancelled.set()
             wake()
-            if 'writer' in locals():
+            if writer_started:
                 writer.join(timeout=1)
             elif incoming is not None:
                 os.close(incoming)
@@ -157,10 +182,12 @@ def run(executable, runtime, errors, pidlog, arguments):
             if opened is not None and opened.poll() is None:
                 opened.terminate()
                 opened.wait(timeout=5)
-            if 'waiter' in locals():
+            if waiter_started:
                 waiter.join(timeout=1)
             os.close(stopped)
             os.close(stop)
+            if stdout_blocking is not None:
+                os.set_blocking(1, stdout_blocking)
 
 
 if __name__ == '__main__':

@@ -2,6 +2,7 @@
 import importlib.util
 import os
 import pathlib
+import select
 import signal
 import subprocess
 import sys
@@ -39,7 +40,7 @@ class LaunchTests(unittest.TestCase):
         self.assertNotIn(str(self.native), command)
         self.assertEqual(command[4:10], ['--stdin', 'in', '--stdout', 'out', '--stderr', 'err'])
 
-    def bridge(self):
+    def bridge(self, cancel_at_input_start=False):
         # Substitute only the platform launcher. Everything after it uses real
         # processes, FIFO backpressure, standard pipes and native EOF behavior.
         runner = '''import importlib.util,pathlib,subprocess,sys
@@ -54,9 +55,22 @@ m.process_identity=lambda pid:(pid,1792436400,123456)
 def command(executable,incoming,outgoing,errors,arguments):
  return [sys.executable,'-c',"import sys; a=open(sys.argv[1],'rb',buffering=0); b=open(sys.argv[2],'wb',buffering=0); data=a.read(); b.write(data); a.close(); b.close()",str(incoming),str(outgoing)]
 m.open_command=command
+if sys.argv[4]=='cancel-input-start':
+ import atexit,os,signal
+ def cleanup_children():
+  for p in children:
+   if p.poll() is None:p.terminate()
+   p.wait(timeout=3)
+ atexit.register(cleanup_children)
+ class Thread(m.threading.Thread):
+  def start(self):
+   if self._target.__name__=='forward_input':os.kill(os.getpid(),signal.SIGTERM)
+   return super().start()
+ m.threading.Thread=Thread
 raise SystemExit(m.run(sys.argv[2],sys.argv[3],sys.argv[3]+'/errors',sys.argv[3]+'/pids',[]))
 '''
-        return subprocess.Popen([sys.executable, '-c', runner, str(SOURCE), str(self.native), str(self.root)],
+        return subprocess.Popen([sys.executable, '-c', runner, str(SOURCE), str(self.native), str(self.root),
+                                 'cancel-input-start' if cancel_at_input_start else 'normal'],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def test_stream_bytes_and_eof_reach_the_independent_app(self):
@@ -88,6 +102,32 @@ raise SystemExit(m.run(sys.argv[2],sys.argv[3],sys.argv[3]+'/errors',sys.argv[3]
             with self.assertRaises(ProcessLookupError):
                 os.kill(int(row.split()[1]), 0)
         self.assertEqual(list(self.root.glob('launch-*')), [])
+
+    def test_cancellation_during_thread_start_cannot_interrupt_cleanup(self):
+        process = self.bridge(cancel_at_input_start=True)
+        _, errors = process.communicate(timeout=10)
+        self.assertNotIn(b'RuntimeError', errors)
+        for row in (self.root / 'pids').read_text().splitlines():
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(row.split()[1]), 0)
+        self.assertEqual(list(self.root.glob('launch-*')), [])
+
+    def test_cancellation_retires_an_app_while_the_consumer_stops_reading(self):
+        process = self.bridge()
+        try:
+            process.stdin.write(bytes(range(256)) * 8192)
+            process.stdin.close()
+            process.stdin = None
+            self.assertTrue(select.select([process.stdout], [], [], 5)[0])
+            process.send_signal(signal.SIGTERM)
+            process.wait(timeout=5)
+        finally:
+            # Drain on failure too, so a red backpressure regression cannot
+            # strand the fixture's real subprocesses or pipe descriptors.
+            process.communicate(timeout=15)
+        for row in (self.root / 'pids').read_text().splitlines():
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(row.split()[1]), 0)
 
 
 if __name__ == '__main__':
