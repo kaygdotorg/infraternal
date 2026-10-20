@@ -271,6 +271,9 @@ export function createViews(cx: Ctx): ViewsModule {
         colsEl.append(colEl);
       }
     } else {
+      // An already-loaded graph lays out synchronously and may settle this view.
+      // Its identity must be registered before layout resolves the fixed view.
+      views.set(view.id, c);
       cx.mesh?.buildGraph(c);
     }
     wireView(c);
