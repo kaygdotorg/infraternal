@@ -55,7 +55,9 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.colorSpaceName = CGColorSpace.sRGB
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         configuration.queueDepth = 3
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: Int32(fps))
+        // Let the framework publish at its maximum source cadence. A numeric
+        // floor delayed changed-frame delivery in the measured 120 Hz path [D266].
+        configuration.minimumFrameInterval = .zero
         configuration.sourceRect = rect.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
         configuration.destinationRect = fittedContent(rect, size)
         configuration.scalesToFit = true; configuration.preservesAspectRatio = true
