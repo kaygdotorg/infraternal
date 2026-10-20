@@ -616,7 +616,7 @@ try:
   soak_start=time.monotonic();counts={'crashes':0,'stuck_frames':0,'requested_drops':0,'reconnects':0,'reopens':0,'typed':0,'resizes':0,'idle_checks':0,'unexpected_helper_exits':0,'slow_worker_updates':0};iteration=0
   def live_helper_pids():
    return {pid for pid,birth in helper_births.items() if process_identity(pid)==birth}
-  previous_helpers=live_helper_pids();previous_expected_retirement=False
+  previous_helpers=live_helper_pids()
   initial_frames=drain()['frames'];initial_painted=[f for f in initial_frames if f.get('outcome')=='painted' and f.get('width') and f.get('height')]
   last_dimensions=(initial_painted[-1]['width'],initial_painted[-1]['height']) if initial_painted else None
   resize_cursor=(E/'helper-metrics.log').stat().st_size;recent_resize_acks=[]
@@ -686,13 +686,14 @@ try:
    current_helpers=live_helper_pids();retired=previous_helpers-current_helpers
    # Resize notifications retire capture asynchronously; keep that attribution
    # through the next observation, while unexplained exits still fail the soak.
-   initiated_retirement=RECOVERY_ENABLED and (iteration in (RECONNECT_ITERATION,REOPEN_ITERATION) or iteration%6==2)
    native_resize=expected_capture_retirement(retired,capture_helpers,previous_helpers-capture_helpers,current_helpers-capture_helpers,last_dimensions,current_dimensions,bool(recent_resize_acks))
-   expected_retirement=initiated_retirement or previous_expected_retirement or native_resize
+   # A requested recovery does not authorize helper loss; only a proven resize
+   # with the same surviving control owner can explain a capture retirement.
+   expected_retirement=native_resize
    if retired:
     emit({'kind':'soak_helper_retirement','iteration':iteration,'expected':expected_retirement,'pids':sorted(retired),'native_resize':native_resize,'resize_acks':[ack for _,ack in recent_resize_acks],'previous_dimensions':last_dimensions,'current_dimensions':current_dimensions,'previous_controls':sorted(previous_helpers-capture_helpers),'current_controls':sorted(current_helpers-capture_helpers)})
     if not expected_retirement:counts['unexpected_helper_exits']+=len(retired)
-   previous_helpers=current_helpers;previous_expected_retirement=initiated_retirement;last_dimensions=current_dimensions
+   previous_helpers=current_helpers;last_dimensions=current_dimensions
    emit({'kind':'soak_step','iteration':iteration,'elapsed_seconds':time.monotonic()-soak_start,'counts':counts.copy()})
    iteration+=1
    page.wait_for_timeout(max(0,int((soak_start+iteration*10-time.monotonic())*1000)))
