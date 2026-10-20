@@ -143,8 +143,13 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,386,224 bytes |
-  | `aarch64-unknown-linux-musl` | 19,557,992 bytes |
+  | `x86_64-unknown-linux-musl` | 21,387,248 bytes |
+  | `aarch64-unknown-linux-musl` | 19,559,400 bytes |
+
+  The RUSTSEC-2026-0382 lockfile update to rustls-webpki 0.103.16 measures
+  21,387,248 / 19,559,400 bytes with the same pinned static recipe: +1,024 /
+  +1,408 bytes versus release 9. Both exact caps ratchet to these measured
+  values; the receipts are on #24.
 
   The reply-reservation production fix (#24, D307) measures 21,387,120 /
   19,558,856 bytes with the same pinned static recipe: -64 / -256 bytes

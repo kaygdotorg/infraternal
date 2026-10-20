@@ -65,8 +65,8 @@ rust_check_static_binary() {
 
     # D243 ratchets each ceiling to the latest measured stripped artifact.
     case "$target" in
-        x86_64-unknown-linux-musl) max_size_bytes=21386224 ;;
-        aarch64-unknown-linux-musl) max_size_bytes=19557992 ;;
+        x86_64-unknown-linux-musl) max_size_bytes=21387248 ;;
+        aarch64-unknown-linux-musl) max_size_bytes=19559400 ;;
         *)
             printf 'no static binary size baseline configured for target: %s\n' "$target" >&2
             return 1
