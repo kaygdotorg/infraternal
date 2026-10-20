@@ -21,7 +21,9 @@ cell dimensions to device pixels. `link-underline.patch` paints temporary link
 underlines with the active theme cursor colour while preserving batched text
 rendering. `renderer-disposal.patch` removes global mouse handlers during
 ordinary disposal and partial-open failure, including disposable sign-in
-warm-up. `zero-pages.patch` edits the Ghostty submodule so the freestanding browser build
+warm-up. `buffered-writes.patch` adds synchronous ordered input slices backed by one temporary
+allocation, with checked bounds, scoped callback lifetime and one paint/effects
+pass. It changes no parser or WASM ABI. `zero-pages.patch` edits the Ghostty submodule so the freestanding browser build
 zeroes every page it hands out; upstream does so only in safe builds, so
 a new or reset terminal showed the previous terminal's rows (#241). The patches apply in that order. The script
 runs the upstream locked install and its four constituent build steps. It does

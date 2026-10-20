@@ -120,9 +120,10 @@ opt-level = "s"
 opt-level = "s"
 
 # Keep host orchestration compact; transport, protocol, VT and cryptographic
-# crates retain their speed optimization [5,243].
+# crates retain their speed optimization. The measured minimum-size profile
+# keeps the bounded terminal-query lane compact [5,243,307].
 [profile.release.package.infraternal-agent]
-opt-level = "s"
+opt-level = "z"
 
 # SSH installation is management orchestration, outside terminal and mesh data
 # paths; it is bounded by the external transport [243,255]. Lifetime-safe retry

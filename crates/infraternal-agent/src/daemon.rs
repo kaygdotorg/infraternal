@@ -50,6 +50,7 @@ mod terminal_events;
 
 enum Command {
     Input(u64, Vec<u8>),
+    Reply(Vec<u8>),
     Credit(u32),
     Resize(u16, u16, u16, u16),
     #[cfg(feature = "remote")]
@@ -761,6 +762,7 @@ async fn run_channel<const SESSION_ONLY: bool>(
                         frame => {
                             let command = match frame {
                                 Frame::Input {in_seq, bytes} => Command::Input(in_seq, bytes.to_vec()),
+                                Frame::InputReply {bytes, ..} => Command::Reply(bytes.to_vec()),
                                 Frame::Ping {nonce, sent_us} => Command::Ping(nonce, sent_us),
                                 Frame::Credit {bytes} => Command::Credit(bytes),
                                 Frame::Resize {cols, rows, px_w, px_h} => Command::Resize(cols, rows, px_w, px_h),
@@ -876,6 +878,7 @@ async fn run_bound_terminal_mode(
             let decoded = receive.next(channel).await?;
             let command = match decoded.frame {
                 Frame::Input { in_seq, bytes } => Command::Input(in_seq, bytes.to_vec()),
+                Frame::InputReply { bytes, .. } => Command::Reply(bytes.to_vec()),
                 Frame::Ping { nonce, sent_us } => Command::Ping(nonce, sent_us),
                 Frame::Credit { bytes } => Command::Credit(bytes),
                 Frame::Call {
@@ -1237,6 +1240,7 @@ async fn terminal_run(
     // One state fence in flight bounds shim work even if probes are pipelined over the network.
     // It belongs to the data socket: parking that socket must clear its pending fence.
     let mut probe = None;
+    let mut reply_unavailable_announced = false;
     loop {
         if let Some(frame) = pending.take() {
             match frame {
@@ -1421,6 +1425,17 @@ async fn terminal_run(
                         }
                         let peer = session.as_mut().ok_or_else(|| sessions::invalid("missing shim"))?;
                         match other {
+                            Command::Reply(bytes) => {
+                                // An older surviving shim cannot accept the extension. Drop
+                                // rather than interpreting a renderer reply as typing [307].
+                                if peer.session.caps & infraternal_shim::frame::QUERY_REPLIES != 0 {
+                                    peer.send(&Shim::QueryReply(bytes)).await?;
+                                } else if !reply_unavailable_announced {
+                                    reply_unavailable_announced = true;
+                                    let json = terminal_events::Notice::QueryRepliesUnavailable { session_id: uuid::Uuid::from_bytes(id) }.json()?;
+                                    emit(&tx, Message::Event(stream, json)).await?;
+                                }
+                            }
                             Command::Input(seq, bytes) => peer.send(&Shim::SequencedInput(seq, bytes)).await?,
                             Command::Resize(cols, rows, px_w, px_h) => peer.send(&Shim::Resize {cols, rows, px_w, px_h}).await?,
                             Command::Ping(nonce, sent_us) => {

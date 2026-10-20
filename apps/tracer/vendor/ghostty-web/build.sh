@@ -67,6 +67,8 @@ git -C "$source_dir" apply "$vendor_dir/cell-metrics.patch"
 git -C "$source_dir" apply "$vendor_dir/link-underline.patch"
 # Dispose global input listeners even when opening failed or the renderer was hidden.
 git -C "$source_dir" apply "$vendor_dir/renderer-disposal.patch"
+# Control boundaries share one scoped input copy and one set of write effects.
+git -C "$source_dir" apply "$vendor_dir/buffered-writes.patch"
 
 git -C "$source_dir" submodule update --quiet --init --recursive --depth=1
 if [[ "$(git -C "$source_dir/ghostty" rev-parse HEAD)" != "$ghostty_commit" ]]; then

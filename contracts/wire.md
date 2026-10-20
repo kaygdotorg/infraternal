@@ -131,6 +131,7 @@ leg B only, contracts/bootstrap.md §4).
 | 0x14 | `Credit` | u32 bytes | client → server: permission to send more output |
 | 0x15 | `Snapshot` | u64 out_seq, bytes | screen repaint valid at out_seq |
 | 0x16 | `AttachTerm` | 16-byte session id, u64 last_out_seq, u64 last_in_seq | opens or resumes a terminal stream |
+| 0x17 | reply-marked `Input` | u64 query_seq, bytes (1–1024) | additive D307 extension; no typing cursor |
 | 0x30 | `Call` | u32 call_id, varint+utf8 action id, JSON input | contracts/plugin.md §3 |
 | 0x31 | `Result` | u32 call_id, u8 ok, JSON output or error | |
 | 0x32 | `Subscribe` | u32 sub_id, JSON filter | events (contracts/plugin.md §5) |
@@ -681,3 +682,54 @@ snapshot, since recovered IDs are assigned by the server. The client must keep
 its original local document until success, then treat it only as a drawing cache.
 Errors are Result `ok:false` with `{"error":"invalid canvas operation"}`;
 no account existence or foreign ownership detail is exposed.
+
+## Reply-marked Input [D307, #160, #206]
+
+Hello capability bit 3 (`TERMINAL_QUERY_REPLIES`) advertises the v1 reply
+extension. A browser sends 0x17 only to a server advertising it; legacy 0x10
+Input is unchanged and always means ordinary input. The TypeScript Input model
+adds optional `replyTo`; Rust names the distinct layout `InputReply`.
+
+`query_seq` identifies the opening ESC byte in the session's absolute Output
+cursor. It is not a typing offset. Replies consume no typing credit or cursor,
+are not replayed by browsers, and are never reclassified as typing. The server
+timestamps output ranges before delivering them, accepts the first renderer response
+within one second of the opening ESC, and drops duplicate, unknown, expired or
+empty or oversized responses with content-free diagnostics. This window
+covers more than three default 300 ms round trips and bounds stale responses,
+including queries split across output frames. A new query has a new identity,
+even when its bytes match an older query. Query state survives viewer reconnect.
+
+The renderer is authoritative about which output produces a response. Neither
+side matches request kinds or response contents. Generic control boundaries
+split browser renderer writes so identities survive different viewers' paint/credit
+chunking, including multiple requests in one transport frame. They classify no
+request kinds and retain no control contents. A string interrupted by another
+ESC sequence uses the newer opening ESC identity. The server parses no terminal
+grammar: the timestamp of the output byte identified by `query_seq` determines
+the deadline, even when the request completes in a later output frame. Replay
+and fan-out never renew that timestamp.
+
+Only output creates timestamped ranges (at most 64 per session); accepted replies
+create bounded claims (at most 64 live positions per session, 4,096 sessions).
+Unknown marked input creates neither. Evicting the oldest output range refuses
+replies to its positions. A full claim table refuses new replies until expiry;
+it never evicts a live claim and thereby reopens an accepted position. Styling
+controls consume no claims, so they cannot displace a pending query.
+Replies take a separate bounded lane to the shim so discarded replies cannot
+leave gaps in keyboard input cursors or select the answering viewer's geometry.
+On the browser leg, replies retain their wire order relative to Input/Resize
+through both forwarding queues. Each attachment reserves up to 64 reply slots
+of at most 1,024 bytes each, separately from the existing eight keyboard slots
+and wire-byte budget. Full or expired reply admission drops only the reply;
+it never retires the writer. The shared host dispatcher likewise reserves
+64 reply slots separately from its eight Input/Resize slots, while preserving
+one FIFO and the existing accumulated-Credit barriers. Output Credit still
+bypasses the browser FIFO.
+
+A surviving pre-extension shim cannot accept reply bytes without changing typing
+cursors or geometry. On the first marked reply to such a session the infraternal
+agent sends `terminal.query_replies_unavailable` with its `session_id`; the
+server validates and forwards it only in response to marked input, so an old
+browser never receives this new notice. The browser says to open a new shell.
+Ordinary legacy Input remains available. No session is automatically ended.

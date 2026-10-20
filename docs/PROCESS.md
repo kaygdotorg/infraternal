@@ -143,10 +143,15 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,385,264 bytes |
-  | `aarch64-unknown-linux-musl` | 19,570,256 bytes |
+  | `x86_64-unknown-linux-musl` | 21,387,824 bytes |
+  | `aarch64-unknown-linux-musl` | 19,559,624 bytes |
 
-  These are the release-7 measurements after the reviewed Retry and Mesh merges,
+  D307 integrated on release 7 measures 21,387,824 / 19,559,624 bytes (#24):
+  +2,560 / −10,632 bytes versus release 7. The release-6 D307 delta is not
+  additive on this combination. The release-8 brief permits at most +20,000
+  x86_64 bytes; these exact caps retain no growth allowance (D243, D307).
+
+  Release 7 measured 21,385,264 / 19,570,256 bytes after the reviewed Retry and Mesh merges,
   #246 source-path normalization, and the #236 migration collision correction:
   +40,960 / +34,656 bytes over release 6. Retry measured 21,352,208 /
   19,542,304 bytes; Mesh measured 21,385,264 / 19,570,256. Build normalization

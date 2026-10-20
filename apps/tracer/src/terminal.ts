@@ -2,6 +2,7 @@
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
 import { ICONS } from "../../../packages/ui/src/icons";
 import { bindingLabel } from "../../../packages/ui/src/shortcuts";
+import { TerminalQueries } from "./terminal-queries";
 import { terminalRefusal } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
 import { reattachReason, recoveringReason } from "./close-reasons";
@@ -41,6 +42,8 @@ const THEME_COLOR_KEYS: readonly (keyof ITheme)[] = [
   "background", "foreground", "cursor", "cursorAccent", "selectionBackground", "selectionForeground", ...ANSI_THEME_KEYS,
 ];
 const encoder = new TextEncoder();
+/** Never append to this shared sentinel: the first answer gets a private collector. */
+const EMPTY_PARSER_REPLIES: string[] = [];
 
 /** Private hooks on the pinned Ghostty build, kept at the renderer boundary for idle parking. */
 interface GhosttyActivityControls {
@@ -301,6 +304,10 @@ export class TerminalClient {
   private replayResponseFence: bigint | undefined;
   /** Scoped only around synchronous renderer writes; keyboard input arrives in later event tasks. */
   private suppressTerminalResponses = false;
+  // Allocate only when output is scanned; a reset before the first write has no query state.
+  private terminalQueries: TerminalQueries | undefined;
+  private parserReplies: string[] | undefined;
+  private parserReplyLength = 0;
   private renderIdleTimer = 0;
   /** Set by writes and consumed by the next renderer pass; link parsing itself waits for an idle callback. */
   private linkRowsArmed = false;
@@ -390,6 +397,14 @@ export class TerminalClient {
       this.wakeTerminal();
       // Replayed parser replies are not typing: they neither reach the shell nor restart the blink.
       if (this.suppressTerminalResponses) return;
+      if (this.parserReplies) {
+        this.parserReplyLength += data.length;
+        if (this.parserReplyLength <= 1024) {
+          if (this.parserReplies === EMPTY_PARSER_REPLIES) this.parserReplies = [data];
+          else this.parserReplies.push(data);
+        }
+        return;
+      }
       this.restartCursorBlink();
       this.handleInput(data);
     });
@@ -851,6 +866,9 @@ export class TerminalClient {
   dispose(): void {
     if (this.closed) return;
     this.closed = true;
+    this.cursorEpoch += 1;
+    this.terminalQueries?.reset();
+    this.terminalQueries = undefined;
     this.cancelStreamRetry();
     this.linkController?.dispose();
     this.linkController = undefined;
@@ -956,7 +974,9 @@ export class TerminalClient {
           const session = uuidBytes(requireString(notice.session_id));
           if (!this.sessionId || session.some((byte, index) => byte !== this.sessionId?.[index])) throw new Error("session mismatch");
           // Notices describe recovery; only the subsequent wire Snapshot advances the cursor.
-          if (notice.type === "terminal.reconnecting") {
+          if (notice.type === "terminal.query_replies_unavailable") {
+            this.setStatus("Open a new shell to enable terminal query replies after this update.");
+          } else if (notice.type === "terminal.reconnecting") {
             // The supervisor retains this writer and replays it on the new host link.
             // Keep new input locally until the replacement's replay fence is painted.
             if (this.attachmentConfirmed) {
@@ -1241,6 +1261,7 @@ export class TerminalClient {
     this.pendingSnapshot?.bytes.fill(0);
     this.pendingSnapshot = undefined;
     this.prediction?.resetForSnapshot();
+    this.terminalQueries?.reset();
     this.terminal.reset();
     this.resumeInputIfRoom();
   }
@@ -1459,6 +1480,7 @@ export class TerminalClient {
       this.requestSymbolsIfNeeded(snapshot.bytes);
       this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "termWrite", performance.now());
       const epoch = this.cursorEpoch;
+      this.terminalQueries?.reset();
       this.writeSuppressingTerminalResponses(snapshot.bytes, () => {
         if (epoch !== this.cursorEpoch) { this.snapshotWriteInFlight = false; this.drainOutput(); this.tryAttach(); return; }
         const callbackAt = performance.now();
@@ -1520,8 +1542,8 @@ export class TerminalClient {
         this.drainOutput();
         this.tryAttach();
       };
-      if (this.suppressReplayResponses) this.writeSuppressingTerminalResponses(region, onWritten);
-      else this.terminal.write(region, onWritten);
+      if (this.suppressReplayResponses) this.writeSuppressingTerminalResponses(region, onWritten, writeSequence);
+      else this.writeQueryResponses(region, writeSequence, onWritten);
       // The terminal state includes these bytes now; only their paint is a frame away. Reconcile the
       // prediction against them at once, so a key typed in that frame is placed from a consistent cursor.
       if (this.predictionUnsafe()) this.prediction?.unsafeScreen();
@@ -1532,14 +1554,41 @@ export class TerminalClient {
     this.tryAttach();
   }
 
+  /** Write through generic control boundaries and mark every synchronous renderer answer.
+   * Keyboard callbacks run in later tasks and always use the unchanged typing path.
+   */
+  private writeQueryResponses(bytes: Uint8Array, offset: bigint, callback: () => void): void {
+    if (!this.conn.terminalQueryReplies) { this.terminal.write(bytes, callback); return; }
+    this.linkRowsArmed = true;
+    this.terminal.writeSlices(bytes, (writeSlice) => {
+      let start = 0;
+      const write = (end: number, replyTo: bigint): void => {
+        this.parserReplies = EMPTY_PARSER_REPLIES;
+        this.parserReplyLength = 0;
+        try {
+          writeSlice(end);
+          const response = this.parserReplies.join("");
+          if (response && this.parserReplyLength <= 1024) {
+            const encoded = encoder.encode(response);
+            if (encoded.length <= 1024) this.sendFrame(this.streamId, { type: "Input", inSeq: 0n, replyTo, bytes: encoded });
+          }
+        } finally { this.parserReplies = undefined; }
+        start = end;
+      };
+      (this.terminalQueries ??= new TerminalQueries()).scan(bytes, offset, (end, sequence) => write(end, sequence));
+      if (start < bytes.length) write(bytes.length, offset + BigInt(start));
+    }, callback);
+  }
+
   /**
    * Ghostty emits all parser replies synchronously from write() through the same
    * onData event used for keyboard input. This scoped gate drops only those
    * write-time replies; real key events run in a later task and remain enabled.
    */
-  private writeSuppressingTerminalResponses(bytes: Uint8Array, callback: () => void): void {
+  private writeSuppressingTerminalResponses(bytes: Uint8Array, callback: () => void, queryOffset?: bigint): void {
     const previous = this.suppressTerminalResponses;
     this.suppressTerminalResponses = true;
+    if (queryOffset !== undefined) (this.terminalQueries ??= new TerminalQueries()).scan(bytes, queryOffset, () => undefined);
     try {
       this.terminal.write(bytes, callback);
     } finally {

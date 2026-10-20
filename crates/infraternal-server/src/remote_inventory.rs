@@ -95,8 +95,22 @@ impl Inventory for Source {
             let mut inventory = actor.session_inventory();
             let mut available = false;
             loop {
+                // Read the latest census under the same mutex as output admission:
+                // a newer session cannot be removed by an older parked observation.
+                let snapshot = {
+                    let mut queries = self
+                        .hosts
+                        .6
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let snapshot = inventory.borrow_and_update().clone();
+                    if let crate::embedded::SessionInventoryState::Available(ids) = &snapshot {
+                        queries.reconcile(Some(id), ids);
+                    }
+                    snapshot
+                };
                 let current = matches!(
-                    *inventory.borrow_and_update(),
+                    snapshot,
                     crate::embedded::SessionInventoryState::Available(_)
                 );
                 if current != available {
