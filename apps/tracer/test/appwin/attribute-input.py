@@ -71,6 +71,23 @@ def source_callback_stages(draw_ns, display_ns, callback_ns, finished_ns, durati
          'callback_to_encode_begin':(began_ns-callback_ns)/1e6,
          'encode_duration':duration_ns/1e6}
 
+def surface_delivery_stages(delivery, encoded):
+ """Partition a fresh frame on one native clock; reject reused or reversed stamps."""
+ if delivery.get('fresh')!='true' or delivery['capture_ns']!=encoded['capture_ns']:
+  raise ValueError('surface receipt does not identify a fresh encoded frame')
+ callback,dequeued,prepared,output_begin,output_end=(int(delivery[name]) for name in
+  ('callback_ns','dequeued_ns','prepared_ns','output_begin_ns','output_end_ns'))
+ finished=int(encoded['encode_finished_ns']);began=finished-int(encoded['encode_ns'])
+ stamps=(callback,dequeued,prepared,began,finished,output_begin,output_end)
+ if callback<=0 or any(a>b for a,b in zip(stamps,stamps[1:])):
+  raise ValueError('noncausal surface delivery evidence')
+ return {'callback_to_dequeue':(dequeued-callback)/1e6,
+         'dequeue_to_pixels_ready':(prepared-dequeued)/1e6,
+         'pixels_ready_to_encode_begin':(began-prepared)/1e6,
+         'encode_duration':(finished-began)/1e6,
+         'encoded_to_output_begin':(output_begin-finished)/1e6,
+         'native_output_write':(output_end-output_begin)/1e6}
+
 def command_for_post(commands, post_ns):
  """Match on native execution, not a browser window shared by queued mouse input.
 
@@ -161,6 +178,7 @@ def analyze(root, controller):
  if len({r['pid'] for r in receives})!=1:raise ValueError('server clock changed during cohort')
  selected_receives,score=align_command_stream(selected_commands,commands,receives,'receive_ns',server_stamp)
  summary={};events=[];source_details={};source_details_unavailable=[]
+ surface_details={};surface_details_unavailable=[]
  for sample,receive in zip(samples,selected_receives):
   began,ended=forward(receive,stage('server_input_write_begin',4),stage('server_input_write_end',4),server_stamp)
   server_local=(server_stamp(ended)-server_stamp(receive))/1e6
@@ -187,7 +205,13 @@ def analyze(root, controller):
    details=source_callback_stages(sample['draw']['end_ticks']*timebase,int(sample['frame']['captureNs']),int(callbacks[0]['callback_ns']),int(sample['encoded']['encode_finished_ns']),int(sample['encoded']['encode_ns']))
    for name,number in details.items():source_details.setdefault(name,[]).append(number)
   else:source_details_unavailable.append(sample['index'])
-  for name,number in {**local,**network,'input_to_worker':sample['effect']['begin']-sample['key']['eventAt'],'local_total':sum(local.values())}.items():summary.setdefault(name,[]).append(number)
+  deliveries=[r for r in metrics if r['metric']=='surface_delivery' and r.get('capture_ns')==sample['frame']['captureNs'] and r.get('fresh')=='true']
+  if len(deliveries)==1:
+   for name,number in surface_delivery_stages(deliveries[0],sample['encoded']).items():surface_details.setdefault(name,[]).append(number)
+  else:surface_details_unavailable.append(sample['index'])
+  mac_names=('Mac_source_receive_to_companion_receive','companion_receive_to_dispatch','companion_dispatch_to_inject','inject_to_fixture_keydown','fixture_keydown_to_draw_end','draw_end_to_capture','capture_to_encoded','encoded_to_Mac_send')
+  mac_total=sum(local[name] for name in mac_names)
+  for name,number in {**local,**network,'Mac_local_total':mac_total,'Mac_non_encode_total':mac_total-int(sample['encoded']['encode_ns'])/1e6,'input_to_worker':sample['effect']['begin']-sample['key']['eventAt'],'local_total':sum(local.values())}.items():summary.setdefault(name,[]).append(number)
   events.append({'index':sample['index'],'local_ms':local,'network_residual_ms':network,'stamps':sample,'server_input_stamps':{'receive':receive,'forward_begin':began,'forward_end':ended}})
  def quantile(values,p):
   ordered=sorted(values);return ordered[max(0,math.ceil(len(ordered)*p)-1)]
@@ -206,7 +230,7 @@ def analyze(root, controller):
  # Callback diagnostics are additive. Never reconstruct an interleaved record
  # or publish quantiles from a smaller cohort; independent input stamps remain
  # complete even when these optional callback details are unavailable.
- report={'concurrent_network_rtt_ms':network_rtts,'source_clock_half_width_ms':(source_upper-source_lower)/2e6,'clock_uncertainty_ms':((clock['native']['upper']-clock['native']['lower'])+(clock['browser']['upper']-clock['browser']['lower']))/2e6,'server_cohort_spacing_rms_ms':score,'valid_sample_count':len(samples),'invalid_sample_count':len(invalid_samples),'invalid_samples':invalid_samples,'metrics':{k:stats(v) for k,v in summary.items()},'source_details_ms':{} if source_details_unavailable else {k:stats(v) for k,v in source_details.items()},'source_details_unavailable_events':source_details_unavailable,'events':events,'note':'Transport residuals include kernel/library queues outside the stamped send/receive boundaries; they are not pure wire time. Cross-host clocks are never subtracted to infer one-way latency. Source details subdivide existing phases; the display stamp may follow its callback and its signed offset is preserved.'}
+ report={'concurrent_network_rtt_ms':network_rtts,'source_clock_half_width_ms':(source_upper-source_lower)/2e6,'clock_uncertainty_ms':((clock['native']['upper']-clock['native']['lower'])+(clock['browser']['upper']-clock['browser']['lower']))/2e6,'server_cohort_spacing_rms_ms':score,'valid_sample_count':len(samples),'invalid_sample_count':len(invalid_samples),'invalid_samples':invalid_samples,'metrics':{k:stats(v) for k,v in summary.items()},'source_details_ms':{} if source_details_unavailable else {k:stats(v) for k,v in source_details.items()},'source_details_unavailable_events':source_details_unavailable,'surface_details_ms':{} if surface_details_unavailable else {k:stats(v) for k,v in surface_details.items()},'surface_details_unavailable_events':surface_details_unavailable,'events':events,'note':'Transport residuals include kernel/library queues outside the stamped send/receive boundaries; they are not pure wire time. Cross-host clocks are never subtracted to infer one-way latency. Source details subdivide existing phases; the display stamp may follow its callback and its signed offset is preserved.'}
  return report
 
 if __name__=='__main__':

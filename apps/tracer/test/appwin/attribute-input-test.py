@@ -9,6 +9,20 @@ analysis = runpy.run_path(str(pathlib.Path(__file__).with_name('attribute-input.
 
 
 class AttributionTests(unittest.TestCase):
+    def test_surface_partition_preserves_all_queue_pixel_and_write_work(self):
+        row = dict(capture_ns='1', fresh='true', callback_ns='1000000', dequeued_ns='2000000',
+                   prepared_ns='3000000', output_begin_ns='8000000', output_end_ns='9000000')
+        encoded = dict(capture_ns='1', encode_finished_ns='7000000', encode_ns='3000000')
+        stages = analysis['surface_delivery_stages'](row, encoded)
+        self.assertEqual(stages, dict(callback_to_dequeue=1, dequeue_to_pixels_ready=1,
+                                     pixels_ready_to_encode_begin=1, encode_duration=3,
+                                     encoded_to_output_begin=1, native_output_write=1))
+        self.assertEqual(sum(stages.values()), 8)
+        for changed in (dict(fresh='false'), dict(capture_ns='2'), dict(dequeued_ns='0'),
+                        dict(prepared_ns='5000000'), dict(output_end_ns='6000000')):
+            with self.assertRaises(ValueError):
+                analysis['surface_delivery_stages']({**row, **changed}, encoded)
+
     def test_post_selects_execution_when_mouse_receives_share_the_key_window(self):
         commands = [{'receive_ns': '100', 'dispatch_ns': str(begin), 'finished_ns': str(end)}
                     for begin, end in ((110, 120), (125, 130), (135, 140))]
@@ -153,6 +167,8 @@ class ReportCausalityTests(unittest.TestCase):
             controller.write_text('\n'.join(json.dumps(row) for row in controller_rows) + '\n')
 
             report = analysis['analyze'](root, controller)
+            self.assertAlmostEqual(report['metrics']['Mac_local_total']['p50'], 1.11)
+            self.assertAlmostEqual(report['metrics']['Mac_non_encode_total']['p50'], 1.10)
             self.assertEqual(report['valid_sample_count'], 3)
             self.assertEqual(report['invalid_sample_count'], 1)
             self.assertEqual(report['invalid_samples'], [{'index': 0, 'reason': 'injection_before_dispatch'}])
