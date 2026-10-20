@@ -5,12 +5,13 @@ from PIL import Image
 ROOT=pathlib.Path.home()/'infraternal-bench/app-windows-latency'
 args=json.loads(sys.stdin.readline())
 job=args.get('job','app-windows-latency')
-ledger_job=args.get('screen_ledger_job',job)
 os.environ['TRACER_TEST_PORT']=str(args.get('port',4346))
 import re
-if not re.fullmatch(r'[a-z0-9-]{1,48}',ledger_job) or not re.fullmatch(r'[a-z0-9-]{1,48}',job) or not re.fullmatch(r'[a-z0-9-]{1,48}',args['label']):raise SystemExit(2)
+if not re.fullmatch(r'[a-z0-9-]{1,48}',job) or not re.fullmatch(r'[a-z0-9-]{1,48}',args['label']):raise SystemExit(2)
 E=ROOT/'evidence'/args['label'];E.mkdir(parents=True,exist_ok=False)
 BIN=ROOT/'bin'
+RUN_TIMEOUT_SECONDS=900
+CLEANUP_RESERVE_SECONDS=30
 
 class ProcBsdInfo(ctypes.Structure):
  """Kernel process fields used to identify one PID incarnation."""
@@ -184,16 +185,9 @@ try:
  readiness=json.loads(sys.stdin.readline());emit({'kind':'vm_readiness','idle':readiness.get('idle',[]),'phase':readiness.get('phase','vm'),'refusal':readiness.get('refusal')})
  if not readiness.get('ready'):raise RuntimeError('named VM or private server unavailable')
  args.update(readiness)
- def screen_deadline(signum,frame):raise TimeoutError('owned on-screen deadline')
- ledger=ROOT/'evidence/on-screen-ledger.json';used=json.loads(ledger.read_text()).get('seconds',0) if ledger.exists() else 0
- job_ledger=ROOT/'evidence'/(ledger_job+'-screen-ledger.json');job_used=json.loads(job_ledger.read_text()).get('seconds',0) if job_ledger.exists() else 0
- # Continuations explicitly retain the prior round ledger; changing the job
- # identity for locking never creates a fresh screen allowance.
- screen_budget=args.get('screen_budget',18*60)
- if not isinstance(screen_budget,int) or not 60<=screen_budget<=43*60:raise RuntimeError('invalid on-screen allowance')
- if job_used>=screen_budget:raise RuntimeError('owned on-screen allowance exhausted')
- screen_start=time.monotonic()
- signal.signal(signal.SIGALRM,screen_deadline);signal.alarm(max(1,int(screen_budget-job_used)))
+ def run_deadline(signum,frame):raise TimeoutError('measurement run exceeded its 15-minute limit')
+ run_started=time.monotonic();run_deadline_at=run_started+RUN_TIMEOUT_SECONDS
+ signal.signal(signal.SIGALRM,run_deadline);signal.alarm(RUN_TIMEOUT_SECONDS)
  battery();emit({'kind':'environment','text':command(['sw_vers'])+command(['sysctl','-n','hw.model','hw.ncpu','hw.memsize'])+command(['uptime'])})
  console=console_state();emit({'kind':'console','state':console})
  if not console['ready']:raise RuntimeError('console is locked or secure input is active')
@@ -430,9 +424,8 @@ try:
  consent_check()
  if args.get('owner_preview'):
   stage='owner preview'
-  # Authority remains in this private browser context. Closing it or the bounded
-  # allowance runs the same per-PID cleanup as an automated measurement.
-  duration=min(args.get('owner_preview_seconds',900),max(1,screen_budget-job_used-(time.monotonic()-screen_start)-15))
+  # Keep a cleanup reserve before the hard per-run deadline.
+  duration=min(args.get('owner_preview_seconds',900),max(1,int(run_deadline_at-time.monotonic()-CLEANUP_RESERVE_SECONDS)))
   emit({'kind':'owner_preview_ready','origin':args['origin'],'seconds':duration,'host':'App window measurement','window':'App window measurement'})
   deadline=time.monotonic()+duration
   while time.monotonic()<deadline and browser.is_connected() and context.pages:
@@ -710,10 +703,6 @@ finally:
    import shutil
    shutil.rmtree(runtime)
   signal.alarm(0)
-  if 'screen_start' in locals():
-   elapsed=time.monotonic()-screen_start;total=used+elapsed;job_total=job_used+elapsed
-   ledger.write_text(json.dumps({'seconds':total}));job_ledger.write_text(json.dumps({'seconds':job_total}))
-   emit({'kind':'on_screen_ledger','seconds':total,'job':job,'ledger_job':ledger_job,'job_seconds':job_total})
   if (lock/'owner').read_text().strip()==job and (lock/'pid').read_text().strip()==str(args['controller_pid']):
    for name in ['owner','pid','started']:(lock/name).unlink()
    lock.rmdir();emit({'kind':'lock_released'})

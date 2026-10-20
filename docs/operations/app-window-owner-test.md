@@ -40,11 +40,10 @@ route without overriding this protection.
 A window controlled by a desktop window manager retains its native size. The indicator on the Mac identifies remote
 control. Closing the stream releases held input and restores any size it changed.
 
-Close the test browser to finish. The launcher also stops after 15 minutes or
-when this job's remaining screen allowance ends. This continuation retains the
-stopped round's screen ledger: under five minutes remain, not a fresh session.
-It removes its private server
-state and stops its browser, fixture window, source process and helper children.
+Close the test browser to finish. Each run has a hard 15-minute deadline, with
+the final 30 seconds reserved for cleanup. The owner launcher also stops its
+browser after 15 minutes. It removes its private server state and stops its
+browser, fixture window, source process and helper children.
 No production service, owner fixture, permission entry or trust setting changes.
 
 ## Known limits

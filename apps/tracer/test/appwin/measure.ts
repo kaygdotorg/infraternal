@@ -38,8 +38,6 @@ const nativeHash=process.env.APP_WINDOW_NATIVE_HASH;
 if(Boolean(native)!==Boolean(nativeHash)||(nativeHash&&!/^[a-f0-9]{64}$/.test(nativeHash)))throw Error('diagnostic path and SHA-256 must be supplied together');
 const job=process.env.APP_WINDOW_JOB??'app-windows-latency';
 if(!/^[a-z0-9-]{1,48}$/.test(job))throw Error('invalid job name');
-const screenLedgerJob=process.env.APP_WINDOW_SCREEN_LEDGER_JOB??job;
-if(!/^[a-z0-9-]{1,48}$/.test(screenLedgerJob))throw Error('invalid screen ledger job');
 const requireIdle=process.env.APP_WINDOW_REQUIRE_IDLE==='1';
 const demoOnly=process.env.APP_WINDOW_DEMO_ONLY==='1';
 const soak=process.env.APP_WINDOW_SOAK==='1';
@@ -47,8 +45,7 @@ const ownerPreview=process.env.APP_WINDOW_OWNER_PREVIEW==='1';
 const ownerPreviewSeconds=Number(process.env.APP_WINDOW_OWNER_PREVIEW_SECONDS??900);
 if(!Number.isInteger(ownerPreviewSeconds)||ownerPreviewSeconds<1||ownerPreviewSeconds>900)throw Error('invalid owner preview duration');
 const port=Number(process.env.TRACER_TEST_PORT??'4346');
-const screenBudget=Number(process.env.APP_WINDOW_SCREEN_BUDGET_SECONDS??18*60);
-if(!Number.isInteger(port)||port<1024||port>64535||!Number.isInteger(screenBudget)||screenBudget<60||screenBudget>43*60)throw Error('invalid measurement port or screen allowance');
+if(!Number.isInteger(port)||port<1024||port>64535)throw Error('invalid measurement port');
 const label=process.env.APP_WINDOW_RUN_LABEL??pipeline+'-'+Date.now();
 if(!/^[a-z0-9-]{1,48}$/.test(label))throw Error('invalid measurement label');
 const E=ROOT+'/evidence/'+label;await mkdir(E,{recursive:true,mode:0o700});
@@ -96,7 +93,7 @@ try{
  const [built]=await once(build,'exit');if(built!==0)throw Error('production frontend build failed');
  const bundle=await Bun.build({entrypoints:[worktree+'/apps/tracer/test/appwin/bench-probe.ts'],target:'browser',format:'iife',minify:true});
  if(!bundle.success)throw Error('probe build failed');
- const manifest:Record<string,string|boolean|number>={head:new TextDecoder().decode(Bun.spawnSync(['git','rev-parse','HEAD'],{cwd:worktree}).stdout).trim(),desynchronized,resourcesOnly,pipelineDiagnostics,codec,hardwareHint,job,screenLedgerJob,demoOnly,requireIdle,port,screenBudget,soak,ownerPreview,ownerPreviewSeconds,...(native?{native,nativeHash:nativeHash!}:{})};
+ const manifest:Record<string,string|boolean|number>={head:new TextDecoder().decode(Bun.spawnSync(['git','rev-parse','HEAD'],{cwd:worktree}).stdout).trim(),desynchronized,resourcesOnly,pipelineDiagnostics,codec,hardwareHint,job,demoOnly,requireIdle,port,soak,ownerPreview,ownerPreviewSeconds,...(native?{native,nativeHash:nativeHash!}:{})};
  for(const [name,path] of Object.entries({binary:process.env.INFRATERNAL_BIN!,controller:import.meta.path,macDriver:import.meta.dirname+'/measure-mac.py',companionLauncher:import.meta.dirname+'/launch-companion.py',pixelObserver:import.meta.dirname+'/worker-pixel-observer.js',probe:import.meta.dirname+'/bench-probe.ts',nativeFixture:worktree+'/crates/plugins/desktop/tests/fixtures/latency-window.swift',worker:workerOverride??worktree+'/apps/tracer/dist/decode.worker.on-demand.js'}))manifest[name]=new Bun.CryptoHasher('sha256').update(await readFile(path)).digest('hex');
  manifest.worktreeDiffSha256=new Bun.CryptoHasher('sha256').update(Bun.spawnSync(['git','diff','HEAD'],{cwd:worktree}).stdout).digest('hex');
  manifest.probeBundle=new Bun.CryptoHasher('sha256').update(await bundle.outputs[0]!.text()).digest('hex');
@@ -108,7 +105,7 @@ try{
  launcher.stdin!.end(await readFile(import.meta.dirname+'/launch-companion.py'));launcher.stderr!.resume();
  const [launcherCode]=await once(launcher,'exit');if(launcherCode!==0)throw Error('companion launcher staging refused');
  mac=spawn('netbird',['ssh','--no-browser','kayg@10.69.69.101','~/infraternal-bench/app-windows-latency/tools/bin/python -u ~/infraternal-bench/app-windows-latency/venue-mac.py'],{stdio:['pipe','pipe','pipe']});
- mac.stdin!.write(JSON.stringify({controller_pid:process.pid,port,screen_budget:screenBudget,pipeline,label,codec,job,screen_ledger_job:screenLedgerJob,demo_only:demoOnly,soak,owner_preview:ownerPreview,owner_preview_seconds:ownerPreviewSeconds,require_idle:requireIdle,native,native_hash:nativeHash,resources_only:resourcesOnly,pipeline_diagnostics:pipelineDiagnostics,diagnostic_only:process.env.APP_WINDOW_DIAGNOSTIC_ONLY==='1',probe:(hardwareHint?'window.__benchHardwareHint='+JSON.stringify(hardwareHint)+';\n':'')+(resourcesOnly?'window.__benchResourcesOnly=true;\n':'')+await bundle.outputs[0]!.text(),observer:(desynchronized?'self.__benchDesynchronized=true;\n':'')+await readFile(import.meta.dirname+'/worker-pixel-observer.js','utf8'),worker:await readFile(workerOverride??worktree+'/apps/tracer/dist/decode.worker.on-demand.js','utf8')})+'\n');
+ mac.stdin!.write(JSON.stringify({controller_pid:process.pid,port,pipeline,label,codec,job,demo_only:demoOnly,soak,owner_preview:ownerPreview,owner_preview_seconds:ownerPreviewSeconds,require_idle:requireIdle,native,native_hash:nativeHash,resources_only:resourcesOnly,pipeline_diagnostics:pipelineDiagnostics,diagnostic_only:process.env.APP_WINDOW_DIAGNOSTIC_ONLY==='1',probe:(hardwareHint?'window.__benchHardwareHint='+JSON.stringify(hardwareHint)+';\n':'')+(resourcesOnly?'window.__benchResourcesOnly=true;\n':'')+await bundle.outputs[0]!.text(),observer:(desynchronized?'self.__benchDesynchronized=true;\n':'')+await readFile(import.meta.dirname+'/worker-pixel-observer.js','utf8'),worker:await readFile(workerOverride??worktree+'/apps/tracer/dist/decode.worker.on-demand.js','utf8')})+'\n');
  const prepare=async()=>{
   const vm=spawn('netbird',['ssh','--no-browser','calternal@10.69.69.21','top -l 3 -s 1 -n 0'],{stdio:['ignore','pipe','pipe']});
   let status='';vm.stdout!.on('data',bytes=>{status+=String(bytes);});vm.stderr!.resume();

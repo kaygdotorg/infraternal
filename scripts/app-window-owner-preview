@@ -9,10 +9,8 @@ fi
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 export APP_WINDOW_BINARY="$1"
 export APP_WINDOW_JOB=app-windows-latency-r3b
-# Continuation shares the stopped round's allowance, never a new 45 minutes.
-export APP_WINDOW_SCREEN_LEDGER_JOB=app-windows-latency-r3
 export APP_WINDOW_BENCH_DIR="${HOME}/.cache/codex-scratch/app-windows-latency-r3b"
-export APP_WINDOW_OWNER_PREVIEW=1 APP_WINDOW_DEMO_ONLY=0 APP_WINDOW_RESOURCES_ONLY=1 APP_WINDOW_SCREEN_BUDGET_SECONDS=2580
+export APP_WINDOW_OWNER_PREVIEW=1 APP_WINDOW_OWNER_PREVIEW_SECONDS=900 APP_WINDOW_DEMO_ONLY=0 APP_WINDOW_RESOURCES_ONLY=1
 case "${2:-}" in
     "") ;;
     --demo) export APP_WINDOW_OWNER_PREVIEW=0 APP_WINDOW_DEMO_ONLY=1 APP_WINDOW_RESOURCES_ONLY=0 ;;

@@ -206,6 +206,51 @@ class ProcessIdentityTests(unittest.TestCase):
             self.assertIsNone(namespace['process_identity'](101))
 
 
+class RunDeadlineTests(unittest.TestCase):
+    """A single bounded measurement run owns cleanup without cross-run state."""
+
+    def test_mac_runner_has_a_fixed_deadline_and_cleanup_reserve(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py').read_text()
+        tree = ast.parse(source)
+        timeout = next(
+            node.value for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == 'RUN_TIMEOUT_SECONDS' for target in node.targets)
+        )
+        reserve = next(
+            node.value for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == 'CLEANUP_RESERVE_SECONDS' for target in node.targets)
+        )
+        self.assertEqual(ast.literal_eval(timeout), 900)
+        self.assertEqual(ast.literal_eval(reserve), 30)
+        self.assertIn('signal.alarm(RUN_TIMEOUT_SECONDS)', source)
+        self.assertIn('run_deadline_at-time.monotonic()-CLEANUP_RESERVE_SECONDS', source)
+
+    def test_old_cross_run_budget_inputs_and_receipts_are_absent(self):
+        root = pathlib.Path(__file__).parents[4]
+        paths = [
+            root / 'apps/tracer/test/appwin/measure.ts',
+            root / 'apps/tracer/test/appwin/measure-mac.py',
+            root / 'scripts/app-window-owner-preview',
+            root / 'docs/operations/app-window-owner-test.md',
+        ]
+        retired_markers = (
+            'APP_WINDOW_SCREEN_LEDGER_JOB', 'APP_WINDOW_SCREEN_BUDGET_SECONDS',
+            'screen_ledger_job', 'screen_budget', 'on-screen-ledger.json',
+            'remaining screen allowance', 'screen ledger',
+        )
+        for path in paths:
+            contents = path.read_text().lower()
+            for marker in retired_markers:
+                with self.subTest(path=path.name, marker=marker):
+                    self.assertNotIn(marker.lower(), contents)
+
+    def test_owner_launcher_keeps_its_fifteen_minute_cap(self):
+        launcher = pathlib.Path(__file__).parents[4] / 'scripts/app-window-owner-preview'
+        self.assertIn('APP_WINDOW_OWNER_PREVIEW_SECONDS=900', launcher.read_text())
+
+
 class ConsentTests(unittest.TestCase):
     """Execute only the consent guard, without importing or launching the browser driver."""
 
