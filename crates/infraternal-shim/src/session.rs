@@ -991,9 +991,9 @@ impl InputCursors {
 #[path = "../tests/unit/sequenced_input.rs"]
 mod sequenced_checks;
 
-/// Static error copy keeps malformed writer data out of diagnostics.
+/// An opaque error kind keeps invalid writer data out of diagnostics without allocation.
 fn invalid_input() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, "invalid shim writer input")
+    io::ErrorKind::InvalidData.into()
 }
 
 fn invalid_request() -> io::Error {
