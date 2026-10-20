@@ -7,7 +7,8 @@
  * - Every inventory change renames and re-shows the windows it concerns (`syncSession`), repaints their
  *   surfaces, rebuilds the tree, and repaints an open manager.
  * - `windowFor` answers "which window shows this session" for the lifecycle, the manager and the sidebar.
- * - `toggleManager` loads the on-demand part, then opens the card; a failed load shows a toast and nothing else.
+ * - `toggleManager` loads the on-demand part, then opens the card; a failed load shows a toast and nothing else. The idle warm-up that
+ *   fetches the same code fails silently (#249).
  */
 import { onDemand, whenIdle } from "../../on-demand";
 import type { PopoverSource } from "../../../../../packages/ui/src/anchored-popover";
@@ -39,13 +40,26 @@ export function createSessionHooks(cx: Ctx): SessionUi {
   const inventory = cx.adapters.inventory!;
   let part: SessionUiPart | undefined;
   let loading: Promise<SessionUiPart | undefined> | undefined;
+  // A failed load clears `loading` so the next call tries again. It stays quiet: whether to tell the person is the
+  // caller's choice, because the idle warm-up below is not something they asked for.
   const load = (): Promise<SessionUiPart | undefined> => {
     loading ??= onDemand(() => import("./session-ui.on-demand")).then((m) => { part = m.createSessionUi(cx); return part; })
-      .catch(() => { loading = undefined; cx.toast.show({ message: "Could not load the session list. Try again.", tone: "error", duration: 5000 }); return undefined; });
+      .catch(() => { loading = undefined; return undefined; });
     return loading;
   };
-  // Warm the manager's code once the page is idle, so the first open never waits for a download (#128).
-  whenIdle(() => { void load(); });
+  /** A load someone is waiting on (an open manager, a window that needs its surfaces): a failure gets a toast. */
+  const loadForUser = (): Promise<SessionUiPart | undefined> => load().then((p) => {
+    if (!p) cx.toast.show({ message: "Could not load the session list. Try again.", tone: "error", duration: 5000 });
+    return p;
+  });
+  // Warm the manager's code once the page is idle, so the first open never waits for a download (#128). Nobody asked
+  // for it, so a failure (often a network that is reconnecting) shows nothing; it tries once more when the browser
+  // is back online, and a real open retries on its own.
+  whenIdle(() => {
+    void load().then((p) => {
+      if (!p && !cx.signal.aborted) window.addEventListener("online", () => { void load(); }, { once: true, signal: cx.signal });
+    });
+  });
   const windows = (): WinRec[] => [...cx.views.values()].flatMap((c) => [...c.wins.values()]);
   const windowFor = (host: string, id: string): WinRec | undefined => windows().find((w) => isTerminal(w) && w.model.host === host && w.model.sessionId === id);
 
@@ -57,7 +71,7 @@ export function createSessionHooks(cx: Ctx): SessionUi {
   const paint = (rec: WinRec): void => {
     if (!isTerminal(rec)) return;
     if (part) part.paint(rec);
-    else if (needsSurfaces(rec)) void load().then((p) => { if (p && rec.card.root.isConnected) p.paint(rec); });
+    else if (needsSurfaces(rec)) void loadForUser().then((p) => { if (p && rec.card.root.isConnected) p.paint(rec); });
   };
 
   const off = inventory.onChange(() => {
@@ -77,7 +91,7 @@ export function createSessionHooks(cx: Ctx): SessionUi {
       // Keep all manager entry points usable when the touch header has only Close.
       const resolvedAnchor = anchor ?? rec.card.pill;
       if (part) { part.toggleManager(rec, resolvedAnchor, source); return; }
-      void load().then((p) => { if (p && resolvedAnchor.isConnected && canManage(rec)) p.toggleManager(rec, resolvedAnchor, source); });
+      void loadForUser().then((p) => { if (p && resolvedAnchor.isConnected && canManage(rec)) p.toggleManager(rec, resolvedAnchor, source); });
     },
     closeManager() { part?.closeManager(); },
     arrived(rec) { part?.arrived(rec); },
