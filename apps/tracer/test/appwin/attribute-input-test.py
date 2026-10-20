@@ -48,6 +48,28 @@ class AttributionTests(unittest.TestCase):
         with self.assertRaises(ValueError): match([0, 10, 20], [100, 110, 120, 130], lambda value: value)
         with self.assertRaises(ValueError): match([0, 1], [0, 1], lambda value: value)
 
+    def test_intervening_mouse_commands_do_not_break_the_quiet_key_cohort(self):
+        commands = [{'receive_ns': str(i * 50_000_000)} for i in range(5)]
+        candidates = [700_000_000 + int(row['receive_ns']) for row in commands]
+        selected = [commands[i] for i in (0, 2, 4)]
+        rows, score = analysis['align_command_stream'](selected, commands, candidates,
+                                                       'receive_ns', lambda value: value)
+        self.assertEqual(rows, [candidates[i] for i in (0, 2, 4)])
+        self.assertEqual(score, 0)
+
+    def test_complete_command_alignment_keeps_ambiguity_and_identity_guards(self):
+        match = analysis['align_command_stream']
+        commands = [{'receive_ns': str(i * 10_000_000)} for i in range(3)]
+        with self.assertRaises(ValueError):
+            match(commands, commands, [100_000_000 + i * 10_000_000 for i in range(4)],
+                  'receive_ns', lambda value: value)
+        with self.assertRaises(ValueError):
+            match(commands, [commands[0], commands[0], commands[2]], [0, 10, 20],
+                  'receive_ns', lambda value: value)
+        with self.assertRaises(ValueError):
+            match([{'receive_ns': '1'}], commands, [0, 10_000_000, 20_000_000],
+                  'receive_ns', lambda value: value)
+
     def test_local_causality_bounds_the_clock_without_symmetric_delays(self):
         bounds = analysis['source_clock_bounds']([1012, 1045], [1020, 1050], [10, 40], [24, 53])
         self.assertEqual(bounds, (997, 1002))

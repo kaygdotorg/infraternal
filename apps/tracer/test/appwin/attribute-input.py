@@ -23,6 +23,22 @@ def align_ordered(reference,candidates,stamp):
  score,start=rank[0]
  return candidates[start:start+n],score
 
+def align_command_stream(selected, commands, candidates, native_stamp, candidate_stamp):
+ """Align the complete command stream before selecting measured keyboard input.
+
+ Real focus recovery can add mouse commands between sampled keys. Those keys
+ are not a contiguous command cohort. Preserve every intervening receipt while
+ applying the original spacing/ambiguity guard, then project by native identity.
+ """
+ identities=[int(row['receive_ns']) for row in commands]
+ if any(left>=right for left,right in zip(identities,identities[1:])):
+  raise ValueError('native command identities are not strictly ordered')
+ aligned,score=align_ordered([int(row[native_stamp]) for row in commands],candidates,candidate_stamp)
+ by_identity=dict(zip(identities,aligned))
+ if any(int(row['receive_ns']) not in by_identity for row in selected):
+  raise ValueError('sample command is absent from the complete stream')
+ return [by_identity[int(row['receive_ns'])] for row in selected],score
+
 def source_clock_bounds(native_receives, native_finishes, source_receives, source_acks):
  """Bound the source Instant origin in native nanoseconds without wall clocks.
 
@@ -123,8 +139,10 @@ def analyze(root, controller):
  # Source Instant -> native Mach clock offset is bracketed by each local command:
  # receive precedes companion receive; acknowledgement follows native completion.
  # This avoids wall clocks, which may slew during a run.
- source_receives,_=align_ordered([int(s['native']['receive_ns']) for s in samples],stage('source_control_receive',4),lambda r:int(r['at_ns']))
- source_acks,_=align_ordered([int(s['native']['finished_ns']) for s in samples],stage('source_control_ack',67),lambda r:int(r['at_ns']))
+ commands=[r for r in metrics if r['metric']=='native_input']
+ selected_commands=[s['native'] for s in samples]
+ source_receives,_=align_command_stream(selected_commands,commands,stage('source_control_receive',4),'receive_ns',lambda r:int(r['at_ns']))
+ source_acks,_=align_command_stream(selected_commands,commands,stage('source_control_ack',67),'finished_ns',lambda r:int(r['at_ns']))
  if len({r['pid'] for r in source_receives+source_acks})!=1:raise ValueError('source clock changed during cohort')
  source_lower,source_upper=source_clock_bounds([int(s['native']['receive_ns']) for s in samples],[int(s['native']['finished_ns']) for s in samples],[int(r['at_ns']) for r in source_receives],[int(r['at_ns']) for r in source_acks])
  source_origin=(source_lower+source_upper)/2
@@ -133,11 +151,11 @@ def analyze(root, controller):
  # is calibrated directly above; no cross-host wall-clock subtraction is needed.
  def local_epoch(row):return native_epoch(source_origin+int(row['at_ns']))
  
- # Quiet single-key samples preserve input order. Match their inter-arrival
- # pattern instead of assuming that the two hosts' wall clocks are synchronized.
+ # Match the full command pattern before selecting quiet keys. Network clocks
+ # are never assumed synchronized, including when focus recovery adds mouse input.
  receives=sorted(stage('server_input_receive',4),key=server_stamp)
  if len({r['pid'] for r in receives})!=1:raise ValueError('server clock changed during cohort')
- selected_receives,score=align_ordered([int(s['native']['receive_ns']) for s in samples],receives,server_stamp)
+ selected_receives,score=align_command_stream(selected_commands,commands,receives,'receive_ns',server_stamp)
  summary={};events=[];source_details={};source_details_unavailable=[]
  for sample,receive in zip(samples,selected_receives):
   began,ended=forward(receive,stage('server_input_write_begin',4),stage('server_input_write_end',4),server_stamp)
