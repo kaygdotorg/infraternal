@@ -891,7 +891,9 @@ fn handle<'a>(
             // older typing [307]. Deferring them would retain stale answers
             // behind that typing and let new replies refill each partial drain.
             if !reserved {
-                cursors.reply(&bytes, input)?;
+                // A full queue also expires replies without disconnecting the
+                // peer; refusal leaves byte ownership and typing cursors intact.
+                let _ = cursors.reply(&bytes, input);
             }
         }
         Frame::SelectWriter(id) if p.caps & MULTI_WRITER != 0 && p.writer.is_none() && id != 0 => {
