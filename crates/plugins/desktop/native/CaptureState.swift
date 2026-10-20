@@ -5,15 +5,6 @@ import Foundation
 import CoreGraphics
 #endif
 
-/// One input-time snapshot: minimized first, main second. Unknown individual
-/// values stay unknown; an unavailable or malformed batch uses the old reads.
-/// Nothing is cached across events, so closed or newly focused windows cannot
-/// inherit a previous event's successful validation.
-func inputWindowFlags(batch: [Any]?, fallback: (Int) -> Bool?) -> (minimized: Bool?, main: Bool?) {
-    guard let batch, batch.count == 2 else { return (fallback(0), fallback(1)) }
-    return (batch[0] as? Bool, batch[1] as? Bool)
-}
-
 /// Executable basenames used only for factual process detection [D290].
 let tilingManagerExecutables: Set<String> = [
     "OmniWM", "yabai", "AeroSpace", "Amethyst", "paneru", "glide"

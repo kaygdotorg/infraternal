@@ -81,19 +81,6 @@ import CoreGraphics
         assert(rate.current > 500_000 && rate.current < 12_000_000)
         for step in 301...1100 { _ = rate.feedback(at: Double(step), congested: false) }
         assert(rate.current == 12_000_000)
-        var reads: [Int] = []
-        let focused = inputWindowFlags(batch: [false, true]) { index in reads.append(index); return nil }
-        assert(focused.minimized == false && focused.main == true && reads.isEmpty)
-        let absent = inputWindowFlags(batch: nil) { index in reads.append(index); return index == 1 }
-        assert(absent.minimized == false && absent.main == true && reads == [0, 1])
-        reads = []
-        let malformed = inputWindowFlags(batch: [true]) { index in reads.append(index); return index == 1 }
-        assert(malformed.minimized == false && malformed.main == true && reads == [0, 1])
-        reads = []
-        let partial = inputWindowFlags(batch: [false, NSNull()]) { index in reads.append(index); return true }
-        assert(partial.minimized == false && partial.main == nil && reads.isEmpty)
-        let unknown = inputWindowFlags(batch: [NSNull(), NSNull()]) { _ in true }
-        assert(unknown.minimized == nil && unknown.main == nil)
         print("PASS geometry/local-priority/repair; motion_frames=120 raw_drop=skip refresh_drop=refresh encoded_gap=IDR bitrate_feedbacks=1102")
     }
 }
