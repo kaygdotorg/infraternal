@@ -205,10 +205,19 @@ test("a transitive span group reduces identically before and after a fresh snaps
       { id: "b", weight: 1, windows: [{ id: "middle", target, span: 2, rows: 1, row: 1 }] },
       { id: "c", weight: 1, windows: [{ id: "right", target, span: 1, rows: 1, row: 0 }] },
     ] } }] };
-    expect((await request(server, desktop, "canvas.layout.initialize", { op_id: randomUUID(), document: incoming })).ok).toBe(true);
+    // Explicit window creation permits repeated references; bootstrap imports now deduplicate targets.
+    const chain = incoming.views[0]!;
+    expect((await request(server, desktop, "canvas.layout.apply", { op_id: randomUUID(), base_revision: initial.revision, intent: { type: "view.add", view: { ...chain, layout: { type: "tiled", columns: [] } } } })).ok).toBe(true);
+    if (chain.layout.type !== "tiled") throw Error("chain must be tiled");
+    for (const column of chain.layout.columns) for (const window of column.windows) {
+      expect((await request(server, desktop, "canvas.layout.apply", { op_id: randomUUID(), base_revision: initial.revision, intent: { type: "open", view_id: chain.id, column_id: column.id, window: { id: window.id, target: window.target } } })).ok).toBe(true);
+    }
+    for (const column of chain.layout.columns) for (const window of column.windows) {
+      expect((await request(server, desktop, "canvas.layout.apply", { op_id: randomUUID(), base_revision: initial.revision, intent: { type: "resize", window_id: window.id, span: window.span, rows: window.rows, row: window.row } })).ok).toBe(true);
+    }
     await settled(page); await settled(mobile);
     const before = (await request(server, desktop, "", {}, true)).value;
-    const view = (before.document as CanvasDocument).views.find((v) => v.name === "Recovered: Span chain")!;
+    const view = (before.document as CanvasDocument).views.find((v) => v.id === "chain")!;
     if (view.layout.type !== "tiled") throw Error("chain must be tiled");
     const anchor = view.layout.columns[2]!.windows[0]!;
     expect((await request(server, desktop, "canvas.layout.apply", { op_id: randomUUID(), base_revision: before.revision, intent: { type: "split", view_id: view.id, anchor_id: anchor.id, axis: "down", column_id: view.layout.columns[2]!.id, window: { id: "new-chain", target } } })).ok).toBe(true);

@@ -60,6 +60,10 @@ async fn snapshot_then_ordered_commit_events_and_revocation_cancel_output() {
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0030_canvas_receipt_count.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
     let store = Store::new(pool);
     let plugin = CanvasPlugin(Arc::new(store.clone()));
     let (live, authority) = watch::channel(true);

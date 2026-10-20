@@ -66,6 +66,10 @@ openssl.workspace = true
 infraternal-agent = { path = "../infraternal-agent", version = "0.1.0", default-features = false }
 quinn = { workspace = true, optional = true }
 
+# Reuse the pinned digest for original migration checksums in generated build data [243].
+[build-dependencies]
+sha2.workspace = true
+
 [dev-dependencies]
 hyper.workspace = true
 hyper-util.workspace = true
