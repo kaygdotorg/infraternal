@@ -83,7 +83,7 @@ impl Store {
             let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool).await?;
             let mut current = head_document(&mut tx, account).await?;
             if repair(&mut tx, account, &mut current).await? {
-                commit(tx, self.changes.clone()).await?;
+                commit(tx, self.changes.clone(), true).await?;
             }
             return Ok(vec![snapshot(&current, true)]);
         }
@@ -154,11 +154,12 @@ impl Store {
             receipt(&mut tx, account, op_id, &request_hash, document.revision()).await?
         {
             if repaired {
-                commit(tx, self.changes.clone()).await?;
+                commit(tx, self.changes.clone(), true).await?;
             }
             return Ok(revision);
         }
         let mut noop = false;
+        let mut import_noop = false;
         if initialize {
             let mut incoming = Document(request.get("document").cloned().ok_or(Error)?);
             if !incoming.valid() || serde_json::to_string(&incoming.0)?.len() > MAX_DOCUMENT {
@@ -176,16 +177,7 @@ impl Store {
             if initialized {
                 let before = document.clone();
                 recovery::merge(&mut document, incoming)?;
-                if document == before {
-                    save_receipt(&mut tx, account, op_id, &request_hash, document.revision())
-                        .await?;
-                    if repaired {
-                        commit(tx, self.changes.clone()).await?;
-                    } else {
-                        tx.commit().await?;
-                    }
-                    return Ok(document.revision());
-                }
+                import_noop = document == before;
             } else {
                 document = incoming;
             }
@@ -246,32 +238,29 @@ impl Store {
                     .await?;
             }
         }
-        document.normalize();
-        document.0["revision"] = json!(document.revision() + 1);
-        if !document.valid() {
-            return Err(Error);
+        if !import_noop {
+            document.normalize();
+            document.0["revision"] = json!(document.revision() + 1);
+            if !document.valid() {
+                return Err(Error);
+            }
+            let event = if initialize {
+                snapshot(&document, true)
+            } else {
+                model::object(vec![
+                    ("type", Value::from("canvas.layout.operation")),
+                    ("revision", Value::from(document.revision())),
+                    ("op_id", Value::from(op_id)),
+                    ("intent", request["intent"].clone()),
+                    ("noop", Value::from(noop)),
+                ])
+            };
+            save(&mut tx, account, &document, &event, initialize).await?;
         }
-        let event = if initialize {
-            snapshot(&document, true)
-        } else {
-            model::object(vec![
-                ("type", Value::from("canvas.layout.operation")),
-                ("revision", Value::from(document.revision())),
-                ("op_id", Value::from(op_id)),
-                ("intent", request["intent"].clone()),
-                ("noop", Value::from(noop)),
-            ])
-        };
-        save(
-            &mut tx,
-            account,
-            &document,
-            Some((op_id, &request_hash)),
-            &event,
-            initialize,
-        )
-        .await?;
-        commit(tx, self.changes.clone()).await?;
+        // Imports with no new targets still retain a durable retry receipt. Keep
+        // both paths in one commit, notifying only when the layout actually changed.
+        save_receipt(&mut tx, account, op_id, &request_hash, document.revision()).await?;
+        commit(tx, self.changes.clone(), repaired || !import_noop).await?;
         Ok(document.revision())
     }
 }
@@ -293,17 +282,23 @@ fn repair<'a>(
         if !document.valid() {
             return Err(Error);
         }
-        save(tx, account, document, None, &snapshot(document, true), true).await?;
+        save(tx, account, document, &snapshot(document, true), true).await?;
         Ok(true)
     })
 }
-async fn commit(tx: Transaction<'static, Sqlite>, changes: watch::Sender<()>) -> Result<(), Error> {
+async fn commit(
+    tx: Transaction<'static, Sqlite>,
+    changes: watch::Sender<()>,
+    notify: bool,
+) -> Result<(), Error> {
     // COMMIT can become durable before its caller receives the acknowledgement.
     // Keep its invalidation in the same finite task so socket cancellation cannot
     // strand connected devices on an older revision. No timer or worker is retained.
     tokio::spawn(async move {
         tx.commit().await?;
-        changes.send_replace(());
+        if notify {
+            changes.send_replace(());
+        }
         Ok::<(), Error>(())
     })
     .await
@@ -446,7 +441,6 @@ async fn save(
     tx: &mut Transaction<'_, Sqlite>,
     account: &str,
     document: &Document,
-    receipt: Option<(&str, &str)>,
     event: &Value,
     force_snapshot: bool,
 ) -> Result<(), Error> {
@@ -460,9 +454,6 @@ async fn save(
         .bind(account)
         .execute(&mut **tx)
         .await?;
-    if let Some((id, request_hash)) = receipt {
-        save_receipt(tx, account, id, request_hash, document.revision()).await?;
-    }
     if force_snapshot || document.revision() % CHECKPOINT == 0 {
         sqlx::query("INSERT INTO canvas_snapshots(account,revision,document) VALUES(?,?,?) ON CONFLICT(account) DO UPDATE SET revision=excluded.revision,document=excluded.document").bind(account).bind(document.revision()).bind(json).execute(&mut **tx).await?;
         sqlx::query("DELETE FROM canvas_operations WHERE account=?")
@@ -539,7 +530,7 @@ mod tests {
         .execute(&mut *tx)
         .await
         .unwrap();
-        let mut pending = Box::pin(commit(tx, store.changes.clone()));
+        let mut pending = Box::pin(commit(tx, store.changes.clone(), true));
         let ready =
             std::future::poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_ready())).await;
         assert!(!ready, "commit needs the database worker acknowledgement");
