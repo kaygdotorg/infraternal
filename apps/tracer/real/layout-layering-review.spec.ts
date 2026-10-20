@@ -77,3 +77,24 @@ with sqlite3.connect(sys.argv[1]) as db:
     expect(second.filter((entry) => entry.intersections > 0), "foreign view content remains over Console after two complete resting frame sequences").toEqual([]);
   } finally { await context.close(); await server.dispose(); }
 });
+
+test("removing the current shared view still reconciles the surviving views", async ({ browser }) => {
+  const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4387) });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
+  const errors: string[] = [];
+  try {
+    const page = await context.newPage();
+    page.on("pageerror", (error) => errors.push(error.message));
+    await enrol(page, server);
+    await expect.poll(async () => (await cache(page)).canonical.views.some((view) => view.id === "mesh")).toBe(true);
+    const result = await request(server, context, "canvas.layout.apply", {
+      op_id: "remove-current-view", base_revision: (await cache(page)).canonical.revision,
+      intent: { type: "view.remove", view_id: "console" },
+    });
+    expect(result.ok).toBe(true);
+    await expect(page.locator('.cl[data-view="console"]')).toHaveCount(0);
+    await expect(page.locator('.cl[data-view="settings"]')).toHaveCount(1);
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    expect(errors).toEqual([]);
+  } finally { await context.close(); await server.dispose(); }
+});
