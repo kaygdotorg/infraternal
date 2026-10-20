@@ -40,7 +40,7 @@ class LaunchTests(unittest.TestCase):
         self.assertNotIn(str(self.native), command)
         self.assertEqual(command[4:10], ['--stdin', 'in', '--stdout', 'out', '--stderr', 'err'])
 
-    def bridge(self, cancel_at_input_start=False, finish_before_output=False):
+    def bridge(self, cancel_at_input_start=False, finish_before_output=False, exit_before_identity=False, missing_live_identity=False):
         # Substitute only the platform launcher. Everything after it uses real
         # processes, FIFO backpressure, standard pipes and native EOF behavior.
         runner = '''import importlib.util,pathlib,subprocess,sys
@@ -53,10 +53,19 @@ m.subprocess.Popen=launch
 m.app_pids=lambda executable:{p.pid for p in children if p.poll() is None}
 m.process_identity=lambda pid:(pid,1792436400,123456)
 def command(executable,incoming,outgoing,errors,arguments):
+ if sys.argv[4]=='exit-before-identity':
+  return [sys.executable,'-c',"import pathlib,sys,time; b=open(sys.argv[1],'wb',buffering=0); release=pathlib.Path(sys.argv[2]); next(i for i in range(5000) if release.exists() or time.sleep(.001)); b.write(bytes.fromhex('7b2273637265656e5f7265636f7264696e67223a747275652c226465766963655f636f6e74726f6c223a747275657d0a')); b.close()",str(outgoing),sys.argv[3]+'/release']
  if sys.argv[4]=='finish-before-output':
   return [sys.executable,'-c',"import pathlib,sys; a=open(sys.argv[1],'rb',buffering=0); b=open(sys.argv[2],'wb',buffering=0); pathlib.Path(sys.argv[3]).write_text('ready'); data=a.read(); b.write(data); a.close(); b.close()",str(incoming),str(outgoing),sys.argv[3]+'/reader-ready']
  return [sys.executable,'-c',"import sys; a=open(sys.argv[1],'rb',buffering=0); b=open(sys.argv[2],'wb',buffering=0); data=a.read(); b.write(data); a.close(); b.close()",str(incoming),str(outgoing)]
 m.open_command=command
+if sys.argv[4]=='live-without-identity':m.process_identity=lambda pid:None
+if sys.argv[4]=='exit-before-identity':
+ def identity(pid):
+  pathlib.Path(sys.argv[3]+'/release').touch()
+  children[0].wait(timeout=5)
+  return None
+ m.process_identity=identity
 if sys.argv[4]=='cancel-input-start':
  import atexit,os,signal
  def cleanup_children():
@@ -85,7 +94,7 @@ if sys.argv[4]=='finish-before-output':
 raise SystemExit(m.run(sys.argv[2],sys.argv[3],sys.argv[3]+'/errors',sys.argv[3]+'/pids',[]))
 '''
         return subprocess.Popen([sys.executable, '-c', runner, str(SOURCE), str(self.native), str(self.root),
-                                 'cancel-input-start' if cancel_at_input_start else 'finish-before-output' if finish_before_output else 'normal'],
+                                 'cancel-input-start' if cancel_at_input_start else 'finish-before-output' if finish_before_output else 'exit-before-identity' if exit_before_identity else 'live-without-identity' if missing_live_identity else 'normal'],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def test_stream_bytes_and_eof_reach_the_independent_app(self):
@@ -143,6 +152,26 @@ raise SystemExit(m.run(sys.argv[2],sys.argv[3],sys.argv[3]+'/errors',sys.argv[3]
         for row in (self.root / 'pids').read_text().splitlines():
             with self.assertRaises(ProcessLookupError):
                 os.kill(int(row.split()[1]), 0)
+
+    def test_a_live_app_without_kernel_identity_remains_refused(self):
+        process = self.bridge(missing_live_identity=True)
+        out, _ = process.communicate(timeout=15)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertEqual(out, b'')
+        for row in (self.root / 'pids').read_text().splitlines():
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(row.split()[1]), 0)
+        self.assertEqual(list(self.root.glob('launch-*')), [])
+
+    def test_app_exit_before_identity_keeps_its_completed_reply(self):
+        process = self.bridge(exit_before_identity=True)
+        out, errors = process.communicate(timeout=15)
+        self.assertEqual(process.returncode, 0, errors.decode())
+        self.assertEqual(out, b'{"screen_recording":true,"device_control":true}\n')
+        for row in (self.root / 'pids').read_text().splitlines():
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(row.split()[1]), 0)
+        self.assertEqual(list(self.root.glob('launch-*')), [])
 
     def test_normal_app_exit_does_not_discard_its_pending_reply(self):
         process = self.bridge(finish_before_output=True)

@@ -46,6 +46,7 @@ def run(executable, runtime, errors, pidlog, arguments):
         log.write(prefix + 'bridge ' + str(os.getpid()) + '\n')
     before = app_pids(executable)
     owned = set()
+    births = {}
     opened = None
     incoming = outgoing = output_guard = None
     stdout_blocking = None
@@ -101,10 +102,19 @@ def run(executable, runtime, errors, pidlog, arguments):
                     raise TimeoutError('independent app launch unavailable')
                 time.sleep(.01)
             with open(pidlog, 'a') as log:
-                for pid in owned:
+                for pid in tuple(owned):
                     birth = process_identity(pid)
                     if birth is None:
-                        raise ValueError('app process identity unavailable')
+                        # A short preflight can finish after enumeration but
+                        # before its kernel identity is queried. Its queued
+                        # reply remains valid; a vanished PID owns no cleanup.
+                        owned.discard(pid)
+                        if pid in app_pids(executable):
+                            log.write(f'unverified {pid}\n')
+                            raise ValueError('app process identity unavailable')
+                        log.write(f'completed {pid}\n')
+                        continue
+                    births[pid] = birth
                     log.write(f'{app_role} {pid} {birth[1]} {birth[2]}\n')
             if cancelled.is_set():
                 raise InterruptedError('companion bridge cancelled')
@@ -184,6 +194,8 @@ def run(executable, runtime, errors, pidlog, arguments):
             # An interrupted wrapper must also retire its independently owned
             # app. Only PIDs first seen in this launch are eligible for signals.
             for pid in owned & app_pids(executable):
+                if process_identity(pid) != births.get(pid):
+                    continue
                 try:
                     os.kill(pid, signal.SIGTERM)
                 except ProcessLookupError:
