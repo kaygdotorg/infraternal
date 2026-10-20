@@ -430,6 +430,19 @@ private command's retirement; success does not open another writer. Ownership
 is cleared synchronously before the subsequent authorization await. An error,
 timeout or cancellation before proof retains the exact session for recovery.
 
+Installed transport readiness (#230) waits on registry admission and actor
+route notifications, with subscriptions established before inspection. Ledger
+admission alone and the provisional SSH shell cannot release that fence. The
+service admission phase and the greeted actor phase each receive the original
+30-second startup allowance plus eight observed authenticated SSH exchanges;
+the existing check or session reattach supplies a conservative RTT upper bound
+including remote execution, without another command. Installed registration
+advances startup once; unrelated notifications never renew the allowance.
+The outer attempt deadline and cancellation still apply. A deliberately
+unreachable first attempt can exhaust that allowance; its failure wait is
+reported separately from the subsequent Retry duration. Facts, execution UID,
+private terminal proof and commit remain required on initial setup and Retry.
+
 ### Verified payload reuse (#169)
 
 An SSH installation may retain one public executable in a private marked

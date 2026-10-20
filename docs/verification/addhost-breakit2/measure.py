@@ -21,6 +21,28 @@ def docker(*args, **kwargs):
     return subprocess.run(DOCKER + list(args), check=True, **kwargs)
 
 
+def live_test_environment(args, scratch, target_ip):
+    """Give the live test its fixed fixture coordinates and explicit retry mode."""
+    environment = dict(
+        os.environ,
+        INFRATERNAL_TEST_STATE_ROOT=str(scratch),
+        INFRATERNAL_REMOTE_TEST_BINARY=str(args.payload.resolve()),
+        BREAKIT2_TARGET=f"{args.user}@{target_ip}:22",
+        BREAKIT2_MODE=args.mode,
+        BREAKIT2_CONTROLLER_IP=str(args.controller_ip),
+    )
+    if args.session_payload is not None:
+        environment["INFRATERNAL_REMOTE_TEST_SESSION_BINARY"] = str(args.session_payload)
+    if args.retry:
+        # The one-shot refusal runs after shell publication, then the live test
+        # drives the real Retry path without waiting for a network timeout.
+        environment["ADDHOST_INSTANT"] = "1"
+        environment["BREAKIT2_RETRY"] = "1"
+    if args.expect_failure:
+        environment["BREAKIT2_EXPECT_FAILURE"] = "1"
+    return environment
+
+
 def generated_key():
     private = subprocess.check_output(["openssl", "genpkey", "-algorithm", "ED25519"], stderr=subprocess.DEVNULL)
     public = subprocess.check_output(["openssl", "pkey", "-pubout", "-outform", "DER"], input=private, stderr=subprocess.DEVNULL)
@@ -105,6 +127,7 @@ def main():
     parser.add_argument("--ssh-server", choices=["openssh", "netbird"], default="openssh")
     parser.add_argument("--netbird-binary", type=Path, help="owned standalone real server fixture")
     parser.add_argument("--expect-failure", action="store_true", help="assert refusal, retired authority and empty owned host state")
+    parser.add_argument("--retry", action="store_true", help="inject one published setup failure, then complete Retry (#230)")
     parser.add_argument("--remove", action="store_true", help="after joining, remove the host as the canvas does and prove nothing is left on it (#235)")
     parser.add_argument("--fresh", action="store_true", help="recreate only this lane target before measuring")
     parser.add_argument("--test-binary", type=Path, required=True)
@@ -116,6 +139,10 @@ def main():
     parser.add_argument("--case", choices=["clean", "tiny-disk", "readonly-home", "noexec-tmp", "foreign-base", "linger-off", "no-manager", "password-sudo", "no-sudo"], default="clean")
     parser.add_argument("--shell", choices=["bash", "zsh", "fish", "sh"], default="bash")
     args = parser.parse_args()
+    if args.retry and args.session_payload is None:
+        parser.error("--retry requires --session-payload")
+    if args.retry and (args.expect_failure or args.remove):
+        parser.error("--retry cannot be combined with --expect-failure or --remove")
     if "ADDHOST_INSTANT" in os.environ and args.session_payload is None:
         parser.error("Instant-shell measurements require --session-payload; a full-image fallback is a different case")
     if args.session_payload is not None:
@@ -243,11 +270,7 @@ def main():
             for device in ["eth0", "ifb0"]:
                 docker("exec", TARGET, "tc", "qdisc", "add", "dev", device, "root", "netem", "delay", "75ms")
         print(f"ENVIRONMENT machine={os.uname().nodename} cores={os.cpu_count()} load={Path('/proc/loadavg').read_text().strip()} ssh_server={args.ssh_server} case={args.case} user={args.user} rtt_ms={args.rtt} mode={args.mode} shell={args.shell} payload_bytes={args.payload.stat().st_size}", flush=True)
-        environment = dict(os.environ, INFRATERNAL_TEST_STATE_ROOT=str(scratch), INFRATERNAL_REMOTE_TEST_BINARY=str(args.payload.resolve()), BREAKIT2_TARGET=f"{args.user}@{ip}:22", BREAKIT2_MODE=args.mode, BREAKIT2_CONTROLLER_IP=str(args.controller_ip))
-        if args.session_payload is not None:
-            environment["INFRATERNAL_REMOTE_TEST_SESSION_BINARY"] = str(args.session_payload)
-        if args.expect_failure:
-            environment["BREAKIT2_EXPECT_FAILURE"] = "1"
+        environment = live_test_environment(args, scratch, ip)
         seeder = None
         if args.remove:
             if args.expect_failure:

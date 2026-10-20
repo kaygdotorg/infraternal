@@ -295,6 +295,29 @@ impl SshSession for Pending {
                 .map(|(output, _)| output)
         })
     }
+
+    fn run_with_timeout<'a>(
+        &'a self,
+        script: &'a str,
+        input: Input<'a>,
+        timeout: std::time::Duration,
+    ) -> Operation<'a, CommandOutput> {
+        Box::pin(async move {
+            // A commit can run only after the read-only check selected and
+            // authenticated its method. Preserve that connection's caller
+            // deadline instead of falling back to its ordinary SSH timeout.
+            let session = self
+                .selected
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| {
+                    Failure::install("SSH authentication requires the read-only system check.")
+                })?;
+            session.run_with_timeout(script, input, timeout).await
+        })
+    }
 }
 impl Pending {
     async fn select_check(
@@ -376,6 +399,55 @@ fn authentication_check(script: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TimedSession(Mutex<Option<std::time::Duration>>);
+    impl SshSession for TimedSession {
+        fn run<'a>(&'a self, _: &'a str, _: Input<'a>) -> Operation<'a, CommandOutput> {
+            Box::pin(async { panic!("ordinary timeout path used") })
+        }
+
+        fn run_with_timeout<'a>(
+            &'a self,
+            _: &'a str,
+            _: Input<'a>,
+            timeout: std::time::Duration,
+        ) -> Operation<'a, CommandOutput> {
+            *self.0.lock().unwrap() = Some(timeout);
+            Box::pin(async { Ok(CommandOutput { stdout: Vec::new() }) })
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_forwards_the_caller_deadline_to_its_selected_session() {
+        let selected = Arc::new(TimedSession(Mutex::new(None)));
+        let pending = Pending {
+            transport: Arc::new(UnusedTransport),
+            destination: Destination::parse("user@fixture").unwrap(),
+            mesh: MeshEvidence::default(),
+            provider: Mutex::new(None),
+            selected: tokio::sync::Mutex::new(Some(selected.clone())),
+            authentication: Mutex::new(None),
+            trust_lookup: Mutex::new(None),
+        };
+        let timeout = std::time::Duration::from_secs(91);
+        pending
+            .run_with_timeout("commit", Input::Empty, timeout)
+            .await
+            .unwrap();
+        assert_eq!(*selected.0.lock().unwrap(), Some(timeout));
+    }
+
+    struct UnusedTransport;
+    impl SshTransport for UnusedTransport {
+        fn open(
+            &self,
+            _: Destination,
+            _: Credentials,
+            _: MeshEvidence,
+        ) -> Operation<'_, Arc<dyn SshSession>> {
+            Box::pin(async { Err(Failure::install("Unexpected SSH transport open.")) })
+        }
+    }
 
     #[test]
     fn only_exact_generated_read_only_checks_can_choose_credentials() {

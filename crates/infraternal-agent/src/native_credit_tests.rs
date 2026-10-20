@@ -4,8 +4,7 @@ use super::*;
 #[tokio::test]
 async fn private_credit_burst_waits_for_its_shim_without_retiring_native_stream() {
     let id = uuid::Uuid::new_v4();
-    let base =
-        PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/remote-agents");
+    let base = crate::test_state_root();
     let path = sessions::state(Some(
         base.join(format!("c{}", &id.simple().to_string()[..8])),
     ))

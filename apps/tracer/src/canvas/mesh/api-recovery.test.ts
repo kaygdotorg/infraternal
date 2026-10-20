@@ -69,6 +69,42 @@ test("a synchronous subscription refusal leaves retry able to install a new watc
   expect(active).toBe(0);
 });
 
+test("a changed Mesh revision refreshes a renamed host in the existing view model", async () => {
+  const restore = timers();
+  let deliver: ((event: Record<string, unknown>) => void) | undefined;
+  const initial: Snapshot = {
+    rev: 0,
+    access: { view: true, manageGrants: false },
+    nodes: [{
+      id: 1, name: "before-name", tags: [], state: "offline", rttMs: undefined,
+      os: undefined, address: undefined, path: undefined, via: undefined,
+    }],
+    tags: {},
+    grants: [],
+  };
+  const renamed = {
+    revision: 1,
+    nodes: [{ node: { id: 1, host: "after-name", tags: [] }, live: true }],
+    tags: [],
+    grants: [],
+  };
+  const source = createMeshApi({
+    prime: initial,
+    transport: {
+      call: () => Promise.resolve(renamed),
+      onReady: () => () => {},
+      subscribe: (_topic, listener) => { deliver = listener; return () => {}; },
+    },
+  });
+  try {
+    expect(source.data().nodes.has("before-name")).toBe(true);
+    deliver!({ type: "changed", revision: 1 });
+    await settle();
+    expect(source.data().nodes.has("before-name")).toBe(false);
+    expect(source.data().nodes.has("after-name")).toBe(true);
+  } finally { source.dispose(); restore(); }
+});
+
 
 test("a pushed recovery cancels the scheduled retry", async () => {
   const pending = new Set<number>();

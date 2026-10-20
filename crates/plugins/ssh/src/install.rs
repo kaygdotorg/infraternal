@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 #[path = "setup_scripts.rs"]
@@ -1003,11 +1004,23 @@ fi
     /// # Errors
     /// Reports failed cleanup without claiming that installation is complete.
     pub async fn commit(&self) -> Result<(), Failure> {
-        self.session.run(&self.script(r#"[ -f "$base/.bootstrap-lock/activating" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$transaction" ] || exit 71
+        self.commit_with_timeout(None).await
+    }
+
+    async fn commit_with_timeout(&self, timeout: Option<Duration>) -> Result<(), Failure> {
+        let script = self.script(r#"[ -f "$base/.bootstrap-lock/activating" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$transaction" ] || exit 71
 stage="$base/.bootstrap-lock"
 retire_setup_lease
 rm -rf "$stage"
-"#), Input::Empty).await.map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
+"#);
+        let result = if let Some(timeout) = timeout {
+            self.session
+                .run_with_timeout(&script, Input::Empty, timeout)
+                .await
+        } else {
+            self.session.run(&script, Input::Empty).await
+        };
+        result.map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
         Ok(())
     }
 
@@ -1018,12 +1031,13 @@ rm -rf "$stage"
     pub async fn commit_after(
         &self,
         release: tokio::sync::oneshot::Receiver<()>,
+        timeout: Option<Duration>,
     ) -> Result<(), Failure> {
         if !self.session.setup_steps() {
             release.await.map_err(|_| {
                 Failure::install("Host provisioning stopped before terminal proof.")
             })?;
-            return self.commit().await;
+            return self.commit_with_timeout(timeout).await;
         }
         // The parent-directory guard is taken only after approval. The new
         // agent takes a shared lock on that directory before it binds (#230);
@@ -1047,10 +1061,14 @@ rm -rf "$stage"
 "#
             ),
         );
-        self.session
-            .run(&script, Input::Signal(release))
-            .await
-            .map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
+        let result = if let Some(timeout) = timeout {
+            self.session
+                .run_with_timeout(&script, Input::Signal(release), timeout)
+                .await
+        } else {
+            self.session.run(&script, Input::Signal(release)).await
+        };
+        result.map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
         Ok(())
     }
 

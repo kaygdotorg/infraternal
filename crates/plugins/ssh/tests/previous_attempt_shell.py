@@ -2,10 +2,11 @@
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import subprocess
-import tempfile
 import unittest
+import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 # Confirmation programs: the shared guard, the lease (rollback retires it),
@@ -19,8 +20,12 @@ class EarlierSetup(unittest.TestCase):
     def setUp(self):
         scratch = Path(os.environ.get('INFRATERNAL_TEST_STATE_ROOT', Path.home() / '.cache/codex-scratch/asf'))
         scratch.mkdir(parents=True, exist_ok=True)
-        self.temp = tempfile.TemporaryDirectory(dir=scratch)
-        self.base = Path(self.temp.name) / 'infraternal'
+        os.chdir(scratch)
+        # Keep the fixture directory name short for AF_UNIX; the shell receives
+        # a canonical absolute root so its path ownership checks stay realistic.
+        self.temp = Path(f'asf-{uuid.uuid4().hex[:12]}')
+        self.temp.mkdir(mode=0o700)
+        self.base = Path.cwd() / self.temp / 'infraternal'
         self.base.mkdir(mode=0o700)
         helper = Path(os.environ['INFRATERNAL_TEST_RUNTIME_HELPER'])
         cache = Path(str(self.base) + '.bootstrap-cache')
@@ -44,12 +49,12 @@ class EarlierSetup(unittest.TestCase):
         os.chdir(self.sessions)
         self.listener = socket.socket(socket.AF_UNIX)
         self.listener.bind(self.socket.name)
-        self.socket.chmod(0o600)
+        Path(self.socket.name).chmod(0o600)
         os.chdir(previous)
 
     def tearDown(self):
         self.listener.close()
-        self.temp.cleanup()
+        shutil.rmtree(self.temp)
 
     def run_shell(self, body):
         script = f'set -euC\numask 077\nbase="{self.base}"\nhost={HOST}\ntransaction={TRANSACTION}\n' + INSPECT + body
@@ -114,7 +119,7 @@ class EarlierSetup(unittest.TestCase):
         self.listener.close()
         control = self.sessions.parent / 'plugins.sock'
         self.socket.rename(control)
-        other = Path(self.temp.name) / 'other'
+        other = self.base.parent / 'other'
         other.mkdir(mode=0o700)
         unrelated = other / 'plugins.sock'
         with socket.socket(socket.AF_UNIX) as listener:

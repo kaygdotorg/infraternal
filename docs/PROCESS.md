@@ -143,8 +143,8 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,344,304 bytes |
-  | `aarch64-unknown-linux-musl` | 19,535,600 bytes |
+  | `x86_64-unknown-linux-musl` | 21,385,264 bytes |
+  | `aarch64-unknown-linux-musl` | 19,570,256 bytes |
 
   Release jobs (not `scripts/verify fast`, which every job runs) also run
   `scripts/test-static-reproducibility.py`. It builds both targets again from a detached checkout with separate
@@ -155,10 +155,17 @@ Reviews and fixes run at the same time as the next lane's build.
   rustc applies the later match, which keeps sources under `/cargo/<crate>`.
   This catches release output that depends on a job's build locations.
 
-  These are the release-6 measurements. From release 5, #244 adds 3,776 /
+  These are the release-7 measurements after the reviewed Retry and Mesh merges,
+  #246 source-path normalization, and the #236 migration collision correction:
+  +40,960 / +34,656 bytes over release 6. Retry measured 21,352,208 /
+  19,542,304 bytes; Mesh measured 21,385,264 / 19,570,256. Build normalization
+  preserved those sizes. Reserving existing names in unshipped migration 0029
+  adds +0 / +0 bytes. The exact caps retain no growth allowance (D243).
+  Release jobs run the cross-root reproducibility check after `scripts/verify fast`.
+  Release 6 measured 21,344,304 / 19,535,600 bytes. From release 5, #244 adds 3,776 /
   3,320 bytes and #243 adds 114,656 / 104,592 bytes, totaling 118,432 /
   107,912 bytes. D308 accepts the shared-layout increase after its first
-  trim; x86_64 remains 24,928 bytes below this task's +140 KiB stop line.
+  trim; release 6 x86_64 remained 24,928 bytes below its +140 KiB stop line.
   Release 5 added the Mesh view (#236) at +81,760 / +56,992 over release 4;
   D306 accepted that increase. Each cap stays at its exact measured size
   until a later measured reduction ratchets it down. Release 4's one-off D243 exception was accepted

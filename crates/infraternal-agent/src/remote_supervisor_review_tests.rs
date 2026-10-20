@@ -80,8 +80,7 @@ struct StateDirectory(std::path::PathBuf);
 impl StateDirectory {
     fn new() -> Self {
         use std::os::unix::fs::DirBuilderExt;
-        let parent = std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(".cache/codex-scratch/agent-reconnect-review");
+        let parent = crate::test_state_root().join("agent-reconnect-review");
         std::fs::create_dir_all(&parent).unwrap();
         let path = parent.join(format!(
             "r1-{}",

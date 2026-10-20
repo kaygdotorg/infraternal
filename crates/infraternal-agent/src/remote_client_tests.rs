@@ -20,10 +20,8 @@ async fn reserve_transport_pair() -> (tokio::net::TcpListener, tokio::net::UdpSo
 struct StateDirectory(PathBuf);
 impl StateDirectory {
     fn new() -> Self {
-        let parent = PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(".cache/codex-scratch/remote-agents");
-        std::fs::create_dir_all(&parent).unwrap();
-        let path = parent.join(format!("client-test-{}", uuid::Uuid::new_v4()));
+        let parent = crate::test_state_root();
+        let path = parent.join(format!("c{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path).unwrap();
         std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o700))
             .unwrap();

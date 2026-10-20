@@ -14,7 +14,8 @@ function withoutWorkspaceStaticFeature(flags: string[]): string[] {
       index++;
       continue;
     }
-    if (flags[index] !== "-Ctarget-feature=+crt-static") result.push(flags[index]);
+    const flag = flags[index];
+    if (flag !== undefined && flag !== "-Ctarget-feature=+crt-static") result.push(flag);
   }
   return result;
 }

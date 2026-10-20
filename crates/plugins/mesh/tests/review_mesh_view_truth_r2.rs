@@ -150,7 +150,7 @@ async fn version_25_database() -> SqlitePool {
 /// first round of attaches (in an unlucky order: the host whose record collides first, the server last) names
 /// every machine, and a second round in the opposite order renames nothing and audits nothing.
 #[tokio::test]
-async fn evidence_migration_0026_upgrades_a_realistic_database_without_churn() {
+async fn evidence_migrations_0026_and_0029_upgrade_a_realistic_database_without_churn() {
     let pool = version_25_database().await;
     sqlx::migrate!("../../infraternal-server/migrations")
         .run(&pool)
@@ -160,11 +160,38 @@ async fn evidence_migration_0026_upgrades_a_realistic_database_without_churn() {
         name_rows(&pool).await,
         [
             ("server".into(), "placeholder".into(), Some("server".into())),
-            (format!("mesh-{A}"), "placeholder".into(), Some(A.into())),
+            ("unnamed-2".into(), "placeholder".into(), Some(A.into())),
             ("minipc01".into(), "hand".into(), Some(B.into())),
-            (format!("mesh-{C}"), "placeholder".into(), Some(C.into())),
+            ("unnamed-4".into(), "placeholder".into(), Some(C.into())),
         ]
     );
+    let migration_revision: i64 =
+        sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let migration_audits = automatic_renames(&pool).await;
+    sqlx::migrate!("../../infraternal-server/migrations")
+        .run(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        name_rows(&pool).await,
+        [
+            ("server".into(), "placeholder".into(), Some("server".into())),
+            ("unnamed-2".into(), "placeholder".into(), Some(A.into())),
+            ("minipc01".into(), "hand".into(), Some(B.into())),
+            ("unnamed-4".into(), "placeholder".into(), Some(C.into())),
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM mesh_state WHERE singleton=1")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        migration_revision
+    );
+    assert_eq!(automatic_renames(&pool).await, migration_audits);
     let service = MeshService::new(pool.clone());
     let store = service.dataplane();
     let round = |order: [(&'static str, u8, Option<&'static str>); 4]| {
@@ -192,7 +219,7 @@ async fn evidence_migration_0026_upgrades_a_realistic_database_without_churn() {
         .collect();
     assert_eq!(named, ["monitor01", "minipc01-2", "minipc01", "lab07"]);
     let audited = automatic_renames(&pool).await;
-    assert_eq!(audited, 3);
+    assert_eq!(audited, 5);
     round([
         ("server", 1, Some("monitor01")),
         (B, 11, Some("raspberrypi")),
@@ -218,8 +245,8 @@ async fn evidence_migration_0026_upgrades_a_realistic_database_without_churn() {
 ///
 /// Resolution (#236): production deploys run through the owner's deploy script, which copies the whole
 /// `/var/lib/infraternal` before the switch and restores that copy on a failed health check, so the previous binary
-/// starts on its own database. Migrations 0026 and 0027 are additive. The test stays as a record of the rule and
-/// runs with `--ignored`.
+/// starts on its own database. Migration 0029 rewrites old UUID-shaped placeholder labels; rollback restores the
+/// pre-switch database copy. The test stays as a record of the rule and runs with `--ignored`.
 #[tokio::test]
 #[ignore = "deploy gate, not code: production rollback restores the database copy (#236)"]
 async fn the_previous_release_starts_on_a_database_this_release_migrated() {

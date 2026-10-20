@@ -206,8 +206,10 @@ fn failed_restart_endpoint_does_not_prevent_http_serving() {
     const NAME: &str =
         "remote_server::tests::failed_restart_endpoint_does_not_prevent_http_serving";
     if std::env::var_os("INFRATERNAL_CONTROL_FAILURE_TEST").is_some() {
-        let directory = PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(".cache/codex-scratch/ca-handoff")
+        // Keep this socket fixture within the Unix pathname limit even when
+        // the test runner supplies a long, isolated absolute HOME.
+        let directory = std::env::temp_dir()
+            .join("ca")
             .join(format!("endpoint-{}", uuid::Uuid::new_v4().simple()));
         std::fs::DirBuilder::new()
             .recursive(true)

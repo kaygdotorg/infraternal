@@ -566,6 +566,15 @@ impl MeshService {
         }
     }
 
+    /// Rename an attached node from newly retained host inventory and notify live Mesh viewers after commit.
+    pub async fn refresh_host_name(&self, host: &str) -> bool {
+        if self.store.refresh_host_name(host).await != Ok(true) {
+            return false;
+        }
+        self.invalidate_dataplane().await;
+        true
+    }
+
     /// Bind destructive browser authority to the transaction that commits the edit.
     /// Direct service callers remain responsible for authenticating their adapter.
     #[must_use]

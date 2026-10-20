@@ -606,7 +606,7 @@ async fn commit_signal_retains_journal_until_proof_and_on_cancel() {
         install.setup(&fixture.join).await.unwrap();
         let stage = fixture.base().join(".bootstrap-lock");
         let (release, receiver) = tokio::sync::oneshot::channel();
-        let pending = install.commit_after(receiver);
+        let pending = install.commit_after(receiver, None);
         tokio::pin!(pending);
         tokio::select! {
             result = &mut pending => panic!("commit preceded proof: {result:?}"),
@@ -3068,8 +3068,8 @@ async fn concurrent_attempts_cannot_replace_or_clean_each_others_transaction() {
     let descriptor = PathBuf::from(format!("/proc/{pid}/fd/7"));
     assert!(loser.rollback().await.is_err());
     assert_eq!(
-        std::fs::read_link(&descriptor).unwrap(),
-        fixture.base().join(".bootstrap-lock"),
+        std::fs::canonicalize(std::fs::read_link(&descriptor).unwrap()).unwrap(),
+        std::fs::canonicalize(fixture.base().join(".bootstrap-lock")).unwrap(),
         "the losing attempt retired the winner's setup lease"
     );
     assert_eq!(
