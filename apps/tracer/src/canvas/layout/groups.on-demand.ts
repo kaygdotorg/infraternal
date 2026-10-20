@@ -11,8 +11,8 @@
  * itself with layout/groups-handle.ts when it evaluates, so every path that loads it sees the same instance. A group's DOM
  * exists only after this module has run, so a caller that finds a group can use `groupsLoaded()` without waiting.
  */
-import { COLUMN_GAP } from "./geometry";
-import { columnEls } from "./column-els";
+import { COLUMN_GAP, drawnWidth } from "./geometry";
+import { columnEls, setColumnWidth } from "./column-els";
 import { bandHeights, copy, insertBand, insertSorted, locate, newRight, runOf, runsOf, settle, splitDown, splitRight, type Col, type ColIn, type Run, type Win } from "./grid";
 import { registerGroups } from "./groups-handle";
 import type { Ctx, ViewRec } from "../context";
@@ -135,9 +135,11 @@ export function arrange(cx: Ctx, c: ViewRec, cols: ColumnModel[]): void {
     if (run.to === run.from) continue;
     const g = wrappers.get(run)!;
     const cols = settled.slice(run.from, run.to + 1);
-    const total = cols.reduce((sum, col) => sum + col.w, 0) + COLUMN_GAP * (cols.length - 1);
+    // The tracks are drawn widths: a touch screen's floor widens them, the saved widths (`col.w`) stay as they are.
+    const drawn = cols.map((col) => drawnWidth(col.w, cx.state.metrics));
+    const total = drawn.reduce((sum, w) => sum + w, 0) + COLUMN_GAP * (cols.length - 1);
     put(g, "width", `${total + SIDE}px`);
-    put(g, "gridTemplateColumns", cols.map((col) => `${col.w}px`).join(" "));
+    put(g, "gridTemplateColumns", drawn.map((w) => `${w}px`).join(" "));
     const bands = bandHeights(settled, run);
     put(g, "gridTemplateRows", Array.from({ length: run.rows }, (_, r) => bandTrack(bands[r])).join(" "));
     cols.forEach((col, j) => {
@@ -185,8 +187,7 @@ export function applyCols(cx: Ctx, c: ViewRec, cols: ColumnModel[]): void {
       else { const first = columnEls(c.colsEl)[0]; if (first) first.before(colEl); else c.colsEl.append(colEl); }
     }
     anchor = colEl;
-    colEl.dataset.w = String(col.w);
-    colEl.style.setProperty("--w", `${col.w}px`);
+    setColumnWidth(colEl, col.w, cx.state.metrics);
     if (col.half) colEl.dataset.half = col.half; else delete colEl.dataset.half;
     // Windows in the column's order: a window already in place is not moved.
     let prev: Element | null = null;

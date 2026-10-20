@@ -1,6 +1,6 @@
 /** Placement rules of the clusters mockup: grid snapping, pushing and grant reach (src/canvas/layout/geometry.ts). */
 import { expect, test } from "bun:test";
-import { CELL, COLUMN_GAP, defaultWidth, isDefaultWidth, metricsFor, resolve, snapToGrid, type Box } from "./geometry";
+import { CELL, COLUMN_GAP, MIN_TOUCH_COLUMN, contentSize, defaultWidth, drawnWidth, isDefaultWidth, metricsFor, resolve, snapToGrid, type Box } from "./geometry";
 import { DEFAULT_SIZES, PEEK } from "../window-sizes";
 import { reach } from "../mesh/grants";
 import { INITIAL_GRANTS, TAGS } from "../mock/data";
@@ -70,4 +70,26 @@ test("comfortable phones: a column in a strip leaves PEEK px of each neighbour; 
 test("a desktop column is the same alone and in a strip", () => {
   const m = metricsFor(1400, 900, false);
   expect(m.peekW).toBe(m.colW);
+});
+
+test("D309: a touch screen draws every column at least MIN_TOUCH_COLUMN wide, never wider than a lone column; a fine pointer has no floor", () => {
+  const wide = metricsFor(430, 932, true);
+  expect(wide.minW).toBe(MIN_TOUCH_COLUMN);
+  expect(drawnWidth(39, wide)).toBe(MIN_TOUCH_COLUMN);
+  expect(drawnWidth(500, wide)).toBe(500);
+  // A narrower screen cannot show a floor wider than a column of its default strip: the floor is that column, so the
+  // default layout looks as it did and a column never overflows the screen.
+  for (const width of [320, 375, 393]) { const m = metricsFor(width, 700, true); expect(m.minW).toBe(m.peekW); expect(m.minW).toBeLessThan(MIN_TOUCH_COLUMN); }
+  const desktop = metricsFor(1440, 900, false);
+  expect(desktop.minW).toBe(0);
+  expect(drawnWidth(39, desktop)).toBe(39);
+  // A narrow desktop window is still a fine pointer: no floor.
+  expect(metricsFor(600, 800, false).minW).toBe(0);
+});
+
+test("D309: the content is as wide as the drawn columns, so the camera reaches every column", () => {
+  const phone = metricsFor(430, 932, true);
+  const view = { id: "console", name: "Console", layout: "tiled" as const, nodes: [], x: 0, y: 0, cols: [39, 39, 430].map((w, i) => ({ id: `c${i}`, w, wins: [] })) };
+  expect(contentSize(view, phone).w).toBe(2 * MIN_TOUCH_COLUMN + 430 + 2 * COLUMN_GAP);
+  expect(contentSize(view, metricsFor(1440, 900, false)).w).toBe(39 + 39 + 430 + 2 * COLUMN_GAP);
 });

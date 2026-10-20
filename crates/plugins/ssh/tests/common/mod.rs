@@ -25,6 +25,7 @@ pub fn recovery_scratch() -> PathBuf {
     let process_id = format!("{:x}", std::process::id());
     let fallback = home.join(".cache").join(&process_id);
     let requested = std::env::var_os("INFRATERNAL_SSH_TEST_STATE_ROOT")
+        .or_else(|| std::env::var_os("INFRATERNAL_TEST_SOCKET_ROOT"))
         .or_else(|| std::env::var_os("INFRATERNAL_TEST_STATE_ROOT"))
         .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
         .map(PathBuf::from);

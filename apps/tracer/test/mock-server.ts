@@ -7,6 +7,7 @@ import { extname, resolve, sep } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { CLOSE_SESSION_GONE, encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
+import { QueryReplies } from "./query-replies-double";
 import { terminalFixtures } from "./terminal-fixtures";
 import { handleBootstrapHttp, serveProvisioning } from "./provisioning-double";
 import { serveSetup } from "./setup-double";
@@ -43,6 +44,7 @@ interface MockOwner {
 }
 
 interface MockSession {
+  queries: QueryReplies;
   sessionId: Uint8Array;
   sessionIdText: string;
   connectionId: Uint8Array;
@@ -55,6 +57,8 @@ interface MockSession {
   echoOutputLength: number;
   outputLength: number;
   writtenInput: bigint;
+  /** Fixture labels preserve each viewer cursor across reconnects. */
+  viewerCursors: Map<string, bigint>;
   acceptedInputBytes: number;
   echoedText: string;
   echoMode: "normal" | "none" | "mask" | "wrong";
@@ -62,6 +66,10 @@ interface MockSession {
 }
 
 interface Connection {
+  /** Test-only identity used to attribute input bytes to one attached browser. */
+  clientId: number;
+  viewerLabel: string | null;
+  acceptedInputBytes: number;
   socket: WebSocket;
   decoder: WebSocketFrameDecoder;
   traceEnabled: boolean;
@@ -112,6 +120,8 @@ let pendingLogin: { ceremony: string } | undefined;
 let dropNextAck = false;
 /** Closes each newly attached stream after a controlled delay for reconnect regressions. */
 let closeAfterAttachMs: number | undefined;
+/** A program that repaints after the next reattach (`/__mock/redraw-on-attach`): its bytes follow the replay once, after a delay. */
+let redrawOnAttach: { bytes: Uint8Array; delayMs: number } | undefined;
 let selectedFixture: Uint8Array | undefined;
 const liveSessionIds = new Set<string>();
 let sessionInventoryAvailable = true;
@@ -128,6 +138,7 @@ const retiredSessions = new Map<string, { status: number; finalSeq: number }>();
 /** Interrupt exactly the first final answer to test recovery between its two ordered frames. */
 const interruptedRetirements = new Set<string>();
 let attachCount = 0;
+let nextClientId = 0;
 const attachHistory: Array<{ last_out_seq: string; output_sequence: string }> = [];
 const traceEvents: TraceEvent[] = [];
 
@@ -173,6 +184,9 @@ webSockets.on("connection", (socket, request) => {
     return;
   }
   const connection: Connection = {
+    clientId: ++nextClientId,
+    viewerLabel: new URL(request.url ?? "/", "http://localhost").searchParams.get("fixture_viewer"),
+    acceptedInputBytes: 0,
     socket,
     decoder: new WebSocketFrameDecoder(),
     traceEnabled: new URL(request.url ?? "/", `http://${request.headers.host ?? `${HOST}:${PORT}`}`).searchParams.get("trace") === "1",
@@ -318,6 +332,25 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     // Use the existing live suffix writer so these bytes follow the captured replay head.
     appendEchoOutput(session, bytes);
     return sendJson(response, 200, { bytes: bytes.byteLength, output_sequence: String(session.outputLength) });
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/synchronized-output") {
+    const body = await readJson(request);
+    if (!Array.isArray(body?.parts) || body.parts.length < 2 || body.parts.length > 8 || body.parts.some((part) => typeof part !== "string")) {
+      return sendJson(response, 400, { error: "synchronized output needs two to eight text parts" });
+    }
+    const parts = body.parts.map((part: string) => new TextEncoder().encode(part));
+    if (parts.some((part: Uint8Array) => part.byteLength === 0 || part.byteLength > MAX_MESSAGE)) {
+      return sendJson(response, 413, { error: "each synchronized output part must fit one frame" });
+    }
+    session.echoMode = "none";
+    const outputSequences: string[] = [];
+    for (let index = 0; index < parts.length; index += 1) {
+      appendEchoOutput(session, parts[index]!);
+      outputSequences.push(String(session.outputLength));
+      // Let the browser's frame loop run between Output frames while keeping the test batch within its hold bound.
+      if (index + 1 < parts.length) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return sendJson(response, 200, { output_sequences: outputSequences });
   }
   if (request.method === "POST" && url.pathname === "/__mock/query-snapshot") {
     const body = await readJson(request);
@@ -480,6 +513,8 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
         : {}),
       written_input: session.writtenInput.toString(),
       accepted_input_bytes: session.acceptedInputBytes,
+      reply_attempts: session.queries.attempts,
+      dropped_replies: session.queries.dropped,
       output_sequence: String(session.outputLength),
       snapshot_count: session.snapshotCount,
       socket_open_count: socketOpenCount,
@@ -487,6 +522,12 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
       attach_count: attachCount,
       attach_history: attachHistory,
       attached_stream_ids: [...connections].filter((connection) => connection.attached).map((connection) => connection.stream),
+      viewer_input_bytes: [...connections].map((connection) => ({
+        client_id: connection.clientId,
+        viewer_label: connection.viewerLabel,
+        attached: connection.attached,
+        accepted_input_bytes: connection.acceptedInputBytes,
+      })),
       session_id: session.sessionIdText,
       active_socket_count: connections.size,
     });
@@ -591,6 +632,21 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   }
   if (request.method === "POST" && url.pathname === "/__mock/drop-sockets") {
     for (const connection of connections) connection.socket.close(1011, "test-double link dropped");
+    return sendJson(response, 200, {});
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/live-output") {
+    const body = await readJson(request);
+    if (typeof body?.text !== "string") return sendJson(response, 400, { error: "text output must be a string" });
+    appendEchoOutput(session, new TextEncoder().encode(body.text));
+    return sendJson(response, 200, { output_sequence: String(session.outputLength) });
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/redraw-on-attach") {
+    const body = await readJson(request);
+    if (body?.text === null) { redrawOnAttach = undefined; return sendJson(response, 200, {}); }
+    if (typeof body?.text !== "string" || typeof body.delay_ms !== "number" || !(body.delay_ms >= 0 && body.delay_ms <= 5000)) {
+      return sendJson(response, 400, { error: "redraw needs text and a delay up to 5000 ms" });
+    }
+    redrawOnAttach = { bytes: new TextEncoder().encode(body.text), delayMs: body.delay_ms };
     return sendJson(response, 200, {});
   }
   if (request.method === "POST" && url.pathname === "/__mock/close-after-attach") {
@@ -796,8 +852,9 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
         // starts at zero even though accepted_input_bytes remains cumulative.
         connection.inputCursor = 0n;
         connection.session.writtenInput = 0n;
+        connection.session.viewerCursors.set(connection.viewerLabel ?? "", 0n);
       }
-      sendFrame(connection.socket, 0, { type: "Hello", version: 1, caps: 4n, clientInfo: "infraternal-mock-test-double/0.1" });
+      sendFrame(connection.socket, 0, { type: "Hello", version: 1, caps: 12n, clientInfo: "infraternal-mock-test-double/0.1" });
       connection.welcomeTimer = setTimeout(() => sendWelcome(connection), 0);
       return;
     case "Resume":
@@ -811,7 +868,7 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
         return;
       }
       connection.resumeAccepted = true;
-      connection.inputCursor = connection.session.writtenInput;
+      connection.inputCursor = connection.session.viewerCursors.get(connection.viewerLabel ?? "") ?? 0n;
       if (connection.welcomeTimer) clearTimeout(connection.welcomeTimer);
       sendWelcome(connection);
       return;
@@ -923,6 +980,12 @@ function handleTerminalFrame(connection: Connection, streamId: number, frame: Wi
       connection.replayUntil = BigInt(connection.session.outputLength);
       sendFrame(connection.socket, connection.stream, { type: "Ack", inSeqAcked: connection.inputCursor });
       flushOutput(connection);
+      if (redrawOnAttach) {
+        const redraw = redrawOnAttach;
+        redrawOnAttach = undefined;
+        const target = connection.session;
+        setTimeout(() => appendEchoOutput(target, redraw.bytes), redraw.delayMs);
+      }
       if (closeAfterAttachMs !== undefined) {
         setTimeout(() => {
           if (!isSocketOpen(connection.socket)) return;
@@ -942,6 +1005,13 @@ function handleTerminalFrame(connection: Connection, streamId: number, frame: Wi
     case "Input":
       if (!connection.attached) {
         connection.socket.close(1002, "input before test-double attach");
+        return;
+      }
+      if (frame.replyTo !== undefined) {
+        if (connection.session.queries.accept(frame.replyTo, frame.bytes)) {
+          connection.session.acceptedInputBytes += frame.bytes.length;
+          connection.acceptedInputBytes += frame.bytes.length;
+        }
         return;
       }
       acceptInput(connection, frame.inSeq, frame.bytes);
@@ -975,7 +1045,9 @@ function acceptInput(connection: Connection, sequence: bigint, bytes: Uint8Array
     }
     connection.inputCursor += BigInt(fresh.byteLength);
     connection.session.writtenInput = connection.inputCursor;
+    connection.session.viewerCursors.set(connection.viewerLabel ?? "", connection.inputCursor);
     connection.session.acceptedInputBytes += fresh.byteLength;
+    connection.acceptedInputBytes += fresh.byteLength;
     connection.session.echoedText += new TextDecoder().decode(fresh);
     const echoed = echoBytes(connection.session, fresh);
     if (echoed && connection.session.echoDelayMs > 0) {
@@ -1049,6 +1121,7 @@ function flushOutput(connection: Connection): void {
     const length = Math.min(MAX_MESSAGE, connection.credit, sourceEnd - absoluteOffset, replayRemaining);
     if (length <= 0) break;
     const bytes = source.subarray(offset, offset + length);
+    connection.session.queries.output(connection.outputCursor, bytes);
     sendFrame(connection.socket, connection.stream, { type: "Output", outSeq: connection.outputCursor, bytes },
       connection.traceEnabled ? connection.outputCursor : undefined, length);
     connection.outputCursor += BigInt(length);
@@ -1231,6 +1304,7 @@ function resetMockState(): void {
   pendingLogin = undefined;
   dropNextAck = false;
   closeAfterAttachMs = undefined;
+  redrawOnAttach = undefined;
   selectedFixture = undefined;
   socketOpenCount = 0;
   socketCloseCount = 0;
@@ -1251,6 +1325,7 @@ function createSession(resumeFrom?: MockSession, fixtureOutput: Uint8Array = new
   const sessionIdText = randomUuid();
   liveSessionIds.add(sessionIdText);
   return {
+    queries: new QueryReplies(),
     sessionId: uuidBytes(sessionIdText),
     sessionIdText,
     // The resume token belongs to the authenticated websocket connection, not a fresh PTY.
@@ -1264,6 +1339,7 @@ function createSession(resumeFrom?: MockSession, fixtureOutput: Uint8Array = new
     echoOutputLength: 0,
     outputLength: fixtureOutput.byteLength,
     writtenInput: 0n,
+    viewerCursors: new Map(),
     acceptedInputBytes: 0,
     echoedText: "",
     echoMode: "normal",

@@ -21,6 +21,8 @@ pub const SESSION_OWNER: u64 = 8;
 /// independently of peer selection mode; ordinary writer selection and
 /// replacement remain unchanged.
 pub const SHARED_WRITER: u64 = 16;
+/// Capability bit 5 permits bounded renderer replies without typing cursors or geometry changes [307].
+pub const QUERY_REPLIES: u64 = 32;
 
 /// Frozen v1 messages. Byte vectors are owned only after length validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +40,8 @@ pub enum Frame {
     },
     Attach(u64),
     Input(Vec<u8>),
+    /// Additive 0x1E; server-arbitrated reply bytes, at most 1024 bytes.
+    QueryReply(Vec<u8>),
     Output(u64, Vec<u8>),
     Resize {
         cols: u16,
@@ -196,6 +200,12 @@ impl Frame {
             return Self::output_slices_into::<APPEND>(*seq, bytes, &[], wire);
         }
         let size = match self {
+            Self::QueryReply(bytes) => {
+                if bytes.is_empty() || bytes.len() > 1024 {
+                    return Err(invalid());
+                }
+                1 + bytes.len()
+            }
             Self::Input(bytes) => 1 + bytes.len(),
             Self::Output(_, bytes) | Self::Snapshot(_, bytes) | Self::SequencedInput(_, bytes) => {
                 9 + bytes.len()
@@ -249,6 +259,10 @@ impl Frame {
             Self::Attach(caps) => {
                 body.push(2);
                 put!(caps);
+            }
+            Self::QueryReply(bytes) => {
+                body.push(0x1e);
+                body.extend_from_slice(bytes);
             }
             Self::Input(bytes) => {
                 body.push(0x10);
@@ -352,6 +366,7 @@ impl Frame {
             },
             2 => Self::Attach(p.u64()?),
             0x10 => Self::Input(p.bytes()),
+            0x1e if !p.0.is_empty() && p.0.len() <= 1024 => Self::QueryReply(p.bytes()),
             0x11 => Self::Output(p.u64()?, p.bytes()),
             0x12 => Self::Resize {
                 cols: p.u16()?,

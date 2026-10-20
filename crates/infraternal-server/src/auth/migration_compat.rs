@@ -2,8 +2,9 @@
 use super::{Error, Result};
 use sqlx::{SqlitePool, migrate::MigrateError};
 
-// Reuse compile-time checksums rather than linking or running another hash operation at startup.
-pub(super) static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+// The build retains the original checksums while removing only executable SQL
+// comments and redundant whitespace. No runtime hash, parser or allocation is added.
+include!(concat!(env!("OUT_DIR"), "/compact_migrations.rs"));
 
 /// Retag only the shipped, successful index migration; normal `SQLx` validation handles every other history.
 /// The immediate writer transaction makes concurrent startup and interruption safe. A committed

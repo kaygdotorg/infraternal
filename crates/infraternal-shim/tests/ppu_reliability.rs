@@ -138,6 +138,10 @@ impl Host {
     }
 
     fn connect(&mut self, id: u128) -> UnixStream {
+        self.connect_with_caps(id, infraternal_shim::frame::APPROXIMATE_SNAPSHOT)
+    }
+
+    fn connect_with_caps(&mut self, id: u128, requested: u64) -> UnixStream {
         let id = id.to_le_bytes();
         let name = format!("{:032x}", u128::from_be_bytes(id));
         let path = self.root.join("sessions").join(format!("{name}.sock"));
@@ -154,11 +158,10 @@ impl Host {
             .unwrap();
         peer.set_write_timeout(Some(Duration::from_secs(30)))
             .unwrap();
-        assert!(matches!(read(&mut peer), Frame::Hello { pid, .. } if pid == self.child.id()));
-        send(
-            &mut peer,
-            &Frame::Attach(infraternal_shim::frame::APPROXIMATE_SNAPSHOT),
+        assert!(
+            matches!(read(&mut peer), Frame::Hello { pid, caps, .. } if pid == self.child.id() && caps & requested == requested)
         );
+        send(&mut peer, &Frame::Attach(requested));
         send(&mut peer, &Frame::ReadFrom(0));
         peer
     }
@@ -372,4 +375,54 @@ fn diagnostic_flush_records_numeric_stages_without_terminal_content() {
     }
     assert!(!text.contains("private-diagnostic-marker"));
     assert!(!text.contains("printf"));
+}
+
+#[test]
+fn shared_host_advertises_and_routes_isolated_terminal_replies() {
+    let mut host = Host::new();
+    let mut peer = host.connect_with_caps(
+        1,
+        infraternal_shim::frame::APPROXIMATE_SNAPSHOT | infraternal_shim::frame::QUERY_REPLIES,
+    );
+    input_and_marker(&mut peer, b"stty -echo; ", b"reply-ready");
+    // A comment consumes reply bytes without executing a command; later typing
+    // proves that the negotiated reply did not disconnect or replace its writer.
+    send(
+        &mut peer,
+        &Frame::QueryReply(b"# terminal reply\n".to_vec()),
+    );
+    input_and_marker(&mut peer, b"", b"typing-after-reply");
+    assert!(host.child.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn merge_review_reply_bytes_reach_pty_and_caps_zero_peer_still_works() {
+    let mut host = Host::new();
+    let mut peer = host.connect_with_caps(1, infraternal_shim::frame::QUERY_REPLIES);
+    input_and_marker(&mut peer, b"stty -echo; ", b"merge-ready");
+    // Echo is off: the marker proves execution of reply bytes in the real
+    // PTY, rather than merely proving that the data connection stayed open.
+    send(
+        &mut peer,
+        &Frame::QueryReply(b"printf 'reply-reached-pty\\n'\n".to_vec()),
+    );
+    let marker = b"reply-reached-pty";
+    let mut tail = Vec::new();
+    loop {
+        match read(&mut peer) {
+            Frame::Output(_, bytes) => {
+                tail.extend(bytes);
+                if tail.windows(marker.len()).any(|part| part == marker) {
+                    break;
+                }
+            }
+            frame @ (Frame::Error(..) | Frame::Exited(..)) => {
+                panic!("reply ended the data connection: {frame:?}");
+            }
+            _ => {}
+        }
+    }
+    input_and_marker(&mut peer, b"", b"typing-still-works");
+    let mut legacy = host.connect_with_caps(2, 0);
+    input_and_marker(&mut legacy, b"", b"caps-zero-still-works");
 }

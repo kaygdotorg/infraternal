@@ -708,7 +708,8 @@ impl Session {
                         | MULTI_WRITER
                         | APPROXIMATE_SNAPSHOT
                         | SESSION_OWNER
-                        | SHARED_WRITER,
+                        | SHARED_WRITER
+                        | crate::frame::QUERY_REPLIES,
                     session: self.config.session,
                     pid: std::process::id(),
                     cols: self.config.cols,

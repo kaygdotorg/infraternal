@@ -143,8 +143,8 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,385,264 bytes |
-  | `aarch64-unknown-linux-musl` | 19,570,256 bytes |
+  | `x86_64-unknown-linux-musl` | 21,387,248 bytes |
+  | `aarch64-unknown-linux-musl` | 19,559,400 bytes |
 
   Release jobs (not `scripts/verify fast`, which every job runs) also run
   `scripts/test-static-reproducibility.py`. It builds both targets again from a detached checkout with separate
@@ -155,7 +155,82 @@ Reviews and fixes run at the same time as the next lane's build.
   rustc applies the later match, which keeps sources under `/cargo/<crate>`.
   This catches release output that depends on a job's build locations.
 
-  These are the release-7 measurements after the reviewed Retry and Mesh merges,
+  The release-9 merge back into dev (#24) retains the optional per-user host
+  and updates only the existing `rustls-webpki` dependency to 0.103.16 for
+  RUSTSEC-2026-0382. Fresh builds of dev `fe047e2d3` and the merged source use
+  the same pinned static recipe on infraternal-dev:
+
+  | Source | x86_64 bytes | aarch64 bytes |
+  | --- | ---: | ---: |
+  | Dev before | 21,385,264 | 19,570,256 |
+  | Release 9 merged, with the TLS patch | 21,387,248 | 19,559,400 |
+  | Delta | +1,984 | −10,856 |
+
+  Both exact caps above use the measured merge bytes, with no allowance
+  (D243). The existing TLS engine and features stay selected; no protocol or
+  build-profile change is included. Receipts and compatibility gates are on #24.
+
+  The reply-reservation production fix (#24, D307) measures 21,387,120 /
+  19,558,856 bytes with the same pinned static recipe: -64 / -256 bytes
+  against release 8. Replies expire while older typing waits or the queue
+  is full; expected expiry and opaque writer refusals avoid error allocation.
+  Both exact caps ratchet down to these measurements (D243). No protocol,
+  dependency or build-profile change is added.
+
+  Release 9 merges the reviewed reply reservation and shared-layout recovery
+  histories, then picks the quiet session-list warm-up and its standalone test
+  fix (#24, #243, #249). Same pinned stripped static measurements:
+
+  | Stage | x86_64 bytes | aarch64 bytes |
+  | --- | ---: | ---: |
+  | Release 8 | 21,387,184 | 19,559,112 |
+  | Reply reservation | 21,387,120 | 19,558,856 |
+  | Layout recovery | 21,386,224 | 19,557,992 |
+  | Quiet warm-up and final | 21,386,224 | 19,557,992 |
+
+  Final deltas versus release 8 are -960 / -1,120 bytes;
+  both exact caps retain no growth allowance (D243). Link-time effects make
+  the individual reductions non-additive. The TypeScript-only picks
+  leave both native images byte-identical. Migration 0030 is the only added
+  migration; production's 0001–0029 SQL remains unchanged. Qualification and
+  artifact receipts are recorded on #24, #243 and #249. No dev or delta-review
+  branch is included, and this release qualification does not deploy.
+
+  Release 8 integrates D307, synchronized output and input ordering (#206),
+  the stale-screen note (#248), and the display-only phone column minimum
+  (#243, D309). The stripped static measurements are:
+
+  | Stage | x86_64 bytes | aarch64 bytes |
+  | --- | ---: | ---: |
+  | Release 7 | 21,385,264 | 19,570,256 |
+  | D307 | 21,387,824 | 19,559,624 |
+  | Synchronized output, colour and input ordering | 21,387,184 | 19,559,112 |
+  | Stale-screen note | 21,387,184 | 19,559,112 |
+  | Phone minimum and final | 21,387,184 | 19,559,112 |
+
+  Final deltas are +1,920 / −11,144 bytes versus release 7. The release-6
+  D307 delta is not additive on this combination. The release-8 brief permits
+  at most +20,000 x86_64 bytes: the result is 18,080 bytes below that stop
+  line. Both exact caps retain no growth allowance (D243). The note and phone
+  changes leave both native files byte-identical. No migration is added;
+  production's 0001–0029 SQL files remain unchanged. Measurements and release
+  qualification receipts are recorded on #24, #206, #243 and #248.
+
+  The initial shared layout recovery fix (#243) ratcheted the ceilings to
+  21,386,992 / 19,558,632 bytes: −192 / −480 versus release 8. It adds migration
+  0030 to backfill transactional receipt counts. Build-time SQL formatting
+  compaction preserves every original migration checksum; historical layout
+  repair happens through normal snapshot revisions. Static receipts and the
+  production-shaped two-device checks are recorded on #243.
+
+  The release-9 recovery review fixes (#243) preserve bounded fallback and queued
+  membership IDs, then share ID assignment and recovery recognition to offset
+  their code. Same-recipe rebuilds against `bd5ee1dd7` measure 21,386,224 /
+  19,558,248 bytes: −768 / −384. Both exact ceilings ratchet downward to these
+  measurements. No dependency, profile or migration SQL changes are included;
+  both architecture receipts and the review regressions are recorded on #243.
+
+  Release 7 measured 21,385,264 / 19,570,256 bytes after the reviewed Retry and Mesh merges,
   #246 source-path normalization, and the #236 migration collision correction:
   +40,960 / +34,656 bytes over release 6. Retry measured 21,352,208 /
   19,542,304 bytes; Mesh measured 21,385,264 / 19,570,256. Build normalization

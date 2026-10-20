@@ -58,6 +58,9 @@ declare global {
         wasmMemoryBytes: number;
         themeColorsMs: number;
         themeRenderMs: number;
+        synchronizedOutputHoldsPaint: boolean;
+        synchronizedTimeoutReleasedAt: number;
+        lastPaintedOutputAt: number;
         terminalColors?: { background: { r: number; g: number; b: number }; foreground: { r: number; g: number; b: number } };
       } | undefined;
       benchmarkFullRedraw: (iterations: number) => number[] | undefined;

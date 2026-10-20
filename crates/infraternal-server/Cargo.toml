@@ -9,6 +9,8 @@ license.workspace = true
 workspace = true
 
 [features]
+# Development-only bounded parser corpus entrypoint; absent from shipping builds.
+parser-checks = []
 staging-trust = []
 default = ["mesh", "cli-plugin", "ssh", "release", "canvas"]
 canvas = ["dep:infraternal-plugin-canvas"]
@@ -63,6 +65,10 @@ webauthn-rs.workspace = true
 openssl.workspace = true
 infraternal-agent = { path = "../infraternal-agent", version = "0.1.0", default-features = false }
 quinn = { workspace = true, optional = true }
+
+# Reuse the pinned digest for original migration checksums in generated build data [243].
+[build-dependencies]
+sha2.workspace = true
 
 [dev-dependencies]
 hyper.workspace = true

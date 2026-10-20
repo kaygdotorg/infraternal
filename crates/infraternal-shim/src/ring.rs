@@ -75,6 +75,12 @@ impl Ring {
             .head
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| io::Error::other("output offset exhausted"))?;
+        // Shared hosts publish only after fallible pool accounting. Ordinary
+        // rings retain the production publication order [243].
+        #[cfg(not(feature = "process-per-user"))]
+        {
+            self.head = head;
+        }
         let mut keep = bytes.len().min(self.capacity);
         let discard = self
             .bytes
@@ -167,7 +173,10 @@ impl Ring {
         #[cfg(not(feature = "process-per-user"))]
         let _ = &mut keep;
         self.bytes.extend(&bytes[bytes.len() - keep..]);
-        self.head = head;
+        #[cfg(feature = "process-per-user")]
+        {
+            self.head = head;
+        }
         Ok(())
     }
     /// Read at most limit bytes, or None if the offset is outside retained history.

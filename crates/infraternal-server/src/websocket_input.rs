@@ -1,4 +1,4 @@
-//! Owns each browser terminal's cancellable Input/Resize FIFO while durable input credit is parked [128][215].
+//! Owns each browser terminal's cancellable Input/Resize/reply FIFO while durable input credit is parked [128][215][307].
 
 use crate::{
     embedded::{AttachmentHandle, TerminalOutput},
@@ -15,10 +15,22 @@ use tokio::{
 // mux/header overhead; a single maximum legal Input must fit without a copy.
 const REQUESTS: usize = 8;
 const WIRE_BYTES: usize = infraternal_protocol::MAX_FRAME_LEN + 128;
+// Reply claims are already bounded per session. Separate reservations keep
+// those small best-effort frames from spending keyboard capacity.
+const REPLY_REQUESTS: usize = crate::terminal_queries::POSITIONS;
+
+enum QueuedFrame {
+    Wire(Bytes),
+    Reply {
+        query_seq: u64,
+        bytes: Bytes,
+        expires: std::time::Instant,
+    },
+}
 
 struct Request {
-    wire: Bytes,
-    _bytes: OwnedSemaphorePermit,
+    frame: QueuedFrame,
+    _bytes: Option<OwnedSemaphorePermit>,
     _slot: OwnedSemaphorePermit,
 }
 
@@ -27,6 +39,7 @@ pub(super) struct InputQueue {
     sender: mpsc::Sender<Request>,
     bytes: Arc<Semaphore>,
     slots: Arc<Semaphore>,
+    reply_slots: Arc<Semaphore>,
     worker: JoinHandle<()>,
 }
 
@@ -36,10 +49,41 @@ impl InputQueue {
         stream: u32,
         output: mpsc::Sender<(u32, TerminalOutput)>,
     ) -> Self {
-        let (sender, mut receiver) = mpsc::channel::<Request>(REQUESTS);
+        let (sender, mut receiver) = mpsc::channel::<Request>(REQUESTS + REPLY_REQUESTS);
         let worker = tokio::spawn(async move {
+            let mut frames_need_fence = false;
             while let Some(request) = receiver.recv().await {
-                if handle.send_frame(request.wire.clone()).await.is_err() {
+                let failed = match &request.frame {
+                    QueuedFrame::Wire(wire) => {
+                        let failed = handle.send_frame(wire.clone()).await.is_err();
+                        frames_need_fence = true;
+                        failed
+                    }
+                    QueuedFrame::Reply {
+                        query_seq,
+                        bytes,
+                        expires,
+                    } => {
+                        let delivered = if std::time::Instant::now() >= *expires {
+                            false
+                        } else if frames_need_fence {
+                            handle
+                                .reply_after_queued_input(*query_seq, bytes.clone(), *expires)
+                                .await
+                        } else {
+                            handle.reply(*query_seq, bytes.clone(), *expires)
+                        };
+                        if delivered {
+                            // Consecutive replies reuse the publication fence;
+                            // only another ordinary frame needs a new one.
+                            frames_need_fence = false;
+                        } else {
+                            crate::terminal_queries::record_drop();
+                        }
+                        false
+                    }
+                };
+                if failed {
                     let _ = output
                         .send((
                             stream,
@@ -61,6 +105,7 @@ impl InputQueue {
             sender,
             bytes: Arc::new(Semaphore::new(WIRE_BYTES)),
             slots: Arc::new(Semaphore::new(REQUESTS)),
+            reply_slots: Arc::new(Semaphore::new(REPLY_REQUESTS)),
             worker,
         }
     }
@@ -76,11 +121,33 @@ impl InputQueue {
         let slot = self.slots.clone().try_acquire_owned().map_err(|_| ())?;
         self.sender
             .try_send(Request {
-                wire,
-                _bytes: bytes,
+                frame: QueuedFrame::Wire(wire),
+                _bytes: Some(bytes),
                 _slot: slot,
             })
             .map_err(|_| ())
+    }
+
+    /// Replies retain their wire position without using keyboard bytes or slots.
+    /// Expired or full reply admission is a drop, never a writer retirement.
+    pub(super) fn reply(&self, query_seq: u64, bytes: Bytes, expires: std::time::Instant) -> bool {
+        if bytes.is_empty() || bytes.len() > 1024 || std::time::Instant::now() >= expires {
+            return false;
+        }
+        let Ok(slot) = self.reply_slots.clone().try_acquire_owned() else {
+            return false;
+        };
+        self.sender
+            .try_send(Request {
+                frame: QueuedFrame::Reply {
+                    query_seq,
+                    bytes,
+                    expires,
+                },
+                _bytes: None,
+                _slot: slot,
+            })
+            .is_ok()
     }
 }
 

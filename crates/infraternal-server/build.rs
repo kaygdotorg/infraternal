@@ -1,9 +1,14 @@
-//! Tracks migrations, marks release payloads [225], and isolates per-run staging trust (#188 D1).
+//! Compacts immutable migration data [243], marks releases [225], and isolates staging trust (#188 D1).
 use std::{env, fs, path::PathBuf};
+
+#[path = "build_support/migrations.rs"]
+mod migrations;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Directory tracking also rebuilds SQLx when a new migration is added.
     println!("cargo:rerun-if-changed=migrations");
+    let output = PathBuf::from(env::var_os("OUT_DIR").ok_or("Cargo output directory missing")?);
+    migrations::generate(std::path::Path::new("migrations"), &output)?;
     println!("cargo:rerun-if-env-changed=INFRATERNAL_RELEASE_BUILD");
     let release = env::var("INFRATERNAL_RELEASE_BUILD").is_ok_and(|value| value == "1");
     println!(
@@ -43,7 +48,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "{production}\nrelease@infraternal.com namespaces=\"infraternal-release\" ssh-ed25519 {} infraternal-staging-trust-v1\n",
         fields[1]
     );
-    let output = PathBuf::from(env::var_os("OUT_DIR").ok_or("Cargo output directory missing")?);
     fs::write(output.join("staging-trust"), trust)?;
     Ok(())
 }

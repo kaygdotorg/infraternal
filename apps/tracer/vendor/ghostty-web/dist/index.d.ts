@@ -305,6 +305,12 @@ export declare class GhosttyTerminal {
     get cols(): number;
     get rows(): number;
     write(data: string | Uint8Array): void;
+    /**
+     * Parse ordered slices from one owned input allocation. The synchronous writer
+     * accepts increasing exclusive ends and becomes invalid when the scope ends.
+     * Responses may be drained between slices without copying input again.
+     */
+    writeSlices(data: Uint8Array, split: (write: (end: number) => void) => void): void;
     /** Updates indexed or default colors locally, without feeding bytes into the VT stream. */
     setThemeColor(index: number, rgb: number): void;
     resize(cols: number, rows: number): void;
@@ -1745,6 +1751,8 @@ export declare class Terminal implements ITerminalCore {
      * Write data to terminal
      */
     write(data: string | Uint8Array, callback?: () => void): void;
+    /** Parse every slice and emit its replies synchronously; schedule write effects and paint once. */
+    writeSlices(data: Uint8Array, split: (write: (end: number) => void) => void, callback?: () => void): void;
     /**
      * Internal write implementation (extracted from write())
      */

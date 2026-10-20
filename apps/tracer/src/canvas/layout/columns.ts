@@ -9,7 +9,7 @@
 import { randomUuid } from "../../identifiers";
 import { Spring } from "../../../../../packages/ui/src/spring";
 import type { Ctx, ViewRec } from "../context";
-import { columnEls } from "./column-els";
+import { columnEls, drawnWidthOf } from "./column-els";
 import { clamp } from "../camera/camera";
 import { restPx } from "../springs";
 
@@ -45,9 +45,9 @@ export function columnRect(colEl: HTMLElement): DOMRect {
   let left = 14; // the group's padding: where its first track starts
   for (const other of group.querySelectorAll<HTMLElement>(":scope > .cl-col")) {
     if (other === colEl) break;
-    left += (Number(other.dataset.w) || 0) + 12;
+    left += drawnWidthOf(other) + 12;
   }
-  const w = (Number(colEl.dataset.w) || 0) + 28;
+  const w = drawnWidthOf(colEl) + 28;
   return new DOMRect(frame.left + (left - 14) * z, frame.top, w * z, frame.height);
 }
 

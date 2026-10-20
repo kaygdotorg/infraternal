@@ -98,6 +98,11 @@
       "name": "event",
       "file": "event.bin",
       "frame": { "type": "Event", "subId": 2, "eventJson": "{\"state\":\"ready\"}" }
+    },
+    {
+      "name": "reply-marked-input",
+      "file": "input-reply.bin",
+      "frame": { "type": "Input", "inSeq": "0", "replyTo": "18446744073709551614", "bytesHex": "1b5b313b3152" }
     }
   ]
 }

@@ -48,6 +48,10 @@ enum OwnedFrame {
         in_seq: u64,
         bytes: Vec<u8>,
     },
+    InputReply {
+        query_seq: u64,
+        bytes: Vec<u8>,
+    },
     Output {
         out_seq: u64,
         bytes: Vec<u8>,
@@ -137,6 +141,10 @@ impl OwnedFrame {
             },
             Self::Input { in_seq, bytes } => Frame::Input {
                 in_seq: *in_seq,
+                bytes,
+            },
+            Self::InputReply { query_seq, bytes } => Frame::InputReply {
+                query_seq: *query_seq,
                 bytes,
             },
             Self::Output { out_seq, bytes } => Frame::Output {
@@ -397,6 +405,10 @@ fn read_frame(frame: &Value) -> OwnedFrame {
             code: number(frame, "code"),
             reason: string(frame, "reason").to_owned(),
         },
+        "Input" if frame.get("replyTo").is_some() => OwnedFrame::InputReply {
+            query_seq: decimal(frame, "replyTo"),
+            bytes: hex(frame, "bytesHex"),
+        },
         "Input" => OwnedFrame::Input {
             in_seq: decimal(frame, "inSeq"),
             bytes: hex(frame, "bytesHex"),
@@ -476,4 +488,32 @@ fn hex(value: &Value, key: &str) -> Vec<u8> {
             u8::from_str_radix(digits, 16).expect("valid hex byte")
         })
         .collect()
+}
+
+#[test]
+fn marked_input_preserves_legacy_bytes_and_bounds_reply_body() {
+    let legacy = Frame::Input {
+        in_seq: 9,
+        bytes: b"typing",
+    };
+    let marked = Frame::InputReply {
+        query_seq: 42,
+        bytes: b"\x1b[1;1R",
+    };
+    for frame in [legacy, marked] {
+        let mut encoded = Vec::new();
+        encode_frame_into(&frame, &mut encoded).unwrap();
+        assert_eq!(decode_frame(&encoded).unwrap().frame, frame);
+    }
+    let oversized = vec![b'x'; 1025];
+    assert!(
+        encode_frame_into(
+            &Frame::InputReply {
+                query_seq: 0,
+                bytes: &oversized
+            },
+            &mut Vec::new()
+        )
+        .is_err()
+    );
 }

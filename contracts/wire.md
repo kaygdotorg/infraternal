@@ -131,6 +131,7 @@ leg B only, contracts/bootstrap.md §4).
 | 0x14 | `Credit` | u32 bytes | client → server: permission to send more output |
 | 0x15 | `Snapshot` | u64 out_seq, bytes | screen repaint valid at out_seq |
 | 0x16 | `AttachTerm` | 16-byte session id, u64 last_out_seq, u64 last_in_seq | opens or resumes a terminal stream |
+| 0x17 | reply-marked `Input` | u64 query_seq, bytes (1–1024) | additive D307 extension; no typing cursor |
 | 0x30 | `Call` | u32 call_id, varint+utf8 action id, JSON input | contracts/plugin.md §3 |
 | 0x31 | `Result` | u32 call_id, u8 ok, JSON output or error | |
 | 0x32 | `Subscribe` | u32 sub_id, JSON filter | events (contracts/plugin.md §5) |
@@ -670,14 +671,83 @@ a limit refuses new writes without losing existing idempotence or tombstones.
 
 `Call canvas.layout.initialize {op_id,document:DOC}` is the sole whole-document
 exception: a one-time migration from old local storage, never a save method.
-The first transaction initializes the account's head. A later identical layout
-(ignoring revision) is acknowledged without duplicating views. A differing
-layout is preserved as extra views named `Recovered: <name>` with server-generated
-IDs for views, columns and windows, keeping target references and geometry.
-The result is `{revision}`. Retrying the same op_id is idempotent; if bounds or
-ownership checks fail the transaction rolls back and the browser must keep its
-local document for a later retry/export. Initialization events use a canonical
-snapshot, since recovered IDs are assigned by the server. The client must keep
-its original local document until success, then treat it only as a drawing cache.
+The first transaction initializes the account's head. A later import adds only
+windows whose target identity is absent from every canonical view. Session
+identity is host plus session ID (stable host IDs take precedence when both
+references carry one); Settings uses its section, and logs/containers use host.
+Names and other presentation metadata do not create a new target. New windows
+keep their relative column order, weights and heights, appended to the existing
+same-kind tiled view. A new tiled view is created only when it has new windows;
+window-less views and existing graph pins are never imported again. An import
+that adds nothing returns the current revision without a layout event.
+
+Historical `Recovered: <name>` views are folded by the same rule only when an
+existing view has that base name and kind. Their removal is committed as a normal
+snapshot revision on load or the next write, so all devices converge. Unrelated
+user-named views are preserved. When repair and an accepted edit commit together,
+their normal revision steps may share the final snapshot boundary; no operation
+tail crosses the replacement of historical window IDs. Repair does not rewrite
+documents in a migration.
+Migration 0030 backfills a transactional receipt counter so quota admission stays
+constant in the number of historical receipts, including no-op imports.
+
+The result is `{revision}`. Retrying the same op_id is idempotent, including a
+no-op import; the receipt quota counts calls rather than layout revisions. If
+bounds or ownership checks fail the transaction rolls back and the browser must
+keep its local document for a later retry/export. Initialization and repair events
+use a canonical snapshot, since imported IDs are assigned by the server. The
+client keeps its original local document until success, then treats it only as a
+drawing cache.
 Errors are Result `ok:false` with `{"error":"invalid canvas operation"}`;
 no account existence or foreign ownership detail is exposed.
+
+## Reply-marked Input [D307, #160, #206]
+
+Hello capability bit 3 (`TERMINAL_QUERY_REPLIES`) advertises the v1 reply
+extension. A browser sends 0x17 only to a server advertising it; legacy 0x10
+Input is unchanged and always means ordinary input. The TypeScript Input model
+adds optional `replyTo`; Rust names the distinct layout `InputReply`.
+
+`query_seq` identifies the opening ESC byte in the session's absolute Output
+cursor. It is not a typing offset. Replies consume no typing credit or cursor,
+are not replayed by browsers, and are never reclassified as typing. The server
+timestamps output ranges before delivering them, accepts the first renderer response
+within one second of the opening ESC, and drops duplicate, unknown, expired or
+empty or oversized responses with content-free diagnostics. This window
+covers more than three default 300 ms round trips and bounds stale responses,
+including queries split across output frames. A new query has a new identity,
+even when its bytes match an older query. Query state survives viewer reconnect.
+
+The renderer is authoritative about which output produces a response. Neither
+side matches request kinds or response contents. Generic control boundaries
+split browser renderer writes so identities survive different viewers' paint/credit
+chunking, including multiple requests in one transport frame. They classify no
+request kinds and retain no control contents. A string interrupted by another
+ESC sequence uses the newer opening ESC identity. The server parses no terminal
+grammar: the timestamp of the output byte identified by `query_seq` determines
+the deadline, even when the request completes in a later output frame. Replay
+and fan-out never renew that timestamp.
+
+Only output creates timestamped ranges (at most 64 per session); accepted replies
+create bounded claims (at most 64 live positions per session, 4,096 sessions).
+Unknown marked input creates neither. Evicting the oldest output range refuses
+replies to its positions. A full claim table refuses new replies until expiry;
+it never evicts a live claim and thereby reopens an accepted position. Styling
+controls consume no claims, so they cannot displace a pending query.
+Replies take a separate bounded lane to the shim so discarded replies cannot
+leave gaps in keyboard input cursors or select the answering viewer's geometry.
+On the browser leg, replies retain their wire order relative to Input/Resize
+through both forwarding queues. Each attachment reserves up to 64 reply slots
+of at most 1,024 bytes each, separately from the existing eight keyboard slots
+and wire-byte budget. Full or expired reply admission drops only the reply;
+it never retires the writer. The shared host dispatcher likewise reserves
+64 reply slots separately from its eight Input/Resize slots, while preserving
+one FIFO and the existing accumulated-Credit barriers. Output Credit still
+bypasses the browser FIFO.
+
+A surviving pre-extension shim cannot accept reply bytes without changing typing
+cursors or geometry. On the first marked reply to such a session the infraternal
+agent sends `terminal.query_replies_unavailable` with its `session_id`; the
+server validates and forwards it only in response to marked input, so an old
+browser never receives this new notice. The browser says to open a new shell.
+Ordinary legacy Input remains available. No session is automatically ended.
