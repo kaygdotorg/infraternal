@@ -23,6 +23,8 @@
  * for reconnect diagnosis; it never changes the production liveness deadline.
  * APP_WINDOW_INPUT_ONLY=1 collects 80 quiet inputs, records idle resources and
  * cleans up without the separate demo, motion or stability phases.
+ * Measured keyboard cohorts emulate page focus through CDP, so native input
+ * can keep its app forward without OS app switching before every sample.
  */
 import { startRealServer, type DesktopStage, type ProbeStage } from '../../real/server';
 import { plainCloseReason } from '../../src/close-reasons';
@@ -119,6 +121,7 @@ try{
  manifest.probeBundle=new Bun.CryptoHasher('sha256').update(await bundle.outputs[0]!.text()).digest('hex');
  manifest.probeTrace=probeTrace;
  manifest.inputOnly=inputOnly;manifest.inputSampleCount=inputOnly?80:40;
+ manifest.inputFocusEmulation=!resourcesOnly&&!demoOnly&&!ownerPreview;
  await writeFile(E+'/input-manifest.json',JSON.stringify(manifest,null,2));
  const staged=spawn('netbird',['ssh','--no-browser','kayg@10.69.69.101','cat > ~/infraternal-bench/app-windows-latency/venue-mac.py'],{stdio:['pipe','ignore','pipe']});
  staged.stdin!.end(await readFile(import.meta.dirname+'/measure-mac.py'));

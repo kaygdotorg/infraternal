@@ -566,14 +566,14 @@ try:
    result={'kind':'sample','index':index,'source':draw,'effect':effect,'events':events,'compositor':compositor};results.append(result);emit(result)
   stage='input samples'
   # Compositor observations can outlive focus/control acquired at window open.
-  # Re-establish both through the real UI before admitting this quiet cohort.
+  # Emulate the viewer's focus independently of the OS foreground app. Actual
+  # native input must keep its app forward without making every key switch apps.
+  cdp.send('Emulation.setFocusEmulationEnabled',{'enabled':True})
+  emit({'kind':'input_focus','mode':'emulated','native_activation':False})
   focus_input(surface)
   emit({'kind':'input_sample_plan','count':INPUT_SAMPLE_COUNT,'trigger':'immediate after key event'})
   for index in range(INPUT_SAMPLE_COUNT):
-   # Native input brings its app forward. On a viewer running on the same Mac,
-   # renew browser activation before each key, without adding remote mouse work
-   # when the controlled DOM surface still owns typing focus.
-   page.bring_to_front()
+   # Keep control/DOM admission explicit without changing the native foreground.
    if not surface.evaluate('(canvas)=>canvas.parentElement===document.activeElement'):focus_input(surface)
    page.wait_for_function('document.hasFocus()',timeout=5000)
    sequence=max(r['sequence'] for r in all_draws if r['kind']=='draw')+1
