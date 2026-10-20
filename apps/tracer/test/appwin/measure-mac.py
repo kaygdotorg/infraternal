@@ -428,6 +428,14 @@ try:
  fixture=runtime/'latency-window'
  command(['swiftc','-O',str(fixture_source),'-o',str(fixture)],timeout=60)
  emit({'kind':'native_fixture','sha256':command(['shasum','-a','256',str(fixture)]).split()[0],'source_sha256':command(['shasum','-a','256',str(fixture_source)]).split()[0]})
+ # Exercise AppKit's actual content/title-bar projection before opening capture.
+ # A synthetic worker bitmap cannot detect a marker drawn on the wrong row.
+ marker=launch([str(fixture),'--check-content-marker'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+ marker_out,_=marker.communicate(timeout=10)
+ if marker.returncode:raise RuntimeError('native fixture content marker check failed')
+ marker_rows=[json.loads(line) for line in marker_out.splitlines()]
+ marker_check=next(row for row in marker_rows if row.get('kind')=='marker_check')
+ emit({**marker_check,'kind':'native_fixture_marker','pid':marker.pid})
  window=launch([str(fixture)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1)
  while True:
   ready=json.loads(window.stdout.readline())

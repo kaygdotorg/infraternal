@@ -32,7 +32,10 @@ final class Picture: NSView {
         let marker = UInt32(truncatingIfNeeded: sequence)
         let markerHeader: UInt8 = 0xa5
         let markerCellCount = 40
-        let cell = bounds.width * 0.2 / CGFloat(markerCellCount)
+        // Capture includes the title bar; use that same full-window coordinate
+        // space so the worker's fixed sample row intersects the marker cells.
+        let picture = window?.frame.size ?? bounds.size
+        let cell = picture.width * 0.2 / CGFloat(markerCellCount)
         for position in 0..<markerCellCount {
             let set: Bool
             if position < 8 {
@@ -41,8 +44,8 @@ final class Picture: NSView {
                 set = marker & (UInt32(1) << (position - 8)) != 0
             }
             (set ? NSColor.white : NSColor.black).setFill()
-            NSBezierPath(rect: NSRect(x: bounds.width * 0.8 + CGFloat(position) * cell,
-                                      y: bounds.height * 0.3,
+            NSBezierPath(rect: NSRect(x: picture.width * 0.8 + CGFloat(position) * cell,
+                                      y: picture.height * 0.3,
                                       width: cell, height: cell)).fill()
         }
     }
@@ -67,6 +70,32 @@ let view = Picture(frame: NSRect(x: 0, y: 0, width: 640, height: 400))
 let window = NSWindow(contentRect: view.bounds, styleMask: [.titled, .closable], backing: .buffered, defer: false)
 window.title = "App window measurement"
 window.contentView = view
+if CommandLine.arguments.contains("--check-content-marker") {
+    // Read our own rendered view in memory, without screen capture or input.
+    // The observer samples the entire window, so account for its title bar
+    // when projecting that row into the content-only bitmap.
+    view.sequence = 257
+    guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { exit(1) }
+    view.cacheDisplay(in: view.bounds, to: bitmap)
+    let scale = CGFloat(bitmap.pixelsWide) / view.bounds.width
+    let width = window.frame.width * scale
+    let height = window.frame.height * scale
+    let cell = width * 0.2 / 40
+    let y = Int(floor(height * 0.7 - cell / 2 - (window.frame.height - view.bounds.height) * scale))
+    var header: UInt32 = 0
+    var sequence: UInt32 = 0
+    for position in 0..<40 {
+        let x = Int(floor(width * 0.8 + (CGFloat(position) + 0.5) * cell))
+        guard let colour = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { exit(1) }
+        if (colour.redComponent + colour.greenComponent + colour.blueComponent) / 3 > 0.5 {
+            if position < 8 { header |= UInt32(1) << position }
+            else { sequence |= UInt32(1) << (position - 8) }
+        }
+    }
+    emit(["kind": "marker_check", "header": header, "sequence": sequence,
+          "expected_sequence": view.sequence, "title_height": window.frame.height - view.bounds.height])
+    exit(header == 0xa5 && sequence == UInt32(view.sequence) ? 0 : 1)
+}
 if let screen = NSScreen.main {
     window.setFrameTopLeftPoint(NSPoint(x: screen.visibleFrame.maxX - window.frame.width - 10, y: screen.visibleFrame.maxY - 10))
 }
