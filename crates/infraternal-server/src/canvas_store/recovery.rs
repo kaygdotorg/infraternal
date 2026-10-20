@@ -20,6 +20,12 @@ fn same_target(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// Share UUID generation and JSON assignment across membership, column and view imports [243].
+#[inline(never)]
+fn fresh_id(value: &mut Value) {
+    value["id"] = Value::from(uuid::Uuid::new_v4().to_string());
+}
+
 /// Only import absent targets; a second device never replaces canonical order, names, geometry or graph pins.
 pub(super) fn merge(
     document: &mut Document,
@@ -49,12 +55,12 @@ pub(super) fn merge(
                 // Device imports need fresh IDs to avoid durable close tombstones.
                 // Persisted recovery memberships already own their IDs: queued edits must still address them.
                 if imported {
-                    window["id"] = Value::from(uuid::Uuid::new_v4().to_string());
+                    fresh_id(window);
                 }
                 true
             });
             if !windows.is_empty() || index < end {
-                column["id"] = Value::from(uuid::Uuid::new_v4().to_string());
+                fresh_id(&mut column);
                 retained.push(column);
             }
         }
@@ -102,7 +108,7 @@ pub(super) fn merge(
                 view["name"] = Value::from(base);
             }
             if views.iter().any(|v| v["id"] == view["id"]) {
-                view["id"] = Value::from(uuid::Uuid::new_v4().to_string());
+                fresh_id(&mut view);
             }
             view["layout"]["columns"] = Value::Array(retained);
             views.push(view);
@@ -136,26 +142,20 @@ pub(super) fn needed(document: &Document) -> bool {
 #[inline(never)]
 pub(super) fn repair(document: &mut Document) -> Result<bool, ()> {
     let views = document.0["views"].as_array().ok_or(())?;
-    let indices: Vec<usize> = views
-        .iter()
-        .enumerate()
-        .filter(|(_, view)| recovered(views, view))
-        .map(|(index, _)| index)
-        .collect();
-    if indices.is_empty() {
+    if !needed(document) {
         return Ok(false);
     }
     // Repair is optional maintenance: a valid account must stay editable even
     // when combining its views cannot fit the document or per-view bounds.
     let mut candidate = document.clone();
     let mut incoming = Vec::new();
-    let mut index = 0;
     candidate.0["views"]
         .as_array_mut()
         .ok_or(())?
         .retain_mut(|view| {
-            let remove = indices.contains(&index);
-            index += 1;
+            // Recognition reads the retained original, including any recovery base
+            // that this candidate has already removed. No second index list is needed.
+            let remove = recovered(views, view);
             if remove {
                 // The removed membership owns its data; move it instead of cloning its entire layout.
                 incoming.push(view.take());
