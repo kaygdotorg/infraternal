@@ -25,7 +25,7 @@
    const finished=performance.timeOrigin+performance.now();
    let best=-1,distance=Infinity;
    palette.forEach((p,i)=>{const d=p.reduce((s,v,k)=>s+(v-rgb[k])**2,0);if(d<distance){best=i;distance=d;}});
-   pixel={id:armed.id,colour:best,expected:armed.colour,begin,finished,distance};
+   pixel={id:armed.id,colour:best,expected:armed.colour,begin,finished,distance,rgb:Array.from(rgb).slice(0,3)};
   }
   return result;
  };
@@ -35,6 +35,7 @@
  });
  self.postMessage=function(message,...rest){
   send(message,...rest);
+  if(message?.t==='trace' && message.frame.outcome==='painted' && pixel)send({t:'bench-observation',...pixel,frame:message.frame});
   if(message?.t==='trace' && message.frame.outcome==='painted' && pixel && pixel.colour===pixel.expected && pixel.distance<2500){
    send({t:'bench-effect',...pixel,frame:message.frame});armed=undefined;pixel=undefined;
   }
