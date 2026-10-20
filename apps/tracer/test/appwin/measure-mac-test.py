@@ -335,6 +335,55 @@ class ContinuousSoakTests(unittest.TestCase):
         self.assertFalse(matches([{'kind': 'input'}] * 4, 'abcd'))
 
 
+class RecoveryAccountingTests(unittest.TestCase):
+    """A requested recovery must not bless extra socket or helper failures."""
+
+    def test_recovery_counts_every_socket_reconnect(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        branch = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                      and isinstance(node.test, ast.BoolOp)
+                      and any(isinstance(value, ast.Name) and value.id == 'RECOVERY_ENABLED' for value in node.test.values)
+                      and any(isinstance(value, ast.Compare) and ast.unparse(value) == 'iteration == RECONNECT_ITERATION' for value in node.test.values))
+        before = {'opened': 1, 'closed': 1, 'history': []}
+        after = {'opened': 4, 'closed': 4, 'history': []}
+        snapshots = iter((before, after))
+        counts = {'reconnects': 0, 'requested_drops': 0, 'stuck_frames': 0}
+        namespace = {
+            'RECOVERY_ENABLED': True, 'iteration': 3, 'RECONNECT_ITERATION': 3,
+            'counts': counts,
+            'page': SimpleNamespace(evaluate=lambda _script: next(snapshots),
+                                    wait_for_function=lambda *_args, **_kwargs: None),
+            'emit': lambda _row: None,
+            'sys': SimpleNamespace(stdin=io.StringIO('{"kind":"network_restored"}\n')),
+            'json': json, 'first_picture': lambda *_args: None,
+        }
+        exec(compile(ast.Module(body=[branch], type_ignores=[]), str(source), 'exec'), namespace)
+        self.assertEqual(counts['reconnects'], after['opened'] - before['opened'])
+
+    def test_requested_drop_does_not_excuse_control_owner_retirement(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        names = {'native_resize', 'initiated_retirement', 'expected_retirement'}
+        statements = [node for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id in names for target in node.targets)]
+        statements.sort(key=lambda node: next(i for i, name in enumerate(('native_resize', 'initiated_retirement', 'expected_retirement'))
+                                               if any(isinstance(target, ast.Name) and target.id == name for target in node.targets)))
+        helpers = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == 'expected_capture_retirement':
+                exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), 'exec'), helpers)
+        namespace = {
+            'RECOVERY_ENABLED': True, 'iteration': 3, 'RECONNECT_ITERATION': 3, 'REOPEN_ITERATION': 6,
+            'previous_expected_retirement': False,
+            'retired': {99}, 'capture_helpers': {101}, 'previous_helpers': {99, 101}, 'current_helpers': {101},
+            'last_dimensions': (1512, 1020), 'current_dimensions': (1512, 1208), 'recent_resize_acks': [],
+            'expected_capture_retirement': helpers['expected_capture_retirement'],
+        }
+        exec(compile(ast.Module(body=statements, type_ignores=[]), str(source), 'exec'), namespace)
+        self.assertFalse(namespace['expected_retirement'])
+
+
 class CaptureReconfigurationTests(unittest.TestCase):
     """A capture replacement requires causal resize evidence and the same live control owner."""
 
