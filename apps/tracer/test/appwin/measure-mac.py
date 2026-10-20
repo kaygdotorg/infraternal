@@ -60,7 +60,10 @@ class PhaseComplete(Exception):
 owned=set();children=[];browser=None;play=None;lock=pathlib.Path('/tmp/infraternal-bench.lock');locked=False;cua_pid=None;cua_birth=None
 runtime_owned=False
 start=time.monotonic();stage='lock';all_draws=[];native_metrics=[];results=[];failed=False;cleanup_remaining=0
-def emit(value): print(json.dumps(value),flush=True)
+output_lock=threading.Lock()
+def emit(value):
+ # Main sampling, consent checks and RTT receipts share one JSON-line stream.
+ with output_lock:print(json.dumps(value),flush=True)
 def command(argv,**kw):return subprocess.run(argv,capture_output=True,text=True,check=True,**kw).stdout
 
 def capture_environment(pipeline, inherited):
@@ -514,6 +517,11 @@ try:
   x,y=compositor_pixel(copy_target,event['metadata'],image.width,image.height)
   rgb=image.getpixel((x,y));distances=[sum((a-b)**2 for a,b in zip(rgb,p)) for p in palette]
   composites.append({'timestamp_ms':event['metadata'].get('timestamp',0)*1000,'colour':distances.index(min(distances)),'distance':min(distances),'received_perf_ns':time.perf_counter_ns(),'rgb':list(rgb),'target':copy_target,'metadata':event['metadata'],'image_width':image.width,'image_height':image.height})
+ # Keep the Mac/server leg sampled concurrently with browser protocol pings.
+ network_ping=launch(['ping','-n','-i','1','10.69.69.125'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
+ def network_ping_reader():
+  for line in network_ping.stdout:emit({'kind':'network_leg_rtt','leg':'Mac_server','at_perf_ns':time.perf_counter_ns(),'raw':line.strip()})
+ threading.Thread(target=network_ping_reader,daemon=True).start()
  emit({'kind':'network_rtt_before','raw':command(['ping','-n','-c','5','-W','1000','10.69.69.125'])})
  if not console_state()['ready']:raise RuntimeError('console changed before sampling')
  own_windows=cua('list_windows',{'on_screen_only':True}).get('windows',[])
