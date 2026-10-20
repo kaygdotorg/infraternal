@@ -20,7 +20,9 @@
    const begin=performance.timeOrigin+performance.now();
    const probe=new OffscreenCanvas(2,2);
    const probeContext=probe.getContext('2d',{alpha:false});
-   draw.call(probeContext,args[0],Math.floor(args[0].displayWidth/2),Math.floor(args[0].displayHeight/2),2,2,0,0,2,2);
+   // Control clicks place the captured pointer at the centre. The fixture's
+   // lower-right background stays clear of that pointer and its text label.
+   draw.call(probeContext,args[0],Math.floor(args[0].displayWidth*.75),Math.floor(args[0].displayHeight*.75),2,2,0,0,2,2);
    const rgb=probeContext.getImageData(0,0,1,1).data;
    const finished=performance.timeOrigin+performance.now();
    let best=-1,distance=Infinity;
