@@ -8,17 +8,6 @@ private let remoteTag: Int64 = 0x696e667261746572
 private let inputTypes: [CGEventType] = [.mouseMoved, .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp,
     .leftMouseDragged, .rightMouseDragged, .otherMouseDragged, .scrollWheel, .keyDown, .keyUp, .flagsChanged]
 
-// Reuse the attribute-name array; one fresh batch replaces two cross-process
-// reads per event. Options zero retains positional errors for conservative use.
-private let inputWindowAttributes = [kAXMinimizedAttribute as CFString, kAXMainAttribute as CFString]
-private let inputWindowAttributeArray = inputWindowAttributes as CFArray
-private func inputWindowBatch(_ window: AXUIElement) -> [Any]? {
-    var values: CFArray?
-    guard AXUIElementCopyMultipleAttributeValues(window, inputWindowAttributeArray,
-        AXCopyMultipleAttributeOptions(rawValue: 0), &values) == .success else { return nil }
-    return values as? [Any]
-}
-
 private final class LocalInputClock {
     private var pause = LocalInputPause(lastLocal: ProcessInfo.processInfo.systemUptime - (inputTypes.map { CGEventSource.secondsSinceLastEventType(.hidSystemState,eventType:$0) }.min() ?? 0))
     var onLocal: (() -> Void)?
@@ -125,17 +114,10 @@ final class RemoteControl {
             }
             owner = app
             if let window = geometry.window {
-                let flags = inputWindowFlags(batch: inputWindowBatch(window)) { index in
-                    axValue(window, inputWindowAttributes[index]) as? Bool
-                }
-                var main = flags.main
-                if flags.minimized == true {
+                if axValue(window,kAXMinimizedAttribute as CFString) as? Bool == true {
                     _ = AXUIElementSetAttributeValue(window,kAXMinimizedAttribute as CFString,kCFBooleanFalse)
-                    // Deminimizing may itself make the window main. Preserve the
-                    // original fresh check after that mutation, never a stale flag.
-                    main = axValue(window,kAXMainAttribute as CFString) as? Bool
                 }
-                if main != true { _ = AXUIElementPerformAction(window,kAXRaiseAction as CFString) }
+                if axValue(window,kAXMainAttribute as CFString) as? Bool != true { _ = AXUIElementPerformAction(window,kAXRaiseAction as CFString) }
             }
         }
         guard localIdleSeconds() >= 2 else { releaseHeld(); return ["accepted":false,"reason":"local_input","pause_remaining_ms":max(0,2-localIdleSeconds())*1000] }
