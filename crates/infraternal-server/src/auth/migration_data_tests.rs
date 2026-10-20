@@ -32,6 +32,7 @@ async fn quoted_text_and_comment_looking_literals_keep_their_values() {
     let pool = database().await;
     for value in [
         "plain",
+        "UTF-8: λ界🪟",
         "-- literal",
         "a'b",
         "a\n-- retain this line\nb",
@@ -48,6 +49,19 @@ async fn quoted_text_and_comment_looking_literals_keep_their_values() {
             .await
             .unwrap();
         assert_eq!(actual, value);
+    }
+    for expression in [
+        "1 - - 2",
+        "3 / 1",
+        "length ( 'two' )",
+        "coalesce ( NULL , 4 )",
+    ] {
+        let sql = format!("SELECT {expression}; -- trailing\n");
+        let original: i64 = sqlx::query_scalar(&sql).fetch_one(&pool).await.unwrap();
+        let compact = compact_sql::compact(&sql);
+        assert_eq!(compact_sql::compact(&compact), compact);
+        let actual: i64 = sqlx::query_scalar(&compact).fetch_one(&pool).await.unwrap();
+        assert_eq!(actual, original);
     }
     for name in ["name", "--name", "a\n-- quoted name\nb", "a'b"] {
         for quote in ['"', '`', '['] {
