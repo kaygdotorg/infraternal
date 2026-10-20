@@ -710,6 +710,23 @@ class CompositorGeometryTests(unittest.TestCase):
         exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
         return namespace[name]
 
+    def test_capture_projection_accounts_for_letterbox_and_auxiliary_bounds(self):
+        state = {'width': 640, 'height': 400,
+                 'actual': {'x': 100, 'y': 200, 'width': 640, 'height': 280},
+                 'capture_rect': {'x': 100, 'y': 200, 'width': 640, 'height': 280},
+                 'content_rect': {'x': 0, 'y': 60, 'width': 640, 'height': 280}}
+        project = self.target('capture_projection')
+        projection = project(state)
+        self.assertAlmostEqual(projection['markerY'], .636)
+        self.assertAlmostEqual(projection['colourY'], .675)
+        state['capture_rect']['x'] = 90
+        state['capture_rect']['width'] = 660
+        state['content_rect']['width'] = 660
+        state['width'] = 660
+        self.assertAlmostEqual(project(state)['markerX'], (10 + 512) / 660)
+        state['actual']['x'] = -1000
+        with self.assertRaises(RuntimeError): project(state)
+
     def test_current_bounds_replace_the_initial_window_shape(self):
         class Surface:
             rectangle = {'x': 100, 'y': 100, 'width': 200, 'height': 200}

@@ -132,14 +132,31 @@ def battery():
 def cua(name,params):
  return json.loads(command([str(pathlib.Path.home()/'.local/bin/cua-driver'),'call',name,json.dumps(params)],timeout=20))
 
-def compositor_target(surface, viewport):
+def capture_projection(state):
+ """Project the selected window through auxiliary capture bounds and letterboxing."""
+ import math
+ actual,capture,content=(state[name] for name in ('actual','capture_rect','content_rect'))
+ values=[state['width'],state['height']]+[rect[key] for rect in (actual,capture,content) for key in ('x','y','width','height')]
+ if not all(isinstance(value,(int,float)) and math.isfinite(value) for value in values):raise RuntimeError('invalid capture geometry')
+ if any(rect[key]<=0 for rect in (actual,capture,content) for key in ('width','height')) or state['width']<=0 or state['height']<=0:raise RuntimeError('empty capture geometry')
+ sx,sy=content['width']/capture['width'],content['height']/capture['height']
+ def point(x,y):
+  return ((content['x']+(actual['x']-capture['x']+actual['width']*x)*sx)/state['width'],(content['y']+(actual['y']-capture['y']+actual['height']*y)*sy)/state['height'])
+ colour=point(.75,.75)
+ native_cell=actual['width']*.2/40
+ marker=point(.8,.7-native_cell/2/actual['height'])
+ projection={'width':state['width'],'height':state['height'],'colourX':colour[0],'colourY':colour[1],'markerX':marker[0],'markerY':marker[1],'cell':native_cell*sx/state['width']}
+ if not all(0<projection[key]<1 for key in ('colourX','colourY','markerX','markerY','cell')) or projection['markerX']+40*projection['cell']>1:raise RuntimeError('fixture outside capture geometry')
+ return projection
+
+def compositor_target(surface, viewport, projection=None):
  # Opening/following can change the canvas shape after its first picture. Read
  # bounds for each stimulus; never retain that startup rectangle for sampling.
  rectangle=surface.bounding_box()
  if not rectangle or not viewport:raise RuntimeError('viewer target unavailable')
  # Match the worker's lower-right fixture sample, away from the centre cursor.
- x=(rectangle['x']+rectangle['width']*.75)/viewport['width']
- y=(rectangle['y']+rectangle['height']*.75)/viewport['height']
+ x=(rectangle['x']+rectangle['width']*(projection['colourX'] if projection else .75))/viewport['width']
+ y=(rectangle['y']+rectangle['height']*(projection['colourY'] if projection else .75))/viewport['height']
  if not 0<=x<1 or not 0<=y<1:raise RuntimeError('viewer target outside viewport')
  return {'x':x,'y':y,'rectangle':rectangle,'viewport':viewport}
 
@@ -535,17 +552,23 @@ try:
  own_windows=cua('list_windows',{'on_screen_only':True}).get('windows',[])
  emit({'kind':'owned_window_layout','windows':[{k:w.get(k) for k in ['pid','window_id','bounds']} for w in own_windows if w.get('pid') in owned]})
  emit({'kind':'viewer_animation_frames','times':page.evaluate('()=>new Promise(resolve=>{const times=[];const next=t=>{times.push(t);if(times.length===96)resolve(times);else requestAnimationFrame(next)};requestAnimationFrame(next)})')})
+ def fixture_projection(phase):
+  state=call('desktop.session.clock',{'session_id':page.evaluate('window.__appWindowBench.session')})
+  projection=capture_projection(state)
+  emit({'kind':'fixture_projection','phase':phase,'state':state,'projection':projection})
+  return projection
  if not args.get('resources_only') and not args.get('demo_only'):
   stage='change samples'
+  projection=fixture_projection('change samples')
   for index in range(48):
    if index==24:
-    copy_target=compositor_target(surface,page.viewport_size)
+    copy_target=compositor_target(surface,page.viewport_size,projection)
     cdp.on('Page.screencastFrame',observe_compositor)
     cdp.send('Page.startScreencast',{'format':'jpeg','quality':80,'maxWidth':1280,'maxHeight':900,'everyNthFrame':1})
    native_command('idle');page.wait_for_timeout(150+(index*37)%103)
    sequence=max([r['sequence'] for r in all_draws if r['kind']=='draw'] or [0])+1
-   drain();page.evaluate('([id,colour,sequence])=>window.__appWindowBench.arm(id,{colour,sequence})',[index,sequence%8,sequence])
-   if index>=24:copy_target=compositor_target(surface,page.viewport_size)
+   drain();page.evaluate('([id,colour,sequence,projection])=>window.__appWindowBench.arm(id,{colour,sequence,projection})',[index,sequence%8,sequence,projection])
+   if index>=24:copy_target=compositor_target(surface,page.viewport_size,projection)
    composite_begin=len(composites)
    native_command('next');deadline=time.monotonic()+5;effect=None;events=[]
    while time.monotonic()<deadline:
@@ -553,7 +576,9 @@ try:
     effect=next((e for e in receipt['probe']['events'] if e.get('t')=='bench-effect' and e['id']==index),None)
     if effect:break
     page.wait_for_timeout(5)
-   if not effect:raise RuntimeError('numbered native change not observed')
+   if not effect:
+    emit({'kind':'change_sample_failure','index':index,'expected_sequence':sequence,'projection':projection,'state':call('desktop.session.clock',{'session_id':page.evaluate('window.__appWindowBench.session')}),'events':events})
+    raise RuntimeError('numbered native change not observed')
    draw=next((r for r in all_draws if r['kind']=='draw' and r['sequence']==sequence),None)
    if not draw:raise RuntimeError('native draw receipt missing')
    compositor=None
@@ -571,13 +596,14 @@ try:
   cdp.send('Emulation.setFocusEmulationEnabled',{'enabled':True})
   emit({'kind':'input_focus','mode':'emulated','native_activation':False})
   focus_input(surface)
+  projection=fixture_projection('input samples')
   emit({'kind':'input_sample_plan','count':INPUT_SAMPLE_COUNT,'trigger':'immediate after key event'})
   for index in range(INPUT_SAMPLE_COUNT):
    # Keep control/DOM admission explicit without changing the native foreground.
    if not surface.evaluate('(canvas)=>canvas.parentElement===document.activeElement'):focus_input(surface)
    page.wait_for_function('document.hasFocus()',timeout=5000)
    sequence=max(r['sequence'] for r in all_draws if r['kind']=='draw')+1
-   drain();page.evaluate('([id,colour,sequence])=>window.__appWindowBench.arm(id,{colour,sequence})',[100+index,sequence%8,sequence]);copy_target=compositor_target(surface,page.viewport_size);composite_begin=len(composites);page.keyboard.type('x');deadline=time.monotonic()+5;events=[];effect=None
+   drain();page.evaluate('([id,colour,sequence,projection])=>window.__appWindowBench.arm(id,{colour,sequence,projection})',[100+index,sequence%8,sequence,projection]);copy_target=compositor_target(surface,page.viewport_size,projection);composite_begin=len(composites);page.keyboard.type('x');deadline=time.monotonic()+5;events=[];effect=None
    while time.monotonic()<deadline:
     receipt=drain();events.append(receipt);effect=next((e for e in receipt['probe']['events'] if e.get('t')=='bench-effect' and e['id']==100+index),None)
     if effect:break
@@ -686,7 +712,8 @@ try:
     burst=soak_burst(iteration)
     sequence=max(r['sequence'] for r in all_draws if r['kind']=='draw')+len(burst)
     prior_inputs=sum(r.get('kind')=='input' for r in all_draws);draw_start=len(all_draws)
-    drain();page.evaluate('([id,colour,sequence])=>window.__appWindowBench.arm(id,{colour,sequence})',[1000+iteration,sequence%8,sequence]);page.keyboard.type(burst,delay=90)
+    projection=fixture_projection('soak '+str(iteration))
+    drain();page.evaluate('([id,colour,sequence,projection])=>window.__appWindowBench.arm(id,{colour,sequence,projection})',[1000+iteration,sequence%8,sequence,projection]);page.keyboard.type(burst,delay=90)
     deadline=time.monotonic()+5;observed=False;effect=None;dom_inputs=[];receipts=[]
     while time.monotonic()<deadline:
      receipt=drain();receipts.append(receipt);dom_inputs.extend(receipt['probe']['domInputs'])

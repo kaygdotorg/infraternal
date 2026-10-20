@@ -5,27 +5,30 @@ import { runInNewContext } from "node:vm";
 
 const script = readFileSync(new URL("worker-pixel-observer.js", import.meta.url), "utf8");
 
-function observe(cursor: boolean, background: number[], expectedColour = 1, expectedSequence = 1, contentSequence = expectedSequence): Array<{ t: string }> {
+function observe(cursor: boolean, background: number[], expectedColour = 1, expectedSequence = 1, contentSequence = expectedSequence, letterboxed = false, projected = false): Array<{ t: string }> {
   const rows: Array<{ t: string }> = [];
   const handlers: Array<(event: { data: unknown }) => void> = [];
-  const pixels = new Uint8ClampedArray(42 * 4);
-  pixels.set([...background, 255], 0);
-  for (let bit = 0; bit < 8; bit++) {
-    const set = (0xa5 & (1 << bit)) !== 0;
-    pixels.set(set ? [255, 255, 255, 255] : [0, 0, 0, 255], (bit + 2) * 4);
-  }
-  for (let bit = 0; bit < 32; bit++) {
-    const set = (contentSequence & (1 << bit)) !== 0;
-    pixels.set(set ? [255, 255, 255, 255] : [0, 0, 0, 255], (bit + 10) * 4);
+  const picture = letterboxed ? { x: 0, y: 60, width: 640, height: 280 } : { x: 0, y: 0, width: 640, height: 400 };
+  const cell = picture.width * .2 / 40;
+  function pixelAt(x: number, y: number): number[] {
+    if (cursor && x === 320 && y === 200) return [0, 0, 0, 255];
+    const bit = Math.floor((x - picture.x - picture.width * .8) / cell);
+    const bottom = picture.y + picture.height * .7;
+    if (bit >= 0 && bit < 40 && y >= bottom - cell && y < bottom) {
+      const set = bit < 8 ? (0xa5 & (1 << bit)) !== 0 : (contentSequence & (1 << (bit - 8))) !== 0;
+      return set ? [255, 255, 255, 255] : [0, 0, 0, 255];
+    }
+    return [...background, 255];
   }
   class Context {
-    x = 0; y = 0;
-    drawImage(_image: unknown, ...coordinates: number[]): void { this.x = coordinates[0] ?? 0; this.y = coordinates[1] ?? 0; }
+    samples = new Map<number, number[]>();
+    drawImage(_image: unknown, ...coordinates: number[]): void {
+      const [x = 0, y = 0, width = 1, , destination = 0] = coordinates;
+      for (let index = 0; index < width; index++) this.samples.set(destination + index, pixelAt(x + index, y));
+    }
     getImageData(): { data: Uint8ClampedArray } {
-      // The fixture's click activates remote control at the picture centre.
-      const covered = cursor && this.x === 320 && this.y === 200;
-      const result = pixels.slice();
-      if (covered) result.set([0, 0, 0, 255], 0);
+      const result = new Uint8ClampedArray(42 * 4);
+      for (const [index, pixel] of this.samples) result.set(pixel, index * 4);
       return { data: result };
     }
     getContextAttributes(): object { return {}; }
@@ -37,7 +40,7 @@ function observe(cursor: boolean, background: number[], expectedColour = 1, expe
   };
   runInNewContext(script, { self: worker, OffscreenCanvas: Canvas,
     OffscreenCanvasRenderingContext2D: Context, performance: { timeOrigin: 1000, now: () => 1 } });
-  for (const handler of handlers) handler({ data: { t: "bench-arm", id: 1, crop: { colour: expectedColour, sequence: expectedSequence } } });
+  for (const handler of handlers) handler({ data: { t: "bench-arm", id: 1, crop: { colour: expectedColour, sequence: expectedSequence, ...(projected ? { projection: { width: 640, height: 400, colourX: .75, colourY: .675, markerX: .8, markerY: .636, cell: .005 } } : {}) } } });
   new Context().drawImage({ displayWidth: 640, displayHeight: 400 }, 0, 0);
   worker.postMessage({ t: "trace", frame: { outcome: "painted", sequence: 17, captureNs: "9000" } } as { t: string });
   return rows;
@@ -54,4 +57,12 @@ test("a painted fixture colour is acknowledged with a centre cursor", () => {
 test("a palette-alias frame from eight fixture changes ago cannot acknowledge new content", () => {
   // The transport frame is newer, but its embedded fixture marker is stale.
   expect(observe(false, [38, 89, 204], 0, 8, 0).some(row => row.t === "bench-effect")).toBe(false);
+});
+
+// The bitmap model samples coordinates, so fixed full-frame fractions cannot
+// accidentally pass when capture adds space around the selected window.
+test("letterboxed content needs the selected window projection", () => {
+  expect(observe(false, [38, 191, 89], 1, 257, 257, true).some(row => row.t === "bench-effect")).toBe(false);
+  expect(observe(false, [38, 191, 89], 1, 257, 257, true, true).some(row => row.t === "bench-effect")).toBe(true);
+  expect(observe(false, [38, 89, 204], 0, 8, 0, true, true).some(row => row.t === "bench-effect")).toBe(false);
 });

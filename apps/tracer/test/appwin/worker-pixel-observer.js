@@ -22,15 +22,17 @@
   if(armed){
    const width=args[0].displayWidth,height=args[0].displayHeight;
    if(!Number.isFinite(width)||!Number.isFinite(height)||width<=0||height<=0||!Number.isSafeInteger(armed.sequence))return result;
+   const projection=armed.projection;
+   if(projection && (projection.width!==width || projection.height!==height || !['colourX','colourY','markerX','markerY','cell'].every(key=>Number.isFinite(projection[key]) && projection[key]>0 && projection[key]<1) || projection.markerX+markerCells*projection.cell>1))return result;
    const begin=performance.timeOrigin+performance.now();
    const probe=new OffscreenCanvas(markerCells+2,1);
    const probeContext=probe.getContext('2d',{alpha:false});
    // Control clicks place the captured pointer at the centre. The fixture's
    // lower-right background stays clear of that pointer and its text label.
-   draw.call(probeContext,args[0],Math.floor(width*.75),Math.floor(height*.75),2,1,0,0,2,1);
-   const markerCell=width*.2/markerCells,markerY=Math.floor(height*.7-markerCell/2);
+   draw.call(probeContext,args[0],Math.floor(width*(projection?.colourX??.75)),Math.floor(height*(projection?.colourY??.75)),2,1,0,0,2,1);
+   const markerCell=width*(projection?.cell??(.2/markerCells)),markerY=Math.floor(projection?height*projection.markerY:height*.7-markerCell/2);
    for(let cell=0;cell<markerCells;cell++){
-    const markerX=Math.floor(width*.8+(cell+.5)*markerCell);
+    const markerX=Math.floor(width*(projection?.markerX??.8)+(cell+.5)*markerCell);
     draw.call(probeContext,args[0],markerX,markerY,1,1,cell+2,0,1,1);
    }
    const data=probeContext.getImageData(0,0,markerCells+2,1).data;
@@ -53,7 +55,7 @@
   return result;
  };
  self.addEventListener('message',e=>{
-  if(e.data?.t==='bench-arm')armed={id:e.data.id,colour:e.data.crop.colour,sequence:e.data.crop.sequence};
+  if(e.data?.t==='bench-arm')armed={id:e.data.id,colour:e.data.crop.colour,sequence:e.data.crop.sequence,projection:e.data.crop.projection};
   if(e.data?.t==='bench-clock')send({t:'bench-clock',id:e.data.id,at:performance.timeOrigin+performance.now()});
  });
  self.postMessage=function(message,...rest){
