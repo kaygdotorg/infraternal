@@ -79,14 +79,22 @@ test("44-window recovered account sends edits from both devices", async ({ brows
     };
     const mesh: DocView = { id: "mesh", kind: "mesh", name: "Mesh", cell: { x: 2, y: 4 }, layout: { type: "graph", pinned: {} } };
     const doc: CanvasDocument = { ...initial, revision: 2, views: [consoleView, recovered, mesh, { ...mesh, id: "old-mesh", name: "Recovered: Mesh", cell: { x: 4, y: 4 } }] };
-    const seeded = spawnSync("python3", ["-c", `import sqlite3,sys
+    await server.restart(async () => {
+      const seeded = spawnSync("python3", ["-c", `import sqlite3,sys
 with sqlite3.connect(sys.argv[1]) as db:
+ # Recreate the production v29 schema while stopped, then exercise the real upgrade.
+ if sys.argv[3] == "0":
+  for name in ("canvas_receipt_insert", "canvas_receipt_delete", "canvas_receipt_account"):
+   db.execute("DROP TRIGGER " + name)
+  db.execute("ALTER TABLE canvas_heads DROP COLUMN receipt_count")
+  db.execute("DELETE FROM _sqlx_migrations WHERE version=30")
  account=db.execute("SELECT account FROM canvas_heads LIMIT 1").fetchone()[0]
  db.execute("UPDATE canvas_heads SET revision=2,document=?,initialized=1 WHERE account=?",(sys.argv[2],account))
  db.execute("DELETE FROM canvas_operations WHERE account=?",(account,))
  db.execute("DELETE FROM canvas_snapshots WHERE account=?",(account,))
-`, `${server.dataDir}/infraternal.sqlite`, JSON.stringify(doc)], { encoding: "utf8" });
-    expect(seeded.status).toBe(0);
+`, `${server.dataDir}/infraternal.sqlite`, JSON.stringify(doc), baseline ? "1" : "0"], { encoding: "utf8" });
+      expect(seeded.status).toBe(0);
+    });
     // Existing devices can mount the historical drawing cache before the repaired snapshot arrives.
     await page.evaluate((document) => {
       const key = Object.keys(localStorage).find((key) => key.startsWith("infraternal.canvas."))!;
@@ -141,13 +149,15 @@ with sqlite3.connect(sys.argv[1]) as db:
     }
     const persisted = spawnSync("python3", ["-c", `import json,sqlite3,sys
 with sqlite3.connect(sys.argv[1]) as db:
- print(json.dumps({"revision":db.execute("SELECT revision FROM canvas_heads LIMIT 1").fetchone()[0],"operations":db.execute("SELECT count(*) FROM canvas_operations").fetchone()[0],"migrations":db.execute("SELECT max(version) FROM _sqlx_migrations").fetchone()[0]}))
-`, `${server.dataDir}/infraternal.sqlite`], { encoding: "utf8" });
+ print(json.dumps({"revision":db.execute("SELECT revision FROM canvas_heads LIMIT 1").fetchone()[0],"operations":db.execute("SELECT count(*) FROM canvas_operations").fetchone()[0],"migrations":db.execute("SELECT max(version) FROM _sqlx_migrations").fetchone()[0],"receipts":db.execute("SELECT count(*) FROM canvas_receipts").fetchone()[0],"receipt_count":db.execute("SELECT receipt_count FROM canvas_heads LIMIT 1").fetchone()[0] if sys.argv[2]=="0" else None}))
+`, `${server.dataDir}/infraternal.sqlite`, baseline ? "1" : "0"], { encoding: "utf8" });
     expect(persisted.status).toBe(0);
-    const stored = JSON.parse(persisted.stdout) as { revision: number; operations: number; migrations: number };
+    const stored = JSON.parse(persisted.stdout) as { revision: number; operations: number; migrations: number; receipts: number; receipt_count: number | null };
     expect(errors).toEqual([]);
+    expect(wire.filter((frame) => frame.type === "result" && frame.ok === false)).toEqual([]);
+    if (!baseline) expect(stored.receipt_count).toBe(stored.receipts);
     expect(stored.operations).toBeGreaterThan(0);
-    expect(stored.migrations).toBe(29);
+    expect(stored.migrations).toBe(baseline ? 29 : 30);
     await expect.poll(async () => (await cache(page)).canonical.revision).toBe(stored.revision);
     await expect.poll(async () => (await cache(mobile)).canonical.revision).toBe(stored.revision);
     expect((await cache(page)).canonical).toEqual((await cache(mobile)).canonical);
