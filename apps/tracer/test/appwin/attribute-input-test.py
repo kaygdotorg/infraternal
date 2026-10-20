@@ -176,6 +176,14 @@ class ReportCausalityTests(unittest.TestCase):
             self.assertEqual(report['invalid_samples'], [{'index': 0, 'reason': 'injection_before_dispatch'}])
             for event in report['events']:
                 self.assertTrue(all(duration >= 0 for duration in event['local_ms'].values()))
+            # Companion and Rust helper appenders must not share a diagnostic
+            # stream. Splitting their files preserves every core attribution.
+            companion_rows = [row for row in helper_rows if not row.startswith('METRIC app_window_stage ')]
+            rust_rows = [row for row in helper_rows if row.startswith('METRIC app_window_stage ')]
+            (root / 'companion-metrics.log').write_text('\n'.join(companion_rows) + '\n')
+            (root / 'helper-metrics.log').write_text('\n'.join(rust_rows) + '\n')
+            self.assertEqual(analysis['analyze'](root, controller), report)
+
 
 
 if __name__ == '__main__':

@@ -113,7 +113,9 @@ def analyze(root, controller):
  # obtained by subtracting clocks on different machines.
  def native_epoch(ns):return (float(ns)+native_epoch_offset)/1e6
  metrics=[]
- for name in ('helper-metrics.log','native-metrics.log','server-stages.log'):
+ for name in ('helper-metrics.log','native-metrics.log','server-stages.log','companion-metrics.log'):
+  # Older receipts share helper stderr; new runs isolate the native appender.
+  if name=='companion-metrics.log' and not (root/name).exists():continue
   for line in (root/name).read_text().splitlines():
    if not line.startswith('METRIC '):continue
    fields=dict(re.findall(r'(\w+)=(\S+)',line));fields['metric']=line.split()[1]

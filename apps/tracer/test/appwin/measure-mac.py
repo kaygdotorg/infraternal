@@ -286,7 +286,10 @@ try:
  # Native capture must be a LaunchServices app, never an exec in this SSH tree.
  import shlex
  bridge=ROOT/'launch-companion.py'
- argv=[sys.executable,str(bridge),str(native),str(runtime),str(E/'helper-metrics.log'),str(pidlog)]
+ # Rust formatting can append fragments. Keep native records on their own
+ # stream so an inherited helper stderr writer cannot split their fields.
+ (E/'companion-metrics.log').write_text('')
+ argv=[sys.executable,str(bridge),str(native),str(runtime),str(E/'companion-metrics.log'),str(pidlog)]
  (runtime/'native').write_text('#!/bin/sh\n# Role: bridge to an independently launched signed app.\ntest ! -e '+shlex.quote(str(runtime/'capture-refused'))+' || exit 1\nexec '+shlex.join(argv)+' "$@"'+(' --hevc' if args.get('codec')=='hevc' else '')+'\n')
  (runtime/'native').chmod(0o700)
  def stop_capture():
