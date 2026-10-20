@@ -570,13 +570,22 @@ try:
   focus_input(surface)
   emit({'kind':'input_sample_plan','count':INPUT_SAMPLE_COUNT,'trigger':'immediate after key event'})
   for index in range(INPUT_SAMPLE_COUNT):
+   # Native input brings its app forward. On a viewer running on the same Mac,
+   # renew browser activation before each key, without adding remote mouse work
+   # when the controlled DOM surface still owns typing focus.
+   page.bring_to_front()
+   if not surface.evaluate('(canvas)=>canvas.parentElement===document.activeElement'):focus_input(surface)
+   page.wait_for_function('document.hasFocus()',timeout=5000)
    sequence=max(r['sequence'] for r in all_draws if r['kind']=='draw')+1
    drain();page.evaluate('([id,colour,sequence])=>window.__appWindowBench.arm(id,{colour,sequence})',[100+index,sequence%8,sequence]);copy_target=compositor_target(surface,page.viewport_size);composite_begin=len(composites);page.keyboard.type('x');deadline=time.monotonic()+5;events=[];effect=None
    while time.monotonic()<deadline:
     receipt=drain();events.append(receipt);effect=next((e for e in receipt['probe']['events'] if e.get('t')=='bench-effect' and e['id']==100+index),None)
     if effect:break
     page.wait_for_timeout(5)
-   if not effect:raise RuntimeError('input change not observed')
+   if not effect:
+    focus=surface.evaluate('(canvas)=>({surface:canvas.parentElement===document.activeElement,document:document.hasFocus()})')
+    emit({'kind':'input_sample_failure','index':index,'expected_sequence':sequence,'events':events,'focus':focus})
+    raise RuntimeError('input change not observed')
    compositor=None
    for attempt in range(100):
     compositor=next((c for c in composites[composite_begin:] if c['colour']==sequence%8 and c['distance']<2500),None)

@@ -47,6 +47,26 @@ class InputCohortTests(unittest.TestCase):
         self.assertEqual(rows, ['after', {'kind': 'clocks_after', 'native': 'native', 'browser': 'browser'},
                                 {'kind': 'result', 'status': 'input_measured', 'count': 80}])
 
+    def test_each_key_renews_browser_activation_without_unneeded_remote_clicks(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        loop = next(node for node in ast.walk(tree) if isinstance(node, ast.For)
+                    and ast.unparse(node.iter) == 'range(INPUT_SAMPLE_COUNT)')
+        admission = loop.body[:next(index for index, node in enumerate(loop.body)
+                                    if isinstance(node, ast.Assign) and ast.unparse(node.targets[0]) == 'sequence')]
+        for focused in (False, True):
+            with self.subTest(focused=focused):
+                actions = []
+                def ready(*_args, **_kwargs):
+                    self.assertEqual(actions[0], 'activate')
+                    actions.append('ready')
+                namespace = {'page': SimpleNamespace(bring_to_front=lambda: actions.append('activate'),
+                                                      wait_for_function=ready),
+                             'surface': SimpleNamespace(evaluate=lambda _: focused),
+                             'focus_input': lambda _: actions.append('control_focus')}
+                exec(compile(ast.Module(body=admission, type_ignores=[]), str(source), 'exec'), namespace)
+                self.assertEqual(actions, ['activate', 'ready'] if focused else ['activate', 'control_focus', 'ready'])
+
 
 class RecordingTypingTests(unittest.TestCase):
     """Earlier latency samples cannot conceal missing letters in the recording."""
