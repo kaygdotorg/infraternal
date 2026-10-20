@@ -56,6 +56,27 @@ fn merge_review_replies_cannot_consume_space_reserved_for_deferred_typing() {
     let mut terminal = Terminal::new(80, 24).unwrap();
     let ring = Ring::new(8192);
     let mut config = Config::new([0; 16], Uid::effective().as_raw());
+    // A full queue drops best-effort replies without closing the peer or
+    // changing typing ownership. The decoder already validates reply size.
+    assert!(
+        handle(
+            Frame::QueryReply(REPLY.to_vec()),
+            &mut peer,
+            &mut pty.0,
+            &mut terminal,
+            &ring,
+            &mut config,
+            &mut input,
+            &mut cursors,
+            false,
+            false,
+        )
+        .is_ok(),
+        "a full queue must drop a reply without closing its peer"
+    );
+    assert_eq!(input.len(), MAX_FRAME);
+    assert_eq!(cursors.get(Some(9)).unwrap().accepted, 512);
+    assert_eq!(cursors.get(Some(9)).unwrap().written, 0);
     // An older shared writer waits for eight bytes of room. Each bounded PTY
     // write frees six bytes; a fresh reply must leave that reservation alone.
     // Repeating this schedule otherwise keeps the oldest typing frame parked.
