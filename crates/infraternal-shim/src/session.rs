@@ -887,7 +887,12 @@ fn handle<'a>(
     };
     match frame {
         Frame::QueryReply(bytes) if p.caps & QUERY_REPLIES != 0 && !exited => {
-            cursors.reply(&bytes, input)?;
+            // Best-effort replies expire instead of taking space reserved for
+            // older typing [307]. Deferring them would retain stale answers
+            // behind that typing and let new replies refill each partial drain.
+            if !reserved {
+                cursors.reply(&bytes, input)?;
+            }
         }
         Frame::SelectWriter(id) if p.caps & MULTI_WRITER != 0 && p.writer.is_none() && id != 0 => {
             cursors.select(id, p.size)?;
