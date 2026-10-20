@@ -21,6 +21,7 @@
  * APP_WINDOW_MAC_ONLY=1 omits guest access and records no guest-idle evidence.
  */
 import { startRealServer, type DesktopStage } from '../../real/server';
+import { plainCloseReason } from '../../src/close-reasons';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
@@ -167,6 +168,8 @@ try{
  console.log(JSON.stringify({kind:'mac_exit',code,label}));
  process.exitCode=code===0?0:1;
 }finally{
+ // Bridge state also contains private fixture authority; persist this whitelist only.
+ await writeFile(E+'/socket-bridges.json',JSON.stringify(server?.bridges.map(bridge=>({id:bridge.id,closed:bridge.closed,at:bridge.closedAt,side:/^(browser|server) [0-9]+$/.test(bridge.closedBy??'')?bridge.closedBy:'other',reason:plainCloseReason(bridge.closedReason,'other'),serverReason:plainCloseReason(bridge.serverClose,'other')}))??[]));
  await writeFile(E+'/fixture-stages.json',JSON.stringify(fixtureStages));
  await writeFile(E+'/server-stages.log',diagnostics.join('\n')+'\n');
  try { await server?.dispose(); } finally { await unlink(runtimeAlias); }

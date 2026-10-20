@@ -1,6 +1,7 @@
 /** Observes content-free wire/worker receipts and owns a separate authenticated control socket for the real-window benchmark [D208,D232]. */
 import { WebSocketFrameDecoder } from "../../../../packages/protocol/src/codec";
 import { MuxConnection } from "../../src/connection";
+import { plainCloseReason } from "../../src/close-reasons";
 
 const now = (): number => performance.timeOrigin + performance.now();
 const NativeSocket = WebSocket;
@@ -16,14 +17,19 @@ let activeWorker: Worker | undefined;
 let session: string | undefined;
 let openedSockets = 0;
 let closedSockets = 0;
+let nextSocket = 0;
+interface SocketEvent { at: number; socket: number; event: "open" | "close" | "client-close"; viewer: boolean; code?: number; reason?: string; clean?: boolean }
+const socketEvents: SocketEvent[] = [];
 
 if (!window.__benchResourcesOnly) globalThis.WebSocket = class extends NativeSocket {
   private readonly outgoing = new WebSocketFrameDecoder();
+  private readonly identity = ++nextSocket;
+  private viewer = false;
   private readonly probes = new Map<bigint, { at: number; sentUs: bigint }>();
   constructor(...args: ConstructorParameters<typeof WebSocket>) {
     super(...args);
-    this.addEventListener("open", () => { openedSockets++; });
-    this.addEventListener("close", () => { closedSockets++; });
+    this.addEventListener("open", () => { openedSockets++; limit(socketEvents, { at: now(), socket: this.identity, event: "open", viewer: this.viewer }); });
+    this.addEventListener("close", (event: CloseEvent) => { closedSockets++; limit(socketEvents, { at: now(), socket: this.identity, event: "close", viewer: this.viewer, code: event.code, reason: plainCloseReason(event.reason, "other"), clean: event.wasClean }); });
     const incoming = new WebSocketFrameDecoder();
     this.addEventListener("message", (event) => {
       if (!(event.data instanceof ArrayBuffer)) return;
@@ -39,6 +45,11 @@ if (!window.__benchResourcesOnly) globalThis.WebSocket = class extends NativeSoc
       });
     });
   }
+  override close(code?: number, reason?: string): void {
+    // Peer text never enters receipts: reuse the application's fixed reason map.
+    limit(socketEvents, { at: now(), socket: this.identity, event: "client-close", viewer: this.viewer, ...(code === undefined ? {} : { code }), reason: plainCloseReason(reason, "other") });
+    super.close(code, reason);
+  }
   override send(data: Parameters<WebSocket["send"]>[0]): void {
     if (data instanceof Uint8Array) this.outgoing.feed(data, (_stream, frame) => {
       if (frame.type === "Ping") {
@@ -49,6 +60,7 @@ if (!window.__benchResourcesOnly) globalThis.WebSocket = class extends NativeSoc
       const value = frame.message;
       if (value.kind === "input") limit(inputs, { at: now(), kind: value.input.kind });
       if (value.kind === "attach") {
+        this.viewer = true;
         const hex = Array.from(value.sessionId, (byte) => byte.toString(16).padStart(2, "0")).join("");
         session = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
       }
@@ -124,7 +136,7 @@ const probe = {
   stats: workerStats,
   workerClock,
   get session(): string | undefined { return session; },
-  get sockets(): { opened: number; closed: number } { return { opened: openedSockets, closed: closedSockets }; },
+  get sockets(): { opened: number; closed: number; history: SocketEvent[] } { return { opened: openedSockets, closed: closedSockets, history: socketEvents.slice() }; },
   take: () => ({ domInputs: domInputs.splice(0), inputs: inputs.splice(0), videos: videos.splice(0), events: events.splice(0), roundTrips: roundTrips.splice(0) }),
   arm: (id: number, crop: { colour: number }): void => { activeWorker?.postMessage({ t: "bench-arm", id, crop }); },
   close: (): void => { fixture?.dispose(); },
