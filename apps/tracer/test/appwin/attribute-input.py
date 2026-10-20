@@ -128,7 +128,7 @@ def analyze(root, controller):
  receives=sorted(stage('server_input_receive',4),key=server_stamp)
  if len({r['pid'] for r in receives})!=1:raise ValueError('server clock changed during cohort')
  selected_receives,score=align_ordered([int(s['native']['receive_ns']) for s in samples],receives,server_stamp)
- summary={};events=[];source_details={}
+ summary={};events=[];source_details={};source_details_unavailable=[]
  for sample,receive in zip(samples,selected_receives):
   began,ended=forward(receive,stage('server_input_write_begin',4),stage('server_input_write_end',4),server_stamp)
   server_local=(server_stamp(ended)-server_stamp(receive))/1e6
@@ -150,9 +150,11 @@ def analyze(root, controller):
    'input_two_legs_residual':local_epoch(sample['source_receive'])-sample['send']['at']-server_local,
    'video_two_legs_residual':sample['frame']['receivedAt']-local_epoch(sample['source_end'])-local['server_video_receive_to_forward'],
   }
-  callback=exactly([r for r in metrics if r['metric']=='source_frame' and r.get('damaged')=='true' and r.get('capture_ns')==sample['frame']['captureNs']],'source callback')
-  details=source_callback_stages(sample['draw']['end_ticks']*timebase,int(sample['frame']['captureNs']),int(callback['callback_ns']),int(sample['encoded']['encode_finished_ns']),int(sample['encoded']['encode_ns']))
-  for name,number in details.items():source_details.setdefault(name,[]).append(number)
+  callbacks=[r for r in metrics if r['metric']=='source_frame' and r.get('damaged')=='true' and r.get('capture_ns')==sample['frame']['captureNs']]
+  if len(callbacks)==1:
+   details=source_callback_stages(sample['draw']['end_ticks']*timebase,int(sample['frame']['captureNs']),int(callbacks[0]['callback_ns']),int(sample['encoded']['encode_finished_ns']),int(sample['encoded']['encode_ns']))
+   for name,number in details.items():source_details.setdefault(name,[]).append(number)
+  else:source_details_unavailable.append(sample['index'])
   for name,number in {**local,**network,'input_to_worker':sample['effect']['begin']-sample['key']['eventAt'],'local_total':sum(local.values())}.items():summary.setdefault(name,[]).append(number)
   events.append({'index':sample['index'],'local_ms':local,'network_residual_ms':network,'stamps':sample,'server_input_stamps':{'receive':receive,'forward_begin':began,'forward_end':ended}})
  def quantile(values,p):
@@ -169,7 +171,10 @@ def analyze(root, controller):
  for name,values in [('Mac_server_icmp',mac_rtts),('browser_server_protocol',browser_rtts)]:
   if values:network_rtts[name]={'n':len(values),'p50':statistics.median(values),'p95':quantile(values,.95),'max':max(values)}
  def stats(values):return {'n':len(values),'p50':statistics.median(values),'p95':quantile(values,.95),'max':max(values),'min':min(values)}
- report={'concurrent_network_rtt_ms':network_rtts,'source_clock_half_width_ms':(source_upper-source_lower)/2e6,'clock_uncertainty_ms':((clock['native']['upper']-clock['native']['lower'])+(clock['browser']['upper']-clock['browser']['lower']))/2e6,'server_cohort_spacing_rms_ms':score,'metrics':{k:stats(v) for k,v in summary.items()},'source_details_ms':{k:stats(v) for k,v in source_details.items()},'events':events,'note':'Transport residuals include kernel/library queues outside the stamped send/receive boundaries; they are not pure wire time. Cross-host clocks are never subtracted to infer one-way latency. Source details subdivide existing phases; the display stamp may follow its callback and its signed offset is preserved.'}
+ # Callback diagnostics are additive. Never reconstruct an interleaved record
+ # or publish quantiles from a smaller cohort; independent input stamps remain
+ # complete even when these optional callback details are unavailable.
+ report={'concurrent_network_rtt_ms':network_rtts,'source_clock_half_width_ms':(source_upper-source_lower)/2e6,'clock_uncertainty_ms':((clock['native']['upper']-clock['native']['lower'])+(clock['browser']['upper']-clock['browser']['lower']))/2e6,'server_cohort_spacing_rms_ms':score,'metrics':{k:stats(v) for k,v in summary.items()},'source_details_ms':{} if source_details_unavailable else {k:stats(v) for k,v in source_details.items()},'source_details_unavailable_events':source_details_unavailable,'events':events,'note':'Transport residuals include kernel/library queues outside the stamped send/receive boundaries; they are not pure wire time. Cross-host clocks are never subtracted to infer one-way latency. Source details subdivide existing phases; the display stamp may follow its callback and its signed offset is preserved.'}
  return report
 
 if __name__=='__main__':
