@@ -36,9 +36,6 @@ fn merge_review_replies_cannot_consume_space_reserved_for_deferred_typing() {
     };
     let (mut peer, _remote) = make_peer(9);
     let (mut waiting_peer, _waiting_remote) = make_peer(7);
-    #[cfg(feature = "process-per-user")]
-    let mut cursors = Inputs::for_host(peer.size);
-    #[cfg(not(feature = "process-per-user"))]
     let mut cursors = Inputs::with_geometry(peer.size);
     cursors.select(7, peer.size).unwrap();
     cursors.select(9, peer.size).unwrap();
@@ -82,9 +79,6 @@ fn merge_review_replies_cannot_consume_space_reserved_for_deferred_typing() {
             waiting_peer.deferred.is_some(),
         );
     }
-    #[cfg(feature = "process-per-user")]
-    let available = cursors.available(7, input.len());
-    #[cfg(not(feature = "process-per-user"))]
     let available = MAX_FRAME - input.len();
     assert!(
         !waiting_peer.input_waits(0, 8, 0, available, false).unwrap(),

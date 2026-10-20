@@ -55,5 +55,4 @@ mod tests {
         assert_eq!(ring.head(), u64::MAX);
         assert_eq!(ring.read(ring.start(), 8).unwrap(), b"keptx");
     }
-
 }
