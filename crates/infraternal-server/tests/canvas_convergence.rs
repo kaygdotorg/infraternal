@@ -548,12 +548,16 @@ async fn a_tiled_import_cannot_duplicate_an_existing_graph_kind() {
 
 #[tokio::test]
 async fn importing_an_orphaned_recovery_view_does_not_create_another_recovery_name() {
-    let (store, _) = fixture().await;
-    init(&store, Document::default(), "empty").await;
-    let mut incoming = document(1);
-    incoming.0["views"][0]["name"] = json!("Recovered: Console");
-    init(&store, incoming, "import").await;
-    let doc = canonical(&store, "a").await;
-    assert_eq!(doc.windows().count(), 1);
-    assert_eq!(doc.0["views"][0]["name"], "Console");
+    for prefixes in [1, 2] {
+        let (store, _) = fixture().await;
+        init(&store, Document::default(), "empty").await;
+        let mut incoming = document(1);
+        incoming.0["views"][0]["name"] =
+            json!(format!("{}Console", "Recovered: ".repeat(prefixes)));
+        init(&store, incoming, "import").await;
+        let doc = canonical(&store, "a").await;
+        assert_eq!(doc.windows().count(), 1);
+        assert_eq!(doc.0["views"][0]["name"], "Console");
+    }
 }
+

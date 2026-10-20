@@ -77,7 +77,11 @@ pub(super) fn merge(document: &mut Document, mut incoming: Document) -> Result<(
                 return Err(());
             }
             // A surviving stale-device copy becomes an ordinary view, even if its original is gone.
-            if let Some(base) = name.strip_prefix("Recovered: ") {
+            let mut base = name;
+            while let Some(rest) = base.strip_prefix("Recovered: ") {
+                base = rest;
+            }
+            if base != name {
                 view["name"] = Value::from(base);
             }
             if views.iter().any(|v| v["id"] == view["id"]) {
