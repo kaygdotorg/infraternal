@@ -143,8 +143,8 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,386,992 bytes |
-  | `aarch64-unknown-linux-musl` | 19,558,632 bytes |
+  | `x86_64-unknown-linux-musl` | 21,386,224 bytes |
+  | `aarch64-unknown-linux-musl` | 19,558,248 bytes |
 
   Release 8 integrates D307, synchronized output and input ordering (#206),
   the stale-screen note (#248), and the display-only phone column minimum
@@ -166,12 +166,19 @@ Reviews and fixes run at the same time as the next lane's build.
   production's 0001–0029 SQL files remain unchanged. Measurements and release
   qualification receipts are recorded on #24, #206, #243 and #248.
 
-  The shared layout recovery fix (#243) ratchets the current ceilings to
+  The initial shared layout recovery fix (#243) ratcheted the ceilings to
   21,386,992 / 19,558,632 bytes: −192 / −480 versus release 8. It adds migration
   0030 to backfill transactional receipt counts. Build-time SQL formatting
   compaction preserves every original migration checksum; historical layout
   repair happens through normal snapshot revisions. Static receipts and the
   production-shaped two-device checks are recorded on #243.
+
+  The release-9 recovery review fixes (#243) preserve bounded fallback and queued
+  membership IDs, then share ID assignment and recovery recognition to offset
+  their code. Same-recipe rebuilds against `bd5ee1dd7` measure 21,386,224 /
+  19,558,248 bytes: −768 / −384. Both exact ceilings ratchet downward to these
+  measurements. No dependency, profile or migration SQL changes are included;
+  both architecture receipts and the review regressions are recorded on #243.
 
   Release 7 measured 21,385,264 / 19,570,256 bytes after the reviewed Retry and Mesh merges,
   #246 source-path normalization, and the #236 migration collision correction:
