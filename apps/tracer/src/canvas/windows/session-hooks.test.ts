@@ -11,7 +11,10 @@ mock.module("../../on-demand", () => ({
 const part = { toggleManager: mock(() => {}), paint() {}, render() {}, closeManager() {}, arrived() {}, refused: () => false, dispose() {} };
 mock.module("./session-ui.on-demand", () => ({ createSessionUi: () => { created.push(part); return part; } }));
 
+const previousMatchMedia = globalThis.matchMedia;
+globalThis.matchMedia = (() => ({ matches: false })) as unknown as typeof matchMedia;
 const { createSessionHooks } = await import("./session-hooks");
+if (previousMatchMedia) globalThis.matchMedia = previousMatchMedia;
 
 const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 5));
 const toasts: string[] = [];
