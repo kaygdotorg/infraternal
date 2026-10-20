@@ -171,12 +171,16 @@ test("fresh phone restores ten split windows and both devices converge", async (
   } finally { await peer?.close(); await phone.close(); await desktop.close(); await server.dispose(); }
 });
 
-test("a differing legacy cache survives as recovered views on both devices", async ({ browser }) => {
+test("an overlapping legacy cache keeps the canonical view on both devices", async ({ browser }) => {
   const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4563) });
   const first = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
   const second = await browser.newContext({ ...devices["iPhone 15"], viewport: { width: 393, height: 852 }, ignoreHTTPSErrors: true });
   try {
     const page = await first.newPage(); await enrol(page, server); await settled(page);
+    // Built-in Mesh registration is independent of the import; finish it before taking the no-op baseline.
+    await expect.poll(async () => (await cache(page) as { canonical: { views: Array<{ id: string }> } }).canonical.views.some((view) => view.id === "mesh")).toBe(true);
+    await settled(page);
+    const before = (await cache(page) as { canonical: import("../src/canvas/model/schema").CanvasDocument }).canonical;
     const legacy = await page.evaluate(() => {
       const key = Object.keys(localStorage).find((key) => key.startsWith("infraternal.canvas."))!;
       const document = JSON.parse(localStorage.getItem(key)!).canonical;
@@ -189,10 +193,11 @@ test("a differing legacy cache survives as recovered views on both devices", asy
     const phone = await second.newPage(); await phone.goto(server.origin + "/?theme=ink&bg=none");
     await expect.poll(async () => {
       const value = await cache(phone) as { canonical?: { views: Array<{ name: string }> }; migration?: unknown };
-      return value?.migration === undefined && value?.canonical?.views.some((view) => view.name === "Recovered: Local Console");
+      return value?.migration === undefined && value?.canonical?.views.every((view) => !view.name.startsWith("Recovered: "));
     }, { timeout: 30_000 }).toBe(true);
-    await expect(phone.locator('.cl-label-name').filter({ hasText: "Recovered: Local Console" })).toHaveCount(1);
-    await expect(page.locator('.cl-label-name').filter({ hasText: "Recovered: Local Console" })).toHaveCount(1);
+    await expect.poll(async () => (await cache(phone) as { canonical: unknown }).canonical).toEqual(before);
+    await expect(phone.locator('.cl-label-name').filter({ hasText: "Recovered: Local Console" })).toHaveCount(0);
+    await expect(page.locator('.cl-label-name').filter({ hasText: "Recovered: Local Console" })).toHaveCount(0);
     await expect(windows(page)).toHaveCount(1); await expect(windows(phone)).toHaveCount(1);
     expect(server.bridges.flatMap((bridge) => bridge.control).filter((frame) => frame.type === "Call" && frame.detail === "ssh.session.open")).toHaveLength(1);
     const views = await phone.evaluate(() => {

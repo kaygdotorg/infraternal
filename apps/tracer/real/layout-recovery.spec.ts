@@ -87,6 +87,12 @@ with sqlite3.connect(sys.argv[1]) as db:
  db.execute("DELETE FROM canvas_snapshots WHERE account=?",(account,))
 `, `${server.dataDir}/infraternal.sqlite`, JSON.stringify(doc)], { encoding: "utf8" });
     expect(seeded.status).toBe(0);
+    // Existing devices can mount the historical drawing cache before the repaired snapshot arrives.
+    await page.evaluate((document) => {
+      const key = Object.keys(localStorage).find((key) => key.startsWith("infraternal.canvas."))!;
+      const value = JSON.parse(localStorage.getItem(key)!);
+      localStorage.setItem(key, JSON.stringify({ ...value, canonical: document, document, pending: [], unresolved: [] }));
+    }, doc);
     await page.reload(); await expect(windows(page)).toHaveCount(baseline ? 44 : 45); await settled(page);
     await phone.addCookies(await desktop.cookies());
     const mobile = await phone.newPage(); record(mobile, "phone"); await mobile.goto(server.origin + "/?theme=ink&bg=none");
@@ -153,3 +159,37 @@ with sqlite3.connect(sys.argv[1]) as db:
   } finally { await phone.close(); await desktop.close(); await server.dispose(); }
 });
 
+
+test("a repaired cached graph cannot build after its view was removed", async ({ browser }) => {
+  const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4293) });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true, serviceWorkers: "block" });
+  let release = (): void => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const errors: string[] = [];
+  try {
+    const page = await context.newPage(); page.on("pageerror", (error) => errors.push(error.message));
+    await enrol(page, server);
+    await expect.poll(async () => (await cache(page)).canonical.views.some((view) => view.id === "mesh")).toBe(true);
+    const historical = structuredClone((await cache(page)).canonical);
+    const mesh = historical.views.find((view) => view.id === "mesh")!;
+    historical.views.push({ ...mesh, id: "delayed-recovery", name: "Recovered: Mesh", cell: { x: 0, y: 0 } });
+    await page.evaluate((document) => {
+      const key = Object.keys(localStorage).find((key) => key.startsWith("infraternal.canvas."))!;
+      const value = JSON.parse(localStorage.getItem(key)!);
+      localStorage.setItem(key, JSON.stringify({ ...value, canonical: document, document, pending: [], unresolved: [] }));
+    }, historical);
+    let blocked = false;
+    await page.route("**/*.js", async (route) => {
+      const response = await route.fetch();
+      if ((await response.text()).includes("cl-graph-arrows")) { blocked = true; await gate; }
+      await route.fulfill({ response });
+    });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect.poll(() => blocked).toBe(true);
+    await expect.poll(async () => (await cache(page)).canonical.views.some((view) => view.id === "delayed-recovery")).toBe(false);
+    await expect(page.locator('.cl[data-view="delayed-recovery"]')).toHaveCount(0);
+    release();
+    await expect(page.locator('.cl[data-view="mesh"] .cl-graph-arrows')).toHaveCount(1);
+    expect(errors).toEqual([]);
+  } finally { release(); await context.unrouteAll({ behavior: "wait" }); await context.close(); await server.dispose(); }
+});
