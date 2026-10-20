@@ -31,6 +31,8 @@ mod migration_compat;
 #[cfg(test)]
 mod migration_compat_tests;
 #[cfg(test)]
+mod migration_data_tests;
+#[cfg(test)]
 pub(crate) mod tests;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
