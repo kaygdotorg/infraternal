@@ -560,26 +560,38 @@ mod tests {
         let request = json!({"op_id":"initial","document":Document::default()});
         let input = serde_json::to_vec(&request).unwrap();
         store.initialize("a", &input).await.unwrap();
-        let legacy = json!({"op_id":"legacy","document":Document::default()});
-        let digest = crate::auth::hash(
-            &serde_json::to_string(&model::object(vec![
-                ("action", Value::from("initialize")),
-                ("input", legacy.clone()),
-            ]))
-            .unwrap(),
-        );
-        sqlx::query("INSERT INTO canvas_receipts VALUES('a','legacy',?,1)")
-            .bind(digest)
-            .execute(&store.pool)
-            .await
-            .unwrap();
-        assert_eq!(
-            store
-                .initialize("a", &serde_json::to_vec(&legacy).unwrap())
-                .await
+        for (initialize, legacy) in [
+            (
+                true,
+                json!({"op_id":"legacy-λ-\"","document":Document::default()}),
+            ),
+            (
+                false,
+                json!({"op_id":"legacy-apply","base_revision":1,"intent":{"type":"close","window_id":"gone"}}),
+            ),
+        ] {
+            let action = if initialize { "initialize" } else { "apply" };
+            let digest = crate::auth::hash(
+                &serde_json::to_string(&model::object(vec![
+                    ("action", Value::from(action)),
+                    ("input", legacy.clone()),
+                ]))
                 .unwrap(),
-            1
-        );
+            );
+            sqlx::query("INSERT INTO canvas_receipts VALUES('a',?,?,1)")
+                .bind(legacy["op_id"].as_str().unwrap())
+                .bind(digest)
+                .execute(&store.pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .call(initialize, "a", &serde_json::to_vec(&legacy).unwrap())
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
     }
     #[tokio::test]
     async fn cancelled_commit_still_invalidates_a_durable_change() {
