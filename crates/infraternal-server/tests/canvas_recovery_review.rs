@@ -105,6 +105,35 @@ async fn queued_close_of_unique_recovered_window_survives_repair() {
         !doc.windows().any(|w| w["target"]["host"] == "unique"),
         "successful close was acknowledged but repair gave its target a new ID and left it open"
     );
+    assert_eq!(store.apply("a", &input).await.unwrap(), 4);
+    assert_eq!(store.events("a", None).await.unwrap()[0]["document"], doc.0);
+}
+
+#[tokio::test]
+async fn queued_resize_keeps_its_membership_after_a_separate_read_repair() {
+    let (store, pool) = historical(1).await;
+    let peer = Store::new(pool);
+    let repaired = peer.events("a", Some(2)).await.unwrap();
+    let doc = Document(repaired[0]["document"].clone());
+    assert_eq!(doc.revision(), 3);
+    assert_eq!(
+        doc.windows()
+            .find(|w| w["target"]["host"] == "unique")
+            .unwrap()["id"],
+        "recovered-window"
+    );
+    let input = serde_json::to_vec(&json!({"op_id":"resize-recovered","base_revision":2,"intent":{"type":"resize","window_id":"recovered-window","height":0.9}})).unwrap();
+    assert_eq!(store.apply("a", &input).await.unwrap(), 4);
+    let snapshot = store.events("a", None).await.unwrap();
+    let doc = Document(snapshot[0]["document"].clone());
+    assert_eq!(
+        doc.windows()
+            .find(|w| w["id"] == "recovered-window")
+            .unwrap()["height"],
+        0.9
+    );
+    assert_eq!(store.apply("a", &input).await.unwrap(), 4);
+    assert_eq!(peer.events("a", None).await.unwrap()[0]["document"], doc.0);
 }
 
 #[tokio::test]

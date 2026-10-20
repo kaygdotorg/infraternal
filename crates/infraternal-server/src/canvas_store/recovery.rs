@@ -21,7 +21,11 @@ fn same_target(a: &Value, b: &Value) -> bool {
 }
 
 /// Only import absent targets; a second device never replaces canonical order, names, geometry or graph pins.
-pub(super) fn merge(document: &mut Document, incoming: Vec<Value>) -> Result<(), ()> {
+pub(super) fn merge(
+    document: &mut Document,
+    incoming: Vec<Value>,
+    imported: bool,
+) -> Result<(), ()> {
     let mut seen: Vec<Value> = document.windows().map(|w| w["target"].clone()).collect();
     let views = document.0["views"].as_array_mut().ok_or(())?;
     for mut view in incoming {
@@ -42,8 +46,11 @@ pub(super) fn merge(document: &mut Document, incoming: Vec<Value>) -> Result<(),
                 end = end.max(
                     index + usize::try_from(window["span"].as_u64().unwrap_or(1)).unwrap_or(64),
                 );
-                // Imported IDs cannot collide with canonical memberships or durable close tombstones.
-                window["id"] = Value::from(uuid::Uuid::new_v4().to_string());
+                // Device imports need fresh IDs to avoid durable close tombstones.
+                // Persisted recovery memberships already own their IDs: queued edits must still address them.
+                if imported {
+                    window["id"] = Value::from(uuid::Uuid::new_v4().to_string());
+                }
                 true
             });
             if !windows.is_empty() || index < end {
@@ -155,7 +162,7 @@ pub(super) fn repair(document: &mut Document) -> Result<bool, ()> {
             }
             !remove
         });
-    if merge(&mut candidate, incoming).is_err() {
+    if merge(&mut candidate, incoming, false).is_err() {
         return Ok(false);
     }
     candidate.0["revision"] = Value::from(candidate.revision() + 1);

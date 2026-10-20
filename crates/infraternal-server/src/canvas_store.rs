@@ -225,7 +225,7 @@ impl Store {
                     if initialized {
                         let before = document.clone();
                         let views = incoming.0["views"].as_array_mut().ok_or(Error)?;
-                        recovery::merge(&mut document, std::mem::take(views))?;
+                        recovery::merge(&mut document, std::mem::take(views), true)?;
                         import_noop = document == before;
                     } else {
                         document = incoming;
