@@ -7,6 +7,18 @@ analysis = runpy.run_path(str(pathlib.Path(__file__).with_name('attribute-input.
 
 
 class AttributionTests(unittest.TestCase):
+    def test_post_selects_execution_when_mouse_receives_share_the_key_window(self):
+        commands = [{'receive_ns': '100', 'dispatch_ns': str(begin), 'finished_ns': str(end)}
+                    for begin, end in ((110, 120), (125, 130), (135, 140))]
+        self.assertIs(analysis['command_for_post'](commands, 138), commands[2])
+
+    def test_missing_or_overlapping_dispatches_are_not_guessed(self):
+        match = analysis['command_for_post']
+        with self.assertRaises(ValueError): match([], 138)
+        with self.assertRaises(ValueError): match([{'dispatch_ns': '110', 'finished_ns': '120'}], 138)
+        with self.assertRaises(ValueError): match([{'dispatch_ns': '110', 'finished_ns': '140'},
+                                                 {'dispatch_ns': '135', 'finished_ns': '145'}], 138)
+
     def test_source_callback_split_preserves_a_future_display_stamp(self):
         stages = analysis['source_callback_stages'](100_000_000, 120_000_000, 110_000_000, 140_000_000, 20_000_000)
         self.assertEqual(stages, {'draw_end_to_callback': 10, 'display_stamp_to_callback': -10,

@@ -48,6 +48,16 @@ def source_callback_stages(draw_ns, display_ns, callback_ns, finished_ns, durati
          'callback_to_encode_begin':(began_ns-callback_ns)/1e6,
          'encode_duration':duration_ns/1e6}
 
+def command_for_post(commands, post_ns):
+ """Match on native execution, not a browser window shared by queued mouse input.
+
+ Receive stamps may overlap while commands await the main queue. The actual
+ post must lie in exactly one dispatch/completion interval on that same clock.
+ """
+ matches=[row for row in commands if int(row['dispatch_ns'])<=post_ns<=int(row['finished_ns'])]
+ if len(matches)!=1:raise ValueError(f'companion dispatch: expected one receipt, found {len(matches)}')
+ return matches[0]
+
 def analyze(root, controller):
  rows=[json.loads(line) for line in controller.read_text().splitlines() if line.startswith('{')]
  clock=next(r for r in rows if r.get('kind')=='clocks');timebase=clock['timebase']['numer']/clock['timebase']['denom']
@@ -83,8 +93,8 @@ def analyze(root, controller):
   key=exactly([v for r in probe for v in r['domInputs']],'keydown')
   sent=exactly([v for r in probe for v in r['inputs'] if v['kind'] in ('text','key')],'browser send')
   effect=sample['effect'];lo=key['eventAt'];hi=effect['begin']
-  command=exactly(between([r for r in metrics if r['metric']=='native_input'],lambda r:native_epoch(r['receive_ns']),lo,hi),'companion receive')
   post=exactly(between([r for r in metrics if r['metric']=='native_input_post' and r.get('type')=='10'],lambda r:native_epoch(r['at_ns']),lo,hi),'worker inject')
+  command=command_for_post(between([r for r in metrics if r['metric']=='native_input'],lambda r:native_epoch(r['receive_ns']),lo,hi),int(post['at_ns']))
   if command.get('accepted')!='true':raise ValueError('native input was refused')
   native_event=exactly(between([r for r in json.loads((root/'source-draws.json').read_text()) if r.get('kind')=='input'],lambda r:native_epoch(r['ticks']*timebase),lo,hi),'fixture input')
   draws=[r for r in json.loads((root/'source-draws.json').read_text()) if r.get('kind')=='draw' and r['sequence']==native_event['sequence']]
