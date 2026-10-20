@@ -242,8 +242,9 @@ try:
     except ProcessLookupError:pass
  stop_monitor=threading.Event()
  def watch_launches():
-  # PID-only bridge/launcher rows and permission preflight rows are short-lived
-  # bookkeeping. Only the signed app's launch-time identity can authorize cleanup.
+  # Inventory requests launch a signed helper that exits after one response.
+  # Only an exact, still-live launch identity may enter cleanup tracking; a
+  # retired or reused PID is never authority to signal its current process.
   seen=set()
   while not stop_monitor.wait(.5):
    try:
@@ -255,7 +256,7 @@ try:
       identity=logged_capture_identity(row)
       if identity is None:continue
       role,pid,birth=identity
-      if process_identity(pid)!=birth:raise RuntimeError('signed app PID changed before its launch identity was observed')
+      if process_identity(pid)!=birth:continue
       helper_births[pid]=birth
       if role=='capture':capture_helpers.add(pid)
     consent_check()

@@ -347,6 +347,76 @@ class LaunchMonitorTests(unittest.TestCase):
         self.assertEqual(namespace['helper_births'], {101: (101, 10, 1)})
         self.assertEqual(namespace['capture_helpers'], {101})
 
+    def test_monitor_skips_a_retired_inventory_helper_before_its_first_poll(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        function = next(node for node in ast.walk(tree)
+                        if isinstance(node, ast.FunctionDef) and node.name == 'watch_launches')
+        parser = next(node for node in ast.walk(tree)
+                      if isinstance(node, ast.FunctionDef) and node.name == 'logged_capture_identity')
+
+        class StopMonitor:
+            def __init__(self): self.waits = 0
+            def wait(self, _timeout):
+                self.waits += 1
+                return self.waits > 1
+
+        class PidLog:
+            def read_text(self): return 'native 101 10 1\n'
+
+        errors, stopped, checks = [], [], []
+        namespace = {
+            'stop_monitor': StopMonitor(), 'pidlog': PidLog(),
+            'process_identity': lambda _pid: None,
+            'capture_helpers': set(), 'helper_births': {}, 'consent_errors': errors,
+            'stop_capture': lambda: stopped.append(True), 'consent_check': lambda: checks.append(True),
+        }
+        parser_namespace = {}
+        exec(compile(ast.Module(body=[parser], type_ignores=[]), str(source), 'exec'), parser_namespace)
+        namespace['logged_capture_identity'] = parser_namespace['logged_capture_identity']
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        namespace['watch_launches']()
+        self.assertEqual(errors, [])
+        self.assertEqual(stopped, [])
+        self.assertEqual(namespace['helper_births'], {})
+        self.assertEqual(checks, [True])
+
+    def test_monitor_does_not_adopt_a_reused_capture_pid(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        function = next(node for node in ast.walk(tree)
+                        if isinstance(node, ast.FunctionDef) and node.name == 'watch_launches')
+        parser = next(node for node in ast.walk(tree)
+                      if isinstance(node, ast.FunctionDef) and node.name == 'logged_capture_identity')
+
+        class StopMonitor:
+            def __init__(self): self.waits = 0
+            def wait(self, _timeout):
+                self.waits += 1
+                return self.waits > 1
+
+        class PidLog:
+            def read_text(self): return 'capture 101 10 1\n'
+
+        errors, stopped, checks = [], [], []
+        namespace = {
+            'stop_monitor': StopMonitor(), 'pidlog': PidLog(),
+            # The PID has been reused within the same second.
+            'process_identity': lambda _pid: (101, 10, 2),
+            'capture_helpers': set(), 'helper_births': {}, 'consent_errors': errors,
+            'stop_capture': lambda: stopped.append(True), 'consent_check': lambda: checks.append(True),
+        }
+        parser_namespace = {}
+        exec(compile(ast.Module(body=[parser], type_ignores=[]), str(source), 'exec'), parser_namespace)
+        namespace['logged_capture_identity'] = parser_namespace['logged_capture_identity']
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        namespace['watch_launches']()
+        self.assertEqual(errors, [])
+        self.assertEqual(stopped, [])
+        self.assertEqual(namespace['helper_births'], {})
+        self.assertEqual(namespace['capture_helpers'], set())
+        self.assertEqual(checks, [True])
+
 
 class ConsentTests(unittest.TestCase):
     """Execute only the consent guard, without importing or launching the browser driver."""
