@@ -16,7 +16,10 @@ final class Picture: NSView {
     private var typed = ""
     override var acceptsFirstResponder: Bool { true }
     override func keyDown(with event: NSEvent) {
-        emit(["kind": "input", "ticks": mach_absolute_time(), "sequence": sequence + 1])
+        // Only this isolated fixture's known test text is recorded. The bounded
+        // display suffix is not an input ledger and cannot prove a long burst.
+        emit(["kind": "input", "ticks": mach_absolute_time(), "sequence": sequence + 1,
+              "characters": event.characters ?? ""])
         if let characters = event.characters, !event.modifierFlags.contains(.command) {
             typed = String((typed + characters).suffix(80))
         }
