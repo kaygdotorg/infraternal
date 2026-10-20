@@ -153,6 +153,25 @@ Reviews and fixes run at the same time as the next lane's build.
   Both exact caps ratchet down to these measurements (D243). No protocol,
   dependency or build-profile change is added.
 
+  Release 9 merges the reviewed reply reservation and shared-layout recovery
+  histories, then picks the quiet session-list warm-up and its standalone test
+  fix (#24, #243, #249). Same pinned stripped static measurements:
+
+  | Stage | x86_64 bytes | aarch64 bytes |
+  | --- | ---: | ---: |
+  | Release 8 | 21,387,184 | 19,559,112 |
+  | Reply reservation | 21,387,120 | 19,558,856 |
+  | Layout recovery | 21,386,224 | 19,557,992 |
+  | Quiet warm-up and final | 21,386,224 | 19,557,992 |
+
+  Final deltas versus release 8 are -960 / -1,120 bytes;
+  both exact caps retain no growth allowance (D243). Link-time effects make
+  the individual reductions non-additive. The TypeScript-only picks
+  leave both native images byte-identical. Migration 0030 is the only added
+  migration; production's 0001–0029 SQL remains unchanged. Qualification and
+  artifact receipts are recorded on #24, #243 and #249. No dev or delta-review
+  branch is included, and this release qualification does not deploy.
+
   Release 8 integrates D307, synchronized output and input ordering (#206),
   the stale-screen note (#248), and the display-only phone column minimum
   (#243, D309). The stripped static measurements are:
