@@ -219,7 +219,7 @@ final class Encoder {
         let payload: Data
         do {
             guard let completed = try result.completedPayload(timeout:.now()+2) else {
-                if measure { fputs("METRIC encoder_drop=1\n",stderr) }
+                if measure { fputs("METRIC encoder_drop=1 drop_ns=\(nanos(mach_absolute_time()-begin)) requested_keyframe=\(force ? 1 : 0) bitrate=\(bitrate) width=\(width) height=\(height) capture_ns=\(nanos(ticks))\n",stderr) }
                 return nil
             }
             payload = completed
@@ -231,7 +231,7 @@ final class Encoder {
             let finished = mach_absolute_time()
             // Submit and callback can overlap. Configuration plus callback delay
             // plus conversion describe the critical path; submit is separate.
-            fputs("METRIC encode_ns=\(nanos(finished-begin)) encode_finished_ns=\(nanos(finished)) encode_config_ns=\(nanos(configured-begin)) encode_submit_ns=\(nanos(submitted-submitting)) encode_callback_delay_ns=\(nanos(result.callbackBegan-submitting)) encode_conversion_ns=\(nanos(result.callbackFinished-result.callbackBegan)) encode_return_ns=\(nanos(finished-max(submitted,result.callbackFinished))) encode_rate_changed=\(rateChanged ? 1 : 0) bytes=\(payload.count-1) capture_ns=\(nanos(ticks)) codec=\(codec == kCMVideoCodecType_HEVC ? "hevc" : "h264")\n",stderr)
+            fputs("METRIC encode_ns=\(nanos(finished-begin)) encode_finished_ns=\(nanos(finished)) encode_config_ns=\(nanos(configured-begin)) encode_submit_ns=\(nanos(submitted-submitting)) encode_callback_delay_ns=\(nanos(result.callbackBegan-submitting)) encode_conversion_ns=\(nanos(result.callbackFinished-result.callbackBegan)) encode_return_ns=\(nanos(finished-max(submitted,result.callbackFinished))) encode_rate_changed=\(rateChanged ? 1 : 0) requested_keyframe=\(force ? 1 : 0) encoded_keyframe=\(payload.first == 1 ? 1 : 0) bitrate=\(bitrate) width=\(width) height=\(height) bytes=\(payload.count-1) capture_ns=\(nanos(ticks)) codec=\(codec == kCMVideoCodecType_HEVC ? "hevc" : "h264")\n",stderr)
         }
         var stamp = nanos(ticks).bigEndian
         return withUnsafeBytes(of:&stamp) { Data($0) } + payload
