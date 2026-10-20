@@ -7,6 +7,18 @@ analysis = runpy.run_path(str(pathlib.Path(__file__).with_name('attribute-input.
 
 
 class AttributionTests(unittest.TestCase):
+    def test_source_callback_split_preserves_a_future_display_stamp(self):
+        stages = analysis['source_callback_stages'](100_000_000, 120_000_000, 110_000_000, 140_000_000, 20_000_000)
+        self.assertEqual(stages, {'draw_end_to_callback': 10, 'display_stamp_to_callback': -10,
+                                 'callback_to_encode_begin': 10, 'encode_duration': 20})
+        self.assertEqual(sum(stages[k] for k in ('draw_end_to_callback', 'callback_to_encode_begin', 'encode_duration')), 40)
+
+    def test_source_callback_split_refuses_missing_or_reversed_encoder_receipts(self):
+        split = analysis['source_callback_stages']
+        with self.assertRaises(ValueError): split(100, 120, 0, 140, 20)
+        with self.assertRaises(ValueError): split(100, 120, 110, 140, 40)
+        with self.assertRaises(ValueError): split(100, 120, 110, 140, -1)
+
     def test_arrival_spacing_matches_without_synchronized_wall_clocks(self):
         reference = [0, 37_000_000, 93_000_000, 144_000_000, 206_000_000]
         offset = 1_700_000_000_000_000_000
