@@ -24,19 +24,23 @@ def align_ordered(reference,candidates,stamp):
  return candidates[start:start+n],score
 
 def align_command_stream(selected, commands, candidates, native_stamp, candidate_stamp):
- """Align the complete command stream before selecting measured keyboard input.
+ """Align every command spanning the measured keyboard inputs.
 
  Real focus recovery can add mouse commands between sampled keys. Those keys
  are not a contiguous command cohort. Preserve every intervening receipt while
  applying the original spacing/ambiguity guard, then project by native identity.
+ Unrelated setup and later stress phases cannot alter this cohort's alignment.
  """
  identities=[int(row['receive_ns']) for row in commands]
  if any(left>=right for left,right in zip(identities,identities[1:])):
   raise ValueError('native command identities are not strictly ordered')
- aligned,score=align_ordered([int(row[native_stamp]) for row in commands],candidates,candidate_stamp)
- by_identity=dict(zip(identities,aligned))
- if any(int(row['receive_ns']) not in by_identity for row in selected):
+ if not selected or any(int(row['receive_ns']) not in identities for row in selected):
   raise ValueError('sample command is absent from the complete stream')
+ lower=min(int(row['receive_ns']) for row in selected)
+ upper=max(int(row['receive_ns']) for row in selected)
+ cohort=[row for row in commands if lower<=int(row['receive_ns'])<=upper]
+ aligned,score=align_ordered([int(row[native_stamp]) for row in cohort],candidates,candidate_stamp)
+ by_identity={int(row['receive_ns']):receipt for row,receipt in zip(cohort,aligned)}
  return [by_identity[int(row['receive_ns'])] for row in selected],score
 
 def source_clock_bounds(native_receives, native_finishes, source_receives, source_acks):

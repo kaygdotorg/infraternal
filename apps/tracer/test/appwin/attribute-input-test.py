@@ -57,6 +57,16 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual(rows, [candidates[i] for i in (0, 2, 4)])
         self.assertEqual(score, 0)
 
+    def test_unrelated_later_phases_do_not_change_the_measured_cohort(self):
+        commands = [{'receive_ns': str(value)} for value in
+                    (0, 100_000_000, 1_000_000_000, 1_200_000_000, 1_500_000_000, 3_000_000_000)]
+        candidates = [7_000_000_000, 8_100_000_000, 9_000_000_000,
+                      9_200_000_000, 9_500_000_000, 12_000_000_000]
+        rows, score = analysis['align_command_stream'](commands[2:5], commands, candidates,
+                                                       'receive_ns', lambda value: value)
+        self.assertEqual(rows, candidates[2:5])
+        self.assertEqual(score, 0)
+
     def test_complete_command_alignment_keeps_ambiguity_and_identity_guards(self):
         match = analysis['align_command_stream']
         commands = [{'receive_ns': str(i * 10_000_000)} for i in range(3)]
