@@ -48,12 +48,23 @@ async fn recovery_at_column_capacity_keeps_the_account_readable() {
         result.is_ok(),
         "a valid 65-window account must remain readable when automatic folding exceeds one view's 64-column bound"
     );
-    let events = result.unwrap();
+    // A safe fallback may keep revision 2 and return no tail events to an already-current device.
+    let events = store.events("a", None).await.unwrap();
     let doc = Document(events[0]["document"].clone());
     assert_eq!(
         doc.windows().count(),
         65,
         "repair cannot discard a unique target to fit"
+    );
+    let actual: std::collections::BTreeSet<_> = doc
+        .windows()
+        .map(|window| window["target"]["host"].as_str().unwrap().to_owned())
+        .collect();
+    let mut expected: std::collections::BTreeSet<_> = (0..64).map(|i| format!("host{i}")).collect();
+    expected.insert("unique".to_owned());
+    assert_eq!(
+        actual, expected,
+        "all distinct targets must survive any safe fallback"
     );
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM canvas_heads")
         .fetch_one(&pool)
