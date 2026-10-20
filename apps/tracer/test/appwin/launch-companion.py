@@ -52,6 +52,7 @@ def run(executable, runtime, errors, pidlog, arguments):
     writer_started = waiter_started = False
     cancelled = threading.Event()
     stopped, stop = os.pipe()
+    os.set_blocking(stopped, False)
     os.set_blocking(stop, False)
     def wake():
         try:
@@ -149,7 +150,15 @@ def run(executable, runtime, errors, pidlog, arguments):
                     while view and not cancelled.is_set():
                         ready = select.select([stopped], [1], [])
                         if stopped in ready[0]:
-                            break
+                            if cancelled.is_set():
+                                break
+                            # App completion wakes the reader too. Its buffered
+                            # reply still belongs to the caller; consume only
+                            # that wake, leaving any later cancellation visible.
+                            try:
+                                os.read(stopped, 1)
+                            except BlockingIOError:
+                                pass
                         if ready[1]:
                             try:
                                 view = view[os.write(1, view):]

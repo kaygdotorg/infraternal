@@ -10,7 +10,7 @@ import tempfile
 import time
 import unittest
 
-SOURCE = pathlib.Path(__file__).with_name('launch-companion.py')
+SOURCE = pathlib.Path(os.environ.get('APP_WINDOW_LAUNCHER_SOURCE', pathlib.Path(__file__).with_name('launch-companion.py')))
 spec = importlib.util.spec_from_file_location('companion_launch', SOURCE)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -40,7 +40,7 @@ class LaunchTests(unittest.TestCase):
         self.assertNotIn(str(self.native), command)
         self.assertEqual(command[4:10], ['--stdin', 'in', '--stdout', 'out', '--stderr', 'err'])
 
-    def bridge(self, cancel_at_input_start=False):
+    def bridge(self, cancel_at_input_start=False, finish_before_output=False):
         # Substitute only the platform launcher. Everything after it uses real
         # processes, FIFO backpressure, standard pipes and native EOF behavior.
         runner = '''import importlib.util,pathlib,subprocess,sys
@@ -53,6 +53,8 @@ m.subprocess.Popen=launch
 m.app_pids=lambda executable:{p.pid for p in children if p.poll() is None}
 m.process_identity=lambda pid:(pid,1792436400,123456)
 def command(executable,incoming,outgoing,errors,arguments):
+ if sys.argv[4]=='finish-before-output':
+  return [sys.executable,'-c',"import pathlib,sys; a=open(sys.argv[1],'rb',buffering=0); b=open(sys.argv[2],'wb',buffering=0); pathlib.Path(sys.argv[3]).write_text('ready'); data=a.read(); b.write(data); a.close(); b.close()",str(incoming),str(outgoing),sys.argv[3]+'/reader-ready']
  return [sys.executable,'-c',"import sys; a=open(sys.argv[1],'rb',buffering=0); b=open(sys.argv[2],'wb',buffering=0); data=a.read(); b.write(data); a.close(); b.close()",str(incoming),str(outgoing)]
 m.open_command=command
 if sys.argv[4]=='cancel-input-start':
@@ -67,10 +69,23 @@ if sys.argv[4]=='cancel-input-start':
    if self._target.__name__=='forward_input':os.kill(os.getpid(),signal.SIGTERM)
    return super().start()
  m.threading.Thread=Thread
+if sys.argv[4]=='finish-before-output':
+ real_select=m.select.select;real_pipe=m.os.pipe;finished=False;pipes=[]
+ def pipe():
+  pair=real_pipe();pipes.append(pair);return pair
+ m.os.pipe=pipe
+ def select(readers,writers,errors,timeout=None):
+  global finished
+  if writers==[1] and not finished:
+   finished=True
+   # Order the normal app-finished wake ahead of the pending stdout write.
+   m.os.write(next(w for r,w in pipes if r==readers[0]),b'x')
+  return real_select(readers,writers,errors,timeout)
+ m.select.select=select
 raise SystemExit(m.run(sys.argv[2],sys.argv[3],sys.argv[3]+'/errors',sys.argv[3]+'/pids',[]))
 '''
         return subprocess.Popen([sys.executable, '-c', runner, str(SOURCE), str(self.native), str(self.root),
-                                 'cancel-input-start' if cancel_at_input_start else 'normal'],
+                                 'cancel-input-start' if cancel_at_input_start else 'finish-before-output' if finish_before_output else 'normal'],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def test_stream_bytes_and_eof_reach_the_independent_app(self):
@@ -128,6 +143,22 @@ raise SystemExit(m.run(sys.argv[2],sys.argv[3],sys.argv[3]+'/errors',sys.argv[3]
         for row in (self.root / 'pids').read_text().splitlines():
             with self.assertRaises(ProcessLookupError):
                 os.kill(int(row.split()[1]), 0)
+
+    def test_normal_app_exit_does_not_discard_its_pending_reply(self):
+        process = self.bridge(finish_before_output=True)
+        data = b'{"screen_recording":true,"device_control":true}\n'
+        process.stdin.write(data)
+        process.stdin.flush()
+        deadline = time.monotonic() + 10
+        while not (self.root / 'reader-ready').exists():
+            if time.monotonic() > deadline:
+                self.fail('independent reader did not open its pipes')
+            time.sleep(.01)
+        process.stdin.close()
+        process.stdin = None
+        out, errors = process.communicate(timeout=10)
+        self.assertEqual(process.returncode, 0, errors.decode())
+        self.assertEqual(out, data)
 
 
 if __name__ == '__main__':
