@@ -10,7 +10,7 @@ function observe(cursor: boolean, background: number[]): Array<{ t: string }> {
   const handlers: Array<(event: { data: unknown }) => void> = [];
   class Context {
     x = 0; y = 0;
-    drawImage(_image: unknown, x: number, y: number): void { this.x = x; this.y = y; }
+    drawImage(_image: unknown, ...coordinates: number[]): void { this.x = coordinates[0] ?? 0; this.y = coordinates[1] ?? 0; }
     getImageData(): { data: Uint8ClampedArray } {
       // The fixture's click activates remote control at the picture centre.
       const covered = cursor && this.x === 320 && this.y === 200;
@@ -31,10 +31,36 @@ function observe(cursor: boolean, background: number[]): Array<{ t: string }> {
   return rows;
 }
 
+function observeAliasedFrame(): Array<{ t: string; frame?: { outcome?: string; sequence?: number; captureNs?: string } }> {
+  const rows: Array<{ t: string; frame?: { outcome?: string; sequence?: number; captureNs?: string } }> = [];
+  const handlers: Array<(event: { data: unknown }) => void> = [];
+  class Context {
+    drawImage(_image: unknown, ..._coordinates: number[]): void {}
+    getImageData(): { data: Uint8ClampedArray } { return { data: new Uint8ClampedArray([38, 89, 204, 255]) }; }
+  }
+  class Canvas { getContext(): Context { return new Context(); } }
+  const worker = {
+    postMessage: (row: { t: string; frame?: { outcome?: string; sequence?: number; captureNs?: string } }): void => { rows.push(row); },
+    addEventListener: (_name: string, handler: (event: { data: unknown }) => void): void => { handlers.push(handler); },
+  };
+  runInNewContext(script, { self: worker, OffscreenCanvas: Canvas,
+    OffscreenCanvasRenderingContext2D: Context, performance: { timeOrigin: 1000, now: () => 1 } });
+  // Fixture sequence 8 expects palette entry 0. The displayed pixels still
+  // come from sequence 0, whose palette entry aliases after one full cycle.
+  for (const handler of handlers) handler({ data: { t: "bench-arm", id: 8, crop: { colour: 0 } } });
+  new Context().drawImage({ displayWidth: 640, displayHeight: 400 });
+  worker.postMessage({ t: "trace", frame: { outcome: "painted", sequence: 17, captureNs: "9000" } });
+  return rows;
+}
+
 test("an unchanged wrong-colour picture never acknowledges the stimulus", () => {
   expect(observe(true, [38, 89, 204]).some(row => row.t === "bench-effect")).toBe(false);
 });
 
 test("a painted fixture colour is acknowledged with a centre cursor", () => {
   expect(observe(true, [38, 191, 89]).filter(row => row.t === "bench-effect")).toHaveLength(1);
+});
+
+test("a palette-alias frame from eight fixture changes ago cannot acknowledge new content", () => {
+  expect(observeAliasedFrame().some(row => row.t === "bench-effect")).toBe(false);
 });
