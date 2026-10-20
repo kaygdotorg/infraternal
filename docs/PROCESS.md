@@ -143,13 +143,28 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,387,824 bytes |
-  | `aarch64-unknown-linux-musl` | 19,559,624 bytes |
+  | `x86_64-unknown-linux-musl` | 21,387,184 bytes |
+  | `aarch64-unknown-linux-musl` | 19,559,112 bytes |
 
-  D307 integrated on release 7 measures 21,387,824 / 19,559,624 bytes (#24):
-  +2,560 / −10,632 bytes versus release 7. The release-6 D307 delta is not
-  additive on this combination. The release-8 brief permits at most +20,000
-  x86_64 bytes; these exact caps retain no growth allowance (D243, D307).
+  Release 8 integrates D307, synchronized output and input ordering (#206),
+  the stale-screen note (#248), and the display-only phone column minimum
+  (#243, D309). The stripped static measurements are:
+
+  | Stage | x86_64 bytes | aarch64 bytes |
+  | --- | ---: | ---: |
+  | Release 7 | 21,385,264 | 19,570,256 |
+  | D307 | 21,387,824 | 19,559,624 |
+  | Synchronized output, colour and input ordering | 21,387,184 | 19,559,112 |
+  | Stale-screen note | 21,387,184 | 19,559,112 |
+  | Phone minimum and final | 21,387,184 | 19,559,112 |
+
+  Final deltas are +1,920 / −11,144 bytes versus release 7. The release-6
+  D307 delta is not additive on this combination. The release-8 brief permits
+  at most +20,000 x86_64 bytes: the result is 18,080 bytes below that stop
+  line. Both exact caps retain no growth allowance (D243). The note and phone
+  changes leave both native files byte-identical. No migration is added;
+  production's 0001–0029 SQL files remain unchanged. Measurements and release
+  qualification receipts are recorded on #24, #206, #243 and #248.
 
   Release 7 measured 21,385,264 / 19,570,256 bytes after the reviewed Retry and Mesh merges,
   #246 source-path normalization, and the #236 migration collision correction:
