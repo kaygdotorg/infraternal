@@ -14,7 +14,7 @@ E=ROOT/'evidence'/args['label'];E.mkdir(parents=True,exist_ok=False)
 BIN=ROOT/'bin'
 RUN_TIMEOUT_SECONDS=900
 CLEANUP_RESERVE_SECONDS=30
-INPUT_SAMPLE_COUNT=40
+INPUT_SAMPLE_COUNT=80 if args.get('input_only') else 40
 STABILITY_SECONDS=args.get('stability_seconds',600)
 RECOVERY_ENABLED=args.get('recovery',False)
 if type(STABILITY_SECONDS) is not int or STABILITY_SECONDS not in (180,600):raise ValueError('invalid stability duration')
@@ -585,6 +585,13 @@ try:
    if not compositor:raise RuntimeError('input change absent from compositor copies')
    result={'kind':'input_sample','index':index,'effect':effect,'events':events,'compositor':compositor};results.append(result);emit(result)
   cdp.send('Page.stopScreencast');cdp.remove_listener('Page.screencastFrame',observe_compositor)
+ if args.get('input_only'):
+  # This cohort ends before the bounded 80-character display suffix is used
+  # by the independent demo. Keep its clocks and ordinary cleanup receipts.
+  source_round_trips('after')
+  emit({'kind':'clocks_after','native':native_clock(),'browser':browser_clock()})
+  battery();emit({'kind':'result','status':'input_measured','count':INPUT_SAMPLE_COUNT})
+  raise PhaseComplete()
  stage='shape'
  if not args.get('resources_only'):emit({'kind':'source_geometry_before','state':call('desktop.session.clock',{'session_id':page.evaluate('window.__appWindowBench.session')})})
  before=page.locator('.ui-window[data-kind="app"]').bounding_box();native_command('shape');page.wait_for_timeout(2500);after=page.locator('.ui-window[data-kind="app"]').bounding_box()

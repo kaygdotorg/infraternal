@@ -17,6 +17,37 @@ from unittest import mock
 SCRATCH = pathlib.Path.home() / '.cache/codex-scratch/review-app-windows-r3b/python-tests'
 
 
+class InputCohortTests(unittest.TestCase):
+    """The larger input cohort exits through cleanup before the independent demo."""
+
+    def test_sample_count_is_bounded_to_the_two_supported_cohorts(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        assignment = next(node for node in tree.body if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == 'INPUT_SAMPLE_COUNT' for target in node.targets))
+        for enabled, count in ((False, 40), (True, 80)):
+            namespace = {'args': {'input_only': enabled}}
+            exec(compile(ast.Module(body=[assignment], type_ignores=[]), str(source), 'exec'), namespace)
+            self.assertEqual(namespace['INPUT_SAMPLE_COUNT'], count)
+
+    def test_input_only_completion_preserves_clock_receipts_and_cleanup(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        branch = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                      and ast.unparse(node.test) == "args.get('input_only')")
+        class PhaseComplete(Exception):
+            """Reach the real driver's finally block without entering another phase."""
+        rows = []
+        namespace = {'args': {'input_only': True}, 'INPUT_SAMPLE_COUNT': 80,
+                     'source_round_trips': lambda phase: rows.append(phase),
+                     'native_clock': lambda: 'native', 'browser_clock': lambda: 'browser',
+                     'battery': lambda: None, 'emit': rows.append, 'PhaseComplete': PhaseComplete}
+        with self.assertRaises(PhaseComplete):
+            exec(compile(ast.Module(body=[branch], type_ignores=[]), str(source), 'exec'), namespace)
+        self.assertEqual(rows, ['after', {'kind': 'clocks_after', 'native': 'native', 'browser': 'browser'},
+                                {'kind': 'result', 'status': 'input_measured', 'count': 80}])
+
+
 class RecordingTypingTests(unittest.TestCase):
     """Earlier latency samples cannot conceal missing letters in the recording."""
 

@@ -21,6 +21,8 @@
  * APP_WINDOW_MAC_ONLY=1 omits guest access and records no guest-idle evidence.
  * APP_WINDOW_PROBE_TRACE=1 records bounded, content-free control-probe handling
  * for reconnect diagnosis; it never changes the production liveness deadline.
+ * APP_WINDOW_INPUT_ONLY=1 collects 80 quiet inputs and then cleans up, without
+ * the separate demo, resource or stability phases.
  */
 import { startRealServer, type DesktopStage, type ProbeStage } from '../../real/server';
 import { plainCloseReason } from '../../src/close-reasons';
@@ -36,6 +38,7 @@ const pipeline=process.env.APP_WINDOW_PIPELINE??'default';
 if(!['default','surface','owned'].includes(pipeline))throw Error('invalid capture path');
 const desynchronized=process.env.APP_WINDOW_DESYNCHRONIZED==='1';
 const resourcesOnly=process.env.APP_WINDOW_RESOURCES_ONLY==='1';
+const inputOnly=process.env.APP_WINDOW_INPUT_ONLY==='1';
 const pipelineDiagnostics=!resourcesOnly&&process.env.APP_WINDOW_PIPELINE_DIAGNOSTICS!=='0';
 const probeTrace=process.env.APP_WINDOW_PROBE_TRACE==='1';
 const codec=process.env.APP_WINDOW_CODEC??'h264';
@@ -57,6 +60,7 @@ const recovery=process.env.APP_WINDOW_RECOVERY==='1';
 const stabilitySeconds=Number(process.env.APP_WINDOW_STABILITY_SECONDS??600);
 if(![180,600].includes(stabilitySeconds))throw Error('invalid stability duration');
 const ownerPreview=process.env.APP_WINDOW_OWNER_PREVIEW==='1';
+if(inputOnly&&(resourcesOnly||demoOnly||soak||ownerPreview))throw Error('input-only mode cannot include another measurement phase');
 const ownerPreviewSeconds=Number(process.env.APP_WINDOW_OWNER_PREVIEW_SECONDS??900);
 if(!Number.isInteger(ownerPreviewSeconds)||ownerPreviewSeconds<1||ownerPreviewSeconds>900)throw Error('invalid owner preview duration');
 const port=Number(process.env.TRACER_TEST_PORT??'4346');
@@ -114,6 +118,7 @@ try{
  manifest.worktreeDiffSha256=new Bun.CryptoHasher('sha256').update(Bun.spawnSync(['git','diff','HEAD'],{cwd:worktree}).stdout).digest('hex');
  manifest.probeBundle=new Bun.CryptoHasher('sha256').update(await bundle.outputs[0]!.text()).digest('hex');
  manifest.probeTrace=probeTrace;
+ manifest.inputOnly=inputOnly;manifest.inputSampleCount=inputOnly?80:40;
  await writeFile(E+'/input-manifest.json',JSON.stringify(manifest,null,2));
  const staged=spawn('netbird',['ssh','--no-browser','kayg@10.69.69.101','cat > ~/infraternal-bench/app-windows-latency/venue-mac.py'],{stdio:['pipe','ignore','pipe']});
  staged.stdin!.end(await readFile(import.meta.dirname+'/measure-mac.py'));
@@ -125,7 +130,7 @@ try{
  identity.stdin!.end(await readFile(import.meta.dirname+'/process_identity.py'));identity.stderr!.resume();
  const [identityCode]=await once(identity,'exit');if(identityCode!==0)throw Error('process identity staging refused');
  mac=spawn('netbird',['ssh','--no-browser','kayg@10.69.69.101','~/infraternal-bench/app-windows-latency/tools/bin/python -u ~/infraternal-bench/app-windows-latency/venue-mac.py'],{stdio:['pipe','pipe','pipe']});
- mac.stdin!.write(JSON.stringify({controller_pid:process.pid,port,pipeline,label,codec,job,demo_only:demoOnly,soak,recovery,stability_seconds:stabilitySeconds,owner_preview:ownerPreview,owner_preview_seconds:ownerPreviewSeconds,require_idle:requireIdle,native,native_hash:nativeHash,resources_only:resourcesOnly,pipeline_diagnostics:pipelineDiagnostics,fixture_source:await readFile(worktree+'/crates/plugins/desktop/tests/fixtures/latency-window.swift','utf8'),diagnostic_only:process.env.APP_WINDOW_DIAGNOSTIC_ONLY==='1',probe:(hardwareHint?'window.__benchHardwareHint='+JSON.stringify(hardwareHint)+';\n':'')+(resourcesOnly?'window.__benchResourcesOnly=true;\n':'')+await bundle.outputs[0]!.text(),observer:(desynchronized?'self.__benchDesynchronized=true;\n':'')+await readFile(import.meta.dirname+'/worker-pixel-observer.js','utf8'),worker:await readFile(workerOverride??worktree+'/apps/tracer/dist/decode.worker.on-demand.js','utf8')})+'\n');
+ mac.stdin!.write(JSON.stringify({controller_pid:process.pid,port,pipeline,label,codec,job,input_only:inputOnly,demo_only:demoOnly,soak,recovery,stability_seconds:stabilitySeconds,owner_preview:ownerPreview,owner_preview_seconds:ownerPreviewSeconds,require_idle:requireIdle,native,native_hash:nativeHash,resources_only:resourcesOnly,pipeline_diagnostics:pipelineDiagnostics,fixture_source:await readFile(worktree+'/crates/plugins/desktop/tests/fixtures/latency-window.swift','utf8'),diagnostic_only:process.env.APP_WINDOW_DIAGNOSTIC_ONLY==='1',probe:(hardwareHint?'window.__benchHardwareHint='+JSON.stringify(hardwareHint)+';\n':'')+(resourcesOnly?'window.__benchResourcesOnly=true;\n':'')+await bundle.outputs[0]!.text(),observer:(desynchronized?'self.__benchDesynchronized=true;\n':'')+await readFile(import.meta.dirname+'/worker-pixel-observer.js','utf8'),worker:await readFile(workerOverride??worktree+'/apps/tracer/dist/decode.worker.on-demand.js','utf8')})+'\n');
  const prepare=async()=>{
   if(!macOnly){
    const vm=spawn('netbird',['ssh','--no-browser','calternal@10.69.69.21','top -l 3 -s 1 -n 0'],{stdio:['ignore','pipe','pipe']});

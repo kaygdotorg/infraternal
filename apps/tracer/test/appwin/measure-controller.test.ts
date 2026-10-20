@@ -24,3 +24,13 @@ test("Mac-only readiness never starts a guest command", async () => {
   expect(starts[0]).toMatchObject({ address: "10.69.69.125", port: 4746 });
   expect(replies).toEqual([{ ready: true, idle: [], origin: "https://localhost:4746", token: "fixture-only" }]);
 });
+
+test("the 80-input cohort cannot silently replace another requested phase", () => {
+  const configuration = source.slice(source.indexOf("const resourcesOnly="), source.indexOf("const port="));
+  const validate = new Function("process", new Bun.Transpiler({ loader: "ts" }).transformSync(configuration + "return inputOnly;"));
+  expect(validate({ env: {} })).toBe(false);
+  expect(validate({ env: { APP_WINDOW_INPUT_ONLY: "1" } })).toBe(true);
+  for (const phase of ["APP_WINDOW_RESOURCES_ONLY", "APP_WINDOW_DEMO_ONLY", "APP_WINDOW_SOAK", "APP_WINDOW_OWNER_PREVIEW"]) {
+    expect(() => validate({ env: { APP_WINDOW_INPUT_ONLY: "1", [phase]: "1" } })).toThrow("input-only mode cannot include another measurement phase");
+  }
+});
