@@ -601,16 +601,19 @@ try:
    else:
     surface=page.locator('.aw-surface');focus_input(surface);page.wait_for_timeout(2200)
     sequence=max(r['sequence'] for r in all_draws if r['kind']=='draw')+6
-    prior_inputs=sum(r.get('kind')=='input' for r in all_draws)
+    prior_inputs=sum(r.get('kind')=='input' for r in all_draws);draw_start=len(all_draws)
     drain();page.evaluate('([id,colour])=>window.__appWindowBench.arm(id,{colour})',[1000+iteration,sequence%8]);page.keyboard.type('typing',delay=90)
-    deadline=time.monotonic()+5;observed=False;effect=None;dom_inputs=[]
+    deadline=time.monotonic()+5;observed=False;effect=None;dom_inputs=[];receipts=[]
     while time.monotonic()<deadline:
-     receipt=drain();dom_inputs.extend(receipt['probe']['domInputs'])
+     receipt=drain();receipts.append(receipt);dom_inputs.extend(receipt['probe']['domInputs'])
      effect=effect or next((e for e in receipt['probe']['events'] if e.get('t')=='bench-effect' and e['id']==1000+iteration),None)
      draw=next((r for r in all_draws if r.get('kind')=='draw' and r['sequence']==sequence),None)
      received_inputs=sum(r.get('kind')=='input' for r in all_draws)-prior_inputs
      if effect and draw and received_inputs>=6 and int(effect['frame']['captureNs'])>=draw['end_ticks']*timebase:observed=True;break
      page.wait_for_timeout(10)
+    # Keep every stage even when the predicate fails; a counter alone cannot
+    # distinguish input loss, stale colour, timestamp ordering or delivery loss.
+    emit({'kind':'soak_typing_receipt','iteration':iteration,'expected_sequence':sequence,'timebase':timebase,'observed':observed,'effect':effect,'draw':draw,'received_inputs':received_inputs,'native':all_draws[draw_start:],'receipts':receipts})
     if observed:
      counts['typed']+=6
      delay=effect['begin']-dom_inputs[-1]['at'] if dom_inputs else None
