@@ -6,7 +6,6 @@ import tempfile
 import unittest
 
 analysis = runpy.run_path(str(pathlib.Path(__file__).with_name('attribute-input.py')))
-SCRATCH = pathlib.Path.home() / '.cache/codex-scratch/review-app-windows-r4/attribution-tests'
 
 
 class AttributionTests(unittest.TestCase):
@@ -68,8 +67,7 @@ class ReportCausalityTests(unittest.TestCase):
     """The report must reject a local phase whose end precedes its start."""
 
     def test_reversed_companion_dispatch_and_injection_stamps_are_rejected(self):
-        SCRATCH.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+        with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             controller_rows = [{
                 'kind': 'clocks', 'timebase': {'numer': 1, 'denom': 1},
@@ -78,10 +76,14 @@ class ReportCausalityTests(unittest.TestCase):
             source_draws = []
             helper_rows = []
             server_rows = []
-            for index in range(3):
+            for index in range(4):
                 base = 10_000_000 * (index + 1)
                 capture = base + 80_000
                 sequence = index + 1
+                dispatch = base + (100_000 if index == 0 else 20_000)
+                source_receive = 0 if index == 0 else base - 1_000_000
+                source_ack = 0 if index == 0 else base + 300_000
+                server_receive = 1_000_000 if index == 0 else base
                 controller_rows.append({
                     'kind': 'input_sample', 'index': index,
                     'events': [{'probe': {
@@ -97,15 +99,15 @@ class ReportCausalityTests(unittest.TestCase):
                     {'kind': 'draw', 'sequence': sequence, 'begin_ticks': base + 61_000, 'end_ticks': base + 70_000},
                 ])
                 helper_rows.extend([
-                    f'METRIC native_input receive_ns={base} dispatch_ns={base + 100_000} finished_ns={base + 200_000} accepted=true',
+                    f'METRIC native_input receive_ns={base} dispatch_ns={dispatch} finished_ns={base + 200_000} accepted=true',
                     f'METRIC native_input_post at_ns={base + 50_000} type=10',
                     f'METRIC encode_ns=10000 encode_finished_ns={capture + 10_000} bytes=10 capture_ns={capture} codec=h264',
                     f'METRIC app_window_stage pid=40 stage=source_send_end at_ns={base + 110_000} capture_ns={capture} sequence={sequence} bytes=10',
                 ])
                 server_rows.extend([
-                    f'METRIC app_window_control pid=40 stage=source_control_receive at_ns={base - 1_000_000} kind=4',
-                    f'METRIC app_window_control pid=40 stage=source_control_ack at_ns={base + 300_000} kind=67',
-                    f'METRIC app_window_stage pid=70 stage=server_input_receive at_ns={base} kind=4 capture_ns=0 sequence=0 bytes=0',
+                    f'METRIC app_window_control pid=40 stage=source_control_receive at_ns={source_receive} kind=4',
+                    f'METRIC app_window_control pid=40 stage=source_control_ack at_ns={source_ack} kind=67',
+                    f'METRIC app_window_stage pid=70 stage=server_input_receive at_ns={server_receive} kind=4 capture_ns=0 sequence=0 bytes=0',
                     f'METRIC app_window_stage pid=70 stage=server_input_write_begin at_ns={base + 10_000} kind=4 capture_ns=0 sequence=0 bytes=0',
                     f'METRIC app_window_stage pid=70 stage=server_input_write_end at_ns={base + 20_000} kind=4 capture_ns=0 sequence=0 bytes=0',
                     f'METRIC app_window_stage pid=70 stage=relay_receive at_ns={base + 120_000} capture_ns={capture} sequence={sequence} bytes=10',
@@ -119,7 +121,11 @@ class ReportCausalityTests(unittest.TestCase):
             controller.write_text('\n'.join(json.dumps(row) for row in controller_rows) + '\n')
 
             report = analysis['analyze'](root, controller)
-            self.assertGreaterEqual(report['metrics']['companion_dispatch_to_inject']['min'], 0)
+            self.assertEqual(report['valid_sample_count'], 3)
+            self.assertEqual(report['invalid_sample_count'], 1)
+            self.assertEqual(report['invalid_samples'], [{'index': 0, 'reason': 'injection_before_dispatch'}])
+            for event in report['events']:
+                self.assertTrue(all(duration >= 0 for duration in event['local_ms'].values()))
 
 
 if __name__ == '__main__':

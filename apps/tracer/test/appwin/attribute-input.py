@@ -6,6 +6,9 @@ import re
 import statistics
 import sys
 
+class InvalidAttributionSample(ValueError):
+ """One same-clock input sample contradicts companion execution order."""
+
 def align_ordered(reference,candidates,stamp):
  if len(reference)<3:raise ValueError('too few ordered samples')
  n=len(reference);rank=[]
@@ -54,7 +57,11 @@ def command_for_post(commands, post_ns):
  Receive stamps may overlap while commands await the main queue. The actual
  post must lie in exactly one dispatch/completion interval on that same clock.
  """
- matches=[row for row in commands if int(row['dispatch_ns'])<=post_ns<=int(row['finished_ns'])]
+ received=lambda row:int(row.get('receive_ns',row['dispatch_ns']))
+ matches=[row for row in commands if received(row)<=int(row['dispatch_ns'])<=post_ns<=int(row['finished_ns'])]
+ if not matches:
+  reversed_matches=[row for row in commands if received(row)<=post_ns<int(row['dispatch_ns'])<=int(row['finished_ns'])]
+  if len(reversed_matches)==1:raise InvalidAttributionSample('injection precedes companion dispatch')
  if len(matches)!=1:raise ValueError(f'companion dispatch: expected one receipt, found {len(matches)}')
  return matches[0]
 
@@ -87,14 +94,17 @@ def analyze(root, controller):
   if stamp(ended)-stamp(receive)>100e6:raise ValueError('ambiguous server forward')
   return began,ended
  
- samples=[]
+ samples=[];invalid_samples=[]
  for sample in (r for r in rows if r.get('kind')=='input_sample'):
   probe=[v['probe'] for v in sample['events']]
   key=exactly([v for r in probe for v in r['domInputs']],'keydown')
   sent=exactly([v for r in probe for v in r['inputs'] if v['kind'] in ('text','key')],'browser send')
   effect=sample['effect'];lo=key['eventAt'];hi=effect['begin']
   post=exactly(between([r for r in metrics if r['metric']=='native_input_post' and r.get('type')=='10'],lambda r:native_epoch(r['at_ns']),lo,hi),'worker inject')
-  command=command_for_post(between([r for r in metrics if r['metric']=='native_input'],lambda r:native_epoch(r['receive_ns']),lo,hi),int(post['at_ns']))
+  try:command=command_for_post(between([r for r in metrics if r['metric']=='native_input'],lambda r:native_epoch(r['receive_ns']),lo,hi),int(post['at_ns']))
+  except InvalidAttributionSample:
+   invalid_samples.append({'index':sample.get('index'),'reason':'injection_before_dispatch'})
+   continue
   if command.get('accepted')!='true':raise ValueError('native input was refused')
   native_event=exactly(between([r for r in json.loads((root/'source-draws.json').read_text()) if r.get('kind')=='input'],lambda r:native_epoch(r['ticks']*timebase),lo,hi),'fixture input')
   draws=[r for r in json.loads((root/'source-draws.json').read_text()) if r.get('kind')=='draw' and r['sequence']==native_event['sequence']]
@@ -174,7 +184,7 @@ def analyze(root, controller):
  # Callback diagnostics are additive. Never reconstruct an interleaved record
  # or publish quantiles from a smaller cohort; independent input stamps remain
  # complete even when these optional callback details are unavailable.
- report={'concurrent_network_rtt_ms':network_rtts,'source_clock_half_width_ms':(source_upper-source_lower)/2e6,'clock_uncertainty_ms':((clock['native']['upper']-clock['native']['lower'])+(clock['browser']['upper']-clock['browser']['lower']))/2e6,'server_cohort_spacing_rms_ms':score,'metrics':{k:stats(v) for k,v in summary.items()},'source_details_ms':{} if source_details_unavailable else {k:stats(v) for k,v in source_details.items()},'source_details_unavailable_events':source_details_unavailable,'events':events,'note':'Transport residuals include kernel/library queues outside the stamped send/receive boundaries; they are not pure wire time. Cross-host clocks are never subtracted to infer one-way latency. Source details subdivide existing phases; the display stamp may follow its callback and its signed offset is preserved.'}
+ report={'concurrent_network_rtt_ms':network_rtts,'source_clock_half_width_ms':(source_upper-source_lower)/2e6,'clock_uncertainty_ms':((clock['native']['upper']-clock['native']['lower'])+(clock['browser']['upper']-clock['browser']['lower']))/2e6,'server_cohort_spacing_rms_ms':score,'valid_sample_count':len(samples),'invalid_sample_count':len(invalid_samples),'invalid_samples':invalid_samples,'metrics':{k:stats(v) for k,v in summary.items()},'source_details_ms':{} if source_details_unavailable else {k:stats(v) for k,v in source_details.items()},'source_details_unavailable_events':source_details_unavailable,'events':events,'note':'Transport residuals include kernel/library queues outside the stamped send/receive boundaries; they are not pure wire time. Cross-host clocks are never subtracted to infer one-way latency. Source details subdivide existing phases; the display stamp may follow its callback and its signed offset is preserved.'}
  return report
 
 if __name__=='__main__':
