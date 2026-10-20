@@ -38,6 +38,22 @@ def soak_input_matches(rows, expected):
  inputs=[row for row in rows if row.get('kind')=='input']
  return len(inputs)==len(expected) and all(isinstance(row.get('characters'),str) and len(row['characters'])==1 for row in inputs) and ''.join(row['characters'] for row in inputs)==expected
 
+def expected_capture_retirement(retired, captures, previous_controls, current_controls, previous_dimensions, current_dimensions, resize_ack):
+ """A native resize replaces capture, while the same control owner must survive."""
+ return bool(retired and retired<=captures and previous_controls and previous_controls==current_controls and previous_dimensions and current_dimensions and previous_dimensions!=current_dimensions and resize_ack)
+
+def read_resize_acks(path, cursor):
+ """Read only newly completed diagnostic lines; partial or begin records prove no resize."""
+ with path.open('rb') as stream:
+  stream.seek(cursor);data=stream.read()
+ complete=data.rfind(b'\n')+1
+ rows=[]
+ for line in data[:complete].splitlines():
+  if b' stage=helper_native_end ' not in line:continue
+  fields=dict(part.split('=',1) for part in line.decode('ascii',errors='replace').split() if '=' in part)
+  if fields.get('kind')=='3':rows.append(fields)
+ return cursor+complete,rows
+
 class PhaseComplete(Exception):
  """Finish a short phase through cleanup, whose result still controls exit status."""
  pass
@@ -590,10 +606,13 @@ try:
   def live_helper_pids():
    return {pid for pid,birth in helper_births.items() if process_identity(pid)==birth}
   previous_helpers=live_helper_pids();previous_expected_retirement=False
+  initial_frames=drain()['frames'];initial_painted=[f for f in initial_frames if f.get('outcome')=='painted' and f.get('width') and f.get('height')]
+  last_dimensions=(initial_painted[-1]['width'],initial_painted[-1]['height']) if initial_painted else None
+  resize_cursor=(E/'helper-metrics.log').stat().st_size;recent_resize_acks=[]
   soak_sockets_before=page.evaluate('window.__appWindowBench.sockets');soak_native_start=len(all_draws)
   soak_windows_before=page.locator('.ui-window[data-kind="app"]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.windowId)')
   while time.monotonic()-soak_start<STABILITY_SECONDS:
-   consent_guard();battery()
+   consent_guard();battery();receipts=[]
    if source.poll() is not None or window.poll() is not None or not browser.is_connected():
     counts['crashes']+=1;break
    if RECOVERY_ENABLED and iteration==RECONNECT_ITERATION:
@@ -647,15 +666,22 @@ try:
      if delay is not None and delay>=1000:counts['slow_worker_updates']+=1
      emit({'kind':'soak_typing','iteration':iteration,'characters':len(burst),'last_key_to_worker_ms':delay})
     else:counts['stuck_frames']+=1
+   step_receipt=drain()
+   painted=[frame for receipt in receipts+[step_receipt] for frame in receipt['frames'] if frame.get('outcome')=='painted' and frame.get('width') and frame.get('height')]
+   newest=max(painted,key=lambda frame:frame['receivedAt']) if painted else None
+   current_dimensions=(newest['width'],newest['height']) if newest else last_dimensions
+   resize_cursor,resize_acks=read_resize_acks(E/'helper-metrics.log',resize_cursor)
+   recent_resize_acks=[(step,ack) for step,ack in recent_resize_acks if iteration-step<=1]+[(iteration,ack) for ack in resize_acks]
    current_helpers=live_helper_pids();retired=previous_helpers-current_helpers
    # Resize notifications retire capture asynchronously; keep that attribution
    # through the next observation, while unexplained exits still fail the soak.
    initiated_retirement=RECOVERY_ENABLED and (iteration in (RECONNECT_ITERATION,REOPEN_ITERATION) or iteration%6==2)
-   expected_retirement=initiated_retirement or previous_expected_retirement
+   native_resize=expected_capture_retirement(retired,capture_helpers,previous_helpers-capture_helpers,current_helpers-capture_helpers,last_dimensions,current_dimensions,bool(recent_resize_acks))
+   expected_retirement=initiated_retirement or previous_expected_retirement or native_resize
    if retired:
-    emit({'kind':'soak_helper_retirement','iteration':iteration,'expected':expected_retirement,'pids':sorted(retired)})
+    emit({'kind':'soak_helper_retirement','iteration':iteration,'expected':expected_retirement,'pids':sorted(retired),'native_resize':native_resize,'resize_acks':[ack for _,ack in recent_resize_acks],'previous_dimensions':last_dimensions,'current_dimensions':current_dimensions,'previous_controls':sorted(previous_helpers-capture_helpers),'current_controls':sorted(current_helpers-capture_helpers)})
     if not expected_retirement:counts['unexpected_helper_exits']+=len(retired)
-   previous_helpers=current_helpers;previous_expected_retirement=initiated_retirement
+   previous_helpers=current_helpers;previous_expected_retirement=initiated_retirement;last_dimensions=current_dimensions
    emit({'kind':'soak_step','iteration':iteration,'elapsed_seconds':time.monotonic()-soak_start,'counts':counts.copy()})
    iteration+=1
    page.wait_for_timeout(max(0,int((soak_start+iteration*10-time.monotonic())*1000)))

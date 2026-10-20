@@ -335,6 +335,48 @@ class ContinuousSoakTests(unittest.TestCase):
         self.assertFalse(matches([{'kind': 'input'}] * 4, 'abcd'))
 
 
+class CaptureReconfigurationTests(unittest.TestCase):
+    """A capture replacement requires causal resize evidence and the same live control owner."""
+
+    def functions(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        names = {'expected_capture_retirement', 'read_resize_acks'}
+        nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+        namespace = {}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), namespace)
+        return namespace
+
+    def test_acknowledged_new_geometry_preserves_the_live_control_owner(self):
+        classify = self.functions()['expected_capture_retirement']
+        self.assertTrue(classify({101}, {101}, {99}, {99}, (1512, 1020), (1512, 1208), True))
+
+    def test_a_crashed_control_owner_or_unexplained_exit_still_fails(self):
+        classify = self.functions()['expected_capture_retirement']
+        self.assertFalse(classify({99, 101}, {101}, {99}, set(), (1512, 1020), (1512, 1208), True))
+        self.assertFalse(classify({101}, {101}, {99}, {99}, (1512, 1020), (1512, 1208), False))
+        self.assertFalse(classify({101}, {101}, {99}, {99}, (1512, 1020), (1512, 1020), True))
+        self.assertFalse(classify({101}, {101}, set(), set(), (1512, 1020), (1512, 1208), True))
+        self.assertFalse(classify({101}, {101}, {99}, {100}, (1512, 1020), (1512, 1208), True))
+        self.assertFalse(classify({102}, {101}, {99}, {99}, (1512, 1020), (1512, 1208), True))
+
+    def test_partial_and_other_control_receipts_never_authorize_retirement(self):
+        read = self.functions()['read_resize_acks']
+        import tempfile
+        SCRATCH.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            path = pathlib.Path(directory) / 'metrics.log'
+            before = 'METRIC app_window_control pid=1 stage=helper_native_begin at_ns=2 kind=3\n'
+            after = 'METRIC app_window_control pid=1 stage=helper_native_end at_ns=3 kind=3'
+            path.write_text(before + after)
+            cursor, rows = read(path, 0)
+            self.assertEqual(rows, [])
+            with path.open('a') as stream: stream.write('\n')
+            cursor, rows = read(path, cursor)
+            self.assertEqual(rows, [{'pid': '1', 'stage': 'helper_native_end', 'at_ns': '3', 'kind': '3'}])
+            self.assertEqual(read(path, cursor), (cursor, []))
+
+
 class LaunchMonitorTests(unittest.TestCase):
     """Only signed-app launches use birth identities; short-lived rows are skipped."""
 
