@@ -179,7 +179,7 @@ class ProcessIdentityTests(unittest.TestCase):
     """The cleanup fence uses the kernel PID and microsecond start fields."""
 
     def test_identity_reads_subsecond_start_time_and_checks_the_pid(self):
-        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        source = pathlib.Path(__file__).with_name('process_identity.py')
         tree = ast.parse(source.read_text())
         nodes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'ProcBsdInfo']
         nodes.extend(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'process_identity')
@@ -270,13 +270,15 @@ class RunDeadlineTests(unittest.TestCase):
 
 
 class LaunchMonitorTests(unittest.TestCase):
-    """Only launches after the watcher starts need process birth identities."""
+    """Only signed-app launches use birth identities; short-lived rows are skipped."""
 
-    def test_monitor_skips_already_logged_permission_preflight_helper(self):
+    def test_monitor_skips_a_permission_preflight_that_exits_before_the_first_poll(self):
         source = pathlib.Path(__file__).with_name('measure-mac.py')
         tree = ast.parse(source.read_text())
         function = next(node for node in ast.walk(tree)
                         if isinstance(node, ast.FunctionDef) and node.name == 'watch_launches')
+        identity_parser = next(node for node in ast.walk(tree)
+                               if isinstance(node, ast.FunctionDef) and node.name == 'logged_capture_identity')
 
         class StopMonitor:
             def __init__(self):
@@ -288,24 +290,62 @@ class LaunchMonitorTests(unittest.TestCase):
 
         class PidLog:
             def read_text(self):
-                return 'helper 101\n'
+                return 'preflight 101 10 1\n'
 
         errors, stopped, checks = [], [], []
         namespace = {
             'stop_monitor': StopMonitor(),
             'pidlog': PidLog(),
             'process_identity': lambda _pid: None,
+            'logged_capture_identity': None,
             'capture_helpers': set(),
             'helper_births': {},
             'consent_errors': errors,
             'stop_capture': lambda: stopped.append(True),
             'consent_check': lambda: checks.append(True),
         }
+        parser_namespace = {}
+        exec(compile(ast.Module(body=[identity_parser], type_ignores=[]), str(source), 'exec'), parser_namespace)
+        namespace['logged_capture_identity'] = parser_namespace['logged_capture_identity']
         exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
         namespace['watch_launches']()
         self.assertEqual(errors, [])
         self.assertEqual(stopped, [])
         self.assertEqual(checks, [True])
+
+    def test_monitor_records_only_a_matching_signed_app_identity(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        function = next(node for node in ast.walk(tree)
+                        if isinstance(node, ast.FunctionDef) and node.name == 'watch_launches')
+        parser = next(node for node in ast.walk(tree)
+                      if isinstance(node, ast.FunctionDef) and node.name == 'logged_capture_identity')
+
+        class StopMonitor:
+            def __init__(self): self.waits = 0
+            def wait(self, _timeout):
+                self.waits += 1
+                return self.waits > 1
+
+        class PidLog:
+            def read_text(self): return 'capture-bridge 88\ncapture-launcher 89\ncapture 101 10 1\n'
+
+        errors, stopped, checks = [], [], []
+        namespace = {
+            'stop_monitor': StopMonitor(), 'pidlog': PidLog(),
+            'process_identity': lambda pid: (pid, 10, 1),
+            'capture_helpers': set(), 'helper_births': {}, 'consent_errors': errors,
+            'stop_capture': lambda: stopped.append(True), 'consent_check': lambda: checks.append(True),
+        }
+        parser_namespace = {}
+        exec(compile(ast.Module(body=[parser], type_ignores=[]), str(source), 'exec'), parser_namespace)
+        namespace['logged_capture_identity'] = parser_namespace['logged_capture_identity']
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        namespace['watch_launches']()
+        self.assertEqual(errors, [])
+        self.assertEqual(stopped, [])
+        self.assertEqual(namespace['helper_births'], {101: (101, 10, 1)})
+        self.assertEqual(namespace['capture_helpers'], {101})
 
 
 class ConsentTests(unittest.TestCase):

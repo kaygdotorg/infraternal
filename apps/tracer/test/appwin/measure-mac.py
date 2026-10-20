@@ -1,8 +1,10 @@
 """Role: measure the real native window through the production canvas on the named Mac; keep authority in memory and prove owned-PID cleanup."""
-import base64,ctypes,io,json,os,pathlib,queue,signal,subprocess,sys,threading,time,traceback,uuid
+import base64,io,json,os,pathlib,queue,signal,subprocess,sys,threading,time,traceback,uuid
 from playwright.sync_api import sync_playwright
 from PIL import Image
 ROOT=pathlib.Path.home()/'infraternal-bench/app-windows-latency'
+sys.path.insert(0,str(ROOT))
+from process_identity import process_identity
 args=json.loads(sys.stdin.readline())
 job=args.get('job','app-windows-latency')
 os.environ['TRACER_TEST_PORT']=str(args.get('port',4346))
@@ -17,32 +19,6 @@ STABILITY_SECONDS=180
 RECONNECT_ITERATION=3
 REOPEN_ITERATION=6
 
-class ProcBsdInfo(ctypes.Structure):
- """Kernel process fields used to identify one PID incarnation."""
- # Match the public proc_bsdinfo layout, including its fixed MAXCOMLEN arrays.
- _fields_=[
-  ('flags',ctypes.c_uint32),('status',ctypes.c_uint32),('xstatus',ctypes.c_uint32),
-  ('pid',ctypes.c_uint32),('ppid',ctypes.c_uint32),('uid',ctypes.c_uint32),('gid',ctypes.c_uint32),
-  ('ruid',ctypes.c_uint32),('rgid',ctypes.c_uint32),('svuid',ctypes.c_uint32),('svgid',ctypes.c_uint32),('reserved',ctypes.c_uint32),
-  ('command',ctypes.c_char*16),('name',ctypes.c_char*32),
-  ('open_files',ctypes.c_uint32),('process_group',ctypes.c_uint32),('job_count',ctypes.c_uint32),
-  ('tty_device',ctypes.c_uint32),('tty_process_group',ctypes.c_uint32),('nice',ctypes.c_int32),
-  ('start_seconds',ctypes.c_uint64),('start_microseconds',ctypes.c_uint64),
- ]
-
-def process_identity(pid):
- """Return a PID and kernel microsecond start time, or no identity if unavailable."""
- if sys.platform!='darwin':return None
- try:
-  query=ctypes.CDLL('/usr/lib/libproc.dylib').proc_pidinfo
-  query.argtypes=[ctypes.c_int,ctypes.c_int,ctypes.c_uint64,ctypes.c_void_p,ctypes.c_int]
-  query.restype=ctypes.c_int
-  info=ProcBsdInfo();size=ctypes.sizeof(info)
-  read=query(pid,3,0,ctypes.byref(info),size)
- except (AttributeError,OSError):return None
- if read!=size or info.pid!=pid:return None
- return (int(info.pid),int(info.start_seconds),int(info.start_microseconds))
-
 class PhaseComplete(Exception):
  """Finish a short phase through cleanup, whose result still controls exit status."""
  pass
@@ -54,6 +30,15 @@ def command(argv,**kw):return subprocess.run(argv,capture_output=True,text=True,
 
 def launch(argv,**kw):
  p=subprocess.Popen(argv,**kw);owned.add(p.pid);children.append(p);return p
+
+def logged_capture_identity(row):
+ """Parse only signed-app rows that carry the launch-time kernel identity."""
+ parts=row.split()
+ if len(parts)!=4 or parts[0] not in ('native','capture'):return None
+ try:pid,seconds,microseconds=map(int,parts[1:])
+ except ValueError:raise RuntimeError('invalid signed-app process identity row')
+ if pid<=0 or seconds<=0 or not 0<=microseconds<1_000_000:raise RuntimeError('invalid signed-app process identity row')
+ return parts[0],pid,(pid,seconds,microseconds)
 
 def descendants(seed):
  rows=[r.strip().split(None,2) for r in command(['ps','-axo','pid=,ppid=,comm=']).splitlines()]
@@ -257,21 +242,22 @@ try:
     except ProcessLookupError:pass
  stop_monitor=threading.Event()
  def watch_launches():
-  # Permission preflight has already exited; its historical PID row is not a
-  # live capture launch and cannot supply a safe birth identity.
-  seen=set(pidlog.read_text().splitlines())
+  # PID-only bridge/launcher rows and permission preflight rows are short-lived
+  # bookkeeping. Only the signed app's launch-time identity can authorize cleanup.
+  seen=set()
   while not stop_monitor.wait(.5):
    try:
     rows=pidlog.read_text().splitlines()
     if any(row not in seen for row in rows):
      for row in rows:
       if row in seen:continue
-      pid=int(row.split()[1])
-      if row.split()[0].startswith('capture'):capture_helpers.add(pid)
-      birth=process_identity(pid)
-      if birth is None:raise RuntimeError('cannot identify a launched helper process')
+      seen.add(row)
+      identity=logged_capture_identity(row)
+      if identity is None:continue
+      role,pid,birth=identity
+      if process_identity(pid)!=birth:raise RuntimeError('signed app PID changed before its launch identity was observed')
       helper_births[pid]=birth
-     seen.update(rows)
+      if role=='capture':capture_helpers.add(pid)
     consent_check()
    except Exception as e:
     consent_errors.append(type(e).__name__)
@@ -567,10 +553,7 @@ try:
   emit({'kind':'stability_plan','seconds':STABILITY_SECONDS,'reconnect_iteration':RECONNECT_ITERATION,'reopen_iteration':REOPEN_ITERATION})
   soak_start=time.monotonic();counts={'crashes':0,'stuck_frames':0,'requested_drops':0,'reconnects':0,'reopens':0,'typed':0,'resizes':0,'idle_checks':0,'unexpected_helper_exits':0,'slow_worker_updates':0};iteration=0
   def live_helper_pids():
-   ids={int(line.split()[1]) for line in pidlog.read_text().splitlines()}
-   if not ids:return set()
-   result=subprocess.run(['ps','-p',','.join(map(str,ids)),'-o','pid='],capture_output=True,text=True)
-   return {int(value) for value in result.stdout.split()}
+   return {pid for pid,birth in helper_births.items() if process_identity(pid)==birth}
   previous_helpers=live_helper_pids();previous_expected_retirement=False
   soak_sockets_before=page.evaluate('window.__appWindowBench.sockets')
   while time.monotonic()-soak_start<STABILITY_SECONDS:

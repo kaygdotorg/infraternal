@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import time
+from process_identity import process_identity
 
 
 def app_bundle(executable):
@@ -40,6 +41,7 @@ def run(executable, runtime, errors, pidlog, arguments):
     executable = pathlib.Path(executable).resolve(strict=True)
     capture = '--surface-capture' in arguments
     prefix = 'capture-' if capture else ''
+    app_role = 'preflight' if '--check-permissions' in arguments else 'capture' if capture else 'native'
     with open(pidlog, 'a') as log:
         log.write(prefix + 'bridge ' + str(os.getpid()) + '\n')
     before = app_pids(executable)
@@ -88,7 +90,10 @@ def run(executable, runtime, errors, pidlog, arguments):
                 time.sleep(.01)
             with open(pidlog, 'a') as log:
                 for pid in owned:
-                    log.write(('capture' if capture else 'native') + ' ' + str(pid) + '\n')
+                    birth = process_identity(pid)
+                    if birth is None:
+                        raise ValueError('app process identity unavailable')
+                    log.write(f'{app_role} {pid} {birth[1]} {birth[2]}\n')
             def forward_input():
                 try:
                     while not cancelled.is_set():

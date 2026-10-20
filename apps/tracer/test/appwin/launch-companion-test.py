@@ -43,12 +43,14 @@ class LaunchTests(unittest.TestCase):
         # Substitute only the platform launcher. Everything after it uses real
         # processes, FIFO backpressure, standard pipes and native EOF behavior.
         runner = '''import importlib.util,pathlib,subprocess,sys
+sys.path.insert(0,str(pathlib.Path(sys.argv[1]).parent))
 spec=importlib.util.spec_from_file_location('launch',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 children=[];real=m.subprocess.Popen
 def launch(*a,**kw):
  p=real(*a,**kw);children.append(p);return p
 m.subprocess.Popen=launch
 m.app_pids=lambda executable:{p.pid for p in children if p.poll() is None}
+m.process_identity=lambda pid:(pid,1792436400,123456)
 def command(executable,incoming,outgoing,errors,arguments):
  return [sys.executable,'-c',"import sys; a=open(sys.argv[1],'rb',buffering=0); b=open(sys.argv[2],'wb',buffering=0); data=a.read(); b.write(data); a.close(); b.close()",str(incoming),str(outgoing)]
 m.open_command=command
@@ -64,7 +66,11 @@ raise SystemExit(m.run(sys.argv[2],sys.argv[3],sys.argv[3]+'/errors',sys.argv[3]
         self.assertEqual(process.returncode, 0, errors.decode())
         self.assertEqual(out, data)
         self.assertEqual(list(self.root.glob('launch-*')), [])
-        for row in (self.root / 'pids').read_text().splitlines():
+        rows = (self.root / 'pids').read_text().splitlines()
+        native = next(row for row in rows if row.startswith('native '))
+        self.assertEqual(len(native.split()), 4)
+        self.assertEqual(native.split()[2:], ['1792436400', '123456'])
+        for row in rows:
             with self.assertRaises(ProcessLookupError):
                 os.kill(int(row.split()[1]), 0)
 
