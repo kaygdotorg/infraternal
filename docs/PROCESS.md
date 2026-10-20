@@ -143,8 +143,15 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,387,184 bytes |
-  | `aarch64-unknown-linux-musl` | 19,559,112 bytes |
+  | `x86_64-unknown-linux-musl` | 21,387,120 bytes |
+  | `aarch64-unknown-linux-musl` | 19,558,856 bytes |
+
+  The reply-reservation production fix (#24, D307) measures 21,387,120 /
+  19,558,856 bytes with the same pinned static recipe: -64 / -256 bytes
+  against release 8. Replies expire while older typing waits or the queue
+  is full; expected expiry and opaque writer refusals avoid error allocation.
+  Both exact caps ratchet down to these measurements (D243). No protocol,
+  dependency or build-profile change is added.
 
   Release 8 integrates D307, synchronized output and input ordering (#206),
   the stale-screen note (#248), and the display-only phone column minimum
