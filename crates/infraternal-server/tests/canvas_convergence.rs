@@ -620,3 +620,48 @@ async fn imports_use_account_wide_target_identity_and_keep_spanning_column_geome
     assert_eq!(columns[3]["windows"][0]["height"], 0.6);
     assert_eq!(columns[3]["windows"][0]["target"]["hostId"], json!(host_b));
 }
+
+#[tokio::test]
+async fn import_prefers_matching_names_before_the_first_view_of_its_kind() {
+    for (name, destination) in [("Console", 1), ("Recovered: Console", 1), ("Unmatched", 0)] {
+        let (store, _) = fixture().await;
+        let mut canonical = document(1);
+        let mut other = canonical.0["views"][0].clone();
+        other["id"] = json!("other");
+        other["name"] = json!("Other");
+        other["layout"]["columns"][0]["id"] = json!("other-column");
+        other["layout"]["columns"][0]["windows"][0]["id"] = json!("other-window");
+        other["layout"]["columns"][0]["windows"][0]["target"]["section"] = json!("toolbar");
+        canonical.0["views"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, other);
+        assert_eq!(init(&store, canonical, "first").await, 1);
+        let mut incoming = document(1);
+        incoming.0["views"][0]["name"] = json!(name);
+        incoming.0["views"][0]["layout"]["columns"][0]["windows"][0]["target"]["section"] =
+            json!("about");
+        assert_eq!(init(&store, incoming, "second").await, 2);
+        let saved = store.events("a", None).await.unwrap();
+        let views = saved[0]["document"]["views"].as_array().unwrap();
+        assert_eq!(views.len(), 2);
+        assert_eq!(
+            views[destination]["layout"]["columns"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            views[1 - destination]["layout"]["columns"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            views[destination]["layout"]["columns"][1]["windows"][0]["target"]["section"],
+            "about"
+        );
+    }
+}
