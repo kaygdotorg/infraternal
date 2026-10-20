@@ -1,4 +1,6 @@
 //! Supplies the canvas plugin with the host's existing SQLite and terminal-ownership context [183,198,243].
+mod recovery;
+
 use infraternal_plugin_canvas::{
     model::{self, CHECKPOINT, Document, MAX_DOCUMENT, MAX_INPUT, MAX_RECEIPTS, text},
     reducer::reduce,
@@ -78,6 +80,15 @@ impl Store {
         if !document.valid() {
             return Err(Error);
         }
+        if recovery::needed(&document) {
+            let _writer = self.writes.lock().await;
+            let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool).await?;
+            let mut current = head_document(&mut tx, account).await?;
+            if repair(&mut tx, account, &mut current).await? {
+                commit(tx, self.changes.clone()).await?;
+            }
+            return Ok(vec![snapshot(&current, true)]);
+        }
         Ok(vec![snapshot(
             &document,
             head.get::<bool, _>("initialized"),
@@ -89,7 +100,7 @@ impl Store {
     pub async fn apply(&self, account: &str, input: &[u8]) -> Result<i64, Error> {
         self.call(false, account, input).await
     }
-    /// Compare-and-set bootstrap, preserving a differing loser as recoverable views.
+    /// Initialize once, then merge only targets absent from the account canvas.
     /// # Errors
     /// Refuses invalid references, bounds, ownership or inconsistent retry input.
     pub async fn initialize(&self, account: &str, input: &[u8]) -> Result<i64, Error> {
@@ -126,10 +137,14 @@ impl Store {
         ]))?);
         let _writer = self.writes.lock().await;
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool).await?;
-        let mut document = head(&mut tx, account).await?;
+        let mut document = head_document(&mut tx, account).await?;
+        let repaired = repair(&mut tx, account, &mut document).await?;
         if let Some(revision) =
             receipt(&mut tx, account, op_id, &request_hash, document.revision()).await?
         {
+            if repaired {
+                commit(tx, self.changes.clone()).await?;
+            }
             return Ok(revision);
         }
         let mut noop = false;
@@ -147,10 +162,21 @@ impl Store {
                     .await?
                     .get(0);
             incoming.0["revision"] = json!(document.revision());
-            if !initialized {
+            if initialized {
+                let before = document.clone();
+                recovery::merge(&mut document, incoming)?;
+                if document == before {
+                    save_receipt(&mut tx, account, op_id, &request_hash, document.revision())
+                        .await?;
+                    if repaired {
+                        commit(tx, self.changes.clone()).await?;
+                    } else {
+                        tx.commit().await?;
+                    }
+                    return Ok(document.revision());
+                }
+            } else {
                 document = incoming;
-            } else if incoming != document {
-                recover(&mut document, incoming)?;
             }
         } else {
             let base = request
@@ -229,8 +255,7 @@ impl Store {
             &mut tx,
             account,
             &document,
-            op_id,
-            &request_hash,
+            Some((op_id, &request_hash)),
             &event,
             initialize,
         )
@@ -239,59 +264,22 @@ impl Store {
         Ok(document.revision())
     }
 }
-fn recover(document: &mut Document, mut incoming: Document) -> Result<(), Error> {
-    let mut ids = Vec::<(String, String)>::new();
-    for mut view in incoming
-        .0
-        .get_mut("views")
-        .and_then(Value::as_array_mut)
-        .ok_or(Error)?
-        .drain(..)
-    {
-        view["id"] = json!(uuid::Uuid::new_v4().to_string());
-        // The v1 browser bound counts UTF-16 units, including the recovery prefix.
-        let mut units = 0;
-        let name = model::string(&view, "name")
-            .ok_or(Error)?
-            .chars()
-            .take_while(|c| {
-                units += c.len_utf16();
-                units <= 189
-            })
-            .collect::<String>();
-        view["name"] = Value::String(format!("Recovered: {name}"));
-        if let Some(columns) = view
-            .get_mut("layout")
-            .and_then(|l| l.get_mut("columns"))
-            .and_then(Value::as_array_mut)
-        {
-            for column in columns {
-                column["id"] = json!(uuid::Uuid::new_v4().to_string());
-                for window in column
-                    .get_mut("windows")
-                    .and_then(Value::as_array_mut)
-                    .ok_or(Error)?
-                {
-                    let old = model::string(window, "id").ok_or(Error)?.to_owned();
-                    let id = if let Some((_, id)) = ids.iter().find(|(seen, _)| *seen == old) {
-                        id.clone()
-                    } else {
-                        let id = uuid::Uuid::new_v4().to_string();
-                        ids.push((old, id.clone()));
-                        id
-                    };
-                    window["id"] = Value::String(id);
-                }
-            }
-        }
-        document
-            .0
-            .get_mut("views")
-            .and_then(Value::as_array_mut)
-            .ok_or(Error)?
-            .push(view);
+/// Repairs advance the same canonical revision sequence as edits, with a snapshot boundary for old IDs.
+async fn repair(
+    tx: &mut Transaction<'_, Sqlite>,
+    account: &str,
+    document: &mut Document,
+) -> Result<bool, Error> {
+    if !recovery::repair(document)? {
+        return Ok(false);
     }
-    Ok(())
+    document.0["revision"] = json!(document.revision() + 1);
+    document.normalize();
+    if !document.valid() {
+        return Err(Error);
+    }
+    save(tx, account, document, None, &snapshot(document, true), true).await?;
+    Ok(true)
 }
 async fn commit(tx: Transaction<'static, Sqlite>, changes: watch::Sender<()>) -> Result<(), Error> {
     // COMMIT can become durable before its caller receives the acknowledgement.
@@ -333,7 +321,7 @@ fn snapshot(document: &Document, initialized: bool) -> Value {
         ("document", document.0.clone()),
     ])
 }
-async fn head(tx: &mut Transaction<'_, Sqlite>, account: &str) -> Result<Document, Error> {
+async fn head_document(tx: &mut Transaction<'_, Sqlite>, account: &str) -> Result<Document, Error> {
     let empty = serde_json::to_string(&Document::default().0)?;
     sqlx::query(
         "INSERT OR IGNORE INTO canvas_heads(account,revision,document,initialized) VALUES(?,0,?,0)",
@@ -368,9 +356,13 @@ async fn receipt(
         }
         return Ok(Some(row.get("revision")));
     }
-    // One unique accepted call increments the head and inserts one receipt in
-    // the same transaction. Check retries first so the quota never expires them.
-    if revision >= MAX_RECEIPTS {
+    // No-op imports retain receipts without advancing layout revisions. Count
+    // accepted calls rather than revisions; repair revisions have no receipt.
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM canvas_receipts WHERE account=?")
+        .bind(account)
+        .fetch_one(&mut **tx)
+        .await?;
+    if count >= MAX_RECEIPTS || revision >= 9_007_199_254_740_991 {
         return Err(Error);
     }
     Ok(None)
@@ -424,13 +416,27 @@ async fn ownership_window<'a>(
     }
     Ok(())
 }
-#[allow(clippy::too_many_arguments)]
+async fn save_receipt(
+    tx: &mut Transaction<'_, Sqlite>,
+    account: &str,
+    id: &str,
+    request_hash: &str,
+    revision: i64,
+) -> Result<(), Error> {
+    sqlx::query("INSERT INTO canvas_receipts(account,op_id,request,revision) VALUES(?,?,?,?)")
+        .bind(account)
+        .bind(id)
+        .bind(request_hash)
+        .bind(revision)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
 async fn save(
     tx: &mut Transaction<'_, Sqlite>,
     account: &str,
     document: &Document,
-    id: &str,
-    request_hash: &str,
+    receipt: Option<(&str, &str)>,
     event: &Value,
     force_snapshot: bool,
 ) -> Result<(), Error> {
@@ -444,13 +450,9 @@ async fn save(
         .bind(account)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("INSERT INTO canvas_receipts(account,op_id,request,revision) VALUES(?,?,?,?)")
-        .bind(account)
-        .bind(id)
-        .bind(request_hash)
-        .bind(document.revision())
-        .execute(&mut **tx)
-        .await?;
+    if let Some((id, request_hash)) = receipt {
+        save_receipt(tx, account, id, request_hash, document.revision()).await?;
+    }
     if force_snapshot || document.revision() % CHECKPOINT == 0 {
         sqlx::query("INSERT INTO canvas_snapshots(account,revision,document) VALUES(?,?,?) ON CONFLICT(account) DO UPDATE SET revision=excluded.revision,document=excluded.document").bind(account).bind(document.revision()).bind(json).execute(&mut **tx).await?;
         sqlx::query("DELETE FROM canvas_operations WHERE account=?")
