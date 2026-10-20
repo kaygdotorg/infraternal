@@ -1,5 +1,5 @@
 """Role: measure the real native window through the production canvas on the named Mac; keep authority in memory and prove owned-PID cleanup."""
-import base64,io,json,os,pathlib,queue,signal,subprocess,sys,threading,time,traceback,uuid
+import base64,ctypes,io,json,os,pathlib,queue,signal,subprocess,sys,threading,time,traceback,uuid
 from playwright.sync_api import sync_playwright
 from PIL import Image
 ROOT=pathlib.Path.home()/'infraternal-bench/app-windows-latency'
@@ -11,10 +11,37 @@ import re
 if not re.fullmatch(r'[a-z0-9-]{1,48}',ledger_job) or not re.fullmatch(r'[a-z0-9-]{1,48}',job) or not re.fullmatch(r'[a-z0-9-]{1,48}',args['label']):raise SystemExit(2)
 E=ROOT/'evidence'/args['label'];E.mkdir(parents=True,exist_ok=False)
 BIN=ROOT/'bin'
+
+class ProcBsdInfo(ctypes.Structure):
+ """Kernel process fields used to identify one PID incarnation."""
+ # Match the public proc_bsdinfo layout, including its fixed MAXCOMLEN arrays.
+ _fields_=[
+  ('flags',ctypes.c_uint32),('status',ctypes.c_uint32),('xstatus',ctypes.c_uint32),
+  ('pid',ctypes.c_uint32),('ppid',ctypes.c_uint32),('uid',ctypes.c_uint32),('gid',ctypes.c_uint32),
+  ('ruid',ctypes.c_uint32),('rgid',ctypes.c_uint32),('svuid',ctypes.c_uint32),('svgid',ctypes.c_uint32),('reserved',ctypes.c_uint32),
+  ('command',ctypes.c_char*16),('name',ctypes.c_char*32),
+  ('open_files',ctypes.c_uint32),('process_group',ctypes.c_uint32),('job_count',ctypes.c_uint32),
+  ('tty_device',ctypes.c_uint32),('tty_process_group',ctypes.c_uint32),('nice',ctypes.c_int32),
+  ('start_seconds',ctypes.c_uint64),('start_microseconds',ctypes.c_uint64),
+ ]
+
+def process_identity(pid):
+ """Return a PID and kernel microsecond start time, or no identity if unavailable."""
+ if sys.platform!='darwin':return None
+ try:
+  query=ctypes.CDLL('/usr/lib/libproc.dylib').proc_pidinfo
+  query.argtypes=[ctypes.c_int,ctypes.c_int,ctypes.c_uint64,ctypes.c_void_p,ctypes.c_int]
+  query.restype=ctypes.c_int
+  info=ProcBsdInfo();size=ctypes.sizeof(info)
+  read=query(pid,3,0,ctypes.byref(info),size)
+ except (AttributeError,OSError):return None
+ if read!=size or info.pid!=pid:return None
+ return (int(info.pid),int(info.start_seconds),int(info.start_microseconds))
+
 class PhaseComplete(Exception):
  """Finish a short phase through cleanup, whose result still controls exit status."""
  pass
-owned=set();children=[];browser=None;play=None;lock=pathlib.Path('/tmp/infraternal-bench.lock');locked=False;cua_pid=None
+owned=set();children=[];browser=None;play=None;lock=pathlib.Path('/tmp/infraternal-bench.lock');locked=False;cua_pid=None;cua_birth=None
 runtime_owned=False
 start=time.monotonic();stage='lock';all_draws=[];native_metrics=[];results=[];failed=False;cleanup_remaining=0
 def emit(value): print(json.dumps(value),flush=True)
@@ -133,10 +160,11 @@ def consent_check():
   if not v.get('pid') or not v.get('window_id'):continue
   session='app-windows-latency-consent'
   state=cua('get_window_state',{'pid':v['pid'],'window_id':v['window_id'],'session':session,'include_screenshot':False,'max_depth':12,'max_elements':300})
-  controls=list(walk(state));safe=json.dumps(state)
+  controls=list(walk(state))
   # A re-signed diagnostic must retain existing permission. Never approve a
   # new permission request or type into a password sheet in this measurement.
-  if any('secure' in str(x.get('role','')).lower() or 'password' in str(x.get('role','')).lower() for x in controls) or ('Allow' in safe and ('requesting' in safe or 'bypass' in safe)):
+  allow_control=any('button' in str(x.get('role','')).lower() and any(str(x.get(key,'')).strip().lower()=='allow' for key in ('title','name','label','value')) for x in controls)
+  if any('secure' in str(x.get('role','')).lower() or 'password' in str(x.get('role','')).lower() for x in controls) or allow_control:
    emit({'kind':'helper_permission_changed','controls':[{key:x[key] for key in ('role','title','name','label') if key in x} for x in controls]})
    raise RuntimeError('helper permission changed; owner intervention required')
  emit({'kind':'consent','checked':True,'our_windows':len(matches)})
@@ -177,7 +205,9 @@ try:
  time.sleep(1)
  status=json.loads(command([str(pathlib.Path.home()/'.local/bin/cua-driver'),'permissions','status','--json']))
  cua_pid=status.get('source',{}).get('pid') if not previous_cua else None
- if cua_pid:owned.add(cua_pid)
+ if cua_pid:
+  owned.add(cua_pid);cua_birth=process_identity(cua_pid)
+  if cua_birth is None:raise RuntimeError('cannot identify the owned CUA process')
  if not status.get('accessibility') or not status.get('screen_recording'):raise RuntimeError('existing CUA permissions unavailable')
  emit({'kind':'cua','pid':cua_pid,'accessibility':True,'screen_recording':True})
  stage='clock'
@@ -224,8 +254,7 @@ try:
   for pid in list(capture_helpers):
    birth=helper_births.get(pid)
    if birth is None:continue
-   current=subprocess.run(['ps','-p',str(pid),'-o','lstart='],capture_output=True,text=True)
-   if current.returncode==0 and current.stdout.strip()==birth:
+   if process_identity(pid)==birth:
     try:os.kill(pid,signal.SIGTERM)
     except ProcessLookupError:pass
  stop_monitor=threading.Event()
@@ -239,8 +268,9 @@ try:
       if row in seen:continue
       pid=int(row.split()[1])
       if row.split()[0].startswith('capture'):capture_helpers.add(pid)
-      birth=subprocess.run(['ps','-p',str(pid),'-o','lstart='],capture_output=True,text=True)
-      if birth.returncode==0:helper_births[pid]=birth.stdout.strip()
+      birth=process_identity(pid)
+      if birth is None:raise RuntimeError('cannot identify a launched helper process')
+      helper_births[pid]=birth
      seen.update(rows)
     consent_check()
    except Exception as e:
@@ -336,8 +366,7 @@ try:
   # recorded identities, or resource receipts would silently omit native capture.
   live=set()
   for pid,birth in list(helper_births.items()):
-   current=subprocess.run(['ps','-p',str(pid),'-o','lstart='],capture_output=True,text=True)
-   if current.returncode==0 and current.stdout.strip()==birth:live.add(pid)
+   if process_identity(pid)==birth:live.add(pid)
   return live
  def resource_sample(label):
   consent_guard()
@@ -656,14 +685,12 @@ finally:
    if p.args[0].endswith('/source') and p.returncode!=0:failed=True
   if 'helper_births' in locals():
    for pid,birth in helper_births.items():
-    current=subprocess.run(['ps','-p',str(pid),'-o','lstart='],capture_output=True,text=True)
-    if current.returncode==0 and current.stdout.strip()==birth:
+    if process_identity(pid)==birth:
      emit({'kind':'cleanup_term','pid':pid});os.kill(pid,signal.SIGTERM)
      time.sleep(.5)
-     current=subprocess.run(['ps','-p',str(pid),'-o','lstart='],capture_output=True,text=True)
-     if current.returncode==0 and current.stdout.strip()==birth:
+     if process_identity(pid)==birth:
       os.kill(pid,signal.SIGKILL);emit({'kind':'cleanup_kill','pid':pid});failed=True
-  if cua_pid:
+  if cua_pid and process_identity(cua_pid)==cua_birth:
    try:os.kill(cua_pid,signal.SIGTERM)
    except ProcessLookupError:pass
   try:

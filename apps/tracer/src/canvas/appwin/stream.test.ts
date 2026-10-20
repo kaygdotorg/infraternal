@@ -1,18 +1,23 @@
 /** Exercises viewer/control ownership through public stream operations without a decoder or DOM renderer [D208,D232]. */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { StreamHandler } from "../../connection";
+import type { VideoInput } from "../../../../../packages/protocol/src/desktop";
 import type { WireFrame } from "../../../../../packages/protocol/src/codec";
 import { AppStream, parseStatus, type StreamOptions } from "./stream";
+import type { ControlState } from "./status";
 
 const originals = new Map<string, PropertyDescriptor | undefined>();
-beforeAll(() => {
+let bindingPrototype: object;
+beforeAll(async () => {
   class Canvas { className = ""; width = 2; height = 2; transferControlToOffscreen() { return {}; } }
   const globals = { window: globalThis, document: { createElement: () => new Canvas() }, HTMLCanvasElement: Canvas,
-    OffscreenCanvas: class {}, VideoDecoder: class {}, EncodedVideoChunk: class {}, Worker: class {} };
+    OffscreenCanvas: class {}, VideoDecoder: class {}, EncodedVideoChunk: class {}, Worker: class {},
+    matchMedia: () => ({ matches: false }) };
   for (const [key, value] of Object.entries(globals)) {
     originals.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
     Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
   }
+  bindingPrototype = (await import("./window-body")).AppBinding.prototype;
 });
 afterAll(() => {
   for (const [key, descriptor] of originals) {
@@ -21,7 +26,7 @@ afterAll(() => {
   }
 });
 
-async function fixture(deferControl = false) {
+async function fixture(deferControl = false, onControl: (control: ControlState) => void = () => undefined) {
   const shapes: number[] = [];
   let controlReply: ((allowed: boolean) => void) | undefined;
   let next = 1;
@@ -49,12 +54,28 @@ async function fixture(deferControl = false) {
     send(id, frame) { frames.push({ id, frame }); return true; },
   };
   const stream = new AppStream({ connection, hostId: "host", target: { type: "screen", displayId: 1 }, coarse: false,
-    events: { state() {}, control() {}, picture() {}, surface() {}, shape(aspect) { shapes.push(aspect); } },
+    events: { state() {}, control: onControl, picture() {}, surface() {}, shape(aspect) { shapes.push(aspect); } },
     makeWorker: () => worker as unknown as Worker });
   await stream.open({ width: 800, height: 600, density: 1 });
   stream.setVisible(true);
   await Promise.resolve();
   return { stream, shapes, frames, actions, closed, handlers, worker, controller: () => controller, answerControl: (allowed: boolean) => controlReply?.(allowed), reply: (value: Record<string, unknown>) => clockReply?.(value) };
+}
+
+interface BindingProbe {
+  queued: VideoInput[];
+  send(input: VideoInput): void;
+  paintControl(control: ControlState): void;
+}
+
+function bindingProbe(stream: AppStream): BindingProbe {
+  const label = { textContent: "" };
+  const badge = { dataset: {}, hasAttribute: () => false, setAttribute() {}, removeAttribute() {}, querySelector: () => label };
+  return Object.assign(Object.create(bindingPrototype), {
+    stream, queued: [], disposed: false, activeNow: true, justActivated: false,
+    lastState: { kind: "live" }, o: { machine: "fixture" },
+    root: { querySelector: (selector: string) => selector === ".aw-control" ? badge : undefined },
+  }) as BindingProbe;
 }
 
 test("retry after a decoder failure stops the previous native session", async () => {
@@ -119,6 +140,37 @@ test("viewing never sends controller-only resize before acquisition", async () =
     await Promise.resolve(); await Promise.resolve();
     expect(f.controller()).toBe(1);
     expect(f.frames.some(({ frame }) => frame.type === "Desktop" && frame.message.kind === "size" && frame.message.width === 1000)).toBe(true);
+  } finally { f.stream.dispose(); }
+});
+
+test("a resize queued during control confirmation reaches the machine before pending input", async () => {
+  let binding: BindingProbe | undefined;
+  let resize: (() => void) | undefined;
+  const f = await fixture(true, (control) => {
+    // The size change is queued just before the binding's drain microtask to
+    // model a resize already observed while control approval is settling.
+    if (control.kind === "controlled") queueMicrotask(() => resize?.());
+    binding?.paintControl(control);
+  });
+  try {
+    binding = bindingProbe(f.stream);
+    const worker = f.worker as unknown as { onmessage: (event: { data: unknown }) => void };
+    worker.onmessage({ data: { t: "first", width: 800, height: 600 } });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    resize = () => f.stream.resize({ width: 1000, height: 600, density: 1 }, false);
+
+    binding.send({ kind: "text", scalar: 97 });
+    expect(binding.queued).toEqual([{ kind: "text", scalar: 97 }]);
+    f.answerControl(true);
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    const messages = f.frames
+      .map(({ frame }) => frame.type === "Desktop" ? frame.message : undefined)
+      .filter((message) => message?.kind === "size" || message?.kind === "input");
+    expect(messages.map((message) => message?.kind)).toEqual(["size", "size", "input"]);
+    expect(messages[0]).toMatchObject({ kind: "size", width: 800, height: 600 });
+    expect(messages[1]).toMatchObject({ kind: "size", width: 1000, height: 600 });
+    expect(binding.queued).toHaveLength(0);
   } finally { f.stream.dispose(); }
 });
 
