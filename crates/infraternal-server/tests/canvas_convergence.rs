@@ -244,7 +244,9 @@ async fn loading_repairs_only_matching_recovery_views_and_converges_clients() {
         .await
         .unwrap();
     let peer = Store::new(pool.clone());
-    let (first, second) = tokio::join!(canonical(&store, "a"), canonical(&peer, "a"));
+    let (first, second) = tokio::join!(store.events("a", Some(2)), peer.events("a", Some(2)));
+    let first = Document(first.unwrap()[0]["document"].clone());
+    let second = Document(second.unwrap()[0]["document"].clone());
     assert_eq!(first, second);
     assert_eq!(first.revision(), 3);
     assert_eq!(first.0["views"].as_array().unwrap().len(), 2);
@@ -515,4 +517,17 @@ async fn simultaneous_first_devices_merge_disjoint_targets_into_one_view() {
     assert_eq!(canonical.revision(), 2);
     assert_eq!(canonical.0["views"].as_array().unwrap().len(), 1);
     assert_eq!(canonical.windows().count(), 2);
+}
+
+#[tokio::test]
+async fn a_tiled_import_cannot_duplicate_an_existing_graph_kind() {
+    let (store, _) = fixture().await;
+    let mut graph = document(0);
+    graph.0["views"][0]["layout"] = json!({"type":"graph","pinned":{}});
+    init(&store, graph, "graph").await;
+    let before = canonical(&store, "a").await;
+    let input =
+        serde_json::to_vec(&json!({"op_id":"conflicting-kind","document":document(1)})).unwrap();
+    assert!(store.initialize("a", &input).await.is_err());
+    assert_eq!(canonical(&store, "a").await, before);
 }

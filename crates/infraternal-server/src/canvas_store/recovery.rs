@@ -72,6 +72,10 @@ pub(super) fn merge(document: &mut Document, mut incoming: Document) -> Result<(
                 .ok_or(())?
                 .extend(retained);
         } else {
+            // Graphs cannot gain tiled memberships; refuse instead of duplicating that kind.
+            if views.iter().any(|v| v["kind"] == view["kind"]) {
+                return Err(());
+            }
             if views.iter().any(|v| v["id"] == view["id"]) {
                 view["id"] = Value::from(uuid::Uuid::new_v4().to_string());
             }

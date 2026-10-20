@@ -62,18 +62,6 @@ impl Store {
             return Err(Error);
         }
         let revision: i64 = head.get("revision");
-        if let Some(after) = after
-            && after <= revision
-            && i64::try_from(rows.len() - 1).ok() == Some(revision - after)
-        {
-            let mut events = Vec::with_capacity(rows.len() - 1);
-            for row in &rows[1..] {
-                events.push(serde_json::from_slice(
-                    row.get::<&str, _>("event").as_bytes(),
-                )?);
-            }
-            return Ok(events);
-        }
         let document = Document(serde_json::from_slice(
             head.get::<&str, _>("document").as_bytes(),
         )?);
@@ -88,6 +76,18 @@ impl Store {
                 commit(tx, self.changes.clone()).await?;
             }
             return Ok(vec![snapshot(&current, true)]);
+        }
+        if let Some(after) = after
+            && after <= revision
+            && i64::try_from(rows.len() - 1).ok() == Some(revision - after)
+        {
+            let mut events = Vec::with_capacity(rows.len() - 1);
+            for row in &rows[1..] {
+                events.push(serde_json::from_slice(
+                    row.get::<&str, _>("event").as_bytes(),
+                )?);
+            }
+            return Ok(events);
         }
         Ok(vec![snapshot(
             &document,
