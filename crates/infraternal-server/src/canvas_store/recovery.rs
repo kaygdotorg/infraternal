@@ -118,26 +118,29 @@ pub(super) fn needed(document: &Document) -> bool {
 /// A committed snapshot records their removal, so repeated loads and stale-device imports converge idempotently.
 pub(super) fn repair(document: &mut Document) -> Result<bool, ()> {
     let views = document.0["views"].as_array().ok_or(())?;
-    let ids: Vec<Value> = views
+    let indices: Vec<usize> = views
         .iter()
-        .filter(|view| recovered(views, view))
-        .map(|v| v["id"].clone())
+        .enumerate()
+        .filter(|(_, view)| recovered(views, view))
+        .map(|(index, _)| index)
         .collect();
-    if ids.is_empty() {
+    if indices.is_empty() {
         return Ok(false);
     }
     let mut recovered = Document::default();
     let incoming = recovered.0["views"].as_array_mut().ok_or(())?;
+    let mut index = 0;
     document.0["views"]
         .as_array_mut()
         .ok_or(())?
-        .retain(|view| {
-            if ids.contains(&view["id"]) {
-                incoming.push(view.clone());
-                false
-            } else {
-                true
+        .retain_mut(|view| {
+            let remove = indices.contains(&index);
+            index += 1;
+            if remove {
+                // The removed membership owns its data; move it instead of cloning its entire layout.
+                incoming.push(view.take());
             }
+            !remove
         });
     merge(document, recovered)?;
     Ok(true)
