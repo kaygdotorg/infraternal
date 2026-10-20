@@ -684,7 +684,10 @@ that adds nothing returns the current revision without a layout event.
 Historical `Recovered: <name>` views are folded by the same rule only when an
 existing view has that base name and kind. Their removal is committed as a normal
 snapshot revision on load or the next write, so all devices converge. Unrelated
-user-named views are preserved. Repair does not rewrite documents in a migration.
+user-named views are preserved. When repair and an accepted edit commit together,
+their normal revision steps may share the final snapshot boundary; no operation
+tail crosses the replacement of historical window IDs. Repair does not rewrite
+documents in a migration.
 Migration 0030 backfills a transactional receipt counter so quota admission stays
 constant in the number of historical receipts, including no-op imports.
 
