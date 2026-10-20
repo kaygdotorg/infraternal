@@ -19,7 +19,7 @@ fn interleaved_replies_and_replays_match_partial_write_model() {
         match seed % 5 {
             0 => {
                 let bytes = [u8::try_from(step % 251).unwrap(); 7];
-                inputs.reply(&bytes, &mut queue).unwrap();
+                assert!(inputs.reply(false, &bytes, &mut queue));
                 model.extend(bytes.into_iter().map(|byte| (None, byte)));
             }
             1..=3 => {
@@ -79,13 +79,13 @@ fn repeated_reply_registration_adds_exactly_one_identity() {
         let mut inputs = Inputs::default();
         let mut queue = VecDeque::new();
         if reply_first {
-            inputs.reply(b"r", &mut queue).unwrap();
+            assert!(inputs.reply(false, b"r", &mut queue));
         }
         for writer in 1..=512 {
             inputs.select(writer, (80, 24, 0, 0)).unwrap();
         }
         for _ in 0..1024 {
-            inputs.reply(b"r", &mut queue).unwrap();
+            assert!(inputs.reply(false, b"r", &mut queue));
             assert!(inputs.select(513, (80, 24, 0, 0)).is_err());
             assert_eq!(inputs.cursors.len(), 514);
         }

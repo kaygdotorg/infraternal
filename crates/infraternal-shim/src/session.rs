@@ -887,14 +887,9 @@ fn handle<'a>(
     };
     match frame {
         Frame::QueryReply(bytes) if p.caps & QUERY_REPLIES != 0 && !exited => {
-            // Best-effort replies expire instead of taking space reserved for
-            // older typing [307]. Deferring them would retain stale answers
-            // behind that typing and let new replies refill each partial drain.
-            if !reserved {
-                // A full queue also expires replies without disconnecting the
-                // peer; refusal leaves byte ownership and typing cursors intact.
-                let _ = cursors.reply(&bytes, input);
-            }
+            // Replies expire on reserved or full capacity without disconnecting
+            // the peer; admission refusal leaves typing cursors intact [307].
+            let _ = cursors.reply(reserved, &bytes, input);
         }
         Frame::SelectWriter(id) if p.caps & MULTI_WRITER != 0 && p.writer.is_none() && id != 0 => {
             cursors.select(id, p.size)?;

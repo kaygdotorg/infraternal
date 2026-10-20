@@ -127,18 +127,21 @@ impl Inputs {
     }
     /// Reply queue ownership is separate from every selected writer. It never
     /// updates active geometry or publishes an input acknowledgement [307].
-    pub(super) fn reply(&mut self, bytes: &[u8], queue: &mut VecDeque<u8>) -> io::Result<()> {
-        if bytes.is_empty()
+    /// All reply admission checks precede mutation, including older typing's
+    /// reservation. Refusal is expected expiry, so it needs no allocated error.
+    pub(super) fn reply(&mut self, reserved: bool, bytes: &[u8], queue: &mut VecDeque<u8>) -> bool {
+        if reserved
+            || bytes.is_empty()
             || bytes.len() > 1024
             || queue.len().saturating_add(bytes.len()) > MAX_FRAME
         {
-            return Err(super::invalid_input());
+            return false;
         }
         // The internal key is outside the full u32 peer-writer namespace.
         // Widening keys leaves the aligned segment layout unchanged.
         let state = self.cursors.entry(u64::MAX).or_default();
         let seq = state.accepted;
-        self.accept_owned(u64::MAX, seq, bytes, queue)
+        self.accept_owned(u64::MAX, seq, bytes, queue).is_ok()
     }
     pub(super) fn advance(&mut self, mut bytes: usize) -> io::Result<()> {
         while bytes > 0 {
@@ -214,7 +217,10 @@ mod reply_tests {
         cursors.select(7, (120, 40, 0, 0)).unwrap();
         cursors.active_writer = Some(7);
         cursors.accept(7, 0, b"typed", &mut queue).unwrap();
-        cursors.reply(b"\x1b[1;1R", &mut queue).unwrap();
+        assert!(!cursors.reply(true, b"\x1b[1;1R", &mut queue));
+        assert_eq!(queue.iter().copied().collect::<Vec<_>>(), b"typed");
+        assert!(!cursors.cursors.contains_key(&u64::MAX));
+        assert!(cursors.reply(false, b"\x1b[1;1R", &mut queue));
         assert_eq!(cursors.get(Some(7)).unwrap().accepted, 5);
         assert_eq!(cursors.active_writer, Some(7));
         cursors.advance(queue.len()).unwrap();
@@ -223,6 +229,6 @@ mod reply_tests {
             cursors.get(Some(7)).unwrap().requested_size,
             (120, 40, 0, 0)
         );
-        assert!(cursors.reply(&vec![b'x'; 1025], &mut queue).is_err());
+        assert!(!cursors.reply(false, &vec![b'x'; 1025], &mut queue));
     }
 }

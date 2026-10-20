@@ -42,16 +42,16 @@ fn merge_review_replies_cannot_consume_space_reserved_for_deferred_typing() {
     let mut input = VecDeque::new();
     for seq in 0..512 {
         cursors.accept(9, seq, b"t", &mut input).unwrap();
-        cursors.reply(REPLY, &mut input).unwrap();
+        assert!(cursors.reply(false, REPLY, &mut input));
     }
     // Start at the shared-host segment cap with a reply tail. Coalescing
     // replies can then fill the byte budget without adding another segment.
     // Two seven-byte position reports make the remaining space divisible
     // by six, so every queued reply is also valid terminal reply syntax.
-    cursors.reply(b"\x1b[10;1R", &mut input).unwrap();
-    cursors.reply(b"\x1b[10;1R", &mut input).unwrap();
+    assert!(cursors.reply(false, b"\x1b[10;1R", &mut input));
+    assert!(cursors.reply(false, b"\x1b[10;1R", &mut input));
     while input.len() < MAX_FRAME {
-        cursors.reply(REPLY, &mut input).unwrap();
+        assert!(cursors.reply(false, REPLY, &mut input));
     }
     let mut terminal = Terminal::new(80, 24).unwrap();
     let ring = Ring::new(8192);
