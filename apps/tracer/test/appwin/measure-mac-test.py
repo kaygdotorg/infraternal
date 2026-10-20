@@ -280,7 +280,7 @@ class RunDeadlineTests(unittest.TestCase):
         launcher = pathlib.Path(__file__).parents[4] / 'scripts/app-window-owner-preview'
         self.assertIn('APP_WINDOW_OWNER_PREVIEW_SECONDS=900', launcher.read_text())
 
-    def test_measurement_plan_collects_forty_inputs_and_three_minutes(self):
+    def test_measurement_plan_collects_forty_inputs_and_ten_minutes(self):
         source = pathlib.Path(__file__).with_name('measure-mac.py').read_text()
         tree = ast.parse(source)
         constants = {}
@@ -290,13 +290,49 @@ class RunDeadlineTests(unittest.TestCase):
                     if isinstance(target, ast.Name) and target.id in {
                         'INPUT_SAMPLE_COUNT', 'STABILITY_SECONDS', 'RECONNECT_ITERATION', 'REOPEN_ITERATION',
                     }:
-                        constants[target.id] = ast.literal_eval(node.value)
+                        constants[target.id] = eval(compile(ast.Expression(body=node.value), str(source), 'eval'), {'args': {}})
         self.assertEqual(constants, {
             'INPUT_SAMPLE_COUNT': 40,
-            'STABILITY_SECONDS': 180,
+            'STABILITY_SECONDS': 600,
             'RECONNECT_ITERATION': 3,
             'REOPEN_ITERATION': 6,
         })
+
+
+
+class ContinuousSoakTests(unittest.TestCase):
+    """A ten-minute soak proves the exact known text, including ordering."""
+
+    def functions(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        names = {'known_soak_text', 'soak_burst', 'soak_input_matches'}
+        nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+        namespace = {}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), namespace)
+        return namespace
+
+    def test_ten_minutes_sends_exactly_240_characters_in_order(self):
+        functions = self.functions()
+        expected = functions['known_soak_text']()
+        self.assertEqual(len(expected), 240)
+        bursts = [functions['soak_burst'](step) for step in range(60)]
+        self.assertEqual(''.join(bursts), expected)
+        self.assertEqual(sum(bool(burst) for burst in bursts), 40)
+        self.assertTrue(all(len(burst) in (0, 6) for burst in bursts))
+
+    def test_same_count_with_reordered_keys_fails(self):
+        matches = self.functions()['soak_input_matches']
+        rows = [{'kind': 'input', 'characters': c} for c in 'abdc']
+        self.assertFalse(matches(rows, 'abcd'))
+        rows[2:] = [{'kind': 'draw'}, {'kind': 'input', 'characters': 'c'}, {'kind': 'input', 'characters': 'd'}]
+        self.assertTrue(matches(rows, 'abcd'))
+
+    def test_missing_duplicate_or_unstamped_keys_fail(self):
+        matches = self.functions()['soak_input_matches']
+        for values in ('abc', 'aabcd', 'abcc'):
+            self.assertFalse(matches([{'kind': 'input', 'characters': c} for c in values], 'abcd'))
+        self.assertFalse(matches([{'kind': 'input'}] * 4, 'abcd'))
 
 
 class LaunchMonitorTests(unittest.TestCase):
@@ -539,9 +575,9 @@ class CompositorGeometryTests(unittest.TestCase):
         before = target(surface, {'width': 832, 'height': 720})
         surface.rectangle = {'x': 300, 'y': 200, 'width': 100, 'height': 100}
         after = target(surface, {'width': 832, 'height': 720})
-        self.assertEqual(before['x'], 200 / 832)
-        self.assertEqual(after['x'], 350 / 832)
-        self.assertEqual(after['y'], 250 / 720)
+        self.assertEqual(before['x'], 250 / 832)
+        self.assertEqual(after['x'], 375 / 832)
+        self.assertEqual(after['y'], 275 / 720)
 
     def test_copy_uses_device_metadata_when_the_window_exceeds_the_emulated_viewport(self):
         target = {'x': 506 / 832, 'y': 294 / 720, 'viewport': {'width': 832, 'height': 720}}

@@ -4,7 +4,8 @@
  * Run with `bun test/appwin/measure.ts` from apps/tracer through the build-slot wrapper.
  * APP_WINDOW_BINARY selects a desktop-enabled static server; the Mac job directory
  * must already contain the source supervisor, Rust helper, clock bridge, native
- * fixture, Python environment and browser installation. The approved signed native
+ * Python environment and browser installation. The controller sends the fixture
+ * source, which is compiled inside its locked private runtime before capture. The approved signed native
  * companion is verified, never installed or replaced here.
  *
  * APP_WINDOW_RUN_LABEL names a fresh receipt directory. APP_WINDOW_RESOURCES_ONLY=1
@@ -14,6 +15,10 @@
  * in the owned Mac diagnostic directory; a changed permission stops the run.
  * Optional pipeline, codec, worker, decoder hint and context settings are isolated
  * experiments; the input manifest records them alongside exact artifact hashes.
+ * APP_WINDOW_SOAK=1 defaults to an uninterrupted 600-second/240-character run.
+ * APP_WINDOW_RECOVERY=1 explicitly enables the separate drop/reopen/resize case;
+ * APP_WINDOW_STABILITY_SECONDS=180 selects its short diagnostic duration.
+ * APP_WINDOW_MAC_ONLY=1 omits guest access and records no guest-idle evidence.
  */
 import { startRealServer, type DesktopStage } from '../../real/server';
 import { resolve } from 'node:path';
@@ -44,6 +49,9 @@ const requireIdle=process.env.APP_WINDOW_REQUIRE_IDLE==='1';
 const macOnly=process.env.APP_WINDOW_MAC_ONLY==='1';
 const demoOnly=process.env.APP_WINDOW_DEMO_ONLY==='1';
 const soak=process.env.APP_WINDOW_SOAK==='1';
+const recovery=process.env.APP_WINDOW_RECOVERY==='1';
+const stabilitySeconds=Number(process.env.APP_WINDOW_STABILITY_SECONDS??600);
+if(![180,600].includes(stabilitySeconds))throw Error('invalid stability duration');
 const ownerPreview=process.env.APP_WINDOW_OWNER_PREVIEW==='1';
 const ownerPreviewSeconds=Number(process.env.APP_WINDOW_OWNER_PREVIEW_SECONDS??900);
 if(!Number.isInteger(ownerPreviewSeconds)||ownerPreviewSeconds<1||ownerPreviewSeconds>900)throw Error('invalid owner preview duration');
@@ -96,7 +104,7 @@ try{
  const [built]=await once(build,'exit');if(built!==0)throw Error('production frontend build failed');
  const bundle=await Bun.build({entrypoints:[worktree+'/apps/tracer/test/appwin/bench-probe.ts'],target:'browser',format:'iife',minify:true});
  if(!bundle.success)throw Error('probe build failed');
- const manifest:Record<string,string|boolean|number>={head:new TextDecoder().decode(Bun.spawnSync(['git','rev-parse','HEAD'],{cwd:worktree}).stdout).trim(),desynchronized,resourcesOnly,pipeline,capturePath:pipeline==='owned'?'owned-copy':'signed-surface',pipelineDiagnostics,codec,hardwareHint,job,macOnly,demoOnly,requireIdle,port,soak,ownerPreview,ownerPreviewSeconds,...(native?{native,nativeHash:nativeHash!}:{})};
+ const manifest:Record<string,string|boolean|number>={head:new TextDecoder().decode(Bun.spawnSync(['git','rev-parse','HEAD'],{cwd:worktree}).stdout).trim(),desynchronized,resourcesOnly,pipeline,capturePath:pipeline==='owned'?'owned-copy':'signed-surface',pipelineDiagnostics,codec,hardwareHint,job,macOnly,demoOnly,requireIdle,port,soak,recovery,stabilitySeconds,ownerPreview,ownerPreviewSeconds,...(native?{native,nativeHash:nativeHash!}:{})};
  for(const [name,path] of Object.entries({binary:process.env.INFRATERNAL_BIN!,controller:import.meta.path,macDriver:import.meta.dirname+'/measure-mac.py',companionLauncher:import.meta.dirname+'/launch-companion.py',processIdentity:import.meta.dirname+'/process_identity.py',pixelObserver:import.meta.dirname+'/worker-pixel-observer.js',probe:import.meta.dirname+'/bench-probe.ts',nativeFixture:worktree+'/crates/plugins/desktop/tests/fixtures/latency-window.swift',worker:workerOverride??worktree+'/apps/tracer/dist/decode.worker.on-demand.js'}))manifest[name]=new Bun.CryptoHasher('sha256').update(await readFile(path)).digest('hex');
  manifest.worktreeDiffSha256=new Bun.CryptoHasher('sha256').update(Bun.spawnSync(['git','diff','HEAD'],{cwd:worktree}).stdout).digest('hex');
  manifest.probeBundle=new Bun.CryptoHasher('sha256').update(await bundle.outputs[0]!.text()).digest('hex');
@@ -111,7 +119,7 @@ try{
  identity.stdin!.end(await readFile(import.meta.dirname+'/process_identity.py'));identity.stderr!.resume();
  const [identityCode]=await once(identity,'exit');if(identityCode!==0)throw Error('process identity staging refused');
  mac=spawn('netbird',['ssh','--no-browser','kayg@10.69.69.101','~/infraternal-bench/app-windows-latency/tools/bin/python -u ~/infraternal-bench/app-windows-latency/venue-mac.py'],{stdio:['pipe','pipe','pipe']});
- mac.stdin!.write(JSON.stringify({controller_pid:process.pid,port,pipeline,label,codec,job,demo_only:demoOnly,soak,owner_preview:ownerPreview,owner_preview_seconds:ownerPreviewSeconds,require_idle:requireIdle,native,native_hash:nativeHash,resources_only:resourcesOnly,pipeline_diagnostics:pipelineDiagnostics,diagnostic_only:process.env.APP_WINDOW_DIAGNOSTIC_ONLY==='1',probe:(hardwareHint?'window.__benchHardwareHint='+JSON.stringify(hardwareHint)+';\n':'')+(resourcesOnly?'window.__benchResourcesOnly=true;\n':'')+await bundle.outputs[0]!.text(),observer:(desynchronized?'self.__benchDesynchronized=true;\n':'')+await readFile(import.meta.dirname+'/worker-pixel-observer.js','utf8'),worker:await readFile(workerOverride??worktree+'/apps/tracer/dist/decode.worker.on-demand.js','utf8')})+'\n');
+ mac.stdin!.write(JSON.stringify({controller_pid:process.pid,port,pipeline,label,codec,job,demo_only:demoOnly,soak,recovery,stability_seconds:stabilitySeconds,owner_preview:ownerPreview,owner_preview_seconds:ownerPreviewSeconds,require_idle:requireIdle,native,native_hash:nativeHash,resources_only:resourcesOnly,pipeline_diagnostics:pipelineDiagnostics,fixture_source:await readFile(worktree+'/crates/plugins/desktop/tests/fixtures/latency-window.swift','utf8'),diagnostic_only:process.env.APP_WINDOW_DIAGNOSTIC_ONLY==='1',probe:(hardwareHint?'window.__benchHardwareHint='+JSON.stringify(hardwareHint)+';\n':'')+(resourcesOnly?'window.__benchResourcesOnly=true;\n':'')+await bundle.outputs[0]!.text(),observer:(desynchronized?'self.__benchDesynchronized=true;\n':'')+await readFile(import.meta.dirname+'/worker-pixel-observer.js','utf8'),worker:await readFile(workerOverride??worktree+'/apps/tracer/dist/decode.worker.on-demand.js','utf8')})+'\n');
  const prepare=async()=>{
   if(!macOnly){
    const vm=spawn('netbird',['ssh','--no-browser','calternal@10.69.69.21','top -l 3 -s 1 -n 0'],{stdio:['ignore','pipe','pipe']});

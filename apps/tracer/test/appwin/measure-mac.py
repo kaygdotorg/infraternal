@@ -15,9 +15,28 @@ BIN=ROOT/'bin'
 RUN_TIMEOUT_SECONDS=900
 CLEANUP_RESERVE_SECONDS=30
 INPUT_SAMPLE_COUNT=40
-STABILITY_SECONDS=180
+STABILITY_SECONDS=args.get('stability_seconds',600)
+RECOVERY_ENABLED=args.get('recovery',False)
+if type(STABILITY_SECONDS) is not int or STABILITY_SECONDS not in (180,600):raise ValueError('invalid stability duration')
 RECONNECT_ITERATION=3
 REOPEN_ITERATION=6
+
+def known_soak_text():
+ """Only known fixture text enters the exact-order stability comparison."""
+ return ('infraternal keeps every key in order 0123456789. '*6)[:240]
+
+def soak_burst(iteration):
+ """Sixty ten-second steps contain forty six-key bursts and twenty idle checks."""
+ if not 0<=iteration<60:raise ValueError('invalid stability step')
+ phase=iteration%6
+ if phase in (3,4):return ''
+ start=((iteration//6)*4+{0:0,1:1,2:2,5:3}[phase])*6
+ return known_soak_text()[start:start+6]
+
+def soak_input_matches(rows, expected):
+ """Counts alone cannot detect reordered or substituted keys; fail on unstamped input."""
+ inputs=[row for row in rows if row.get('kind')=='input']
+ return len(inputs)==len(expected) and all(isinstance(row.get('characters'),str) and len(row['characters'])==1 for row in inputs) and ''.join(row['characters'] for row in inputs)==expected
 
 class PhaseComplete(Exception):
  """Finish a short phase through cleanup, whose result still controls exit status."""
@@ -99,8 +118,9 @@ def compositor_target(surface, viewport):
  # bounds for each stimulus; never retain that startup rectangle for sampling.
  rectangle=surface.bounding_box()
  if not rectangle or not viewport:raise RuntimeError('viewer target unavailable')
- x=(rectangle['x']+rectangle['width']/2)/viewport['width']
- y=(rectangle['y']+rectangle['height']/2)/viewport['height']
+ # Match the worker's lower-right fixture sample, away from the centre cursor.
+ x=(rectangle['x']+rectangle['width']*.75)/viewport['width']
+ y=(rectangle['y']+rectangle['height']*.75)/viewport['height']
  if not 0<=x<1 or not 0<=y<1:raise RuntimeError('viewer target outside viewport')
  return {'x':x,'y':y,'rectangle':rectangle,'viewport':viewport}
 
@@ -383,8 +403,13 @@ try:
  page.wait_for_timeout(1000)
  resource_sample('empty')
  stage='native fixture'
- emit({'kind':'native_fixture','sha256':command(['shasum','-a','256',str(BIN/'latency-window')]).split()[0]})
- window=launch([str(BIN/'latency-window')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1)
+ # Build the fixture sent by this controller while holding our Mac lock; a
+ # retained external binary could otherwise omit the new input receipts.
+ fixture_source=runtime/'latency-window.swift';fixture_source.write_text(args['fixture_source'])
+ fixture=runtime/'latency-window'
+ command(['swiftc','-O',str(fixture_source),'-o',str(fixture)],timeout=60)
+ emit({'kind':'native_fixture','sha256':command(['shasum','-a','256',str(fixture)]).split()[0],'source_sha256':command(['shasum','-a','256',str(fixture_source)]).split()[0]})
+ window=launch([str(fixture)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1)
  while True:
   ready=json.loads(window.stdout.readline())
   if ready.get('kind')=='ready':break
@@ -560,17 +585,18 @@ try:
  emit({'kind':'recording','frames':len(frames),'typed_before':typed_before,'typed_count':typed_count,'typed_expected':sum(map(len,demo_text)),'canvas_after':page.locator('.ui-window[data-kind="app"]').bounding_box()})
  if args.get('soak'):
   stage='stability soak'
-  emit({'kind':'stability_plan','seconds':STABILITY_SECONDS,'reconnect_iteration':RECONNECT_ITERATION,'reopen_iteration':REOPEN_ITERATION})
+  emit({'kind':'stability_plan','seconds':STABILITY_SECONDS,'recovery':RECOVERY_ENABLED,'reconnect_iteration':RECONNECT_ITERATION,'reopen_iteration':REOPEN_ITERATION})
   soak_start=time.monotonic();counts={'crashes':0,'stuck_frames':0,'requested_drops':0,'reconnects':0,'reopens':0,'typed':0,'resizes':0,'idle_checks':0,'unexpected_helper_exits':0,'slow_worker_updates':0};iteration=0
   def live_helper_pids():
    return {pid for pid,birth in helper_births.items() if process_identity(pid)==birth}
   previous_helpers=live_helper_pids();previous_expected_retirement=False
-  soak_sockets_before=page.evaluate('window.__appWindowBench.sockets')
+  soak_sockets_before=page.evaluate('window.__appWindowBench.sockets');soak_native_start=len(all_draws)
+  soak_windows_before=page.locator('.ui-window[data-kind="app"]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.windowId)')
   while time.monotonic()-soak_start<STABILITY_SECONDS:
    consent_guard();battery()
    if source.poll() is not None or window.poll() is not None or not browser.is_connected():
     counts['crashes']+=1;break
-   if iteration==RECONNECT_ITERATION:
+   if RECOVERY_ENABLED and iteration==RECONNECT_ITERATION:
     prior_sockets=page.evaluate('window.__appWindowBench.sockets')
     emit({'kind':'network_drop_request'});counts['requested_drops']+=1
     ack=json.loads(sys.stdin.readline())
@@ -580,7 +606,7 @@ try:
      first_picture();counts['reconnects']+=1
      emit({'kind':'soak_reconnect','before':prior_sockets,'after':page.evaluate('window.__appWindowBench.sockets')})
     except Exception:counts['stuck_frames']+=1
-   if iteration==REOPEN_ITERATION:
+   if RECOVERY_ENABLED and iteration==REOPEN_ITERATION:
     previous=page.locator('.ui-window[data-kind="app"]').first
     previous_id=previous.get_attribute('data-window-id')
     if not previous_id:raise RuntimeError('app window identity unavailable')
@@ -592,7 +618,7 @@ try:
      counts['reopens']+=1
      emit({'kind':'soak_reopen','previous_id':previous_id,'replacement_id':replacement.last.get_attribute('data-window-id')})
     except Exception:counts['stuck_frames']+=1
-   if iteration%6==2:
+   if RECOVERY_ENABLED and iteration%6==2:
     native_command('shape' if iteration%12==2 else 'wide');counts['resizes']+=1
    if iteration%6 in (3,4):
     native_command('idle');page.wait_for_timeout(1500)
@@ -600,30 +626,31 @@ try:
     emit({'kind':'soak_idle','before':before,'after':after});counts['idle_checks']+=1
    else:
     surface=page.locator('.aw-surface');focus_input(surface);page.wait_for_timeout(2200)
-    sequence=max(r['sequence'] for r in all_draws if r['kind']=='draw')+6
+    burst=soak_burst(iteration)
+    sequence=max(r['sequence'] for r in all_draws if r['kind']=='draw')+len(burst)
     prior_inputs=sum(r.get('kind')=='input' for r in all_draws);draw_start=len(all_draws)
-    drain();page.evaluate('([id,colour])=>window.__appWindowBench.arm(id,{colour})',[1000+iteration,sequence%8]);page.keyboard.type('typing',delay=90)
+    drain();page.evaluate('([id,colour])=>window.__appWindowBench.arm(id,{colour})',[1000+iteration,sequence%8]);page.keyboard.type(burst,delay=90)
     deadline=time.monotonic()+5;observed=False;effect=None;dom_inputs=[];receipts=[]
     while time.monotonic()<deadline:
      receipt=drain();receipts.append(receipt);dom_inputs.extend(receipt['probe']['domInputs'])
      effect=effect or next((e for e in receipt['probe']['events'] if e.get('t')=='bench-effect' and e['id']==1000+iteration),None)
      draw=next((r for r in all_draws if r.get('kind')=='draw' and r['sequence']==sequence),None)
      received_inputs=sum(r.get('kind')=='input' for r in all_draws)-prior_inputs
-     if effect and draw and received_inputs>=6 and int(effect['frame']['captureNs'])>=draw['end_ticks']*timebase:observed=True;break
+     if effect and draw and soak_input_matches(all_draws[draw_start:],burst) and int(effect['frame']['captureNs'])>=draw['end_ticks']*timebase:observed=True;break
      page.wait_for_timeout(10)
     # Keep every stage even when the predicate fails; a counter alone cannot
     # distinguish input loss, stale colour, timestamp ordering or delivery loss.
-    emit({'kind':'soak_typing_receipt','iteration':iteration,'expected_sequence':sequence,'timebase':timebase,'observed':observed,'effect':effect,'draw':draw,'received_inputs':received_inputs,'native':all_draws[draw_start:],'receipts':receipts})
+    emit({'kind':'soak_typing_receipt','iteration':iteration,'expected_sequence':sequence,'expected_text':burst,'timebase':timebase,'observed':observed,'effect':effect,'draw':draw,'received_inputs':received_inputs,'native':all_draws[draw_start:],'receipts':receipts})
     if observed:
-     counts['typed']+=6
+     counts['typed']+=len(burst)
      delay=effect['begin']-dom_inputs[-1]['at'] if dom_inputs else None
      if delay is not None and delay>=1000:counts['slow_worker_updates']+=1
-     emit({'kind':'soak_typing','iteration':iteration,'characters':6,'last_key_to_worker_ms':delay})
+     emit({'kind':'soak_typing','iteration':iteration,'characters':len(burst),'last_key_to_worker_ms':delay})
     else:counts['stuck_frames']+=1
    current_helpers=live_helper_pids();retired=previous_helpers-current_helpers
    # Resize notifications retire capture asynchronously; keep that attribution
    # through the next observation, while unexplained exits still fail the soak.
-   initiated_retirement=iteration in (RECONNECT_ITERATION,REOPEN_ITERATION) or iteration%6==2
+   initiated_retirement=RECOVERY_ENABLED and (iteration in (RECONNECT_ITERATION,REOPEN_ITERATION) or iteration%6==2)
    expected_retirement=initiated_retirement or previous_expected_retirement
    if retired:
     emit({'kind':'soak_helper_retirement','iteration':iteration,'expected':expected_retirement,'pids':sorted(retired)})
@@ -632,8 +659,16 @@ try:
    emit({'kind':'soak_step','iteration':iteration,'elapsed_seconds':time.monotonic()-soak_start,'counts':counts.copy()})
    iteration+=1
    page.wait_for_timeout(max(0,int((soak_start+iteration*10-time.monotonic())*1000)))
+  final_sockets=page.evaluate('window.__appWindowBench.sockets')
+  final_windows=page.locator('.ui-window[data-kind="app"]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.windowId)')
+  expected_text=''.join(soak_burst(step) for step in range(STABILITY_SECONDS//10))
+  exact_text=soak_input_matches(all_draws[soak_native_start:],expected_text)
+  emit({'kind':'soak_input_comparison','expected':expected_text,'expected_characters':len(expected_text),'exact_match':exact_text,'native':all_draws[soak_native_start:]})
+  if not RECOVERY_ENABLED:
+   counts['reconnects']=max(0,final_sockets['opened']-soak_sockets_before['opened'],final_sockets['closed']-soak_sockets_before['closed'])
+   counts['reopens']=int(final_windows!=soak_windows_before)
   emit({'kind':'soak_result','seconds':time.monotonic()-soak_start,'counts':counts,'sockets_before':soak_sockets_before,'sockets_after':page.evaluate('window.__appWindowBench.sockets')})
-  if counts['crashes'] or counts['stuck_frames'] or counts['unexpected_helper_exits'] or counts['reconnects']!=1 or counts['reopens']!=1:raise RuntimeError('stability soak did not pass')
+  if counts['crashes'] or counts['stuck_frames'] or counts['unexpected_helper_exits'] or counts['reconnects']!=int(RECOVERY_ENABLED) or counts['reopens']!=int(RECOVERY_ENABLED) or not exact_text or counts['typed']!=len(expected_text):raise RuntimeError('stability soak did not pass')
  source_round_trips('after')
  emit({'kind':'network_rtt_after','raw':command(['ping','-n','-c','5','-W','1000','10.69.69.125'])})
  console=console_state();emit({'kind':'console_after','state':console})
