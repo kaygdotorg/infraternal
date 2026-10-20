@@ -20,7 +20,7 @@ def app_bundle(executable):
     return app
 
 
-def open_command(executable, incoming, outgoing, errors, arguments):
+def open_command(executable, incoming, outgoing, errors, arguments, launch_record):
     # The marker prevents the companion's legacy SETEXEC responsibility hook:
     # LaunchServices already owns this launch, and must retain its attribution.
     command = ['/usr/bin/open', '-n', '-W', '-g', '--stdin', str(incoming),
@@ -28,13 +28,8 @@ def open_command(executable, incoming, outgoing, errors, arguments):
     for name in ('INFRATERNAL_DESKTOP_MEASURE',):
         if name in os.environ:
             command += ['--env', name + '=' + os.environ[name]]
-    return command + [str(app_bundle(executable)), '--args', '--responsible-child'] + arguments
-
-
-def app_pids(executable):
-    rows = subprocess.check_output(['/bin/ps', '-axo', 'pid=,comm='], text=True)
-    return {int(parts[0]) for row in rows.splitlines()
-            if len(parts := row.strip().split(None, 1)) == 2 and parts[1] == str(executable)}
+    return command + [str(app_bundle(executable)), '--args', '--responsible-child',
+                      '--launch-pid-file', str(launch_record)] + arguments
 
 
 def run(executable, runtime, errors, pidlog, arguments):
@@ -44,7 +39,6 @@ def run(executable, runtime, errors, pidlog, arguments):
     app_role = 'preflight' if '--check-permissions' in arguments else 'capture' if capture else 'native'
     with open(pidlog, 'a') as log:
         log.write(prefix + 'bridge ' + str(os.getpid()) + '\n')
-    before = app_pids(executable)
     owned = set()
     births = {}
     opened = None
@@ -69,6 +63,9 @@ def run(executable, runtime, errors, pidlog, arguments):
     signal.signal(signal.SIGHUP, interrupt)
     with tempfile.TemporaryDirectory(prefix='launch-', dir=runtime) as directory:
         root = pathlib.Path(directory)
+        # The bundle writes only its own PID here. The private directory and
+        # exclusive create tie this record to this one LaunchServices request.
+        launch_record = root / 'launched-pid'
         input_path, output_path = root / 'stdin', root / 'stdout'
         os.mkfifo(input_path, 0o600)
         os.mkfifo(output_path, 0o600)
@@ -83,7 +80,7 @@ def run(executable, runtime, errors, pidlog, arguments):
             os.set_blocking(1, False)
             if cancelled.is_set():
                 raise InterruptedError('companion bridge cancelled')
-            opened = subprocess.Popen(open_command(executable, pathlib.Path('/dev/null') if '--check-permissions' in arguments else input_path, output_path, errors, arguments),
+            opened = subprocess.Popen(open_command(executable, pathlib.Path('/dev/null') if '--check-permissions' in arguments else input_path, output_path, errors, arguments, launch_record),
                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             with open(pidlog, 'a') as log:
                 log.write(prefix + 'launcher ' + str(opened.pid) + '\n')
@@ -94,28 +91,43 @@ def run(executable, runtime, errors, pidlog, arguments):
             waiter.start()
             waiter_started = True
             deadline = time.monotonic() + 10
-            while not owned:
-                owned = app_pids(executable) - before
-                if owned or opened.poll() is not None:
+            launched_pid = None
+            while launched_pid is None:
+                try:
+                    record = launch_record.read_text()
+                except FileNotFoundError:
+                    record = ''
+                if record.endswith('\n'):
+                    rows = record.splitlines()
+                    if len(rows) != 1 or not rows[0].isdecimal() or int(rows[0]) <= 0:
+                        raise ValueError('app launch PID record invalid')
+                    launched_pid = int(rows[0])
                     break
+                if opened.poll() is not None:
+                    raise ValueError('app launch PID unavailable')
                 if time.monotonic() >= deadline:
                     raise TimeoutError('independent app launch unavailable')
                 time.sleep(.01)
             with open(pidlog, 'a') as log:
-                for pid in tuple(owned):
-                    birth = process_identity(pid)
-                    if birth is None:
-                        # A short preflight can finish after enumeration but
-                        # before its kernel identity is queried. Its queued
-                        # reply remains valid; a vanished PID owns no cleanup.
-                        owned.discard(pid)
-                        if pid in app_pids(executable):
-                            log.write(f'unverified {pid}\n')
-                            raise ValueError('app process identity unavailable')
-                        log.write(f'completed {pid}\n')
-                        continue
-                    births[pid] = birth
-                    log.write(f'{app_role} {pid} {birth[1]} {birth[2]}\n')
+                birth = process_identity(launched_pid)
+                if birth is None:
+                    # A short preflight may finish after publishing its PID
+                    # but before its kernel identity is queried. It needs no
+                    # cleanup authority once the PID has disappeared.
+                    try:
+                        os.kill(launched_pid, 0)
+                    except ProcessLookupError:
+                        log.write(f'completed {launched_pid}\n')
+                    except PermissionError as error:
+                        log.write(f'unverified {launched_pid}\n')
+                        raise ValueError('app process identity unavailable') from error
+                    else:
+                        log.write(f'unverified {launched_pid}\n')
+                        raise ValueError('app process identity unavailable')
+                else:
+                    owned.add(launched_pid)
+                    births[launched_pid] = birth
+                    log.write(f'{app_role} {launched_pid} {birth[1]} {birth[2]}\n')
             if cancelled.is_set():
                 raise InterruptedError('companion bridge cancelled')
             def forward_input():
@@ -191,9 +203,9 @@ def run(executable, runtime, errors, pidlog, arguments):
                 os.close(output_guard)
             if outgoing is not None:
                 os.close(outgoing)
-            # An interrupted wrapper must also retire its independently owned
-            # app. Only PIDs first seen in this launch are eligible for signals.
-            for pid in owned & app_pids(executable):
+            # An interrupted wrapper retires only the PID its child recorded;
+            # the kernel birth value guards against reuse after that record.
+            for pid in owned:
                 if process_identity(pid) != births.get(pid):
                     continue
                 try:

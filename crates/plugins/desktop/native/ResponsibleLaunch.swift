@@ -38,3 +38,32 @@ func establishResponsibility() throws {
     // Successful SETEXEC never returns, even if the replacement later fails.
     throw POSIXError(.EIO)
 }
+
+/// Publish this bundle's PID to the per-launch bridge record before it serves requests.
+func recordLaunchPIDIfRequested() throws {
+    let marker = "--launch-pid-file"
+    guard let index = CommandLine.arguments.firstIndex(of: marker) else { return }
+    guard CommandLine.arguments.count > index + 1 else { throw POSIXError(.EINVAL) }
+    let path = CommandLine.arguments[index + 1]
+    guard path.hasPrefix("/") else { throw POSIXError(.EINVAL) }
+    let descriptor = Darwin.open(path, O_WRONLY | O_CREAT | O_EXCL, mode_t(S_IRUSR | S_IWUSR))
+    guard descriptor >= 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    defer { _ = Darwin.close(descriptor) }
+
+    let bytes = Array("\(getpid())\n".utf8)
+    var offset = 0
+    while offset < bytes.count {
+        let written = bytes.withUnsafeBufferPointer { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Darwin.write(descriptor, base.advanced(by: offset), bytes.count - offset)
+        }
+        if written < 0 {
+            if errno == EINTR { continue }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        guard written > 0 else { throw POSIXError(.EIO) }
+        offset += written
+    }
+}

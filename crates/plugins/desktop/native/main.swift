@@ -10,6 +10,11 @@ catch {
     FileHandle.standardError.write(Data("Desktop responsibility launch unavailable.\n".utf8))
     exit(1)
 }
+do { try recordLaunchPIDIfRequested() }
+catch {
+    FileHandle.standardError.write(Data("Desktop launch identity unavailable.\n".utf8))
+    exit(1)
+}
 
 // Diagnostic mode shares production attribution and exits before AppKit state,
 // capture, input monitors or any permission-request API can be created.
