@@ -165,3 +165,15 @@ async fn independent_loads_and_base_edit_repair_exactly_once() {
         .unwrap();
     assert_eq!(serde_json::from_str::<Value>(&raw).unwrap(), doc.0);
 }
+
+#[tokio::test]
+async fn repair_rebases_a_cursor_that_already_names_its_next_revision() {
+    let (store, _) = historical(1).await;
+    // A future cursor needs canonical state, even when repair reaches that exact revision.
+    let events = store.events("a", Some(3)).await.unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["type"], "canvas.layout.snapshot");
+    let doc = Document(events[0]["document"].clone());
+    assert_eq!(doc.revision(), 3);
+    assert_eq!(doc.windows().count(), 2);
+}
