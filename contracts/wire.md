@@ -671,15 +671,28 @@ a limit refuses new writes without losing existing idempotence or tombstones.
 
 `Call canvas.layout.initialize {op_id,document:DOC}` is the sole whole-document
 exception: a one-time migration from old local storage, never a save method.
-The first transaction initializes the account's head. A later identical layout
-(ignoring revision) is acknowledged without duplicating views. A differing
-layout is preserved as extra views named `Recovered: <name>` with server-generated
-IDs for views, columns and windows, keeping target references and geometry.
-The result is `{revision}`. Retrying the same op_id is idempotent; if bounds or
-ownership checks fail the transaction rolls back and the browser must keep its
-local document for a later retry/export. Initialization events use a canonical
-snapshot, since recovered IDs are assigned by the server. The client must keep
-its original local document until success, then treat it only as a drawing cache.
+The first transaction initializes the account's head. A later import adds only
+windows whose target identity is absent from every canonical view. Session
+identity is host plus session ID (stable host IDs take precedence when both
+references carry one); Settings uses its section, and logs/containers use host.
+Names and other presentation metadata do not create a new target. New windows
+keep their relative column order, weights and heights, appended to the existing
+same-kind tiled view. A new tiled view is created only when it has new windows;
+window-less views and existing graph pins are never imported again. An import
+that adds nothing returns the current revision without a layout event.
+
+Historical `Recovered: <name>` views are folded by the same rule only when an
+existing view has that base name and kind. Their removal is committed as a normal
+snapshot revision on load or the next write, so all devices converge. Unrelated
+user-named views are preserved. No schema migration is required.
+
+The result is `{revision}`. Retrying the same op_id is idempotent, including a
+no-op import; the receipt quota counts calls rather than layout revisions. If
+bounds or ownership checks fail the transaction rolls back and the browser must
+keep its local document for a later retry/export. Initialization and repair events
+use a canonical snapshot, since imported IDs are assigned by the server. The
+client keeps its original local document until success, then treats it only as a
+drawing cache.
 Errors are Result `ok:false` with `{"error":"invalid canvas operation"}`;
 no account existence or foreign ownership detail is exposed.
 
