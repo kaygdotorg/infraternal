@@ -8,6 +8,12 @@ import { tracerEvidencePath } from "../test/evidence-path";
 test.setTimeout(240_000);
 const windows = (page: Page) => page.locator('.cl[data-view="console"] .ui-window');
 const ids = (page: Page) => windows(page).evaluateAll((els) => els.map((el) => (el as HTMLElement).dataset.windowId));
+// Group columns use display:contents; their enclosing frame carries the actual scale.
+const outerDropX = (page: Page) => page.locator('.cl[data-view="console"] .cl-col').first().evaluate((column) => {
+  const frame = column.closest<HTMLElement>(".cl-group") ?? column as HTMLElement;
+  const box = frame.getBoundingClientRect();
+  return box.left - 20 * box.width / frame.offsetWidth - 1;
+});
 async function cache(page: Page): Promise<unknown> {
   return page.evaluate(() => { const key = Object.keys(localStorage).find((k) => k.startsWith("infraternal.canvas.")); return key ? JSON.parse(localStorage.getItem(key)!) : undefined; });
 }
@@ -83,6 +89,13 @@ test("fresh phone restores ten split windows and both devices converge", async (
     await mobile.locator('button[aria-label="Sessions"]').last().evaluate((el) => (el as HTMLElement).click());
     await expect(mobile.locator(".cl-sx-group")).toHaveCount(0);
     expect(server.bridges.flatMap((bridge) => bridge.control).filter((frame) => frame.type === "Call" && frame.detail === "ssh.session.open")).toHaveLength(10);
+    // Expose a reachable outer drop zone before moving a window out of the spanning group.
+    await mobile.getByRole("button", { name: "Canvas lock on", exact: true }).click();
+    await mobile.mouse.move(196, 426);
+    await mobile.keyboard.down("Control");
+    await mobile.mouse.wheel(0, 25);
+    await mobile.keyboard.up("Control");
+    await expect.poll(() => outerDropX(mobile)).toBeGreaterThan(0);
     const beforeMove = await ids(mobile), beforePhoneEdits = phoneEdits;
     const remotePaint = perf ? page.evaluate((before) => new Promise<number>((resolve, reject) => {
       const timer = setTimeout(() => { observer.disconnect(); reject(Error("shared move did not paint")); }, 10_000);
@@ -105,8 +118,13 @@ test("fresh phone restores ten split windows and both devices converge", async (
     await mobile.screenshot({ path: `${evidence}/phone-layout.png` });
     const pill = (await movingPill.boundingBox())!;
     const x = pill.x + pill.width / 2, y = pill.y + pill.height / 2;
+    // Cross the actual new-column boundary. A fixed gutter coordinate can keep
+    // the same slot, and a partial-width top band cannot be inserted into a spanning group.
+    const dropX = await outerDropX(mobile);
+    expect(dropX).toBeGreaterThanOrEqual(0);
+    const columnsBefore = await mobile.locator('.cl[data-view="console"] .cl-col').evaluateAll((columns) => columns.map((column) => (column as HTMLElement).dataset.id));
     await mobile.mouse.move(x, y); await mobile.mouse.down();
-    await mobile.mouse.move(5, y + 16, { steps: 12 });
+    await mobile.mouse.move(dropX, y + 16, { steps: 12 });
     if (perf) await mobile.evaluate(() => {
       const probe = window as unknown as { __layoutTiming: { start: number; drop: number; work: number; paint: number } };
       probe.__layoutTiming = { start: 0, drop: 0, work: 0, paint: 0 };
@@ -114,6 +132,8 @@ test("fresh phone restores ten split windows and both devices converge", async (
       window.addEventListener("pointerup", () => { queueMicrotask(() => { probe.__layoutTiming.work = performance.now() - probe.__layoutTiming.start; }); requestAnimationFrame(() => { probe.__layoutTiming.paint = performance.now() - probe.__layoutTiming.start; }); }, { once: true });
     });
     await expect(mobile.locator(".is-lifted")).toHaveCount(1);
+    const dropColumn = await mobile.locator(".cl-slot").evaluate((slot) => slot.parentElement?.dataset.id);
+    expect(columnsBefore).not.toContain(dropColumn);
     await mobile.mouse.up();
     if (remotePaint) void remotePaint.catch(() => undefined);
     await expect.poll(() => ids(page), { timeout: 15_000 }).not.toEqual(beforeMove);
