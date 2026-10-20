@@ -48,6 +48,36 @@ class InputCohortTests(unittest.TestCase):
         self.assertEqual(rows, ['after', 'input_idle', {'kind': 'clocks_after', 'native': 'native', 'browser': 'browser'},
                                 {'kind': 'result', 'status': 'input_measured', 'count': 80}])
 
+    def test_initial_control_admission_uses_the_measured_focus_mode(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        function = next(node for node in ast.parse(source.read_text()).body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'focus_input')
+        actions = []
+        def wait_for(**_kwargs):
+            if 'emulated' not in actions:
+                raise TimeoutError('native activation removed viewer admission')
+        namespace = dict(args={}, cdp=SimpleNamespace(send=lambda *_: actions.append('emulated')),
+                         consent_guard=lambda: None,
+                         page=SimpleNamespace(locator=lambda _: SimpleNamespace(wait_for=wait_for)),
+                         emit=lambda _: None)
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        namespace['focus_input'](SimpleNamespace(click=lambda: actions.append('click'), evaluate=lambda _: True))
+        self.assertEqual(actions, ['emulated', 'click', 'click'])
+
+    def test_human_preview_and_resource_modes_keep_real_focus(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        function = next(node for node in ast.parse(source.read_text()).body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'focus_input')
+        for mode in ('resources_only', 'demo_only', 'owner_preview'):
+            actions = []
+            namespace = dict(args={mode: True}, cdp=SimpleNamespace(send=lambda *_: actions.append('emulated')),
+                             consent_guard=lambda: None,
+                             page=SimpleNamespace(locator=lambda _: SimpleNamespace(wait_for=lambda **_: None)),
+                             emit=lambda _: None)
+            exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+            namespace['focus_input'](SimpleNamespace(click=lambda: actions.append('click'), evaluate=lambda _: True))
+            self.assertEqual(actions, ['click', 'click'])
+
     def test_each_key_keeps_native_activation_outside_the_input_interval(self):
         source = pathlib.Path(__file__).with_name('measure-mac.py')
         tree = ast.parse(source.read_text())

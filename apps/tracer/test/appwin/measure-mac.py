@@ -175,6 +175,11 @@ def focus_input(surface):
  # The first press may only activate the card (D208). Both presses use the
  # picture centre; sampling starts only after the real lease and DOM focus.
  consent_guard()
+ # Native activation can move the viewer out of focus during the first
+ # control press. Use the measured cohort's same focus mode from admission,
+ # while retaining its real control lease and focused-element checks.
+ if not any(args.get(mode) for mode in ('resources_only','demo_only','owner_preview')):
+  cdp.send('Emulation.setFocusEmulationEnabled',{'enabled':True})
  surface.click()
  surface.click()
  page.locator('.aw-control[data-kind="controlled"]').wait_for(timeout=10000)
