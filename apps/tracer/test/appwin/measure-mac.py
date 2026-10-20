@@ -557,6 +557,9 @@ try:
     if not compositor:raise RuntimeError('native change absent from compositor copies')
    result={'kind':'sample','index':index,'source':draw,'effect':effect,'events':events,'compositor':compositor};results.append(result);emit(result)
   stage='input samples'
+  # Compositor observations can outlive focus/control acquired at window open.
+  # Re-establish both through the real UI before admitting this quiet cohort.
+  focus_input(surface)
   emit({'kind':'input_sample_plan','count':INPUT_SAMPLE_COUNT,'trigger':'immediate after key event'})
   for index in range(INPUT_SAMPLE_COUNT):
    sequence=max(r['sequence'] for r in all_draws if r['kind']=='draw')+1
