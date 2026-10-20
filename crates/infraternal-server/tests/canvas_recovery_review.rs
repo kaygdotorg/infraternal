@@ -71,6 +71,26 @@ async fn recovery_at_column_capacity_keeps_the_account_readable() {
         .await
         .unwrap();
     assert_eq!(count, 1);
+    assert_eq!(doc.revision(), 2, "a deferred repair is not an edit");
+    assert_eq!(
+        store.events("a", Some(2)).await.unwrap(),
+        Vec::<Value>::new()
+    );
+    let input = serde_json::to_vec(&json!({"op_id":"resize-at-capacity","base_revision":2,"intent":{"type":"resize","window_id":"w0","height":0.8}})).unwrap();
+    assert_eq!(store.apply("a", &input).await.unwrap(), 3);
+    let edited = store.events("a", None).await.unwrap();
+    let edited = Document(edited[0]["document"].clone());
+    assert!(edited.valid());
+    assert_eq!(edited.revision(), 3);
+    assert_eq!(edited.windows().count(), 65);
+    assert_eq!(
+        edited.windows().find(|w| w["id"] == "w0").unwrap()["height"],
+        0.8
+    );
+    assert_eq!(
+        store.events("a", Some(3)).await.unwrap(),
+        Vec::<Value>::new()
+    );
 }
 
 #[tokio::test]

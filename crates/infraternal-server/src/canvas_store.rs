@@ -87,10 +87,11 @@ impl Store {
             } else {
                 None
             };
-            if document.as_ref().is_some_and(recovery::needed) {
-                drop(document);
-                drop(rows);
-                self.transact(Mode::Repair, account, &[]).await?;
+            // A bounded repair can leave recovery views intact. Only reload
+            // if maintenance (or a competing writer) advanced the head.
+            if document.as_ref().is_some_and(recovery::needed)
+                && self.transact(Mode::Repair, account, &[]).await? != revision
+            {
                 cursor = None;
                 continue;
             }
@@ -197,13 +198,6 @@ impl Store {
             let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool).await?;
             let mut document = head_document(&mut tx, account).await?;
             let repaired = recovery::repair(&mut document)?;
-            if repaired {
-                document.0["revision"] = json!(document.revision() + 1);
-                document.normalize();
-                if !document.valid() {
-                    return Err(Error);
-                }
-            }
             let retry = if maintenance {
                 None
             } else {

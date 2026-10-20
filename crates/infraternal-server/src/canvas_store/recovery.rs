@@ -1,5 +1,5 @@
 //! Merges first-device imports and recognizes historical recovery views without duplicating targets [178,180,248].
-use infraternal_plugin_canvas::model::{Document, string};
+use infraternal_plugin_canvas::model::{Document, MAX_DOCUMENT, string};
 use serde_json::Value;
 
 /// Presentation metadata never makes a target new. Prefer stable host identities when both references carry them.
@@ -138,9 +138,12 @@ pub(super) fn repair(document: &mut Document) -> Result<bool, ()> {
     if indices.is_empty() {
         return Ok(false);
     }
+    // Repair is optional maintenance: a valid account must stay editable even
+    // when combining its views cannot fit the document or per-view bounds.
+    let mut candidate = document.clone();
     let mut incoming = Vec::new();
     let mut index = 0;
-    document.0["views"]
+    candidate.0["views"]
         .as_array_mut()
         .ok_or(())?
         .retain_mut(|view| {
@@ -152,6 +155,16 @@ pub(super) fn repair(document: &mut Document) -> Result<bool, ()> {
             }
             !remove
         });
-    merge(document, incoming)?;
+    if merge(&mut candidate, incoming).is_err() {
+        return Ok(false);
+    }
+    candidate.0["revision"] = Value::from(candidate.revision() + 1);
+    candidate.normalize();
+    if !candidate.valid()
+        || !serde_json::to_string(&candidate.0).is_ok_and(|json| json.len() <= MAX_DOCUMENT)
+    {
+        return Ok(false);
+    }
+    *document = candidate;
     Ok(true)
 }
