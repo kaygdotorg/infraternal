@@ -62,13 +62,23 @@ impl Store {
             return Err(Error);
         }
         let revision: i64 = head.get("revision");
-        let document = Document(serde_json::from_slice(
-            head.get::<&str, _>("document").as_bytes(),
-        )?);
-        if !document.valid() {
-            return Err(Error);
-        }
-        if recovery::needed(&document) {
+        let tail = after.is_some_and(|after| {
+            after <= revision && i64::try_from(rows.len() - 1).ok() == Some(revision - after)
+        });
+        let raw: &str = head.get("document");
+        // Every persisted document is written by serde_json, which leaves this
+        // literal prefix unescaped. A missing marker rules out historical recovery
+        // views; incidental matches only take the fully validated slow path.
+        let document = if !tail || raw.contains("Recovered: ") {
+            let document = Document(serde_json::from_slice(raw.as_bytes())?);
+            if !document.valid() {
+                return Err(Error);
+            }
+            Some(document)
+        } else {
+            None
+        };
+        if document.as_ref().is_some_and(recovery::needed) {
             let _writer = self.writes.lock().await;
             let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool).await?;
             let mut current = head_document(&mut tx, account).await?;
@@ -77,10 +87,7 @@ impl Store {
             }
             return Ok(vec![snapshot(&current, true)]);
         }
-        if let Some(after) = after
-            && after <= revision
-            && i64::try_from(rows.len() - 1).ok() == Some(revision - after)
-        {
+        if tail {
             let mut events = Vec::with_capacity(rows.len() - 1);
             for row in &rows[1..] {
                 events.push(serde_json::from_slice(
@@ -90,7 +97,7 @@ impl Store {
             return Ok(events);
         }
         Ok(vec![snapshot(
-            &document,
+            &document.ok_or(Error)?,
             head.get::<bool, _>("initialized"),
         )])
     }
@@ -138,7 +145,11 @@ impl Store {
         let _writer = self.writes.lock().await;
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool).await?;
         let mut document = head_document(&mut tx, account).await?;
-        let repaired = repair(&mut tx, account, &mut document).await?;
+        let repaired = if recovery::needed(&document) {
+            repair(&mut tx, account, &mut document).await?
+        } else {
+            false
+        };
         if let Some(revision) =
             receipt(&mut tx, account, op_id, &request_hash, document.revision()).await?
         {
@@ -265,21 +276,26 @@ impl Store {
     }
 }
 /// Repairs advance the same canonical revision sequence as edits, with a snapshot boundary for old IDs.
-async fn repair(
-    tx: &mut Transaction<'_, Sqlite>,
-    account: &str,
-    document: &mut Document,
-) -> Result<bool, Error> {
-    if !recovery::repair(document)? {
-        return Ok(false);
-    }
-    document.0["revision"] = json!(document.revision() + 1);
-    document.normalize();
-    if !document.valid() {
-        return Err(Error);
-    }
-    save(tx, account, document, None, &snapshot(document, true), true).await?;
-    Ok(true)
+#[inline(never)]
+fn repair<'a>(
+    tx: &'a mut Transaction<'_, Sqlite>,
+    account: &'a str,
+    document: &'a mut Document,
+) -> infraternal_plugin_api::Operation<'a, Result<bool, Error>> {
+    // Erase only the historical maintenance future: ordinary edits never allocate
+    // it, and reads do not embed a second copy of the write/checkpoint machinery.
+    Box::pin(async move {
+        if !recovery::repair(document)? {
+            return Ok(false);
+        }
+        document.0["revision"] = json!(document.revision() + 1);
+        document.normalize();
+        if !document.valid() {
+            return Err(Error);
+        }
+        save(tx, account, document, None, &snapshot(document, true), true).await?;
+        Ok(true)
+    })
 }
 async fn commit(tx: Transaction<'static, Sqlite>, changes: watch::Sender<()>) -> Result<(), Error> {
     // COMMIT can become durable before its caller receives the acknowledgement.
