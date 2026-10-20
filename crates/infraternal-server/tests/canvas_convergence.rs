@@ -437,7 +437,13 @@ async fn no_op_imports_keep_retry_receipts_and_do_not_clear_operation_history() 
     )
     .await
     .unwrap();
+    let mut notices = store.changes();
+    notices.borrow_and_update();
     assert_eq!(init(&store, doc.clone(), "noop").await, 2);
+    assert!(
+        !notices.has_changed().unwrap(),
+        "receipt-only imports do not invalidate subscribers"
+    );
     assert_eq!(store.events("a", Some(1)).await.unwrap().len(), 1);
     apply(
         &store,
@@ -561,3 +567,56 @@ async fn importing_an_orphaned_recovery_view_does_not_create_another_recovery_na
     }
 }
 
+#[tokio::test]
+async fn imports_use_account_wide_target_identity_and_keep_spanning_column_geometry() {
+    let (store, pool) = fixture().await;
+    let id = uuid::Uuid::new_v4();
+    let host_a = uuid::Uuid::new_v4();
+    let host_b = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO terminal_sessions VALUES(?,'a')")
+        .bind(id.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut doc = document(2);
+    doc.0["views"][0]["layout"]["columns"][0]["windows"][0]["target"] =
+        json!({"type":"session","id":id,"host":"old-name","hostId":host_a});
+    doc.0["views"].as_array_mut().unwrap().push(json!({
+        "id":"logs","kind":"logs","name":"Logs","cell":{"x":1,"y":0},
+        "layout":{"type":"tiled","columns":[{"id":"logs-column","weight":1,
+        "windows":[{"id":"logs-window","target":{"type":"logs","host":"shared"}}]}]}
+    }));
+    init(&store, doc, "first").await;
+    let before = canonical(&store, "a").await;
+    let mut incoming = document(0);
+    incoming.0["views"][0]["layout"]["columns"] = json!([
+        {"id":"a","weight":2,"windows":[
+            {"id":"same-session","target":{"type":"session","id":id,"host":"new-name","hostId":host_a}},
+            {"id":"same-settings","target":{"type":"settings","section":"appearance"}},
+            {"id":"container","height":0.4,"span":2,"target":{"type":"containers","host":"shared"}}
+        ]},
+        {"id":"b","weight":3,"windows":[{"id":"same-log","target":{"type":"logs","host":"shared"}}]},
+        {"id":"c","weight":4,"windows":[
+            {"id":"other-host","height":0.6,"target":{"type":"session","id":id,"host":"new-name","hostId":host_b}},
+            {"id":"same-container","target":{"type":"containers","host":"shared"}}
+        ]}
+    ]);
+    assert_eq!(init(&store, incoming, "second").await, 2);
+    let merged = canonical(&store, "a").await;
+    assert_eq!(merged.windows().count(), 5);
+    assert_eq!(merged.0["views"][1], before.0["views"][1]);
+    let columns = merged.0["views"][0]["layout"]["columns"]
+        .as_array()
+        .unwrap();
+    assert_eq!(columns.len(), 4);
+    assert_eq!(columns[0], before.0["views"][0]["layout"]["columns"][0]);
+    for (column, weight) in columns[1..].iter().zip([2.0, 3.0, 4.0]) {
+        assert_eq!(column["weight"].as_f64(), Some(weight));
+    }
+    assert_eq!(columns[1]["windows"][0]["height"], 0.4);
+    assert_eq!(columns[1]["windows"][0]["span"], 2);
+    assert_eq!(columns[1]["windows"][0]["target"]["type"], "containers");
+    assert_eq!(columns[2]["windows"], json!([]));
+    assert_eq!(columns[3]["windows"][0]["height"], 0.6);
+    assert_eq!(columns[3]["windows"][0]["target"]["hostId"], json!(host_b));
+}
