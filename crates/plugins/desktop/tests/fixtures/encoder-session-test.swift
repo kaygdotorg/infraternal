@@ -35,9 +35,12 @@ enum HelperFailure: Error { case invalid, permission, unavailable }
     }
 
     static func main() throws {
-        let dropped = EncodeResult(parameters: LowDelayParameterSets())
+        let dropped = EncodeResult(parameters: LowDelayParameterSets(), measure: true)
         encodedCallback(nil, Unmanaged.passUnretained(dropped).toOpaque(), noErr, .frameDropped, nil)
         guard try dropped.completedPayload(timeout: .now()) == nil else { fatalError("a dropped frame must complete without retiring capture") }
+        guard dropped.callbackBegan > 0, dropped.callbackFinished >= dropped.callbackBegan else {
+            fatalError("callback completion must publish its ordered diagnostic interval")
+        }
         for (status,flags) in [(OSStatus(-12902), VTEncodeInfoFlags.frameDropped), (noErr, VTEncodeInfoFlags())] {
             let failed = EncodeResult(parameters: LowDelayParameterSets())
             encodedCallback(nil, Unmanaged.passUnretained(failed).toOpaque(), status, flags, nil)

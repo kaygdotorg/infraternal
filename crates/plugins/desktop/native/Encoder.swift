@@ -62,7 +62,12 @@ private func annexB(_ sample: CMSampleBuffer, parameters: LowDelayParameterSets)
 final class EncodeResult {
     let done = DispatchSemaphore(value:0)
     let parameters: LowDelayParameterSets
-    init(parameters: LowDelayParameterSets) { self.parameters = parameters }
+    let measure: Bool
+    var callbackBegan: UInt64 = 0
+    var callbackFinished: UInt64 = 0
+    init(parameters: LowDelayParameterSets, measure: Bool = false) {
+        self.parameters = parameters; self.measure = measure
+    }
     var payload: Data?
     var dropped = false
     func completedPayload(timeout: DispatchTime) throws -> Data? {
@@ -81,7 +86,13 @@ let encodedCallback: VTCompressionOutputCallback = { _, context, status, flags, 
     guard let context else { return }
     // The submitter retains this object until completion or invalidation.
     let result = Unmanaged<EncodeResult>.fromOpaque(context).takeUnretainedValue()
-    defer { result.done.signal() }
+    if result.measure { result.callbackBegan = mach_absolute_time() }
+    defer {
+        if result.measure { result.callbackFinished = mach_absolute_time() }
+        // The semaphore publishes callback fields and output together. These
+        // stamps never assume that an asynchronous submit returned first.
+        result.done.signal()
+    }
     guard status == noErr else { fputs("ENCODER callback_status=\(status)\n",stderr); return }
     if flags.contains(.frameDropped) { result.dropped = true; return }
     guard let sample else { fputs("ENCODER callback_no_sample flags=\(flags.rawValue)\n",stderr); return }
@@ -93,6 +104,7 @@ let encodedCallback: VTCompressionOutputCallback = { _, context, status, flags, 
 }
 
 final class Encoder {
+    private let measure = ProcessInfo.processInfo.environment["INFRATERNAL_DESKTOP_MEASURE"] != nil
     private let parameters = LowDelayParameterSets()
     private var session: VTCompressionSession?
     private(set) var width = 0
@@ -184,12 +196,14 @@ final class Encoder {
     func encodeSurface(_ pixel: CVPixelBuffer, ticks: UInt64, force: Bool, bitrate: Int) throws -> Data? {
         guard CVPixelBufferGetWidth(pixel) == width, CVPixelBufferGetHeight(pixel) == height, let session else { throw HelperFailure.invalid }
         let begin = mach_absolute_time()
+        let rateChanged = lastBitrate != bitrate
         // A settled refresh gets a larger intra-frame budget; restore the motion
         // budget on the next submission instead of queueing quality work.
         if lastBitrate != bitrate {
             try set(kVTCompressionPropertyKey_AverageBitRate,NSNumber(value:bitrate)); lastBitrate = bitrate
         }
-        let result = EncodeResult(parameters:parameters)
+        let configured = measure ? mach_absolute_time() : 0
+        let result = EncodeResult(parameters:parameters, measure:measure)
         // The C callback owns only an unretained pointer. ARC may otherwise end
         // this local's lifetime after the throwing wait, before catch invalidates
         // a timed-out session. Keep it alive through every completion/error path.
@@ -198,12 +212,14 @@ final class Encoder {
         // One reusable input buffer is in flight; it is not overwritten until completion.
         let options = force ? [kVTEncodeFrameOptionKey_ForceKeyFrame as String:true] as CFDictionary : nil
         let time = CMTime(value:Int64(nanos(mach_absolute_time())),timescale:1_000_000_000)
+        let submitting = measure ? mach_absolute_time() : 0
         let status = VTCompressionSessionEncodeFrame(session,imageBuffer:pixel,presentationTimeStamp:time,duration:CMTime(value:1,timescale:Int32(frameRate)),frameProperties:options,sourceFrameRefcon:pointer,infoFlagsOut:nil)
+        let submitted = measure ? mach_absolute_time() : 0
         guard status == noErr else { fputs("ENCODER submit_status=\(status)\n",stderr); stop(); throw HelperFailure.unavailable }
         let payload: Data
         do {
             guard let completed = try result.completedPayload(timeout:.now()+2) else {
-                if ProcessInfo.processInfo.environment["INFRATERNAL_DESKTOP_MEASURE"] != nil { fputs("METRIC encoder_drop=1\n",stderr) }
+                if measure { fputs("METRIC encoder_drop=1\n",stderr) }
                 return nil
             }
             payload = completed
@@ -211,8 +227,11 @@ final class Encoder {
             // Invalidate synchronizes callbacks before result and source are released.
             stop(); throw error
         }
-        if ProcessInfo.processInfo.environment["INFRATERNAL_DESKTOP_MEASURE"] != nil {
-            fputs("METRIC encode_ns=\(nanos(mach_absolute_time()-begin)) encode_finished_ns=\(nanos(mach_absolute_time())) bytes=\(payload.count-1) capture_ns=\(nanos(ticks)) codec=\(codec == kCMVideoCodecType_HEVC ? "hevc" : "h264")\n",stderr)
+        if measure {
+            let finished = mach_absolute_time()
+            // Submit and callback can overlap. Configuration plus callback delay
+            // plus conversion describe the critical path; submit is separate.
+            fputs("METRIC encode_ns=\(nanos(finished-begin)) encode_finished_ns=\(nanos(finished)) encode_config_ns=\(nanos(configured-begin)) encode_submit_ns=\(nanos(submitted-submitting)) encode_callback_delay_ns=\(nanos(result.callbackBegan-submitting)) encode_conversion_ns=\(nanos(result.callbackFinished-result.callbackBegan)) encode_return_ns=\(nanos(finished-max(submitted,result.callbackFinished))) encode_rate_changed=\(rateChanged ? 1 : 0) bytes=\(payload.count-1) capture_ns=\(nanos(ticks)) codec=\(codec == kCMVideoCodecType_HEVC ? "hevc" : "h264")\n",stderr)
         }
         var stamp = nanos(ticks).bigEndian
         return withUnsafeBytes(of:&stamp) { Data($0) } + payload
