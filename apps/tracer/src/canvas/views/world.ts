@@ -48,8 +48,8 @@ export interface ViewsModule {
    * FLIP around it, as they do for any other reflow.
    */
   fitWidths(c: ViewRec, was?: Metrics): void;
-  /** After a view changed size: push neighbours aside (never the changed one). */
-  settle(fixedId: ViewId, at?: { x: number; y: number }): void;
+  /** After a view changed size: push neighbours aside; display-only placement keeps saved cells intact. */
+  settle(fixedId: ViewId, at?: { x: number; y: number }, displayOnly?: boolean): void;
   paintEmpty(c: ViewRec): void;
   /** Rebuilds a view from its model, in place in the order. */
   replace(id: ViewId): void;
@@ -336,20 +336,22 @@ export function createViews(cx: Ctx): ViewsModule {
    * and the others move, at once and never animated: this runs when a layout arrives, and a view must not slide in from
    * where the desktop had it. How this device draws is not what the layout says. The saved position stays in `home`, which
    * is what a save writes (`toDocument`), so a phone never moves a view in the shared layout.
+   * Incoming snapshots use the same display-only settlement on desktop: cached geometry and generated Settings
+   * can also overlap newly restored content, without the person having moved a shared view.
    */
-  function settle(fixedId: ViewId, at?: { x: number; y: number }): void {
-    const touch = state.metrics.minW > 0 && !at;
+  function settle(fixedId: ViewId, at?: { x: number; y: number }, displayOnly = state.metrics.minW > 0): void {
+    const local = displayOnly && !at;
     const trial = boxes().map((b) => (at && b.id === fixedId ? { ...b, x: at.x, y: at.y } : b));
-    const next = resolve(trial, touch && views.has(state.currentView) ? state.currentView : fixedId);
+    const next = resolve(trial, local && views.has(state.currentView) ? state.currentView : fixedId);
     for (const c of views.values()) {
       const p = next.get(c.view.id);
       if (!p || (p.x === c.view.x && p.y === c.view.y)) continue;
-      if (touch) {
+      if (local) {
         c.view.home ??= { x: c.view.x, y: c.view.y };
         if (c.view.home.x === p.x && c.view.home.y === p.y) delete c.view.home;
       }
       c.view.x = p.x; c.view.y = p.y;
-      c.sx.set(p.x, touch); c.sy.set(p.y, touch);
+      c.sx.set(p.x, local); c.sy.set(p.y, local);
     }
   }
 

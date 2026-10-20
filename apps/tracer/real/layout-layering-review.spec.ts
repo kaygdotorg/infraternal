@@ -1,5 +1,5 @@
 /** Verifies settled cross-view geometry on a production-shaped recovered account (#243, D119, D248). */
-import { expect, test } from "playwright/test";
+import { devices, expect, test } from "playwright/test";
 import { spawnSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { cache, enrol, request, settled, windows } from "./layout-devices";
@@ -8,9 +8,12 @@ import { tracerEvidencePath } from "../test/evidence-path";
 import { isMacPlatform } from "../../../packages/ui/src/platform";
 
 test.setTimeout(180_000);
-test("settled Console has no Mesh or Settings content over its windows", async ({ browser }) => {
+for (const profile of [
+  { name: "desktop", options: { viewport: { width: 1440, height: 900 } } },
+  { name: "phone", options: { ...devices["iPhone 15"], viewport: { width: 393, height: 852 } } },
+]) test(`settled Console has no Mesh or Settings content over its windows (${profile.name})`, async ({ browser }) => {
   const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4387) });
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
+  const context = await browser.newContext({ ...profile.options, ignoreHTTPSErrors: true });
   try {
     const page = await context.newPage();
     await enrol(page, server);
@@ -45,7 +48,8 @@ with sqlite3.connect(sys.argv[1]) as db:
     });
     await page.reload();
     await expect(windows(page)).toHaveCount(44);
-    await expect(page.locator('.cl[data-view="mesh"] .cl-graph-arrows')).toHaveCount(1);
+    // Graph drawing is lazy when its view is off screen on a phone; its content footprint still participates in settlement.
+    if (profile.name === "desktop") await expect(page.locator('.cl[data-view="mesh"] .cl-graph-arrows')).toHaveCount(1);
     await expect.poll(async () => (await cache(page)).canonical.revision).toBeGreaterThan(2);
     await settled(page);
     // A complete frame sequence and stable DOM distinguish resting overlap from a transition capture.
@@ -61,9 +65,9 @@ with sqlite3.connect(sys.argv[1]) as db:
     });
     const first = await measure();
     const second = await measure();
-    await page.screenshot({ path: tracerEvidencePath("layering-settled.png") });
-    await writeFile(tracerEvidencePath("layering-geometry.json"), JSON.stringify({ first, second }, null, 2));
-    // Also prove the cached cold-load path still submits an edit after the graph module has loaded.
+    await page.screenshot({ path: tracerEvidencePath(`layering-${profile.name}-settled.png`) });
+    await writeFile(tracerEvidencePath(`layering-${profile.name}-geometry.json`), JSON.stringify({ first, second }, null, 2));
+    // Also prove the cached cold-load path still submits an edit after reconciliation.
     const revision = (await cache(page)).canonical.revision;
     await windows(page).first().dispatchEvent("pointerdown", { button: 0 });
     await page.keyboard.press(await page.evaluate(isMacPlatform) ? "Meta+d" : "Control+Shift+D");
