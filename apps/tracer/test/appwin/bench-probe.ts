@@ -18,7 +18,7 @@ let session: string | undefined;
 let openedSockets = 0;
 let closedSockets = 0;
 let nextSocket = 0;
-interface SocketEvent { at: number; socket: number; event: "open" | "close" | "client-close"; viewer: boolean; code?: number; reason?: string; clean?: boolean }
+interface SocketEvent { at: number; socket: number; event: "open" | "close" | "client-close" | "server-close"; viewer: boolean; code?: number; reason?: string; clean?: boolean }
 const socketEvents: SocketEvent[] = [];
 
 if (!window.__benchResourcesOnly) globalThis.WebSocket = class extends NativeSocket {
@@ -34,6 +34,7 @@ if (!window.__benchResourcesOnly) globalThis.WebSocket = class extends NativeSoc
     this.addEventListener("message", (event) => {
       if (!(event.data instanceof ArrayBuffer)) return;
       incoming.feed(new Uint8Array(event.data), (_stream, frame) => {
+        if (frame.type === "Close" && _stream === 0) limit(socketEvents, { at: now(), socket: this.identity, event: "server-close", viewer: this.viewer, code: frame.code, reason: plainCloseReason(frame.reason, "other") });
         if (frame.type === "Pong") {
           const began = this.probes.get(frame.nonce);
           if (began !== undefined && began.sentUs === frame.sentUs) { limit(roundTrips, { at: now(), ms: now() - began.at }); this.probes.delete(frame.nonce); }

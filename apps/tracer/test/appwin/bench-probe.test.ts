@@ -1,11 +1,12 @@
 /** Role: keep per-socket lifecycle receipts useful without retaining peer-provided close text (#146). */
 import { expect, test } from "bun:test";
 import { runInNewContext } from "node:vm";
+import { encodeMuxedFrame } from "../../../../packages/protocol/src/codec";
 
-async function lifecycle(reason: string): Promise<{ opened: number; closed: number; history: Array<{ event: string; reason?: string; socket: number }> }> {
+async function lifecycle(reason: string, server = false): Promise<{ opened: number; closed: number; history: Array<{ event: string; reason?: string; socket: number }> }> {
   const result = await Bun.build({ entrypoints: [import.meta.dirname + "/bench-probe.ts"], target: "browser", format: "iife" });
   expect(result.success).toBe(true);
-  type Event = { code?: number; reason?: string; wasClean?: boolean };
+  type Event = { code?: number; reason?: string; wasClean?: boolean; data?: ArrayBuffer };
   const events = new Map<string, Array<(event: Event) => void>>();
   class Socket {
     addEventListener(name: string, listener: (event: Event) => void): void { events.set(name, [...(events.get(name) ?? []), listener]); }
@@ -17,6 +18,10 @@ async function lifecycle(reason: string): Promise<{ opened: number; closed: numb
   runInNewContext(await result.outputs[0]!.text(), scope);
   const socket = new scope.WebSocket();
   for (const listener of events.get("open") ?? []) listener({});
+  if (server) {
+    const frame = encodeMuxedFrame(0, { type: "Close", code: 1001, reason });
+    for (const listener of events.get("message") ?? []) listener({ data: frame.slice().buffer });
+  }
   socket.close(4000, reason);
   for (const listener of events.get("close") ?? []) listener({ code: 4000, reason, wasClean: true });
   return (scope.window as unknown as { __appWindowBench: { sockets: Awaited<ReturnType<typeof lifecycle>> } }).__appWindowBench.sockets;
@@ -34,4 +39,12 @@ test("a liveness retirement keeps its mapped reason and socket identity", async 
   const rows = await lifecycle("connection unresponsive");
   expect(rows.history[1]?.reason).toBe("The connection did not respond in time.");
   expect(rows.history.every(row => row.socket === 1)).toBe(true);
+});
+
+
+test("a protocol close retains only its registered reason", async () => {
+  const rows = await lifecycle("the server was too busy to confirm the session", true);
+  expect(rows.history.find(row => row.event === "server-close")?.reason).toBe("The server was too busy to confirm your session.");
+  const unknown = await lifecycle("unrecognized-private-text", true);
+  expect(JSON.stringify(unknown)).not.toContain("unrecognized-private-text");
 });
