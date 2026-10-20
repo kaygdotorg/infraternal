@@ -174,16 +174,24 @@ impl Store {
             } else {
                 model::string(&request, "op_id").ok_or(Error)?
             };
-            let action = if initialize { "initialize" } else { "apply" };
             // Permanent retry receipts retain the existing SHA-256 digest, never a
             // second copy of a bootstrap document. Canonical JSON ignores key order.
             let request_hash = if maintenance {
                 String::new()
             } else {
-                crate::auth::hash(&serde_json::to_string(&model::object(vec![
-                    ("action", Value::from(action)),
-                    ("input", request.clone()),
-                ]))?)
+                // The original envelope sorts action before input. Only the fixed
+                // header is literal; serde_json still encodes every input value.
+                let mut envelope = serde_json::to_string(&request)?;
+                envelope.insert_str(
+                    0,
+                    if initialize {
+                        r#"{"action":"initialize","input":"#
+                    } else {
+                        r#"{"action":"apply","input":"#
+                    },
+                );
+                envelope.push('}');
+                crate::auth::hash(&envelope)
             };
             let _writer = self.writes.lock().await;
             let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool).await?;
