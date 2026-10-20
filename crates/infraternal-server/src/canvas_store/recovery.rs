@@ -76,6 +76,10 @@ pub(super) fn merge(document: &mut Document, mut incoming: Document) -> Result<(
             if views.iter().any(|v| v["kind"] == view["kind"]) {
                 return Err(());
             }
+            // A surviving stale-device copy becomes an ordinary view, even if its original is gone.
+            if let Some(base) = name.strip_prefix("Recovered: ") {
+                view["name"] = Value::from(base);
+            }
             if views.iter().any(|v| v["id"] == view["id"]) {
                 view["id"] = Value::from(uuid::Uuid::new_v4().to_string());
             }
