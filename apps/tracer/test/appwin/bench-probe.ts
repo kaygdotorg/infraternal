@@ -18,7 +18,7 @@ let session: string | undefined;
 let openedSockets = 0;
 let closedSockets = 0;
 let nextSocket = 0;
-interface SocketEvent { at: number; socket: number; event: "open" | "close" | "client-close" | "server-close"; viewer: boolean; code?: number; reason?: string; clean?: boolean }
+interface SocketEvent { at: number; socket: number; event: "open" | "close" | "client-close" | "server-close"; viewer: boolean; code?: number; reason?: string; clean?: boolean; probes?: { pending: Array<{ nonce: string; sentUs: string; ageMs: number }>; lastPongMs: number | null; lastInboundMs: number | null; bufferedBytes: number; hidden: boolean } }
 const socketEvents: SocketEvent[] = [];
 
 if (!window.__benchResourcesOnly) globalThis.WebSocket = class extends NativeSocket {
@@ -26,6 +26,8 @@ if (!window.__benchResourcesOnly) globalThis.WebSocket = class extends NativeSoc
   private readonly identity = ++nextSocket;
   private viewer = false;
   private readonly probes = new Map<bigint, { at: number; sentUs: bigint }>();
+  private lastPong: number | undefined;
+  private lastInbound: number | undefined;
   constructor(...args: ConstructorParameters<typeof WebSocket>) {
     super(...args);
     this.addEventListener("open", () => { openedSockets++; limit(socketEvents, { at: now(), socket: this.identity, event: "open", viewer: this.viewer }); });
@@ -33,11 +35,18 @@ if (!window.__benchResourcesOnly) globalThis.WebSocket = class extends NativeSoc
     const incoming = new WebSocketFrameDecoder();
     this.addEventListener("message", (event) => {
       if (!(event.data instanceof ArrayBuffer)) return;
+      this.lastInbound = now();
       incoming.feed(new Uint8Array(event.data), (_stream, frame) => {
         if (frame.type === "Close" && _stream === 0) limit(socketEvents, { at: now(), socket: this.identity, event: "server-close", viewer: this.viewer, code: frame.code, reason: plainCloseReason(frame.reason, "other") });
         if (frame.type === "Pong") {
           const began = this.probes.get(frame.nonce);
-          if (began !== undefined && began.sentUs === frame.sentUs) { limit(roundTrips, { at: now(), ms: now() - began.at }); this.probes.delete(frame.nonce); }
+          if (began !== undefined && began.sentUs === frame.sentUs) {
+            this.lastPong = now();
+            limit(roundTrips, { at: this.lastPong, ms: this.lastPong - began.at });
+            // Match the connection's cumulative proof: a newer reply redeems
+            // older unanswered probes too. Only actual outstanding waits count.
+            for (const nonce of this.probes.keys()) if (nonce <= frame.nonce) this.probes.delete(nonce);
+          }
         }
         if (frame.type === "Desktop" && frame.message.kind === "video") {
           const v = frame.message;
@@ -48,7 +57,14 @@ if (!window.__benchResourcesOnly) globalThis.WebSocket = class extends NativeSoc
   }
   override close(code?: number, reason?: string): void {
     // Peer text never enters receipts: reuse the application's fixed reason map.
-    limit(socketEvents, { at: now(), socket: this.identity, event: "client-close", viewer: this.viewer, ...(code === undefined ? {} : { code }), reason: plainCloseReason(reason, "other") });
+    const at = now();
+    const probes = reason === "connection unresponsive" ? {
+      pending: [...this.probes].map(([nonce, probe]) => ({ nonce: nonce.toString(), sentUs: probe.sentUs.toString(), ageMs: at - probe.at })),
+      lastPongMs: this.lastPong === undefined ? null : at - this.lastPong,
+      lastInboundMs: this.lastInbound === undefined ? null : at - this.lastInbound,
+      bufferedBytes: this.bufferedAmount, hidden: document.hidden,
+    } : undefined;
+    limit(socketEvents, { at, socket: this.identity, event: "client-close", viewer: this.viewer, ...(code === undefined ? {} : { code }), reason: plainCloseReason(reason, "other"), ...(probes ? { probes } : {}) });
     super.close(code, reason);
   }
   override send(data: Parameters<WebSocket["send"]>[0]): void {

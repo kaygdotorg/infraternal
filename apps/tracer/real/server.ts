@@ -92,6 +92,22 @@ export interface DesktopStage {
   captureNs: string;
   bytes: number;
 }
+
+/** Content-free control probes isolate server handling from browser/network waits (#146). */
+export interface ProbeStage {
+  phase: "browser_ping" | "server_pong";
+  socket: number;
+  nonce: string;
+  sentUs: string;
+  at: number;
+}
+
+/** Project matching control probes only; action bodies and bootstrap sockets are excluded. */
+export function probeStage(phase: ProbeStage["phase"], socket: number, stream: number, frame: WireFrame, at: number): ProbeStage | undefined {
+  if (stream !== 0 || (phase === "browser_ping" ? frame.type !== "Ping" : frame.type !== "Pong")) return undefined;
+  if (frame.type !== "Ping" && frame.type !== "Pong") return undefined;
+  return { phase, socket, nonce: frame.nonce.toString(), sentUs: frame.sentUs.toString(), at };
+}
 const text = new TextDecoder();
 
 /**
@@ -104,6 +120,8 @@ export async function startRealServer(options: {
   timedControls?: boolean;
   /** Explicit native-window measurement only; bootstrap messages never enter it. */
   onDesktopStage?: (receipt: DesktopStage) => void;
+  /** Explicit reconnect diagnosis only; these are same-host handling intervals. */
+  onProbeStage?: (receipt: ProbeStage) => void;
   /** The bridge does not decode or keep the server's output (benchmarks with busy terminals). */
   lean?: boolean;
   address?: string;
@@ -223,7 +241,7 @@ export async function startRealServer(options: {
       if (protocol) bridges.push(bridge);
       const inbound = new WebSocketFrameDecoder();
       const outbound = new WebSocketFrameDecoder();
-      const desktopDecoder = options.onDesktopStage && protocol ? new WebSocketFrameDecoder() : undefined;
+      const desktopDecoder = (options.onDesktopStage || options.onProbeStage) && protocol ? new WebSocketFrameDecoder() : undefined;
       const queued: Array<{ bytes: Buffer; binary: boolean }> = [];
       let pendingUpstreamMessages = 0;
       let closeBrowserWhenDrained = false;
@@ -235,6 +253,10 @@ export async function startRealServer(options: {
       browser.on("message", (data, binary) => {
         const bytes = Buffer.from(data as Buffer);
         if (protocol && binary) inbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
+          if (options.onProbeStage) {
+            const probe = probeStage("browser_ping", bridge.id, stream, f, performance.timeOrigin + performance.now());
+            if (probe) options.onProbeStage(probe);
+          }
           if (process.env.REAL_FRAME_LOG === "1") {
             // Input bytes can contain private terminal input; record only frame type and bounded metadata.
             const detail = f.type === "Input" ? ` bytes=${f.bytes.byteLength}`
@@ -261,6 +283,10 @@ export async function startRealServer(options: {
         const bytes = Buffer.from(data as Buffer);
         const desktop: Omit<DesktopStage, "stage" | "at">[] | undefined = desktopDecoder ? [] : undefined;
         if (desktopDecoder && binary && desktop) desktopDecoder.feed(new Uint8Array(bytes), (_stream, frame) => {
+          if (options.onProbeStage) {
+            const probe = probeStage("server_pong", bridge.id, _stream, frame, receivedAt);
+            if (probe) options.onProbeStage(probe);
+          }
           if (frame.type !== "Desktop" || frame.message.kind !== "video" || desktop.length === 128) return;
           const video = frame.message;
           const identity = { sequence: video.sequence.toString(), captureNs: video.captureNs.toString(), bytes: video.bytes.length };

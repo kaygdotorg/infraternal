@@ -19,8 +19,10 @@
  * APP_WINDOW_RECOVERY=1 explicitly enables the separate drop/reopen/resize case;
  * APP_WINDOW_STABILITY_SECONDS=180 selects its short diagnostic duration.
  * APP_WINDOW_MAC_ONLY=1 omits guest access and records no guest-idle evidence.
+ * APP_WINDOW_PROBE_TRACE=1 records bounded, content-free control-probe handling
+ * for reconnect diagnosis; it never changes the production liveness deadline.
  */
-import { startRealServer, type DesktopStage } from '../../real/server';
+import { startRealServer, type DesktopStage, type ProbeStage } from '../../real/server';
 import { plainCloseReason } from '../../src/close-reasons';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -35,6 +37,7 @@ if(!['default','surface','owned'].includes(pipeline))throw Error('invalid captur
 const desynchronized=process.env.APP_WINDOW_DESYNCHRONIZED==='1';
 const resourcesOnly=process.env.APP_WINDOW_RESOURCES_ONLY==='1';
 const pipelineDiagnostics=!resourcesOnly&&process.env.APP_WINDOW_PIPELINE_DIAGNOSTICS!=='0';
+const probeTrace=process.env.APP_WINDOW_PROBE_TRACE==='1';
 const codec=process.env.APP_WINDOW_CODEC??'h264';
 const hardwareHint=process.env.APP_WINDOW_HARDWARE_HINT??'';
 if(!['','no-preference','prefer-hardware','prefer-software'].includes(hardwareHint))throw Error('invalid decoder hint');
@@ -75,6 +78,7 @@ process.env.REAL_SERVER_LOG='1';
 process.env.RUST_LOG='infraternal_server::remote_enrollment=debug';
 
 const diagnostics:string[]=[];const fixtureStages:unknown[]=[];
+const probeStages:ProbeStage[]=[];let droppedProbeStages=0;
 const stderr=process.stderr.write.bind(process.stderr);let pending='';
 process.stderr.write=((data:unknown,...rest:unknown[])=>{
  const value=String(data);
@@ -109,6 +113,7 @@ try{
  for(const [name,path] of Object.entries({binary:process.env.INFRATERNAL_BIN!,controller:import.meta.path,macDriver:import.meta.dirname+'/measure-mac.py',companionLauncher:import.meta.dirname+'/launch-companion.py',processIdentity:import.meta.dirname+'/process_identity.py',pixelObserver:import.meta.dirname+'/worker-pixel-observer.js',probe:import.meta.dirname+'/bench-probe.ts',nativeFixture:worktree+'/crates/plugins/desktop/tests/fixtures/latency-window.swift',worker:workerOverride??worktree+'/apps/tracer/dist/decode.worker.on-demand.js'}))manifest[name]=new Bun.CryptoHasher('sha256').update(await readFile(path)).digest('hex');
  manifest.worktreeDiffSha256=new Bun.CryptoHasher('sha256').update(Bun.spawnSync(['git','diff','HEAD'],{cwd:worktree}).stdout).digest('hex');
  manifest.probeBundle=new Bun.CryptoHasher('sha256').update(await bundle.outputs[0]!.text()).digest('hex');
+ manifest.probeTrace=probeTrace;
  await writeFile(E+'/input-manifest.json',JSON.stringify(manifest,null,2));
  const staged=spawn('netbird',['ssh','--no-browser','kayg@10.69.69.101','cat > ~/infraternal-bench/app-windows-latency/venue-mac.py'],{stdio:['pipe','ignore','pipe']});
  staged.stdin!.end(await readFile(import.meta.dirname+'/measure-mac.py'));
@@ -132,7 +137,7 @@ try{
    if(!ready){mac!.stdin!.write(JSON.stringify({ready:false,idle})+'\n');return;}
   }
   readinessPhase='server';
-  server=await startRealServer({address:'10.69.69.125',hostname:'localhost',port,remoteListen:'10.69.69.125:'+String(port+1000),stateRoot:ROOT+'/server-state',lean:true,...(!pipelineDiagnostics?{}:{onDesktopStage:(receipt:DesktopStage)=>{fixtureStages.push(receipt);}})});
+  server=await startRealServer({address:'10.69.69.125',hostname:'localhost',port,remoteListen:'10.69.69.125:'+String(port+1000),stateRoot:ROOT+'/server-state',lean:true,...(!probeTrace?{}:{onProbeStage:(receipt:ProbeStage)=>{if(probeStages.length<100000)probeStages.push(receipt);else droppedProbeStages++;}}),...(!pipelineDiagnostics?{}:{onDesktopStage:(receipt:DesktopStage)=>{fixtureStages.push(receipt);}})});
   console.log(JSON.stringify({kind:'server',pid:server.pid,controller_pid:process.pid,label}));
   mac!.stdin!.write(JSON.stringify({ready:true,idle:vmIdle,origin:server.origin,token:server.token})+'\n');
  };
@@ -171,6 +176,8 @@ try{
  // Bridge state also contains private fixture authority; persist this whitelist only.
  await writeFile(E+'/socket-bridges.json',JSON.stringify(server?.bridges.map(bridge=>({id:bridge.id,closed:bridge.closed,at:bridge.closedAt,side:/^(browser|server) [0-9]+$/.test(bridge.closedBy??'')?bridge.closedBy:'other',reason:plainCloseReason(bridge.closedReason,'other'),serverReason:plainCloseReason(bridge.serverClose,'other')}))??[]));
  await writeFile(E+'/fixture-stages.json',JSON.stringify(fixtureStages));
+ await writeFile(E+'/fixture-probes.json',JSON.stringify({dropped:droppedProbeStages,events:probeStages}));
+ if(probeTrace){console.log(JSON.stringify({kind:'probe_trace',recorded:probeStages.length,dropped:droppedProbeStages}));if(droppedProbeStages)process.exitCode=1;}
  await writeFile(E+'/server-stages.log',diagnostics.join('\n')+'\n');
  try { await server?.dispose(); } finally { await unlink(runtimeAlias); }
  console.log(JSON.stringify({kind:'local_cleanup',server_pid:server?.pid}));

@@ -12,7 +12,7 @@ test("Mac-only readiness never starts a guest command", async () => {
   const replies: unknown[] = [];
   const starts: unknown[] = [];
   const prepare = new Function("macOnly", "startRealServer", "mac", "ROOT", "port", "pipelineDiagnostics", "console", "spawn", `
-    let vmIdle=[];let readinessPhase='vm';let server;const label='test';
+    let vmIdle=[];let readinessPhase='vm';let server;const label='test';const probeTrace=false;
     ${javascript}
   `);
   await prepare(true, async (options: unknown) => {

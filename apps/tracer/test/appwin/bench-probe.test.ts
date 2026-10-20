@@ -3,21 +3,37 @@ import { expect, test } from "bun:test";
 import { runInNewContext } from "node:vm";
 import { encodeMuxedFrame } from "../../../../packages/protocol/src/codec";
 
-async function lifecycle(reason: string, server = false): Promise<{ opened: number; closed: number; history: Array<{ event: string; reason?: string; socket: number }> }> {
+async function lifecycle(reason: string, server = false, probes = false): Promise<{ opened: number; closed: number; history: Array<{ event: string; reason?: string; socket: number; probes?: { pending: Array<{ nonce: string; sentUs: string; ageMs: number }>; lastPongMs: number | null; lastInboundMs: number | null; bufferedBytes: number; hidden: boolean } }> }> {
   const result = await Bun.build({ entrypoints: [import.meta.dirname + "/bench-probe.ts"], target: "browser", format: "iife" });
   expect(result.success).toBe(true);
   type Event = { code?: number; reason?: string; wasClean?: boolean; data?: ArrayBuffer };
   const events = new Map<string, Array<(event: Event) => void>>();
   class Socket {
+    bufferedAmount = 0;
     addEventListener(name: string, listener: (event: Event) => void): void { events.set(name, [...(events.get(name) ?? []), listener]); }
-    send(): void {}
+    send(_data: Uint8Array): void {}
     close(_code?: number, _reason?: string): void {}
   }
-  const scope = { window: { addEventListener(): void {} }, WebSocket: Socket, Worker: class {}, TextDecoder, TextEncoder,
-    performance: { timeOrigin: 1000, now: () => 1 }, Uint8Array, ArrayBuffer, setTimeout, clearTimeout };
+  let clock = 1;
+  const scope = { window: { addEventListener(): void {} }, document: { hidden: false }, WebSocket: Socket, Worker: class {}, TextDecoder, TextEncoder,
+    performance: { timeOrigin: 1000, now: () => clock }, Uint8Array, ArrayBuffer, setTimeout, clearTimeout };
   runInNewContext(await result.outputs[0]!.text(), scope);
   const socket = new scope.WebSocket();
   for (const listener of events.get("open") ?? []) listener({});
+  if (probes) {
+    socket.send(encodeMuxedFrame(0, { type: "Ping", nonce: 1n, sentUs: 1000n }));
+    clock = 2;
+    socket.send(encodeMuxedFrame(0, { type: "Ping", nonce: 2n, sentUs: 2000n }));
+    clock = 10;
+    const reply = encodeMuxedFrame(0, { type: "Pong", nonce: 2n, sentUs: 2000n });
+    for (const listener of events.get("message") ?? []) listener({ data: reply.slice().buffer });
+    clock = 11;
+    socket.send(encodeMuxedFrame(0, { type: "Ping", nonce: 3n, sentUs: 11000n }));
+    clock = 20;
+    const unrelated = encodeMuxedFrame(0, { type: "Pong", nonce: 3n, sentUs: 11001n });
+    for (const listener of events.get("message") ?? []) listener({ data: unrelated.slice().buffer });
+    clock = 601;
+  }
   if (server) {
     const frame = encodeMuxedFrame(0, { type: "Close", code: 1001, reason });
     for (const listener of events.get("message") ?? []) listener({ data: frame.slice().buffer });
@@ -39,6 +55,14 @@ test("a liveness retirement keeps its mapped reason and socket identity", async 
   const rows = await lifecycle("connection unresponsive");
   expect(rows.history[1]?.reason).toBe("The connection did not respond in time.");
   expect(rows.history.every(row => row.socket === 1)).toBe(true);
+});
+
+test("a retirement records unanswered probes without reviving cumulatively answered ones", async () => {
+  const rows = await lifecycle("connection unresponsive", false, true);
+  expect(rows.history.find(row => row.event === "client-close")?.probes).toEqual({
+    pending: [{ nonce: "3", sentUs: "11000", ageMs: 590 }],
+    lastPongMs: 591, lastInboundMs: 581, bufferedBytes: 0, hidden: false,
+  });
 });
 
 
