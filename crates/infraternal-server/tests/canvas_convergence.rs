@@ -15,6 +15,10 @@ async fn fixture() -> (Store, sqlx::SqlitePool) {
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0030_canvas_receipt_count.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
     (Store::new(pool.clone()), pool)
 }
 fn document(count: usize) -> Document {
@@ -232,17 +236,19 @@ async fn loading_repairs_only_matching_recovery_views_and_converges_clients() {
         .unwrap()
         .extend([recovered, unrelated]);
     // Seed the historical document directly, as it was written by the old recovery path.
-    sqlx::query("INSERT INTO canvas_heads VALUES('a',2,?,1)")
-        .bind(
-            serde_json::to_string(&Document({
-                doc.0["revision"] = json!(2);
-                doc.0
-            }))
-            .unwrap(),
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO canvas_heads(account,revision,document,initialized) VALUES('a',2,?,1)",
+    )
+    .bind(
+        serde_json::to_string(&Document({
+            doc.0["revision"] = json!(2);
+            doc.0
+        }))
+        .unwrap(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let peer = Store::new(pool.clone());
     let (first, second) = tokio::join!(store.events("a", Some(2)), peer.events("a", Some(2)));
     let first = Document(first.unwrap()[0]["document"].clone());
@@ -447,6 +453,12 @@ async fn no_op_imports_keep_retry_receipts_and_do_not_clear_operation_history() 
         .await
         .unwrap();
     assert_eq!(count, 4);
+    let counter: i64 =
+        sqlx::query_scalar("SELECT receipt_count FROM canvas_heads WHERE account='a'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(counter, count);
     assert_eq!(canonical(&store, "a").await.revision(), 3);
 }
 
@@ -473,11 +485,13 @@ async fn initialize_and_apply_repair_before_writing_and_notify_subscribers() {
         recovery["id"] = json!("recovery");
         recovery["name"] = json!("Recovered: Console");
         doc.0["views"].as_array_mut().unwrap().push(recovery);
-        sqlx::query("INSERT INTO canvas_heads VALUES('a',2,?,1)")
-            .bind(serde_json::to_string(&doc).unwrap())
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO canvas_heads(account,revision,document,initialized) VALUES('a',2,?,1)",
+        )
+        .bind(serde_json::to_string(&doc).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
         let mut changes = store.changes();
         changes.borrow_and_update();
         let revision = if initialize {

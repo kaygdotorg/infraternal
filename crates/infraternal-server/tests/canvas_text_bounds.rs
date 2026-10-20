@@ -21,6 +21,10 @@ async fn imported_name_respects_the_browser_utf16_bound() {
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0030_canvas_receipt_count.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
     let store = Store::new(pool);
     let mut doc = json!({"format":"infraternal.canvas","version":1,"revision":0,"views":[]});
     store

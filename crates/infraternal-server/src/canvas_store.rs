@@ -344,25 +344,19 @@ async fn receipt(
     request_hash: &str,
     revision: i64,
 ) -> Result<Option<i64>, Error> {
-    if let Some(row) =
-        sqlx::query("SELECT request,revision FROM canvas_receipts WHERE account=? AND op_id=?")
-            .bind(account)
-            .bind(id)
-            .fetch_optional(&mut **tx)
-            .await?
-    {
-        if row.get::<String, _>("request") != request_hash {
+    // A matching retry is the first row; otherwise the union yields the account's
+    // transactional receipt counter. LIMIT preserves retry admission at the quota and shares one
+    // row-query future across both paths. No-op imports count without a revision.
+    let row = sqlx::query("SELECT request,revision FROM canvas_receipts WHERE account=? AND op_id=? UNION ALL SELECT NULL,receipt_count FROM canvas_heads WHERE account=? LIMIT 1")
+        .bind(account).bind(id).bind(account).fetch_one(&mut **tx).await?;
+    let value: i64 = row.get("revision");
+    if let Some(request) = row.get::<Option<&str>, _>("request") {
+        if request != request_hash {
             return Err(Error);
         }
-        return Ok(Some(row.get("revision")));
+        return Ok(Some(value));
     }
-    // No-op imports retain receipts without advancing layout revisions. Count
-    // accepted calls rather than revisions; repair revisions have no receipt.
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM canvas_receipts WHERE account=?")
-        .bind(account)
-        .fetch_one(&mut **tx)
-        .await?;
-    if count >= MAX_RECEIPTS || revision >= 9_007_199_254_740_991 {
+    if value >= MAX_RECEIPTS || revision >= 9_007_199_254_740_991 {
         return Err(Error);
     }
     Ok(None)
@@ -508,6 +502,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0030_canvas_receipt_count.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
         Store::new(pool)
     }
     #[tokio::test]
@@ -519,10 +517,12 @@ mod tests {
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&store.pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO canvas_heads VALUES('a',0,'{}',0)")
-            .execute(&mut *tx)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO canvas_heads(account,revision,document,initialized) VALUES('a',0,'{}',0)",
+        )
+        .execute(&mut *tx)
+        .await
+        .unwrap();
         let mut pending = Box::pin(commit(tx, store.changes.clone()));
         let ready =
             std::future::poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_ready())).await;
