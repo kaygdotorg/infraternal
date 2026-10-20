@@ -21,7 +21,6 @@ fn same_target(a: &Value, b: &Value) -> bool {
 }
 
 /// Only import absent targets; a second device never replaces canonical order, names, geometry or graph pins.
-#[cold]
 pub(super) fn merge(document: &mut Document, mut incoming: Document) -> Result<(), ()> {
     let mut seen: Vec<Value> = document.windows().map(|w| w["target"].clone()).collect();
     let views = document.0["views"].as_array_mut().ok_or(())?;
@@ -96,8 +95,6 @@ pub(super) fn merge(document: &mut Document, mut incoming: Document) -> Result<(
 }
 
 /// Only exact prefix/base-name/kind pairs identify historical recovery output.
-// Both the load probe and write repair use the same recognition invariant.
-#[inline(never)]
 fn recovered(views: &[Value], view: &Value) -> bool {
     string(view, "name")
         .and_then(|name| name.strip_prefix("Recovered: "))
@@ -110,7 +107,6 @@ fn recovered(views: &[Value], view: &Value) -> bool {
         })
 }
 
-#[cold]
 pub(super) fn needed(document: &Document) -> bool {
     document.0["views"]
         .as_array()
