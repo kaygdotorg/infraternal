@@ -257,7 +257,9 @@ try:
     except ProcessLookupError:pass
  stop_monitor=threading.Event()
  def watch_launches():
-  seen=set()
+  # Permission preflight has already exited; its historical PID row is not a
+  # live capture launch and cannot supply a safe birth identity.
+  seen=set(pidlog.read_text().splitlines())
   while not stop_monitor.wait(.5):
    try:
     rows=pidlog.read_text().splitlines()

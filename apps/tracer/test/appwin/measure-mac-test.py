@@ -269,6 +269,45 @@ class RunDeadlineTests(unittest.TestCase):
         })
 
 
+class LaunchMonitorTests(unittest.TestCase):
+    """Only launches after the watcher starts need process birth identities."""
+
+    def test_monitor_skips_already_logged_permission_preflight_helper(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        function = next(node for node in ast.walk(tree)
+                        if isinstance(node, ast.FunctionDef) and node.name == 'watch_launches')
+
+        class StopMonitor:
+            def __init__(self):
+                self.waits = 0
+
+            def wait(self, _timeout):
+                self.waits += 1
+                return self.waits > 1
+
+        class PidLog:
+            def read_text(self):
+                return 'helper 101\n'
+
+        errors, stopped, checks = [], [], []
+        namespace = {
+            'stop_monitor': StopMonitor(),
+            'pidlog': PidLog(),
+            'process_identity': lambda _pid: None,
+            'capture_helpers': set(),
+            'helper_births': {},
+            'consent_errors': errors,
+            'stop_capture': lambda: stopped.append(True),
+            'consent_check': lambda: checks.append(True),
+        }
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        namespace['watch_launches']()
+        self.assertEqual(errors, [])
+        self.assertEqual(stopped, [])
+        self.assertEqual(checks, [True])
+
+
 class ConsentTests(unittest.TestCase):
     """Execute only the consent guard, without importing or launching the browser driver."""
 
