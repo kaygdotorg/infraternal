@@ -40,11 +40,12 @@ class InputCohortTests(unittest.TestCase):
         rows = []
         namespace = {'args': {'input_only': True}, 'INPUT_SAMPLE_COUNT': 80,
                      'source_round_trips': lambda phase: rows.append(phase),
+                     'resource_sample': rows.append,
                      'native_clock': lambda: 'native', 'browser_clock': lambda: 'browser',
                      'battery': lambda: None, 'emit': rows.append, 'PhaseComplete': PhaseComplete}
         with self.assertRaises(PhaseComplete):
             exec(compile(ast.Module(body=[branch], type_ignores=[]), str(source), 'exec'), namespace)
-        self.assertEqual(rows, ['after', {'kind': 'clocks_after', 'native': 'native', 'browser': 'browser'},
+        self.assertEqual(rows, ['after', 'input_idle', {'kind': 'clocks_after', 'native': 'native', 'browser': 'browser'},
                                 {'kind': 'result', 'status': 'input_measured', 'count': 80}])
 
     def test_each_key_renews_browser_activation_without_unneeded_remote_clicks(self):

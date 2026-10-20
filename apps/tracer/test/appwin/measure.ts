@@ -21,8 +21,8 @@
  * APP_WINDOW_MAC_ONLY=1 omits guest access and records no guest-idle evidence.
  * APP_WINDOW_PROBE_TRACE=1 records bounded, content-free control-probe handling
  * for reconnect diagnosis; it never changes the production liveness deadline.
- * APP_WINDOW_INPUT_ONLY=1 collects 80 quiet inputs and then cleans up, without
- * the separate demo, resource or stability phases.
+ * APP_WINDOW_INPUT_ONLY=1 collects 80 quiet inputs, records idle resources and
+ * cleans up without the separate demo, motion or stability phases.
  */
 import { startRealServer, type DesktopStage, type ProbeStage } from '../../real/server';
 import { plainCloseReason } from '../../src/close-reasons';

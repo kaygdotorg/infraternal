@@ -598,6 +598,7 @@ try:
   # This cohort ends before the bounded 80-character display suffix is used
   # by the independent demo. Keep its clocks and ordinary cleanup receipts.
   source_round_trips('after')
+  resource_sample('input_idle')
   emit({'kind':'clocks_after','native':native_clock(),'browser':browser_clock()})
   battery();emit({'kind':'result','status':'input_measured','count':INPUT_SAMPLE_COUNT})
   raise PhaseComplete()
