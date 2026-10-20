@@ -21,10 +21,10 @@ fn same_target(a: &Value, b: &Value) -> bool {
 }
 
 /// Only import absent targets; a second device never replaces canonical order, names, geometry or graph pins.
-pub(super) fn merge(document: &mut Document, mut incoming: Document) -> Result<(), ()> {
+pub(super) fn merge(document: &mut Document, incoming: Vec<Value>) -> Result<(), ()> {
     let mut seen: Vec<Value> = document.windows().map(|w| w["target"].clone()).collect();
     let views = document.0["views"].as_array_mut().ok_or(())?;
-    for mut view in incoming.0["views"].as_array_mut().ok_or(())?.drain(..) {
+    for mut view in incoming {
         let Some(columns) = view["layout"]["columns"].as_array_mut() else {
             continue;
         };
@@ -127,8 +127,7 @@ pub(super) fn repair(document: &mut Document) -> Result<bool, ()> {
     if indices.is_empty() {
         return Ok(false);
     }
-    let mut recovered = Document::default();
-    let incoming = recovered.0["views"].as_array_mut().ok_or(())?;
+    let mut incoming = Vec::new();
     let mut index = 0;
     document.0["views"]
         .as_array_mut()
@@ -142,6 +141,6 @@ pub(super) fn repair(document: &mut Document) -> Result<bool, ()> {
             }
             !remove
         });
-    merge(document, recovered)?;
+    merge(document, incoming)?;
     Ok(true)
 }

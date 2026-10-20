@@ -222,7 +222,8 @@ impl Store {
                     incoming.0["revision"] = json!(document.revision());
                     if initialized {
                         let before = document.clone();
-                        recovery::merge(&mut document, incoming)?;
+                        let views = incoming.0["views"].as_array_mut().ok_or(Error)?;
+                        recovery::merge(&mut document, std::mem::take(views))?;
                         import_noop = document == before;
                     } else {
                         document = incoming;
