@@ -210,8 +210,11 @@ def analyze(root, controller):
    for name,number in surface_delivery_stages(deliveries[0],sample['encoded']).items():surface_details.setdefault(name,[]).append(number)
   else:surface_details_unavailable.append(sample['index'])
   mac_names=('Mac_source_receive_to_companion_receive','companion_receive_to_dispatch','companion_dispatch_to_inject','inject_to_fixture_keydown','fixture_keydown_to_draw_end','draw_end_to_capture','capture_to_encoded','encoded_to_Mac_send')
-  mac_total=sum(local[name] for name in mac_names)
-  for name,number in {**local,**network,'Mac_local_total':mac_total,'Mac_non_encode_total':mac_total-int(sample['encoded']['encode_ns'])/1e6,'input_to_worker':sample['effect']['begin']-sample['key']['eventAt'],'local_total':sum(local.values())}.items():summary.setdefault(name,[]).append(number)
+  native_total=sum(local[name] for name in mac_names)
+  # The browser is on the same physical Mac as the source. The full Mac
+  # budget includes its input and painting, excluding only the server host.
+  mac_total=native_total+local['browser_keydown_to_send']+local['browser_receive_to_worker_paint']
+  for name,number in {**local,**network,'Mac_native_total':native_total,'Mac_native_non_encode_total':native_total-int(sample['encoded']['encode_ns'])/1e6,'Mac_local_total':mac_total,'Mac_non_encode_total':mac_total-int(sample['encoded']['encode_ns'])/1e6,'input_to_worker':sample['effect']['begin']-sample['key']['eventAt'],'local_total':sum(local.values())}.items():summary.setdefault(name,[]).append(number)
   events.append({'index':sample['index'],'local_ms':local,'network_residual_ms':network,'stamps':sample,'server_input_stamps':{'receive':receive,'forward_begin':began,'forward_end':ended}})
  def quantile(values,p):
   ordered=sorted(values);return ordered[max(0,math.ceil(len(ordered)*p)-1)]

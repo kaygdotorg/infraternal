@@ -167,8 +167,10 @@ class ReportCausalityTests(unittest.TestCase):
             controller.write_text('\n'.join(json.dumps(row) for row in controller_rows) + '\n')
 
             report = analysis['analyze'](root, controller)
-            self.assertAlmostEqual(report['metrics']['Mac_local_total']['p50'], 1.11)
-            self.assertAlmostEqual(report['metrics']['Mac_non_encode_total']['p50'], 1.10)
+            self.assertAlmostEqual(report['metrics']['Mac_native_total']['p50'], 1.11)
+            self.assertAlmostEqual(report['metrics']['Mac_native_non_encode_total']['p50'], 1.10)
+            self.assertAlmostEqual(report['metrics']['Mac_local_total']['p50'], 1.9702)
+            self.assertAlmostEqual(report['metrics']['Mac_non_encode_total']['p50'], 1.9602)
             self.assertEqual(report['valid_sample_count'], 3)
             self.assertEqual(report['invalid_sample_count'], 1)
             self.assertEqual(report['invalid_samples'], [{'index': 0, 'reason': 'injection_before_dispatch'}])
