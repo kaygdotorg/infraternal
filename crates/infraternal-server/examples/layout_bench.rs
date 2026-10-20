@@ -15,7 +15,15 @@ async fn main() {
             .nth(1)
             .expect("supply a dedicated benchmark directory"),
     );
+    let receipt_history: i64 = std::env::args().nth(2).map_or(0, |value| {
+        value.parse().expect("receipt history must be an integer")
+    });
+    assert!(
+        (0..=63_535).contains(&receipt_history),
+        "leave room for the two-device run within the receipt quota"
+    );
     std::fs::create_dir_all(&root).unwrap();
+    println!("receipt_history={receipt_history}");
     println!(
         "machine={} load_start={} sqlite=WAL synchronous=NORMAL devices=2 samples_per_device=1000",
         std::fs::read_to_string("/proc/sys/kernel/hostname")
@@ -41,6 +49,10 @@ async fn main() {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0030_canvas_receipt_count.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
         let mut windows = vec![];
         for i in 0..count {
             let id = uuid::Uuid::new_v4();
@@ -57,18 +69,28 @@ async fn main() {
         let store = Store::new(pool.clone());
         let input = serde_json::to_vec(&json!({"op_id":"initialize","document":doc})).unwrap();
         store.initialize("a", &input).await.unwrap();
+        // Model a long-lived account without timing fixture creation or retaining request documents.
+        if receipt_history > 0 {
+            sqlx::query("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<?) INSERT INTO canvas_receipts SELECT 'a','history-'||i,'digest',1 FROM n")
+                .bind(receipt_history).execute(&pool).await.unwrap();
+        }
         let a = store.clone();
         let b = store.clone();
         let (left, right) = tokio::join!(device(a, 0, count), device(b, 1, count));
-        let mut samples = left;
-        samples.extend(right);
+        let mut samples = left.0;
+        samples.extend(right.0);
+        let mut reads = left.1;
+        reads.extend(right.1);
+        reads.sort_unstable();
         samples.sort_unstable();
         let snapshot = &store.events("a", None).await.unwrap()[0];
         println!(
-            "windows={count} devices=2 samples={} apply_p50_us={} apply_p99_us={} snapshot_bytes={} document_bytes={}",
+            "windows={count} devices=2 samples={} apply_p50_us={} apply_p99_us={} event_p50_us={} event_p99_us={} snapshot_bytes={} document_bytes={}",
             samples.len(),
             samples[999],
             samples[1979],
+            reads[999],
+            reads[1979],
             serde_json::to_vec(snapshot).unwrap().len(),
             serde_json::to_vec(&snapshot["document"]).unwrap().len()
         );
@@ -80,14 +102,19 @@ async fn main() {
         std::fs::read_to_string("/proc/loadavg").unwrap().trim()
     );
 }
-async fn device(store: Store, device: u32, count: u32) -> Vec<u128> {
+async fn device(store: Store, device: u32, count: u32) -> (Vec<u128>, Vec<u128>) {
     let mut samples = Vec::with_capacity(1000);
+    let mut reads = Vec::with_capacity(1000);
     for i in 0..1000 {
         // Both devices deliberately use a stale base; at one window they contend on the same field.
         let request=serde_json::to_vec(&json!({"op_id":format!("{device}-{i}"),"base_revision":1,"intent":{"type":"resize","window_id":format!("w{}",device%count),"height":f64::from(i%10+1)}})).unwrap();
         let started = Instant::now();
-        store.apply("a", &request).await.unwrap();
+        let revision = store.apply("a", &request).await.unwrap();
         samples.push(started.elapsed().as_micros());
+        // Read one device tail as the socket subscriber does after a committed edit.
+        let started = Instant::now();
+        store.events("a", Some(revision - 1)).await.unwrap();
+        reads.push(started.elapsed().as_micros());
     }
-    samples
+    (samples, reads)
 }
