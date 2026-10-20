@@ -143,8 +143,8 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,387,184 bytes |
-  | `aarch64-unknown-linux-musl` | 19,559,112 bytes |
+  | `x86_64-unknown-linux-musl` | 21,386,992 bytes |
+  | `aarch64-unknown-linux-musl` | 19,558,632 bytes |
 
   Release 8 integrates D307, synchronized output and input ordering (#206),
   the stale-screen note (#248), and the display-only phone column minimum
@@ -165,6 +165,13 @@ Reviews and fixes run at the same time as the next lane's build.
   changes leave both native files byte-identical. No migration is added;
   production's 0001–0029 SQL files remain unchanged. Measurements and release
   qualification receipts are recorded on #24, #206, #243 and #248.
+
+  The shared layout recovery fix (#243) ratchets the current ceilings to
+  21,386,992 / 19,558,632 bytes: −192 / −480 versus release 8. It adds migration
+  0030 to backfill transactional receipt counts. Build-time SQL formatting
+  compaction preserves every original migration checksum; historical layout
+  repair happens through normal snapshot revisions. Static receipts and the
+  production-shaped two-device checks are recorded on #243.
 
   Release 7 measured 21,385,264 / 19,570,256 bytes after the reviewed Retry and Mesh merges,
   #246 source-path normalization, and the #236 migration collision correction:
