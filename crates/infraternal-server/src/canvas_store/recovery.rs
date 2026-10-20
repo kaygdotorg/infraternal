@@ -54,18 +54,28 @@ pub(super) fn merge(document: &mut Document, incoming: Vec<Value>) -> Result<(),
         if retained.is_empty() {
             continue;
         }
-        let same_kind = |v: &Value| v["kind"] == view["kind"] && v["layout"]["type"] == "tiled";
         let name = string(&view, "name").unwrap_or("");
-        let destination = views
-            .iter()
-            .position(|v| {
-                same_kind(v)
-                    && (v["name"] == name
-                        || name
-                            .strip_prefix("Recovered: ")
-                            .is_some_and(|base| v["name"] == base))
-            })
-            .or_else(|| views.iter().position(same_kind));
+        let base = name.strip_prefix("Recovered: ");
+        let mut destination = None;
+        let mut existing_kind = false;
+        // Prefer the first matching name, falling back to the first tiled view
+        // of that kind. One pass also records the graph-only refusal case.
+        for (index, existing) in views.iter().enumerate() {
+            if existing["kind"] != view["kind"] {
+                continue;
+            }
+            existing_kind = true;
+            if existing["layout"]["type"] != "tiled" {
+                continue;
+            }
+            if destination.is_none() {
+                destination = Some(index);
+            }
+            if existing["name"] == name || base.is_some_and(|base| existing["name"] == base) {
+                destination = Some(index);
+                break;
+            }
+        }
         if let Some(index) = destination {
             views[index]["layout"]["columns"]
                 .as_array_mut()
@@ -73,7 +83,7 @@ pub(super) fn merge(document: &mut Document, incoming: Vec<Value>) -> Result<(),
                 .extend(retained);
         } else {
             // Graphs cannot gain tiled memberships; refuse instead of duplicating that kind.
-            if views.iter().any(|v| v["kind"] == view["kind"]) {
+            if existing_kind {
                 return Err(());
             }
             // A surviving stale-device copy becomes an ordinary view, even if its original is gone.
@@ -100,9 +110,8 @@ fn recovered(views: &[Value], view: &Value) -> bool {
         .and_then(|name| name.strip_prefix("Recovered: "))
         .is_some_and(|name| {
             views.iter().any(|original| {
-                original["id"] != view["id"]
-                    && original["kind"] == view["kind"]
-                    && original["name"] == name
+                // A stripped base name is strictly shorter, so this cannot match the view itself.
+                original["kind"] == view["kind"] && original["name"] == name
             })
         })
 }
