@@ -887,7 +887,9 @@ fn handle<'a>(
     };
     match frame {
         Frame::QueryReply(bytes) if p.caps & QUERY_REPLIES != 0 && !exited => {
-            cursors.reply(&bytes, input)?;
+            // Replies expire on reserved or full capacity without disconnecting
+            // the peer; admission refusal leaves typing cursors intact [307].
+            let _ = cursors.reply(reserved, &bytes, input);
         }
         Frame::SelectWriter(id) if p.caps & MULTI_WRITER != 0 && p.writer.is_none() && id != 0 => {
             cursors.select(id, p.size)?;
@@ -989,9 +991,9 @@ impl InputCursors {
 #[path = "../tests/unit/sequenced_input.rs"]
 mod sequenced_checks;
 
-/// Static error copy keeps malformed writer data out of diagnostics.
+/// An opaque error kind keeps invalid writer data out of diagnostics without allocation.
 fn invalid_input() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, "invalid shim writer input")
+    io::ErrorKind::InvalidData.into()
 }
 
 fn invalid_request() -> io::Error {
