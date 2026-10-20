@@ -125,6 +125,8 @@ pub(super) fn needed(document: &Document) -> bool {
 /// Prefix alone is insufficient: a recovery view must also name an existing view of its original kind.
 /// Removing those views before merging excludes their own duplicate targets from the canonical seen set.
 /// A committed snapshot records their removal, so repeated loads and stale-device imports converge idempotently.
+// Keep synchronous mutation state separate from the asynchronous transaction frame.
+#[inline(never)]
 pub(super) fn repair(document: &mut Document) -> Result<bool, ()> {
     let views = document.0["views"].as_array().ok_or(())?;
     let indices: Vec<usize> = views
