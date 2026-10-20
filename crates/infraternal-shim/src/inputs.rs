@@ -6,6 +6,10 @@ use std::{
     io,
 };
 
+#[cfg(test)]
+#[path = "../tests/unit/review_merge_inputs.rs"]
+mod merge_review;
+
 const MAX_WRITERS: usize = 512;
 
 /// Queue ownership follows byte segments so a partial PTY write credits only
