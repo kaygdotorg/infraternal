@@ -536,7 +536,7 @@ try:
     cdp.send('Page.startScreencast',{'format':'jpeg','quality':80,'maxWidth':1280,'maxHeight':900,'everyNthFrame':1})
    native_command('idle');page.wait_for_timeout(150+(index*37)%103)
    sequence=max([r['sequence'] for r in all_draws if r['kind']=='draw'] or [0])+1
-   drain();page.evaluate('([id,colour])=>window.__appWindowBench.arm(id,{colour})',[index,sequence%8])
+   drain();page.evaluate('([id,colour,sequence])=>window.__appWindowBench.arm(id,{colour,sequence})',[index,sequence%8,sequence])
    if index>=24:copy_target=compositor_target(surface,page.viewport_size)
    composite_begin=len(composites)
    native_command('next');deadline=time.monotonic()+5;effect=None;events=[]
@@ -563,7 +563,7 @@ try:
   emit({'kind':'input_sample_plan','count':INPUT_SAMPLE_COUNT,'trigger':'immediate after key event'})
   for index in range(INPUT_SAMPLE_COUNT):
    sequence=max(r['sequence'] for r in all_draws if r['kind']=='draw')+1
-   drain();page.evaluate('([id,colour])=>window.__appWindowBench.arm(id,{colour})',[100+index,sequence%8]);copy_target=compositor_target(surface,page.viewport_size);composite_begin=len(composites);page.keyboard.type('x');deadline=time.monotonic()+5;events=[];effect=None
+   drain();page.evaluate('([id,colour,sequence])=>window.__appWindowBench.arm(id,{colour,sequence})',[100+index,sequence%8,sequence]);copy_target=compositor_target(surface,page.viewport_size);composite_begin=len(composites);page.keyboard.type('x');deadline=time.monotonic()+5;events=[];effect=None
    while time.monotonic()<deadline:
     receipt=drain();events.append(receipt);effect=next((e for e in receipt['probe']['events'] if e.get('t')=='bench-effect' and e['id']==100+index),None)
     if effect:break
@@ -661,7 +661,7 @@ try:
     burst=soak_burst(iteration)
     sequence=max(r['sequence'] for r in all_draws if r['kind']=='draw')+len(burst)
     prior_inputs=sum(r.get('kind')=='input' for r in all_draws);draw_start=len(all_draws)
-    drain();page.evaluate('([id,colour])=>window.__appWindowBench.arm(id,{colour})',[1000+iteration,sequence%8]);page.keyboard.type(burst,delay=90)
+    drain();page.evaluate('([id,colour,sequence])=>window.__appWindowBench.arm(id,{colour,sequence})',[1000+iteration,sequence%8,sequence]);page.keyboard.type(burst,delay=90)
     deadline=time.monotonic()+5;observed=False;effect=None;dom_inputs=[];receipts=[]
     while time.monotonic()<deadline:
      receipt=drain();receipts.append(receipt);dom_inputs.extend(receipt['probe']['domInputs'])

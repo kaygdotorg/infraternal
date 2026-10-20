@@ -26,11 +26,32 @@ final class Picture: NSView {
         advance()
     }
     func advance() { sequence += 1; needsDisplay = true; displayIfNeeded() }
+    private func drawContentMarker() {
+        // The eight fixture colours repeat; this 32-bit marker identifies the
+        // native content sequence independently of transport frame freshness.
+        let marker = UInt32(truncatingIfNeeded: sequence)
+        let markerHeader: UInt8 = 0xa5
+        let markerCellCount = 40
+        let cell = bounds.width * 0.2 / CGFloat(markerCellCount)
+        for position in 0..<markerCellCount {
+            let set: Bool
+            if position < 8 {
+                set = markerHeader & (UInt8(1) << position) != 0
+            } else {
+                set = marker & (UInt32(1) << (position - 8)) != 0
+            }
+            (set ? NSColor.white : NSColor.black).setFill()
+            NSBezierPath(rect: NSRect(x: bounds.width * 0.8 + CGFloat(position) * cell,
+                                      y: bounds.height * 0.3,
+                                      width: cell, height: cell)).fill()
+        }
+    }
     override func draw(_ dirtyRect: NSRect) {
         let begin = mach_absolute_time()
         let colour = colours[sequence % colours.count]
         NSColor(srgbRed: colour.0, green: colour.1, blue: colour.2, alpha: 1).setFill()
         bounds.fill()
+        drawContentMarker()
         let label = "App window measurement\nFrame \(sequence)\nType to change this native window\n\(typed)"
         label.draw(at: NSPoint(x: 24, y: bounds.height - 100), withAttributes: [
             .font: NSFont.systemFont(ofSize: 22), .foregroundColor: NSColor.white,

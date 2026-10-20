@@ -139,7 +139,7 @@ const probe = {
   get session(): string | undefined { return session; },
   get sockets(): { opened: number; closed: number; history: SocketEvent[] } { return { opened: openedSockets, closed: closedSockets, history: socketEvents.slice() }; },
   take: () => ({ domInputs: domInputs.splice(0), inputs: inputs.splice(0), videos: videos.splice(0), events: events.splice(0), roundTrips: roundTrips.splice(0) }),
-  arm: (id: number, crop: { colour: number }): void => { activeWorker?.postMessage({ t: "bench-arm", id, crop }); },
+  arm: (id: number, crop: { colour: number; sequence: number }): void => { activeWorker?.postMessage({ t: "bench-arm", id, crop }); },
   close: (): void => { fixture?.dispose(); },
 };
 declare global { interface Window { __appWindowBench: typeof probe; __benchResourcesOnly?: boolean; __benchHardwareHint?: HardwareAcceleration } }
