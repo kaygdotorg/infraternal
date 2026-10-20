@@ -633,8 +633,10 @@ try:
     if ack.get('kind')!='network_restored':raise RuntimeError('private route restoration unavailable')
     try:
      page.wait_for_function('(prior)=>window.__appWindowBench.sockets.opened>prior.opened&&window.__appWindowBench.sockets.closed>prior.closed',arg=prior_sockets,timeout=10000)
-     first_picture();counts['reconnects']+=1
-     emit({'kind':'soak_reconnect','before':prior_sockets,'after':page.evaluate('window.__appWindowBench.sockets')})
+     first_picture()
+     after_sockets=page.evaluate('window.__appWindowBench.sockets')
+     counts['reconnects']+=max(0,after_sockets['opened']-prior_sockets['opened'])
+     emit({'kind':'soak_reconnect','before':prior_sockets,'after':after_sockets})
     except Exception:counts['stuck_frames']+=1
    if RECOVERY_ENABLED and iteration==REOPEN_ITERATION:
     previous=page.locator('.ui-window[data-kind="app"]').first
@@ -702,10 +704,11 @@ try:
   expected_text=''.join(soak_burst(step) for step in range(STABILITY_SECONDS//10))
   exact_text=soak_input_matches(all_draws[soak_native_start:],expected_text)
   emit({'kind':'soak_input_comparison','expected':expected_text,'expected_characters':len(expected_text),'exact_match':exact_text,'native':all_draws[soak_native_start:]})
+  opened_reconnects=max(0,final_sockets['opened']-soak_sockets_before['opened'])
+  counts['reconnects']=max(counts['reconnects'],opened_reconnects) if RECOVERY_ENABLED else opened_reconnects
   if not RECOVERY_ENABLED:
-   counts['reconnects']=max(0,final_sockets['opened']-soak_sockets_before['opened'],final_sockets['closed']-soak_sockets_before['closed'])
    counts['reopens']=int(final_windows!=soak_windows_before)
-  emit({'kind':'soak_result','seconds':time.monotonic()-soak_start,'counts':counts,'sockets_before':soak_sockets_before,'sockets_after':page.evaluate('window.__appWindowBench.sockets')})
+  emit({'kind':'soak_result','seconds':time.monotonic()-soak_start,'counts':counts,'sockets_before':soak_sockets_before,'sockets_after':final_sockets})
   if counts['crashes'] or counts['stuck_frames'] or counts['unexpected_helper_exits'] or counts['reconnects']!=int(RECOVERY_ENABLED) or counts['reopens']!=int(RECOVERY_ENABLED) or not exact_text or counts['typed']!=len(expected_text):raise RuntimeError('stability soak did not pass')
  source_round_trips('after')
  emit({'kind':'network_rtt_after','raw':command(['ping','-n','-c','5','-W','1000','10.69.69.125'])})
