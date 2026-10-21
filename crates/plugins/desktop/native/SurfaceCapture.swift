@@ -11,6 +11,8 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let callbacks = DispatchQueue(label: "infraternal.desktop.surface.capture", qos: .userInteractive)
     private let encoder = Encoder()
     private var stream: SCStream?
+    // Only the serial callback queue touches this bounded diagnostic counter.
+    private var diagnosticCallbacks = 0
     // Preserve the callback stamp with its exact buffer through newest-frame
     // replacement; retained refreshes must never acquire a newer callback stamp.
     private var latest: (CVPixelBuffer, UInt64, UInt64)?
@@ -35,8 +37,16 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         bitrate = AdaptiveBitrate(maximum: max(500_000, Int(size.width * size.height) * 3))
     }
 
+    private func trace(_ stage: String) {
+        if measure {
+            FileHandle.standardError.write(Data("METRIC capture_lifecycle pid=\(getpid()) stage=\(stage) at_ns=\(nanos(mach_absolute_time()))\n".utf8))
+        }
+    }
+
     func start() async throws {
+        trace("enumerate_begin")
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        trace("enumerate_end")
         let filter: SCContentFilter
         let sourceRect: CGRect?
         if target["type"] as? String == "screen" {
@@ -50,6 +60,9 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             // ScreenCaptureKit captures the full window bounds, so no display crop applies here.
             filter = SCContentFilter(desktopIndependentWindow: window)
             sourceRect = nil
+            if measure {
+                FileHandle.standardError.write(Data("METRIC capture_window pid=\(getpid()) window_id=\(id) owner_pid=\(pid) on_screen=\(window.isOnScreen) width=\(window.frame.width) height=\(window.frame.height)\n".utf8))
+            }
         } else {
             throw HelperFailure.invalid
         }
@@ -68,7 +81,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.scalesToFit = true; configuration.preservesAspectRatio = true
         configuration.showsCursor = true
         if measure {
-            FileHandle.standardError.write(Data("METRIC source_capture_config fps=\(fps) queue_depth=\(configuration.queueDepth) interval_value=\(configuration.minimumFrameInterval.value) interval_scale=\(configuration.minimumFrameInterval.timescale) width=\(configuration.width) height=\(configuration.height)\n".utf8))
+            FileHandle.standardError.write(Data("METRIC source_capture_config pid=\(getpid()) fps=\(fps) queue_depth=\(configuration.queueDepth) interval_value=\(configuration.minimumFrameInterval.value) interval_scale=\(configuration.minimumFrameInterval.timescale) width=\(configuration.width) height=\(configuration.height)\n".utf8))
         }
         let candidate = SCStream(filter: filter, configuration: configuration, delegate: self)
         try candidate.addStreamOutput(self, type: .screen, sampleHandlerQueue: callbacks)
@@ -76,12 +89,23 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         // that late stream into an already retired session.
         let cancelled = mailbox.withLock { if !stopped { stream = candidate }; return stopped }
         guard !cancelled else { return }
-        try await candidate.startCapture()
+        trace("start_begin")
+        do { try await candidate.startCapture() }
+        catch {
+            if measure {
+                FileHandle.standardError.write(Data("METRIC capture_start_failed pid=\(getpid()) code=\((error as NSError).code)\n".utf8))
+            }
+            throw error
+        }
+        trace("start_end")
         let retired = mailbox.withLock { stopped }
         if retired { try await candidate.stopCapture() }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
+        if measure {
+            FileHandle.standardError.write(Data("METRIC capture_stopped pid=\(getpid()) code=\((error as NSError).code)\n".utf8))
+        }
         if stop() {
             try? output(69, Data("{\"error\":\"Desktop capture is unavailable.\"}".utf8))
         }
@@ -89,6 +113,13 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
         let callback = measure ? nanos(mach_absolute_time()) : 0
+        if measure && diagnosticCallbacks < 8 {
+            diagnosticCallbacks += 1
+            let entries = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]]
+            let status = entries?.first?[.status] as? Int ?? -1
+            let pixel = CMSampleBufferGetImageBuffer(sample)
+            FileHandle.standardError.write(Data("METRIC capture_callback pid=\(getpid()) index=\(diagnosticCallbacks) type=\(type.rawValue) ready=\(CMSampleBufferDataIsReady(sample)) status=\(status) has_pixel=\(pixel != nil) at_ns=\(callback)\n".utf8))
+        }
         guard type == .screen, CMSampleBufferDataIsReady(sample),
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let info = attachments.first, info[.status] as? Int == SCFrameStatus.complete.rawValue,
@@ -111,7 +142,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         mailbox.unlock()
         if measure {
             let entries = (damage as? [Any])?.count ?? -1
-            FileHandle.standardError.write(Data("METRIC source_frame capture_ns=\(nanos(ticks)) callback_ns=\(callback) damaged=\(damaged) damage_entries=\(entries)\n".utf8))
+            FileHandle.standardError.write(Data("METRIC source_frame pid=\(getpid()) capture_ns=\(nanos(ticks)) callback_ns=\(callback) damaged=\(damaged) damage_entries=\(entries)\n".utf8))
         }
         if schedule { encodingQueue.async { [weak self] in self?.drain() } }
     }
@@ -150,7 +181,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                     // One write preserves frame identity across concurrent control
                     // receipts; all stamps use the same native monotonic clock.
                     let sent = nanos(mach_absolute_time())
-                    FileHandle.standardError.write(Data("METRIC surface_delivery capture_ns=\(nanos(current.1)) callback_ns=\(current.2) dequeued_ns=\(dequeued) prepared_ns=\(prepared) output_begin_ns=\(outputBegan) output_end_ns=\(sent) fresh=\(frame != nil)\n".utf8))
+                    FileHandle.standardError.write(Data("METRIC surface_delivery pid=\(getpid()) capture_ns=\(nanos(current.1)) callback_ns=\(current.2) dequeued_ns=\(dequeued) prepared_ns=\(prepared) output_begin_ns=\(outputBegan) output_end_ns=\(sent) fresh=\(frame != nil)\n".utf8))
                 }
                 pixels.delivered()
                 damageState.completed(delivered: true)
