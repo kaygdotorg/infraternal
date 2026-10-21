@@ -107,20 +107,23 @@ impl Auth {
 
     /// Revoke the current session immediately.
     pub async fn logout(&self, token: &str) -> Result<()> {
-        let changed = sqlx::query("DELETE FROM sessions WHERE token_hash=?")
-            .bind(hash(token))
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
-        if changed != 0 {
-            self.revocations.send_replace(());
+        let session_hash = hash(token);
+        // RETURNING binds the affected account to the committed deletion in one statement.
+        // A separate lookup could race recovery or another logout and lose its scope.
+        let user: Option<String> =
+            sqlx::query_scalar("DELETE FROM sessions WHERE token_hash=? RETURNING user_id")
+                .bind(&session_hash)
+                .fetch_optional(&self.pool)
+                .await?;
+        if let Some(user) = user {
+            self.revocations.publish(&user, Some(session_hash));
         }
         Ok(())
     }
 
     /// Wake live sockets on committed revocation without periodic idle database polling.
-    pub(crate) fn revocation_events(&self) -> tokio::sync::watch::Receiver<()> {
-        self.revocations.subscribe()
+    pub(crate) fn revocation_events(&self, user: &str) -> super::AccountSubscription {
+        self.revocations.subscribe(user)
     }
 
     /// Whether a live session read at `now` with this `expiry` is due for its

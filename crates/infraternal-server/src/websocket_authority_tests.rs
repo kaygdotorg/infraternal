@@ -243,7 +243,7 @@ async fn interrupted_authority_operation(interruption: Interruption) {
         tokio::time::advance(before_read).await;
         assert!(guarded.as_mut().now_or_never().is_none());
         match interruption {
-            Interruption::Revocation => crate::auth::tests::publish_revocation(&state.auth),
+            Interruption::Revocation => crate::auth::tests::publish_revocation(&state.auth, &user),
             Interruption::Expiry => tokio::time::advance(Duration::from_millis(10)).await,
         }
         release.send(()).unwrap();

@@ -44,9 +44,9 @@ use tower::ServiceExt;
 
 pub(crate) static SERIAL: Mutex<()> = Mutex::const_new(());
 
-/// Model a committed revocation notification with a fixed signal and no authority data.
-pub(crate) fn publish_revocation(auth: &Auth) {
-    auth.revocations.send_replace(());
+/// Model a committed account revocation without disclosing authority data.
+pub(crate) fn publish_revocation(auth: &Auth, user: &str) {
+    auth.revocations.publish(user, None);
 }
 
 #[path = "socket_clock.rs"]
@@ -499,7 +499,7 @@ async fn setup_restart_rotation_expiry_and_parallel_redemption() {
 async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
-    let events = f.auth.revocation_events();
+    let events = f.auth.revocation_events(&f.user);
     assert!(
         f.auth
             .recovery_start(
@@ -3380,3 +3380,24 @@ mod remote_removal_tests;
 mod terminal_refusal_tests;
 #[path = "tls_tests.rs"]
 mod tls_tests;
+
+/// One logout must not make unrelated accounts contend for socket authority reads.
+#[tokio::test]
+async fn account_logout_does_not_notify_another_account() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let mut own = f.auth.revocation_events(&f.user);
+    let other = f.auth.revocation_events("other-account");
+    f.auth.logout(&f.session).await.unwrap();
+    assert!(own.has_changed().unwrap());
+    assert!(matches!(own.borrow_and_update().as_deref(), Some(hint) if hint == hash(&f.session)));
+    f.auth.logout(&f.session).await.unwrap();
+    assert!(
+        !own.has_changed().unwrap(),
+        "a repeated logout emitted a change"
+    );
+    assert!(
+        !other.has_changed().unwrap(),
+        "unrelated account was notified"
+    );
+}

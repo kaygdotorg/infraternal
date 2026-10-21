@@ -997,7 +997,7 @@ async fn revocation_stall(stall: RevocationStall) {
             .rows_affected();
         assert_eq!(deleted, 1);
     }
-    f.auth.revocations.send_replace(());
+    f.auth.revocations.publish(user, None);
     if matches!(stall, RevocationStall::RevokedEndDeadline) {
         while pending_reads() == 0 {
             tokio::task::yield_now().await;
@@ -1019,7 +1019,18 @@ async fn revocation_stall(stall: RevocationStall) {
         );
         return;
     }
-    let release = if clock.is_some() {
+    let release = if matches!(stall, RevocationStall::OtherAccount) {
+        // The unrelated account cannot start an authority read while storage is held.
+        for _ in 0..60 {
+            tokio::time::advance(Duration::from_millis(5)).await;
+            for _ in 0..32 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(pending_reads(), 0);
+        }
+        drop(held);
+        None
+    } else if clock.is_some() {
         tokio::time::timeout(Duration::from_secs(1), async {
             while pending_reads() == 0 {
                 tokio::task::yield_now().await;

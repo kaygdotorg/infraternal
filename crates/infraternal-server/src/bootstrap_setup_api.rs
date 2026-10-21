@@ -70,7 +70,7 @@ pub(super) async fn run(
 ) -> Result<(), ()> {
     let token = std::str::from_utf8(token.expose()).map_err(|_| ())?;
     let mut enabled = api.runner.enabled_changes();
-    let mut revocation = api.auth.revocation_events();
+    let mut revocation = api.auth.revocation_events(&owner);
     let first = tokio::time::timeout(Duration::from_secs(5), socket.recv())
         .await
         .map_err(|_| ())?

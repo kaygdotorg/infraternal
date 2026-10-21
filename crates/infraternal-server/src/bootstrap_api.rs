@@ -275,10 +275,10 @@ async fn send_live(
     api: &Api,
     owner: &str,
     token: &str,
-    revocation: &mut tokio::sync::watch::Receiver<()>,
+    revocation: &mut crate::auth::AccountSubscription,
     encoded: Option<String>,
 ) -> Result<(), ()> {
-    // Keep the same write future after another user's revocation. Dropping and
+    // Keep the same write future after another session's revocation. Dropping and
     // restarting a partially buffered frame would duplicate sequence delivery.
     // Serialize before this shared async boundary: event and error types must
     // not instantiate the full WebSocket writer and revocation loop twice.
@@ -309,7 +309,7 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
     if !*enabled.borrow() {
         return;
     }
-    let mut revocation = api.auth.revocation_events();
+    let mut revocation = api.auth.revocation_events(&owner);
     let mut batch: Option<Batch> = None;
     let mut changed: Option<tokio::sync::watch::Receiver<u64>> = None;
     let mut after = 0;

@@ -563,7 +563,7 @@ async fn run_socket(
     let mut recovery_snapshot = RecoverySnapshot::Unread;
     let mut session_changes = state.session_changes.subscribe();
     let mut terminal_sessions_subscribed = None;
-    let mut revocations = state.auth.revocation_events();
+    let mut revocations = state.auth.revocation_events(&user_id);
     let (mut sink, mut source) = socket.split();
     let mut receive = BytesMut::with_capacity(4096);
     let mut encode = Vec::with_capacity(4096);
@@ -1081,7 +1081,7 @@ async fn while_authorized_operation(
     renew: bool,
     operation: infraternal_plugin_api::Operation<'_, Result<(), ()>>,
 ) -> Result<(), ()> {
-    let mut revocations = state.auth.revocation_events();
+    let mut revocations = state.auth.revocation_events(user);
     let mut expiry = authority_deadline(state, user, token, renew)
         .await
         .map_err(|_| ())?;

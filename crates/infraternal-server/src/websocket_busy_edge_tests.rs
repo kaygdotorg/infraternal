@@ -44,7 +44,7 @@ async fn expiry_crossing_a_stalled_read_refuses_both_deadline_callers() {
         .await
         .unwrap();
     let held = state.pool.acquire().await.unwrap();
-    crate::auth::tests::publish_revocation(&state.auth);
+    crate::auth::tests::publish_revocation(&state.auth, &user);
     let wrote = std::sync::atomic::AtomicBool::new(false);
     let guarded = async {
         tokio::join!(
@@ -179,7 +179,7 @@ async fn wall_expiry_and_monotonic_deadlines_keep_their_separate_roles() {
         .execute(&state.pool)
         .await
         .unwrap();
-    crate::auth::tests::publish_revocation(&state.auth);
+    crate::auth::tests::publish_revocation(&state.auth, &user);
     let mut proof_polled = false;
     assert_eq!(
         lease
