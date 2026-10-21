@@ -438,4 +438,117 @@ mod cap_review_r3 {
         ));
         assert_eq!(state.authority.reads.available_permits(), AUTHORITY_READS);
     }
+    /// An exclusive SQLite lock keeps each SELECT inside the worker after its
+    /// caller's attempt ends. The busy timeout must recover every place even
+    /// while the lock is still held; unlocking must not be needed for cleanup.
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::too_many_lines)] // Keep lock, query-start observations and cleanup in one test.
+
+    async fn sqlite_busy_timeout_recovers_detached_storm_without_unlocking() {
+        use sqlx::Connection;
+        use sqlx::sqlite::{
+            SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions,
+        };
+
+        let clock = FrozenSocketTime::new().await;
+        let root = std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(".cache/codex-scratch/review-authority-cap-r3");
+        let dir = root.join(format!("sqlite-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let options = SqliteConnectOptions::new()
+            .filename(dir.join("session.sqlite"))
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Delete)
+            .busy_timeout(Duration::from_secs(2));
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let active = Arc::new(AtomicBool::new(false));
+        let observed_started = Arc::clone(&started);
+        let observed_active = Arc::clone(&active);
+        let pool = SqlitePoolOptions::new()
+            .min_connections(8)
+            .max_connections(8)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .before_acquire(move |_, _| {
+                if observed_active.load(Ordering::SeqCst) {
+                    observed_started.fetch_add(1, Ordering::SeqCst);
+                }
+                Box::pin(async { Ok(true) })
+            })
+            .connect_with(options.clone())
+            .await
+            .unwrap();
+        let auth = Auth::new(
+            pool.clone(),
+            "auth.example.test",
+            "https://auth.example.test",
+        )
+        .await
+        .unwrap();
+        let (socket, _peer) = tokio::net::UnixStream::pair().unwrap();
+        let state =
+            WebSocketState::new(auth, pool.clone(), EmbeddedAgent::from_test_socket(socket))
+                .await
+                .unwrap();
+        // Drain initialization returns before placing the independent lock.
+        let connections = futures_util::future::join_all((0..8).map(|_| pool.acquire())).await;
+        drop(connections);
+        let mut locker = SqliteConnection::connect_with(&options).await.unwrap();
+        sqlx::query("BEGIN EXCLUSIVE")
+            .execute(&mut locker)
+            .await
+            .unwrap();
+        active.store(true, Ordering::SeqCst);
+        let mut storm: Vec<_> = (0..32)
+            .map(|_| {
+                Box::pin(read_expiry(
+                    &state,
+                    "absent-user",
+                    "cap-review-r3",
+                    false,
+                    Duration::ZERO,
+                ))
+            })
+            .collect();
+        for read in &mut storm {
+            assert!(read.as_mut().now_or_never().is_none());
+        }
+        // Poll the same futures until four pooled connections are checked out;
+        // frozen runtime time prevents any attempt from expiring during setup.
+        while started.load(Ordering::SeqCst) < AUTHORITY_READS {
+            for read in &mut storm {
+                assert!(read.as_mut().now_or_never().is_none());
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(started.load(Ordering::SeqCst), AUTHORITY_READS);
+        assert_eq!(pool.size() as usize - pool.num_idle(), AUTHORITY_READS);
+        tokio::time::advance(AUTHORITY_READ_TIMEOUT + Duration::from_millis(1)).await;
+        for read in &mut storm {
+            assert!(matches!(
+                read.as_mut().now_or_never(),
+                Some(Err(AuthorityMiss::Unavailable))
+            ));
+        }
+        drop(storm);
+        assert_eq!(state.authority.reads.available_permits(), 0);
+        drop(clock);
+        let all = tokio::time::timeout(
+            Duration::from_secs(15),
+            state
+                .authority
+                .reads
+                .acquire_many(u32::try_from(AUTHORITY_READS).unwrap()),
+        )
+        .await
+        .expect("SQLite busy timeout did not recover the detached places")
+        .unwrap();
+        assert_eq!(state.authority.reads.available_permits(), 0);
+        drop(all);
+        assert_eq!(state.authority.reads.available_permits(), AUTHORITY_READS);
+        sqlx::query("ROLLBACK").execute(&mut locker).await.unwrap();
+        drop(locker);
+        pool.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
