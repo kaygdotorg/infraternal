@@ -928,3 +928,6 @@ mod review_authority_cap;
 #[cfg(feature = "remote")]
 #[path = "socket_tests/review_busy_wake.rs"]
 mod review_busy_wake;
+
+#[path = "socket_tests/per_account_revocation.rs"]
+mod per_account_revocation;

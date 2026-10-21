@@ -178,7 +178,13 @@ impl Auth {
         let pool = self.pool.clone();
         let token_hash = hash(token);
         let user = user.to_owned();
+        #[cfg(test)]
+        let reads = self.authority_reads.clone();
         async move {
+            #[cfg(test)]
+            {
+                *reads.lock().unwrap().entry(user.clone()).or_default() += 1;
+            }
             let _hold = hold;
             sqlx::query_scalar("SELECT expires FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>?")
                 .bind(token_hash).bind(user).bind(now).fetch_optional(&pool).await?.ok_or(Error::Denied)

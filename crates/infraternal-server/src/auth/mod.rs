@@ -159,6 +159,8 @@ pub struct Auth {
     setup_consumed: Arc<watch::Sender<()>>,
     #[cfg(test)]
     recovery_pause: Arc<Mutex<Option<Arc<RecoveryPause>>>>,
+    #[cfg(test)]
+    authority_reads: Arc<std::sync::Mutex<HashMap<String, usize>>>,
     // i64::MIN leaves HTTP on wall time; tests opt into a shared, advanceable clock.
     #[cfg(test)]
     test_http_time: Arc<AtomicI64>,
@@ -211,8 +213,20 @@ impl Auth {
             #[cfg(test)]
             recovery_pause: Arc::default(),
             #[cfg(test)]
+            authority_reads: Arc::default(),
+            #[cfg(test)]
             test_http_time: Arc::new(AtomicI64::new(i64::MIN)),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authority_reads(&self, user: &str) -> usize {
+        self.authority_reads
+            .lock()
+            .unwrap()
+            .get(user)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Set the HTTP time shared by cloned test routers.
