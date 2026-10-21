@@ -558,7 +558,7 @@ async fn run_socket(
     #[cfg(not(test))]
     let handshake_timeout = HANDSHAKE_TIMEOUT;
     let handshake_deadline = tokio::time::Instant::now() + handshake_timeout;
-    let mut recovery_events = state.auth.recovery_events();
+    let mut recovery_events = state.auth.recovery_events(&user_id);
     let mut recovery_subscribed = false;
     let mut recovery_snapshot = RecoverySnapshot::Unread;
     let mut session_changes = state.session_changes.subscribe();

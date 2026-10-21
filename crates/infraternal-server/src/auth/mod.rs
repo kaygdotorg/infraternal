@@ -154,7 +154,7 @@ pub struct Auth {
     origin: String,
     pending: Arc<Mutex<Pending>>,
     ingress: Arc<Mutex<http::Ingress>>,
-    recovery_changes: Arc<tokio::sync::watch::Sender<()>>,
+    recovery_changes: Arc<account_events::AccountEvents>,
     revocations: Arc<account_events::AccountEvents>,
     setup_consumed: Arc<watch::Sender<()>>,
     #[cfg(test)]
@@ -205,7 +205,7 @@ impl Auth {
             origin: url.origin().ascii_serialization(),
             pending: Arc::default(),
             ingress: Arc::default(),
-            recovery_changes: Arc::new(tokio::sync::watch::channel(()).0),
+            recovery_changes: Arc::default(),
             revocations: Arc::default(),
             setup_consumed: Arc::new(setup_consumed),
             #[cfg(test)]

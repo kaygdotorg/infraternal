@@ -73,7 +73,7 @@ impl Auth {
             super::recovery::record(&mut tx, user, "cancel", now).await?;
         }
         tx.commit().await?;
-        self.recovery_changes.send_replace(());
+        self.recovery_changes.publish(user, None);
         Ok(())
     }
 }

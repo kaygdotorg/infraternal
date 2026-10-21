@@ -219,7 +219,7 @@ impl Auth {
         }
         if matches!(registration.authority, Authority::Recovery(_)) {
             self.revocations.publish(user, None);
-            self.recovery_changes.send_replace(());
+            self.recovery_changes.publish(user, None);
         }
         Ok(token)
     }

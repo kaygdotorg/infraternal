@@ -131,7 +131,7 @@ impl Auth {
             record(&mut tx, user, "start", authority_now).await?;
         }
         tx.commit().await?;
-        self.recovery_changes.send_replace(());
+        self.recovery_changes.publish(user, None);
         Ok((token, ready, delay))
     }
 
@@ -164,7 +164,7 @@ impl Auth {
             record(&mut tx, &session.user_id, "cancel", now).await?;
         }
         tx.commit().await?;
-        self.recovery_changes.send_replace(());
+        self.recovery_changes.publish(&session.user_id, None);
         Ok(())
     }
 
@@ -178,9 +178,9 @@ impl Auth {
         )
     }
 
-    /// Coalesced changes wake existing authenticated sockets without idle polling.
-    pub(crate) fn recovery_events(&self) -> tokio::sync::watch::Receiver<()> {
-        self.recovery_changes.subscribe()
+    /// Coalesced account changes wake its authenticated sockets without idle polling.
+    pub(crate) fn recovery_events(&self, user: &str) -> super::AccountSubscription {
+        self.recovery_changes.subscribe(user)
     }
 
     /// Release the old recovery envelope only after the delay, then enroll a replacement passkey.

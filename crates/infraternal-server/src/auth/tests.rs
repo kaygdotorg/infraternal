@@ -500,6 +500,9 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
     let events = f.auth.revocation_events(&f.user);
+    let other_revocations = f.auth.revocation_events("other-account");
+    let mut recovery_events = f.auth.recovery_events(&f.user);
+    let other_recovery = f.auth.recovery_events("other-account");
     assert!(
         f.auth
             .recovery_start(
@@ -551,7 +554,11 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
         .await
         .unwrap();
     let start = f.auth.legacy_ready(&token, NOW + 2 * DAY).await.unwrap();
+    recovery_events.borrow_and_update();
     let session = finish_replacement(&f, &start, &second, NOW + 2 * DAY).await;
+    assert!(recovery_events.has_changed().unwrap());
+    assert!(!other_revocations.has_changed().unwrap());
+    assert!(!other_recovery.has_changed().unwrap());
     assert!(
         events.has_changed().unwrap(),
         "recovery failed to wake live sockets"
