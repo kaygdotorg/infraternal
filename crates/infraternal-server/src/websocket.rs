@@ -437,6 +437,13 @@ impl WebSocketState {
         self
     }
 
+    /// Observe retained reads while socket tests control time around real storage.
+    #[cfg(all(test, feature = "remote"))]
+    pub(crate) fn authority_read_monitor(&self) -> impl Fn() -> usize + 'static {
+        let authority = Arc::clone(&self.authority);
+        move || AUTHORITY_READS - authority.reads.available_permits()
+    }
+
     /// Reserve per-user capacity before Hello. Weak entries disappear when the last socket drops.
     fn user_permit(&self, user: &str) -> Option<tokio::sync::OwnedSemaphorePermit> {
         let mut users = self.users.lock().ok()?;
@@ -731,24 +738,38 @@ async fn run_socket(
             }
             changed = revocations.changed() => {
                 if changed.is_err() {
-                    teardown_reason = RESUME_REFUSED;
+                    teardown_reason = AUTHORITY_UNAVAILABLE;
                     loop_result = Err(());
                     break;
                 }
-                let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else {
-                    teardown_reason = RESUME_REFUSED;
-                    loop_result = Err(());
-                    break;
-                };
-                expiry = deadline;
+                match authority_deadline(&state, &user_id, &session_token, false).await {
+                    Ok(deadline) => expiry = deadline,
+                    Err(miss) => {
+                        // Unproven authority after the bounded retry is server
+                        // unavailability; only a known deletion/expiry is refusal.
+                        teardown_reason = match miss {
+                            AuthorityMiss::Refused => RESUME_REFUSED,
+                            AuthorityMiss::Unavailable => AUTHORITY_UNAVAILABLE,
+                        };
+                        loop_result = Err(());
+                        break;
+                    }
+                }
             }
             () = tokio::time::sleep_until(expiry) => {
-                let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else {
-                    teardown_reason = RESUME_REFUSED;
-                    loop_result = Err(());
-                    break;
-                };
-                expiry = deadline;
+                match authority_deadline(&state, &user_id, &session_token, false).await {
+                    Ok(deadline) => expiry = deadline,
+                    Err(miss) => {
+                        // Unproven authority after the bounded retry is server
+                        // unavailability; only a known deletion/expiry is refusal.
+                        teardown_reason = match miss {
+                            AuthorityMiss::Refused => RESUME_REFUSED,
+                            AuthorityMiss::Unavailable => AUTHORITY_UNAVAILABLE,
+                        };
+                        loop_result = Err(());
+                        break;
+                    }
+                }
             }
             input = transport.recv() => {
                 let Ok(Some(input)) = input else {
@@ -775,7 +796,8 @@ async fn run_socket(
                                 crate::websocket_transport::EndReason::SizeLimit => 1009,
                                 crate::websocket_transport::EndReason::IdleTimeout => 1001,
                                 crate::websocket_transport::EndReason::AuthorizationRefused => 1008,
-                                crate::websocket_transport::EndReason::FlowControlRefused => 1013,
+                                crate::websocket_transport::EndReason::FlowControlRefused
+                                | crate::websocket_transport::EndReason::AuthorityUnavailable => 1013,
                                 _ => 1002,
                             };
                             let _ = tokio::time::timeout(
@@ -1029,7 +1051,9 @@ async fn while_authorized_operation(
     operation: infraternal_plugin_api::Operation<'_, Result<(), ()>>,
 ) -> Result<(), ()> {
     let mut revocations = state.auth.revocation_events();
-    let mut expiry = authority_deadline(state, user, token, renew).await?;
+    let mut expiry = authority_deadline(state, user, token, renew)
+        .await
+        .map_err(|_| ())?;
     let mut check = tokio::time::interval_at(
         tokio::time::Instant::now() + BUSY_AUTHORITY_INTERVAL,
         BUSY_AUTHORITY_INTERVAL,
@@ -2377,18 +2401,21 @@ pub(super) async fn probe_deadline(
     state: &WebSocketState,
     user: &str,
     token: &str,
-) -> Result<tokio::time::Instant, ()> {
+) -> Result<tokio::time::Instant, AuthorityMiss> {
     let started = tokio::time::Instant::now();
     let wall = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|_| ())?;
-    let expiry = read_expiry(state, user, token, false, AUTHORITY_WAIT)
-        .await
-        .map_err(|_| ())?;
-    let wall_deadline = Duration::from_secs(u64::try_from(expiry).map_err(|_| ())?);
+        .map_err(|_| AuthorityMiss::Unavailable)?;
+    let expiry = read_expiry(state, user, token, false, AUTHORITY_WAIT).await?;
+    let wall_deadline =
+        Duration::from_secs(u64::try_from(expiry).map_err(|_| AuthorityMiss::Refused)?);
     started
-        .checked_add(wall_deadline.checked_sub(wall).ok_or(())?)
-        .ok_or(())
+        .checked_add(
+            wall_deadline
+                .checked_sub(wall)
+                .ok_or(AuthorityMiss::Refused)?,
+        )
+        .ok_or(AuthorityMiss::Unavailable)
 }
 
 async fn socket_deadline(
@@ -2396,7 +2423,9 @@ async fn socket_deadline(
     user_id: &str,
     token: &str,
 ) -> Result<tokio::time::Instant, ()> {
-    authority_deadline(state, user_id, token, false).await
+    authority_deadline(state, user_id, token, false)
+        .await
+        .map_err(|_| ())
 }
 
 async fn authority_deadline(
@@ -2404,13 +2433,12 @@ async fn authority_deadline(
     user_id: &str,
     token: &str,
     renew: bool,
-) -> Result<tokio::time::Instant, ()> {
-    let expiry = read_expiry(state, user_id, token, renew, AUTHORITY_WAIT)
-        .await
-        .map_err(|_| ())?;
+) -> Result<tokio::time::Instant, AuthorityMiss> {
+    let expiry = read_expiry(state, user_id, token, renew, AUTHORITY_WAIT).await?;
     // The wait may have taken up to AUTHORITY_WAIT: measure the deadline from the
     // wall clock after the read, so a slow store can never extend a session.
-    let remaining = u64::try_from(expiry - unix_seconds()?).map_err(|_| ())?;
+    let now = unix_seconds().map_err(|()| AuthorityMiss::Unavailable)?;
+    let remaining = u64::try_from(expiry - now).map_err(|_| AuthorityMiss::Refused)?;
     Ok(tokio::time::Instant::now() + Duration::from_secs(remaining))
 }
 
@@ -2501,8 +2529,8 @@ async fn read_expiry(
 /// reports as gone or expired is `Refused`; a read that missed its bound, or
 /// could not reach storage, is `Unavailable`: the server was busy, which is
 /// neither a refusal nor a bad frame (#227, #240).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AuthorityMiss {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AuthorityMiss {
     Refused,
     Unavailable,
 }

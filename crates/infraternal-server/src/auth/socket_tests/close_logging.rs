@@ -790,9 +790,37 @@ async fn session_lookup_store_error_logs_authority_unavailable() {
 /// Audit 9.3 (#240): a revocation wake that meets a busy store is a busy server, not
 /// a refused resume. The session here is never revoked; only the store is slow.
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Keep the real agent socket exchange and structured assertions together.
 async fn revocation_wake_on_busy_store_logs_authority_unavailable_not_resume_refused() {
+    revocation_stall(RevocationStall::Unavailable).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn unrelated_logout_during_transient_stall_keeps_the_terminal_socket() {
+    revocation_stall(RevocationStall::OtherAccount).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn revoked_session_during_transient_stall_logs_resume_refused() {
+    revocation_stall(RevocationStall::Revoked).await;
+}
+
+#[derive(Clone, Copy)]
+enum RevocationStall {
+    Unavailable,
+    OtherAccount,
+    Revoked,
+}
+
+/// Share the attached-terminal fixture so the only varying inputs are whose
+/// session is deleted and whether the store recovers within the authority wait.
+#[allow(clippy::too_many_lines)]
+async fn revocation_stall(stall: RevocationStall) {
     let _serial = SERIAL.lock().await;
+    let clock = if matches!(stall, RevocationStall::Unavailable) {
+        None
+    } else {
+        Some(FrozenSocketTime::new().await)
+    };
     let (capture, _subscriber) = Capture::start();
     let f = fixture().await;
     let session_id = [0x75; 16];
@@ -813,6 +841,7 @@ async fn revocation_wake_on_busy_store_logs_authority_unavailable_not_resume_ref
     .with_authority_read_timeout(Duration::from_millis(100));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let pending_reads = state.authority_read_monitor();
     let app = crate::websocket::router(state);
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     // The host accepts the attach and answers link probes; it never closes the stream.
@@ -862,7 +891,7 @@ async fn revocation_wake_on_busy_store_logs_authority_unavailable_not_resume_ref
         0,
         &Frame::Hello {
             version: 1,
-            caps: 0,
+            caps: if clock.is_some() { 4 } else { 0 },
             client_info: "authority-busy",
         },
     )
@@ -890,28 +919,134 @@ async fn revocation_wake_on_busy_store_logs_authority_unavailable_not_resume_ref
     })
     .await
     .unwrap();
+    // A result after the attach is a main-loop barrier: its guarded attach work
+    // is complete before the stall, so this tests the wake rather than that work.
+    authorized_result(&mut browser, 241).await;
+    if clock.is_some() {
+        // Park probes to isolate session authority from the independent liveness
+        // clock. The correlated proof fences consumption of the visibility notice.
+        client_ws_send(
+            &mut browser,
+            0,
+            &Frame::Event {
+                sub_id: 0,
+                event_json: br#"{"topic":"connection.visibility","hidden":true}"#,
+            },
+        )
+        .await;
+        client_ws_send(
+            &mut browser,
+            0,
+            &Frame::Ping {
+                nonce: 240,
+                sent_us: 0,
+            },
+        )
+        .await;
+        let wire = read_client_frame(&mut browser).await;
+        assert!(matches!(
+            decode_muxed_frame(&wire).unwrap().frame,
+            Frame::Pong { nonce: 240, .. }
+        ));
+    }
     // The pool has one connection: holding it makes every authority read wait out its bound.
-    let held = f.auth.pool.acquire().await.unwrap();
-    // Another account (or another device) signs out: the server-wide revocation
-    // wake makes this still-signed-in socket re-read its authority on a busy store.
+    let mut held = f.auth.pool.acquire().await.unwrap();
+    if matches!(stall, RevocationStall::OtherAccount) {
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES('other-account','other',0,'unused')")
+            .execute(&mut *held).await.unwrap();
+        sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES('other-session','other-account','test',unixepoch()+600,unixepoch(),1)")
+            .execute(&mut *held).await.unwrap();
+    }
+    // Perform the same committed DELETE then publication as logout, on the held
+    // connection: no pool-release race can let a socket read before the stall.
+    let user = if matches!(stall, RevocationStall::OtherAccount) {
+        "other-account"
+    } else {
+        &f.user
+    };
+    if matches!(
+        stall,
+        RevocationStall::OtherAccount | RevocationStall::Revoked
+    ) {
+        let deleted = sqlx::query("DELETE FROM sessions WHERE user_id=?")
+            .bind(user)
+            .execute(&mut *held)
+            .await
+            .unwrap()
+            .rows_affected();
+        assert_eq!(deleted, 1);
+    }
     f.auth.revocations.send_replace(());
+    let release = if clock.is_some() {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while pending_reads() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the revocation wake must begin an authority read");
+        let started = tokio::time::Instant::now();
+        // There are at most two socket checkers. Three held queries prove that
+        // a missed attempt was retried, while the explicit clock stays below
+        // the one-second authority wait. Freeze again as soon as a retry starts
+        // so real SQL completion cannot lose its budget to host scheduling.
+        while pending_reads() < 3 {
+            assert!(
+                started.elapsed() < Duration::from_millis(300),
+                "no retry before the short stall ended"
+            );
+            tokio::time::advance(Duration::from_millis(5)).await;
+            tokio::task::yield_now().await;
+        }
+        drop(held);
+        None
+    } else {
+        Some(tokio::spawn(async move {
+            std::future::pending::<()>().await;
+            drop(held);
+        }))
+    };
+    if matches!(stall, RevocationStall::OtherAccount) {
+        // An action result proves application authority recovered; a transport
+        // pong alone would bypass SQL and could conceal a closed terminal loop.
+        authorized_result(&mut browser, 240).await;
+        assert_eq!(
+            capture.events("terminal_stream_closed"),
+            Vec::<serde_json::Value>::new()
+        );
+        agent.abort();
+        server.abort();
+        return;
+    }
     let events = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let events = capture.events("terminal_stream_closed");
             if !events.is_empty() {
                 break events;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            if clock.is_some() {
+                tokio::task::yield_now().await;
+            } else {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
         }
     })
     .await
     .expect("the stalled socket must log its close");
-    drop(held);
+    if let Some(release) = release {
+        release.abort();
+        let _ = release.await;
+    }
     assert_eq!(events.len(), 1);
     let fields = &events[0]["fields"];
     assert_eq!(fields["who"], "server");
-    assert_eq!(fields["reason_category"], "server_busy", "{fields}");
-    assert_eq!(fields["reason"], "authority_unavailable", "{fields}");
+    let (category, reason) = if matches!(stall, RevocationStall::Revoked) {
+        ("auth_resume_refusal", "connection_resume_refused")
+    } else {
+        ("server_busy", "authority_unavailable")
+    };
+    assert_eq!(fields["reason_category"], category, "{fields}");
+    assert_eq!(fields["reason"], reason, "{fields}");
     assert_eq!(
         fields["session_id"],
         Uuid::from_bytes(session_id).to_string()
@@ -920,3 +1055,36 @@ async fn revocation_wake_on_busy_store_logs_authority_unavailable_not_resume_ref
     server.abort();
 }
 
+/// Application progress is a stronger barrier than a content-free proof: the
+/// result requires authority and runs after previously queued terminal work.
+async fn authorized_result(
+    browser: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    call_id: u32,
+) {
+    client_ws_send(
+        browser,
+        0,
+        &Frame::Call {
+            call_id,
+            action_id: "test.not.an.action",
+            input_json: b"{}",
+        },
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let wire = read_client_frame(browser).await;
+            match decode_muxed_frame(&wire).unwrap().frame {
+                Frame::Result {
+                    call_id: actual, ..
+                } if actual == call_id => break,
+                Frame::Close { .. } => panic!("authority wake closed the terminal socket"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
