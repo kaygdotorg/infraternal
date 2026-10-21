@@ -81,27 +81,55 @@ export const snapToGrid = (v: number): number => Math.round(v / CELL) * CELL;
 
 const overlaps = (a: Box, b: Box): boolean => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 
+/** Picks the least-travel separation, avoiding a protected box when display settlement holds one anchor. */
+function separation(pusher: Box, other: Box, protectedBox?: Box): { dx: number; dy: number } {
+  const options = [
+    { dx: pusher.x + pusher.w - other.x, dy: 0 },
+    { dx: -(other.x + other.w - pusher.x), dy: 0 },
+    { dx: 0, dy: pusher.y + pusher.h - other.y },
+    { dx: 0, dy: -(other.y + other.h - pusher.y) },
+  ];
+  let candidates = options;
+  if (protectedBox && protectedBox.id !== other.id) {
+    const safe = options.filter((move) => !overlaps(protectedBox, { ...other, x: other.x + move.dx, y: other.y + move.dy }));
+    candidates = safe.length ? safe : options.map((move) => {
+      const next = { ...other, x: other.x + move.dx, y: other.y + move.dy };
+      if (!overlaps(protectedBox, next)) return move;
+      if (move.dx > 0) return { dx: protectedBox.x + protectedBox.w - other.x, dy: 0 };
+      if (move.dx < 0) return { dx: protectedBox.x - other.w - other.x, dy: 0 };
+      if (move.dy > 0) return { dx: 0, dy: protectedBox.y + protectedBox.h - other.y };
+      return { dx: 0, dy: protectedBox.y - other.h - other.y };
+    });
+  }
+  return candidates.reduce((a, b) => (Math.abs(b.dx) + Math.abs(b.dy) < Math.abs(a.dx) + Math.abs(a.dy) ? b : a));
+}
+
 /**
  * Returns every box's position after `fixedId` is held where it is and the others that it
  * overlaps are pushed aside. A pushed box pushes the boxes it now overlaps (never the fixed
- * one). Each push is a whole number of cells because every box edge sits on the grid.
+ * one). `settleAll` also visits otherwise disconnected groups so one display settlement can
+ * clear the whole canvas without choosing another view that could move the camera's anchor.
+ * Each push is a whole number of cells because every box edge sits on the grid.
  */
-export function resolve(boxes: Box[], fixedId: string): Map<string, { x: number; y: number }> {
+export function resolve(boxes: Box[], fixedId: string, settleAll = false): Map<string, { x: number; y: number }> {
   const at = new Map(boxes.map((b) => [b.id, { ...b }]));
   const fixed = new Set([fixedId]);
-  const queue = [fixedId];
-  for (let guard = 0; queue.length && guard < 64; guard++) {
+  const queue = settleAll ? boxes.map((b) => b.id) : [fixedId];
+  const limit = settleAll ? Math.max(64, at.size * 64) : 64;
+  for (let guard = 0; queue.length && guard < limit; guard++) {
     const pusher = at.get(queue.shift()!)!;
+    const anchor = at.get(fixedId);
+    if (settleAll && pusher.id !== fixedId && anchor && overlaps(anchor, pusher)) {
+      const best = separation(anchor, pusher);
+      pusher.x += best.dx;
+      pusher.y += best.dy;
+      queue.push(pusher.id);
+      continue;
+    }
     for (const other of at.values()) {
       if (other.id === pusher.id || fixed.has(other.id) || !overlaps(pusher, other)) continue;
-      const options = [
-        { dx: pusher.x + pusher.w - other.x, dy: 0 },
-        { dx: -(other.x + other.w - pusher.x), dy: 0 },
-        { dx: 0, dy: pusher.y + pusher.h - other.y },
-        { dx: 0, dy: -(other.y + other.h - pusher.y) },
-      ];
       // Least travel wins; on a tie prefer moving away to the right or down.
-      const best = options.reduce((a, b) => (Math.abs(b.dx) + Math.abs(b.dy) < Math.abs(a.dx) + Math.abs(a.dy) ? b : a));
+      const best = separation(pusher, other, settleAll ? anchor : undefined);
       other.x += best.dx;
       other.y += best.dy;
       queue.push(other.id);

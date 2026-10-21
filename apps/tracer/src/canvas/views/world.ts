@@ -342,9 +342,10 @@ export function createViews(cx: Ctx): ViewsModule {
   function settle(fixedId: ViewId, at?: { x: number; y: number }, displayOnly = state.metrics.minW > 0): void {
     const local = displayOnly && !at;
     const trial = boxes().map((b) => (at && b.id === fixedId ? { ...b, x: at.x, y: at.y } : b));
-    // On touch, the current view stays fixed as wider drawn columns push neighbours. On desktop, callers may
-    // settle each disconnected group in turn while keeping the current view fixed on its own first pass.
-    const next = resolve(trial, local && state.metrics.minW > 0 && views.has(state.currentView) ? state.currentView : fixedId);
+    // On touch, the current view stays fixed as wider drawn columns push neighbours. Desktop display settlement visits
+    // every overlap group in one resolver pass, keeping only the camera's current view fixed.
+    const root = local && state.metrics.minW > 0 && views.has(state.currentView) ? state.currentView : fixedId;
+    const next = resolve(trial, root, displayOnly && state.metrics.minW === 0);
     for (const c of views.values()) {
       const p = next.get(c.view.id);
       if (!p || (p.x === c.view.x && p.y === c.view.y)) continue;

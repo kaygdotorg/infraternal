@@ -36,6 +36,23 @@ test("a chain of neighbours is pushed in turn", () => {
   expect(at.get("c")!.x).toBe(5 * CELL);
 });
 
+test("display settlement clears disconnected overlaps while keeping its one anchor fixed", () => {
+  const boxes: Box[] = [
+    { id: "settings", x: 0, y: 0, w: 29 * CELL, h: 9 * CELL },
+    { id: "console", x: -3 * CELL, y: -2 * CELL, w: 5 * CELL, h: 9 * CELL },
+    { id: "mesh", x: 21 * CELL, y: 8 * CELL, w: 9 * CELL, h: 5 * CELL },
+    { id: "a", x: -8 * CELL, y: -8 * CELL, w: 5 * CELL, h: 7 * CELL },
+    { id: "b", x: -7 * CELL, y: -11 * CELL, w: 5 * CELL, h: 7 * CELL },
+    { id: "c", x: 2 * CELL, y: -11 * CELL, w: 5 * CELL, h: 7 * CELL },
+    { id: "d", x: -2 * CELL, y: 0, w: 5 * CELL, h: 7 * CELL },
+    { id: "e", x: 0, y: 16 * CELL, w: 5 * CELL, h: 7 * CELL },
+    { id: "f", x: 23 * CELL, y: 20 * CELL, w: 5 * CELL, h: 7 * CELL },
+  ];
+  const at = resolve(boxes, "settings", true);
+  expect(at.get("settings")).toEqual({ x: 0, y: 0 });
+  for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) expect(overlaps(boxes[i]!, boxes[j]!, at)).toBe(false);
+});
+
 test("snapping rounds to whole cells", () => {
   expect(snapToGrid(59)).toBe(0);
   expect(snapToGrid(61)).toBe(CELL);
