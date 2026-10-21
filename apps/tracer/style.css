@@ -347,9 +347,13 @@ button { color: inherit; }
    Widths are measured in the browser (test/top-centre.spec.ts), not offsets. */
 .top {
   --capsule-min: 420px;
+  /* The width each side track keeps clear: the right-hand group's own width (one control by default; the canvas adds its
+     two buttons where they are shown, see clusters.css). The pill's track shrinks to what both sides leave, so the pill
+     never runs under a control and stays on the centre line. */
+  --side: var(--pill-h);
   position: absolute; z-index: 3;
   top: calc(10px + env(safe-area-inset-top)); left: var(--gutter); right: var(--gutter);
-  display: grid; grid-template-columns: minmax(var(--pill-h), 1fr) minmax(min(var(--capsule-min), calc(100vw - 2 * var(--gutter) - 2 * var(--pill-h) - 20px)), auto) minmax(var(--pill-h), 1fr); align-items: center; gap: 10px;
+  display: grid; grid-template-columns: minmax(var(--side), 1fr) minmax(min(var(--capsule-min), calc(100vw - 2 * var(--gutter) - 2 * var(--side) - 20px)), auto) minmax(var(--side), 1fr); align-items: center; gap: 10px;
   pointer-events: none;
 }
 .top > * { pointer-events: auto; }
@@ -600,6 +604,8 @@ button { color: inherit; }
   .keyblur { display: none !important; }
 }
 @media (pointer: coarse) {
+  /* A touch device has no keyboard to hint at (a hardware keyboard on a tablet still has the shortcuts panel). */
+  .capsule-kbd { display: none; }
   .terminal-screen { --gutter: max(20px, env(safe-area-inset-left)); --pill-h: 44px; }
   .add-row, .result { min-height: 44px; }
   .keyblur, .keybar { display: block; }
