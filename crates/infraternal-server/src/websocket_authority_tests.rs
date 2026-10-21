@@ -289,3 +289,102 @@ async fn advance_through_authority_wait<T>(
         tokio::time::advance(Duration::from_millis(1)).await;
     }
 }
+
+/// Exercise the shared places directly so socket transport scheduling cannot
+/// hide a retained query or a duplicated place (#240, delta review r3).
+mod cap_review_r3 {
+    use super::*;
+
+    async fn fixture() -> (WebSocketState, String) {
+        let (pool, user, _) = database().await;
+        let auth = Auth::new(
+            pool.clone(),
+            "auth.example.test",
+            "https://auth.example.test",
+        )
+        .await
+        .unwrap();
+        let now = unix_seconds().unwrap();
+        sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,?,'cap review',?,?,1)")
+            .bind(crate::auth::hash("cap-review-r3"))
+            .bind(&user)
+            .bind(now + 3600)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (socket, _peer) = tokio::net::UnixStream::pair().unwrap();
+        let state = WebSocketState::new(auth, pool, EmbeddedAgent::from_test_socket(socket))
+            .await
+            .unwrap();
+        (state, user)
+    }
+
+    /// Thirty-two simultaneous callers exhaust all four places, but only four
+    /// queries may outlive their attempts. Waiting callers own no place.
+    #[tokio::test(start_paused = true)]
+    async fn deadline_storm_retains_exactly_four_places_then_recovers() {
+        let clock = FrozenSocketTime::new().await;
+        let (state, user) = fixture().await;
+        let held = state.pool.acquire().await.unwrap();
+        let mut storm: Vec<_> = (0..32)
+            .map(|_| {
+                Some(Box::pin(read_expiry(
+                    &state,
+                    &user,
+                    "cap-review-r3",
+                    false,
+                    AUTHORITY_WAIT,
+                )))
+            })
+            .collect();
+        for read in &mut storm {
+            assert!(read.as_mut().unwrap().as_mut().now_or_never().is_none());
+        }
+        assert_eq!(state.authority.reads.available_permits(), 0);
+        let mut ended = 0;
+        // Advance the entire retry budget while the sole pooled connection
+        // stays held. A repeated attempt cannot create a fifth detached query.
+        for _ in 0..22 {
+            tokio::time::advance(Duration::from_millis(50)).await;
+            for slot in &mut storm {
+                if let Some(read) = slot
+                    && let Some(result) = read.as_mut().now_or_never()
+                {
+                    assert!(matches!(result, Err(AuthorityMiss::Unavailable)));
+                    *slot = None;
+                    ended += 1;
+                }
+            }
+            assert_eq!(state.authority.reads.available_permits(), 0);
+        }
+        assert_eq!(ended, 32, "not every waiting access check failed closed");
+        assert_eq!(Arc::strong_count(&state.authority), AUTHORITY_READS + 1);
+        drop(storm);
+        assert_eq!(state.authority.reads.available_permits(), 0);
+        drop(held);
+        // Restore physical scheduling only for SQLite's worker and the pool's
+        // asynchronous return; this is a completion guard, not a latency claim.
+        drop(clock);
+        let all = tokio::time::timeout(
+            Duration::from_secs(10),
+            state
+                .authority
+                .reads
+                .acquire_many(u32::try_from(AUTHORITY_READS).unwrap()),
+        )
+        .await
+        .expect("detached access checks did not return their places")
+        .unwrap();
+        assert_eq!(state.authority.reads.available_permits(), 0);
+        drop(all);
+        assert_eq!(state.authority.reads.available_permits(), AUTHORITY_READS);
+        assert_eq!(Arc::strong_count(&state.authority), 1);
+        assert!(
+            read_expiry(&state, &user, "cap-review-r3", false, AUTHORITY_WAIT)
+                .await
+                .is_ok()
+        );
+        assert_eq!(state.authority.reads.available_permits(), AUTHORITY_READS);
+    }
+}
