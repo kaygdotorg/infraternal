@@ -16,6 +16,7 @@ export class ServerCanvasStore implements CanvasStore {
   readonly acceptsPendingReferences = true;
   readonly #journal: LayoutJournal;
   #disposed = false;
+  #resyncing = false;
   readonly #cache: ReturnType<typeof createStoredJsonCache>;
   readonly #off: SubscriptionHandle;
   #resyncTimer: ReturnType<typeof setTimeout> | undefined;
@@ -32,6 +33,11 @@ export class ServerCanvasStore implements CanvasStore {
     this.#cache = createStoredJsonCache(key, () => layoutCacheValue(this.#journal));
     this.#off = transport.subscribe({ topic: "canvas.layout" }, (event) => this.#event(event), () => {
       this.#journal.restart();
+      this.#resyncing = true;
+      // A reconnect already sent Subscribe. Give its snapshot a full backoff
+      // interval before retrying, replacing any prior generation's watchdog.
+      clearTimeout(this.#resyncTimer); this.#resyncTimer = undefined;
+      this.#resync();
     });
   }
   async load(): Promise<CanvasDocument | undefined> {
@@ -51,16 +57,23 @@ export class ServerCanvasStore implements CanvasStore {
   subscribe(listener: () => void): () => void { return this.#cache.subscribe(listener); }
   #event(event: Record<string, unknown>): void {
     if (this.#disposed) return;
+    if (event.type === "canvas.layout.operation" && this.#resyncing) return;
+    if (event.type === "canvas.layout.operation" && Number.isSafeInteger(event.revision) && Number(event.revision) > this.#journal.canonical.revision + 1) {
+      this.#resyncing = true;
+      this.#resync(Number(event.revision));
+      return;
+    }
     let accepted: boolean;
     try { accepted = this.#journal.accept(event); }
-    catch { this.#resync(); return; }
+    catch { this.#resyncing = true; this.#resync(); return; }
     if (!accepted) {
       // Withdrawals leave the transport healthy. A gap cannot be repaired by
       // ignoring subsequent operations: request a canonical snapshot instead.
-      if (event.type === "error") this.#resync();
+      if (event.type === "error") { this.#resyncing = true; this.#resync(); }
       else if (Number(event.revision) > this.#journal.canonical.revision) this.#resync(Number(event.revision));
       return;
     }
+    if (event.type === "canvas.layout.snapshot") this.#resyncing = false;
     if (this.#resyncTarget > 0 && (event.type === "canvas.layout.snapshot" || this.#journal.canonical.revision >= this.#resyncTarget)) {
       clearTimeout(this.#resyncTimer); this.#resyncTimer = undefined;
       this.#resyncTarget = 0; this.#resyncDelay = 250;
@@ -77,13 +90,13 @@ export class ServerCanvasStore implements CanvasStore {
     this.#resyncTimer = setTimeout(() => {
       this.#resyncTimer = undefined;
       this.#resyncDelay = Math.min(5000, this.#resyncDelay * 2);
-      this.#off.refresh();
+      this.#off.resync();
       if (this.#resyncTarget > 0) this.#resync(this.#resyncTarget);
     }, delay);
   }
   #publish(): void { this.#cache.changed(); }
   #pump(): void {
-    if (this.#disposed || this.transport.isWelcomed === false) return;
+    if (this.#disposed || this.#resyncing || this.transport.isWelcomed === false) return;
     const entry = this.#journal.next(); if (!entry) return;
     const migration = "document" in entry;
     const epoch = this.#journal.epoch;

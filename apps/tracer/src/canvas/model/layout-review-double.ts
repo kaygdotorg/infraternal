@@ -23,7 +23,7 @@ class ReviewTransport implements LayoutTransport {
     this.#listener = event;
     open?.();
     event({ type: "canvas.layout.snapshot", document: structuredClone(this.document), revision: this.document.revision, initialized: true });
-    return Object.assign(() => { this.#listener = undefined; }, { refresh: () => {
+    return Object.assign(() => { this.#listener = undefined; }, { resync: () => {
       if (this.#listener !== event) return;
       open?.();
       event({ type: "canvas.layout.snapshot", document: structuredClone(this.document), revision: this.document.revision, initialized: true });

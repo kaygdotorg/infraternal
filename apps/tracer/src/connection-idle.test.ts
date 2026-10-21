@@ -652,16 +652,34 @@ test("a layout subscription starts the connection before any terminal exists", (
   try { expect(f.connection.isWelcomed).toBe(true); } finally { f.dispose(); }
 });
 
-test("refresh replaces one subscription ID and disposal prevents later refreshes", () => {
+test("resync replaces one subscription ID and disposal prevents later resyncs", () => {
   const f = fixture(30, 0, 4n, true);
   try {
     let opens = 0;
     const subscription = f.connection.subscribe({ topic: "canvas.layout" }, () => {}, () => { opens++; });
     const id = f.subscriptionIds.at(-1);
-    for (let n = 0; n < 100; n++) subscription.refresh();
+    for (let n = 0; n < 100; n++) subscription.resync();
     expect(f.subscriptionIds.slice(-101)).toEqual(Array(101).fill(id));
     expect(opens).toBe(101);
-    subscription(); subscription.refresh();
+    subscription(); subscription.resync();
     expect(opens).toBe(101); expect(f.sockets).toBe(1);
+  } finally { f.dispose(); }
+});
+
+test("resync reopens a feature subscription with the same server ID", () => {
+  const f = fixture(30, 1);
+  try {
+    let opened = 0;
+    const before = f.subscriptionIds.length;
+    const off = f.connection.subscribe({ topic: "canvas.layout" }, () => {}, () => { opened++; });
+    expect(f.subscriptionIds).toHaveLength(before + 1);
+    const subId = f.subscriptionIds.at(-1)!;
+    expect(opened).toBe(1);
+    off.resync();
+    expect(f.subscriptionIds.slice(before)).toEqual([subId, subId]);
+    expect(opened).toBe(2);
+    off();
+    off.resync();
+    expect(f.subscriptionIds.slice(before)).toEqual([subId, subId]);
   } finally { f.dispose(); }
 });

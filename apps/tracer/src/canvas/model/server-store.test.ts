@@ -8,12 +8,12 @@ import { canvasKey, clearAccountStorage } from "../../account-storage";
 const moduleMathRandom = Math.random;
 const document = (): CanvasDocument => ({ format: "infraternal.canvas", version: 1, revision: 0, views: [{ id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [] } }] });
 class Transport implements LayoutTransport {
-  refreshes = 0;
+  resyncs = 0;
   event: (e: Record<string, unknown>) => void = () => {};
   open: () => void = () => {};
   calls: Array<{ action: string; input: Record<string, unknown>; resolve: (r: Record<string, unknown>) => void; reject: (error?: Error) => void }> = [];
   call(action: string, input: Record<string, unknown>): Promise<Record<string, unknown>> { return new Promise((resolve, reject) => this.calls.push({ action, input: structuredClone(input), resolve, reject: (error?: Error) => reject(error ?? Error("disconnected")) })); }
-  subscribe(_filter: { topic: string }, event: (e: Record<string, unknown>) => void, open?: () => void) { this.event = event; this.open = open ?? (() => {}); this.open(); return Object.assign(() => { this.event = () => {}; }, { refresh: () => { this.refreshes++; this.open(); } }); }
+  subscribe(_filter: { topic: string }, event: (e: Record<string, unknown>) => void, open?: () => void) { this.event = event; this.open = open ?? (() => {}); this.open(); return Object.assign(() => { this.event = () => {}; }, { resync: () => { this.resyncs++; this.open(); } }); }
   snapshot(doc = document(), initialized = true): void { this.event({ type: "canvas.layout.snapshot", document: doc, revision: doc.revision, initialized }); }
 }
 const tick = async (): Promise<void> => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
@@ -39,10 +39,10 @@ test("a layout gap or withdrawn worker requests one fresh snapshot with bounded 
   try {
     transport.snapshot();
     for (let n = 0; n < 100; n++) transport.event({ type: "canvas.layout.operation", revision: n + 5, intent: opened });
-    expect(store.current().revision).toBe(0); expect(transport.refreshes).toBe(0);
-    retry(250); expect(transport.refreshes).toBe(1);
+    expect(store.current().revision).toBe(0); expect(transport.resyncs).toBe(0);
+    retry(250); expect(transport.resyncs).toBe(1);
     transport.event({ type: "error", error: "forbidden" });
-    retry(500); expect(transport.refreshes).toBe(2);
+    retry(500); expect(transport.resyncs).toBe(2);
     for (const delay of [1000, 2000, 4000, 5000, 5000]) {
       transport.event({ type: "error", error: "canvas unavailable" }); retry(delay);
     }
@@ -55,7 +55,7 @@ test("a layout gap or withdrawn worker requests one fresh snapshot with bounded 
     transport.event({ type: "canvas.layout.operation", revision: 105, op_id: call.input.op_id, intent: call.input.intent });
     expect([...timers.values()].some((timer) => timer.delay === 250)).toBe(false);
     transport.event({ type: "error", error: "canvas unavailable" }); retry(250);
-    expect(transport.refreshes).toBe(8);
+    expect(transport.resyncs).toBe(8);
     store.dispose(); expect(timers.size).toBe(0);
   } finally { store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
 });
@@ -157,8 +157,8 @@ test("sixty withdrawn layout subscriptions spread their coalesced retry timers",
       const subscribe = transport.subscribe.bind(transport);
       transport.subscribe = (...args) => {
         const off = subscribe(...args);
-        return Object.assign(off, { refresh: () => {
-          transport.refreshes++; transport.open(); transport.event({ type: "error", error: "unavailable" });
+        return Object.assign(off, { resync: () => {
+          transport.resyncs++; transport.open(); transport.event({ type: "error", error: "unavailable" });
         } });
       };
       const store = new ServerCanvasStore(transport, `subscriber-${n}`);
@@ -170,9 +170,9 @@ test("sixty withdrawn layout subscriptions spread their coalesced retry timers",
       firstDelays.push(scheduled[0]![1].delay);
     }
     advance(60_000);
-    const firstMinute = transports.reduce((sum, transport) => sum + transport.refreshes, 0);
+    const firstMinute = transports.reduce((sum, transport) => sum + transport.resyncs, 0);
     advance(65_000);
-    const followingFiveSeconds = transports.reduce((sum, transport) => sum + transport.refreshes, 0) - firstMinute;
+    const followingFiveSeconds = transports.reduce((sum, transport) => sum + transport.resyncs, 0) - firstMinute;
     console.log(`LAYOUT_RETRY_SCHEDULE subscribers=60 first_minute=${firstMinute} following_5s=${followingFiveSeconds} first_delay_slots=${new Set(firstDelays).size}`);
     expect(new Set(firstDelays).size).toBe(60);
     expect(Math.min(...firstDelays)).toBeGreaterThanOrEqual(250);
@@ -194,6 +194,27 @@ test("an acknowledgement after its ordered event does not repaint the same layou
   const call = transport.calls[0]!;
   transport.event({ type: "canvas.layout.operation", revision: 1, op_id: call.input.op_id, intent: opened });
   expect(paints).toBe(2); call.resolve({ revision: 1 }); await tick(); expect(paints).toBe(2); store.dispose();
+});
+
+test("review: a missing layout revision is recovered before the cached document is used again", () => {
+  const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  const originalRandom = Math.random;
+  const timers = new Map<number, { run: () => void; delay: number }>(); let id = 0;
+  globalThis.setTimeout = ((run: () => void, delay: number) => { timers.set(++id, { run, delay }); return id; }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: number) => { timers.delete(timer); }) as unknown as typeof clearTimeout;
+  Math.random = () => 0;
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "a");
+  try {
+    const baseline = document(); baseline.revision = 1; transport.snapshot(baseline); store.flush();
+    transport.event({ type: "canvas.layout.operation", revision: 3, op_id: "peer-after-gap", noop: false,
+      intent: { type: "view.update", view_id: "console", cell: { x: 7, y: 9 } } });
+    expect(store.current().revision).toBe(1);
+    const timer = [...timers].find(([, timer]) => timer.delay === 250); expect(timer).toBeDefined();
+    timers.delete(timer![0]); timer![1].run(); expect(transport.resyncs).toBe(1);
+    const authoritative = document(); authoritative.revision = 3; authoritative.views[0]!.cell = { x: 7, y: 9 };
+    transport.snapshot(authoritative);
+    expect(store.current().revision).toBe(3); expect(store.current().views[0]!.cell).toEqual({ x: 7, y: 9 });
+  } finally { store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
 });
 
 test("a bootstrap receipt before its canonical snapshot keeps the legacy layout drawable", async () => {
@@ -323,4 +344,47 @@ test("review r2: refusal drains independent edits waiting behind four in-flight 
     const final = store.current(); transport.open(); transport.snapshot(final); await tick();
     expect(transport.calls).toHaveLength(7);
   } finally { store.dispose(); }
+});
+
+// Virtual scheduling covers the combined gap, withdrawal and reconnect state machine without host timing claims.
+test("recovery coalesces gaps and errors, ignores operations until a snapshot, and survives reconnect", () => {
+  const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  const originalRandom = Math.random;
+  const timers = new Map<number, { run: () => void; delay: number }>(); let id = 0;
+  globalThis.setTimeout = ((run: () => void, delay: number) => { timers.set(++id, { run, delay }); return id; }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: number) => { timers.delete(timer); }) as unknown as typeof clearTimeout;
+  Math.random = () => 0;
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "interplay");
+  const retries = () => [...timers].filter(([, timer]) => timer.delay >= 250);
+  const fire = (delay: number): void => {
+    const pending = retries(); expect(pending).toHaveLength(1); expect(pending[0]![1].delay).toBe(delay);
+    timers.delete(pending[0]![0]); pending[0]![1].run();
+  };
+  try {
+    const baseline = document(); baseline.revision = 1; transport.snapshot(baseline); store.flush();
+    transport.event({ type: "canvas.layout.operation", revision: 3, op_id: "gap", intent: opened });
+    // An old generation's missing operation arriving late must not release the snapshot wait.
+    transport.event({ type: "canvas.layout.operation", revision: 2, op_id: "late", intent: opened });
+    expect(store.current().revision).toBe(1);
+    for (let n = 0; n < 100; n++) transport.event({ type: "error", error: "subscription no longer current" });
+    fire(250); expect(transport.resyncs).toBe(1);
+    // Errors returned by the replacement cannot strand the wait or start extra timers.
+    for (let n = 0; n < 100; n++) transport.event({ type: "error", error: "canvas unavailable" });
+    fire(500); expect(transport.resyncs).toBe(2);
+    const invalid = document(); invalid.revision = 3;
+    transport.event({ type: "canvas.layout.snapshot", revision: 4, document: invalid, initialized: true });
+    expect(store.current().revision).toBe(1); expect(retries()).toHaveLength(1);
+    // Reconnect already sends Subscribe. Its snapshot cancels the old recovery watchdog.
+    transport.open();
+    const authoritative = document(); authoritative.revision = 3; authoritative.views[0]!.cell = { x: 7, y: 9 };
+    transport.snapshot(authoritative); store.flush();
+    expect(store.current()).toEqual(authoritative); expect(retries()).toHaveLength(0);
+    expect(transport.resyncs).toBe(2);
+    transport.event({ type: "canvas.layout.operation", revision: 4, op_id: "after", intent: { type: "view.update", view_id: "console", name: "Live again" } });
+    expect(store.current().revision).toBe(4); expect(store.current().views[0]!.name).toBe("Live again"); store.flush();
+    transport.event({ type: "error", error: "withdrawn again" }); fire(250);
+    expect(transport.resyncs).toBe(3);
+    transport.snapshot(store.current()); store.flush(); expect(retries()).toHaveLength(0);
+    store.dispose(); expect(timers.size).toBe(0);
+  } finally { store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
 });

@@ -88,7 +88,7 @@ interface Subscription {
   onOpen?: (() => void) | undefined;
 }
 /** Refresh keeps the subscription ID, so retries replace its bounded server slot. */
-export type SubscriptionHandle = (() => void) & { refresh(): void };
+export type SubscriptionHandle = (() => void) & { resync(): void };
 const encoder = new TextEncoder();
 
 /** What a stream gives the connection. All callbacks run on the socket's event task. */
@@ -293,7 +293,7 @@ export class MuxConnection {
     // Account state must load before any terminal window exists (D248).
     if (!this.socket && !this.closed) this.connect();
     return Object.assign(() => { this.subscriptions.delete(subId); }, {
-      refresh: () => { if (this.isWelcomed) this.openSubscription(subId); },
+      resync: () => { if (this.isWelcomed) this.openSubscription(subId); },
     });
   }
 
