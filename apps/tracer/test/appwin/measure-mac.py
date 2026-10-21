@@ -443,7 +443,7 @@ try:
  run_started=time.monotonic();run_deadline_at=run_started+RUN_TIMEOUT_SECONDS
  signal.signal(signal.SIGALRM,run_deadline);signal.alarm(RUN_TIMEOUT_SECONDS)
  environment=command(['sw_vers'])+command(['sysctl','-n','hw.model','hw.ncpu','hw.memsize'])
- if not args.get('first_picture_idle'):environment+=command(['uptime'])
+ environment+=command(['uptime'])
  battery();emit({'kind':'environment','text':environment})
  console=console_state();emit({'kind':'console','state':console})
  if not console['ready']:raise RuntimeError('console is locked or secure input is active')

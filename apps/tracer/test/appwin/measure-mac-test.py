@@ -35,6 +35,21 @@ class PickerSelectionTests(unittest.TestCase):
         actions = ['fixture-host/w-900-' + str(i) for i in range(501, 511)]
         self.assertEqual(calls, [('ready', actions), ('open', actions)])
 
+    def test_first_picture_environment_includes_machine_load(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        body = next(node.body for node in tree.body if isinstance(node, ast.Try))
+        start = next(index for index, node in enumerate(body) if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == 'environment' for target in node.targets))
+        calls = []
+        def command(arguments):
+            calls.append(arguments)
+            return 'load=fixture' if arguments == ['uptime'] else 'machine=fixture'
+        namespace = {'args': {'first_picture_idle': True}, 'command': command}
+        exec(compile(ast.Module(body=body[start:start+2], type_ignores=[]), str(source), 'exec'), namespace)
+        self.assertIn(['uptime'], calls)
+        self.assertIn('load=fixture', namespace['environment'])
+
     def test_window_picker_does_not_confuse_numeric_title_suffixes(self):
         source = pathlib.Path(__file__).with_name('measure-mac.py')
         tree = ast.parse(source.read_text())
