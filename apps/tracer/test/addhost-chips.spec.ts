@@ -87,7 +87,7 @@ test("an invalid token shows the hint and never blocks the chips beside it", asy
   await page.keyboard.type("a@h1 kayg@ ", { delay: 5 });
   await expect(chips(page)).toHaveCount(1);
   await expect(hint(page)).toHaveAttribute("data-show", "true");
-  await expect(hint(page)).toHaveText("Type user@host, for example kayg@o2");
+  await expect(hint(page)).toHaveText("Type user@host, or user@host:2222 for another port");
   await expect(continueButton(page)).toBeEnabled();
   await field(page).fill("");
   await expect(hint(page)).toHaveAttribute("data-show", "false");
