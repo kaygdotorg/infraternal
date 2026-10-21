@@ -541,7 +541,7 @@ export class Wizard {
   private renderAuthority(page: HTMLElement): void {
     page.innerHTML = `${this.hero(ICON.shield)}<h1 class="ah-title">${this.authorityInitialized ? "Unlock" : "Set up"} host connections</h1>
       <p class="ah-lede">${this.authorityInitialized ? "Confirm with your administrator passkey to let this server connect new hosts." : "Host connections have not been set up yet. Confirm with your administrator passkey to create the certificate authority for your hosts."}</p>
-      <p class="ah-text">Your account key stays in your browser. New hosts receive a certificate valid for seven days.</p>`;
+      <p class="ah-text">${this.authorityInitialized ? "" : "The certificate authority signs the short-lived logins to your hosts. It is created once. "}Your account key stays in your browser. New hosts receive a certificate valid for seven days.</p>`;
     this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back">Back</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="unlock-authority">${svg(ICON.shieldCheck)}<span>Confirm with passkey</span></button>`);
   }
 
