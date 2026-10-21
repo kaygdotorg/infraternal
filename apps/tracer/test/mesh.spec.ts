@@ -599,6 +599,53 @@ test("a dragged node is pinned and saved in the canvas document; the others are 
   expect(Object.keys((await probe(page, (p) => p.mesh.document()))!.views.find((v) => v.id === "mesh")!.layout.pinned!)).toEqual(["nix-cache"]);
 });
 
+// A card goes wherever the person drags it: the view's size follows the nodes as placed, it is not a wall (#24).
+async function dragCard(page: Page, id: string, to: { x: number; y: number }): Promise<void> {
+  const from = await centre(page, `.ui-window[data-window-id="n-${id}"] .ui-window-pill`);
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(to.x, to.y, { steps: 10 });
+  await page.mouse.up();
+  await page.waitForTimeout(900); // the view settles and the camera frames it again
+}
+const meshBox = (page: Page) => probe(page, (p) => p.views().find((v) => v.id === "mesh")!);
+// On a phone only the first card column is on screen (the rest is a pan away), so the phone drags that one.
+for (const [label, size, card] of [["desktop", DESKTOP, "nix-cache"], ["phone", PHONE, "tag:ci"]] as const) {
+  test(`drag bounds ${label}: a card dragged right and down past the old edge stays there and the view grows around it`, async ({ page }) => {
+    await open(page, "", size);
+    await intoMesh(page);
+    const before = (await meshBox(page))!;
+    for (let i = 0; i < 3; i++) await dragCard(page, card, { x: size.width - 10, y: size.height - 10 });
+    const pin = (await probe(page, (p) => p.mesh.pins()))[card]!;
+    const after = (await meshBox(page))!;
+    expect(pin.y).toBeGreaterThan(before.h - 104 - 160); // past where the old box ended the card (its height and margin)
+    expect(after.h).toBeGreaterThan(before.h);
+    // The camera rests where the dropped card is: it is on screen, not lost beyond the stop that was framed.
+    const box = (await page.locator(`.ui-window[data-window-id="n-${card}"]`).boundingBox())!;
+    expect(box.x + box.width / 2).toBeGreaterThan(0); expect(box.x + box.width / 2).toBeLessThan(size.width);
+    expect(box.y + box.height / 2).toBeGreaterThan(0); expect(box.y + box.height / 2).toBeLessThan(size.height);
+    // Neighbouring views are pushed clear of the grown one, never overlapped.
+    const boxes = await probe(page, (p) => p.views());
+    for (const a of boxes) for (const b of boxes) if (a.id < b.id) expect(a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h, `${a.id} overlaps ${b.id}`).toBe(false);
+    expect(pin.y + 104 + 30).toBeLessThanOrEqual(after.h); // and the box still holds it with its margin
+    if (label === "desktop") {
+      expect(pin.x).toBeGreaterThan(before.w - 208 - 160);
+      expect(after.w).toBeGreaterThan(before.w);
+      expect(pin.x + 208 + 30).toBeLessThanOrEqual(after.w);
+    }
+  });
+  test(`drag bounds ${label}: a card dragged left and up past zero moves the view's origin`, async ({ page }) => {
+    await open(page, "", size);
+    await intoMesh(page);
+    const before = (await meshBox(page))!;
+    for (let i = 0; i < 3; i++) await dragCard(page, card, { x: 8, y: 8 });
+    const pins = await probe(page, (p) => p.mesh.pins());
+    const after = (await meshBox(page))!;
+    for (const q of Object.values(pins)) { expect(q.x).toBeGreaterThanOrEqual(0); expect(q.y).toBeGreaterThanOrEqual(0); }
+    expect(after.x + after.y).toBeLessThan(before.x + before.y);
+  });
+}
+
 // ---- states and captures ----------------------------------------------------------------------------------------
 const CAPTURE = process.env.MESH_CAPTURES === "1";
 async function capture(page: Page, name: string, testInfo: { outputPath(n: string): string }): Promise<void> {

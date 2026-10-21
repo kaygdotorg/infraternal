@@ -13,7 +13,7 @@ import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
 import { clamp } from "../camera/camera";
 import type { Ctx, ViewRec, WinRec } from "../context";
 import { SVG_NS, coarse, el } from "../dom";
-import { contentSize, type Pt, type Rect } from "../layout/geometry";
+import { CELL, type Pt, type Rect } from "../layout/geometry";
 import type { Grant, NodeModel, WindowModel } from "../model/types";
 import { ICON, lineIcon } from "../views/icons";
 import { Arrow, DragArrow, anchors } from "./arrows";
@@ -198,6 +198,37 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     if (cardPool.length < 120) cardPool.push(rec); else rec.card.dispose();
   };
 
+  /**
+   * Fits the view to its nodes once a card is dropped. Right and down the graph's size already follows the pins
+   * (`layout.fit`), so only a re-read is needed. Left and up a card can sit at a negative place, which the size cannot
+   * say: every node is pinned where it is, shifted right/down by whole grid cells until the leftmost/topmost is at or past
+   * zero, and the view's origin moves the same way up/left, so no card moves on the canvas. Pinning all nodes (not only the
+   * moved one) is what keeps the cards the layout placed from jumping relative to it. The re-read then grows the view
+   * (neighbours are pushed by `settle`, as with any other size change).
+   */
+  const fitAfterDrag = (c: ViewRec, dropped: NodeModel): void => {
+    const nodes = c.view.nodes;
+    let minX = 0, minY = 0;
+    for (const n of nodes) { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); }
+    const dx = minX < 0 ? Math.ceil(-minX / CELL) * CELL : 0, dy = minY < 0 ? Math.ceil(-minY / CELL) * CELL : 0;
+    // A fresh object: the layout cache is keyed by the identity of the pins, and the drag changed them in place.
+    const pins = c.view.graphPins = { ...(c.view.graphPins ?? Object.fromEntries(source.data().pins)) };
+    if (dx || dy) {
+      for (const n of nodes) {
+        n.x += dx; n.y += dy; n.pinned = true;
+        pins[n.id] = { x: Math.round(n.x), y: Math.round(n.y) };
+        if (c.view.id === "mesh") source.pin(n.id, n.x, n.y);
+      }
+      c.view.x -= dx; c.view.y -= dy;
+      c.sx.set(c.view.x, true); c.sy.set(c.view.y, true);
+    }
+    refreshGraph(c);
+    // Locked to this view, the camera rests at the stop that frames the card just dropped: the view grew, and a card
+    // put beyond the stop that was on screen would otherwise be out of reach.
+    if (state.canvasLock && state.currentView === c.view.id) {
+      cx.nav.goStop(c, cx.nav.nearestStop(c, cx.view.contentRect(c).x + dropped.x + state.metrics.nodeW / 2));
+    }
+  };
   const wireNode = (rec: WinRec): void => {
     const pill = rec.card.pill;
     pill.style.touchAction = "none";
@@ -210,9 +241,10 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       d.frame = 0;
       if (!d.at) return;
       const { n } = d;
-      const size = contentSize(rec.owner.view, state.metrics);
-      n.x = clamp(d.nx + (d.at.x - d.x) / cam.z, 0, size.w - state.metrics.nodeW);
-      n.y = clamp(d.ny + (d.at.y - d.y) / cam.z, 0, size.h - state.metrics.nodeH);
+      // No wall: the view is as big as its nodes as placed, so a card can go anywhere; the view is fitted once, on drop
+      // (`fitAfterDrag`), because a resize per pointer move would re-frame the camera under the finger.
+      n.x = d.nx + (d.at.x - d.x) / cam.z;
+      n.y = d.ny + (d.at.y - d.y) / cam.z;
       n.pinned = true; // a node the person moved stays where it is (D180); the canvas document keeps it
       const pins = rec.owner.view.graphPins ??= Object.fromEntries(source.data().pins);
       pins[n.id] = { x: Math.round(n.x), y: Math.round(n.y) };
@@ -241,7 +273,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       const moved = d.nx !== n.x || d.ny !== n.y;
       d = undefined;
       delete rec.card.root.dataset.lifted;
-      if (moved) cx.store.changed();
+      if (moved) { fitAfterDrag(rec.owner, n); cx.store.changed(); }
     };
     pill.addEventListener("pointerup", up, { signal });
     pill.addEventListener("pointercancel", up, { signal });
