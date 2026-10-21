@@ -621,4 +621,44 @@ mod cap_review_r3 {
         assert_eq!(state.authority.reads.available_permits(), AUTHORITY_READS);
         drop(clock);
     }
+
+    /// A cancelled query waiting for the pool must finish at the pool's own
+    /// acquire timeout even if the checked-out connection is never released.
+    #[tokio::test(start_paused = true)]
+    async fn pool_acquire_timeout_recovers_places_without_releasing_the_connection() {
+        let clock = FrozenSocketTime::new().await;
+        let (state, user) = fixture().await;
+        let held = state.pool.acquire().await.unwrap();
+        let mut reads: Vec<_> = (0..AUTHORITY_READS)
+            .map(|_| {
+                Box::pin(read_expiry(
+                    &state,
+                    &user,
+                    "cap-review-r3",
+                    false,
+                    AUTHORITY_WAIT,
+                ))
+            })
+            .collect();
+        for read in &mut reads {
+            assert!(read.as_mut().now_or_never().is_none());
+        }
+        drop(reads);
+        assert_eq!(state.authority.reads.available_permits(), 0);
+        assert_eq!(Arc::strong_count(&state.authority), AUTHORITY_READS + 1);
+        tokio::time::advance(state.pool.options().get_acquire_timeout() + Duration::from_millis(1))
+            .await;
+        // Only local timer completions remain: no SQLite connection can be
+        // obtained while `held` is alive. Give the four unit tasks their polls.
+        for _ in 0..16 {
+            if state.authority.reads.available_permits() == AUTHORITY_READS {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(state.authority.reads.available_permits(), AUTHORITY_READS);
+        assert_eq!(Arc::strong_count(&state.authority), 1);
+        drop(held);
+        drop(clock);
+    }
 }
