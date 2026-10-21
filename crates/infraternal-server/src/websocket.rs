@@ -141,6 +141,23 @@ impl Drop for RenewalHold {
     }
 }
 
+/// Keep a read's server-wide place until its query returns the connection to the pool.
+struct AuthorityReadHold(Arc<AuthorityLimits>);
+
+impl AuthorityReadHold {
+    /// Move a borrowed permit into an owned query lifetime.
+    fn take(limits: Arc<AuthorityLimits>, place: tokio::sync::SemaphorePermit<'_>) -> Self {
+        place.forget();
+        Self(limits)
+    }
+}
+
+impl Drop for AuthorityReadHold {
+    fn drop(&mut self) {
+        self.0.reads.add_permits(1);
+    }
+}
+
 /// State shared by the authenticated browser socket route.
 #[derive(Clone)]
 pub(crate) struct WebSocketState {
@@ -2355,11 +2372,13 @@ async fn authority_deadline(
 /// the retry loop is compiled once (D243).
 ///
 /// Only the read is retried. It is a SELECT, which a WAL database serves while
-/// another connection holds the write lock, so a dropped attempt gives its
-/// connection back as soon as its statement returns. The renewal is a write
-/// that may wait seconds for that lock; it never runs here (`renew_soon`).
-/// Each attempt holds one of the `AUTHORITY_READS` places, so however many
-/// sockets retry at once they hold at most that many connections.
+/// another connection holds the write lock. The renewal is a write that may
+/// wait seconds for that lock; it never runs here (`renew_soon`). Each attempt
+/// obtains one of the `AUTHORITY_READS` places within its deadline. Fast SELECTs
+/// run inline. If one misses its deadline, its future is detached with the
+/// place until `live_expiry` returns its pooled connection. A timed-out caller
+/// then retries without spending another place while that SQLite read remains
+/// in flight.
 ///
 /// Expiry is monotonic: once a session's end has passed it is never found live
 /// again. Every attempt reads the wall clock when it starts, so a retry after a
@@ -2381,29 +2400,46 @@ async fn read_expiry(
     let give_up = tokio::time::Instant::now() + wait;
     let mut pause = AUTHORITY_RETRY_PAUSE;
     let expiry = loop {
+        let attempt_deadline = tokio::time::Instant::now() + read_timeout;
         let read = async {
             let reads = &state.authority.reads;
             let place = match reads.try_acquire() {
                 Ok(place) => place,
-                Err(_) => reads.acquire().await.ok()?,
+                Err(_) => match tokio::time::timeout_at(attempt_deadline, reads.acquire()).await {
+                    Ok(Ok(place)) => place,
+                    _ => return None,
+                },
             };
-            let result = match unix_seconds() {
-                Ok(now) => state
-                    .auth
-                    .live_expiry(token, user_id, now)
-                    .await
-                    .map_err(|error| match error {
-                        crate::auth::Error::Denied => AuthorityMiss::Refused,
-                        _ => AuthorityMiss::Unavailable,
-                    }),
-                Err(()) => Err(AuthorityMiss::Unavailable),
+            let Ok(now) = unix_seconds() else {
+                drop(place);
+                return Some(Err(AuthorityMiss::Unavailable));
             };
-            drop(place);
-            Some(result)
+            let hold = AuthorityReadHold::take(Arc::clone(&state.authority), place);
+            // Pin the future so a miss can move its allocation into a task;
+            // normal reads avoid a task spawn and its scheduler round trip.
+            let mut query = Box::pin(state.auth.live_expiry(token, user_id, now, hold));
+            tokio::select! {
+                biased;
+                result = &mut query => {
+                    if tokio::time::Instant::now() <= attempt_deadline {
+                        Some(result.map_err(|error| match error {
+                            crate::auth::Error::Denied => AuthorityMiss::Refused,
+                            _ => AuthorityMiss::Unavailable,
+                        }))
+                    } else {
+                        None
+                    }
+                }
+                () = tokio::time::sleep_until(attempt_deadline) => {
+                    // The query owns its place until its pooled connection returns.
+                    tokio::spawn(query);
+                    None
+                }
+            }
         };
-        match tokio::time::timeout(read_timeout, read).await {
-            Ok(Some(result)) => break result?,
-            _ if tokio::time::Instant::now() + pause < give_up => {
+        match read.await {
+            Some(result) => break result?,
+            None if tokio::time::Instant::now() + pause < give_up => {
                 tokio::time::sleep(pause).await;
                 pause = (pause * 2).min(AUTHORITY_RETRY_PAUSE_MAX);
             }

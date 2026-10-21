@@ -558,7 +558,7 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
     );
     assert!(
         f.auth
-            .live_expiry(&f.session, &f.user, NOW + 2 * DAY)
+            .live_expiry(&f.session, &f.user, NOW + 2 * DAY, ())
             .await
             .is_err()
     );
