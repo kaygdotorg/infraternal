@@ -158,6 +158,18 @@ impl Drop for AuthorityReadHold {
     }
 }
 
+/// Retain a timed-out query in a unit-output task after its caller has left.
+fn detach_authority_query<F>(query: std::pin::Pin<Box<F>>)
+where
+    F: std::future::Future + Send + 'static,
+{
+    let detached: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> =
+        Box::pin(async move {
+            let _ = query.await;
+        });
+    tokio::spawn(detached);
+}
+
 /// Keep a pinned query alive when its enclosing authority attempt is cancelled.
 struct DetachOnDrop<F: std::future::Future + Send + 'static>(Option<std::pin::Pin<Box<F>>>)
 where
@@ -195,7 +207,7 @@ where
         if let Some(query) = self.0.take() {
             // The attempt timeout drops this wrapper; the query keeps its read
             // place until SQLite returns the pooled connection.
-            tokio::spawn(query);
+            detach_authority_query(query);
         }
     }
 }
