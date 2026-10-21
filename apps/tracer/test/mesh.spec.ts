@@ -651,8 +651,14 @@ for (const [label, size, card] of [["desktop", DESKTOP, "nix-cache"], ["phone", 
     const pins = await probe(page, (p) => p.mesh.pins());
     const after = (await meshBox(page))!;
     await page.screenshot({ path: testInfo.outputPath(`mesh-${label}-left-up.png`) });
-    for (const q of Object.values(pins)) { expect(q.x).toBeGreaterThanOrEqual(0); expect(q.y).toBeGreaterThanOrEqual(0); }
+    // Only the card the person moved is pinned (the server keeps at most 256 pins per view); its pin may be negative.
+    expect(Object.keys(pins)).toEqual([card]);
+    expect(pins[card]!.x < 0 || pins[card]!.y < 0).toBe(true);
     expect(after.x + after.y).toBeLessThan(before.x + before.y);
+    // The shift never writes another pin, and the card is where it was dropped, on screen.
+    const box = (await page.locator(`.ui-window[data-window-id="n-${card}"]`).boundingBox())!;
+    expect(box.x + box.width / 2).toBeGreaterThan(0); expect(box.y + box.height / 2).toBeGreaterThan(0);
+    expect(box.x + box.width / 2).toBeLessThan(size.width); expect(box.y + box.height / 2).toBeLessThan(size.height);
     expect(await probe(page, (p) => p.camera())).toEqual(cameraBefore);
     const boxes = await probe(page, (p) => p.views());
     for (const a of boxes) for (const b of boxes) if (a.id < b.id) expect(a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h, `${a.id} overlaps ${b.id}`).toBe(false);
@@ -707,6 +713,9 @@ test("dragging a node left in a 1,000-host mesh stays within the shared pin limi
   const pins = doc!.views.find((v) => v.id === "mesh")!.layout.pinned!;
   // The server's graph layout accepts at most 256 pins per view (crates/plugins/canvas/src/model.rs).
   expect(Object.keys(pins).length).toBeLessThanOrEqual(256);
+  // A drop writes only the moved card's pin, even when it lands at a negative place: no other pin is shifted (#24).
+  expect(Object.keys(pins)).toEqual([id]);
+  expect(pins[id]!.x < 0 || pins[id]!.y < 0).toBe(true);
 });
 
 test("removing and adding a node during its drag does not persist a pin for the removed node", async ({ page }) => {

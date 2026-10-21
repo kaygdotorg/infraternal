@@ -72,31 +72,36 @@ beforeEach(() => {
   Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: area });
 });
 const opened: Intent = { type: "open", view_id: "console", column_id: "c", window: { id: "w", target: { type: "settings", section: "appearance" } } };
-test("review: a 1,025-pin origin shift leaves pins absent on another device", async () => {
+test("a negative drop on a 1,025-node mesh writes one pin, and the peer ends with every pin (#24)", async () => {
   const transport = new PinLimitTransport();
   const first = new ServerCanvasStore(transport, "mesh-owner"), second = new ServerCanvasStore(transport, "mesh-peer");
   try {
     const initial = await first.load(); await second.load();
-    const shifted = structuredClone(initial!);
-    const view = shifted.views.find((candidate) => candidate.id === "mesh")!;
-    if (view.layout.type !== "graph") throw new Error("graph view missing");
-    // A 1,000-host mesh adds 25 tag nodes; a left/up shift pins hosts and tags alike.
-    for (let n = 0; n < 1025; n++) view.layout.pinned[`node-${n}`] = { x: n * 16, y: n * 16 };
-    const saved = first.save(shifted);
+    const graphOf = (doc: CanvasDocument) => {
+      const view = doc.views.find((candidate) => candidate.id === "mesh")!;
+      if (view.layout.type !== "graph") throw new Error("graph view missing");
+      return view.layout;
+    };
+    // 200 cards moved earlier; a 1,000-host mesh with 25 tags has 1,025 nodes, almost all unmoved.
+    const before = structuredClone(initial!);
+    for (let n = 0; n < 200; n++) graphOf(before).pinned[`node-${n}`] = { x: n * 16, y: n * 16 };
+    await first.save(before); first.flush();
+    await transport.drain(200); // one intent per earlier pin
+    const baseline = transport.processed;
+    // The drop: the card is now left of and above the auto layout. Pins may be negative; no other pin is rewritten.
+    const dropped = structuredClone(before);
+    graphOf(dropped).pinned["node-1000"] = { x: -1280, y: -480 };
+    const saved = first.save(dropped);
     first.flush();
     const raw = localStorage.getItem(canvasKey("mesh-owner"));
-    if (!raw) throw new Error("pin journal cache missing");
-    const cached = JSON.parse(raw) as { pending?: unknown[] };
-    expect(cached.pending).toHaveLength(1025);
-    console.log(`MESH-PIN-JOURNAL hosts=1000 tagNodes=25 intents=1025 pending=${cached.pending!.length} cache_utf16=${raw.length} cache_utf8_bytes=${new TextEncoder().encode(raw).byteLength}`);
+    const cached = JSON.parse(raw ?? "{}") as { pending?: unknown[] };
+    expect(cached.pending).toHaveLength(1);
     await saved;
-    await transport.drain(1025);
-
-    expect(transport.accepted).toBe(256);
-    expect(transport.refused).toBe(769);
+    await transport.drain(baseline + 1);
+    expect(transport.refused).toBe(0);
     const peer = await second.load();
-    const peerView = peer!.views.find((candidate) => candidate.id === "mesh")!;
-    expect(peerView.layout.type === "graph" ? Object.keys(peerView.layout.pinned) : []).toHaveLength(1025);
+    expect(Object.keys(graphOf(peer!).pinned)).toHaveLength(201);
+    expect(graphOf(peer!).pinned["node-1000"]).toEqual({ x: -1280, y: -480 });
   } finally { first.dispose(); second.dispose(); }
 });
 test("a layout gap or withdrawn worker requests one fresh snapshot with bounded backoff", async () => {

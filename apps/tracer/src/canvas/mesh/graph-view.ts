@@ -13,7 +13,7 @@ import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
 import { clamp } from "../camera/camera";
 import type { Ctx, ViewRec, WinRec } from "../context";
 import { SVG_NS, coarse, el } from "../dom";
-import { CELL, type Pt, type Rect } from "../layout/geometry";
+import { type Pt, type Rect } from "../layout/geometry";
 import type { Grant, NodeModel, WindowModel } from "../model/types";
 import { ICON, lineIcon } from "../views/icons";
 import { Arrow, DragArrow, anchors } from "./arrows";
@@ -198,27 +198,22 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     if (cardPool.length < 120) cardPool.push(rec); else rec.card.dispose();
   };
 
+  /** Where each graph view's cards are drawn from, in pin coordinates (`MeshLayout.origin`), as of the last refresh. */
+  const origins = new WeakMap<ViewRec, Pt>();
   /**
-   * Fits the view to its nodes once a card is dropped. Right and down the graph's size already follows the pins
-   * (`layout.fit`), so only a re-read is needed. Left and up a card can sit at a negative place, which the size cannot
-   * say: every node is pinned where it is, shifted right/down by whole grid cells until the leftmost/topmost is at or past
-   * zero, and the view's origin moves the same way up/left, so no card moves on the canvas. Pinning all nodes (not only the
-   * moved one) is what keeps the cards the layout placed from jumping relative to it. The re-read then grows the view
-   * (neighbours are pushed by `settle`, as with any other size change).
+   * Fits the view to its nodes once a card is dropped. Only the dropped card's pin was written (while it moved): pins
+   * may be negative, and the layout model draws the graph shifted by `origin` so the leftmost/topmost card is at or
+   * past zero. When a drop changes that shift, the view's own place moves the opposite way, so no card moves on the
+   * canvas, and no pin of another card is ever rewritten (a shift would write every pin, and the server keeps at most 256
+   * per view). The re-read then grows or shrinks the view (neighbours are pushed by `settle`, as with any size change).
    */
   const fitAfterDrag = (c: ViewRec, dropped: NodeModel): void => {
-    const nodes = c.view.nodes;
-    let minX = 0, minY = 0;
-    for (const n of nodes) { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); }
-    const dx = minX < 0 ? Math.ceil(-minX / CELL) * CELL : 0, dy = minY < 0 ? Math.ceil(-minY / CELL) * CELL : 0;
     // A fresh object: the layout cache is keyed by the identity of the pins, and the drag changed them in place.
-    const pins = c.view.graphPins = { ...(c.view.graphPins ?? Object.fromEntries(source.data().pins)) };
+    c.view.graphPins = { ...(c.view.graphPins ?? Object.fromEntries(source.data().pins)) };
+    const before = origins.get(c) ?? { x: 0, y: 0 };
+    const after = layoutOf(c, state.metrics).origin;
+    const dx = after.x - before.x, dy = after.y - before.y;
     if (dx || dy) {
-      for (const n of nodes) {
-        n.x += dx; n.y += dy; n.pinned = true;
-        pins[n.id] = { x: Math.round(n.x), y: Math.round(n.y) };
-        if (c.view.id === "mesh") source.pin(n.id, n.x, n.y);
-      }
       c.view.x -= dx; c.view.y -= dy;
       c.sx.set(c.view.x, true); c.sy.set(c.view.y, true);
     }
@@ -233,7 +228,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     const pill = rec.card.pill;
     pill.style.touchAction = "none";
     pill.dataset.grab = "";
-    let d: { id: number; x: number; y: number; nx: number; ny: number; n: NodeModel; at?: { x: number; y: number }; frame: number } | undefined;
+    let d: { id: number; x: number; y: number; nx: number; ny: number; n: NodeModel; ox: number; oy: number; at?: { x: number; y: number }; frame: number } | undefined;
     // A drag is applied once per frame, from the last pointer position: a pointer that reports faster than the screen
     // draws would move the card and redraw its arrows several times for one frame.
     const apply = (): void => {
@@ -247,8 +242,9 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       n.y = d.ny + (d.at.y - d.y) / cam.z;
       n.pinned = true; // a node the person moved stays where it is (D180); the canvas document keeps it
       const pins = rec.owner.view.graphPins ??= Object.fromEntries(source.data().pins);
-      pins[n.id] = { x: Math.round(n.x), y: Math.round(n.y) };
-      if (rec.owner.view.id === "mesh") source.pin(n.id, n.x, n.y);
+      // The pin is where the card is minus the shift the graph is drawn with (it may be negative).
+      pins[n.id] = { x: Math.round(n.x - d.ox), y: Math.round(n.y - d.oy) };
+      if (rec.owner.view.id === "mesh") source.pin(n.id, n.x - d.ox, n.y - d.oy);
       rec.card.root.style.transform = `translate(${n.x}px, ${n.y}px)`;
       // Arrows stay attached to the card they belong to while it moves.
       for (const t of topoOf(rec.owner)) if (t.grant.from === n.id || t.grant.to === n.id) drawTopoArrow(rec.owner, t);
@@ -257,7 +253,8 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       const n = boundTo.get(rec);
       if (camera.lod === "thumb" || !n) return;
       pill.setPointerCapture(e.pointerId);
-      d = { id: e.pointerId, x: e.clientX, y: e.clientY, nx: n.x, ny: n.y, n, frame: 0 };
+      const o = origins.get(rec.owner) ?? { x: 0, y: 0 }; // read once: nothing is looked up per pointer move
+      d = { id: e.pointerId, x: e.clientX, y: e.clientY, nx: n.x, ny: n.y, n, ox: o.x, oy: o.y, frame: 0 };
       rec.card.root.dataset.lifted = "";
     }, { signal });
     pill.addEventListener("pointermove", (e) => {
@@ -485,6 +482,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     const graph = graphOf(c);
     if (!graph) return;
     const layout = layoutOf(c, state.metrics);
+    origins.set(c, layout.origin);
     c.view.nodes = layout.nodes;
     c.view.graph = layout.size;
     graph.sync();

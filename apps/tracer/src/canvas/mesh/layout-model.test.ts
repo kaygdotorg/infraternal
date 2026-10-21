@@ -1,7 +1,7 @@
 /** Per-view shared pin snapshots invalidate geometry without sharing mutable node models (#243, D180). */
 import { expect, test } from "bun:test";
 import { createLayoutModel } from "./layout-model";
-import { metricsFor } from "../layout/geometry";
+import { CELL, metricsFor } from "../layout/geometry";
 import type { MeshData } from "./source";
 const metrics = metricsFor(1440, 900, false);
 const data: MeshData = { version: 1, nodes: new Map([["host", { id: 1, name: "host", tags: [], state: "online", rttMs: undefined, os: undefined, address: undefined, path: undefined, via: undefined }]]), tags: {}, pins: new Map() };
@@ -17,4 +17,20 @@ test("a recovered graph owns its node positions independently", () => {
   const b = createLayoutModel({ data: () => data }, () => ({ host: { x: 200, y: 300 } }));
   const first = a(metrics).nodes[0]!, second = b(metrics).nodes[0]!;
   expect(first).not.toBe(second); expect(first.x).toBe(40); expect(second.x).toBe(200);
+});
+test("a negative pin is drawn by shifting the whole graph by whole grid cells; no pin is rewritten", () => {
+  const pins = { host: { x: -1300, y: -490 } };
+  const layout = createLayoutModel({ data: () => data }, () => pins);
+  const out = layout(metrics);
+  expect(out.origin.x % CELL).toBe(0); expect(out.origin.y % CELL).toBe(0);
+  expect(out.origin.x).toBeGreaterThanOrEqual(1300); expect(out.origin.y).toBeGreaterThanOrEqual(490);
+  const n = out.nodes[0]!;
+  expect(n.x).toBe(pins.host.x + out.origin.x); expect(n.y).toBe(pins.host.y + out.origin.y);
+  expect(n.x).toBeGreaterThanOrEqual(0); expect(n.y).toBeGreaterThanOrEqual(0);
+  expect(out.size.w).toBeGreaterThanOrEqual(n.x + metrics.nodeW); expect(out.size.h).toBeGreaterThanOrEqual(n.y + metrics.nodeH);
+  expect(pins).toEqual({ host: { x: -1300, y: -490 } });
+});
+test("with no negative pin the origin is zero and nothing shifts", () => {
+  const out = createLayoutModel({ data: () => data }, () => ({ host: { x: 40, y: 80 } }))(metrics);
+  expect(out.origin).toEqual({ x: 0, y: 0 });
 });
