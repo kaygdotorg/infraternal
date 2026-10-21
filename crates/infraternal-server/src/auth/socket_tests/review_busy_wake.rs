@@ -79,3 +79,88 @@ async fn idle_busy_revocation_wake_sends_server_busy_close_code() {
         "busy wake did not communicate server_busy (1013); close codes: {codes:?}"
     );
 }
+
+/// A shared wake at the per-person ceiling must preserve every live socket,
+/// even when several callers queue behind the four retained read places.
+#[tokio::test(start_paused = true)]
+#[allow(clippy::too_many_lines)] // Keep all sixteen sockets and the shared recovery fence together.
+async fn sixteen_woken_sockets_recover_application_authority_after_a_short_stall() {
+    let _serial = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
+    let f = fixture().await;
+    let (socket, _peer) = UnixStream::pair().unwrap();
+    let state = crate::websocket::WebSocketState::new(
+        f.auth.clone(),
+        f.auth.pool.clone(),
+        EmbeddedAgent::from_test_socket(socket),
+    )
+    .await
+    .unwrap();
+    let pending_reads = state.authority_read_monitor();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, crate::websocket::router(state))
+            .await
+            .unwrap();
+    });
+    let mut browsers = Vec::new();
+    for _ in 0..16 {
+        let mut browser = idle_browser(address, &f).await;
+        super::close_logging::authorized_result(&mut browser, 239).await;
+        browsers.push(browser);
+    }
+    let held = f.auth.pool.acquire().await.unwrap();
+    f.auth.revocations.send_replace(());
+    while pending_reads() < 4 {
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..60 {
+        tokio::time::advance(Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(pending_reads(), 4);
+    }
+    drop(held);
+    // Let detached reads finish at stationary time before releasing the next
+    // retry wave. No worker competes against the host's physical scheduler.
+    while pending_reads() != 0 {
+        tokio::task::yield_now().await;
+    }
+    let recovered = async {
+        for browser in &mut browsers {
+            client_ws_send(
+                browser,
+                0,
+                &Frame::Call {
+                    call_id: 240,
+                    action_id: "test.not.an.action",
+                    input_json: b"{}",
+                },
+            )
+            .await;
+        }
+        for browser in &mut browsers {
+            let wire = read_client_frame(browser).await;
+            assert!(matches!(
+                decode_muxed_frame(&wire).unwrap().frame,
+                Frame::Result { call_id: 240, .. }
+            ));
+        }
+    };
+    tokio::pin!(recovered);
+    let recovering = tokio::time::Instant::now();
+    while recovered.as_mut().now_or_never().is_none() {
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        if pending_reads() == 0 {
+            tokio::time::advance(Duration::from_millis(1)).await;
+        }
+        assert!(recovering.elapsed() < Duration::from_secs(1));
+    }
+    while pending_reads() != 0 {
+        tokio::task::yield_now().await;
+    }
+    drop(f.auth.pool.acquire().await.unwrap());
+    server.abort();
+}
