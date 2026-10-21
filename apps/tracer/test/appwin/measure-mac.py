@@ -29,6 +29,11 @@ native=pathlib.Path(args.get('native') or '/Users/kayg/infraternal-bench/app-win
 if args.get('native') and not native.resolve().is_relative_to((ROOT/'native-diagnostic').resolve()):raise RuntimeError('diagnostic companion outside owned directory')
 if helper_variant and native.resolve()!=(ROOT/'native-diagnostic'/'InfraternalCaptureHelper.app'/'Contents'/'MacOS'/'InfraternalCaptureHelper').resolve():raise RuntimeError('helper archive requires the single diagnostic bundle')
 import re
+
+def picker_title_pattern(title):
+ """Match a complete app-window title within the picker option's accessible name."""
+ return re.compile(rf", {re.escape(title)}, on ")
+
 if not re.fullmatch(r'[a-z0-9-]{1,48}',job) or not re.fullmatch(r'[a-z0-9-]{1,48}',args['label']):raise SystemExit(2)
 E=ROOT/'evidence'/args['label'];E.mkdir(parents=True,exist_ok=False)
 BIN=ROOT/'bin'
@@ -644,7 +649,7 @@ try:
   title='App window measurement' if fixture_window_count==1 else f'App window measurement {index+1}'
   before=page.locator('.ui-window[data-kind="app"]').count()
   page.get_by_role('button',name='New window',exact=True).click()
-  page.get_by_role('option',name=title,exact=False).click()
+  page.get_by_role('option',name=picker_title_pattern(title)).click()
   consent_check()
   page.wait_for_function('(count)=>document.querySelectorAll(\'.ui-window[data-kind="app"]\').length>count',arg=before,timeout=10000)
   card=page.locator('.ui-window[data-kind="app"]').nth(before)
@@ -1013,7 +1018,7 @@ try:
     previous_id=previous.get_attribute('data-window-id')
     if not previous_id:raise RuntimeError('app window identity unavailable')
     previous.locator('[data-action="close"]').evaluate('(button)=>button.click()')
-    page.get_by_role('button',name='New window',exact=True).click();page.get_by_role('option',name='App window measurement',exact=False).click()
+    page.get_by_role('button',name='New window',exact=True).click();page.get_by_role('option',name=picker_title_pattern('App window measurement')).click()
     replacement=page.locator('.ui-window[data-kind="app"]').filter(has=page.locator('.aw-stage[data-picture="live"]'))
     try:
      first_picture(previous_id)

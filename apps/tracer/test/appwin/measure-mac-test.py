@@ -5,6 +5,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import shlex
 import signal
 import subprocess
@@ -15,6 +16,27 @@ from types import SimpleNamespace
 from unittest import mock
 
 SCRATCH = pathlib.Path.home() / '.cache/codex-scratch/app-windows-r7-measure/python-tests'
+
+
+class PickerSelectionTests(unittest.TestCase):
+    """Window fixture selection uses the title field's full boundary."""
+
+    def test_window_picker_does_not_confuse_numeric_title_suffixes(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        selector = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute) and node.func.attr == 'get_by_role'
+                        and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == 'option'
+                        and any(keyword.arg == 'name' and ast.unparse(keyword.value) == 'picker_title_pattern(title)'
+                                for keyword in node.keywords))
+        self.assertIsNotNone(selector)
+        pattern_node = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                            and node.name == 'picker_title_pattern')
+        namespace = {'re': re}
+        exec(compile(ast.Module(body=[pattern_node], type_ignores=[]), str(source), 'exec'), namespace)
+        pattern = namespace['picker_title_pattern']('App window measurement 1')
+        self.assertIsNotNone(pattern.search('latency-window, App window measurement 1, on MacBook'))
+        self.assertIsNone(pattern.search('latency-window, App window measurement 10, on MacBook'))
 
 
 class InputCohortTests(unittest.TestCase):
