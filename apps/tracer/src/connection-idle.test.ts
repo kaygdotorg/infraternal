@@ -23,6 +23,7 @@ function fixture(rtt: number, streams: number, caps = 4n, subscription = false) 
   };
   const sockets: Socket[] = [];
   const notices: boolean[] = [];
+  const subscriptionIds: number[] = [];
   class Socket {
     static OPEN = 1;
     readyState = 1;
@@ -34,6 +35,7 @@ function fixture(rtt: number, streams: number, caps = 4n, subscription = false) 
     constructor() { sockets.push(this); }
     send(bytes: Uint8Array) {
       new WebSocketFrameDecoder().feed(bytes, (stream, frame) => {
+        if (frame.type === "Subscribe") subscriptionIds.push(frame.subId);
         if (frame.type === "Event" && frame.subId === 0) notices.push((JSON.parse(new TextDecoder().decode(frame.eventJson)) as { hidden: boolean }).hidden);
         if (frame.type === "Ping") {
           latestProbe = { nonce: frame.nonce, sentUs: frame.sentUs };
@@ -71,6 +73,7 @@ function fixture(rtt: number, streams: number, caps = 4n, subscription = false) 
   return {
     connection,
     notices,
+    subscriptionIds,
     get now() { return now; },
     get responseAllowance() { return (connection as unknown as { responseAllowance(): number }).responseAllowance(); },
     online() { online(); },
@@ -647,4 +650,18 @@ for (const dispatchVisibleBeforeReplies of [true, false]) test(`review: queued r
 test("a layout subscription starts the connection before any terminal exists", () => {
   const f = fixture(30, 0, 4n, true);
   try { expect(f.connection.isWelcomed).toBe(true); } finally { f.dispose(); }
+});
+
+test("refresh replaces one subscription ID and disposal prevents later refreshes", () => {
+  const f = fixture(30, 0, 4n, true);
+  try {
+    let opens = 0;
+    const subscription = f.connection.subscribe({ topic: "canvas.layout" }, () => {}, () => { opens++; });
+    const id = f.subscriptionIds.at(-1);
+    for (let n = 0; n < 100; n++) subscription.refresh();
+    expect(f.subscriptionIds.slice(-101)).toEqual(Array(101).fill(id));
+    expect(opens).toBe(101);
+    subscription(); subscription.refresh();
+    expect(opens).toBe(101); expect(f.sockets).toBe(1);
+  } finally { f.dispose(); }
 });

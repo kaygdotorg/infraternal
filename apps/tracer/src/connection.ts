@@ -87,6 +87,8 @@ interface Subscription {
   /** The subscription is (re)established: the owner refetches its snapshot, since events may have been missed. */
   onOpen?: (() => void) | undefined;
 }
+/** Refresh keeps the subscription ID, so retries replace its bounded server slot. */
+export type SubscriptionHandle = (() => void) & { refresh(): void };
 const encoder = new TextEncoder();
 
 /** What a stream gives the connection. All callbacks run on the socket's event task. */
@@ -281,13 +283,15 @@ export class MuxConnection {
    * welcome (a new socket has none), and `onOpen` runs each time so the owner can resync: events sent while the
    * socket was down are not replayed. Returns the unsubscribe function.
    */
-  subscribe(filter: { topic: string }, onEvent: (event: Record<string, unknown>) => void, onOpen?: () => void): () => void {
+  subscribe(filter: { topic: string }, onEvent: (event: Record<string, unknown>) => void, onOpen?: () => void): SubscriptionHandle {
     const subId = this.nextSubscription++;
     this.subscriptions.set(subId, { filter, onEvent, onOpen });
     if (this.isWelcomed) this.openSubscription(subId);
     // Account state must load before any terminal window exists (D248).
     if (!this.socket && !this.closed) this.connect();
-    return () => { this.subscriptions.delete(subId); };
+    return Object.assign(() => { this.subscriptions.delete(subId); }, {
+      refresh: () => { if (this.isWelcomed) this.openSubscription(subId); },
+    });
   }
 
   /**
