@@ -39,6 +39,26 @@ class PickerSelectionTests(unittest.TestCase):
         self.assertIsNone(pattern.search('latency-window, App window measurement 10, on MacBook'))
 
 
+class FixtureSourceIdentityTests(unittest.TestCase):
+    """The Mac cohort must bind each canvas card to its fixture window identity."""
+
+    def test_canvas_targets_match_the_native_fixture_ids_in_card_order(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        target_rows = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                           and node.name == 'fixture_target_rows')
+        namespace = {}
+        exec(compile(ast.Module(body=[target_rows], type_ignores=[]), str(source), 'exec'), namespace)
+        reports = [
+            {'id': 'canvas-a', 'target': {'type': 'window', 'windowId': 502, 'ownerPid': 900}},
+            {'id': 'canvas-b', 'target': {'type': 'window', 'windowId': 501, 'ownerPid': 900}},
+        ]
+        mapped = namespace['fixture_target_rows'](reports, ['canvas-a', 'canvas-b'], [502, 501], 900)
+        self.assertEqual([row['target']['windowId'] for row in mapped], [502, 501])
+        with self.assertRaisesRegex(RuntimeError, 'canvas target mismatch'):
+            namespace['fixture_target_rows'](reports, ['canvas-a', 'canvas-b'], [501, 502], 900)
+
+
 class InputCohortTests(unittest.TestCase):
     """The larger input cohort exits through cleanup before the independent demo."""
 

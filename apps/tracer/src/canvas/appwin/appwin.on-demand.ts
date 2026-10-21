@@ -16,7 +16,7 @@ import type { SessionBinding } from "../sessions/adapter";
 import type { HostEntry } from "../sessions/adapter";
 import type { WindowModel } from "../model/types";
 import type { AppWindowsAdapter } from "./adapter";
-import type { Entry } from "./inventory";
+import type { AppTarget, Entry } from "./inventory";
 import { Machines, STALE_MS } from "./machines";
 import { Picker, paletteRows, type Choice } from "./picker";
 import { AppBinding } from "./window-body";
@@ -42,6 +42,8 @@ export interface AppWindowsPart {
   readonly machines: Machines;
   /** Every app window's state and its decode worker's counters (measurement). */
   report(): Promise<Array<{ id: string; state: string; control: string; stats: unknown }>>;
+  /** The source target stored on each canvas model (measurement). */
+  targets(): Array<{ id: string; target: AppTarget }>;
   dispose(): void;
 }
 
@@ -134,6 +136,14 @@ export function createAppWindowsPart(cx: Ctx, adapter: AppWindowsAdapter): AppWi
       for (const c of cx.views.values()) for (const rec of c.wins.values()) {
         const b = rec.binding;
         if (b instanceof AppBinding) out.push({ id: rec.model.id, state: b.streamState.kind, control: b.streamControl.kind, stats: await b.stats() });
+      }
+      return out;
+    },
+    targets() {
+      const out: Array<{ id: string; target: AppTarget }> = [];
+      for (const c of cx.views.values()) for (const rec of c.wins.values()) {
+        const target = rec.model.stream?.target;
+        if (target) out.push({ id: rec.model.id, target });
       }
       return out;
     },

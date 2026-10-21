@@ -347,6 +347,23 @@ def wait_for_first_picture(card,index,failures):
   failures.append(failure);emit({'kind':'first_picture_failure',**failure})
  consent_check()
 
+def fixture_target_rows(reports,canvas_ids,window_ids,owner_pid):
+ """Bind each canvas model to its unique native fixture window before reporting the cohort."""
+ if len(canvas_ids)!=len(window_ids) or len(set(canvas_ids))!=len(canvas_ids) or len(set(window_ids))!=len(window_ids):
+  raise RuntimeError('fixture target identities are not unique')
+ by_id={}
+ for row in reports:
+  if not isinstance(row,dict) or not isinstance(row.get('id'),str) or row['id'] in by_id:
+   raise RuntimeError('canvas target report is incomplete')
+  by_id[row['id']]=row.get('target')
+ mapped=[]
+ for index,(canvas_id,window_id) in enumerate(zip(canvas_ids,window_ids)):
+  expected={'type':'window','windowId':window_id,'ownerPid':owner_pid}
+  if by_id.get(canvas_id)!=expected:
+   raise RuntimeError('canvas target mismatch: fixture_index='+str(index+1))
+  mapped.append({'fixture_index':index+1,'canvas_id':canvas_id,'target':expected})
+ return mapped
+
 def consent_check():
  # Inspect metadata before requesting any screenshot; never retain an unrelated window inventory.
  inventory=cua('list_windows',{'on_screen_only':True})
@@ -686,7 +703,11 @@ try:
   wait_for_first_picture(card,index,first_picture_failures)
   if index==0 and not args.get('first_picture_idle'):first_picture()
  if page.locator('.ui-window[data-kind="app"]').count()!=fixture_window_count:raise RuntimeError('canvas fixture window count mismatch')
- emit({'kind':'canvas_windows_ready','count':fixture_window_count,'window_ids':page.locator('.ui-window[data-kind="app"]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.windowId)')})
+ canvas_ids=page.locator('.ui-window[data-kind="app"]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.windowId)')
+ target_reports=page.evaluate('()=>window.__appwin.targets()')
+ canvas_targets=fixture_target_rows(target_reports,canvas_ids,window_ids,window.pid)
+ emit({'kind':'canvas_window_targets','targets':canvas_targets})
+ emit({'kind':'canvas_windows_ready','count':fixture_window_count,'window_ids':canvas_ids})
  consent_check()
  emit({'kind':'canvas_context','receipts':page.evaluate('window.__appWindowBench.take()')})
  if not args.get('ten_window_idle') and not args.get('first_picture_idle'):page.screenshot(path=str(E/'canvas-native-before.png'))
