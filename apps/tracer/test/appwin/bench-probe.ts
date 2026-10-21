@@ -18,17 +18,26 @@ const errorClasses = [
   ["data-clone", "DataCloneError"], ["not-supported", "NotSupportedError"], ["operation", "OperationError"],
   ["type", "TypeError"], ["reference", "ReferenceError"], ["syntax", "SyntaxError"], ["range", "RangeError"],
 ] as const;
-// Browser error text can include machine paths; retain only bounded categories and numeric source coordinates.
-function safeErrorReceipt(event: Event): { name: string; category: string; source: string; line: number; column: number } {
+const workerFunctions = new Set(["output", "pump", "chunk", "decodeUnit", "retireDecoder", "discardPending", "sendRepair", "repair"]);
+// Browser error text can include machine paths; retain only bounded categories, static identifiers and coordinates.
+function safeErrorReceipt(event: Event): { name: string; category: string; detail: string; function: string; source: string; line: number; column: number } {
   const value = event as ErrorEvent;
-  const error = value.error as { name?: unknown } | null;
+  const error = value.error as { name?: unknown; stack?: unknown } | null;
   const rawName = typeof error?.name === "string" ? error.name : "";
   const message = typeof value.message === "string" ? value.message : "";
   const match = errorClasses.find(([, candidate]) => rawName === candidate || message.includes(candidate));
+  const read = message.match(/Cannot read properties of (undefined|null) \(reading '([A-Za-z_$][\w$]{0,39})'\)/);
+  const write = message.match(/Cannot set properties of (undefined|null) \(setting '([A-Za-z_$][\w$]{0,39})'\)/);
+  const detail = read ? `read-${read[1]}:${read[2]}` : write ? `write-${write[1]}:${write[2]}`
+    : message.includes("is not a function") ? "not-callable" : message.includes("is not iterable") ? "not-iterable" : "other";
+  const stack = typeof error?.stack === "string" ? error.stack : "";
+  const functionName = [...stack.matchAll(/\bat ([A-Za-z_$][\w$]*)/g)].map((frame) => frame[1]!).find((name) => workerFunctions.has(name)) ?? "other";
   const source = value.filename.endsWith("decode.worker.on-demand.js") ? "decode-worker" : value.filename ? "other-script" : "unknown";
   return {
-    name: errorNames.has(rawName) ? rawName : "other",
+    name: errorNames.has(rawName) ? rawName : match?.[1] ?? "other",
     category: match?.[0] ?? (message === "Script error." ? "script" : "other"),
+    detail,
+    function: functionName,
     source,
     line: Number.isInteger(value.lineno) && value.lineno > 0 ? value.lineno : 0,
     column: Number.isInteger(value.colno) && value.colno > 0 ? value.colno : 0,
