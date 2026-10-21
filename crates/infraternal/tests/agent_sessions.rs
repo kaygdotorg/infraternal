@@ -400,25 +400,32 @@ fn latency_fixture_accepts_the_unsolicited_startup_inventory() {
     // Use the real shared verification fixture. Construct it separately from
     // initialization so a refused greeting still releases its owned daemon.
     let script = r#"
-import sys
+import os, sys, tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path('scripts').resolve()))
 from agent_fixture import Binary, fixture_state, cleanup
-state = fixture_state('ir')
-state.mkdir(mode=0o700)
-client = Binary.__new__(Binary)
-try:
-    client.__init__(Path(sys.argv[1]), state)
-    client.open()
-    assert str(client.id) in client.inventory['session_ids'], 'open Result overtook its live census'
-    client.attach()
-    client.input(b"printf 'CENSUS_FIXTURE_OK\\n'\n")
-    client.until(b'CENSUS_FIXTURE_OK')
-    client.ping(168, 0)
-finally:
-    if hasattr(client, 'child'):
-        client.kill()
-    cleanup(state)
+with tempfile.TemporaryDirectory(prefix='ir', dir='/tmp') as root:
+    # A private short root keeps every fixture socket within AF_UNIX limits,
+    # independently of the caller's HOME and worktree path.
+    os.environ['INFRATERNAL_AGENT_TEST_STATE_ROOT'] = root
+    state = fixture_state('ir')
+    socket_path = state / 'sessions' / ('a' * 32 + '.sock')
+    upstream_path = socket_path.with_suffix('.upstream')
+    assert max(len(os.fsencode(path)) for path in (socket_path, upstream_path)) < 108
+    state.mkdir(mode=0o700)
+    client = Binary.__new__(Binary)
+    try:
+        client.__init__(Path(sys.argv[1]), state)
+        client.open()
+        assert str(client.id) in client.inventory['session_ids'], 'open Result overtook its live census'
+        client.attach()
+        client.input(b"printf 'CENSUS_FIXTURE_OK\\n'\n")
+        client.until(b'CENSUS_FIXTURE_OK')
+        client.ping(168, 0)
+    finally:
+        if hasattr(client, 'child'):
+            client.kill()
+        cleanup(state)
 "#;
     let result = std::process::Command::new("python3")
         .arg("-c")
