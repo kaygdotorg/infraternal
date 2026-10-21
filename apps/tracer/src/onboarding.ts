@@ -13,11 +13,42 @@ export function mountOnboarding(
   message: string,
   onAuthenticated: (userId: string, firstSetup: boolean, welcomeName?: string, instant?: boolean) => void,
 ): void {
-  if (setupRequired) {
-    // Shown once per server, so its code is fetched only when it is needed (see onboarding-setup.on-demand.ts).
-    void onDemand(() => import("./onboarding-setup.on-demand")).then(({ mountSetup }) => mountSetup(host, message, onAuthenticated));
-  } else mountSignIn(host, message, onAuthenticated);
+  if (setupRequired) loadSetup(host, message, onAuthenticated);
+  else mountSignIn(host, message, onAuthenticated);
 }
+
+type SetupModule = typeof import("./onboarding-setup.on-demand");
+type Authenticated = (userId: string, firstSetup: boolean, welcomeName?: string, instant?: boolean) => void;
+
+/**
+ * Setup is shown once per server, so its code is fetched on demand. The fetch starts the moment the server reports
+ * that setup is required (the person is already looking at the backdrop; an idle delay would only make it slower),
+ * and a failure is not final: this is the first screen a person ever sees, often on a poor connection. The card says
+ * what happened in the message line sign-in uses for errors, offers "Try again", and retries once by itself when the
+ * browser comes back online (the session manager's on-demand load recovers the same way, #249).
+ */
+export function loadSetup(host: HTMLElement, message: string, onAuthenticated: Authenticated): void {
+  onDemand((): Promise<SetupModule> => import("./onboarding-setup.on-demand")).then(
+    ({ mountSetup }) => mountSetup(host, message, onAuthenticated),
+    () => {
+      host.innerHTML = `<section class="auth-screen" aria-label="Set up infraternal"><section class="auth-card auth-signin ui-overlay-surface" aria-labelledby="setup-title">
+        <div class="auth-mark">${BRAND_MARK}<span>infraternal</span></div>
+        <h1 id="setup-title">Make this server yours</h1>
+        <div class="auth-note"><div><p class="auth-message" id="auth-error" role="alert"></p></div></div>
+        <button class="auth-primary auth-login" id="retry-setup" type="button"><span>Try again</span></button>
+      </section></section>`;
+      host.querySelector<HTMLElement>("#auth-error")!.textContent = SETUP_LOAD_FAILED;
+      // A failed dynamic import stays failed in the page's module map, so importing again would fail again even on a
+      // good network. The retry reloads the page instead; nothing is typed yet on this first card, so nothing is lost.
+      const retry = (): void => location.reload();
+      host.querySelector<HTMLButtonElement>("#retry-setup")!.addEventListener("click", retry, { once: true });
+      window.addEventListener("online", retry, { once: true });
+    },
+  );
+}
+
+/** Shown when the setup code could not be fetched. */
+export const SETUP_LOAD_FAILED = "Could not load setup. Check your connection; it will retry.";
 
 function mountSignIn(
   host: HTMLElement,
