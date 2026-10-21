@@ -312,7 +312,7 @@ export class Wizard {
     page.innerHTML = `<h1 class="ah-title">Add hosts</h1>
       <p class="ah-lede">Pick a host, type <span class="ah-code">user@host</span>, or paste your SSH config. We won't sign in to anything until you continue.</p>
       <div class="ah-field">${svg(ICON.servers, "ah-field-icon")}</div>
-      <p class="ah-hint" role="status" aria-hidden="true">Type user@host, for example kayg@o2</p>
+      <p class="ah-hint" id="ah-host-hint">Type user@host, or user@host:2222 for another port</p>
       <div class="ah-list" role="group" aria-label="Hosts"></div>`;
     this.token = "";
     this.chips = mountChipInput(page.querySelector<HTMLElement>(".ah-field")!, {
@@ -323,6 +323,8 @@ export class Wizard {
       onToken: (token) => { this.token = token; if (!token.trim() || parseTarget(token)) this.hintArmed = false; this.refreshDiscovery(); },
       onSubmit: () => { if (this.selected.length) this.proceed(); },
     });
+    // The hint is the field's description for assistive technology at all times; it is only drawn once a token fails.
+    this.chips.input.setAttribute("aria-describedby", "ah-host-hint");
     for (const entry of this.selected) this.chips.add(this.chipFor(entry));
     this.renderList(page);
     this.setFoot(`<span class="ah-count" aria-live="polite"></span><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="continue"><span>Continue</span></button>`);
@@ -437,7 +439,6 @@ export class Wizard {
     const hint = page.querySelector<HTMLElement>(".ah-hint")!;
     const invalid = this.hintArmed && this.token !== "" && !parseTarget(this.token);
     hint.dataset.show = String(invalid);
-    hint.setAttribute("aria-hidden", String(!invalid));
   }
 
   /** The count and Continue reflect the chips and the unfinished token, which Continue will commit. */
@@ -454,6 +455,13 @@ export class Wizard {
   private readonly onPaste = (event: ClipboardEvent): void => {
     if (!this.chips || event.target !== this.chips.input) return;
     const text = event.clipboardData?.getData("text") ?? "";
+    // A pasted `ssh …` command or `ssh://` address is one target; the chip field would split it at the spaces.
+    if (/^\s*ssh(:\/\/|\s)/i.test(text) && !looksLikeSshConfig(text) && parseTarget(text)) {
+      event.preventDefault();
+      const chip = this.resolve(text.trim(), true);
+      if (chip) this.chips.add(chip);
+      return;
+    }
     if (!looksLikeSshConfig(text)) return;
     const found = parseSshConfig(text);
     event.preventDefault();

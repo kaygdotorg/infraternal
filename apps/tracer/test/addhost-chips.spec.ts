@@ -192,3 +192,22 @@ test("a token typed while the host list is still loading chips when the list arr
   await expect(chips(page).first()).toHaveAttribute("data-chip", "remoternal");
   await expect(page.locator(".ah-row[data-host='remoternal'] input")).toBeChecked();
 });
+
+test("a pasted ssh command or ssh:// address becomes one chip with its port", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await field(page).click();
+  await paste(page, "ssh -p 2222 ada@h1.example");
+  await paste(page, "ssh://bob@h2.example:2200");
+  await expect(chips(page)).toHaveCount(2);
+  await expect(field(page)).toHaveValue("");
+  await expect(chips(page).nth(0)).toContainText("2222");
+  await expect(chips(page).nth(1)).toContainText("2200");
+});
+
+test("the hint is the field's accessible description and names no personal host", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await expect(field(page)).toHaveAccessibleDescription(/user@host/);
+  await expect(hint(page)).not.toContainText("kayg");
+});
