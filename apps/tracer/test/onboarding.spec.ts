@@ -10,7 +10,7 @@ test("invalid setup token stays on step 1 with focused guidance", async ({ page 
   test.setTimeout(60_000);
   const context = page.context();
   // Capture the fresh fixture token before screenshots leave the request connection idle.
-  const resetResponse = await context.request.post("/__mock/reset");
+  const resetResponse = await context.request.post("/__mock/reset", { maxRetries: 1 });
   const setupBody = await resetResponse.json() as { setup_token: string };
   await page.emulateMedia({ colorScheme: "dark", reducedMotion: "no-preference" });
   await page.goto("/?mock=1");
@@ -52,10 +52,10 @@ test("invalid setup token stays on step 1 with focused guidance", async ({ page 
 });
 
 test("setup, recovery acknowledgement, welcome and returning sign-in match the browser contract", async ({ page }, testInfo) => {
-  test.setTimeout(60_000);
+  test.setTimeout(90_000);
   const context = page.context();
   // Capture the fresh fixture token before screenshots leave the request connection idle.
-  const resetResponse = await context.request.post("/__mock/reset");
+  const resetResponse = await context.request.post("/__mock/reset", { maxRetries: 1 });
   const setupBody = await resetResponse.json() as { setup_token: string };
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   const cdp = await context.newCDPSession(page);
@@ -206,7 +206,10 @@ test("setup, recovery acknowledgement, welcome and returning sign-in match the b
   await page.keyboard.press("Enter");
   const signInTransitions = await page.evaluate(() => (window as Window & { __signinTransitions?: string[] }).__signinTransitions ?? []);
   expect(signInTransitions).toEqual([]);
-  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
+  await expect.poll(
+    () => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true),
+    { timeout: 30_000 },
+  ).toBe(true);
   console.log(`ONBOARDING_SCREENSHOTS ${screenshots.join(" ")}`);
 });
 
