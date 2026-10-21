@@ -11,5 +11,8 @@ test("review: the product canvas recovers a missing layout revision while Settin
     api.skipRevision();
     return api.revisions();
   });
-  expect(revisions.client).toBe(revisions.server);
+  await expect.poll(() => page.evaluate(() => {
+    const api = (window as Window & { __tracerLayoutReviewDouble?: { revisions(): { client: number } } }).__tracerLayoutReviewDouble!;
+    return api.revisions().client;
+  })).toBe(revisions.server);
 });
