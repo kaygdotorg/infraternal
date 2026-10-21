@@ -149,3 +149,56 @@ async fn revoked_probe_across_attempt_backoff_and_total_wait_edges() {
         assert_eq!(std::sync::Arc::strong_count(&state.authority), 1);
     }
 }
+
+/// Runtime jumps do not change wall authority. Conversely, a newly observed
+/// stored expiry in the past must stop both proof and application operations.
+#[tokio::test(start_paused = true)]
+async fn wall_expiry_and_monotonic_deadlines_keep_their_separate_roles() {
+    let _clock = FrozenSocketTime::new().await;
+    let (state, user) = fixture().await;
+    sqlx::query("UPDATE sessions SET expires=unixepoch()+120 WHERE token_hash=?")
+        .bind(crate::auth::hash(TOKEN))
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let mut lease = probe_authority::Lease::new(&state, &user, TOKEN)
+        .await
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(121)).await;
+    lease
+        .run(&state, &user, TOKEN, async { Ok::<(), ()>(()) })
+        .await
+        .unwrap();
+    assert!(lease.deadline() > tokio::time::Instant::now());
+    assert!(lease.deadline() <= tokio::time::Instant::now() + Duration::from_secs(120));
+    while_authorized(&state, &user, TOKEN, false, async { Ok(()) })
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sessions SET expires=unixepoch()-1 WHERE token_hash=?")
+        .bind(crate::auth::hash(TOKEN))
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    crate::auth::tests::publish_revocation(&state.auth);
+    let mut proof_polled = false;
+    assert_eq!(
+        lease
+            .run(&state, &user, TOKEN, async {
+                proof_polled = true;
+                Ok::<(), ()>(())
+            })
+            .await,
+        Err(AuthorityMiss::Refused)
+    );
+    assert!(!proof_polled);
+    let mut polled = false;
+    assert_eq!(
+        while_authorized(&state, &user, TOKEN, false, async {
+            polled = true;
+            Ok(())
+        })
+        .await,
+        Err(())
+    );
+    assert!(!polled);
+}
