@@ -238,7 +238,9 @@ export class MuxConnection {
   closeStream(id: number): void {
     if (!this.streams.delete(id)) return;
     this.unacknowledgedInput.delete(id);
-    this.send(id, { type: "Close", code: 1000, reason: "window closed" });
+    // Local windows can leave before their deferred welcome attaches them.
+    // Only a stream actually sent to this server has an attachment to close.
+    if (this.writersUsed.has(id)) this.send(id, { type: "Close", code: 1000, reason: "window closed" });
   }
 
   /** Sends one frame on a stream. Frames are dropped while the socket is not open (the stream resends on attach). */
