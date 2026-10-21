@@ -143,12 +143,20 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,389,296 bytes |
-  | `aarch64-unknown-linux-musl` | 19,561,656 bytes |
+  | `x86_64-unknown-linux-musl` | 21,389,040 bytes |
+  | `aarch64-unknown-linux-musl` | 19,561,912 bytes |
 
-  Release 9.3's socket authority read cap (#240) measures 21,389,296 /
+  Busy-store wake classification and fractional session deadlines (#240)
+  measure 21,389,040 / 19,561,912 bytes with the pinned static recipe:
+  -256 bytes against the reproduced release-9.3 x86_64 baseline, and +256
+  bytes against its recorded aarch64 ceiling. Both ceilings track these
+  exact artifacts with no allowance (D243). The proof path retains the
+  busy/refused distinction and shares the fractional deadline conversion;
+  dependencies, features, query limits and retry budgets are unchanged.
+
+  Release 9.3's socket authority read cap (#240) measured 21,389,296 /
   19,561,656 bytes with the same pinned static recipe: +2,048 / +2,256 bytes
-  versus release 9.2. Both exact caps ratchet to these measurements with no
+  versus release 9.2. Both exact caps were set to those measurements with no
   allowance (D243); the release artifacts and receipts are on #24. The
   rustls-webpki 0.103.16 lockfile update measured 21,387,248 / 19,559,400
   bytes for release 9.2, +1,024 / +1,408 versus release 9.
