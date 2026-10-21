@@ -158,6 +158,48 @@ impl Drop for AuthorityReadHold {
     }
 }
 
+/// Keep a pinned query alive when its enclosing authority attempt is cancelled.
+struct DetachOnDrop<F: std::future::Future + Send + 'static>(Option<std::pin::Pin<Box<F>>>)
+where
+    F::Output: Send;
+
+impl<F: std::future::Future + Send + 'static> std::future::Future for DetachOnDrop<F>
+where
+    F::Output: Send,
+{
+    type Output = F::Output;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        let Some(query) = this.0.as_mut() else {
+            return std::task::Poll::Pending;
+        };
+        match std::future::Future::poll(query.as_mut(), context) {
+            std::task::Poll::Ready(result) => {
+                this.0.take();
+                std::task::Poll::Ready(result)
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+impl<F: std::future::Future + Send + 'static> Drop for DetachOnDrop<F>
+where
+    F::Output: Send,
+{
+    fn drop(&mut self) {
+        if let Some(query) = self.0.take() {
+            // The attempt timeout drops this wrapper; the query keeps its read
+            // place until SQLite returns the pooled connection.
+            tokio::spawn(query);
+        }
+    }
+}
+
 /// State shared by the authenticated browser socket route.
 #[derive(Clone)]
 pub(crate) struct WebSocketState {
@@ -2375,10 +2417,10 @@ async fn authority_deadline(
 /// another connection holds the write lock. The renewal is a write that may
 /// wait seconds for that lock; it never runs here (`renew_soon`). Each attempt
 /// obtains one of the `AUTHORITY_READS` places within its deadline. Fast SELECTs
-/// run inline. If one misses its deadline, its future is detached with the
-/// place until `live_expiry` returns its pooled connection. A timed-out caller
-/// then retries without spending another place while that SQLite read remains
-/// in flight.
+/// run inline. If one misses its deadline, `DetachOnDrop` moves its pinned
+/// future into a task with the place until `live_expiry` returns its pooled
+/// connection. A retry cannot spend another place while that SQLite read
+/// remains in flight.
 ///
 /// Expiry is monotonic: once a session's end has passed it is never found live
 /// again. Every attempt reads the wall clock when it starts, so a retry after a
@@ -2405,41 +2447,26 @@ async fn read_expiry(
             let reads = &state.authority.reads;
             let place = match reads.try_acquire() {
                 Ok(place) => place,
-                Err(_) => match tokio::time::timeout_at(attempt_deadline, reads.acquire()).await {
-                    Ok(Ok(place)) => place,
-                    _ => return None,
-                },
+                Err(_) => reads.acquire().await.ok()?,
             };
             let Ok(now) = unix_seconds() else {
                 drop(place);
                 return Some(Err(AuthorityMiss::Unavailable));
             };
             let hold = AuthorityReadHold::take(Arc::clone(&state.authority), place);
-            // Pin the future so a miss can move its allocation into a task;
-            // normal reads avoid a task spawn and its scheduler round trip.
-            let mut query = Box::pin(state.auth.live_expiry(token, user_id, now, hold));
-            tokio::select! {
-                biased;
-                result = &mut query => {
-                    if tokio::time::Instant::now() <= attempt_deadline {
-                        Some(result.map_err(|error| match error {
-                            crate::auth::Error::Denied => AuthorityMiss::Refused,
-                            _ => AuthorityMiss::Unavailable,
-                        }))
-                    } else {
-                        None
-                    }
-                }
-                () = tokio::time::sleep_until(attempt_deadline) => {
-                    // The query owns its place until its pooled connection returns.
-                    tokio::spawn(query);
-                    None
-                }
-            }
+            let query = DetachOnDrop(Some(Box::pin(
+                state.auth.live_expiry(token, user_id, now, hold),
+            )));
+            Some(query.await.map_err(|error| match error {
+                crate::auth::Error::Denied => AuthorityMiss::Refused,
+                _ => AuthorityMiss::Unavailable,
+            }))
         };
-        match read.await {
-            Some(result) => break result?,
-            None if tokio::time::Instant::now() + pause < give_up => {
+        match tokio::time::timeout_at(attempt_deadline, read).await {
+            // A future that does not yield can finish after the timer. Keep the
+            // explicit post-result check so such a completion still retries.
+            Ok(Some(result)) if tokio::time::Instant::now() <= attempt_deadline => break result?,
+            _ if tokio::time::Instant::now() + pause < give_up => {
                 tokio::time::sleep(pause).await;
                 pause = (pause * 2).min(AUTHORITY_RETRY_PAUSE_MAX);
             }
