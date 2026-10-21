@@ -1,5 +1,5 @@
 """Role: measure the real native window through the production canvas on the named Mac; keep authority in memory and prove owned-PID cleanup."""
-import base64,io,json,os,pathlib,queue,signal,subprocess,sys,threading,time,traceback,uuid
+import base64,ctypes,io,json,os,pathlib,queue,signal,subprocess,sys,threading,time,traceback,uuid
 from playwright.sync_api import sync_playwright
 from PIL import Image
 ROOT=pathlib.Path.home()/'infraternal-bench/app-windows-latency'
@@ -12,12 +12,22 @@ import re
 if not re.fullmatch(r'[a-z0-9-]{1,48}',job) or not re.fullmatch(r'[a-z0-9-]{1,48}',args['label']):raise SystemExit(2)
 E=ROOT/'evidence'/args['label'];E.mkdir(parents=True,exist_ok=False)
 BIN=ROOT/'bin'
-RUN_TIMEOUT_SECONDS=900
+for mode in ('ten_window_idle','flood','input_only'):
+ if type(args.get(mode,False)) is not bool:raise ValueError('invalid measurement mode')
+TEN_WINDOW_IDLE=args.get('ten_window_idle',False)
+FLOOD=args.get('flood',False)
+if TEN_WINDOW_IDLE and FLOOD:raise ValueError('idle and flood cohorts cannot run together')
+FIXTURE_WINDOW_COUNT=args.get('fixture_window_count',1)
+if type(FIXTURE_WINDOW_COUNT) is not int or not 1<=FIXTURE_WINDOW_COUNT<=10:raise ValueError('invalid fixture window count')
+if TEN_WINDOW_IDLE and FIXTURE_WINDOW_COUNT!=10:raise ValueError('idle cohort requires ten fixture windows')
+if FLOOD and FIXTURE_WINDOW_COUNT!=1:raise ValueError('flood cohort requires one fixture window')
+RUN_TIMEOUT_SECONDS=1800 if TEN_WINDOW_IDLE or FLOOD else 900
 CLEANUP_RESERVE_SECONDS=30
 INPUT_SAMPLE_COUNT=80 if args.get('input_only') else 40
 STABILITY_SECONDS=args.get('stability_seconds',600)
 RECOVERY_ENABLED=args.get('recovery',False)
 if type(STABILITY_SECONDS) is not int or STABILITY_SECONDS not in (180,600):raise ValueError('invalid stability duration')
+if (TEN_WINDOW_IDLE or FLOOD) and STABILITY_SECONDS!=600:raise ValueError('soak cohorts require exactly ten minutes')
 RECONNECT_ITERATION=3
 REOPEN_ITERATION=6
 
@@ -37,6 +47,55 @@ def soak_input_matches(rows, expected):
  """Counts alone cannot detect reordered or substituted keys; fail on unstamped input."""
  inputs=[row for row in rows if row.get('kind')=='input']
  return len(inputs)==len(expected) and all(isinstance(row.get('characters'),str) and len(row['characters'])==1 for row in inputs) and ''.join(row['characters'] for row in inputs)==expected
+
+def helper_resource_delta(before, after, elapsed_seconds):
+ """Aggregate matched-helper CPU time and wakeups while retaining current RSS."""
+ if elapsed_seconds<=0:raise ValueError('invalid helper sample interval')
+ matched=set(before)&set(after)
+ cpu_ns=sum(max(0,after[pid]['cpu_ns']-before[pid]['cpu_ns']) for pid in matched)
+ wakeups=sum(max(0,after[pid]['wakeups']-before[pid]['wakeups']) for pid in matched)
+ rss={str(pid):int(row['rss_kb']) for pid,row in after.items()}
+ return {'matched_helpers':len(matched),'helper_count':len(after),'cpu_cores':cpu_ns/(elapsed_seconds*1e9),
+         'wakeups_per_second':wakeups/elapsed_seconds,'rss_kb':sum(rss.values()),'rss_by_pid_kb':rss}
+
+def companion_metric_summary(path, offset=0):
+ """Count source callbacks, fresh deliveries, explicit drops and configured queue depth."""
+ queue_depth=[];source_callbacks=0;damaged_callbacks=0;deliveries=0;encoder_drops=0
+ if path.exists():
+  with path.open('rb') as stream:
+   stream.seek(offset);data=stream.read().decode('utf-8',errors='replace')
+  for line in data.splitlines():
+   if not line.startswith('METRIC '):continue
+   parts=line.split();name=parts[1] if len(parts)>1 else ''
+   fields=dict(part.split('=',1) for part in parts[2:] if '=' in part)
+   if name=='source_capture_config' and fields.get('queue_depth','').isdecimal():queue_depth.append(int(fields['queue_depth']))
+   elif name=='source_frame':
+    source_callbacks+=1
+    if fields.get('damaged')=='true':damaged_callbacks+=1
+   elif name=='surface_delivery' and fields.get('fresh')=='true':deliveries+=1
+   elif name=='encoder_drop=1':encoder_drops+=1
+ return {'queue_depth_max':max(queue_depth,default=0),'source_callbacks':source_callbacks,
+         'damaged_callbacks':damaged_callbacks,'fresh_deliveries':deliveries,
+         'latest_only_callback_gap':max(0,damaged_callbacks-deliveries),
+         'encoder_drops':encoder_drops}
+
+class RusagePrefix(ctypes.Structure):
+ """The rusage_info_v4 prefix used for per-process CPU and wakeups."""
+ # Request type 4 returns rusage_info_v4; these offsets are its leading fields.
+ _fields_=[('uuid',ctypes.c_uint8*16),('user_ns',ctypes.c_uint64),('system_ns',ctypes.c_uint64),
+           ('package_wakeups',ctypes.c_uint64),('interrupt_wakeups',ctypes.c_uint64)]
+
+def process_usage(pid):
+ """Read cumulative nanoseconds and wakeups through macOS libproc."""
+ buffer=ctypes.create_string_buffer(512)
+ library=ctypes.CDLL('/usr/lib/libproc.dylib')
+ query=library.proc_pid_rusage
+ query.argtypes=[ctypes.c_int,ctypes.c_int,ctypes.c_void_p]
+ query.restype=ctypes.c_int
+ if query(pid,4,ctypes.byref(buffer))!=0:raise RuntimeError('helper resource sample unavailable')
+ sample=RusagePrefix.from_buffer(buffer)
+ return {'cpu_ns':int(sample.user_ns+sample.system_ns),
+         'wakeups':int(sample.package_wakeups+sample.interrupt_wakeups)}
 
 def expected_capture_retirement(retired, captures, previous_controls, current_controls, previous_dimensions, current_dimensions, resize_ack):
  """A native resize replaces capture, while the same control owner must survive."""
@@ -128,6 +187,10 @@ def battery():
  import re
  m=re.search(r'(\d+)%;',text)
  if not m or int(m[1])<30:raise RuntimeError('battery below allowed level or unknown')
+
+fixture_build=ROOT/'fixture-build'/args['label'];fixture_build.mkdir(parents=True,exist_ok=False)
+fixture_source=fixture_build/'latency-window.swift';fixture_source.write_text(args['fixture_source'])
+fixture=fixture_build/'latency-window'
 
 def cua(name,params):
  return json.loads(command([str(pathlib.Path.home()/'.local/bin/cua-driver'),'call',name,json.dumps(params)],timeout=20))
@@ -234,6 +297,22 @@ def retire_signal(signum,frame):raise KeyboardInterrupt()
 signal.signal(signal.SIGTERM,retire_signal);signal.signal(signal.SIGHUP,retire_signal)
 emit({'kind':'runner','pid':os.getpid()})
 try:
+ stage='fixture build';battery()
+ compiler=launch(['swiftc','-O',str(fixture_source),'-o',str(fixture)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+ try:
+  _,compile_error=compiler.communicate(timeout=60)
+ except subprocess.TimeoutExpired:
+  compiler.kill();compiler.communicate();owned.discard(compiler.pid);children.remove(compiler)
+  compiler_check=subprocess.run(['ps','-p',str(compiler.pid),'-o','pid=,stat=,comm='],capture_output=True,text=True)
+  emit({'kind':'process_exit','pid':compiler.pid,'role':'swiftc','exit':compiler.returncode,'ps_exit':compiler_check.returncode,'row':compiler_check.stdout.strip()})
+  raise RuntimeError('native fixture build timed out')
+ compiler_check=subprocess.run(['ps','-p',str(compiler.pid),'-o','pid=,stat=,comm='],capture_output=True,text=True)
+ emit({'kind':'fixture_build','pid':compiler.pid,'exit':compiler.returncode,'diagnostic':'compiler_refused' if compiler.returncode else 'ok'})
+ emit({'kind':'process_exit','pid':compiler.pid,'role':'swiftc','exit':compiler.returncode,'ps_exit':compiler_check.returncode,'row':compiler_check.stdout.strip()})
+ owned.discard(compiler.pid);children.remove(compiler)
+ if compiler.returncode:
+  import shutil
+  shutil.rmtree(fixture_build);raise RuntimeError('native fixture build failed')
  for attempt in range(90):
   try:lock.mkdir();locked=True;break
   except FileExistsError:
@@ -245,7 +324,7 @@ try:
  readiness=json.loads(sys.stdin.readline());emit({'kind':'vm_readiness','idle':readiness.get('idle',[]),'phase':readiness.get('phase','vm'),'refusal':readiness.get('refusal')})
  if not readiness.get('ready'):raise RuntimeError('named VM or private server unavailable')
  args.update(readiness)
- def run_deadline(signum,frame):raise TimeoutError('measurement run exceeded its 15-minute limit')
+ def run_deadline(signum,frame):raise TimeoutError('measurement run exceeded its bounded time limit')
  run_started=time.monotonic();run_deadline_at=run_started+RUN_TIMEOUT_SECONDS
  signal.signal(signal.SIGALRM,run_deadline);signal.alarm(RUN_TIMEOUT_SECONDS)
  battery();emit({'kind':'environment','text':command(['sw_vers'])+command(['sysctl','-n','hw.model','hw.ncpu','hw.memsize'])+command(['uptime'])})
@@ -285,6 +364,15 @@ try:
  command(['codesign','--verify','--strict',str(native.parent.parent.parent)])
  if helper_hash!=(args.get('native_hash') or '7b7ad2bcbc18f4f390f00d001b59984b1998665c8ddae9846520b83875001dc5'):raise RuntimeError('approved companion version changed')
  pidlog=E/'helper-pids.txt';pidlog.write_text('');(E/'helper-metrics.log').write_text('');helper_births={};capture_helpers=set()
+ def helper_resource_snapshot():
+  samples={}
+  for pid in sorted(tuple(capture_helpers)):
+   birth=helper_births.get(pid)
+   if birth is None or process_identity(pid)!=birth:continue
+   rss=command(['ps','-p',str(pid),'-o','rss=']).strip()
+   if not rss.isdecimal():raise RuntimeError('helper RSS sample unavailable')
+   samples[pid]={**process_usage(pid),'rss_kb':int(rss)}
+  return samples
  for name,target in [('helper',BIN/'helper')]:
   wrapper=runtime/name
   wrapper.write_text('#!/bin/sh\n# Role: record only an owned helper PID before preserving its pipes and process identity.\nprintf "'+name+' %s\\n" "$$" >> "'+str(pidlog)+'"\nexec "'+str(target)+'" "$@" 2>> "'+str(E/'helper-metrics.log')+'"\n');wrapper.chmod(0o700)
@@ -441,17 +529,14 @@ try:
   emit({'kind':'resources','label':label,'worker_before':worker_before,'worker_after':worker_after,'source_draws':len(all_draws)-draw_before,'begin_perf_ns':begin,'end_perf_ns':end,'host':host,'rows':rows,'sample_times_ns':sample_times,'source_pids':list(source_ids),'browser_pids':list(browser_ids),'uptime':command(['uptime'])})
   if label=='idle' and args.get('require_idle'):
    if len(all_draws)!=draw_before or not worker_before or not worker_after or any(worker_after[k]!=worker_before[k] for k in ('received','decoded','painted')):raise RuntimeError('unchanged native window still sends or paints frames')
+  return worker_after
  # Remove the fixture's initial terminal before both resource baselines.
  initial_terminal=page.locator('.ui-window[data-kind="terminal"] [data-action="close"]')
  if initial_terminal.count():initial_terminal.first.evaluate('(b)=>b.click()')
  page.wait_for_timeout(1000)
  resource_sample('empty')
  stage='native fixture'
- # Build the fixture sent by this controller while holding our Mac lock; a
- # retained external binary could otherwise omit the new input receipts.
- fixture_source=runtime/'latency-window.swift';fixture_source.write_text(args['fixture_source'])
- fixture=runtime/'latency-window'
- command(['swiftc','-O',str(fixture_source),'-o',str(fixture)],timeout=60)
+ # The current fixture and input ledger are built before taking the Mac lock.
  emit({'kind':'native_fixture','sha256':command(['shasum','-a','256',str(fixture)]).split()[0],'source_sha256':command(['shasum','-a','256',str(fixture_source)]).split()[0]})
  # Exercise AppKit's actual content/title-bar projection before opening capture.
  # A synthetic worker bitmap cannot detect a marker drawn on the wrong row.
@@ -461,13 +546,19 @@ try:
  marker_rows=[json.loads(line) for line in marker_out.splitlines()]
  marker_check=next(row for row in marker_rows if row.get('kind')=='marker_check')
  emit({**marker_check,'kind':'native_fixture_marker','pid':marker.pid})
- window=launch([str(fixture)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1)
- while True:
-  ready=json.loads(window.stdout.readline())
-  if ready.get('kind')=='ready':break
-  all_draws.append(ready)
- window_id=ready['window_id'];native_queue=queue.Queue()
- if ready['frame_x']<850:raise RuntimeError('display cannot keep both owned windows visible')
+ fixture_window_count=FIXTURE_WINDOW_COUNT
+ window=launch([str(fixture),'--window-count',str(fixture_window_count)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1)
+ ready_by_index={}
+ while len(ready_by_index)<fixture_window_count:
+  ready_row=json.loads(window.stdout.readline())
+  if ready_row.get('kind')=='ready':
+   index=ready_row.get('fixture_index')
+   if type(index) is not int or index in ready_by_index or not 0<=index<fixture_window_count:raise RuntimeError('invalid native fixture window identity')
+   ready_by_index[index]=ready_row
+  else:all_draws.append(ready_row)
+ ready_rows=[ready_by_index[index] for index in range(fixture_window_count)]
+ window_id=ready_rows[0]['window_id'];window_ids=[row['window_id'] for row in ready_rows];native_queue=queue.Queue()
+ if fixture_window_count==1 and ready_rows[0]['frame_x']<850:raise RuntimeError('display cannot keep both owned windows visible')
  browser_window=cdp.send('Browser.getWindowForTarget')
  cdp.send('Browser.setWindowBounds',{'windowId':browser_window['windowId'],'bounds':{'left':0,'top':32,'width':848,'height':820,'windowState':'normal'}})
  def draw_reader():
@@ -484,7 +575,10 @@ try:
   except RuntimeError:pass
   page.wait_for_timeout(500)
  else:raise RuntimeError('owned native window inventory unavailable')
- emit({'kind':'window','pid':window.pid,'window_id':window_id,'inventory':inventory})
+ if len([w for w in inventory if w.get('window_id') in window_ids])!=fixture_window_count:raise RuntimeError('native fixture window inventory incomplete')
+ emit({'kind':'windows','pid':window.pid,'count':fixture_window_count,'window_ids':window_ids,'inventory':inventory,
+       'display_maximum_fps':ready_rows[0]['display_maximum_fps'],
+       'animation_interval_seconds':ready_rows[0]['animation_interval_seconds']})
  stage='open canvas window'
  page.bring_to_front();page.keyboard.press('Meta+k');page.get_by_role('option',name='Settings: Hosts').click()
  toggle=page.get_by_role('switch',name='Stream app windows')
@@ -493,12 +587,24 @@ try:
  if close.is_visible():close.click()
  terminals=page.locator('.ui-window[data-kind="terminal"] [data-action="close"]')
  if terminals.count():terminals.first.evaluate('(b)=>b.click()')
- page.get_by_role('button',name='New window',exact=True).click();page.get_by_role('option',name='App window measurement',exact=False).click()
- first_picture()
+ for index in range(fixture_window_count):
+  title='App window measurement' if fixture_window_count==1 else f'App window measurement {index+1}'
+  before=page.locator('.ui-window[data-kind="app"]').count()
+  page.get_by_role('button',name='New window',exact=True).click()
+  page.get_by_role('option',name=title,exact=False).click()
+  consent_check()
+  page.wait_for_function('(count)=>document.querySelectorAll(\'.ui-window[data-kind="app"]\').length>count',arg=before,timeout=10000)
+  card=page.locator('.ui-window[data-kind="app"]').nth(before)
+  card.locator('.aw-stage[data-picture="live"]').wait_for(timeout=15000)
+  consent_check()
+  if index==0:first_picture()
+ if page.locator('.ui-window[data-kind="app"]').count()!=fixture_window_count:raise RuntimeError('canvas fixture window count mismatch')
+ emit({'kind':'canvas_windows_ready','count':fixture_window_count,'window_ids':page.locator('.ui-window[data-kind="app"]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.windowId)')})
  consent_check()
  emit({'kind':'canvas_context','receipts':page.evaluate('window.__appWindowBench.take()')})
- page.screenshot(path=str(E/'canvas-native-before.png'))
- surface=page.locator('.aw-surface');focus_input(surface)
+ if not args.get('ten_window_idle'):page.screenshot(path=str(E/'canvas-native-before.png'))
+ surface=page.locator('.ui-window[data-kind="app"] .aw-surface').first
+ if not args.get('ten_window_idle'):focus_input(surface)
  # Every capture helper launch is followed by a consent check, including inventory helpers.
  consent_check()
  if args.get('owner_preview'):
@@ -565,6 +671,67 @@ try:
   projection=capture_projection(state)
   emit({'kind':'fixture_projection','phase':phase,'state':state,'projection':projection})
   return projection
+ if args.get('ten_window_idle'):
+  stage='ten-window idle soak'
+  if fixture_window_count!=10:raise RuntimeError('idle cohort requires ten fixture windows')
+  native_command('idle');battery()
+  deadline=time.monotonic()+30
+  while True:
+   consent_guard()
+   live={pid for pid in capture_helpers if helper_births.get(pid)==process_identity(pid)}
+   if len(live)==10:break
+   if time.monotonic()>=deadline:raise RuntimeError('ten live capture helpers unavailable')
+   page.wait_for_timeout(250)
+  if len(page.locator('.ui-window[data-kind="app"] .aw-stage[data-picture="live"]').all())<10:raise RuntimeError('ten live canvas windows unavailable')
+  drain()
+  helper_before=helper_resource_snapshot()
+  if len(helper_before)!=10:raise RuntimeError('ten helper resource baselines unavailable')
+  metric_path=E/'companion-metrics.log';metric_offset=metric_path.stat().st_size
+  baseline_draws=sum(row.get('kind')=='draw' for row in all_draws)
+  browser_worker_before=page.evaluate('window.__appWindowBench.stats()')
+  phase_start=time.monotonic();previous_at=phase_start;previous_helpers=helper_before
+  resource_samples=[{'checkpoint':0,'elapsed_seconds':0.0,'matched_helpers':10,'helper_count':10,
+                     'cpu_cores':0.0,'wakeups_per_second':0.0,
+                     'rss_kb':sum(row['rss_kb'] for row in helper_before.values()),
+                     'rss_by_pid_kb':{str(pid):row['rss_kb'] for pid,row in helper_before.items()}}]
+  browser_frames=[];frame_traces=[];source_draws=0
+  emit({'kind':'ten_window_idle_plan','seconds':600,'fixture_windows':fixture_window_count,'capture_helpers':len(helper_before),'source_frames':0})
+  for checkpoint in range(1,11):
+   target=phase_start+checkpoint*60
+   while time.monotonic()<target:
+    consent_guard()
+    if source.poll() is not None or window.poll() is not None or not browser.is_connected():raise RuntimeError('idle soak process exited')
+    page.wait_for_timeout(min(1000,max(1,int((target-time.monotonic())*1000))))
+   battery();receipt=drain();browser_frames.extend(receipt['probe']['videos']);frame_traces.extend(receipt['frames'])
+   browser_worker_after=page.evaluate('window.__appWindowBench.stats()')
+   source_draws=sum(row.get('kind')=='draw' for row in all_draws)-baseline_draws
+   after_helpers=helper_resource_snapshot();sample_at=time.monotonic()
+   delta=helper_resource_delta(previous_helpers,after_helpers,sample_at-previous_at)
+   sample={'checkpoint':checkpoint,'elapsed_seconds':sample_at-phase_start,**delta,'source_draws':source_draws,
+           'browser_frames':len(browser_frames),'worker_frames':len(frame_traces),
+           'worker_stats':browser_worker_after}
+   resource_samples.append(sample);emit({'kind':'ten_window_idle_sample',**sample})
+   previous_helpers=after_helpers;previous_at=sample_at
+  metric_summary=companion_metric_summary(metric_path,metric_offset)
+  metric_bounds=companion_metric_summary(metric_path)
+  max_cpu=max((row['cpu_cores'] for row in resource_samples),default=0.0)
+  worker_delta={key:max(0,int(browser_worker_after.get(key,0))-int(browser_worker_before.get(key,0)))
+                for key in ('received','decoded','painted','dropped','superseded')}
+  result={'kind':'ten_window_idle_result','seconds':time.monotonic()-phase_start,'fixture_windows':fixture_window_count,
+          'capture_helpers':len(previous_helpers),'source_draws':source_draws,'browser_frames':len(browser_frames),
+          'worker_frames':len(frame_traces),'worker_delta':worker_delta,
+          'max_helper_cpu_cores':max_cpu,'max_queue_depth':metric_bounds['queue_depth_max'],
+          'source_callbacks':metric_summary['source_callbacks'],'damaged_callbacks':metric_summary['damaged_callbacks'],
+          'fresh_deliveries':metric_summary['fresh_deliveries'],
+          'rss_start_kb':resource_samples[0]['rss_kb'],'rss_end_kb':resource_samples[-1]['rss_kb'],
+          'rss_delta_kb':resource_samples[-1]['rss_kb']-resource_samples[0]['rss_kb'],
+          'rss_samples':[{'elapsed_seconds':r['elapsed_seconds'],'rss_kb':r['rss_kb']} for r in resource_samples],
+          'wakeups_per_second':[r['wakeups_per_second'] for r in resource_samples],
+          'max_helper_wakeups_per_second':max((r['wakeups_per_second'] for r in resource_samples[1:]),default=0.0)}
+  emit(result)
+  if result['seconds']<599 or result['capture_helpers']!=10 or any(r['matched_helpers']!=10 or r['helper_count']!=10 for r in resource_samples) or any(worker_delta.values()) or source_draws or browser_frames or frame_traces or metric_summary['source_callbacks'] or metric_summary['fresh_deliveries'] or max_cpu>0.01 or metric_bounds['queue_depth_max']>3:
+   raise RuntimeError('ten-window idle soak did not meet the no-work bound')
+  battery();emit({'kind':'result','status':'ten_window_idle_measured'});raise PhaseComplete()
  if not args.get('resources_only') and not args.get('demo_only'):
   stage='change samples'
   projection=fixture_projection('change samples')
@@ -605,29 +772,120 @@ try:
   emit({'kind':'input_focus','mode':'emulated','native_activation':False})
   focus_input(surface)
   projection=fixture_projection('input samples')
+  flood_start=None;flood_metric_offset=0;flood_helpers_before={};flood_previous_at=0;flood_baseline_draws=0
+  flood_resource_samples=[];flood_worker_before=None;flood_worker_after=None
+  if args.get('flood'):
+   native_command('motion 0')
   emit({'kind':'input_sample_plan','count':INPUT_SAMPLE_COUNT,'trigger':'immediate after key event'})
   for index in range(INPUT_SAMPLE_COUNT):
    # Keep control/DOM admission explicit without changing the native foreground.
    if not surface.evaluate('(canvas)=>canvas.parentElement===document.activeElement'):focus_input(surface)
    page.wait_for_function('document.hasFocus()',timeout=5000)
    sequence=max(r['sequence'] for r in all_draws if r['kind']=='draw')+1
-   drain();page.evaluate('([id,colour,sequence,projection])=>window.__appWindowBench.arm(id,{colour,sequence,projection})',[100+index,sequence%8,sequence,projection]);copy_target=compositor_target(surface,page.viewport_size,projection);composite_begin=len(composites);page.keyboard.type('x');deadline=time.monotonic()+5;events=[];effect=None
-   while time.monotonic()<deadline:
-    receipt=drain();events.append(receipt);effect=next((e for e in receipt['probe']['events'] if e.get('t')=='bench-effect' and e['id']==100+index),None)
-    if effect:break
-    page.wait_for_timeout(5)
+   drain();copy_target=compositor_target(surface,page.viewport_size,projection);composite_begin=len(composites);events=[];effect=None
+   if args.get('flood'):
+    input_cursor=len([r for r in all_draws if r.get('kind')=='input']);page.keyboard.type('x')
+    input_deadline=time.monotonic()+2;native_input=None
+    while time.monotonic()<input_deadline and native_input is None:
+     receipt=drain();events.append(receipt)
+     native_input=next((r for r in all_draws[input_cursor:] if r.get('kind')=='input' and r.get('characters')=='x'),None)
+     if native_input is None:page.wait_for_timeout(2)
+    if native_input is None:raise RuntimeError('flood input did not reach the native fixture')
+    sequence=native_input['sequence']
+    page.evaluate('([id,colour,sequence,projection])=>window.__appWindowBench.arm(id,{colour,sequence,projection})',[100+index,sequence%8,sequence,projection])
+    deadline=time.monotonic()+5
+    while time.monotonic()<deadline:
+     receipt=drain();events.append(receipt);effect=next((e for e in receipt['probe']['events'] if e.get('t')=='bench-effect' and e['id']==100+index),None)
+     if effect:break
+     page.wait_for_timeout(5)
+   else:
+    page.evaluate('([id,colour,sequence,projection])=>window.__appWindowBench.arm(id,{colour,sequence,projection})',[100+index,sequence%8,sequence,projection]);page.keyboard.type('x');deadline=time.monotonic()+5
+    while time.monotonic()<deadline:
+     receipt=drain();events.append(receipt);effect=next((e for e in receipt['probe']['events'] if e.get('t')=='bench-effect' and e['id']==100+index),None)
+     if effect:break
+     page.wait_for_timeout(5)
    if not effect:
     focus=surface.evaluate('(canvas)=>({surface:canvas.parentElement===document.activeElement,document:document.hasFocus()})')
     emit({'kind':'input_sample_failure','index':index,'expected_sequence':sequence,'events':events,'focus':focus})
     raise RuntimeError('input change not observed')
    compositor=None
-   for attempt in range(100):
-    compositor=next((c for c in composites[composite_begin:] if c['colour']==sequence%8 and c['distance']<2500),None)
+   key_event_at=next((row['eventAt'] for receipt in events for row in receipt['probe']['domInputs']),None)
+   for attempt in range(200):
+    if args.get('flood'):
+     compositor=next((c for c in composites[composite_begin:] if key_event_at is not None and c['timestamp_ms']>=key_event_at and c['distance']<2500),None)
+    else:compositor=next((c for c in composites[composite_begin:] if c['colour']==sequence%8 and c['distance']<2500),None)
     if compositor:break
     page.wait_for_timeout(5)
    if not compositor:raise RuntimeError('input change absent from compositor copies')
-   result={'kind':'input_sample','index':index,'effect':effect,'events':events,'compositor':compositor};results.append(result);emit(result)
+   result={'kind':'input_sample','index':index,'effect':effect,'events':events,'compositor':compositor,
+           **({'native_input':native_input,'flood':True} if args.get('flood') else {})};results.append(result);emit(result)
   cdp.send('Page.stopScreencast');cdp.remove_listener('Page.screencastFrame',observe_compositor)
+ if args.get('flood'):
+  stage='flood soak'
+  # The latency samples run under animation first. Start a fresh, full ten-minute
+  # flood window after them so setup time cannot shorten the requested soak.
+  native_command('idle')
+  flood_baseline_draws=sum(row.get('kind')=='draw' for row in all_draws)
+  flood_metric_offset=(E/'companion-metrics.log').stat().st_size
+  flood_helpers_before=helper_resource_snapshot()
+  if len(flood_helpers_before)!=1:raise RuntimeError('flood cohort requires one live capture helper')
+  flood_worker_before=page.evaluate('window.__appWindowBench.stats()')
+  if not flood_worker_before:raise RuntimeError('flood worker counters unavailable')
+  flood_resource_samples=[{'checkpoint':0,'elapsed_seconds':0.0,'matched_helpers':1,'helper_count':1,
+                           'cpu_cores':0.0,'wakeups_per_second':0.0,
+                           'rss_kb':sum(row['rss_kb'] for row in flood_helpers_before.values()),
+                           'rss_by_pid_kb':{str(pid):row['rss_kb'] for pid,row in flood_helpers_before.items()}}]
+  flood_start=time.monotonic();flood_previous_at=flood_start
+  native_command('motion 0')
+  emit({'kind':'flood_plan','seconds':600,'input_samples':INPUT_SAMPLE_COUNT,'fixture_windows':fixture_window_count,'capture_helpers':len(flood_helpers_before)})
+  previous_helpers=flood_helpers_before;previous_at=flood_previous_at
+  for checkpoint in range(1,11):
+   target=flood_start+checkpoint*60
+   while time.monotonic()<target:
+    consent_guard()
+    if source.poll() is not None or window.poll() is not None or not browser.is_connected():raise RuntimeError('flood process exited')
+    page.wait_for_timeout(min(1000,max(1,int((target-time.monotonic())*1000))))
+   battery();receipt=drain();flood_worker_after=page.evaluate('window.__appWindowBench.stats()')
+   if not flood_worker_after:raise RuntimeError('flood worker counters unavailable')
+   # Drain a second time after the counters so the raw receipt includes every
+   # trace delivered at this checkpoint without stretching the soak by seconds.
+   receipt=drain()
+   after_helpers=helper_resource_snapshot();sample_at=time.monotonic()
+   delta=helper_resource_delta(previous_helpers,after_helpers,sample_at-previous_at)
+   source_draws=sum(row.get('kind')=='draw' for row in all_draws)-flood_baseline_draws
+   sample={'checkpoint':checkpoint,'elapsed_seconds':sample_at-flood_start,**delta,
+           'source_draws':source_draws,'worker_stats':flood_worker_after}
+   flood_resource_samples.append(sample);emit({'kind':'flood_resource_sample',**sample})
+   previous_helpers=after_helpers;previous_at=sample_at
+  native_command('idle')
+  metric_path=E/'companion-metrics.log'
+  metrics_all=companion_metric_summary(metric_path)
+  metrics_flood=companion_metric_summary(metric_path,flood_metric_offset)
+  source_draws=sum(row.get('kind')=='draw' for row in all_draws)-flood_baseline_draws
+  worker_delta={key:max(0,int(flood_worker_after.get(key,0))-int(flood_worker_before.get(key,0)))
+                for key in ('received','decoded','painted','dropped','superseded')}
+  max_cpu=max((row['cpu_cores'] for row in flood_resource_samples),default=0.0)
+  display_maximum_fps=ready_rows[0]['display_maximum_fps']
+  flood_seconds=time.monotonic()-flood_start
+  source_draw_rate=source_draws/max(1,flood_seconds)
+  source_draw_rate_ratio=source_draw_rate/max(1,display_maximum_fps)
+  result={'kind':'flood_result','seconds':flood_seconds,'fixture_windows':fixture_window_count,
+          'capture_helpers':len(previous_helpers),'display_maximum_fps':display_maximum_fps,
+          'source_draws':source_draws,'source_draws_per_second':source_draw_rate,'source_draw_rate_ratio':source_draw_rate_ratio,
+          'browser_video_frames':worker_delta['received'],'worker_painted_frames':worker_delta['painted'],
+          'worker_superseded_frames':worker_delta['superseded'],'worker_dropped_frames':worker_delta['dropped'],
+          'max_queue_depth':metrics_all['queue_depth_max'],'source_callbacks':metrics_flood['source_callbacks'],
+          'fresh_deliveries':metrics_flood['fresh_deliveries'],'latest_only_callback_gap':metrics_flood['latest_only_callback_gap'],
+          'encoder_drops':metrics_flood['encoder_drops'],'max_helper_cpu_cores':max_cpu,
+          'rss_start_kb':sum(row['rss_kb'] for row in flood_helpers_before.values()),
+          'rss_end_kb':flood_resource_samples[-1]['rss_kb'],'rss_samples':[{'elapsed_seconds':r['elapsed_seconds'],'rss_kb':r['rss_kb']} for r in flood_resource_samples],
+          'rss_delta_kb':flood_resource_samples[-1]['rss_kb']-sum(row['rss_kb'] for row in flood_helpers_before.values()),
+          'wakeups_per_second':[r['wakeups_per_second'] for r in flood_resource_samples],
+          'max_helper_wakeups_per_second':max((r['wakeups_per_second'] for r in flood_resource_samples[1:]),default=0.0)}
+  emit(result)
+  if result['seconds']<599 or result['capture_helpers']!=1 or any(r['matched_helpers']!=1 or r['helper_count']!=1 for r in flood_resource_samples) or source_draw_rate_ratio<0.9 or metrics_all['queue_depth_max']>3:
+   raise RuntimeError('flood soak did not meet the bounded-queue run conditions')
+  battery();emit({'kind':'result','status':'flood_measured'});raise PhaseComplete()
  if args.get('input_only'):
   # This cohort ends before the bounded 80-character display suffix is used
   # by the independent demo. Keep its clocks and ordinary cleanup receipts.
@@ -790,6 +1048,14 @@ except Exception as error:
  # Exceptions may contain authority values in page-evaluation arguments: never print their text.
  failed=True
 finally:
+ if not locked:
+  for p in reversed(children):
+   if p.poll() is None:
+    try:p.kill();p.wait(timeout=5)
+    except:pass
+    check=subprocess.run(['ps','-p',str(p.pid),'-o','pid=,stat=,comm='],capture_output=True,text=True)
+    emit({'kind':'process_exit','pid':p.pid,'role':pathlib.Path(p.args[0]).name,'exit':p.returncode,
+          'ps_exit':check.returncode,'row':check.stdout.strip()})
  if locked:
   if 'stop_monitor' in locals():
    stop_monitor.set();monitor.join(timeout=25)
@@ -837,14 +1103,20 @@ finally:
   cleanup_remaining=sum(c['ps_exit']==0 for c in checks)
   emit({'kind':'cleanup','checks':checks,'remaining':cleanup_remaining})
   emit({'kind':'consent_monitor','errors':consent_errors if 'consent_errors' in locals() else []})
-  if 'composites' in locals():(E/'compositor-copies.json').write_text(json.dumps(composites))
-  (E/'native-metrics.log').write_text('\n'.join(native_metrics)+'\n');(E/'source-draws.json').write_text(json.dumps(all_draws));(E/'samples.json').write_text(json.dumps(results))
   if runtime_owned:
    import shutil
    shutil.rmtree(runtime)
   signal.alarm(0)
-  if (lock/'owner').read_text().strip()==job and (lock/'pid').read_text().strip()==str(args['controller_pid']):
+  try:lock_owner=(lock/'owner').read_text().strip();lock_pid=(lock/'pid').read_text().strip()
+  except OSError:lock_owner=lock_pid=''
+  if lock_owner==job and lock_pid==str(args['controller_pid']):
    for name in ['owner','pid','started']:(lock/name).unlink()
-   lock.rmdir();emit({'kind':'lock_released'})
+   lock.rmdir();locked=False
+   emit({'kind':'lock_released'})
+ if 'composites' in locals():(E/'compositor-copies.json').write_text(json.dumps(composites))
+ (E/'native-metrics.log').write_text('\n'.join(native_metrics)+'\n');(E/'source-draws.json').write_text(json.dumps(all_draws));(E/'samples.json').write_text(json.dumps(results))
+ if fixture_build.exists():
+  import shutil
+  shutil.rmtree(fixture_build)
 
 raise SystemExit(1 if failed or cleanup_remaining else 0)

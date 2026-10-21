@@ -335,7 +335,11 @@ class RunDeadlineTests(unittest.TestCase):
             if isinstance(node, ast.Assign)
             and any(isinstance(target, ast.Name) and target.id == 'CLEANUP_RESERVE_SECONDS' for target in node.targets)
         )
-        self.assertEqual(ast.literal_eval(timeout), 900)
+        self.assertIsInstance(timeout, ast.IfExp)
+        self.assertEqual(ast.literal_eval(timeout.body), 1800)
+        self.assertEqual(ast.literal_eval(timeout.orelse), 900)
+        self.assertIn('TEN_WINDOW_IDLE', ast.unparse(timeout.test))
+        self.assertIn('FLOOD', ast.unparse(timeout.test))
         self.assertEqual(ast.literal_eval(reserve), 30)
         self.assertIn('signal.alarm(RUN_TIMEOUT_SECONDS)', source)
         self.assertIn('run_deadline_at-time.monotonic()-CLEANUP_RESERVE_SECONDS', source)
@@ -380,6 +384,48 @@ class RunDeadlineTests(unittest.TestCase):
             'RECONNECT_ITERATION': 3,
             'REOPEN_ITERATION': 6,
         })
+
+
+class HelperResourceTests(unittest.TestCase):
+    """Compute aggregate helper CPU, wakeups and resident memory from Mac samples."""
+
+    def test_interval_delta_uses_only_matching_helpers_and_actual_elapsed_time(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        function = next(node for node in ast.parse(source.read_text()).body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'helper_resource_delta')
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        before = {10: {'cpu_ns': 1_000_000_000, 'wakeups': 10, 'rss_kb': 100},
+                  11: {'cpu_ns': 5_000_000_000, 'wakeups': 20, 'rss_kb': 200}}
+        after = {10: {'cpu_ns': 2_000_000_000, 'wakeups': 15, 'rss_kb': 130},
+                 11: {'cpu_ns': 7_000_000_000, 'wakeups': 35, 'rss_kb': 190},
+                 12: {'cpu_ns': 0, 'wakeups': 0, 'rss_kb': 50}}
+        self.assertEqual(namespace['helper_resource_delta'](before, after, 10), {
+            'matched_helpers': 2, 'helper_count': 3, 'cpu_cores': 0.3,
+            'wakeups_per_second': 2.0, 'rss_kb': 370,
+            'rss_by_pid_kb': {'10': 130, '11': 190, '12': 50},
+        })
+
+    def test_companion_receipts_expose_queue_bound_and_latest_delivery_gap(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                        and node.name == 'companion_metric_summary')
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        SCRATCH.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            path = pathlib.Path(directory) / 'metrics.log'
+            path.write_text('METRIC source_capture_config fps=120 queue_depth=3 interval_value=0\n'
+                            'METRIC source_frame capture_ns=1 damaged=true\n'
+                            'METRIC source_frame capture_ns=2 damaged=true\n'
+                            'METRIC source_frame capture_ns=3 damaged=false\n'
+                            'METRIC surface_delivery capture_ns=1 fresh=true\n'
+                            'METRIC encoder_drop=1 drop_ns=3\n')
+            self.assertEqual(namespace['companion_metric_summary'](path), {
+                'queue_depth_max': 3, 'source_callbacks': 3, 'damaged_callbacks': 2, 'fresh_deliveries': 1,
+                'latest_only_callback_gap': 1, 'encoder_drops': 1,
+            })
 
 
 
