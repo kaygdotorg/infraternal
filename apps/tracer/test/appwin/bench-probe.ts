@@ -13,6 +13,28 @@ window.addEventListener("keydown", (event) => limit(domInputs, { at: now(), even
 const videos: Array<{ at: number; captureNs: string; sequence: number; keyframe: boolean; bytes: number }> = [];
 const events: unknown[] = [];
 const roundTrips: Array<{ at: number; ms: number }> = [];
+const errorNames = new Set(["Error", "TypeError", "ReferenceError", "SyntaxError", "RangeError", "DOMException"]);
+const errorClasses = [
+  ["data-clone", "DataCloneError"], ["not-supported", "NotSupportedError"], ["operation", "OperationError"],
+  ["type", "TypeError"], ["reference", "ReferenceError"], ["syntax", "SyntaxError"], ["range", "RangeError"],
+] as const;
+// Browser error text can include machine paths; retain only bounded categories and numeric source coordinates.
+function safeErrorReceipt(event: Event): { name: string; category: string; source: string; line: number; column: number } {
+  const value = event as ErrorEvent;
+  const error = value.error as { name?: unknown } | null;
+  const rawName = typeof error?.name === "string" ? error.name : "";
+  const message = typeof value.message === "string" ? value.message : "";
+  const match = errorClasses.find(([, candidate]) => rawName === candidate || message.includes(candidate));
+  const source = value.filename.endsWith("decode.worker.on-demand.js") ? "decode-worker" : value.filename ? "other-script" : "unknown";
+  return {
+    name: errorNames.has(rawName) ? rawName : "other",
+    category: match?.[0] ?? (message === "Script error." ? "script" : "other"),
+    source,
+    line: Number.isInteger(value.lineno) && value.lineno > 0 ? value.lineno : 0,
+    column: Number.isInteger(value.colno) && value.colno > 0 ? value.colno : 0,
+  };
+}
+window.addEventListener("error", (event) => limit(events, { t: "page-runtime-error", at: now(), ...safeErrorReceipt(event) }), true);
 let activeWorker: Worker | undefined;
 let session: string | undefined;
 let openedSockets = 0;
@@ -117,7 +139,8 @@ globalThis.Worker = class extends NativeWorker {
         limit(events, { ...value, worker: this.identity });
       }
     });
-    this.addEventListener("error", () => limit(events, { t: "worker-runtime-error", worker: this.identity, at: now() }));
+    this.addEventListener("error", (event) => limit(events, { t: "worker-runtime-error", worker: this.identity, at: now(), ...safeErrorReceipt(event) }));
+    this.addEventListener("messageerror", () => limit(events, { t: "worker-message-error", worker: this.identity, at: now() }));
   }
 };
 
