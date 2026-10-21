@@ -27,6 +27,60 @@ pub(in crate::websocket) async fn fixture() -> (WebSocketState, String) {
     (state, user)
 }
 
+/// The wall clock can reach expiry while runtime time is stationary around
+/// real SQLite. A retried answer must refuse, with no guarded write or renewal.
+#[tokio::test(start_paused = true)]
+async fn expiry_crossing_a_stalled_read_refuses_both_deadline_callers() {
+    let _clock = FrozenSocketTime::new().await;
+    let (state, user) = fixture().await;
+    let end = unix_seconds().unwrap() + 2;
+    sqlx::query("UPDATE sessions SET expires=? WHERE token_hash=?")
+        .bind(end)
+        .bind(crate::auth::hash(TOKEN))
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let mut lease = probe_authority::Lease::new(&state, &user, TOKEN)
+        .await
+        .unwrap();
+    let held = state.pool.acquire().await.unwrap();
+    crate::auth::tests::publish_revocation(&state.auth);
+    let wrote = std::sync::atomic::AtomicBool::new(false);
+    let guarded = async {
+        tokio::join!(
+            authority_deadline(&state, &user, TOKEN, false),
+            lease.run(&state, &user, TOKEN, async {
+                wrote.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok::<(), ()>(())
+            })
+        )
+    };
+    tokio::pin!(guarded);
+    assert!(guarded.as_mut().now_or_never().is_none());
+    tokio::task::spawn_blocking(move || {
+        let deadline = UNIX_EPOCH + Duration::from_secs(u64::try_from(end).unwrap());
+        while let Ok(remaining) = deadline.duration_since(SystemTime::now()) {
+            std::thread::sleep(remaining);
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::advance(AUTHORITY_READ_TIMEOUT + Duration::from_millis(1)).await;
+    assert!(guarded.as_mut().now_or_never().is_none());
+    drop(held);
+    tokio::time::advance(AUTHORITY_RETRY_PAUSE).await;
+    let (main_result, proof_result) = guarded.await;
+    assert_eq!(main_result, Err(AuthorityMiss::Refused));
+    assert_eq!(proof_result, Err(AuthorityMiss::Refused));
+    assert!(!wrote.load(std::sync::atomic::Ordering::SeqCst));
+    let stored: i64 = sqlx::query_scalar("SELECT expires FROM sessions WHERE token_hash=?")
+        .bind(crate::auth::hash(TOKEN))
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, end);
+}
+
 /// Deleted authority is refused when SQL can answer, unavailable when it cannot;
 /// neither outcome may poll the guarded write or retain a place after recovery.
 #[tokio::test(start_paused = true)]
