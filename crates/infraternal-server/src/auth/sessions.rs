@@ -110,12 +110,15 @@ impl Auth {
         let session_hash = hash(token);
         // RETURNING binds the affected account to the committed deletion in one statement.
         // A separate lookup could race recovery or another logout and lose its scope.
-        let user: Option<String> =
+        // Drain through statement completion before acknowledging/publishing: a single-row
+        // RETURNING read can hide a deferred commit refusal. The unique hash bounds this
+        // result to one row, so draining cannot collect an unbounded account list.
+        let mut users: Vec<String> =
             sqlx::query_scalar("DELETE FROM sessions WHERE token_hash=? RETURNING user_id")
                 .bind(&session_hash)
-                .fetch_optional(&self.pool)
+                .fetch_all(&self.pool)
                 .await?;
-        if let Some(user) = user {
+        if let Some(user) = users.pop() {
             self.revocations.publish(&user, Some(session_hash));
         }
         Ok(())

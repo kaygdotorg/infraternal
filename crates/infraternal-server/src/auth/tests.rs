@@ -3408,3 +3408,6 @@ async fn account_logout_does_not_notify_another_account() {
         "unrelated account was notified"
     );
 }
+
+#[path = "logout_commit_tests.rs"]
+mod logout_commit;
