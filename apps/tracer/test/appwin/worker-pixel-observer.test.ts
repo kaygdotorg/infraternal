@@ -5,7 +5,7 @@ import { runInNewContext } from "node:vm";
 
 const script = readFileSync(new URL("worker-pixel-observer.js", import.meta.url), "utf8");
 
-function observe(cursor: boolean, background: number[], expectedColour = 1, expectedSequence = 1, contentSequence = expectedSequence, letterboxed = false, projected = false, flood = false): Array<{ t: string }> {
+function observe(cursor: boolean, background: number[], expectedColour = 1, expectedSequence = 1, contentSequence = expectedSequence, letterboxed = false, projected = false, flood = false, arm = true): Array<{ t: string }> {
   const rows: Array<{ t: string }> = [];
   const handlers: Array<(event: { data: unknown }) => void> = [];
   const picture = letterboxed ? { x: 0, y: 60, width: 640, height: 280 } : { x: 0, y: 0, width: 640, height: 400 };
@@ -41,14 +41,20 @@ function observe(cursor: boolean, background: number[], expectedColour = 1, expe
   };
   runInNewContext(script, { self: worker, OffscreenCanvas: Canvas,
     OffscreenCanvasRenderingContext2D: Context, performance: { timeOrigin: 1000, now: () => 1 } });
-  for (const handler of handlers) handler({ data: { t: "bench-arm", id: 1, crop: { colour: expectedColour, sequence: expectedSequence, ...(projected ? { projection: { width: 640, height: 400, colourX: .75, colourY: .675, markerX: .8, markerY: .636, cell: .005 } } : {}) } } });
-  new Context().drawImage({ displayWidth: 640, displayHeight: 400 }, 0, 0);
+  if (arm) {
+    for (const handler of handlers) handler({ data: { t: "bench-arm", id: 1, crop: { colour: expectedColour, sequence: expectedSequence, ...(projected ? { projection: { width: 640, height: 400, colourX: .75, colourY: .675, markerX: .8, markerY: .636, cell: .005 } } : {}) } } });
+    new Context().drawImage({ displayWidth: 640, displayHeight: 400 }, 0, 0);
+  }
   worker.postMessage({ t: "trace", frame: { outcome: "painted", sequence: 17, captureNs: "9000" } } as { t: string });
   return rows;
 }
 
 test("an unchanged wrong-colour picture never acknowledges the stimulus", () => {
   expect(observe(true, [38, 89, 204]).some(row => row.t === "bench-effect")).toBe(false);
+});
+
+test("a trace without an armed fixture passes through without a worker error", () => {
+  expect(observe(false, [38, 89, 204], 1, 1, 1, false, false, false, false).map(row => row.t)).toEqual(["trace"]);
 });
 
 test("a painted fixture colour is acknowledged with a centre cursor", () => {

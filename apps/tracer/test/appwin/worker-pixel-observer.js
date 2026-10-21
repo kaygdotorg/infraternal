@@ -62,7 +62,8 @@
  self.postMessage=function(message,...rest){
   send(message,...rest);
   if(message?.t==='trace' && message.frame.outcome==='painted' && pixel)send({t:'bench-observation',...pixel,frame:message.frame});
-  const matched=flood?pixel?.markerValid && pixel.contentSequence>=pixel.expectedSequence:pixel?.colour===pixel.expected && pixel.markerValid && pixel.contentSequence===pixel.expectedSequence;
+  // First-picture runs do not arm a content stimulus; their worker messages must pass through without dereferencing it.
+  const matched=!!pixel && (flood?pixel.markerValid && pixel.contentSequence>=pixel.expectedSequence:pixel.colour===pixel.expected && pixel.markerValid && pixel.contentSequence===pixel.expectedSequence);
   if(message?.t==='trace' && message.frame.outcome==='painted' && pixel && matched && pixel.distance<2500){
    send({t:'bench-effect',...pixel,frame:message.frame});armed=undefined;pixel=undefined;
   }
