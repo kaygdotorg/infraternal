@@ -100,8 +100,8 @@ test("a negative drop on a 1,025-node mesh writes one pin, and the peer ends wit
     await transport.drain(baseline + 1);
     expect(transport.refused).toBe(0);
     const peer = await second.load();
-    expect(Object.keys(graphOf(peer!).pinned)).toHaveLength(201);
-    expect(graphOf(peer!).pinned["node-1000"]).toEqual({ x: -1280, y: -480 });
+    // The count and moved point alone miss a peer that changed or lost any earlier coordinates.
+    expect(graphOf(peer!).pinned).toEqual(graphOf(dropped).pinned);
   } finally { first.dispose(); second.dispose(); }
 });
 test("a layout gap or withdrawn worker requests one fresh snapshot with bounded backoff", async () => {
