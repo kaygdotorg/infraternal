@@ -184,8 +184,15 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, layoutOf: (
     const name = chip.querySelector<HTMLElement>(".cl-chip-name")!;
     const meta = chip.querySelector<HTMLElement>(".cl-chip-meta")!;
     if (name.textContent !== cl.label) name.textContent = cl.label;
-    const text = total === 0 ? "no hosts" : `${total} host${total === 1 ? "" : "s"} · ${online} online`;
-    if (meta.textContent !== text) meta.textContent = text;
+    const hostsText = total === 0 ? "no hosts" : `${total} host${total === 1 ? "" : "s"}`;
+    const onlineText = total === 0 ? "" : `${online} online`;
+    const text = onlineText ? `${hostsText} · ${onlineText}` : hostsText;
+    // Two parts the label wraps between (never inside one, never an ellipsis): see `.cl-chip-meta` in mesh.css.
+    if (meta.dataset.text !== text) {
+      meta.dataset.text = text;
+      const head = el("span", "cl-chip-part", hostsText);
+      meta.replaceChildren(...(onlineText ? [head, el("span", "cl-chip-part", `· ${onlineText}`)] : [head]));
+    }
     if (total === 0 || online === total) chip.removeAttribute("data-degraded"); else chip.dataset.degraded = "";
     chip.setAttribute("aria-label", `${cl.label}, ${text}. Zoom in`);
   };
