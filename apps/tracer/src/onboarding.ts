@@ -8,6 +8,11 @@ import { loading, type Loading } from "../../../packages/ui/src/countup";
 import { tick } from "../../../packages/ui/src/tick";
 import { BRAND_MARK, KEY_MARK } from "./auth-marks";
 
+/** The longest display name, in characters: the input's maxlength, the validation and the hint all read this. */
+const DISPLAY_NAME_MAX = 64;
+/** Shown under the username field from the start, so the rule is known before the first wrong key. */
+const USERNAME_RULE = "Use 2–32 lowercase letters, digits, _ or -.";
+
 const SETUP_STEPS = [
   { title: "Make this server yours", lede: "Paste the one-time setup token. It is shown only on the server, so only you can claim it." },
   { title: "Who are you?", lede: "Your username labels your passkey and the audit log. Your display name is what the app shows." },
@@ -86,7 +91,7 @@ function mountSetup(
 
   function ready(): boolean {
     if (index === 0) return state.token.trim().length >= 8;
-    if (index === 1) return validUsername(state.username) && [...state.displayName].length <= 64;
+    if (index === 1) return validUsername(state.username) && [...state.displayName].length <= DISPLAY_NAME_MAX;
     if (index === 2) return true;
     return state.saved;
   }
@@ -230,7 +235,7 @@ function mountSetup(
       <input id="setup-username" class="auth-input auth-mono" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32" placeholder="ada" />
       <p class="auth-hint" id="username-hint" aria-live="polite"></p>
       <label class="auth-label" for="setup-display-name">display name</label>
-      <input id="setup-display-name" class="auth-input" type="text" autocomplete="name" maxlength="256" placeholder="Ada Lovelace" />`;
+      <input id="setup-display-name" class="auth-input" type="text" autocomplete="name" maxlength="${DISPLAY_NAME_MAX}" placeholder="Ada Lovelace" />`;
     const username = body.querySelector<HTMLInputElement>("#setup-username")!;
     const displayName = body.querySelector<HTMLInputElement>("#setup-display-name")!;
     const hint = body.querySelector<HTMLElement>("#username-hint")!;
@@ -239,10 +244,10 @@ function mountSetup(
     const refreshHint = () => {
       markMotion(username.matches(":focus-visible") || displayName.matches(":focus-visible"));
       hint.textContent = state.username && !validUsername(state.username)
-        ? "Use 2–32 lowercase letters, digits, _ or -."
-        : state.displayName && [...state.displayName].length > 64
-          ? "Display names can be at most 64 characters."
-          : " ";
+        ? USERNAME_RULE
+        : state.displayName && [...state.displayName].length > DISPLAY_NAME_MAX
+          ? `Display names can be at most ${DISPLAY_NAME_MAX} characters.`
+          : USERNAME_RULE;
       updateReady();
     };
     username.addEventListener("input", () => {

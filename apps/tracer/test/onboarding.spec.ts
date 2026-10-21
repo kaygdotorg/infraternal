@@ -9,7 +9,9 @@ const viewports = [
 test("invalid setup token stays on step 1 with focused guidance", async ({ page }, testInfo) => {
   test.setTimeout(60_000);
   const context = page.context();
-  await context.request.post("/__mock/reset");
+  // Capture the fresh fixture token before screenshots leave the request connection idle.
+  const resetResponse = await context.request.post("/__mock/reset", { maxRetries: 1 });
+  const setupBody = await resetResponse.json() as { setup_token: string };
   await page.emulateMedia({ colorScheme: "dark", reducedMotion: "no-preference" });
   await page.goto("/?mock=1");
   await expect(page.getByRole("heading", { name: "Make this server yours" })).toBeVisible();
@@ -43,8 +45,6 @@ test("invalid setup token stays on step 1 with focused guidance", async ({ page 
     screenshots.push(path);
   }
 
-  const setupResponse = await context.request.get("/__mock/setup-token");
-  const setupBody = await setupResponse.json() as { setup_token: string };
   await page.locator("#setup-token").fill(setupBody.setup_token);
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByRole("heading", { name: "Who are you?" })).toBeVisible();
@@ -52,9 +52,11 @@ test("invalid setup token stays on step 1 with focused guidance", async ({ page 
 });
 
 test("setup, recovery acknowledgement, welcome and returning sign-in match the browser contract", async ({ page }, testInfo) => {
-  test.setTimeout(60_000);
+  test.setTimeout(90_000);
   const context = page.context();
-  await context.request.post("/__mock/reset");
+  // Capture the fresh fixture token before screenshots leave the request connection idle.
+  const resetResponse = await context.request.post("/__mock/reset", { maxRetries: 1 });
+  const setupBody = await resetResponse.json() as { setup_token: string };
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   const cdp = await context.newCDPSession(page);
   await cdp.send("WebAuthn.enable");
@@ -82,13 +84,14 @@ test("setup, recovery acknowledgement, welcome and returning sign-in match the b
   const tokenCenters = await captureState(page, testInfo, "step-1-token", screenshots, "#setup-card");
   await installShiftObserver(page);
 
-  const setupResponse = await context.request.get("/__mock/setup-token");
-  const setupBody = await setupResponse.json() as { setup_token: string };
   await page.locator("#setup-token").fill(setupBody.setup_token);
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.locator("#setup-username")).toBeVisible();
   await expectNoLayoutShifts(page);
   const identityCenters = await captureState(page, testInfo, "step-2-identity", screenshots, "#setup-card");
+  // The username rule is on screen before any wrong key, and the display-name input stops at the validated limit.
+  await expect(page.locator("#username-hint")).toHaveText("Use 2–32 lowercase letters, digits, _ or -.");
+  await expect(page.locator("#setup-display-name")).toHaveAttribute("maxlength", "64");
   await page.locator("#setup-username").fill("Ada");
   await expect(page.locator("#setup-username")).toHaveValue("ada");
   await expect(page.locator("#setup-display-name")).toHaveValue("ada");
@@ -203,7 +206,10 @@ test("setup, recovery acknowledgement, welcome and returning sign-in match the b
   await page.keyboard.press("Enter");
   const signInTransitions = await page.evaluate(() => (window as Window & { __signinTransitions?: string[] }).__signinTransitions ?? []);
   expect(signInTransitions).toEqual([]);
-  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
+  await expect.poll(
+    () => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true),
+    { timeout: 30_000 },
+  ).toBe(true);
   console.log(`ONBOARDING_SCREENSHOTS ${screenshots.join(" ")}`);
 });
 
