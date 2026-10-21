@@ -49,10 +49,10 @@ describe("foldSetup", () => {
 });
 
 describe("setupGuide", () => {
-  test("says the terminal keeps working and what to do next, in plain words", () => {
+  test("says the other sessions keep working and what to do next, in plain words", () => {
     const guide = setupGuide("o2", foldSetup(freshSetup(), ev("join", "failed", { failedStep: "join" })));
     expect(guide.title).toBe("o2 couldn't join this server");
-    expect(guide.effect).toContain("Your terminal keeps working.");
+    expect(guide.effect).toContain("Your other sessions keep working.");
     expect(guide.effect).toContain("Try again in a moment.");
   });
 });

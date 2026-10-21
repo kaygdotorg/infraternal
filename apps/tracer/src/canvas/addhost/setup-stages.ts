@@ -125,7 +125,7 @@ const NEXT: Record<FailedStep, string> = {
 
 /**
  * What the pill's popover says about a failed stage, in plain words (TASTE: messages say what happens and what to do).
- * The terminal is already live, so the first thing said is that it keeps working.
+ * The new host's window is already live, so the first thing said is that the person's other sessions are untouched.
  */
 export function setupGuide(host: string, view: SetupView): { title: string; effect: string; details: string } {
   const step = view.failedStep ?? "install";
@@ -138,5 +138,5 @@ export function setupGuide(host: string, view: SetupView): { title: string; effe
     readiness: `${host} isn't ready yet`,
   } satisfies Record<FailedStep, string>)[step];
   const next = view.retryAvailable === false ? "Setup has reached its retry limit. Remove this host, then add it again to start over." : NEXT[step];
-  return { title, effect: `Your terminal keeps working. ${next}`, details: view.message ?? "" };
+  return { title, effect: `Your other sessions keep working. ${next}`, details: view.message ?? "" };
 }
