@@ -143,8 +143,15 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,389,040 bytes |
-  | `aarch64-unknown-linux-musl` | 19,561,912 bytes |
+  | `x86_64-unknown-linux-musl` | 21,395,728 bytes |
+  | `aarch64-unknown-linux-musl` | 19,572,056 bytes |
+
+  Account-scoped authority notifications (#240) measure 21,395,728 /
+  19,572,056 bytes with the pinned static recipe. The x86_64 change is
+  +6,304 bytes against the reproduced `auth-busy-1013` merge base
+  (21,389,424 bytes). Per-account coalescing generations replace the global
+  logout and recovery wakes; no dependency, feature or build-profile change
+  is added. Both ceilings track the exact artifacts with no allowance (D243).
 
   Busy-store wake classification and fractional session deadlines (#240)
   measure 21,389,040 / 19,561,912 bytes with the pinned static recipe:
