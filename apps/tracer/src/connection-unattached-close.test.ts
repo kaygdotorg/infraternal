@@ -41,3 +41,49 @@ test("disposing a window before its welcome microtask sends no unbound Close", a
     for (const [key, value] of Object.entries(original)) { if (value === undefined) delete globals[key]; else globals[key] = value; }
   }
 });
+
+
+/** A retained writer row does not recreate a terminal attachment on a replacement socket. */
+test("review #250: disposing a previously attached window during reconnect sends no unbound Close", () => {
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket };
+  const sockets: Socket[] = [];
+  let retry: (() => void) | undefined;
+  class Socket {
+    static OPEN = 1;
+    readyState = 1;
+    binaryType = "";
+    frames: Array<{ stream: number; frame: WireFrame }> = [];
+    onopen?: () => void;
+    onclose?: () => void;
+    onmessage?: (event: { data: ArrayBuffer }) => void;
+    constructor() { sockets.push(this); }
+    send(bytes: Uint8Array) { new WebSocketFrameDecoder().feed(bytes, (stream, frame) => this.frames.push({ stream, frame })); }
+    close() { this.readyState = 3; this.onclose?.(); }
+  }
+  let connection: MuxConnection | undefined;
+  try {
+    globals.window = { setTimeout: (run: () => void) => { retry = run; return 1; }, clearTimeout() {} };
+    globals.location = { protocol: "https:", host: "stream.example.test" };
+    globals.WebSocket = Socket;
+    connection = new MuxConnection();
+    const handler: StreamHandler = { onSocketOpen() {}, onWelcome() {}, onFrame() {}, onDisconnected() {}, hasSession: () => true, onStatus() {} };
+    const stream = connection.openStream(handler);
+    connection.openStream(handler);
+    sockets[0]!.onopen?.();
+    sockets[0]!.onmessage?.({ data: encodeMuxedFrame(0, { type: "Welcome", connectionId: new Uint8Array(16), resumeToken: new Uint8Array(32), resumeWindowSeconds: 120 }).slice().buffer as ArrayBuffer });
+    connection.send(stream, { type: "AttachTerm", sessionId: new Uint8Array(16), lastOutSeq: 0n, lastInSeq: 0n });
+    expect(sockets[0]!.frames.filter((entry) => entry.stream === stream).map((entry) => entry.frame.type)).toEqual(["AttachTerm"]);
+    sockets[0]!.close(); retry?.();
+    expect(sockets).toHaveLength(2);
+    sockets[1]!.onopen?.();
+    // The server can process Hello while the resumed window has not reattached.
+    // Closing it during that round trip must leave the sibling socket healthy.
+    connection.closeStream(stream);
+    expect(connection.streamCount).toBe(1);
+    expect(sockets[1]!.frames.filter((entry) => entry.stream === stream).map((entry) => entry.frame.type)).toEqual([]);
+  } finally {
+    connection?.dispose();
+    for (const [key, value] of Object.entries(original)) { if (value === undefined) delete globals[key]; else globals[key] = value; }
+  }
+});

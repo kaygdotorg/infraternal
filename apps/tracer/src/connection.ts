@@ -184,6 +184,8 @@ export class MuxConnection {
   private attachedCount = 0;
   /** Streams that attached on this server-side connection: the server keeps a writer row for each, up to its cap. */
   private readonly writersUsed = new Set<number>();
+  /** Streams that sent AttachTerm on the current WebSocket; resume retains writers but replaces attachments. */
+  private readonly attachedOnSocket = new Set<number>();
 
   private readonly onVisibility = (): void => this.pageVisibilityChanged();
 
@@ -240,9 +242,8 @@ export class MuxConnection {
   closeStream(id: number): void {
     if (!this.streams.delete(id)) return;
     this.unacknowledgedInput.delete(id);
-    // Local windows can leave before their deferred welcome attaches them.
-    // Only a stream actually sent to this server has an attachment to close.
-    if (this.writersUsed.has(id)) this.send(id, { type: "Close", code: 1000, reason: "window closed" });
+    // A retained writer can belong to the resumed connection's old socket; Close requires a new AttachTerm first.
+    if (this.attachedOnSocket.delete(id)) this.send(id, { type: "Close", code: 1000, reason: "window closed" });
   }
 
   /** Sends one frame on a stream. Frames are dropped while the socket is not open (the stream resends on attach). */
@@ -263,6 +264,8 @@ export class MuxConnection {
       }
       onEncoded?.(performance.now());
       socket.send(this.sendScratch.subarray(0, length));
+      // Server writer identity survives resume, but the attached route is recreated on each WebSocket.
+      if (frame.type === "AttachTerm") this.attachedOnSocket.add(streamId);
       onSent?.(performance.now());
     } catch {
       this.fail("could not encode an infraternal wire frame");
@@ -459,6 +462,7 @@ export class MuxConnection {
     socket.binaryType = "arraybuffer";
     this.socket = socket;
     this.decoder = new WebSocketFrameDecoder();
+    this.attachedOnSocket.clear();
     this.serverVisibility = false;
     this.welcomed = false;
 
@@ -559,6 +563,7 @@ export class MuxConnection {
     this.socket = undefined;
     this.decoder = undefined;
     this.welcomed = false;
+    this.attachedOnSocket.clear();
     this.attachedCount = 0;
     this.config.onConnectionChange?.(false);
     this.resetPings();
