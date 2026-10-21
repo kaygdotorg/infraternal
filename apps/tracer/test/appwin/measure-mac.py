@@ -48,6 +48,19 @@ def open_concurrent_fixture_windows(page,host_id,owner_pid,window_ids):
  page.wait_for_function("actions=>{const rows=window.__appwin?.paletteEntries()??[];return actions.every(action=>rows.some(row=>row.action==='canvas:appwin:'+action))}",arg=actions,timeout=10000)
  page.evaluate("actions=>actions.forEach((action,index)=>{window.__firstPictures.open(index);window.__appwin.openFromPalette(action)})",actions)
 
+def show_fixture_cohort(page,count):
+ """Keep all ten viewers eligible through the production overview, including idle samples."""
+ if count!=10:return
+ page.evaluate('window.__appwinCx.nav.showOverview(true)')
+ page.wait_for_function("""count=>{
+  const viewport=document.querySelector('.cl-viewport')?.getBoundingClientRect();
+  const cards=[...document.querySelectorAll('.ui-window[data-kind="app"]')];
+  return !!viewport&&cards.length===count&&cards.every(card=>{
+   const r=card.getBoundingClientRect();
+   return r.width>0&&r.height>0&&r.right>viewport.left&&r.left<viewport.right&&r.bottom>viewport.top&&r.top<viewport.bottom;
+  });
+ }""",arg=count,timeout=10000)
+
 if not re.fullmatch(r'[a-z0-9-]{1,48}',job) or not re.fullmatch(r'[a-z0-9-]{1,48}',args['label']):raise SystemExit(2)
 E=ROOT/'evidence'/args['label'];E.mkdir(parents=True,exist_ok=False)
 BIN=ROOT/'bin'
@@ -708,6 +721,7 @@ try:
   open_concurrent_fixture_windows(page,host_id,window.pid,window_ids)
   consent_check()
   page.wait_for_function('(count)=>document.querySelectorAll(\'.ui-window[data-kind="app"]\').length===count',arg=fixture_window_count,timeout=10000)
+  show_fixture_cohort(page,fixture_window_count)
  for index in range(fixture_window_count):
   if OPEN_MODE=='serial':
    title='App window measurement' if fixture_window_count==1 else f'App window measurement {index+1}'
@@ -721,6 +735,7 @@ try:
   try:wait_for_first_picture(card,index,first_picture_failures)
   finally:emit({'kind':'stream_first_pictures','open_mode':OPEN_MODE,'streams':page.evaluate('window.__firstPictures.rows()')})
   if index==0 and not args.get('first_picture_idle'):first_picture()
+ if OPEN_MODE=='serial':show_fixture_cohort(page,fixture_window_count)
  page.evaluate('window.__firstPictures.stop()')
  if page.locator('.ui-window[data-kind="app"]').count()!=fixture_window_count:raise RuntimeError('canvas fixture window count mismatch')
  canvas_ids=page.locator('.ui-window[data-kind="app"]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.windowId)')

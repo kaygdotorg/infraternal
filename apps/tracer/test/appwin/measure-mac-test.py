@@ -50,6 +50,26 @@ class PickerSelectionTests(unittest.TestCase):
         self.assertIn(['uptime'], calls)
         self.assertIn('load=fixture', namespace['environment'])
 
+    def test_ten_window_cohorts_use_the_real_overview_and_require_every_card_in_view(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        function = next((node for node in ast.parse(source.read_text()).body
+                         if isinstance(node, ast.FunctionDef) and node.name == 'show_fixture_cohort'), None)
+        self.assertIsNotNone(function, 'cohort visibility setup is missing')
+        calls = []
+        def wait(script, **kwargs):
+            calls.append(('visible', kwargs['arg']))
+            for outside, expected in [(False, 'true'), (True, 'false')]:
+                program = "const outside=" + str(outside).lower() + ";const document={querySelector:()=>({getBoundingClientRect:()=>({left:0,top:0,right:832,bottom:720})}),querySelectorAll:()=>Array.from({length:10},(_,i)=>({getBoundingClientRect:()=>({left:outside&&i===0?900:10,top:10,right:outside&&i===0?950:60,bottom:70,width:50,height:60})}))};console.log((" + script + ")(10));"
+                result = subprocess.check_output(['bun', '-e', program], text=True).strip()
+                self.assertEqual(result, expected)
+        page = SimpleNamespace(evaluate=lambda script: calls.append(('overview', script)), wait_for_function=wait)
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        namespace['show_fixture_cohort'](page, 1)
+        self.assertEqual(calls, [])
+        namespace['show_fixture_cohort'](page, 10)
+        self.assertEqual(calls, [('overview', 'window.__appwinCx.nav.showOverview(true)'), ('visible', 10)])
+
     def test_window_picker_does_not_confuse_numeric_title_suffixes(self):
         source = pathlib.Path(__file__).with_name('measure-mac.py')
         tree = ast.parse(source.read_text())
