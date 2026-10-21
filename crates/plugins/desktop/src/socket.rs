@@ -112,10 +112,8 @@ mod tests {
     }
     #[test]
     fn endpoint_refuses_foreign_permissions_and_never_takes_over() {
-        let root = std::env::var_os("CARGO_TARGET_DIR")
-            .map_or_else(|| PathBuf::from("target"), PathBuf::from);
-        let dir = root.join(format!("desktop-socket-test-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        // Unix socket names must fit sun_path even when build output is deep.
+        let dir = nix::unistd::mkdtemp("/tmp/desktop-socket-XXXXXX").unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(Endpoint::bind(&dir).is_err());
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
@@ -130,10 +128,7 @@ mod tests {
 
     #[test]
     fn dropping_superseded_endpoint_preserves_replacement_socket() {
-        let root = std::env::var_os("CARGO_TARGET_DIR")
-            .map_or_else(|| PathBuf::from("target"), PathBuf::from);
-        let dir = root.join(format!("dsr-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = nix::unistd::mkdtemp("/tmp/desktop-replace-XXXXXX").unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         let original = Endpoint::bind(&dir).unwrap();
         // A same-user recovery can replace a pathname while an old instance still
