@@ -1,0 +1,303 @@
+//! Account-scoped, coalescing authority notifications; no idle task or retained inactive account.
+//!
+//! A watch change means re-read this account's authority, even if intermediate session events
+//! were overwritten. Never filter by the last session: an earlier coalesced logout may be ours.
+//! Subscribers register before reading SQLite, and mutations publish only after commit.
+
+use std::{cell::Cell, collections::HashMap, sync::Arc};
+use tokio::sync::watch;
+
+/// The map key supplies the affected account; the value carries the session hash when known.
+/// Hashes stay private, are never logged, and are hints only: every wake rechecks authority.
+#[derive(Default)]
+pub(crate) struct AccountEvents {
+    accounts: std::sync::Mutex<Channels>,
+    #[cfg(test)]
+    after_unsubscribe: std::sync::Mutex<Option<Arc<std::sync::Barrier>>>,
+}
+
+type Channels = HashMap<Arc<str>, Channel>;
+
+struct Channel {
+    sender: watch::Sender<Option<String>>,
+    // Count subscription lifetimes under the registry lock. Receiver fields drop after
+    // their wrapper's Drop returns, so receiver_count can overcount concurrent final drops.
+    subscribers: Cell<usize>,
+}
+
+/// A socket-local cursor sharing only its authenticated account's generation.
+pub(crate) struct AccountSubscription {
+    receiver: watch::Receiver<Option<String>>,
+    account: Arc<str>,
+    registry: Arc<AccountEvents>,
+}
+
+impl AccountEvents {
+    fn accounts(&self) -> std::sync::MutexGuard<'_, Channels> {
+        // No user code or await runs under this lock. Recovering bookkeeping after a panic
+        // preserves existing generations; replacing them could hide a committed revocation.
+        self.accounts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) fn subscribe(self: &Arc<Self>, account: &str) -> AccountSubscription {
+        let mut accounts = self.accounts();
+        // Operations on an already-connected account clone its key without allocating.
+        let (account, receiver) = if let Some((account, channel)) = accounts.get_key_value(account)
+        {
+            channel.subscribers.set(channel.subscribers.get() + 1);
+            (account.clone(), channel.sender.subscribe())
+        } else {
+            let account: Arc<str> = Arc::from(account);
+            let (sender, receiver) = watch::channel(None);
+            accounts.insert(
+                account.clone(),
+                Channel {
+                    sender,
+                    subscribers: Cell::new(1),
+                },
+            );
+            (account, receiver)
+        };
+        AccountSubscription {
+            receiver,
+            account,
+            registry: self.clone(),
+        }
+    }
+
+    pub(super) fn publish(&self, account: &str, session_hash: Option<String>) {
+        // Snapshot the channel under the registration lock, then wake outside it. A custom
+        // waker must never run while bookkeeping is locked. If the last receiver disappears
+        // before delivery, its replacement reads SQL after this mutation's commit.
+        let sender = self
+            .accounts()
+            .get(account)
+            .map(|channel| channel.sender.clone());
+        if let Some(sender) = sender {
+            sender.send_replace(session_hash);
+        }
+    }
+
+    /// Only tests model a database edit whose affected accounts are unknown. Current production
+    /// mutations (logout and recovery) always know the account; none require a global event.
+    #[cfg(test)]
+    pub(super) fn publish_all(&self) {
+        let senders: Vec<_> = self
+            .accounts()
+            .values()
+            .map(|channel| channel.sender.clone())
+            .collect();
+        for sender in senders {
+            sender.send_replace(None);
+        }
+    }
+}
+
+impl AccountSubscription {
+    /// Model source loss without changing production channel ownership.
+    #[cfg(test)]
+    pub(crate) fn close_source_for_test(&self) {
+        self.registry.accounts().remove(&self.account);
+    }
+
+    pub(crate) async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
+        self.receiver.changed().await
+    }
+
+    pub(crate) fn has_changed(&self) -> Result<bool, watch::error::RecvError> {
+        self.receiver.has_changed()
+    }
+
+    pub(crate) fn borrow_and_update(&mut self) -> watch::Ref<'_, Option<String>> {
+        self.receiver.borrow_and_update()
+    }
+}
+
+impl Drop for AccountSubscription {
+    fn drop(&mut self) {
+        let mut accounts = self.registry.accounts();
+        if let Some((account, channel)) = accounts.get_key_value(&self.account)
+            && Arc::ptr_eq(account, &self.account)
+        {
+            // A closed test source may have a replacement under the same account ID.
+            // Its key has a different identity; an old cursor cannot remove that channel.
+            let remaining = channel.subscribers.get() - 1;
+            channel.subscribers.set(remaining);
+            if remaining == 0 {
+                accounts.remove(&self.account);
+            }
+        }
+        drop(accounts);
+        // Hold receiver fields alive after bookkeeping to expose concurrent final drops.
+        #[cfg(test)]
+        {
+            let barrier = self.registry.after_unsubscribe.lock().unwrap().clone();
+            if let Some(barrier) = barrier {
+                barrier.wait();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::FutureExt;
+
+    #[test]
+    fn coalesced_changes_remain_pending_for_each_affected_account() {
+        let registry = Arc::new(AccountEvents::default());
+        let mut a = registry.subscribe("a");
+        let b = registry.subscribe("b");
+        let c = registry.subscribe("c");
+        registry.publish("a", Some("first-session-hash".into()));
+        registry.publish("b", None);
+        registry.publish("a", Some("second-session-hash".into()));
+        assert!(a.has_changed().unwrap());
+        assert!(b.has_changed().unwrap());
+        assert!(!c.has_changed().unwrap());
+        assert_eq!(
+            a.borrow_and_update().as_deref(),
+            Some("second-session-hash")
+        );
+        assert!(!a.has_changed().unwrap());
+        // The session metadata cannot authorize skipping a recheck: the first event is gone.
+        registry.publish("a", None);
+        assert!(a.has_changed().unwrap());
+    }
+
+    #[test]
+    fn last_subscriber_removes_only_its_account() {
+        let registry = Arc::new(AccountEvents::default());
+        let first = registry.subscribe("a");
+        let second = registry.subscribe("a");
+        let other = registry.subscribe("b");
+        assert_eq!(registry.accounts().len(), 2);
+        drop(first);
+        assert_eq!(registry.accounts().len(), 2);
+        registry.publish("a", None);
+        assert!(second.has_changed().unwrap());
+        drop(second);
+        assert_eq!(registry.accounts().len(), 1);
+        registry.publish("a", None);
+        assert_eq!(registry.accounts().len(), 1);
+        assert!(!other.has_changed().unwrap());
+        drop(other);
+        assert!(registry.accounts().is_empty());
+        let replacement = registry.subscribe("a");
+        assert!(!replacement.has_changed().unwrap());
+        registry.publish("a", None);
+        assert!(replacement.has_changed().unwrap());
+    }
+
+    #[tokio::test]
+    async fn cancellation_preserves_an_unread_generation() {
+        let registry = Arc::new(AccountEvents::default());
+        let mut events = registry.subscribe("a");
+        assert!(events.changed().now_or_never().is_none());
+        registry.publish("a", None);
+        events.changed().await.unwrap();
+        assert!(!events.has_changed().unwrap());
+    }
+
+    #[test]
+    fn many_accounts_do_not_share_generations_or_retain_inactive_entries() {
+        let registry = Arc::new(AccountEvents::default());
+        let subscribers: Vec<_> = (0..256)
+            .map(|i| registry.subscribe(&i.to_string()))
+            .collect();
+        registry.publish("127", None);
+        assert_eq!(
+            subscribers
+                .iter()
+                .filter(|s| s.has_changed().unwrap())
+                .count(),
+            1
+        );
+        registry.publish_all();
+        assert!(subscribers.iter().all(|s| s.has_changed().unwrap()));
+        drop(subscribers);
+        assert!(registry.accounts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_dropped_source_reports_unavailable_instead_of_consuming_a_change() {
+        let registry = Arc::new(AccountEvents::default());
+        let mut events = registry.subscribe("a");
+        events.close_source_for_test();
+        assert!(events.has_changed().is_err());
+        assert!(events.changed().await.is_err());
+    }
+
+    #[test]
+    fn concurrent_final_drops_remove_the_account_before_receiver_fields_drop() {
+        let registry = Arc::new(AccountEvents::default());
+        *registry.after_unsubscribe.lock().unwrap() = Some(Arc::new(std::sync::Barrier::new(2)));
+        let first = registry.subscribe("a");
+        let second = registry.subscribe("a");
+        std::thread::scope(|scope| {
+            scope.spawn(move || drop(first));
+            scope.spawn(move || drop(second));
+        });
+        assert!(
+            registry.accounts().is_empty(),
+            "final concurrent drops retained an inactive account"
+        );
+    }
+
+    #[test]
+    fn a_closed_cursor_cannot_remove_its_replacement_channel() {
+        let registry = Arc::new(AccountEvents::default());
+        let old = registry.subscribe("a");
+        old.close_source_for_test();
+        let replacement = registry.subscribe("a");
+        drop(old);
+        assert_eq!(registry.accounts().len(), 1);
+        registry.publish("a", None);
+        assert!(replacement.has_changed().unwrap());
+        drop(replacement);
+        assert!(registry.accounts().is_empty());
+    }
+
+    #[test]
+    fn publication_wakes_outside_the_registry_lock() {
+        struct CheckUnlocked(Arc<AccountEvents>);
+        impl std::task::Wake for CheckUnlocked {
+            fn wake(self: Arc<Self>) {
+                assert!(self.0.accounts.try_lock().is_ok());
+            }
+        }
+        let registry = Arc::new(AccountEvents::default());
+        let mut events = registry.subscribe("a");
+        let mut changed = Box::pin(events.changed());
+        let waker = std::task::Waker::from(Arc::new(CheckUnlocked(registry.clone())));
+        let mut context = std::task::Context::from_waker(&waker);
+        assert!(std::future::Future::poll(changed.as_mut(), &mut context).is_pending());
+        registry.publish("a", None);
+        assert!(std::future::Future::poll(changed.as_mut(), &mut context).is_ready());
+    }
+
+    #[test]
+    fn concurrent_registration_and_cleanup_keep_the_existing_generation() {
+        let registry = Arc::new(AccountEvents::default());
+        let anchor = registry.subscribe("a");
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let registry = &registry;
+                scope.spawn(move || {
+                    for _ in 0..1000 {
+                        let subscriber = registry.subscribe("a");
+                        registry.publish("a", None);
+                        drop(subscriber);
+                    }
+                });
+            }
+        });
+        assert!(anchor.has_changed().unwrap());
+        assert_eq!(registry.accounts().len(), 1);
+        drop(anchor);
+        assert!(registry.accounts().is_empty());
+    }
+}

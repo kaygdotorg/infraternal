@@ -4,6 +4,8 @@
 //! Restarting invalidates pending ceremonies, never credentials. SQLite transactions serialize
 //! owner creation, recovery replacement, passkey limits and capability redemption.
 
+#[cfg(test)]
+mod account_events;
 mod binding;
 #[path = "../bootstrap_authorization.rs"]
 mod bootstrap_authorization;
