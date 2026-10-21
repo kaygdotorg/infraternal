@@ -41,7 +41,7 @@ test("the ten-window first-picture check and soak cohorts have fixed shapes", ()
   expect(validate({ env: {} })).toEqual({ tenWindowIdle: false, firstPictureIdle: false, flood: false, fixtureWindowCount: 1, pipelineDiagnostics: true, helperBinary: undefined });
   expect(validate({ env: { APP_WINDOW_TEN_WINDOW_IDLE: "1" } })).toEqual({ tenWindowIdle: true, firstPictureIdle: false, flood: false, fixtureWindowCount: 10, pipelineDiagnostics: true, helperBinary: undefined });
   const helperBinary = "/Users/kayg/infraternal-bench/app-windows-first-picture/target/release/infraternal-desktop-helper";
-  expect(validate({ env: { APP_WINDOW_FIRST_PICTURE_IDLE: "1", APP_WINDOW_HELPER_BINARY: helperBinary } })).toEqual({ tenWindowIdle: false, firstPictureIdle: true, flood: false, fixtureWindowCount: 10, pipelineDiagnostics: false, helperBinary });
+  expect(validate({ env: { APP_WINDOW_FIRST_PICTURE_IDLE: "1", APP_WINDOW_HELPER_BINARY: helperBinary } })).toEqual({ tenWindowIdle: false, firstPictureIdle: true, flood: false, fixtureWindowCount: 10, pipelineDiagnostics: true, helperBinary });
   expect(() => validate({ env: { APP_WINDOW_FIRST_PICTURE_IDLE: "1" } })).toThrow("first-picture idle check requires a Mac helper binary");
   expect(() => validate({ env: { APP_WINDOW_HELPER_BINARY: "relative/helper" } })).toThrow("Mac helper binary path must be absolute");
   expect(validate({ env: { APP_WINDOW_FLOOD: "1" } })).toEqual({ tenWindowIdle: false, firstPictureIdle: false, flood: true, fixtureWindowCount: 1, pipelineDiagnostics: true, helperBinary: undefined });

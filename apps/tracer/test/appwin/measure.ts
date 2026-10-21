@@ -21,8 +21,8 @@
  * APP_WINDOW_SOAK=1 defaults to an uninterrupted 600-second/240-character run.
  * APP_WINDOW_RECOVERY=1 explicitly enables the separate drop/reopen/resize case;
  * APP_WINDOW_STABILITY_SECONDS=180 selects its short diagnostic duration.
- * APP_WINDOW_FIRST_PICTURE_IDLE=1 verifies ten first pictures and performs a
- * functional-only 60-second idle check.
+ * APP_WINDOW_FIRST_PICTURE_IDLE=1 verifies ten first pictures and checks
+ * frame and draw counts across 60 seconds without CPU/RSS or latency sampling.
  * APP_WINDOW_MAC_ONLY=1 omits guest access and records no guest-idle evidence.
  * APP_WINDOW_PROBE_TRACE=1 records bounded, content-free control-probe handling
  * for reconnect diagnosis; it never changes the production liveness deadline.
@@ -49,7 +49,7 @@ const firstPictureIdle=process.env.APP_WINDOW_FIRST_PICTURE_IDLE==='1';
 const helperBinary=process.env.APP_WINDOW_HELPER_BINARY;
 if(helperBinary&&!helperBinary.startsWith('/'))throw Error('Mac helper binary path must be absolute');
 const inputOnly=process.env.APP_WINDOW_INPUT_ONLY==='1';
-const pipelineDiagnostics=!resourcesOnly&&!firstPictureIdle&&process.env.APP_WINDOW_PIPELINE_DIAGNOSTICS!=='0';
+const pipelineDiagnostics=!resourcesOnly&&(firstPictureIdle||process.env.APP_WINDOW_PIPELINE_DIAGNOSTICS!=='0');
 const probeTrace=process.env.APP_WINDOW_PROBE_TRACE==='1';
 const codec=process.env.APP_WINDOW_CODEC??'h264';
 const hardwareHint=process.env.APP_WINDOW_HARDWARE_HINT??'';

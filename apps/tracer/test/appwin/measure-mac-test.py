@@ -594,11 +594,67 @@ class FirstPictureIdleTests(unittest.TestCase):
             self.assertEqual(result['fixture_windows'], 10)
             self.assertEqual(result['capture_helpers'], 10)
             self.assertEqual(result['worker_delta'], {key: 0 for key in stats})
+            self.assertTrue(result['worker_counters_available'])
             self.assertEqual(result['source_draws'], 0)
             self.assertEqual(result['browser_frames'], 0)
             self.assertEqual(result['worker_frames'], 0)
             self.assertNotIn('cpu_cores', result)
             self.assertIn({'kind': 'result', 'status': 'first_picture_idle_measured'}, rows)
+        finally:
+            evidence.cleanup()
+
+    def test_first_picture_idle_branch_runs_without_a_decoder_worker_after_failure(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        branch = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                      and ast.unparse(node.test) == "args.get('first_picture_idle')"
+                      and any(isinstance(child, ast.Constant) and child.value == 'first_picture_idle_plan'
+                              for child in ast.walk(node)))
+        now = [0.0]
+        rows = []
+        evidence = tempfile.TemporaryDirectory()
+        metric_path = pathlib.Path(evidence.name) / 'companion-metrics.log'
+        metric_path.write_text('')
+        failure = {'fixture_index': 1, 'window_id': 'fixture-window-1',
+                   'card_state': 'failed:decode', 'picture': 'error'}
+
+        def evaluate(expression):
+            if expression == 'window.__appWindowBench.stats()':
+                raise RuntimeError('worker counters unavailable')
+            raise AssertionError(f'unexpected page evaluation: {expression}')
+
+        namespace = {
+            'args': {'first_picture_idle': True}, 'fixture_window_count': 10,
+            'first_picture_failures': [failure],
+            'capture_helpers': set(range(1, 11)), 'helper_births': {pid: pid for pid in range(1, 11)},
+            'process_identity': lambda pid: pid, 'native_command': rows.append,
+            'battery': lambda: rows.append('battery'), 'consent_guard': lambda: None,
+            'time': SimpleNamespace(monotonic=lambda: now[0]),
+            'E': pathlib.Path(evidence.name),
+            'page': SimpleNamespace(
+                locator=lambda _: SimpleNamespace(all=lambda: []),
+                evaluate=evaluate,
+                wait_for_timeout=lambda ms: now.__setitem__(0, now[0] + ms / 1000),
+            ),
+            'source': SimpleNamespace(poll=lambda: None), 'window': SimpleNamespace(poll=lambda: None),
+            'browser': SimpleNamespace(is_connected=lambda: True),
+            'drain': lambda: {'probe': {'videos': []}, 'frames': []},
+            'metric_path': metric_path,
+            'companion_metric_summary': lambda *_: {'source_callbacks': 0, 'fresh_deliveries': 0},
+            'all_draws': [], 'emit': rows.append,
+        }
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'did not meet the 60-second no-work bound'):
+                exec(compile(ast.Module(body=[branch], type_ignores=[]), str(source), 'exec'), namespace)
+            result = next(row for row in rows if isinstance(row, dict) and row.get('kind') == 'first_picture_idle_result')
+            self.assertGreaterEqual(result['seconds'], 60)
+            self.assertEqual(result['fixture_windows'], 10)
+            self.assertEqual(result['live_pictures'], 0)
+            self.assertEqual(result['first_picture_failures'], [failure])
+            self.assertFalse(result['worker_counters_available'])
+            self.assertIsNone(result['worker_delta'])
+            self.assertIn({'kind': 'first_picture_idle_plan', 'seconds': 60,
+                           'fixture_windows': 10, 'capture_helpers': 10}, rows)
         finally:
             evidence.cleanup()
 

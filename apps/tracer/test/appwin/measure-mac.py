@@ -773,7 +773,14 @@ try:
   drain()
   metric_path=E/'companion-metrics.log';metric_offset=metric_path.stat().st_size if metric_path.exists() else 0
   baseline_draws=sum(row.get('kind')=='draw' for row in all_draws)
-  browser_worker_before=page.evaluate('window.__appWindowBench.stats()')
+  def worker_stats():
+   try:return page.evaluate('window.__appWindowBench.stats()')
+   except Exception as error:
+    # A failed first picture can prevent worker creation; native and frame
+    # receipts still make the idle interval useful for diagnosing that failure.
+    if first_picture_failures and 'worker counters unavailable' in str(error):return None
+    raise
+  browser_worker_before=worker_stats()
   phase_start=time.monotonic();deadline=phase_start+60
   emit({'kind':'first_picture_idle_plan','seconds':60,'fixture_windows':fixture_window_count,'capture_helpers':len(live)})
   while time.monotonic()<deadline:
@@ -783,21 +790,23 @@ try:
    page.wait_for_timeout(min(1000,max(1,int((deadline-time.monotonic())*1000))))
   live={pid for pid in capture_helpers if helper_births.get(pid)==process_identity(pid)}
   if source.poll() is not None or window.poll() is not None or not browser.is_connected():raise RuntimeError('first-picture idle cohort process exited')
-  battery();receipt=drain();browser_worker_after=page.evaluate('window.__appWindowBench.stats()')
+  battery();receipt=drain();browser_worker_after=worker_stats()
   source_draws=sum(row.get('kind')=='draw' for row in all_draws)-baseline_draws
-  worker_delta={key:max(0,int(browser_worker_after.get(key,0))-int(browser_worker_before.get(key,0)))
+  worker_counters_available=browser_worker_before is not None and browser_worker_after is not None
+  worker_delta=({key:max(0,int(browser_worker_after.get(key,0))-int(browser_worker_before.get(key,0)))
                 for key in ('received','decoded','painted','dropped','superseded','repairs')}
+               if worker_counters_available else None)
   metric_summary=companion_metric_summary(metric_path,metric_offset)
   browser_frames=len(receipt['probe']['videos']);worker_frames=len(receipt['frames'])
   result={'kind':'first_picture_idle_result','seconds':time.monotonic()-phase_start,'fixture_windows':fixture_window_count,
           'capture_helpers':len(live),'source_draws':source_draws,'browser_frames':browser_frames,
-          'worker_frames':worker_frames,'worker_delta':worker_delta,
+          'worker_frames':worker_frames,'worker_counters_available':worker_counters_available,'worker_delta':worker_delta,
           'source_callbacks':metric_summary['source_callbacks'],'fresh_deliveries':metric_summary['fresh_deliveries'],
           'live_pictures':live_pictures,'first_picture_failures':first_picture_failures}
   emit(result)
   if result['seconds']<60:
    raise RuntimeError('first-picture idle check ended before 60 seconds')
-  if len(live)!=10 or live_pictures!=10 or first_picture_failures or worker_frames or browser_frames or source_draws or any(worker_delta.values()) or metric_summary['source_callbacks'] or metric_summary['fresh_deliveries']:
+  if len(live)!=10 or live_pictures!=10 or first_picture_failures or worker_frames or browser_frames or source_draws or (worker_delta is not None and any(worker_delta.values())) or metric_summary['source_callbacks'] or metric_summary['fresh_deliveries']:
    raise RuntimeError('first-picture idle check did not meet the 60-second no-work bound')
   battery();emit({'kind':'result','status':'first_picture_idle_measured'});raise PhaseComplete()
  if args.get('ten_window_idle'):
