@@ -34,3 +34,14 @@ test("the 80-input cohort cannot silently replace another requested phase", () =
     expect(() => validate({ env: { APP_WINDOW_INPUT_ONLY: "1", [phase]: "1" } })).toThrow("input-only mode cannot include another measurement phase");
   }
 });
+
+test("the ten-window idle and single-window flood cohorts have fixed shapes", () => {
+  const configuration = source.slice(source.indexOf("const resourcesOnly="), source.indexOf("const port="));
+  const validate = new Function("process", new Bun.Transpiler({ loader: "ts" }).transformSync(configuration + "return {tenWindowIdle,flood,fixtureWindowCount};"));
+  expect(validate({ env: {} })).toEqual({ tenWindowIdle: false, flood: false, fixtureWindowCount: 1 });
+  expect(validate({ env: { APP_WINDOW_TEN_WINDOW_IDLE: "1" } })).toEqual({ tenWindowIdle: true, flood: false, fixtureWindowCount: 10 });
+  expect(validate({ env: { APP_WINDOW_FLOOD: "1" } })).toEqual({ tenWindowIdle: false, flood: true, fixtureWindowCount: 1 });
+  expect(() => validate({ env: { APP_WINDOW_TEN_WINDOW_IDLE: "1", APP_WINDOW_FLOOD: "1" } })).toThrow("idle and flood cohorts cannot run together");
+  expect(() => validate({ env: { APP_WINDOW_TEN_WINDOW_IDLE: "1", APP_WINDOW_STABILITY_SECONDS: "180" } })).toThrow("soak cohorts require exactly ten minutes");
+  expect(() => validate({ env: { APP_WINDOW_FLOOD: "1", APP_WINDOW_INPUT_ONLY: "1" } })).toThrow("flood cohort cannot include another phase");
+});
