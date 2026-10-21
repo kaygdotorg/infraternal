@@ -14,6 +14,8 @@
  * APP_WINDOW_DEMO_ONLY=1 records typing and source resize without latency samples.
  * APP_WINDOW_NATIVE and APP_WINDOW_NATIVE_HASH select an already signed diagnostic
  * in the owned Mac diagnostic directory; a changed permission stops the run.
+ * APP_WINDOW_HELPER_BINARY selects an isolated Rust helper binary under the Mac
+ * bench directory; the first-picture check requires it to avoid shared binaries.
  * Optional pipeline, codec, worker, decoder hint and context settings are isolated
  * experiments; the input manifest records them alongside exact artifact hashes.
  * APP_WINDOW_SOAK=1 defaults to an uninterrupted 600-second/240-character run.
@@ -44,6 +46,8 @@ if(!['default','surface','owned'].includes(pipeline))throw Error('invalid captur
 const desynchronized=process.env.APP_WINDOW_DESYNCHRONIZED==='1';
 const resourcesOnly=process.env.APP_WINDOW_RESOURCES_ONLY==='1';
 const firstPictureIdle=process.env.APP_WINDOW_FIRST_PICTURE_IDLE==='1';
+const helperBinary=process.env.APP_WINDOW_HELPER_BINARY;
+if(helperBinary&&!helperBinary.startsWith('/'))throw Error('Mac helper binary path must be absolute');
 const inputOnly=process.env.APP_WINDOW_INPUT_ONLY==='1';
 const pipelineDiagnostics=!resourcesOnly&&!firstPictureIdle&&process.env.APP_WINDOW_PIPELINE_DIAGNOSTICS!=='0';
 const probeTrace=process.env.APP_WINDOW_PROBE_TRACE==='1';
@@ -93,6 +97,7 @@ const ownerPreview=process.env.APP_WINDOW_OWNER_PREVIEW==='1';
 if((tenWindowIdle||flood)&&stabilitySeconds!==600)throw Error('soak cohorts require exactly ten minutes');
 if(tenWindowIdle&&(resourcesOnly||demoOnly||soak||recovery||inputOnly||ownerPreview))throw Error('ten-window idle cohort cannot include another phase');
 if(firstPictureIdle&&(resourcesOnly||demoOnly||soak||recovery||inputOnly||ownerPreview||probeTrace))throw Error('first-picture idle check cannot include another phase');
+if(firstPictureIdle&&!helperBinary)throw Error('first-picture idle check requires a Mac helper binary');
 if(flood&&(resourcesOnly||demoOnly||soak||recovery||inputOnly||ownerPreview))throw Error('flood cohort cannot include another phase');
 if(inputOnly&&(resourcesOnly||demoOnly||soak||ownerPreview))throw Error('input-only mode cannot include another measurement phase');
 const ownerPreviewSeconds=Number(process.env.APP_WINDOW_OWNER_PREVIEW_SECONDS??900);
@@ -147,7 +152,7 @@ try{
  const [built]=await once(build,'exit');if(built!==0)throw Error('production frontend build failed');
  const bundle=await Bun.build({entrypoints:[worktree+'/apps/tracer/test/appwin/bench-probe.ts'],target:'browser',format:'iife',minify:true});
  if(!bundle.success)throw Error('probe build failed');
-const manifest:Record<string,unknown>={head:new TextDecoder().decode(Bun.spawnSync(['git','rev-parse','HEAD'],{cwd:worktree}).stdout).trim(),desynchronized,resourcesOnly,pipeline,capturePath:pipeline==='owned'?'owned-copy':'signed-surface',pipelineDiagnostics,codec,hardwareHint,job,macOnly,demoOnly,requireIdle,port,soak,recovery,stabilitySeconds,tenWindowIdle,firstPictureIdle,flood,fixtureWindowCount,ownerPreview,ownerPreviewSeconds,...(native?{native,nativeHash:nativeHash!}:{}),...(helperVariant?{helperVariant,helperRestore}:{})};
+ const manifest:Record<string,unknown>={head:new TextDecoder().decode(Bun.spawnSync(['git','rev-parse','HEAD'],{cwd:worktree}).stdout).trim(),desynchronized,resourcesOnly,pipeline,capturePath:pipeline==='owned'?'owned-copy':'signed-surface',pipelineDiagnostics,codec,hardwareHint,job,macOnly,demoOnly,requireIdle,port,soak,recovery,stabilitySeconds,tenWindowIdle,firstPictureIdle,flood,fixtureWindowCount,ownerPreview,ownerPreviewSeconds,...(native?{native,nativeHash:nativeHash!}:{}),...(helperBinary?{helperBinary}:{}),...(helperVariant?{helperVariant,helperRestore}:{})};
  for(const [name,path] of Object.entries({binary:process.env.INFRATERNAL_BIN!,controller:import.meta.path,macDriver:import.meta.dirname+'/measure-mac.py',companionLauncher:import.meta.dirname+'/launch-companion.py',processIdentity:import.meta.dirname+'/process_identity.py',pixelObserver:import.meta.dirname+'/worker-pixel-observer.js',probe:import.meta.dirname+'/bench-probe.ts',nativeFixture:worktree+'/crates/plugins/desktop/tests/fixtures/latency-window.swift',worker:workerOverride??worktree+'/apps/tracer/dist/decode.worker.on-demand.js'}))manifest[name]=new Bun.CryptoHasher('sha256').update(await readFile(path)).digest('hex');
  manifest.worktreeDiffSha256=new Bun.CryptoHasher('sha256').update(Bun.spawnSync(['git','diff','HEAD'],{cwd:worktree}).stdout).digest('hex');
  manifest.probeBundle=new Bun.CryptoHasher('sha256').update(await bundle.outputs[0]!.text()).digest('hex');
@@ -165,7 +170,7 @@ const manifest:Record<string,unknown>={head:new TextDecoder().decode(Bun.spawnSy
  identity.stdin!.end(await readFile(import.meta.dirname+'/process_identity.py'));identity.stderr!.resume();
  const [identityCode]=await once(identity,'exit');if(identityCode!==0)throw Error('process identity staging refused');
  mac=spawn('netbird',['ssh','--no-browser','kayg@10.69.69.101','~/infraternal-bench/app-windows-latency/tools/bin/python -u ~/infraternal-bench/app-windows-latency/venue-mac.py'],{stdio:['pipe','pipe','pipe']});
- mac.stdin!.write(JSON.stringify({controller_pid:process.pid,port,pipeline,label,codec,job,input_only:inputOnly,demo_only:demoOnly,soak,recovery,stability_seconds:stabilitySeconds,ten_window_idle:tenWindowIdle,first_picture_idle:firstPictureIdle,flood,fixture_window_count:fixtureWindowCount,owner_preview:ownerPreview,owner_preview_seconds:ownerPreviewSeconds,require_idle:requireIdle,native,native_hash:nativeHash,helper_variant:helperVariant,helper_restore:helperRestore,resources_only:resourcesOnly,pipeline_diagnostics:pipelineDiagnostics,fixture_source:await readFile(worktree+'/crates/plugins/desktop/tests/fixtures/latency-window.swift','utf8'),diagnostic_only:process.env.APP_WINDOW_DIAGNOSTIC_ONLY==='1',probe:(hardwareHint?'window.__benchHardwareHint='+JSON.stringify(hardwareHint)+';\n':'')+(resourcesOnly?'window.__benchResourcesOnly=true;\n':'')+await bundle.outputs[0]!.text(),observer:(desynchronized?'self.__benchDesynchronized=true;\n':'')+(flood?'self.__benchFlood=true;\n':'')+await readFile(import.meta.dirname+'/worker-pixel-observer.js','utf8'),worker:await readFile(workerOverride??worktree+'/apps/tracer/dist/decode.worker.on-demand.js','utf8')})+'\n');
+ mac.stdin!.write(JSON.stringify({controller_pid:process.pid,port,pipeline,label,codec,job,input_only:inputOnly,demo_only:demoOnly,soak,recovery,stability_seconds:stabilitySeconds,ten_window_idle:tenWindowIdle,first_picture_idle:firstPictureIdle,flood,fixture_window_count:fixtureWindowCount,owner_preview:ownerPreview,owner_preview_seconds:ownerPreviewSeconds,require_idle:requireIdle,native,native_hash:nativeHash,helper_binary:helperBinary,helper_variant:helperVariant,helper_restore:helperRestore,resources_only:resourcesOnly,pipeline_diagnostics:pipelineDiagnostics,fixture_source:await readFile(worktree+'/crates/plugins/desktop/tests/fixtures/latency-window.swift','utf8'),diagnostic_only:process.env.APP_WINDOW_DIAGNOSTIC_ONLY==='1',probe:(hardwareHint?'window.__benchHardwareHint='+JSON.stringify(hardwareHint)+';\n':'')+(resourcesOnly?'window.__benchResourcesOnly=true;\n':'')+await bundle.outputs[0]!.text(),observer:(desynchronized?'self.__benchDesynchronized=true;\n':'')+(flood?'self.__benchFlood=true;\n':'')+await readFile(import.meta.dirname+'/worker-pixel-observer.js','utf8'),worker:await readFile(workerOverride??worktree+'/apps/tracer/dist/decode.worker.on-demand.js','utf8')})+'\n');
  const prepare=async()=>{
   if(!macOnly){
    const vm=spawn('netbird',['ssh','--no-browser','calternal@10.69.69.21','top -l 3 -s 1 -n 0'],{stdio:['ignore','pipe','pipe']});

@@ -15,6 +15,14 @@ def validate_helper_archive_descriptor(value):
  if any(c not in '0123456789abcdef' for key in ('archive_sha256','executable_sha256','leaf_sha1') for c in value[key].lower()):raise ValueError('invalid helper archive descriptor')
  return {**value,'archive_sha256':value['archive_sha256'].lower(),'executable_sha256':value['executable_sha256'].lower(),'leaf_sha1':value['leaf_sha1'].lower()}
 
+def validate_helper_binary(value,default,bench_root):
+ """Keep an isolated helper build inside the job bench; otherwise use the shipped artifact."""
+ if value is None:return default
+ if not isinstance(value,str) or not pathlib.Path(value).is_absolute():raise ValueError('invalid helper binary path')
+ path=pathlib.Path(value).resolve(strict=True);bench=pathlib.Path(bench_root).resolve(strict=True)
+ if not path.is_file() or not path.is_relative_to(bench):raise ValueError('helper binary outside Mac bench directory')
+ return path
+
 args=json.loads(sys.stdin.readline())
 job=args.get('job','app-windows-latency')
 os.environ['TRACER_TEST_PORT']=str(args.get('port',4346))
@@ -37,6 +45,7 @@ def picker_title_pattern(title):
 if not re.fullmatch(r'[a-z0-9-]{1,48}',job) or not re.fullmatch(r'[a-z0-9-]{1,48}',args['label']):raise SystemExit(2)
 E=ROOT/'evidence'/args['label'];E.mkdir(parents=True,exist_ok=False)
 BIN=ROOT/'bin'
+helper_binary=validate_helper_binary(args.get('helper_binary'),BIN/'helper',pathlib.Path.home()/'infraternal-bench')
 for mode in ('ten_window_idle','first_picture_idle','flood','input_only'):
  if type(args.get(mode,False)) is not bool:raise ValueError('invalid measurement mode')
 TEN_WINDOW_IDLE=args.get('ten_window_idle',False)
@@ -448,7 +457,7 @@ try:
    if not rss.isdecimal():raise RuntimeError('helper RSS sample unavailable')
    samples[pid]={**process_usage(pid),'rss_kb':int(rss)}
   return samples
- for name,target in [('helper',BIN/'helper')]:
+ for name,target in [('helper',helper_binary)]:
   wrapper=runtime/name
   wrapper.write_text('#!/bin/sh\n# Role: record only an owned helper PID before preserving its pipes and process identity.\nprintf "'+name+' %s\\n" "$$" >> "'+str(pidlog)+'"\nexec "'+str(target)+'" "$@" 2>> "'+str(E/'helper-metrics.log')+'"\n');wrapper.chmod(0o700)
  # Native capture must be a LaunchServices app, never an exec in this SSH tree.

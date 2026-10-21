@@ -502,6 +502,29 @@ class RunDeadlineTests(unittest.TestCase):
 class FirstPictureIdleTests(unittest.TestCase):
     """The short ten-window check records frame activity without resource timings."""
 
+    def test_short_check_helper_binary_must_be_inside_the_job_bench(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        function = next(node for node in ast.parse(source.read_text()).body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'validate_helper_binary')
+        namespace = {'pathlib': pathlib}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            bench = root / 'infraternal-bench'
+            bench.mkdir()
+            helper = bench / 'helper'
+            helper.write_bytes(b'fixture')
+            outside = root / 'outside-helper'
+            outside.write_bytes(b'fixture')
+            default = root / 'default-helper'
+            validate = namespace['validate_helper_binary']
+            self.assertEqual(validate(None, default, bench), default)
+            self.assertEqual(validate(str(helper), default, bench), helper.resolve())
+            with self.assertRaisesRegex(ValueError, 'helper binary outside Mac bench directory'):
+                validate(str(outside), default, bench)
+            with self.assertRaisesRegex(ValueError, 'invalid helper binary path'):
+                validate('relative/helper', default, bench)
+
     def test_decode_timeout_is_recorded_and_does_not_stop_the_short_check(self):
         source = pathlib.Path(__file__).with_name('measure-mac.py')
         function = next(node for node in ast.parse(source.read_text()).body

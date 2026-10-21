@@ -37,11 +37,14 @@ test("the 80-input cohort cannot silently replace another requested phase", () =
 
 test("the ten-window first-picture check and soak cohorts have fixed shapes", () => {
   const configuration = source.slice(source.indexOf("const resourcesOnly="), source.indexOf("const port="));
-  const validate = new Function("process", new Bun.Transpiler({ loader: "ts" }).transformSync(configuration + "return {tenWindowIdle,firstPictureIdle,flood,fixtureWindowCount,pipelineDiagnostics};"));
-  expect(validate({ env: {} })).toEqual({ tenWindowIdle: false, firstPictureIdle: false, flood: false, fixtureWindowCount: 1, pipelineDiagnostics: true });
-  expect(validate({ env: { APP_WINDOW_TEN_WINDOW_IDLE: "1" } })).toEqual({ tenWindowIdle: true, firstPictureIdle: false, flood: false, fixtureWindowCount: 10, pipelineDiagnostics: true });
-  expect(validate({ env: { APP_WINDOW_FIRST_PICTURE_IDLE: "1" } })).toEqual({ tenWindowIdle: false, firstPictureIdle: true, flood: false, fixtureWindowCount: 10, pipelineDiagnostics: false });
-  expect(validate({ env: { APP_WINDOW_FLOOD: "1" } })).toEqual({ tenWindowIdle: false, firstPictureIdle: false, flood: true, fixtureWindowCount: 1, pipelineDiagnostics: true });
+  const validate = new Function("process", new Bun.Transpiler({ loader: "ts" }).transformSync(configuration + "return {tenWindowIdle,firstPictureIdle,flood,fixtureWindowCount,pipelineDiagnostics,helperBinary};"));
+  expect(validate({ env: {} })).toEqual({ tenWindowIdle: false, firstPictureIdle: false, flood: false, fixtureWindowCount: 1, pipelineDiagnostics: true, helperBinary: undefined });
+  expect(validate({ env: { APP_WINDOW_TEN_WINDOW_IDLE: "1" } })).toEqual({ tenWindowIdle: true, firstPictureIdle: false, flood: false, fixtureWindowCount: 10, pipelineDiagnostics: true, helperBinary: undefined });
+  const helperBinary = "/Users/kayg/infraternal-bench/app-windows-first-picture/target/release/infraternal-desktop-helper";
+  expect(validate({ env: { APP_WINDOW_FIRST_PICTURE_IDLE: "1", APP_WINDOW_HELPER_BINARY: helperBinary } })).toEqual({ tenWindowIdle: false, firstPictureIdle: true, flood: false, fixtureWindowCount: 10, pipelineDiagnostics: false, helperBinary });
+  expect(() => validate({ env: { APP_WINDOW_FIRST_PICTURE_IDLE: "1" } })).toThrow("first-picture idle check requires a Mac helper binary");
+  expect(() => validate({ env: { APP_WINDOW_HELPER_BINARY: "relative/helper" } })).toThrow("Mac helper binary path must be absolute");
+  expect(validate({ env: { APP_WINDOW_FLOOD: "1" } })).toEqual({ tenWindowIdle: false, firstPictureIdle: false, flood: true, fixtureWindowCount: 1, pipelineDiagnostics: true, helperBinary: undefined });
   expect(() => validate({ env: { APP_WINDOW_TEN_WINDOW_IDLE: "1", APP_WINDOW_FLOOD: "1" } })).toThrow("idle and flood cohorts cannot run together");
   expect(() => validate({ env: { APP_WINDOW_TEN_WINDOW_IDLE: "1", APP_WINDOW_FIRST_PICTURE_IDLE: "1" } })).toThrow("ten-window idle modes cannot run together");
   expect(() => validate({ env: { APP_WINDOW_FIRST_PICTURE_IDLE: "1", APP_WINDOW_PROBE_TRACE: "1" } })).toThrow("first-picture idle check cannot include another phase");
