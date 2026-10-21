@@ -87,7 +87,9 @@ const STYLE = `
 .ui-confirm-tip, .ui-confirm-tip * { text-shadow: none; }
 .ui-confirm-tip .ui-confirm-yes { background: var(--fg); color: var(--bg); }
 .ui-confirm-tip .ui-confirm-yes svg { stroke-width: 2; }
-/* Named actions: the two buttons carry their words. */
+/* The secondary action keeps to the start of the row so the answer and the dismissal stay together on the right. */
+.ui-confirm-tip .ui-confirm-alt { margin-right: auto; }
+/* Named actions: the buttons carry their words. */
 .ui-confirm-tip[data-named] button { width: auto; min-width: 28px; padding: 0 12px; font: 500 var(--text-secondary, 12px)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
 @media (pointer: coarse) {
   .ui-confirm-tip { gap: 14px; padding: 16px; }
@@ -145,6 +147,12 @@ export interface ConfirmTipOptions {
    * an action that is not a yes (try again) names itself with its own glyph.
    */
   confirmIcon?: string;
+  /**
+   * A third, quiet action for a way out that is neither the answer nor a dismissal (for example "Remove host" when
+   * retrying is no longer possible). It sits at the start of the row, in the ghost style of the cancel button, and
+   * closes the tip like the others. Only drawn with `named`: an icon needs a glyph this action does not have.
+   */
+  secondary?: { label: string; onSelect(): void };
   onConfirm(): void;
   onCancel?(): void;
   /** A card the confirmation must stay inside (a window), with the same 9 px inset the window's own overlays keep. */
@@ -204,6 +212,14 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
   confirm.dataset.tip = options.confirmLabel;
   confirm.innerHTML = options.named ? `<span></span>` : `<svg viewBox="0 0 24 24" aria-hidden="true">${options.confirmIcon ?? '<path d="m5.5 12.5 4 4 9-9"/>'}</svg>`;
   if (options.named) confirm.querySelector("span")!.textContent = options.confirmLabel;
+  if (options.named && options.secondary) {
+    const alt = document.createElement("button");
+    alt.type = "button";
+    alt.className = "ui-confirm-alt";
+    alt.textContent = options.secondary.label;
+    alt.addEventListener("click", () => { instance.close(false); options.secondary!.onSelect(); });
+    actions.append(alt);
+  }
   actions.append(cancel, confirm);
   tip.append(arrow, text, actions);
   document.body.append(tip);

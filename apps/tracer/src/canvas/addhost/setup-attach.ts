@@ -19,6 +19,8 @@ export interface AttachSetup {
   /** Where events come from. Absent: the host's own setup stream (`/v1/bootstrap/setup/ws`). */
   source?: SetupSource;
   tickHold?: number;
+  /** Removing this host, offered in the popover once setup has no attempts left. */
+  remove?: () => { label: string; run(anchor: HTMLElement): void } | undefined;
   /** Called only after the retained stream reports the final ready stage done. */
   onComplete?(): void;
 }
@@ -43,6 +45,7 @@ export function attachSetup(rec: WinRec, options: AttachSetup): Promise<void> {
       hostId: options.hostId,
       source: options.source ?? module.createSetupFeed({ windowId: rec.model.id }),
       ...(options.status ? { from: options.status } : {}),
+      ...(options.remove ? { remove: options.remove } : {}),
       ...(options.tickHold === undefined ? {} : { tickHold: options.tickHold }),
       ...(options.onComplete ? { onComplete: options.onComplete } : {}),
     });

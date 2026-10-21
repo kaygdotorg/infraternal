@@ -91,7 +91,10 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       // The wizard's glyph is read now (its box is the flight's start); the pill's code is already loaded.
       // Without the demo's script the host's own stream (the test double's) feeds the pill, as in production.
       if (rec && host.hostId && (host.sessionId || setupDemo)) {
-        void attachSetup(rec, { host: host.name, hostId: host.hostId, status, ...(setupDemo ? { source: setupDemo.source } : {}), ...(query.get("tickhold") ? { tickHold: Number(query.get("tickhold")) } : {}) });
+        void attachSetup(rec, { host: host.name, hostId: host.hostId, status,
+          // Removal needs the server's passkey ceremony, which the test double does not have: it only says so.
+          remove: () => ({ label: "Remove host", run: () => core.toast.show({ message: "Removing a host needs the server (not in this mock).", duration: 4000 }) }),
+          ...(setupDemo ? { source: setupDemo.source } : {}), ...(query.get("tickhold") ? { tickHold: Number(query.get("tickhold")) } : {}) });
       }
     }
   }

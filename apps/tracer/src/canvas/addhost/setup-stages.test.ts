@@ -77,7 +77,6 @@ test("exhausted setup preserves eligibility and explains a new setup", () => {
   }
   expect(setupGuide("o2", view).effect).toContain("retry limit");
   const next = setupGuide("o2", view).effect;
-  expect(next).toContain("Remove host in the command palette");
-  expect(next.indexOf("Remove host")).toBeLessThan(next.indexOf("Add host"));
+  expect(next).toContain("Remove this host, then add it again");
   expect(foldSetup(view, ev("join", "running")).retryAvailable).toBeUndefined();
 });
