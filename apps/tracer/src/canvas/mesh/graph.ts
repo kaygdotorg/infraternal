@@ -191,7 +191,7 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, layoutOf: (
     if (meta.dataset.text !== text) {
       meta.dataset.text = text;
       const head = el("span", "cl-chip-part", hostsText);
-      meta.replaceChildren(...(onlineText ? [head, el("span", "cl-chip-part", `· ${onlineText}`)] : [head]));
+      meta.replaceChildren(...(onlineText ? [head, el("span", "cl-chip-part cl-chip-part-after", onlineText)] : [head]));
     }
     if (total === 0 || online === total) chip.removeAttribute("data-degraded"); else chip.dataset.degraded = "";
     chip.setAttribute("aria-label", `${cl.label}, ${text}. Zoom in`);

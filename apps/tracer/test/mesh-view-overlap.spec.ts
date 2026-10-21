@@ -38,6 +38,17 @@ for (const [w, h, touch] of [[1440, 900, false], [600, 900, false], [390, 844, t
         const meta = chip.querySelector<HTMLElement>(".cl-chip-meta")!;
         const bad = getComputedStyle(meta).textOverflow === "ellipsis" ? ["ellipsis"] : [];
         for (const part of meta.querySelectorAll<HTMLElement>(".cl-chip-part")) if (part.getBoundingClientRect().right > r.right + 1) bad.push(`${part.textContent} leaves the chip`);
+        // No line of the count starts with the separator: the part's own text has none, and when it wraps to a new line it
+        // starts at the row's left edge, where its hung ::before is outside the row and clipped.
+        const parts = [...meta.querySelectorAll<HTMLElement>(".cl-chip-part")];
+        for (const part of parts) if (part.textContent!.trim().startsWith("·")) bad.push("a part starts with the dot");
+        const [first, second] = parts;
+        if (first && second) {
+          const mr = meta.getBoundingClientRect(), wrapped = second.getBoundingClientRect().top > first.getBoundingClientRect().top + 1;
+          const dot = getComputedStyle(second, "::before").content;
+          if (wrapped && !(Math.abs(second.getBoundingClientRect().left - mr.left) < 1 && getComputedStyle(meta).overflowX === "clip")) bad.push("wrapped count shows a dot");
+          if (!wrapped && !dot.includes("·")) bad.push("one-line count lost its dot");
+        }
         return bad.map((b) => `${chip.dataset.cluster}: ${b}`);
       }));
       expect(cut).toEqual([]);

@@ -18,10 +18,13 @@
   letter-spacing: var(--ui-tracking); pointer-events: none;
 }
 .cl-chip-name { overflow: hidden; font: var(--ui-type-button); text-overflow: ellipsis; white-space: nowrap; }
-/* The count wraps between its two parts ("15 hosts" / "· 15 online") when the frame is narrow, so a number is never cut
-   mid-word. Only the name, which is the person's text, can truncate. */
-.cl-chip-meta { display: flex; flex-wrap: wrap; column-gap: 1ch; color: var(--ui-text-secondary); font: var(--ui-type-label); }
-.cl-chip-part { white-space: nowrap; }
+/* The count wraps between its two parts ("15 hosts" / "15 online") when the frame is narrow, so a number is never cut
+   mid-word. The separator dot is the second part's ::before, hung into the gap to its left: on one line it sits between
+   the parts; when the part wraps it starts at the row's left edge, the dot lands outside the row and `overflow-x: clip`
+   hides it, so no line ever starts with a dot. Only the name, which is the person's text, can truncate. */
+.cl-chip-meta { display: flex; flex-wrap: wrap; column-gap: 3ch; overflow-x: clip; color: var(--ui-text-secondary); font: var(--ui-type-label); }
+.cl-chip-part { position: relative; white-space: nowrap; }
+.cl-chip-part-after::before { content: "·"; position: absolute; right: 100%; width: 3ch; text-align: center; }
 .cl-chip[data-degraded] .cl-chip-meta { color: var(--fg); }
 
 /* Cards and arrows change level with a short fade; the DOM is only changed once it has played. */
