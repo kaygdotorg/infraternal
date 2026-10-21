@@ -47,7 +47,11 @@ class PinLimitTransport implements LayoutTransport {
         const next = structuredClone(this.document);
         reduce(next, intent);
         const view = next.views.find((candidate) => candidate.id === "mesh")!;
-        if (view.layout.type !== "graph" || Object.keys(view.layout.pinned).length > 256) {
+        const invalidPins = view.layout.type !== "graph"
+          || Object.keys(view.layout.pinned).length > 256
+          || Object.values(view.layout.pinned).some(({ x, y }) =>
+            !Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 100_000 || Math.abs(y) > 100_000);
+        if (invalidPins) {
           this.refused++; reject(new ActionRefused(undefined, "invalid input")); return;
         }
         next.revision++;
@@ -100,8 +104,40 @@ test("a negative drop on a 1,025-node mesh writes one pin, and the peer ends wit
     await transport.drain(baseline + 1);
     expect(transport.refused).toBe(0);
     const peer = await second.load();
-    expect(Object.keys(graphOf(peer!).pinned)).toHaveLength(201);
-    expect(graphOf(peer!).pinned["node-1000"]).toEqual({ x: -1280, y: -480 });
+    // The count and moved point alone miss a peer that changed or lost any earlier coordinates.
+    expect(graphOf(peer!).pinned).toEqual(graphOf(dropped).pinned);
+  } finally { first.dispose(); second.dispose(); }
+});
+test("repeated pin moves reach both coordinate limits; the next move is refused and rolled back", async () => {
+  const transport = new PinLimitTransport(), notices: boolean[] = [];
+  const first = new ServerCanvasStore(transport, "mesh-bound-owner", (definitive) => notices.push(definitive === true));
+  const second = new ServerCanvasStore(transport, "mesh-bound-peer");
+  const graphOf = (doc: CanvasDocument) => {
+    const view = doc.views.find((candidate) => candidate.id === "mesh")!;
+    if (view.layout.type !== "graph") throw new Error("graph view missing");
+    return view.layout;
+  };
+  try {
+    await first.load(); await second.load();
+    let expected = 0;
+    for (let step = 1; step <= 10; step++) {
+      const next = structuredClone(first.current());
+      graphOf(next).pinned["node-0"] = { x: -step * 10_000, y: step * 10_000 };
+      const saved = first.save(next); first.flush(); await saved;
+      await transport.drain(++expected);
+      expect(graphOf(second.current()).pinned["node-0"]).toEqual({ x: -step * 10_000, y: step * 10_000 });
+    }
+
+    const outside = structuredClone(first.current());
+    graphOf(outside).pinned["node-0"] = { x: -100_001, y: 100_001 };
+    const saved = first.save(outside); first.flush(); await saved;
+    await transport.drain(++expected);
+
+    expect(transport.accepted).toBe(10);
+    expect(transport.refused).toBe(1);
+    expect(notices).toEqual([true]);
+    expect(graphOf(first.current()).pinned["node-0"]).toEqual({ x: -100_000, y: 100_000 });
+    expect(graphOf(second.current()).pinned["node-0"]).toEqual({ x: -100_000, y: 100_000 });
   } finally { first.dispose(); second.dispose(); }
 });
 test("a layout gap or withdrawn worker requests one fresh snapshot with bounded backoff", async () => {

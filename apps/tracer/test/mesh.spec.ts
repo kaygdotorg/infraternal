@@ -44,7 +44,8 @@ type Probe = {
     status(): string;
     pins(): Record<string, { x: number; y: number }>;
     stats(): Stats | undefined;
-    document(): Promise<{ views: Array<{ id: string; layout: { type: string; pinned?: Record<string, { x: number; y: number }> } }> } | undefined>;
+    document(): Promise<{ revision: number; views: Array<{ id: string; name: string; kind: string; cell: { x: number; y: number }; layout: { type: string; pinned?: Record<string, { x: number; y: number }> } }> } | undefined>;
+    applyRemoteLayout(document: unknown): Promise<void>;
     source(): { data(): { nodes: { size: number } }; retry(): void; renameGrant(g: unknown, name: string): void; grants(): Grant[] };
   };
 };
@@ -620,7 +621,9 @@ for (const [label, size, card] of [["desktop", DESKTOP, "nix-cache"], ["phone", 
     await intoMesh(page);
     const before = (await meshBox(page))!;
     for (let i = 0; i < 3; i++) await dragCard(page, card, { x: size.width - 10, y: size.height - 10 });
-    const pin = (await probe(page, (p) => p.mesh.pins()))[card]!;
+    const pins = await probe(page, (p) => p.mesh.pins());
+    expect(Object.keys(pins)).toEqual([card]);
+    const pin = pins[card]!;
     const after = (await meshBox(page))!;
     await page.screenshot({ path: testInfo.outputPath(`mesh-${label}-right-down.png`) });
     expect(pin.y).toBeGreaterThan(before.h - 104 - 160); // past where the old box ended the card (its height and margin)
@@ -673,27 +676,74 @@ test("a Mesh card can be moved and pinned by touch on a phone", async ({ browser
   try {
     await open(page, "", PHONE);
     await intoMesh(page);
+    await probe(page, (p) => p.setCanvasLock(false));
+    const view = (await meshBox(page))!;
+    await setCamera(page, view.x + 100, view.y + 100, 1);
+    await page.waitForTimeout(400);
+    const cameraBefore = await probe(page, (p) => p.camera());
     const id = "tag:ci";
     const pill = `.ui-window[data-window-id="n-${id}"] .ui-window-pill`;
     await expect(page.locator(pill)).toBeVisible();
     const before = (await centre(page, pill));
-    const oldPin = (await probe(page, (p) => p.mesh.pins()))[id];
     const touch = (type: "touchStart" | "touchMove" | "touchEnd", points: Array<{ x: number; y: number; id: number }>) =>
       cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points });
     await touch("touchStart", [{ ...before, id: 0 }]);
     for (let i = 1; i <= 10; i++) {
-      await touch("touchMove", [{ x: before.x + i * 6, y: before.y + i * 4, id: 0 }]);
+      await touch("touchMove", [{ x: before.x + (8 - before.x) * i / 10, y: before.y + (8 - before.y) * i / 10, id: 0 }]);
       await page.waitForTimeout(16);
     }
     await touch("touchEnd", []);
     await page.waitForTimeout(900);
-    const pin = (await probe(page, (p) => p.mesh.pins()))[id];
+    const pins = await probe(page, (p) => p.mesh.pins());
+    expect(Object.keys(pins)).toEqual([id]);
+    const pin = pins[id];
     expect(pin).toBeDefined();
-    expect(Math.abs(pin!.x - (oldPin?.x ?? 0)) + Math.abs(pin!.y - (oldPin?.y ?? 0))).toBeGreaterThan(20);
+    expect(pin!.x < 0 || pin!.y < 0).toBe(true);
+    expect(await probe(page, (p) => p.camera())).toEqual(cameraBefore);
   } finally {
     await cdp.detach();
     await context.close();
   }
+});
+
+test("drag bounds: a remote negative pin during a drag keeps the moved card under the pointer", async ({ page }, testInfo) => {
+  await open(page);
+  await intoMesh(page);
+  await probe(page, (p) => p.setCanvasLock(false));
+  const view = (await meshBox(page))!;
+  await setCamera(page, view.x + 100, view.y + 100, 1);
+  await page.waitForTimeout(400);
+  const cameraBefore = await probe(page, (p) => p.camera());
+
+  const moving = page.locator('.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill');
+  await expect(moving).toBeVisible();
+  const start = await centre(page, '.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill');
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+
+  const remote = structuredClone((await probe(page, (p) => p.mesh.document()))!);
+  const remoteMesh = remote.views.find((candidate) => candidate.id === "mesh")!;
+  remoteMesh.cell.x -= 11;
+  remoteMesh.cell.y -= 5;
+  remoteMesh.layout.pinned = { "build-01": { x: -1300, y: -490 } };
+  await page.evaluate((document) => (window as unknown as { __tracerClusters: Probe }).__tracerClusters.mesh.applyRemoteLayout(document), remote);
+  await page.waitForTimeout(50);
+
+  const afterRemote = await moving.boundingBox();
+  expect(afterRemote).not.toBeNull();
+  expect(afterRemote!.x + afterRemote!.width / 2).toBeCloseTo(start.x, 0);
+  expect(afterRemote!.y + afterRemote!.height / 2).toBeCloseTo(start.y, 0);
+  expect(await probe(page, (p) => p.camera())).toEqual(cameraBefore);
+  await page.screenshot({ path: testInfo.outputPath("remote-negative-pin-before-next-move.png") });
+
+  await page.mouse.move(start.x + 24, start.y + 16);
+  await page.waitForTimeout(40);
+  const afterMove = await moving.boundingBox();
+  await page.screenshot({ path: testInfo.outputPath("remote-negative-pin-after-next-move.png") });
+  expect(afterMove).not.toBeNull();
+  expect(afterMove!.x + afterMove!.width / 2).toBeCloseTo(start.x + 24, 0);
+  expect(afterMove!.y + afterMove!.height / 2).toBeCloseTo(start.y + 16, 0);
+  await page.mouse.up();
 });
 
 test("dragging a node left in a 1,000-host mesh stays within the shared pin limit", async ({ page }) => {
