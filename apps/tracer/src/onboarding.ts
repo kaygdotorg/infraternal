@@ -179,7 +179,8 @@ function mountSetup(
     body.innerHTML = `<label class="auth-label" for="setup-token">setup token</label>
       <input id="setup-token" class="auth-input auth-mono" type="text" autocomplete="off" spellcheck="false" placeholder="paste token" />
       <p class="auth-error-line" id="setup-token-error" role="alert" hidden></p>
-      <div class="auth-command"><code>infraternal server setup-token</code><button class="icon-action" type="button" aria-label="Copy setup token command" data-copy-command>${swapIcon(CLIPBOARD)}</button></div>`;
+      <div class="auth-command"><code>infraternal server setup-token</code><button class="icon-action" type="button" aria-label="Copy setup token command" data-copy-command>${swapIcon(CLIPBOARD)}</button></div>
+      <p class="auth-hint">Run it on the server, as the user the server runs as. The token expires after 24 hours.</p>`;
     const token = body.querySelector<HTMLInputElement>("#setup-token")!;
     const tokenError = body.querySelector<HTMLElement>("#setup-token-error")!;
     token.value = state.token;

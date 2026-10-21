@@ -15,6 +15,8 @@ test("invalid setup token stays on step 1 with focused guidance", async ({ page 
   await page.emulateMedia({ colorScheme: "dark", reducedMotion: "no-preference" });
   await page.goto("/?mock=1");
   await expect(page.getByRole("heading", { name: "Make this server yours" })).toBeVisible();
+  // The command says as whom to run it and how long the token lives (the socket is private to the server's user).
+  await expect(page.locator(".auth-hint")).toContainText("as the user the server runs as. The token expires after 24 hours.");
 
   // Hold the validation response long enough to check the 400 ms count-up threshold.
   await page.route("**/auth/setup-check", async (route) => {
