@@ -551,4 +551,74 @@ mod cap_review_r3 {
         pool.close().await;
         std::fs::remove_dir_all(dir).unwrap();
     }
+    /// Poll a real SELECT manually: observe its worker wake, then move runtime
+    /// time beyond the attempt before polling its ready result. A retry must
+    /// read the subsequent deletion instead of exposing the late live answer.
+    #[tokio::test(start_paused = true)]
+    async fn ready_result_observed_after_deadline_retries_current_authority() {
+        struct ReadWake(tokio::sync::mpsc::UnboundedSender<()>);
+        impl futures_util::task::ArcWake for ReadWake {
+            fn wake_by_ref(wake: &Arc<Self>) {
+                let _ = wake.0.send(());
+            }
+        }
+
+        let clock = FrozenSocketTime::new().await;
+        let (state, user) = fixture().await;
+        let (entered, mut entry) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let mut entered = Some(entered);
+        let mut connection = state.pool.acquire().await.unwrap();
+        connection
+            .lock_handle()
+            .await
+            .unwrap()
+            .set_progress_handler(1, move || {
+                if let Some(entered) = entered.take() {
+                    let _ = entered.send(());
+                    return released.recv().is_ok();
+                }
+                true
+            });
+        drop(connection);
+
+        let (notify, mut notifications) = tokio::sync::mpsc::unbounded_channel();
+        let waker = futures_util::task::waker(Arc::new(ReadWake(notify)));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut read = Box::pin(read_expiry(
+            &state,
+            &user,
+            "cap-review-r3",
+            false,
+            AUTHORITY_WAIT,
+        ));
+        loop {
+            assert!(std::future::Future::poll(read.as_mut(), &mut context).is_pending());
+            tokio::select! {
+                result = &mut entry => { result.unwrap(); break; },
+                wake = notifications.recv() => { wake.unwrap(); },
+            }
+        }
+        // The SQLite worker is inside the SELECT, blocked by our callback.
+        // Discard earlier acquisition wakes. The next wake after release is
+        // its query result; runtime time cannot advance automatically.
+        while notifications.try_recv().is_ok() {}
+        release.send(()).unwrap();
+        notifications.recv().await.unwrap();
+        tokio::time::advance(AUTHORITY_READ_TIMEOUT + Duration::from_millis(1)).await;
+        assert!(
+            std::future::Future::poll(read.as_mut(), &mut context).is_pending(),
+            "an access check used a live result observed after its attempt deadline"
+        );
+        assert_eq!(state.authority.reads.available_permits(), AUTHORITY_READS);
+        sqlx::query("DELETE FROM sessions WHERE token_hash=?")
+            .bind(crate::auth::hash("cap-review-r3"))
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        tokio::time::advance(AUTHORITY_RETRY_PAUSE).await;
+        assert!(matches!(read.await, Err(AuthorityMiss::Refused)));
+        assert_eq!(state.authority.reads.available_permits(), AUTHORITY_READS);
+        drop(clock);
+    }
 }
