@@ -711,8 +711,11 @@ async fn run_socket(
     let mut loop_result = Ok(());
     let mut teardown_reason = crate::stream_close::SERVER_PROCESSING_FAILED;
     let mut close_already_logged = false;
-    // Set when teardown already read the session's authority, so the 1011 Close below reuses that
-    // answer instead of reading a second time (#227).
+    // AUTHORITY_UNAVAILABLE is provisional after frame errors; only a typed
+    // unavailable result, closed revocation source, or transport end is final.
+    let mut authority_unavailable_known = false;
+    // Set when teardown already read the session's authority, so the final Close
+    // decision reuses that answer instead of reading a second time (#227).
     let mut session_live_at_teardown = None;
     loop {
         transport.active(!attachments.is_empty());
@@ -739,6 +742,7 @@ async fn run_socket(
             changed = revocations.changed() => {
                 if changed.is_err() {
                     teardown_reason = AUTHORITY_UNAVAILABLE;
+                    authority_unavailable_known = true;
                     loop_result = Err(());
                     break;
                 }
@@ -749,7 +753,10 @@ async fn run_socket(
                         // unavailability; only a known deletion/expiry is refusal.
                         teardown_reason = match miss {
                             AuthorityMiss::Refused => RESUME_REFUSED,
-                            AuthorityMiss::Unavailable => AUTHORITY_UNAVAILABLE,
+                            AuthorityMiss::Unavailable => {
+                                authority_unavailable_known = true;
+                                AUTHORITY_UNAVAILABLE
+                            }
                         };
                         loop_result = Err(());
                         break;
@@ -764,7 +771,10 @@ async fn run_socket(
                         // unavailability; only a known deletion/expiry is refusal.
                         teardown_reason = match miss {
                             AuthorityMiss::Refused => RESUME_REFUSED,
-                            AuthorityMiss::Unavailable => AUTHORITY_UNAVAILABLE,
+                            AuthorityMiss::Unavailable => {
+                                authority_unavailable_known = true;
+                                AUTHORITY_UNAVAILABLE
+                            }
                         };
                         loop_result = Err(());
                         break;
@@ -948,8 +958,15 @@ async fn run_socket(
     drop(plugins);
     if !close_already_logged && !attachments.is_empty() {
         let end = transport.end_reason();
+        if end == crate::websocket_transport::EndReason::AuthorityUnavailable {
+            authority_unavailable_known = true;
+        }
         let reason = if end != crate::websocket_transport::EndReason::Open {
             end.close_reason()
+        } else if authority_unavailable_known {
+            // The authority outcome is already known unavailable. Preserve its
+            // classification and release attached streams without another read.
+            AUTHORITY_UNAVAILABLE
         } else if teardown_reason == PROTOCOL_ERROR
             || teardown_reason == AUTHORITY_UNAVAILABLE
             || teardown_reason == crate::stream_close::SERVER_PROCESSING_FAILED
@@ -960,6 +977,7 @@ async fn run_socket(
             let (reason, live) =
                 failure_reason(&state, &user_id, &session_token, teardown_reason).await;
             session_live_at_teardown = Some(live);
+            authority_unavailable_known = reason == AUTHORITY_UNAVAILABLE;
             reason
         } else {
             teardown_reason
@@ -968,32 +986,45 @@ async fn run_socket(
         record_socket_close(&state, &attachments, CloseWho::Server, reason, None, None);
     }
     drop(attachments);
-    // Only a still-authorized browser hears why its socket ended. The liveness
-    // is the one non-renewing, single-attempt read already made for the close
-    // log when the exit was a failure; otherwise make that read now. No wait
-    // and no renewal: a busy store must not hold the transport open here, and
-    // a socket that is closing is not activity (#240).
-    if loop_result.is_err()
-        && match session_live_at_teardown {
-            Some(live) => live,
-            None => teardown_read(&state, &user_id, &session_token)
-                .await
-                .is_ok(),
-        }
-    {
-        let _ = tokio::time::timeout(
-            CLOSE_TIMEOUT,
-            send_frame(
-                &mut sink,
-                CONTROL_STREAM,
-                &Frame::Close {
-                    code: 1011,
-                    reason: teardown_reason.client_text,
+    // A known server_busy outcome reports only server status, so it does not
+    // need another liveness read. Other close details require confirmed
+    // liveness, reusing the close-log read or making one non-renewing attempt.
+    if loop_result.is_err() {
+        let close_allowed = if authority_unavailable_known {
+            true
+        } else {
+            match session_live_at_teardown {
+                Some(live) => live,
+                None => match teardown_read(&state, &user_id, &session_token).await {
+                    Ok(_) => true,
+                    Err(AuthorityMiss::Refused) => false,
+                    Err(AuthorityMiss::Unavailable) => {
+                        authority_unavailable_known = true;
+                        teardown_reason = AUTHORITY_UNAVAILABLE;
+                        true
+                    }
                 },
-                &mut encode,
-            ),
-        )
-        .await;
+            }
+        };
+        if close_allowed {
+            let _ = tokio::time::timeout(
+                CLOSE_TIMEOUT,
+                send_frame(
+                    &mut sink,
+                    CONTROL_STREAM,
+                    &Frame::Close {
+                        code: if authority_unavailable_known {
+                            1013
+                        } else {
+                            1011
+                        },
+                        reason: teardown_reason.client_text,
+                    },
+                    &mut encode,
+                ),
+            )
+            .await;
+        }
     }
     let _ =
         tokio::time::timeout(CLOSE_TIMEOUT, send_message(&mut sink, Message::Close(None))).await;
