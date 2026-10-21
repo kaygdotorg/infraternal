@@ -9,7 +9,9 @@ const viewports = [
 test("invalid setup token stays on step 1 with focused guidance", async ({ page }, testInfo) => {
   test.setTimeout(60_000);
   const context = page.context();
-  await context.request.post("/__mock/reset");
+  // Capture the fresh fixture token before screenshots leave the request connection idle.
+  const resetResponse = await context.request.post("/__mock/reset");
+  const setupBody = await resetResponse.json() as { setup_token: string };
   await page.emulateMedia({ colorScheme: "dark", reducedMotion: "no-preference" });
   await page.goto("/?mock=1");
   await expect(page.getByRole("heading", { name: "Make this server yours" })).toBeVisible();
@@ -43,8 +45,6 @@ test("invalid setup token stays on step 1 with focused guidance", async ({ page 
     screenshots.push(path);
   }
 
-  const setupResponse = await context.request.get("/__mock/setup-token");
-  const setupBody = await setupResponse.json() as { setup_token: string };
   await page.locator("#setup-token").fill(setupBody.setup_token);
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByRole("heading", { name: "Who are you?" })).toBeVisible();
@@ -54,7 +54,9 @@ test("invalid setup token stays on step 1 with focused guidance", async ({ page 
 test("setup, recovery acknowledgement, welcome and returning sign-in match the browser contract", async ({ page }, testInfo) => {
   test.setTimeout(60_000);
   const context = page.context();
-  await context.request.post("/__mock/reset");
+  // Capture the fresh fixture token before screenshots leave the request connection idle.
+  const resetResponse = await context.request.post("/__mock/reset");
+  const setupBody = await resetResponse.json() as { setup_token: string };
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   const cdp = await context.newCDPSession(page);
   await cdp.send("WebAuthn.enable");
@@ -82,8 +84,6 @@ test("setup, recovery acknowledgement, welcome and returning sign-in match the b
   const tokenCenters = await captureState(page, testInfo, "step-1-token", screenshots, "#setup-card");
   await installShiftObserver(page);
 
-  const setupResponse = await context.request.get("/__mock/setup-token");
-  const setupBody = await setupResponse.json() as { setup_token: string };
   await page.locator("#setup-token").fill(setupBody.setup_token);
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.locator("#setup-username")).toBeVisible();
