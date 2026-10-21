@@ -722,25 +722,52 @@ mod child_environment_tests {
         }
     }
 
+    /// Read one process environment snapshot into owned pairs for bounded startup polling.
+    fn read_environment(pid: u32) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let raw = std::fs::read(format!("/proc/{pid}/environ"))?;
+        Ok(raw
+            .split(|byte| *byte == 0)
+            .filter_map(|entry| {
+                let separator = entry.iter().position(|byte| *byte == b'=')?;
+                Some((entry[..separator].to_vec(), entry[separator + 1..].to_vec()))
+            })
+            .collect())
+    }
+
     #[test]
     fn spawned_login_shell_receives_selected_environment_without_other_host_variables() {
         let expected = crate::locale::environment();
         let pty = Pty::spawn(Uid::effective().as_raw(), 80, 24).unwrap();
         let child = ChildGuard(pty.child);
-        let raw = std::fs::read(format!("/proc/{}/environ", child.0.id())).unwrap();
-        let actual = raw
-            .split(|byte| *byte == 0)
-            .filter_map(|entry| {
-                let separator = entry.iter().position(|byte| *byte == b'=')?;
-                Some((&entry[..separator], &entry[separator + 1..]))
-            })
-            .collect::<Vec<_>>();
+        // The spawned shell can start after this test resumes; avoid treating one
+        // early procfs snapshot as the shell's final environment.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let actual = loop {
+            let actual = read_environment(child.0.id()).unwrap();
+            let has_locale = expected.iter().all(|(name, value)| {
+                let name = name.as_os_str().as_encoded_bytes();
+                let value = value.as_os_str().as_encoded_bytes();
+                actual
+                    .iter()
+                    .any(|(actual_name, actual_value)| actual_name == name && actual_value == value)
+            });
+            let has_terminal = actual
+                .iter()
+                .any(|(name, value)| name == b"TERM" && value == b"xterm-256color")
+                && actual
+                    .iter()
+                    .any(|(name, value)| name == b"COLORTERM" && value == b"truecolor");
+            if (has_locale && has_terminal) || std::time::Instant::now() >= deadline {
+                break actual;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
         for (name, value) in expected {
             let name = name.as_os_str().as_encoded_bytes();
             let value = value.as_os_str().as_encoded_bytes();
             assert!(
                 actual.iter().any(|(actual_name, actual_value)| {
-                    *actual_name == name && *actual_value == value
+                    actual_name == name && actual_value == value
                 }),
                 "the login shell must receive the selected locale variable"
             );
@@ -748,23 +775,23 @@ mod child_environment_tests {
         assert!(
             actual
                 .iter()
-                .any(|(name, value)| *name == b"TERM" && *value == b"xterm-256color")
+                .any(|(name, value)| name == b"TERM" && value == b"xterm-256color")
         );
         assert!(
             actual
                 .iter()
-                .any(|(name, value)| *name == b"COLORTERM" && *value == b"truecolor")
+                .any(|(name, value)| name == b"COLORTERM" && value == b"truecolor")
         );
         assert!(actual.iter().all(|(name, _)| {
-            *name == b"HOME"
-                || *name == b"USER"
-                || *name == b"LOGNAME"
-                || *name == b"SHELL"
-                || *name == b"TERM"
-                || *name == b"COLORTERM"
-                || *name == b"PATH"
-                || *name == b"ZDOTDIR"
-                || *name == b"LANG"
+            name == b"HOME"
+                || name == b"USER"
+                || name == b"LOGNAME"
+                || name == b"SHELL"
+                || name == b"TERM"
+                || name == b"COLORTERM"
+                || name == b"PATH"
+                || name == b"ZDOTDIR"
+                || name == b"LANG"
                 || name.starts_with(b"LC_")
         }));
     }
