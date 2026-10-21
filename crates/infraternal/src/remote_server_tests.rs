@@ -92,13 +92,13 @@ async fn missing_ca_refuses_before_database_or_listener_creation() {
         trusted_proxies: vec![],
     };
     assert!(
-        serve(
+        Box::pin(serve(
             config,
             Options {
                 remote_listen: Some("127.0.0.1:7443".parse().unwrap()),
                 remote_ca_dir: Some(directory.join("ca"))
             }
-        )
+        ))
         .await
         .is_err()
     );
@@ -203,6 +203,7 @@ fn failed_restart_endpoint_does_not_prevent_http_serving() {
         process::{Command, Stdio},
         time::Duration,
     };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     const NAME: &str =
         "remote_server::tests::failed_restart_endpoint_does_not_prevent_http_serving";
     if std::env::var_os("INFRATERNAL_CONTROL_FAILURE_TEST").is_some() {
@@ -220,18 +221,17 @@ fn failed_restart_endpoint_does_not_prevent_http_serving() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         drop(listener);
-        let config = infraternal_server::ServerConfig {
-            listen: address,
-            data_dir: directory.clone(),
-            public_origin: "https://localhost".into(),
-            web_root: None,
-            tls: None,
-            behind_proxy: true,
-            trusted_proxies: vec!["127.0.0.1".parse().unwrap()],
-        };
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let serving = tokio::spawn(serve(config, Options { remote_listen: None, remote_ca_dir: None }));
+            let serving = async move {
+                let listener = tokio::net::TcpListener::bind(address).await.expect("HTTP bind");
+                let (mut stream, _) = listener.accept().await.expect("HTTP accept");
+                let mut request = [0_u8; 256];
+                let _ = stream.read(&mut request).await.expect("HTTP request");
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await.expect("HTTP reply");
+                Ok::<(), infraternal_server::ServerError>(())
+            };
+            let serving = tokio::spawn(serve_behind_control(directory.clone(), serving));
             // Polls until the listener answers; the limit only catches a real hang, since a
             // debug-build startup under host load can exceed any short fixed budget.
             let deadline = std::time::Instant::now() + Duration::from_secs(60);
@@ -244,7 +244,6 @@ fn failed_restart_endpoint_does_not_prevent_http_serving() {
                     }
                 }
                 if let Ok(mut stream) = tokio::net::TcpStream::connect(address).await {
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
                     stream.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").await.unwrap();
                     let mut reply = Vec::new(); stream.read_to_end(&mut reply).await.unwrap();
                     assert!(reply.starts_with(b"HTTP/1.1 200"));
@@ -253,7 +252,7 @@ fn failed_restart_endpoint_does_not_prevent_http_serving() {
                 assert!(std::time::Instant::now() < deadline, "HTTP startup deadline");
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            serving.abort(); let _ = serving.await;
+            assert!(matches!(serving.await.unwrap(), Ok(Outcome::Stopped)));
         });
         runtime.shutdown_timeout(Duration::from_secs(4));
         std::fs::remove_dir_all(directory).unwrap();
