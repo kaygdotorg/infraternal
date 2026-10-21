@@ -70,3 +70,13 @@ test("a signed helper variant always carries a checked shipped-bundle restoratio
   });
   expect(() => validate({ env: { APP_WINDOW_VARIANT_ARCHIVE: env.APP_WINDOW_VARIANT_ARCHIVE } }, undefined, undefined)).toThrow("helper variant and restoration archives must be supplied together");
 });
+
+
+test("concurrent opening is explicit and requires ten fixture windows", () => {
+  const configuration = source.slice(source.indexOf("const resourcesOnly="), source.indexOf("const port="));
+  const validate = new Function("process", new Bun.Transpiler({ loader: "ts" }).transformSync(configuration + "return openMode;"));
+  expect(validate({ env: {} })).toBe("serial");
+  expect(validate({ env: { APP_WINDOW_TEN_WINDOW_IDLE: "1", APP_WINDOW_OPEN_MODE: "concurrent" } })).toBe("concurrent");
+  expect(() => validate({ env: { APP_WINDOW_OPEN_MODE: "concurrent" } })).toThrow("concurrent opening requires ten fixture windows");
+  expect(() => validate({ env: { APP_WINDOW_OPEN_MODE: "invalid" } })).toThrow("invalid fixture open mode");
+});
