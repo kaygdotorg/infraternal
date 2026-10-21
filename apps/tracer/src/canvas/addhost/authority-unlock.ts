@@ -37,10 +37,11 @@ const STALE_MS = 30_000;
 const RESUME_MS = 5_000;
 /** The sign-in toast waits this long for the person before it hands the item to the inbox. */
 const TOAST_MS = 30_000;
-export const LOCKED_TITLE = "Host connections are locked";
+/** Calm and literal: the lock is routine after every restart, so the words say why and what to do, not "locked". */
+export const LOCKED_TITLE = "The server restarted. Confirm your passkey once to reconnect your hosts.";
 /** The inbox line: what the person does, not the state. The toast keeps the state wording. */
 export const UNLOCK_TITLE = "Unlock host connections";
-export const LOCKED_DETAIL = "Host connections are locked. Confirm with your passkey to connect to hosts.";
+export const LOCKED_DETAIL = "The server restarted, so it needs your passkey once to reconnect your hosts.";
 
 export type AuthorityState = "unknown" | "locked" | "unlocked";
 
