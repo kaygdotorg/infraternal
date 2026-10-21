@@ -1,11 +1,16 @@
 //! Independent control and capture workers prevent snapshot/encode latency from delaying input [D200,D203,D208].
+#[cfg(target_os = "macos")]
+use crate::capture::{Capture, CapturedFrame};
+#[cfg(target_os = "macos")]
+use crate::macos::MacCapture;
 use crate::{
-    capture::{Capture, CapturedFrame, Rect},
-    macos::MacCapture,
+    capture::Rect,
     native::Native,
     protocol::{self, Kind, Size, Start},
 };
+#[cfg(target_os = "macos")]
 use std::hash::Hasher;
+#[cfg(target_os = "macos")]
 #[derive(serde::Deserialize)]
 struct Clock {
     capture_ticks: u64,
@@ -79,10 +84,20 @@ impl Worker {
         // Retain owned pixels only for explicit diagnostics; normal capture
         // never takes the full-image copy/hash/pipe or polling path.
         let surface = std::env::var_os("INFRATERNAL_DESKTOP_OWNED").is_none();
+        #[cfg(target_os = "macos")]
         let capture = if surface {
             None
         } else {
             Some(MacCapture::start(&start.target, start.size, rect)?)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let capture = {
+            if !surface {
+                return Err(io::Error::other(
+                    "Owned-pixel desktop capture is available only on macOS.",
+                ));
+            }
+            None::<()>
         };
         let pending = Arc::new(Mutex::new(None));
         let update = Arc::clone(&pending);
@@ -97,6 +112,7 @@ impl Worker {
         let screen = matches!(start.target, protocol::Target::Screen { .. });
         let start = start.clone();
         let thread = thread::spawn(move || {
+            #[cfg(target_os = "macos")]
             let result = if let Some(capture) = capture {
                 produce(
                     capture,
@@ -112,6 +128,23 @@ impl Worker {
                     },
                 )
             } else {
+                produce_surface(
+                    start,
+                    rect,
+                    &native_path,
+                    Production {
+                        pending: &update,
+                        stop: &cancelled,
+                        force_keyframe: &force,
+                        congested: &pressure,
+                        frames: &sender,
+                        wake: &wake,
+                    },
+                )
+            };
+            #[cfg(not(target_os = "macos"))]
+            let result = {
+                let _ = capture;
                 produce_surface(
                     start,
                     rect,
@@ -170,6 +203,7 @@ struct Production<'a> {
     frames: &'a mpsc::SyncSender<io::Result<Vec<u8>>>,
     wake: &'a Wake,
 }
+#[cfg(target_os = "macos")]
 fn produce(
     mut capture: MacCapture,
     mut size: Size,
@@ -282,6 +316,98 @@ fn produce(
         next_frame = begin;
     }
     capture.stop()
+}
+
+#[cfg(test)]
+mod startup_recovery_tests {
+    //! Exercises the real native-surface producer with a scripted companion that misses its startup keyframe.
+    use super::*;
+    use std::{fs, os::unix::fs::PermissionsExt, sync::atomic::AtomicU64};
+
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn delta_before_startup_keyframe_requests_repair_before_delivery() {
+        let root = std::env::temp_dir().join(format!(
+            "infraternal-desktop-first-picture-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).expect("create private test directory");
+        let native_path = root.join("surface-native");
+        fs::write(
+            &native_path,
+            include_bytes!("../tests/fixtures/surface-first-picture.py"),
+        )
+        .expect("write scripted companion");
+        fs::set_permissions(&native_path, fs::Permissions::from_mode(0o700))
+            .expect("make scripted companion executable");
+
+        let start = Start {
+            target: protocol::Target::Screen { display_id: 1 },
+            size: Size {
+                width: 64,
+                height: 48,
+                canvas_width: 64.0,
+                canvas_height: 48.0,
+                backing_scale: 1.0,
+            },
+        };
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 48.0,
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let pending = Arc::new(Mutex::new(None));
+        let force_keyframe = Arc::new(AtomicBool::new(false));
+        let congested = Arc::new(AtomicBool::new(false));
+        let (frames, received) = mpsc::sync_channel(1);
+        let wake = Arc::new(Wake::default());
+        let worker_stop = Arc::clone(&stop);
+        let worker_pending = Arc::clone(&pending);
+        let worker_force = Arc::clone(&force_keyframe);
+        let worker_congested = Arc::clone(&congested);
+        let worker_wake = Arc::clone(&wake);
+        let worker_path = native_path.clone();
+        let worker = thread::spawn(move || {
+            produce_surface(
+                start,
+                rect,
+                &worker_path,
+                Production {
+                    pending: &worker_pending,
+                    stop: &worker_stop,
+                    force_keyframe: &worker_force,
+                    congested: &worker_congested,
+                    frames: &frames,
+                    wake: &worker_wake,
+                },
+            )
+        });
+
+        let first = received.recv_timeout(Duration::from_secs(2));
+        stop.store(true, Ordering::Release);
+        let _ = worker.join();
+        let requests =
+            fs::read_to_string(format!("{}.requests", native_path.display())).unwrap_or_default();
+        let _ = fs::remove_dir_all(&root);
+
+        let frame = first
+            .expect("startup delta must trigger a repair keyframe")
+            .unwrap();
+        assert_eq!(
+            frame.get(8),
+            Some(&1),
+            "only a keyframe can start this stream"
+        );
+        assert_eq!(
+            requests.lines().count(),
+            1,
+            "one startup gap needs one repair request"
+        );
+    }
 }
 
 fn produce_surface(

@@ -4,13 +4,13 @@
 pub mod capture;
 #[cfg(feature = "desktop")]
 pub mod component;
-#[cfg(all(feature = "desktop", target_os = "macos"))]
+#[cfg(all(feature = "desktop", any(target_os = "macos", test)))]
 pub mod helper;
 #[cfg(all(feature = "desktop", target_os = "macos"))]
 pub mod macos;
 #[cfg(feature = "desktop")]
 pub mod manifest;
-#[cfg(all(feature = "desktop", target_os = "macos"))]
+#[cfg(all(feature = "desktop", any(target_os = "macos", test)))]
 pub mod native;
 pub mod protocol;
 #[cfg(test)]
@@ -23,7 +23,7 @@ pub mod datagram;
 #[cfg(any(
     feature = "source",
     feature = "server",
-    all(feature = "desktop", target_os = "macos")
+    all(feature = "desktop", any(target_os = "macos", test))
 ))]
 mod measurement;
 #[cfg(any(feature = "source", feature = "server"))]
