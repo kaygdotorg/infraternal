@@ -545,7 +545,7 @@ class FirstPictureIdleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'invalid helper binary path'):
                 validate('relative/helper', default, bench)
 
-    def test_decode_timeout_is_recorded_and_does_not_stop_the_short_check(self):
+    def test_decode_timeout_is_recorded_and_stops_capture_immediately(self):
         source = pathlib.Path(__file__).with_name('measure-mac.py')
         function = next(node for node in ast.parse(source.read_text()).body
                         if isinstance(node, ast.FunctionDef) and node.name == 'wait_for_first_picture')
@@ -567,16 +567,18 @@ class FirstPictureIdleTests(unittest.TestCase):
         rows, checks, failures = [], [], []
         namespace = {'PlaywrightTimeoutError': PictureTimeout,
                      'args': {'first_picture_idle': True}, 'emit': rows.append,
-                     'consent_check': lambda: checks.append(True)}
+                     'consent_check': lambda: checks.append(True),
+                     'stop_capture': lambda: checks.append('stopped')}
         exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
-        namespace['wait_for_first_picture'](Card(), 2, failures)
+        with self.assertRaisesRegex(RuntimeError, 'native first picture unavailable'):
+            namespace['wait_for_first_picture'](Card(), 2, failures)
         self.assertEqual(failures, [{'fixture_index': 3, 'window_id': 'fixture-window-3',
                                      'card_state': 'failed:decode', 'picture': 'error',
                                      'card_rect': {'x': 10, 'y': 20, 'width': 300, 'height': 200},
                                      'stage_rect': {'x': 10, 'y': 20, 'width': 300, 'height': 200},
                                      'page_state': {'hidden': False, 'innerWidth': 848, 'innerHeight': 820}}])
         self.assertEqual(rows, [{'kind': 'first_picture_failure', **failures[0]}])
-        self.assertEqual(checks, [True])
+        self.assertEqual(checks, ['stopped'])
 
     def test_first_picture_idle_branch_checks_ten_live_windows_for_sixty_seconds(self):
         source = pathlib.Path(__file__).with_name('measure-mac.py')

@@ -333,7 +333,7 @@ def first_picture(previous=None):
   raise
 
 def wait_for_first_picture(card,index,failures):
- """Keep a decode timeout as a receipt in the short diagnostic so later windows and idle can finish."""
+ """Record a missing native picture and retire capture before any next window or phase."""
  try:card.locator('.aw-stage[data-picture="live"]').wait_for(timeout=15000)
  except PlaywrightTimeoutError:
   if not args.get('first_picture_idle'):raise
@@ -345,6 +345,8 @@ def wait_for_first_picture(card,index,failures):
            'stage_rect':card.locator('.aw-stage').bounding_box(),
            'page_state':card.evaluate('(node) => ({hidden: document.hidden, innerWidth: window.innerWidth, innerHeight: window.innerHeight})')}
   failures.append(failure);emit({'kind':'first_picture_failure',**failure})
+  stop_capture()
+  raise RuntimeError('native first picture unavailable')
  consent_check()
 
 def fixture_target_rows(reports,canvas_ids,window_ids,owner_pid):
