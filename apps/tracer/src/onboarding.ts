@@ -10,6 +10,8 @@ import { BRAND_MARK, KEY_MARK } from "./auth-marks";
 
 /** The longest display name, in characters: the input's maxlength, the validation and the hint all read this. */
 const DISPLAY_NAME_MAX = 64;
+/** Shown under the username field from the start, so the rule is known before the first wrong key. */
+const USERNAME_RULE = "Use 2–32 lowercase letters, digits, _ or -.";
 
 const SETUP_STEPS = [
   { title: "Make this server yours", lede: "Paste the one-time setup token. It is shown only on the server, so only you can claim it." },
@@ -242,10 +244,10 @@ function mountSetup(
     const refreshHint = () => {
       markMotion(username.matches(":focus-visible") || displayName.matches(":focus-visible"));
       hint.textContent = state.username && !validUsername(state.username)
-        ? "Use 2–32 lowercase letters, digits, _ or -."
+        ? USERNAME_RULE
         : state.displayName && [...state.displayName].length > DISPLAY_NAME_MAX
           ? `Display names can be at most ${DISPLAY_NAME_MAX} characters.`
-          : " ";
+          : USERNAME_RULE;
       updateReady();
     };
     username.addEventListener("input", () => {
