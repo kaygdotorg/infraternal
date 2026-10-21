@@ -160,9 +160,23 @@ impl Auth {
     }
 
     /// Read a socket's actual deadline without sliding it during idle checks.
-    pub(crate) async fn live_expiry(&self, token: &str, user: &str, now: i64) -> Result<i64> {
-        sqlx::query_scalar("SELECT expires FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>?")
-            .bind(hash(token)).bind(user).bind(now).fetch_optional(&self.pool).await?.ok_or(Error::Denied)
+    /// `hold` stays with the SELECT future until it completes, even if the
+    /// caller's wait expires. Pool return and health checks may finish afterward.
+    pub(crate) fn live_expiry(
+        &self,
+        token: &str,
+        user: &str,
+        now: i64,
+        hold: impl Send + 'static,
+    ) -> impl std::future::Future<Output = Result<i64>> + Send + 'static {
+        let pool = self.pool.clone();
+        let token_hash = hash(token);
+        let user = user.to_owned();
+        async move {
+            let _hold = hold;
+            sqlx::query_scalar("SELECT expires FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>?")
+                .bind(token_hash).bind(user).bind(now).fetch_optional(&pool).await?.ok_or(Error::Denied)
+        }
     }
 }
 

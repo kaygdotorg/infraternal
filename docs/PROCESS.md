@@ -145,8 +145,8 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,387,248 bytes |
-  | `aarch64-unknown-linux-musl` | 19,559,400 bytes |
+  | `x86_64-unknown-linux-musl` | 21,389,232 bytes |
+  | `aarch64-unknown-linux-musl` | 19,561,656 bytes |
 
   Release jobs (not `scripts/verify fast`, which every job runs) also run
   `scripts/test-static-reproducibility.py`. It builds both targets again from a detached checkout with separate
@@ -176,6 +176,20 @@ Reviews and fixes run at the same time as the next lane's build.
   21,387,248 / 19,559,400 bytes with the same pinned static recipe: +1,024 /
   +1,408 bytes versus release 9. Both exact caps ratchet to these measured
   values; the receipts are on #24.
+
+  Release 9.3's socket authority read cap (#240) measures 21,389,296 /
+  19,561,656 bytes with the same pinned static recipe: +2,048 / +2,256 bytes
+  versus release 9.2. Both exact caps ratchet to these measurements with no
+  allowance (D243); the release artifacts and receipts are on #24. The
+  rustls-webpki 0.103.16 lockfile update measured 21,387,248 / 19,559,400
+  bytes for release 9.2, +1,024 / +1,408 versus release 9.
+
+  The release 9.3 merge back into dev (#24, #240) keeps dev's optional
+  per-user host and brings in the authority read cap unchanged; dev had not
+  touched the auth or websocket sources since the merge base. The merged
+  source measures 21,389,232 / 19,561,656 bytes with the same pinned static
+  recipe: -64 / +0 bytes versus release 9.3. The x86_64 cap ratchets down to
+  that measurement and the aarch64 cap stays (D243).
 
   The reply-reservation production fix (#24, D307) measures 21,387,120 /
   19,558,856 bytes with the same pinned static recipe: -64 / -256 bytes

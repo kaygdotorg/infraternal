@@ -141,6 +141,78 @@ impl Drop for RenewalHold {
     }
 }
 
+/// Keep a server-wide read place until its SELECT future completes.
+struct AuthorityReadHold(Arc<AuthorityLimits>);
+
+impl AuthorityReadHold {
+    /// Move a borrowed permit into an owned query lifetime.
+    fn take(limits: Arc<AuthorityLimits>, place: tokio::sync::SemaphorePermit<'_>) -> Self {
+        place.forget();
+        Self(limits)
+    }
+}
+
+impl Drop for AuthorityReadHold {
+    fn drop(&mut self) {
+        self.0.reads.add_permits(1);
+    }
+}
+
+/// Retain a timed-out query in a unit-output task after its caller has left.
+fn detach_authority_query<F>(query: std::pin::Pin<Box<F>>)
+where
+    F: std::future::Future + Send + 'static,
+{
+    let detached: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> =
+        Box::pin(async move {
+            let _ = query.await;
+        });
+    tokio::spawn(detached);
+}
+
+/// Keep a pinned query alive when its enclosing authority attempt is cancelled.
+struct DetachOnDrop<F: std::future::Future + Send + 'static>(Option<std::pin::Pin<Box<F>>>)
+where
+    F::Output: Send;
+
+impl<F: std::future::Future + Send + 'static> std::future::Future for DetachOnDrop<F>
+where
+    F::Output: Send,
+{
+    type Output = F::Output;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        let Some(query) = this.0.as_mut() else {
+            return std::task::Poll::Pending;
+        };
+        match std::future::Future::poll(query.as_mut(), context) {
+            std::task::Poll::Ready(result) => {
+                this.0.take();
+                std::task::Poll::Ready(result)
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+impl<F: std::future::Future + Send + 'static> Drop for DetachOnDrop<F>
+where
+    F::Output: Send,
+{
+    fn drop(&mut self) {
+        if let Some(query) = self.0.take() {
+            // The attempt timeout drops this wrapper; the detached SELECT keeps
+            // its place until its future completes. Pool health checks may finish
+            // afterward, so the place counts active queries, not idle connections.
+            detach_authority_query(query);
+        }
+    }
+}
+
 /// State shared by the authenticated browser socket route.
 #[derive(Clone)]
 pub(crate) struct WebSocketState {
@@ -2355,11 +2427,14 @@ async fn authority_deadline(
 /// the retry loop is compiled once (D243).
 ///
 /// Only the read is retried. It is a SELECT, which a WAL database serves while
-/// another connection holds the write lock, so a dropped attempt gives its
-/// connection back as soon as its statement returns. The renewal is a write
-/// that may wait seconds for that lock; it never runs here (`renew_soon`).
-/// Each attempt holds one of the `AUTHORITY_READS` places, so however many
-/// sockets retry at once they hold at most that many connections.
+/// another connection holds the write lock. The renewal is a write that may
+/// wait seconds for that lock; it never runs here (`renew_soon`). Each attempt
+/// obtains one of the `AUTHORITY_READS` places within its deadline. Fast SELECTs
+/// run inline. If one misses its deadline, `DetachOnDrop` moves its pinned
+/// future into a task with its place until the SELECT future completes. Pool
+/// return and health checks may finish afterward, so the place bounds active
+/// queries rather than an instantaneous pool-idle count. A retry cannot start
+/// another SELECT while its previous query future remains in flight.
 ///
 /// Expiry is monotonic: once a session's end has passed it is never found live
 /// again. Every attempt reads the wall clock when it starts, so a retry after a
@@ -2381,28 +2456,30 @@ async fn read_expiry(
     let give_up = tokio::time::Instant::now() + wait;
     let mut pause = AUTHORITY_RETRY_PAUSE;
     let expiry = loop {
+        let attempt_deadline = tokio::time::Instant::now() + read_timeout;
         let read = async {
             let reads = &state.authority.reads;
             let place = match reads.try_acquire() {
                 Ok(place) => place,
                 Err(_) => reads.acquire().await.ok()?,
             };
-            let result = match unix_seconds() {
-                Ok(now) => state
-                    .auth
-                    .live_expiry(token, user_id, now)
-                    .await
-                    .map_err(|error| match error {
-                        crate::auth::Error::Denied => AuthorityMiss::Refused,
-                        _ => AuthorityMiss::Unavailable,
-                    }),
-                Err(()) => Err(AuthorityMiss::Unavailable),
+            let Ok(now) = unix_seconds() else {
+                drop(place);
+                return Some(Err(AuthorityMiss::Unavailable));
             };
-            drop(place);
-            Some(result)
+            let hold = AuthorityReadHold::take(Arc::clone(&state.authority), place);
+            let query = DetachOnDrop(Some(Box::pin(
+                state.auth.live_expiry(token, user_id, now, hold),
+            )));
+            Some(query.await.map_err(|error| match error {
+                crate::auth::Error::Denied => AuthorityMiss::Refused,
+                _ => AuthorityMiss::Unavailable,
+            }))
         };
-        match tokio::time::timeout(read_timeout, read).await {
-            Ok(Some(result)) => break result?,
+        match tokio::time::timeout_at(attempt_deadline, read).await {
+            // A future that does not yield can finish after the timer. Keep the
+            // explicit post-result check so such a completion still retries.
+            Ok(Some(result)) if tokio::time::Instant::now() <= attempt_deadline => break result?,
             _ if tokio::time::Instant::now() + pause < give_up => {
                 tokio::time::sleep(pause).await;
                 pause = (pause * 2).min(AUTHORITY_RETRY_PAUSE_MAX);

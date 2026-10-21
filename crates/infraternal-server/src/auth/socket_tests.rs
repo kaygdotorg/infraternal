@@ -921,3 +921,6 @@ mod review_mobile_visibility;
 #[cfg(all(feature = "canvas", feature = "mesh"))]
 #[path = "socket_tests/canvas.rs"]
 mod canvas;
+
+#[path = "socket_tests/review_authority_cap.rs"]
+mod review_authority_cap;
