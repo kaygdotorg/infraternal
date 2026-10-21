@@ -981,3 +981,80 @@ async fn revoked_before_subscription(mode: SocketMode) {
     );
     assert!(!matches!(closed.unwrap(), Some(Ok(ClientMessage::Text(_)))));
 }
+
+#[tokio::test]
+async fn review_account_scope_logout_after_subscription_retires_idle_bootstrap() {
+    let (auth, _, cookie, backend, address, serving, _, _) = fixture(false).await;
+    let (mut socket, _) = connect_async(request(address, ORIGIN, Some(&cookie)))
+        .await
+        .unwrap();
+    // A response fences run's subscription and entry read before this logout.
+    socket
+        .send(ClientMessage::Text(
+            serde_json::json!({"action":"review-invalid"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap(),
+        Some(Ok(ClientMessage::Text(_)))
+    ));
+    auth.logout(cookie.split_once('=').unwrap().1)
+        .await
+        .unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(2), socket.next()).await;
+    serving.abort();
+    assert!(
+        closed.is_ok(),
+        "logout after subscription left bootstrap open"
+    );
+    assert!(!matches!(closed.unwrap(), Some(Ok(ClientMessage::Text(_)))));
+    assert_eq!(backend.0.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn review_account_scope_lost_bootstrap_source_retires_instead_of_spinning() {
+    let (auth, owner, cookie, _, address, serving, _, api) = fixture(false).await;
+    let (mut socket, _) = connect_async(request(address, ORIGIN, Some(&cookie)))
+        .await
+        .unwrap();
+    socket
+        .send(ClientMessage::Text(
+            serde_json::json!({"action":"review-invalid"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap(),
+        Some(Ok(ClientMessage::Text(_)))
+    ));
+    let source = auth.revocation_events(&owner);
+    source.close_source_for_test();
+    let closed = tokio::time::timeout(Duration::from_secs(2), socket.next()).await;
+    // An upgrade has its own task. Retire it even when the source-loss assertion
+    // fails; aborting only the listener would leave the fixture's loop alive.
+    auth.logout(cookie.split_once('=').unwrap().1)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while api.sockets.available_permits() != 16 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    serving.abort();
+    assert!(
+        closed.is_ok(),
+        "lost revocation source retained bootstrap instead of failing closed"
+    );
+    assert!(!matches!(closed.unwrap(), Some(Ok(ClientMessage::Text(_)))));
+}
