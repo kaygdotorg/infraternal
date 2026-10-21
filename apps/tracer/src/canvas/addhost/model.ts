@@ -20,7 +20,7 @@ export const STAGES: ReadonlyArray<{ id: StageId; label: string }> = [
   { id: "detect", label: "Find a way to sign in" },
   { id: "connect", label: "Connect and check the host" },
   { id: "install", label: "Install the infraternal agent" },
-  { id: "enrol", label: "Let the host join" },
+  { id: "enrol", label: "Connect the host to this server" },
   { id: "session", label: "Open a terminal on the host" },
 ];
 
@@ -45,7 +45,7 @@ export function failureLine(failure: FailureDetail | undefined): string {
     case "setup_running": return "Setup is already running on this host";
     case "install":
       if (failure.failed_step === "get-arm64-binary" || failure.failed_step === "get-x86-64-binary") {
-        return `Get the ${failure.failed_step === "get-arm64-binary" ? "arm64" : "x86_64"} binary: ${failure.message}`;
+        return `Download infraternal (${failure.failed_step === "get-arm64-binary" ? "arm64" : "x86_64"}): ${failure.message}`;
       }
       if (failure.already_added) return failure.message;
       if (failure.missing_binary) return `The ${failure.missing_binary.architecture} static infraternal binary is unavailable. Put it at ${failure.missing_binary.path} on the server, then try again.`;

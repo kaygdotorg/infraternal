@@ -41,9 +41,10 @@ import type { AddHostSink, DiscoveredHost, EnrolledHost, InstallCommand, Provisi
 /** Trusted bootstrap boundaries use plain labels in the existing details disclosure. */
 const FAILED_STEP_LABELS: Record<NonNullable<FailureDetail["failed_step"]>, string> = {
   connect: "Connect to the host",
-  "get-arm64-binary": "Get the arm64 binary", "get-x86-64-binary": "Get the x86_64 binary",
-  upload: "Upload the binary", install: "Install the infraternal agent",
-  join: "Join the host to this server", start: "Start the host service", readiness: "Check terminal readiness",
+  // Plain names first; the processor architecture stays as quiet secondary text, where it helps to pick the right file.
+  "get-arm64-binary": "Download infraternal (arm64)", "get-x86-64-binary": "Download infraternal (x86_64)",
+  upload: "Copy infraternal to the host", install: "Install infraternal on the host",
+  join: "Connect the host to this server", start: "Start infraternal on the host", readiness: "Check that the terminal opens",
 };
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 const SOURCE_LABELS: Record<HostSource, string> = { netbird: "NetBird", tailscale: "Tailscale", "known-hosts": "Known hosts", "ssh-config": "SSH config", "already-added": "Added" };
