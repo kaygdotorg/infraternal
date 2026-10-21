@@ -11,6 +11,15 @@ use super::*;
 use sqlx::Connection;
 use sqlx::sqlite::{SqliteConnection, SqliteJournalMode};
 
+#[derive(Debug)]
+enum SocketOutcome {
+    ExplicitClose,
+    EndOfStream,
+    ReadError,
+    UnexpectedMessage,
+    TimedOut,
+}
+
 fn call(call_id: u32) -> Frame<'static> {
     Frame::Call {
         call_id,
@@ -89,9 +98,11 @@ async fn retries_whose_select_waits_stay_within_the_authority_cap() {
     );
 }
 
-/// Count real socket outcomes when the shared store cannot serve any access
-/// check. Use the per-person ceiling of sixteen sockets. Transport pings
-/// remain serviced so liveness cannot explain a Close.
+/// Count terminal socket outcomes when the shared store cannot serve any
+/// access check. Use the per-person ceiling of sixteen sockets. Transport
+/// pings remain serviced so liveness cannot explain termination. The server's
+/// best-effort Close write is bounded; if that deadline expires, a TCP reset
+/// is still a terminal fail-closed outcome.
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // Keep socket setup, all outcomes and cleanup together.
 async fn every_socket_in_a_full_place_storm_fails_closed_without_a_reply() {
@@ -119,13 +130,13 @@ async fn every_socket_in_a_full_place_storm_fails_closed_without_a_reply() {
     }))
     .await;
     let held = f.auth.pool.acquire().await.unwrap();
-    let outcomes =
-        futures_util::future::join_all(browsers.into_iter().map(|mut socket| async move {
+    let outcomes = futures_util::future::join_all(browsers.into_iter().enumerate().map(
+        |(index, mut socket)| async move {
             client_ws_send(&mut socket, 0, &call(1)).await;
-            tokio::time::timeout(Duration::from_secs(15), async {
+            let outcome = tokio::time::timeout(Duration::from_secs(15), async {
                 loop {
                     match socket.next().await {
-                        Some(Ok(Message::Close(_))) => break true,
+                        Some(Ok(Message::Close(_))) => break SocketOutcome::ExplicitClose,
                         Some(Ok(Message::Ping(bytes))) => {
                             socket.send(Message::Pong(bytes)).await.unwrap();
                         }
@@ -147,17 +158,32 @@ async fn every_socket_in_a_full_place_storm_fails_closed_without_a_reply() {
                                 _ => {}
                             }
                         }
-                        _ => break false,
+                        Some(Err(_)) => break SocketOutcome::ReadError,
+                        None => break SocketOutcome::EndOfStream,
+                        Some(Ok(_)) => break SocketOutcome::UnexpectedMessage,
                     }
                 }
             })
             .await
-            .unwrap_or(false)
-        }))
-        .await;
+            .unwrap_or(SocketOutcome::TimedOut);
+            (index, outcome)
+        },
+    ))
+    .await;
     // Release only after all socket outcomes have been observed. Detached
     // access checks must not keep the transport open until pool acquisition.
     drop(held);
     server.abort();
-    assert_eq!(outcomes.iter().filter(|&&closed| closed).count(), 16);
+    let terminal_count = outcomes
+        .iter()
+        .filter(|(_, outcome)| {
+            matches!(
+                outcome,
+                SocketOutcome::ExplicitClose
+                    | SocketOutcome::EndOfStream
+                    | SocketOutcome::ReadError
+            )
+        })
+        .count();
+    assert_eq!(terminal_count, 16, "socket terminal outcomes: {outcomes:?}");
 }
