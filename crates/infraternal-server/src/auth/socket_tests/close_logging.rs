@@ -804,11 +804,19 @@ async fn revoked_session_during_transient_stall_logs_resume_refused() {
     revocation_stall(RevocationStall::Revoked).await;
 }
 
+/// A missed wake read already exhausted its authority wait. Stream cleanup
+/// must not inherit an additional classification read before releasing it.
+#[tokio::test(start_paused = true)]
+async fn revoked_busy_wake_records_stream_end_within_the_existing_wait() {
+    revocation_stall(RevocationStall::RevokedEndDeadline).await;
+}
+
 #[derive(Clone, Copy)]
 enum RevocationStall {
     Unavailable,
     OtherAccount,
     Revoked,
+    RevokedEndDeadline,
 }
 
 /// Share the attached-terminal fixture so the only varying inputs are whose
@@ -977,7 +985,9 @@ async fn revocation_stall(stall: RevocationStall) {
     };
     if matches!(
         stall,
-        RevocationStall::OtherAccount | RevocationStall::Revoked
+        RevocationStall::OtherAccount
+            | RevocationStall::Revoked
+            | RevocationStall::RevokedEndDeadline
     ) {
         let deleted = sqlx::query("DELETE FROM sessions WHERE user_id=?")
             .bind(user)
@@ -988,6 +998,27 @@ async fn revocation_stall(stall: RevocationStall) {
         assert_eq!(deleted, 1);
     }
     f.auth.revocations.send_replace(());
+    if matches!(stall, RevocationStall::RevokedEndDeadline) {
+        while pending_reads() == 0 {
+            tokio::task::yield_now().await;
+        }
+        let started = tokio::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(1) {
+            tokio::time::advance(Duration::from_millis(5)).await;
+            for _ in 0..32 {
+                tokio::task::yield_now().await;
+            }
+        }
+        let events = capture.events("terminal_stream_closed");
+        drop(held);
+        agent.abort();
+        server.abort();
+        assert!(
+            !events.is_empty(),
+            "stream cleanup waited beyond the existing authority wait for another classification read"
+        );
+        return;
+    }
     let release = if clock.is_some() {
         tokio::time::timeout(Duration::from_secs(1), async {
             while pending_reads() == 0 {
