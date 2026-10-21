@@ -927,3 +927,57 @@ fn start_fresh_request_is_bound_to_a_target_and_public_challenge() {
 #[cfg(feature = "remote")]
 #[path = "bootstrap_setup_api_tests.rs"]
 mod setup_status_tests;
+
+// Bootstrap admission-to-subscription regressions for #240.
+#[tokio::test]
+async fn bootstrap_logout_before_subscription_closes_idle_upgrade() {
+    revoked_before_subscription(SocketMode::Bootstrap).await;
+}
+
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn setup_logout_before_subscription_closes_idle_upgrade() {
+    revoked_before_subscription(SocketMode::Setup).await;
+}
+
+async fn revoked_upgrade(
+    State(api): State<Arc<Api>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    mode: SocketMode,
+) -> Response {
+    let (owner, token) = authenticate_headers(&api, &headers).await.unwrap();
+    let token = Secret::new(token.as_bytes().to_vec());
+    // Commit in the exact gap after admission but before run installs its receiver.
+    api.auth
+        .logout(std::str::from_utf8(token.expose()).unwrap())
+        .await
+        .unwrap();
+    let activity = api.runner.activity().unwrap();
+    let permit = api.sockets.clone().acquire_owned().await.unwrap();
+    upgrade_admitted(ws, api, owner, token, activity, permit, mode)
+}
+
+async fn revoked_before_subscription(mode: SocketMode) {
+    let (_, _, cookie, _, _, original, _, api) = fixture(false).await;
+    original.abort();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route(
+            "/v1/bootstrap/ws",
+            get(move |state, headers, ws| revoked_upgrade(state, headers, ws, mode)),
+        )
+        .with_state(api);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (mut socket, _) = connect_async(request(address, ORIGIN, Some(&cookie)))
+        .await
+        .unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(2), socket.next()).await;
+    server.abort();
+    assert!(
+        closed.is_ok(),
+        "logout before subscription left an idle bootstrap socket open"
+    );
+    assert!(!matches!(closed.unwrap(), Some(Ok(ClientMessage::Text(_)))));
+}

@@ -71,6 +71,10 @@ pub(super) async fn run(
     let token = std::str::from_utf8(token.expose()).map_err(|_| ())?;
     let mut enabled = api.runner.enabled_changes();
     let mut revocation = api.auth.revocation_events(&owner);
+    // Admission preceded this subscription; recheck so an intervening logout cannot be missed.
+    if !authorized(&api, token, &owner).await {
+        return Err(());
+    }
     let first = tokio::time::timeout(Duration::from_secs(5), socket.recv())
         .await
         .map_err(|_| ())?

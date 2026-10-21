@@ -310,6 +310,10 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
         return;
     }
     let mut revocation = api.auth.revocation_events(&owner);
+    // Admission preceded this subscription; recheck so an intervening logout cannot be missed.
+    if !authorized(&api, token, &owner).await {
+        return;
+    }
     let mut batch: Option<Batch> = None;
     let mut changed: Option<tokio::sync::watch::Receiver<u64>> = None;
     let mut after = 0;
