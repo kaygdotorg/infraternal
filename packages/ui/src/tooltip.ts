@@ -89,6 +89,14 @@ const STYLE = `
 .ui-confirm-tip .ui-confirm-yes svg { stroke-width: 2; }
 /* The secondary action keeps to the start of the row so the answer and the dismissal stay together on the right. */
 .ui-confirm-tip .ui-confirm-alt { margin-right: auto; }
+/* With three actions a phone-width card stacks them full width in priority order (answer, way out, dismiss), never a ragged wrap. */
+@media (max-width: 480px) {
+  .ui-confirm-tip[data-stack] .ui-confirm-tip-actions { display: grid; grid-template-columns: minmax(0, 1fr); justify-content: stretch; gap: 4px; }
+  .ui-confirm-tip[data-stack] .ui-confirm-yes { order: 1; }
+  .ui-confirm-tip[data-stack] .ui-confirm-alt { order: 2; margin-right: 0; }
+  .ui-confirm-tip[data-stack] .ui-confirm-no { order: 3; }
+  .ui-confirm-tip[data-stack][data-named] button { width: 100%; }
+}
 /* Named actions: the buttons carry their words. */
 .ui-confirm-tip[data-named] button { width: auto; min-width: 28px; padding: 0 12px; font: 500 var(--text-secondary, 12px)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
 @media (pointer: coarse) {
@@ -217,6 +225,7 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
     alt.type = "button";
     alt.className = "ui-confirm-alt";
     alt.textContent = options.secondary.label;
+    tip.dataset.stack = "";
     alt.addEventListener("click", () => { instance.close(false); options.secondary!.onSelect(); });
     actions.append(alt);
   }
