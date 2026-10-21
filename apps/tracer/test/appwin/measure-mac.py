@@ -1,6 +1,6 @@
 """Role: measure the real native window through the production canvas on the named Mac; keep authority in memory and prove owned-PID cleanup."""
 import base64,ctypes,io,json,os,pathlib,queue,signal,subprocess,sys,threading,time,traceback,uuid
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 from PIL import Image
 ROOT=pathlib.Path.home()/'infraternal-bench/app-windows-latency'
 sys.path.insert(0,str(ROOT))
@@ -322,6 +322,18 @@ def first_picture(previous=None):
  except Exception:
   stop_capture()
   raise
+
+def wait_for_first_picture(card,index,failures):
+ """Keep a decode timeout as a receipt in the short diagnostic so later windows and idle can finish."""
+ try:card.locator('.aw-stage[data-picture="live"]').wait_for(timeout=15000)
+ except PlaywrightTimeoutError:
+  if not args.get('first_picture_idle'):raise
+  failure={'fixture_index':index+1,
+           'window_id':card.get_attribute('data-window-id'),
+           'card_state':card.locator('.aw-card').get_attribute('data-signature'),
+           'picture':card.locator('.aw-stage').get_attribute('data-picture')}
+  failures.append(failure);emit({'kind':'first_picture_failure',**failure})
+ consent_check()
 
 def consent_check():
  # Inspect metadata before requesting any screenshot; never retain an unrelated window inventory.
@@ -650,6 +662,7 @@ try:
  if close.is_visible():close.click()
  terminals=page.locator('.ui-window[data-kind="terminal"] [data-action="close"]')
  if terminals.count():terminals.first.evaluate('(b)=>b.click()')
+ first_picture_failures=[]
  for index in range(fixture_window_count):
   title='App window measurement' if fixture_window_count==1 else f'App window measurement {index+1}'
   before=page.locator('.ui-window[data-kind="app"]').count()
@@ -658,9 +671,8 @@ try:
   consent_check()
   page.wait_for_function('(count)=>document.querySelectorAll(\'.ui-window[data-kind="app"]\').length>count',arg=before,timeout=10000)
   card=page.locator('.ui-window[data-kind="app"]').nth(before)
-  card.locator('.aw-stage[data-picture="live"]').wait_for(timeout=15000)
-  consent_check()
-  if index==0:first_picture()
+  wait_for_first_picture(card,index,first_picture_failures)
+  if index==0 and not args.get('first_picture_idle'):first_picture()
  if page.locator('.ui-window[data-kind="app"]').count()!=fixture_window_count:raise RuntimeError('canvas fixture window count mismatch')
  emit({'kind':'canvas_windows_ready','count':fixture_window_count,'window_ids':page.locator('.ui-window[data-kind="app"]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.windowId)')})
  consent_check()
@@ -744,10 +756,11 @@ try:
   while True:
    consent_guard()
    live={pid for pid in capture_helpers if helper_births.get(pid)==process_identity(pid)}
-   if len(live)==10:break
-   if time.monotonic()>=deadline:raise RuntimeError('ten live capture helpers unavailable')
+   if len(live)==10 or time.monotonic()>=deadline:break
    page.wait_for_timeout(250)
-  if len(page.locator('.ui-window[data-kind="app"] .aw-stage[data-picture="live"]').all())!=10:raise RuntimeError('ten live canvas windows unavailable')
+  live_pictures=len(page.locator('.ui-window[data-kind="app"] .aw-stage[data-picture="live"]').all())
+  if live_pictures!=10 or first_picture_failures:
+   emit({'kind':'first_picture_summary','expected':10,'live':live_pictures,'failures':first_picture_failures})
   drain()
   metric_path=E/'companion-metrics.log';metric_offset=metric_path.stat().st_size if metric_path.exists() else 0
   baseline_draws=sum(row.get('kind')=='draw' for row in all_draws)
@@ -757,10 +770,10 @@ try:
   while time.monotonic()<deadline:
    consent_guard()
    live={pid for pid in capture_helpers if helper_births.get(pid)==process_identity(pid)}
-   if len(live)!=10 or source.poll() is not None or window.poll() is not None or not browser.is_connected():raise RuntimeError('first-picture idle cohort process exited')
+   if source.poll() is not None or window.poll() is not None or not browser.is_connected():raise RuntimeError('first-picture idle cohort process exited')
    page.wait_for_timeout(min(1000,max(1,int((deadline-time.monotonic())*1000))))
   live={pid for pid in capture_helpers if helper_births.get(pid)==process_identity(pid)}
-  if len(live)!=10 or source.poll() is not None or window.poll() is not None or not browser.is_connected():raise RuntimeError('first-picture idle cohort process exited')
+  if source.poll() is not None or window.poll() is not None or not browser.is_connected():raise RuntimeError('first-picture idle cohort process exited')
   battery();receipt=drain();browser_worker_after=page.evaluate('window.__appWindowBench.stats()')
   source_draws=sum(row.get('kind')=='draw' for row in all_draws)-baseline_draws
   worker_delta={key:max(0,int(browser_worker_after.get(key,0))-int(browser_worker_before.get(key,0)))
@@ -770,9 +783,12 @@ try:
   result={'kind':'first_picture_idle_result','seconds':time.monotonic()-phase_start,'fixture_windows':fixture_window_count,
           'capture_helpers':len(live),'source_draws':source_draws,'browser_frames':browser_frames,
           'worker_frames':worker_frames,'worker_delta':worker_delta,
-          'source_callbacks':metric_summary['source_callbacks'],'fresh_deliveries':metric_summary['fresh_deliveries']}
+          'source_callbacks':metric_summary['source_callbacks'],'fresh_deliveries':metric_summary['fresh_deliveries'],
+          'live_pictures':live_pictures,'first_picture_failures':first_picture_failures}
   emit(result)
-  if result['seconds']<60 or len(live)!=10 or worker_frames or browser_frames or source_draws or any(worker_delta.values()) or metric_summary['source_callbacks'] or metric_summary['fresh_deliveries']:
+  if result['seconds']<60:
+   raise RuntimeError('first-picture idle check ended before 60 seconds')
+  if len(live)!=10 or live_pictures!=10 or first_picture_failures or worker_frames or browser_frames or source_draws or any(worker_delta.values()) or metric_summary['source_callbacks'] or metric_summary['fresh_deliveries']:
    raise RuntimeError('first-picture idle check did not meet the 60-second no-work bound')
   battery();emit({'kind':'result','status':'first_picture_idle_measured'});raise PhaseComplete()
  if args.get('ten_window_idle'):

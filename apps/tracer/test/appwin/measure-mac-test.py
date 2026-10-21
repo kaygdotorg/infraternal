@@ -502,6 +502,32 @@ class RunDeadlineTests(unittest.TestCase):
 class FirstPictureIdleTests(unittest.TestCase):
     """The short ten-window check records frame activity without resource timings."""
 
+    def test_decode_timeout_is_recorded_and_does_not_stop_the_short_check(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        function = next(node for node in ast.parse(source.read_text()).body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'wait_for_first_picture')
+        class PictureTimeout(Exception):
+            """Stand in for the browser driver's bounded picture wait."""
+        class Card:
+            def locator(self, selector):
+                if selector == '.aw-stage[data-picture="live"]':
+                    return SimpleNamespace(wait_for=lambda **_: (_ for _ in ()).throw(PictureTimeout()))
+                if selector == '.aw-card':
+                    return SimpleNamespace(get_attribute=lambda _: 'failed:decode')
+                return SimpleNamespace(get_attribute=lambda _: 'error')
+            def get_attribute(self, _):
+                return 'fixture-window-3'
+        rows, checks, failures = [], [], []
+        namespace = {'PlaywrightTimeoutError': PictureTimeout,
+                     'args': {'first_picture_idle': True}, 'emit': rows.append,
+                     'consent_check': lambda: checks.append(True)}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        namespace['wait_for_first_picture'](Card(), 2, failures)
+        self.assertEqual(failures, [{'fixture_index': 3, 'window_id': 'fixture-window-3',
+                                     'card_state': 'failed:decode', 'picture': 'error'}])
+        self.assertEqual(rows, [{'kind': 'first_picture_failure', **failures[0]}])
+        self.assertEqual(checks, [True])
+
     def test_first_picture_idle_branch_checks_ten_live_windows_for_sixty_seconds(self):
         source = pathlib.Path(__file__).with_name('measure-mac.py')
         tree = ast.parse(source.read_text())
@@ -520,6 +546,7 @@ class FirstPictureIdleTests(unittest.TestCase):
             stats = {'received': 0, 'decoded': 0, 'painted': 0, 'dropped': 0, 'superseded': 0, 'repairs': 0}
             namespace = {
                 'args': {'first_picture_idle': True}, 'fixture_window_count': 10,
+                'first_picture_failures': [],
                 'capture_helpers': set(range(1, 11)), 'helper_births': {pid: pid for pid in range(1, 11)},
                 'process_identity': lambda pid: pid, 'native_command': rows.append,
                 'battery': lambda: rows.append('battery'), 'consent_guard': lambda: None,
