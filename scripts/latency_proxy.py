@@ -232,8 +232,8 @@ class TcpLatencyProxy:
             self.thread.join(timeout=1)
 
 
-def self_test(config: LatencyConfig, samples: int) -> None:
-    """Measure round trips through the TCP proxy and fail if configured RTT is absent."""
+def self_test(config: LatencyConfig, samples: int, *, measure_rtt: bool = True) -> None:
+    """Check byte forwarding, optionally measuring whether configured RTT arrives."""
     if samples < 3:
         raise ValueError("latency self-test needs at least 3 samples")
     echo = socket.create_server(("127.0.0.1", 0))
@@ -272,16 +272,21 @@ def self_test(config: LatencyConfig, samples: int) -> None:
             with socket.create_connection(proxy.address, timeout=10) as client:
                 client.settimeout(10)
                 token = bytes([index % 251])
-                started = time.perf_counter()
+                started = time.perf_counter() if measure_rtt else 0.0
                 client.sendall(token)
                 if client.recv(1) != token:
                     raise AssertionError("latency self-test echo changed bytes")
-                timings_ms.append((time.perf_counter() - started) * 1000)
+                if measure_rtt:
+                    timings_ms.append((time.perf_counter() - started) * 1000)
     finally:
         proxy.close()
         stopped.set()
         echo.close()
         echo_thread.join(timeout=1)
+
+    if not measure_rtt:
+        print(f"PASS proxy_forwarding samples={samples} timed=false", flush=True)
+        return
 
     timings_ms.sort()
     p50 = percentile(timings_ms, 0.50)
@@ -374,16 +379,21 @@ def port_from_env(name: str, default: int) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    smoke = commands.add_parser("self-test", help="measure the configured TCP RTT through the proxy")
+    smoke = commands.add_parser("self-test", help="check byte forwarding and optionally measure configured TCP RTT")
     smoke.add_argument("--samples", type=int, default=31)
+    smoke.add_argument(
+        "--forwarding-only",
+        action="store_true",
+        help="check byte forwarding without timing bounds",
+    )
     commands.add_parser("serve-tracer", help="serve the tracer test double behind a loopback latency proxy")
     args = parser.parse_args()
     try:
-        config = LatencyConfig.from_environment()
         if args.command == "self-test":
-            self_test(config, args.samples)
+            config = LatencyConfig(rtt_ms=0, jitter_ms=0) if args.forwarding_only else LatencyConfig.from_environment()
+            self_test(config, args.samples, measure_rtt=not args.forwarding_only)
         else:
-            serve_tracer(config)
+            serve_tracer(LatencyConfig.from_environment())
     except (AssertionError, FileNotFoundError, OSError, RuntimeError, TimeoutError, ValueError) as error:
         print(f"latency proxy: {error}", file=sys.stderr)
         return 1

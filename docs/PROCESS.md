@@ -115,7 +115,9 @@ Reviews and fixes run at the same time as the next lane's build.
   limit.
 - `python3 scripts/latency_proxy.py self-test --samples 31` measures the
   configured loopback RTT and prints `METRIC name=network_rtt_selftest ...`.
-  `scripts/verify fast` runs the short three-sample version. The full
+  `scripts/verify fast` runs a three-sample zero-delay byte-forwarding check
+  without a timing bound; the configured RTT measurement stays in the latency
+  profile. The full
   `scripts/verify latency` profile runs the relay self-test, a real agent/PTy
   echo and flood gate, `verify-auth-browser`, and the production tracer browser
   suite. Playwright uses `TRACER_TEST_PORT` (default 4621); concurrent runs

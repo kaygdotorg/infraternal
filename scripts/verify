@@ -106,7 +106,7 @@ case "$1" in
         python3 "${script_dir}/release/deploy_test.py"
         python3 "${script_dir}/release/staging_artifacts_test.py"
         bun test "${script_dir}/release/deploy-review.test.ts"
-        python3 "${script_dir}/latency_proxy.py" self-test --samples 3
+        python3 "${script_dir}/latency_proxy.py" self-test --samples 3 --forwarding-only
         rust_verify_fast "$mode"
         ts_verify_fast
         if [[ "$mode" == iterate ]]; then
