@@ -213,9 +213,13 @@ fn kernel_holds(path: &Path) -> Option<bool> {
     kernel_bound(&[(path.to_path_buf(), fs::metadata(path).unwrap())])
 }
 
-/// Waits briefly for the kernel socket dump to forget a just-closed endpoint.
+const AFTER_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Waits up to two seconds for the kernel socket dump to forget a closed endpoint.
 fn after_close<T: PartialEq>(live: &T, mut inspect: impl FnMut() -> T) -> T {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+    // A procfs snapshot can itself take longer than the old 100 ms budget when
+    // several verification jobs run at once, leaving no poll to observe release.
+    let deadline = std::time::Instant::now() + AFTER_CLOSE_TIMEOUT;
     loop {
         let result = inspect();
         if result != *live || std::time::Instant::now() >= deadline {
@@ -227,6 +231,22 @@ fn after_close<T: PartialEq>(live: &T, mut inspect: impl FnMut() -> T) -> T {
 
 fn sessions_after_close(runtime: &File) -> Result<(), u8> {
     after_close(&Err(73), || sessions(runtime))
+}
+
+#[test]
+fn after_close_waits_for_a_slow_socket_snapshot() {
+    let mut inspections = 0;
+    let result = after_close(&Some(true), || {
+        inspections += 1;
+        if inspections == 1 {
+            std::thread::sleep(std::time::Duration::from_millis(125));
+            Some(true)
+        } else {
+            Some(false)
+        }
+    });
+    assert_eq!(result, Some(false));
+    assert_eq!(inspections, 2);
 }
 
 /// Kernel ownership remains observable when a runtime makes descriptors private.
