@@ -764,6 +764,14 @@ fn remove_setup_token_socket_or_warn(data_dir: &Path, operation: &'static str) {
 }
 
 async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerError> {
+    open_database_with_acquire_timeout(data_dir, None).await
+}
+
+/// Leaves production on the default acquire bound while tests may allow shared-disk startup slack.
+async fn open_database_with_acquire_timeout(
+    data_dir: &std::path::Path,
+    acquire_timeout: Option<Duration>,
+) -> Result<SqlitePool, ServerError> {
     std::fs::create_dir_all(data_dir).map_err(|_| ServerError::InvalidConfiguration)?;
     set_private_directory(data_dir).map_err(|_| ServerError::InvalidConfiguration)?;
     let database = data_dir.join("infraternal.sqlite");
@@ -774,8 +782,11 @@ async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerE
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(5));
-    let pool = SqlitePoolOptions::new()
-        .max_connections(8)
+    let mut pool_options = SqlitePoolOptions::new().max_connections(8);
+    if let Some(timeout) = acquire_timeout {
+        pool_options = pool_options.acquire_timeout(timeout);
+    }
+    let pool = pool_options
         // Local SQLite has no remote connection lifetime. Keep the bounded
         // eight-connection pool until shutdown instead of waking a reaper
         // every 600s while idle; request failures still surface normally [41].
@@ -1554,5 +1565,6 @@ mod temporal_admission_tests {
 pub(crate) async fn test_open_database(
     data_dir: &std::path::Path,
 ) -> Result<SqlitePool, ServerError> {
-    open_database(data_dir).await
+    // Verification opens private databases while other workspace jobs share disk I/O.
+    open_database_with_acquire_timeout(data_dir, Some(Duration::from_secs(60))).await
 }
