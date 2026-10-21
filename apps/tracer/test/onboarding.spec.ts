@@ -89,6 +89,8 @@ test("setup, recovery acknowledgement, welcome and returning sign-in match the b
   await expect(page.locator("#setup-username")).toBeVisible();
   await expectNoLayoutShifts(page);
   const identityCenters = await captureState(page, testInfo, "step-2-identity", screenshots, "#setup-card");
+  // The display-name input stops at the validated limit.
+  await expect(page.locator("#setup-display-name")).toHaveAttribute("maxlength", "64");
   await page.locator("#setup-username").fill("Ada");
   await expect(page.locator("#setup-username")).toHaveValue("ada");
   await expect(page.locator("#setup-display-name")).toHaveValue("ada");
