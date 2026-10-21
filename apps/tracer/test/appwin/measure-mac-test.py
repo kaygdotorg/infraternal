@@ -21,6 +21,20 @@ SCRATCH = pathlib.Path.home() / '.cache/codex-scratch/app-windows-r7-measure/pyt
 class PickerSelectionTests(unittest.TestCase):
     """Window fixture selection uses the title field's full boundary."""
 
+    def test_concurrent_opens_share_one_browser_turn_and_keep_native_identities(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        function = next((node for node in ast.parse(source.read_text()).body
+                         if isinstance(node, ast.FunctionDef) and node.name == 'open_concurrent_fixture_windows'), None)
+        self.assertIsNotNone(function, 'concurrent fixture opener is missing')
+        calls = []
+        page = SimpleNamespace(wait_for_function=lambda script, **kwargs: calls.append(('ready', kwargs['arg'])),
+                               evaluate=lambda script, argument: calls.append(('open', argument)))
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        namespace['open_concurrent_fixture_windows'](page, 'fixture-host', 900, list(range(501, 511)))
+        actions = ['fixture-host/w-900-' + str(i) for i in range(501, 511)]
+        self.assertEqual(calls, [('ready', actions), ('open', actions)])
+
     def test_window_picker_does_not_confuse_numeric_title_suffixes(self):
         source = pathlib.Path(__file__).with_name('measure-mac.py')
         tree = ast.parse(source.read_text())

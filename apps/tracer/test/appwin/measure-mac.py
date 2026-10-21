@@ -42,6 +42,12 @@ def picker_title_pattern(title):
  """Match a complete app-window title within the picker option's accessible name."""
  return re.compile(rf", {re.escape(title)}, on ")
 
+def open_concurrent_fixture_windows(page,host_id,owner_pid,window_ids):
+ """Use cached production palette actions in one browser turn, before any picture wait."""
+ actions=[f'{host_id}/w-{owner_pid}-{window_id}' for window_id in window_ids]
+ page.wait_for_function("actions=>{const rows=window.__appwin?.paletteEntries()??[];return actions.every(action=>rows.some(row=>row.action==='canvas:appwin:'+action))}",arg=actions,timeout=10000)
+ page.evaluate("actions=>actions.forEach((action,index)=>{window.__firstPictures.open(index);window.__appwin.openFromPalette(action)})",actions)
+
 if not re.fullmatch(r'[a-z0-9-]{1,48}',job) or not re.fullmatch(r'[a-z0-9-]{1,48}',args['label']):raise SystemExit(2)
 E=ROOT/'evidence'/args['label'];E.mkdir(parents=True,exist_ok=False)
 BIN=ROOT/'bin'
@@ -51,12 +57,15 @@ for mode in ('ten_window_idle','first_picture_idle','flood','input_only'):
 TEN_WINDOW_IDLE=args.get('ten_window_idle',False)
 FIRST_PICTURE_IDLE=args.get('first_picture_idle',False)
 FLOOD=args.get('flood',False)
+OPEN_MODE=args.get('open_mode','serial')
+if OPEN_MODE not in ('serial','concurrent'):raise ValueError('invalid fixture open mode')
 if TEN_WINDOW_IDLE and FIRST_PICTURE_IDLE:raise ValueError('ten-window idle modes cannot run together')
 if (TEN_WINDOW_IDLE or FIRST_PICTURE_IDLE) and FLOOD:raise ValueError('idle and flood cohorts cannot run together')
 FIXTURE_WINDOW_COUNT=args.get('fixture_window_count',1)
 if type(FIXTURE_WINDOW_COUNT) is not int or not 1<=FIXTURE_WINDOW_COUNT<=10:raise ValueError('invalid fixture window count')
 if TEN_WINDOW_IDLE and FIXTURE_WINDOW_COUNT!=10:raise ValueError('idle cohort requires ten fixture windows')
 if FIRST_PICTURE_IDLE and FIXTURE_WINDOW_COUNT!=10:raise ValueError('first-picture check requires ten fixture windows')
+if OPEN_MODE=='concurrent' and FIXTURE_WINDOW_COUNT!=10:raise ValueError('concurrent opening requires ten fixture windows')
 if FLOOD and FIXTURE_WINDOW_COUNT!=1:raise ValueError('flood cohort requires one fixture window')
 RUN_TIMEOUT_SECONDS=1800 if TEN_WINDOW_IDLE or FLOOD else 900
 CLEANUP_RESERVE_SECONDS=30
@@ -694,16 +703,25 @@ try:
  terminals=page.locator('.ui-window[data-kind="terminal"] [data-action="close"]')
  if terminals.count():terminals.first.evaluate('(b)=>b.click()')
  first_picture_failures=[]
- for index in range(fixture_window_count):
-  title='App window measurement' if fixture_window_count==1 else f'App window measurement {index+1}'
-  before=page.locator('.ui-window[data-kind="app"]').count()
-  page.get_by_role('button',name='New window',exact=True).click()
-  page.get_by_role('option',name=picker_title_pattern(title)).click()
+ page.evaluate(args['first_picture_observer'])
+ if OPEN_MODE=='concurrent':
+  open_concurrent_fixture_windows(page,host_id,window.pid,window_ids)
   consent_check()
-  page.wait_for_function('(count)=>document.querySelectorAll(\'.ui-window[data-kind="app"]\').length>count',arg=before,timeout=10000)
-  card=page.locator('.ui-window[data-kind="app"]').nth(before)
-  wait_for_first_picture(card,index,first_picture_failures)
+  page.wait_for_function('(count)=>document.querySelectorAll(\'.ui-window[data-kind="app"]\').length===count',arg=fixture_window_count,timeout=10000)
+ for index in range(fixture_window_count):
+  if OPEN_MODE=='serial':
+   title='App window measurement' if fixture_window_count==1 else f'App window measurement {index+1}'
+   before=page.locator('.ui-window[data-kind="app"]').count()
+   page.get_by_role('button',name='New window',exact=True).click()
+   # Stamp the same browser task that dispatches the production picker click.
+   page.get_by_role('option',name=picker_title_pattern(title)).evaluate('(option,index)=>{window.__firstPictures.open(index);option.click()}',index)
+   consent_check()
+   page.wait_for_function('(count)=>document.querySelectorAll(\'.ui-window[data-kind="app"]\').length>count',arg=before,timeout=10000)
+  card=page.locator('.ui-window[data-kind="app"]').nth(index)
+  try:wait_for_first_picture(card,index,first_picture_failures)
+  finally:emit({'kind':'stream_first_pictures','open_mode':OPEN_MODE,'streams':page.evaluate('window.__firstPictures.rows()')})
   if index==0 and not args.get('first_picture_idle'):first_picture()
+ page.evaluate('window.__firstPictures.stop()')
  if page.locator('.ui-window[data-kind="app"]').count()!=fixture_window_count:raise RuntimeError('canvas fixture window count mismatch')
  canvas_ids=page.locator('.ui-window[data-kind="app"]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.windowId)')
  target_reports=page.evaluate('()=>window.__appwin.targets()')
