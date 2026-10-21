@@ -5,7 +5,7 @@ import { runInNewContext } from "node:vm";
 
 const script = readFileSync(new URL("worker-pixel-observer.js", import.meta.url), "utf8");
 
-function observe(cursor: boolean, background: number[], expectedColour = 1, expectedSequence = 1, contentSequence = expectedSequence, letterboxed = false, projected = false): Array<{ t: string }> {
+function observe(cursor: boolean, background: number[], expectedColour = 1, expectedSequence = 1, contentSequence = expectedSequence, letterboxed = false, projected = false, flood = false): Array<{ t: string }> {
   const rows: Array<{ t: string }> = [];
   const handlers: Array<(event: { data: unknown }) => void> = [];
   const picture = letterboxed ? { x: 0, y: 60, width: 640, height: 280 } : { x: 0, y: 0, width: 640, height: 400 };
@@ -35,6 +35,7 @@ function observe(cursor: boolean, background: number[], expectedColour = 1, expe
   }
   class Canvas { getContext(): Context { return new Context(); } }
   const worker = {
+    __benchFlood: flood,
     postMessage: (row: { t: string }): void => { rows.push(row); },
     addEventListener: (_name: string, handler: (event: { data: unknown }) => void): void => { handlers.push(handler); },
   };
@@ -57,6 +58,13 @@ test("a painted fixture colour is acknowledged with a centre cursor", () => {
 test("a palette-alias frame from eight fixture changes ago cannot acknowledge new content", () => {
   // The transport frame is newer, but its embedded fixture marker is stale.
   expect(observe(false, [38, 89, 204], 0, 8, 0).some(row => row.t === "bench-effect")).toBe(false);
+});
+
+test("animated matching accepts a newer content sequence only in flood mode", () => {
+  // A higher-rate fixture can advance again between input and presentation;
+  // retain marker validation while allowing the newest visible sequence.
+  expect(observe(false, [102, 64, 204], 5, 5, 6).some(row => row.t === "bench-effect")).toBe(false);
+  expect(observe(false, [102, 64, 204], 5, 5, 6, false, false, true).some(row => row.t === "bench-effect")).toBe(true);
 });
 
 // The bitmap model samples coordinates, so fixed full-frame fractions cannot

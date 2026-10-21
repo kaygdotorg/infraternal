@@ -4,6 +4,7 @@
  const markerBits=32;
  const markerHeader=0xa5;
  const markerCells=markerBits+8;
+ const flood=!!self.__benchFlood;
  let armed,pixel;
  // Each observation reads its own tiny surface. Repeated readback never
  // changes the visible context's acceleration choice.
@@ -61,7 +62,8 @@
  self.postMessage=function(message,...rest){
   send(message,...rest);
   if(message?.t==='trace' && message.frame.outcome==='painted' && pixel)send({t:'bench-observation',...pixel,frame:message.frame});
-  if(message?.t==='trace' && message.frame.outcome==='painted' && pixel && pixel.colour===pixel.expected && pixel.distance<2500 && pixel.markerValid && pixel.contentSequence===pixel.expectedSequence){
+  const matched=flood?pixel?.markerValid && pixel.contentSequence>=pixel.expectedSequence:pixel?.colour===pixel.expected && pixel.markerValid && pixel.contentSequence===pixel.expectedSequence;
+  if(message?.t==='trace' && message.frame.outcome==='painted' && pixel && matched && pixel.distance<2500){
    send({t:'bench-effect',...pixel,frame:message.frame});armed=undefined;pixel=undefined;
   }
  };
