@@ -537,9 +537,13 @@ class FirstPictureIdleTests(unittest.TestCase):
                     return SimpleNamespace(wait_for=lambda **_: (_ for _ in ()).throw(PictureTimeout()))
                 if selector == '.aw-card':
                     return SimpleNamespace(get_attribute=lambda _: 'failed:decode')
-                return SimpleNamespace(get_attribute=lambda _: 'error')
+                return SimpleNamespace(get_attribute=lambda _: 'error', bounding_box=lambda: {'x': 10, 'y': 20, 'width': 300, 'height': 200})
             def get_attribute(self, _):
                 return 'fixture-window-3'
+            def bounding_box(self):
+                return {'x': 10, 'y': 20, 'width': 300, 'height': 200}
+            def evaluate(self, _):
+                return {'hidden': False, 'innerWidth': 848, 'innerHeight': 820}
         rows, checks, failures = [], [], []
         namespace = {'PlaywrightTimeoutError': PictureTimeout,
                      'args': {'first_picture_idle': True}, 'emit': rows.append,
@@ -547,7 +551,10 @@ class FirstPictureIdleTests(unittest.TestCase):
         exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
         namespace['wait_for_first_picture'](Card(), 2, failures)
         self.assertEqual(failures, [{'fixture_index': 3, 'window_id': 'fixture-window-3',
-                                     'card_state': 'failed:decode', 'picture': 'error'}])
+                                     'card_state': 'failed:decode', 'picture': 'error',
+                                     'card_rect': {'x': 10, 'y': 20, 'width': 300, 'height': 200},
+                                     'stage_rect': {'x': 10, 'y': 20, 'width': 300, 'height': 200},
+                                     'page_state': {'hidden': False, 'innerWidth': 848, 'innerHeight': 820}}])
         self.assertEqual(rows, [{'kind': 'first_picture_failure', **failures[0]}])
         self.assertEqual(checks, [True])
 

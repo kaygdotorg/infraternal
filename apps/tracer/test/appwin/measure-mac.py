@@ -340,7 +340,10 @@ def wait_for_first_picture(card,index,failures):
   failure={'fixture_index':index+1,
            'window_id':card.get_attribute('data-window-id'),
            'card_state':card.locator('.aw-card').get_attribute('data-signature'),
-           'picture':card.locator('.aw-stage').get_attribute('data-picture')}
+           'picture':card.locator('.aw-stage').get_attribute('data-picture'),
+           'card_rect':card.bounding_box(),
+           'stage_rect':card.locator('.aw-stage').bounding_box(),
+           'page_state':card.evaluate('(node) => ({hidden: document.hidden, innerWidth: window.innerWidth, innerHeight: window.innerHeight})')}
   failures.append(failure);emit({'kind':'first_picture_failure',**failure})
  consent_check()
 

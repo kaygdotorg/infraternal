@@ -10,7 +10,7 @@ const limit = <T>(rows: T[], row: T): void => { if (rows.length === 512) rows.sh
 const inputs: Array<{ at: number; kind: string }> = [];
 const domInputs: Array<{ at: number; eventAt: number }> = [];
 window.addEventListener("keydown", (event) => limit(domInputs, { at: now(), eventAt: performance.timeOrigin + event.timeStamp }), true);
-const videos: Array<{ at: number; captureNs: string; sequence: number; bytes: number }> = [];
+const videos: Array<{ at: number; captureNs: string; sequence: number; keyframe: boolean; bytes: number }> = [];
 const events: unknown[] = [];
 const roundTrips: Array<{ at: number; ms: number }> = [];
 let activeWorker: Worker | undefined;
@@ -18,6 +18,7 @@ let session: string | undefined;
 let openedSockets = 0;
 let closedSockets = 0;
 let nextSocket = 0;
+let nextWorker = 0;
 interface SocketEvent { at: number; socket: number; event: "open" | "close" | "client-close" | "server-close"; viewer: boolean; code?: number; reason?: string; clean?: boolean; probes?: { pending: Array<{ nonce: string; sentUs: string; ageMs: number }>; lastPongMs: number | null; lastInboundMs: number | null; bufferedBytes: number; hidden: boolean } }
 const socketEvents: SocketEvent[] = [];
 
@@ -50,7 +51,7 @@ if (!window.__benchResourcesOnly) globalThis.WebSocket = class extends NativeSoc
         }
         if (frame.type === "Desktop" && frame.message.kind === "video") {
           const v = frame.message;
-          limit(videos, { at: now(), captureNs: v.captureNs.toString(), sequence: Number(v.sequence), bytes: v.bytes.length });
+          limit(videos, { at: now(), captureNs: v.captureNs.toString(), sequence: Number(v.sequence), keyframe: v.keyframe, bytes: v.bytes.length });
         }
       });
     });
@@ -86,17 +87,37 @@ if (!window.__benchResourcesOnly) globalThis.WebSocket = class extends NativeSoc
   }
 };
 globalThis.Worker = class extends NativeWorker {
+  private readonly identity = ++nextWorker;
   override postMessage(message: unknown, options?: Transferable[] | StructuredSerializeOptions): void {
-    const value = message as { t?: string };
+    const value = message as { t?: string; sequence?: number; keyframe?: boolean; bytes?: ArrayBuffer; measure?: boolean };
+    if (value?.t === "init" || value?.t === "reset" || value?.t === "close" || value?.t === "chunk") {
+      limit(events, {
+        t: "worker-send", worker: this.identity, message: value.t, at: now(),
+        ...(value.t === "init" ? { measure: Boolean(value.measure) } : {}),
+        ...(value.t === "chunk" ? { sequence: value.sequence, keyframe: Boolean(value.keyframe), bytes: value.bytes?.byteLength ?? 0 } : {}),
+      });
+    }
     const forwarded = value?.t === "init" && window.__benchHardwareHint ? { ...value, hardware: window.__benchHardwareHint } : message;
     if (Array.isArray(options)) super.postMessage(forwarded, options); else super.postMessage(forwarded, options);
   }
   constructor(...args: ConstructorParameters<typeof Worker>) {
     super(...args);
-    this.addEventListener("message", (event: MessageEvent<{ t?: string }>) => {
-      if (event.data?.t === "first") activeWorker = this;
-      if (event.data?.t?.startsWith("bench-") || event.data?.t === "trace") limit(events, event.data);
+    limit(events, { t: "worker-create", worker: this.identity, at: now() });
+    this.addEventListener("message", (event: MessageEvent<{ t?: string; width?: number; height?: number; reason?: string; frame?: unknown }>) => {
+      const value = event.data;
+      if (value?.t === "first") {
+        activeWorker = this;
+        limit(events, { t: "worker-first", worker: this.identity, at: now(), width: value.width, height: value.height });
+      } else if (value?.t === "error") {
+        const reasons = new Set(["decode", "unsupported-codec", "unsupported-canvas"]);
+        limit(events, { t: "worker-error", worker: this.identity, at: now(), reason: reasons.has(value.reason ?? "") ? value.reason : "other" });
+      } else if (value?.t === "trace") {
+        limit(events, { ...value, worker: this.identity });
+      } else if (value?.t?.startsWith("bench-") || value?.t === "size") {
+        limit(events, { ...value, worker: this.identity });
+      }
     });
+    this.addEventListener("error", () => limit(events, { t: "worker-runtime-error", worker: this.identity, at: now() }));
   }
 };
 
