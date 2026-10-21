@@ -24,7 +24,7 @@ test.beforeAll(() => {
 });
 
 const config = (page: Page, data: Record<string, unknown>) => page.request.post("/__mock/appwin/config", { data });
-const machineState = async (page: Page) => (await page.request.get("/__mock/appwin/state")).json() as Promise<{ sessions: Array<{ id: string; width: number; height: number; controller: boolean }>; inputs: Array<{ input: { kind: string; state?: number; scalar?: number; x?: number; y?: number; keycode?: number; down?: boolean; modifiers?: number } }>; sizes: Array<{ width: number; height: number }>; attaches: number }>;
+const machineState = async (page: Page) => (await page.request.get("/__mock/appwin/state")).json() as Promise<{ sessions: Array<{ id: string; width: number; height: number; controller: boolean }>; inputs: Array<{ input: { kind: string; state?: number; scalar?: number; x?: number; y?: number; keycode?: number; down?: boolean; modifiers?: number } }>; sizes: Array<{ width: number; height: number }>; attaches: number; repairs: number }>;
 
 async function openCanvas(page: Page, query = "&appwin=1", before: Record<string, unknown> = {}, fresh = true): Promise<void> {
   await page.request.post("/__mock/reset");
@@ -127,6 +127,15 @@ test("an app window goes live in a worker, names itself, and the machine's windo
   // Decoded and drawn off the main thread: the worker counted pictures, the page thread did not decode.
   const report = await page.evaluate(() => (window as unknown as { __appwin: { report(): Promise<Array<{ stats: { painted: number } }>> } }).__appwin.report());
   expect(report[0]!.stats.painted).toBeGreaterThan(10);
+});
+
+test("a delta before the startup keyframe requests one repair and renders the returned picture", async ({ page }) => {
+  await openCanvas(page, "&appwin=1", { dropInitialKeyframe: true });
+  await openEditor(page);
+  await expect.poll(async () => (await machineState(page)).repairs).toBe(1);
+  const report = await page.evaluate(() => (window as unknown as { __appwin: { report(): Promise<Array<{ stats: { painted: number; repairs: number } }>> } }).__appwin.report());
+  expect(report[0]!.stats).toMatchObject({ painted: expect.any(Number), repairs: 1 });
+  expect(report[0]!.stats.painted).toBeGreaterThan(0);
 });
 
 test("a window the machine keeps at its own size gives the canvas window its shape, and follows when it changes", async ({ page }) => {

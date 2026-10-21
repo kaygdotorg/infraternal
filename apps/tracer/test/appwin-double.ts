@@ -102,6 +102,8 @@ const config = {
   windowsDelayMs: 0,
   /** The answer to `desktop.session.start` is delayed by this long (the connecting state). */
   startDelayMs: 0,
+  /** The first viewer gets a delta instead of the startup IDR; its repair gets the IDR. */
+  dropInitialKeyframe: false,
   /**
    * The machine's window keeps its own size (a window manager owns it, or it refuses a size): status replies report this
    * capture rectangle with reason "managed". Unset, they report no rectangle, as before.
@@ -110,7 +112,7 @@ const config = {
 };
 
 interface Session { id: string; target: { type: "window"; window_id: number; owner_pid: number } | { type: "screen"; display_id: number }; app: string; width: number; height: number; density: number; controller?: { socket: WebSocket; stream: number }; viewers: Set<Viewer>; startedAt: number }
-interface Viewer { socket: WebSocket; stream: number; session: Session; sequence: bigint; index: number; timer: ReturnType<typeof setInterval> | undefined; variant: string; sent: number }
+interface Viewer { socket: WebSocket; stream: number; session: Session; sequence: bigint; index: number; timer: ReturnType<typeof setInterval> | undefined; variant: string; sent: number; startupFaultPending: boolean }
 const sessions = new Map<string, Session>();
 const inputs: Array<{ session: string; stream: number; input: VideoInput }> = [];
 const sizes: Array<{ session: string; width: number; height: number; densityMilli: number }> = [];
@@ -156,9 +158,17 @@ function startViewer(v: Viewer): void {
   stopTimer(v);
   v.variant = variantFor(v.session);
   const list = units(v.variant);
-  v.index = 0;
-  sendVideo(v, list[0]!);
-  v.index = 1;
+  if (v.startupFaultPending) {
+    v.startupFaultPending = false;
+    const delta = list.findIndex((unit) => !unit.keyframe);
+    if (delta < 0) throw new Error("the app-window fixture needs a delta picture");
+    sendVideo(v, list[delta]!);
+    v.index = delta + 1;
+  } else {
+    v.index = 0;
+    sendVideo(v, list[0]!);
+    v.index = 1;
+  }
   const period = 1000 / config.fps;
   // One timer per viewer; drift-corrected so a long run keeps its rate.
   let next = performance.now() + period;
@@ -266,7 +276,7 @@ export function appwinFrame(socket: WebSocket, streamId: number, frame: WireFram
     const session = sessions.get(id);
     if (!session) { socket.send(Buffer.from(encodeMuxedFrame(streamId, { type: "Close", code: 4404, reason: "viewer ended" })), { binary: true }); return; }
     attaches++;
-    const v: Viewer = { socket, stream: streamId, session, sequence: 0n, index: 0, timer: undefined, variant: "", sent: 0 };
+    const v: Viewer = { socket, stream: streamId, session, sequence: 0n, index: 0, timer: undefined, variant: "", sent: 0, startupFaultPending: config.dropInitialKeyframe };
     session.viewers.add(v);
     startViewer(v);
     return;
@@ -311,8 +321,8 @@ export async function appwinHttp(request: IncomingMessage, response: ServerRespo
       sessions.clear(); layout = { format: FORMAT, version: VERSION, revision: 0, views: [] };
       layoutInitialized = false; layoutSubscribers.clear(); layoutReceipts.clear();
     }
-    if (body.reset) { Object.assign(config, { fps: 60, windows: defaults(), screenRecording: true, accessibility: true, viewOnly: false, controlContract: true, inputPauseMs: 0, refuseNextStart: false, windowsDelayMs: 0, startDelayMs: 0, windowShape: undefined }); inputs.length = 0; sizes.length = 0; starts.length = 0; attaches = 0; repairs = 0; }
-    for (const key of ["controlContract", "fps", "screenRecording", "accessibility", "viewOnly", "inputPauseMs", "refuseNextStart", "windowsDelayMs", "startDelayMs", "windowShape"] as const) if (key in body) (config as Record<string, unknown>)[key] = body[key];
+    if (body.reset) { Object.assign(config, { fps: 60, windows: defaults(), screenRecording: true, accessibility: true, viewOnly: false, controlContract: true, inputPauseMs: 0, refuseNextStart: false, windowsDelayMs: 0, startDelayMs: 0, dropInitialKeyframe: false, windowShape: undefined }); inputs.length = 0; sizes.length = 0; starts.length = 0; attaches = 0; repairs = 0; }
+    for (const key of ["controlContract", "fps", "screenRecording", "accessibility", "viewOnly", "inputPauseMs", "refuseNextStart", "windowsDelayMs", "startDelayMs", "dropInitialKeyframe", "windowShape"] as const) if (key in body) (config as Record<string, unknown>)[key] = body[key];
     if (Array.isArray(body.windows)) config.windows = body.windows as Win[];
     sendJson(response, 200, { ok: true });
     return true;
