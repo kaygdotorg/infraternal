@@ -37,14 +37,17 @@ def picker_title_pattern(title):
 if not re.fullmatch(r'[a-z0-9-]{1,48}',job) or not re.fullmatch(r'[a-z0-9-]{1,48}',args['label']):raise SystemExit(2)
 E=ROOT/'evidence'/args['label'];E.mkdir(parents=True,exist_ok=False)
 BIN=ROOT/'bin'
-for mode in ('ten_window_idle','flood','input_only'):
+for mode in ('ten_window_idle','first_picture_idle','flood','input_only'):
  if type(args.get(mode,False)) is not bool:raise ValueError('invalid measurement mode')
 TEN_WINDOW_IDLE=args.get('ten_window_idle',False)
+FIRST_PICTURE_IDLE=args.get('first_picture_idle',False)
 FLOOD=args.get('flood',False)
-if TEN_WINDOW_IDLE and FLOOD:raise ValueError('idle and flood cohorts cannot run together')
+if TEN_WINDOW_IDLE and FIRST_PICTURE_IDLE:raise ValueError('ten-window idle modes cannot run together')
+if (TEN_WINDOW_IDLE or FIRST_PICTURE_IDLE) and FLOOD:raise ValueError('idle and flood cohorts cannot run together')
 FIXTURE_WINDOW_COUNT=args.get('fixture_window_count',1)
 if type(FIXTURE_WINDOW_COUNT) is not int or not 1<=FIXTURE_WINDOW_COUNT<=10:raise ValueError('invalid fixture window count')
 if TEN_WINDOW_IDLE and FIXTURE_WINDOW_COUNT!=10:raise ValueError('idle cohort requires ten fixture windows')
+if FIRST_PICTURE_IDLE and FIXTURE_WINDOW_COUNT!=10:raise ValueError('first-picture check requires ten fixture windows')
 if FLOOD and FIXTURE_WINDOW_COUNT!=1:raise ValueError('flood cohort requires one fixture window')
 RUN_TIMEOUT_SECONDS=1800 if TEN_WINDOW_IDLE or FLOOD else 900
 CLEANUP_RESERVE_SECONDS=30
@@ -387,7 +390,9 @@ try:
  def run_deadline(signum,frame):raise TimeoutError('measurement run exceeded its bounded time limit')
  run_started=time.monotonic();run_deadline_at=run_started+RUN_TIMEOUT_SECONDS
  signal.signal(signal.SIGALRM,run_deadline);signal.alarm(RUN_TIMEOUT_SECONDS)
- battery();emit({'kind':'environment','text':command(['sw_vers'])+command(['sysctl','-n','hw.model','hw.ncpu','hw.memsize'])+command(['uptime'])})
+ environment=command(['sw_vers'])+command(['sysctl','-n','hw.model','hw.ncpu','hw.memsize'])
+ if not args.get('first_picture_idle'):environment+=command(['uptime'])
+ battery();emit({'kind':'environment','text':environment})
  console=console_state();emit({'kind':'console','state':console})
  if not console['ready']:raise RuntimeError('console is locked or secure input is active')
  launch(['/usr/bin/caffeinate','-d','-i','-w',str(os.getpid())],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -412,7 +417,7 @@ try:
    before=time.perf_counter_ns();clock.stdin.write('x');clock.stdin.flush();v=json.loads(clock.stdout.readline());after=time.perf_counter_ns()
    samples.append({'before_ns':before,'after_ns':after,**v,'lower':before-v['after_ticks']*timebase,'upper':after-v['before_ticks']*timebase})
   best=min(samples,key=lambda x:x['upper']-x['lower']);return {'samples':samples,'lower':best['lower'],'upper':best['upper']}
- native_mapping=native_clock()
+ native_mapping=None if args.get('first_picture_idle') else native_clock()
  emit({'kind':'runtime_artifacts','sha256':{name:command(['shasum','-a','256',str(BIN/name)]).split()[0] for name in ('source','helper','clock-bridge')}})
  stage='helper wrappers'
  consent_errors=[]
@@ -592,7 +597,7 @@ try:
  initial_terminal=page.locator('.ui-window[data-kind="terminal"] [data-action="close"]')
  if initial_terminal.count():initial_terminal.first.evaluate('(b)=>b.click()')
  page.wait_for_timeout(1000)
- resource_sample('empty')
+ if not args.get('first_picture_idle'):resource_sample('empty')
  stage='native fixture'
  # The current fixture and input ledger are built before taking the Mac lock.
  emit({'kind':'native_fixture','sha256':command(['shasum','-a','256',str(fixture)]).split()[0],'source_sha256':command(['shasum','-a','256',str(fixture_source)]).split()[0]})
@@ -660,9 +665,9 @@ try:
  emit({'kind':'canvas_windows_ready','count':fixture_window_count,'window_ids':page.locator('.ui-window[data-kind="app"]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.windowId)')})
  consent_check()
  emit({'kind':'canvas_context','receipts':page.evaluate('window.__appWindowBench.take()')})
- if not args.get('ten_window_idle'):page.screenshot(path=str(E/'canvas-native-before.png'))
+ if not args.get('ten_window_idle') and not args.get('first_picture_idle'):page.screenshot(path=str(E/'canvas-native-before.png'))
  surface=page.locator('.ui-window[data-kind="app"] .aw-surface').first
- if not args.get('ten_window_idle'):focus_input(surface)
+ if not args.get('ten_window_idle') and not args.get('first_picture_idle'):focus_input(surface)
  # Every capture helper launch is followed by a consent check, including inventory helpers.
  consent_check()
  if args.get('owner_preview'):
@@ -685,18 +690,19 @@ try:
    before=time.perf_counter_ns();value=page.evaluate('performance.timeOrigin+performance.now()');after=time.perf_counter_ns()
    samples.append({'before_ns':before,'after_ns':after,'epoch_ms':value,'lower':before-value*1e6,'upper':after-value*1e6})
   best=min(samples,key=lambda x:x['upper']-x['lower']);return {'samples':samples,'lower':best['lower'],'upper':best['upper']}
- browser_mapping=browser_clock()
+ browser_mapping=None if args.get('first_picture_idle') else browser_clock()
  worker_mapping=None
- if not args.get('resources_only'):
+ if not args.get('resources_only') and not args.get('first_picture_idle'):
   samples=[page.evaluate('window.__appWindowBench.workerClock()') for _ in range(16)]
   best=min(samples,key=lambda r:r['after']-r['before'])
   worker_mapping={'samples':samples,'lower_ms':best['before']-best['worker'],'upper_ms':best['after']-best['worker']}
- emit({'kind':'clocks','timebase':base,'native':native_mapping,'browser':browser_mapping,'worker':worker_mapping})
+ if not args.get('first_picture_idle'):emit({'kind':'clocks','timebase':base,'native':native_mapping,'browser':browser_mapping,'worker':worker_mapping})
  def source_round_trips(phase):
   samples=[page.evaluate("async()=>{const began=performance.timeOrigin+performance.now();await window.__appWindowBench.call('desktop.session.clock',{session_id:window.__appWindowBench.session});return {at:performance.timeOrigin+performance.now(),ms:performance.timeOrigin+performance.now()-began};}") for _ in range(8)]
   emit({'kind':'source_round_trips','phase':phase,'samples':samples})
- if not args.get('resources_only'):source_round_trips('before')
- info=browser.new_browser_cdp_session().send('SystemInfo.getInfo');emit({'kind':'browser_rendering','version':browser.version,'gpu':info.get('gpu')})
+ if not args.get('resources_only') and not args.get('first_picture_idle'):source_round_trips('before')
+ if not args.get('first_picture_idle'):
+  info=browser.new_browser_cdp_session().send('SystemInfo.getInfo');emit({'kind':'browser_rendering','version':browser.version,'gpu':info.get('gpu')})
  def drain():
   consent_guard()
   return page.evaluate('()=>({probe:window.__appWindowBench.take(),frames:window.__infraternalAppWindowTrace?.take()??[]})')
@@ -715,20 +721,60 @@ try:
   rgb=image.getpixel((x,y));distances=[sum((a-b)**2 for a,b in zip(rgb,p)) for p in palette]
   composites.append({'timestamp_ms':event['metadata'].get('timestamp',0)*1000,'colour':distances.index(min(distances)),'distance':min(distances),'received_perf_ns':time.perf_counter_ns(),'rgb':list(rgb),'target':copy_target,'metadata':event['metadata'],'image_width':image.width,'image_height':image.height})
  # Keep the Mac/server leg sampled concurrently with browser protocol pings.
- network_ping=launch(['ping','-n','-i','1','10.69.69.125'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
- def network_ping_reader():
-  for line in network_ping.stdout:emit({'kind':'network_leg_rtt','leg':'Mac_server','at_perf_ns':time.perf_counter_ns(),'raw':line.strip()})
- threading.Thread(target=network_ping_reader,daemon=True).start()
- emit({'kind':'network_rtt_before','raw':command(['ping','-n','-c','5','-W','1000','10.69.69.125'])})
+ if not args.get('first_picture_idle'):
+  network_ping=launch(['ping','-n','-i','1','10.69.69.125'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
+  def network_ping_reader():
+   for line in network_ping.stdout:emit({'kind':'network_leg_rtt','leg':'Mac_server','at_perf_ns':time.perf_counter_ns(),'raw':line.strip()})
+  threading.Thread(target=network_ping_reader,daemon=True).start()
+  emit({'kind':'network_rtt_before','raw':command(['ping','-n','-c','5','-W','1000','10.69.69.125'])})
  if not console_state()['ready']:raise RuntimeError('console changed before sampling')
  own_windows=cua('list_windows',{'on_screen_only':True}).get('windows',[])
  emit({'kind':'owned_window_layout','windows':[{k:w.get(k) for k in ['pid','window_id','bounds']} for w in own_windows if w.get('pid') in owned]})
- emit({'kind':'viewer_animation_frames','times':page.evaluate('()=>new Promise(resolve=>{const times=[];const next=t=>{times.push(t);if(times.length===96)resolve(times);else requestAnimationFrame(next)};requestAnimationFrame(next)})')})
+ if not args.get('first_picture_idle'):emit({'kind':'viewer_animation_frames','times':page.evaluate('()=>new Promise(resolve=>{const times=[];const next=t=>{times.push(t);if(times.length===96)resolve(times);else requestAnimationFrame(next)};requestAnimationFrame(next)})')})
  def fixture_projection(phase):
   state=call('desktop.session.clock',{'session_id':page.evaluate('window.__appWindowBench.session')})
   projection=capture_projection(state)
   emit({'kind':'fixture_projection','phase':phase,'state':state,'projection':projection})
   return projection
+ if args.get('first_picture_idle'):
+  stage='ten-window first-picture idle check'
+  if fixture_window_count!=10:raise RuntimeError('first-picture check requires ten fixture windows')
+  native_command('idle');battery()
+  deadline=time.monotonic()+30
+  while True:
+   consent_guard()
+   live={pid for pid in capture_helpers if helper_births.get(pid)==process_identity(pid)}
+   if len(live)==10:break
+   if time.monotonic()>=deadline:raise RuntimeError('ten live capture helpers unavailable')
+   page.wait_for_timeout(250)
+  if len(page.locator('.ui-window[data-kind="app"] .aw-stage[data-picture="live"]').all())!=10:raise RuntimeError('ten live canvas windows unavailable')
+  drain()
+  metric_path=E/'companion-metrics.log';metric_offset=metric_path.stat().st_size if metric_path.exists() else 0
+  baseline_draws=sum(row.get('kind')=='draw' for row in all_draws)
+  browser_worker_before=page.evaluate('window.__appWindowBench.stats()')
+  phase_start=time.monotonic();deadline=phase_start+60
+  emit({'kind':'first_picture_idle_plan','seconds':60,'fixture_windows':fixture_window_count,'capture_helpers':len(live)})
+  while time.monotonic()<deadline:
+   consent_guard()
+   live={pid for pid in capture_helpers if helper_births.get(pid)==process_identity(pid)}
+   if len(live)!=10 or source.poll() is not None or window.poll() is not None or not browser.is_connected():raise RuntimeError('first-picture idle cohort process exited')
+   page.wait_for_timeout(min(1000,max(1,int((deadline-time.monotonic())*1000))))
+  live={pid for pid in capture_helpers if helper_births.get(pid)==process_identity(pid)}
+  if len(live)!=10 or source.poll() is not None or window.poll() is not None or not browser.is_connected():raise RuntimeError('first-picture idle cohort process exited')
+  battery();receipt=drain();browser_worker_after=page.evaluate('window.__appWindowBench.stats()')
+  source_draws=sum(row.get('kind')=='draw' for row in all_draws)-baseline_draws
+  worker_delta={key:max(0,int(browser_worker_after.get(key,0))-int(browser_worker_before.get(key,0)))
+                for key in ('received','decoded','painted','dropped','superseded','repairs')}
+  metric_summary=companion_metric_summary(metric_path,metric_offset)
+  browser_frames=len(receipt['probe']['videos']);worker_frames=len(receipt['frames'])
+  result={'kind':'first_picture_idle_result','seconds':time.monotonic()-phase_start,'fixture_windows':fixture_window_count,
+          'capture_helpers':len(live),'source_draws':source_draws,'browser_frames':browser_frames,
+          'worker_frames':worker_frames,'worker_delta':worker_delta,
+          'source_callbacks':metric_summary['source_callbacks'],'fresh_deliveries':metric_summary['fresh_deliveries']}
+  emit(result)
+  if result['seconds']<60 or len(live)!=10 or worker_frames or browser_frames or source_draws or any(worker_delta.values()) or metric_summary['source_callbacks'] or metric_summary['fresh_deliveries']:
+   raise RuntimeError('first-picture idle check did not meet the 60-second no-work bound')
+  battery();emit({'kind':'result','status':'first_picture_idle_measured'});raise PhaseComplete()
  if args.get('ten_window_idle'):
   stage='ten-window idle soak'
   if fixture_window_count!=10:raise RuntimeError('idle cohort requires ten fixture windows')
