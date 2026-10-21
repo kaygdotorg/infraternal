@@ -387,4 +387,55 @@ mod cap_review_r3 {
         );
         assert_eq!(state.authority.reads.available_permits(), AUTHORITY_READS);
     }
+    /// Disconnect and shutdown both drop the enclosing read future. Cancelling
+    /// while queued must release nothing; cancelling a query must detach it.
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_storm_returns_every_place_without_duplication() {
+        let clock = FrozenSocketTime::new().await;
+        let (state, user) = fixture().await;
+        let held = state.pool.acquire().await.unwrap();
+        let mut storm: Vec<_> = (0..32)
+            .map(|_| {
+                Box::pin(read_expiry(
+                    &state,
+                    &user,
+                    "cap-review-r3",
+                    false,
+                    AUTHORITY_WAIT,
+                ))
+            })
+            .collect();
+        for read in &mut storm {
+            assert!(read.as_mut().now_or_never().is_none());
+        }
+        assert_eq!(state.authority.reads.available_permits(), 0);
+        drop(storm);
+        assert_eq!(state.authority.reads.available_permits(), 0);
+        drop(held);
+        drop(clock);
+        let all = tokio::time::timeout(
+            Duration::from_secs(10),
+            state
+                .authority
+                .reads
+                .acquire_many(u32::try_from(AUTHORITY_READS).unwrap()),
+        )
+        .await
+        .expect("cancelled access checks retained their places")
+        .unwrap();
+        assert_eq!(state.authority.reads.available_permits(), 0);
+        drop(all);
+        assert_eq!(state.authority.reads.available_permits(), AUTHORITY_READS);
+        assert!(matches!(
+            read_expiry(&state, &user, "absent-session", false, AUTHORITY_WAIT).await,
+            Err(AuthorityMiss::Refused)
+        ));
+        assert_eq!(state.authority.reads.available_permits(), AUTHORITY_READS);
+        state.pool.close().await;
+        assert!(matches!(
+            read_expiry(&state, &user, "cap-review-r3", false, AUTHORITY_WAIT).await,
+            Err(AuthorityMiss::Unavailable)
+        ));
+        assert_eq!(state.authority.reads.available_permits(), AUTHORITY_READS);
+    }
 }
