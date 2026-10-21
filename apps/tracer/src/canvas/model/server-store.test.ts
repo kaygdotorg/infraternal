@@ -7,11 +7,12 @@ import type { CanvasDocument } from "./document";
 import { canvasKey, clearAccountStorage } from "../../account-storage";
 const document = (): CanvasDocument => ({ format: "infraternal.canvas", version: 1, revision: 0, views: [{ id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [] } }] });
 class Transport implements LayoutTransport {
+  refreshes = 0;
   event: (e: Record<string, unknown>) => void = () => {};
   open: () => void = () => {};
   calls: Array<{ action: string; input: Record<string, unknown>; resolve: (r: Record<string, unknown>) => void; reject: (error?: Error) => void }> = [];
   call(action: string, input: Record<string, unknown>): Promise<Record<string, unknown>> { return new Promise((resolve, reject) => this.calls.push({ action, input: structuredClone(input), resolve, reject: (error?: Error) => reject(error ?? Error("disconnected")) })); }
-  subscribe(_filter: { topic: string }, event: (e: Record<string, unknown>) => void, open?: () => void): () => void { this.event = event; this.open = open ?? (() => {}); this.open(); return () => { this.event = () => {}; }; }
+  subscribe(_filter: { topic: string }, event: (e: Record<string, unknown>) => void, open?: () => void) { this.event = event; this.open = open ?? (() => {}); this.open(); return Object.assign(() => { this.event = () => {}; }, { refresh: () => { this.refreshes++; this.open(); } }); }
   snapshot(doc = document(), initialized = true): void { this.event({ type: "canvas.layout.snapshot", document: doc, revision: doc.revision, initialized }); }
 }
 const tick = async (): Promise<void> => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
@@ -22,6 +23,39 @@ beforeEach(() => {
   Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: area });
 });
 const opened: Intent = { type: "open", view_id: "console", column_id: "c", window: { id: "w", target: { type: "settings", section: "appearance" } } };
+test("a layout gap or withdrawn worker requests one fresh snapshot with bounded backoff", async () => {
+  const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  const timers = new Map<number, { run: () => void; delay: number }>(); let id = 0;
+  globalThis.setTimeout = ((run: () => void, delay: number) => { timers.set(++id, { run, delay }); return id; }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: number) => { timers.delete(timer); }) as unknown as typeof clearTimeout;
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "a");
+  const retry = (delay: number): void => {
+    const timer = [...timers].find(([, timer]) => timer.delay === delay); expect(timer).toBeDefined();
+    timers.delete(timer![0]); timer![1].run();
+  };
+  try {
+    transport.snapshot();
+    for (let n = 0; n < 100; n++) transport.event({ type: "canvas.layout.operation", revision: n + 5, intent: opened });
+    expect(store.current().revision).toBe(0); expect(transport.refreshes).toBe(0);
+    retry(250); expect(transport.refreshes).toBe(1);
+    transport.event({ type: "error", error: "forbidden" });
+    retry(500); expect(transport.refreshes).toBe(2);
+    for (const delay of [1000, 2000, 4000, 5000, 5000]) {
+      transport.event({ type: "error", error: "canvas unavailable" }); retry(delay);
+    }
+    const head = document(); reduce(head, opened); head.revision = 104;
+    transport.snapshot(head); expect(store.current()).toEqual(head);
+    const next = store.current(); next.views[0]!.name = "After receipt";
+    await store.save(next);
+    const call = transport.calls[0]!; call.resolve({ revision: 105 }); await tick();
+    expect([...timers.values()].some((timer) => timer.delay === 250)).toBe(true);
+    transport.event({ type: "canvas.layout.operation", revision: 105, op_id: call.input.op_id, intent: call.input.intent });
+    expect([...timers.values()].some((timer) => timer.delay === 250)).toBe(false);
+    transport.event({ type: "error", error: "canvas unavailable" }); retry(250);
+    expect(transport.refreshes).toBe(8);
+    store.dispose(); expect(timers.size).toBe(0);
+  } finally { store.dispose(); Object.assign(globalThis, original); }
+});
 test("event before Result and duplicate events do not apply an optimistic edit twice", async () => {
   const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
   const next = document(); reduce(next, opened); await store.save(next);

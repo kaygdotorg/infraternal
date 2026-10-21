@@ -30,7 +30,7 @@ test("inventory includes shared memberships that this device cannot render", asy
   const view: ViewModel = { id: "console", name: "Console", layout: "tiled", x: 0, y: 0, nodes: [], cols: [{ id: "c", w: metrics.colW, wins: [{ id: "visible", kind: "terminal", host: "local", sessionId: "known" }] }] };
   const remote = structuredClone(view); remote.cols[0]!.wins.push({ id: "hidden", kind: "terminal", host: "unavailable", sessionId: "other" });
   let event: (value: Record<string, unknown>) => void = () => {};
-  const store = new ServerCanvasStore({ call: () => new Promise(() => {}), subscribe: (_filter, receive) => { event = receive; return () => {}; } }, "inventory-scope");
+  const store = new ServerCanvasStore({ call: () => new Promise(() => {}), subscribe: (_filter, receive) => { event = receive; return Object.assign(() => {}, { refresh() {} }); } }, "inventory-scope");
   const shared = toDocument([remote], metrics, 1); event({ type: "canvas.layout.snapshot", revision: 1, initialized: true, document: shared });
   let inventory: CanvasDocument | undefined;
   const cx = { views: new Map([[view.id, { view, wins: new Map([["visible", { model: view.cols[0]!.wins[0]! }]]) }]]), state: { metrics }, adapters: { store, inventory: { setLayout: (document: CanvasDocument) => { inventory = document; } } } } as unknown as Ctx;
