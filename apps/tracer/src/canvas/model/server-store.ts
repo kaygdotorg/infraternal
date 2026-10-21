@@ -72,12 +72,14 @@ export class ServerCanvasStore implements CanvasStore {
     if (this.#disposed) return;
     this.#resyncTarget = Math.max(this.#resyncTarget, revision);
     if (this.#resyncTimer !== undefined) return;
+    // Keep the backoff base capped while independent account stores retry at different times.
+    const delay = this.#resyncDelay + Math.random() * (this.#resyncDelay / 2);
     this.#resyncTimer = setTimeout(() => {
       this.#resyncTimer = undefined;
       this.#resyncDelay = Math.min(5000, this.#resyncDelay * 2);
       this.#off.refresh();
       if (this.#resyncTarget > 0) this.#resync(this.#resyncTarget);
-    }, this.#resyncDelay);
+    }, delay);
   }
   #publish(): void { this.#cache.changed(); }
   #pump(): void {

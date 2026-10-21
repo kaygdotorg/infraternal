@@ -5,6 +5,7 @@ import { ActionRefused } from "../../connection";
 import { reduce, type Intent } from "./operations";
 import type { CanvasDocument } from "./document";
 import { canvasKey, clearAccountStorage } from "../../account-storage";
+const moduleMathRandom = Math.random;
 const document = (): CanvasDocument => ({ format: "infraternal.canvas", version: 1, revision: 0, views: [{ id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [] } }] });
 class Transport implements LayoutTransport {
   refreshes = 0;
@@ -25,9 +26,11 @@ beforeEach(() => {
 const opened: Intent = { type: "open", view_id: "console", column_id: "c", window: { id: "w", target: { type: "settings", section: "appearance" } } };
 test("a layout gap or withdrawn worker requests one fresh snapshot with bounded backoff", async () => {
   const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  const originalRandom = Math.random;
   const timers = new Map<number, { run: () => void; delay: number }>(); let id = 0;
   globalThis.setTimeout = ((run: () => void, delay: number) => { timers.set(++id, { run, delay }); return id; }) as unknown as typeof setTimeout;
   globalThis.clearTimeout = ((timer: number) => { timers.delete(timer); }) as unknown as typeof clearTimeout;
+  Math.random = () => 0;
   const transport = new Transport(), store = new ServerCanvasStore(transport, "a");
   const retry = (delay: number): void => {
     const timer = [...timers].find(([, timer]) => timer.delay === delay); expect(timer).toBeDefined();
@@ -54,7 +57,10 @@ test("a layout gap or withdrawn worker requests one fresh snapshot with bounded 
     transport.event({ type: "error", error: "canvas unavailable" }); retry(250);
     expect(transport.refreshes).toBe(8);
     store.dispose(); expect(timers.size).toBe(0);
-  } finally { store.dispose(); Object.assign(globalThis, original); }
+  } finally { store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
+});
+test("layout recovery restores Math.random after its virtual timer test", () => {
+  expect(Math.random).toBe(moduleMathRandom);
 });
 test("event before Result and duplicate events do not apply an optimistic edit twice", async () => {
   const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
@@ -122,6 +128,64 @@ test("closing an unsent shell removes its unresolved birth without blocking surv
   const intent = transport.calls[0]!.input.intent as Extract<Intent, { type: "open" }>;
   expect(intent.type).toBe("open"); expect(intent.window.id).toBe("child");
   store.flush(); expect(JSON.stringify(JSON.parse(localStorage.getItem(canvasKey("a"))!).pending)).not.toContain('"id":"pending"'); store.dispose();
+});
+
+test("sixty withdrawn layout subscriptions spread their coalesced retry timers", () => {
+  const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  const originalRandom = Math.random;
+  const timers = new Map<number, { run: () => void; at: number; delay: number }>();
+  let id = 0, now = 0, randomStep = 0;
+  globalThis.setTimeout = ((run: () => void, delay: number) => {
+    timers.set(++id, { run, at: now + delay, delay }); return id;
+  }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: number) => { timers.delete(timer); }) as unknown as typeof clearTimeout;
+  // A low-discrepancy sequence keeps the virtual retry schedule reproducible across 60 stores.
+  Math.random = () => ((randomStep++ * 0.6180339887498949) % 1);
+  const stores: ServerCanvasStore[] = [], transports: Transport[] = [], firstDelays: number[] = [];
+  // Virtual time counts scheduled requests without making a host-latency claim.
+  const advance = (until: number): void => {
+    while (true) {
+      const next = [...timers].sort((a, b) => a[1].at - b[1].at)[0];
+      if (!next || next[1].at > until) break;
+      now = next[1].at; timers.delete(next[0]); next[1].run();
+    }
+    now = until;
+  };
+  try {
+    for (let n = 0; n < 60; n++) {
+      const transport = new Transport();
+      const subscribe = transport.subscribe.bind(transport);
+      transport.subscribe = (...args) => {
+        const off = subscribe(...args);
+        return Object.assign(off, { refresh: () => {
+          transport.refreshes++; transport.open(); transport.event({ type: "error", error: "unavailable" });
+        } });
+      };
+      const store = new ServerCanvasStore(transport, `subscriber-${n}`);
+      stores.push(store); transports.push(transport); transport.snapshot();
+      const before = id;
+      for (let burst = 0; burst < 100; burst++) transport.event({ type: "error", error: "unavailable" });
+      const scheduled = [...timers].filter(([timerId]) => timerId > before);
+      expect(scheduled).toHaveLength(1);
+      firstDelays.push(scheduled[0]![1].delay);
+    }
+    advance(60_000);
+    const firstMinute = transports.reduce((sum, transport) => sum + transport.refreshes, 0);
+    advance(65_000);
+    const followingFiveSeconds = transports.reduce((sum, transport) => sum + transport.refreshes, 0) - firstMinute;
+    console.log(`LAYOUT_RETRY_SCHEDULE subscribers=60 first_minute=${firstMinute} following_5s=${followingFiveSeconds} first_delay_slots=${new Set(firstDelays).size}`);
+    expect(new Set(firstDelays).size).toBe(60);
+    expect(Math.min(...firstDelays)).toBeGreaterThanOrEqual(250);
+    expect(Math.max(...firstDelays)).toBeLessThan(375);
+    expect(firstMinute).toBeLessThan(900);
+    expect(followingFiveSeconds).toBeLessThan(60);
+    for (const transport of transports) transport.snapshot();
+    for (const store of stores) store.flush();
+    expect(timers.size).toBe(0);
+  } finally { for (const store of stores) store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
+});
+test("multi-subscriber retry scheduling restores Math.random", () => {
+  expect(Math.random).toBe(moduleMathRandom);
 });
 test("an acknowledgement after its ordered event does not repaint the same layout", async () => {
   const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
