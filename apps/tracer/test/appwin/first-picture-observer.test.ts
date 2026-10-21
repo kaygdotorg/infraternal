@@ -19,6 +19,10 @@ test("each open uses the page clock and latches only its first live picture", ()
   const clock = scope.window.__firstPictures;
   clock.open(0);
   now = 15; clock.open(1);
+  expect(clock.rows()).toEqual([
+    { fixture_index: 1, window_id: "canvas-a", open_ms: 10, first_picture_ms: null, elapsed_ms: null },
+    { fixture_index: 2, window_id: "canvas-b", open_ms: 15, first_picture_ms: null, elapsed_ms: null },
+  ]);
   now = 20; cards[1]!.live = true; changed();
   now = 30; cards[0]!.live = true; changed();
   now = 90; changed();

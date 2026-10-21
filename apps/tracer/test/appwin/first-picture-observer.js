@@ -17,7 +17,13 @@
       if (!Number.isInteger(index) || index < 0 || index >= 10 || opens[index] !== undefined) throw Error("invalid first-picture open index");
       opens[index] = performance.now();
     },
-    rows: () => [...pictures.entries()].sort(([a], [b]) => a - b).map(([, row]) => row),
+    rows: () => {
+      const cards = document.querySelectorAll('.ui-window[data-kind="app"]');
+      return opens.flatMap((open, index) => [pictures.get(index) ?? {
+        fixture_index: index + 1, window_id: cards[index]?.dataset.windowId ?? null,
+        open_ms: open, first_picture_ms: null, elapsed_ms: null,
+      }]);
+    },
     stop: () => observer.disconnect(),
   };
 })();
