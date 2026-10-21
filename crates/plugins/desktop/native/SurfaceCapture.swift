@@ -37,16 +37,21 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func start() async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-        let display: SCDisplay
         let filter: SCContentFilter
+        let sourceRect: CGRect?
         if target["type"] as? String == "screen" {
-            guard let id = target["display_id"] as? UInt32, let found = content.displays.first(where: { $0.displayID == id }), found.frame == rect else { throw HelperFailure.unavailable }
-            display = found; filter = SCContentFilter(display: found, excludingWindows: [])
-        } else {
+            guard let id = target["display_id"] as? UInt32, let display = content.displays.first(where: { $0.displayID == id }), display.frame == rect else { throw HelperFailure.unavailable }
+            filter = SCContentFilter(display: display, excludingWindows: [])
+            sourceRect = rect.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
+        } else if target["type"] as? String == "window" {
             guard let id = target["window_id"] as? UInt32, let pid = target["owner_pid"] as? Int32,
-                  let window = content.windows.first(where: { $0.windowID == id && $0.owningApplication?.processID == pid }), let app = window.owningApplication,
-                  let found = content.displays.first(where: { $0.frame.intersects(rect) }) else { throw HelperFailure.unavailable }
-            display = found; filter = SCContentFilter(display: found, including: [app], exceptingWindows: [])
+                  let window = content.windows.first(where: { $0.windowID == id && $0.owningApplication?.processID == pid }) else { throw HelperFailure.unavailable }
+            // Each window gets a filter bound to its own WindowServer target.
+            // ScreenCaptureKit captures the full window bounds, so no display crop applies here.
+            filter = SCContentFilter(desktopIndependentWindow: window)
+            sourceRect = nil
+        } else {
+            throw HelperFailure.invalid
         }
         let configuration = SCStreamConfiguration()
         configuration.width = Int(size.width); configuration.height = Int(size.height)
@@ -58,7 +63,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         // Let the framework publish at its maximum source cadence. A numeric
         // floor delayed changed-frame delivery in the measured 120 Hz path [D266].
         configuration.minimumFrameInterval = .zero
-        configuration.sourceRect = rect.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
+        if let sourceRect { configuration.sourceRect = sourceRect }
         configuration.destinationRect = fittedContent(rect, size)
         configuration.scalesToFit = true; configuration.preservesAspectRatio = true
         configuration.showsCursor = true

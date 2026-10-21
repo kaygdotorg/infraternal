@@ -29,3 +29,16 @@ fn surface_capture_stored_properties_have_distinct_names() {
     }
     assert!(declarations.len() > 10, "capture member scan is nonempty");
 }
+
+#[test]
+fn window_targets_use_an_independent_capture_filter() {
+    let source = include_str!("../native/SurfaceCapture.swift");
+    assert!(
+        source.contains("filter = SCContentFilter(desktopIndependentWindow: window)"),
+        "window streams must bind ScreenCaptureKit to their selected window"
+    );
+    assert!(
+        source.contains("sourceRect = nil"),
+        "the system captures the full bounds of an independently filtered window"
+    );
+}
