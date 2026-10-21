@@ -5,9 +5,29 @@ from PIL import Image
 ROOT=pathlib.Path.home()/'infraternal-bench/app-windows-latency'
 sys.path.insert(0,str(ROOT))
 from process_identity import process_identity
+
+def validate_helper_archive_descriptor(value):
+ """Validate the content-free paths and hashes for one signed helper archive."""
+ required={'archive','archive_sha256','executable_sha256','leaf_sha1'}
+ if not isinstance(value,dict) or set(value)!=required:raise ValueError('invalid helper archive descriptor')
+ if any(not isinstance(value[key],str) for key in required):raise ValueError('invalid helper archive descriptor')
+ if not value['archive'].startswith('/') or len(value['archive_sha256'])!=64 or len(value['executable_sha256'])!=64 or len(value['leaf_sha1'])!=40:raise ValueError('invalid helper archive descriptor')
+ if any(c not in '0123456789abcdef' for key in ('archive_sha256','executable_sha256','leaf_sha1') for c in value[key].lower()):raise ValueError('invalid helper archive descriptor')
+ return {**value,'archive_sha256':value['archive_sha256'].lower(),'executable_sha256':value['executable_sha256'].lower(),'leaf_sha1':value['leaf_sha1'].lower()}
+
 args=json.loads(sys.stdin.readline())
 job=args.get('job','app-windows-latency')
 os.environ['TRACER_TEST_PORT']=str(args.get('port',4346))
+helper_variant=args.get('helper_variant')
+helper_restore=args.get('helper_restore')
+if bool(helper_variant)!=bool(helper_restore):raise ValueError('helper variant and restoration archives must be supplied together')
+if helper_variant:
+ helper_variant=validate_helper_archive_descriptor(helper_variant)
+ helper_restore=validate_helper_archive_descriptor(helper_restore)
+elif helper_restore is not None:raise ValueError('helper restoration requires a selected variant')
+native=pathlib.Path(args.get('native') or '/Users/kayg/infraternal-bench/app-windows/InfraternalCaptureHelper.app/Contents/MacOS/InfraternalCaptureHelper')
+if args.get('native') and not native.resolve().is_relative_to((ROOT/'native-diagnostic').resolve()):raise RuntimeError('diagnostic companion outside owned directory')
+if helper_variant and native.resolve()!=(ROOT/'native-diagnostic'/'InfraternalCaptureHelper.app'/'Contents'/'MacOS'/'InfraternalCaptureHelper').resolve():raise RuntimeError('helper archive requires the single diagnostic bundle')
 import re
 if not re.fullmatch(r'[a-z0-9-]{1,48}',job) or not re.fullmatch(r'[a-z0-9-]{1,48}',args['label']):raise SystemExit(2)
 E=ROOT/'evidence'/args['label'];E.mkdir(parents=True,exist_ok=False)
@@ -116,7 +136,7 @@ def read_resize_acks(path, cursor):
 class PhaseComplete(Exception):
  """Finish a short phase through cleanup, whose result still controls exit status."""
  pass
-owned=set();children=[];browser=None;play=None;lock=pathlib.Path('/tmp/infraternal-bench.lock');locked=False;cua_pid=None;cua_birth=None
+owned=set();children=[];browser=None;play=None;lock=pathlib.Path('/tmp/infraternal-bench.lock');locked=False;cua_pid=None;cua_birth=None;restore_pending=False
 runtime_owned=False
 start=time.monotonic();stage='lock';all_draws=[];native_metrics=[];results=[];failed=False;cleanup_remaining=0
 output_lock=threading.Lock()
@@ -124,6 +144,32 @@ def emit(value):
  # Main sampling, consent checks and RTT receipts share one JSON-line stream.
  with output_lock:print(json.dumps(value),flush=True)
 def command(argv,**kw):return subprocess.run(argv,capture_output=True,text=True,check=True,**kw).stdout
+
+def replace_signed_helper_bundle(bundle, archive, archive_sha256, executable_sha256, leaf_sha1):
+ """Replace the one diagnostic bundle from a verified, signed archive."""
+ import hashlib,shutil
+ bundle=pathlib.Path(bundle);archive=pathlib.Path(archive)
+ if bundle.name!='InfraternalCaptureHelper.app' or bundle.parent.name!='native-diagnostic':raise RuntimeError('unexpected helper bundle path')
+ bench=pathlib.Path.home()/'infraternal-bench'
+ if not archive.is_absolute() or not archive.resolve().is_relative_to(bench.resolve()):raise RuntimeError('helper archive outside the Mac bench directory')
+ if not archive.is_file() or hashlib.sha256(archive.read_bytes()).hexdigest()!=archive_sha256:raise RuntimeError('helper archive hash mismatch')
+ if len(executable_sha256)!=64 or any(c not in '0123456789abcdef' for c in executable_sha256):raise RuntimeError('invalid helper executable hash')
+ if len(leaf_sha1)!=40 or any(c not in '0123456789abcdef' for c in leaf_sha1.lower()):raise RuntimeError('invalid helper leaf hash')
+ if bundle.exists():shutil.rmtree(bundle)
+ extracted=subprocess.run(['/usr/bin/ditto','-x','-k','--sequesterRsrc',str(archive),str(bundle.parent)],capture_output=True,text=True)
+ if extracted.returncode:raise RuntimeError('helper archive extraction failed')
+ executable=bundle/'Contents'/'MacOS'/'InfraternalCaptureHelper'
+ if not executable.is_file() or hashlib.sha256(executable.read_bytes()).hexdigest()!=executable_sha256:raise RuntimeError('restored helper executable hash mismatch')
+ verified=subprocess.run(['/usr/bin/codesign','--verify','--strict',str(bundle)],capture_output=True,text=True)
+ if verified.returncode:raise RuntimeError('restored helper signature verification failed')
+ requirement=subprocess.run(['/usr/bin/codesign','-d','-r-',str(bundle)],capture_output=True,text=True)
+ description=(requirement.stdout+'\n'+requirement.stderr).lower()
+ if requirement.returncode or 'identifier "com.infraternal.desktop.helper"' not in description or f'certificate leaf = h"{leaf_sha1.lower()}"' not in description:raise RuntimeError('restored helper leaf hash mismatch')
+ return {'archive_sha256':archive_sha256,'executable_sha256':executable_sha256,'leaf_sha1':leaf_sha1.lower()}
+
+def restore_helper_bundle(bundle, archive, archive_sha256, executable_sha256, leaf_sha1):
+ """Restore the shipped capture helper while the MacBook lease is still held."""
+ return replace_signed_helper_bundle(bundle,archive,archive_sha256,executable_sha256,leaf_sha1)
 
 def capture_environment(pipeline, inherited):
  """Select the production capture route or its explicit owned-pixel diagnostic."""
@@ -324,6 +370,15 @@ try:
  readiness=json.loads(sys.stdin.readline());emit({'kind':'vm_readiness','idle':readiness.get('idle',[]),'phase':readiness.get('phase','vm'),'refusal':readiness.get('refusal')})
  if not readiness.get('ready'):raise RuntimeError('named VM or private server unavailable')
  args.update(readiness)
+ if helper_variant:
+  battery()
+  existing=subprocess.run(['/usr/bin/pgrep','-x','InfraternalCaptureHelper'],capture_output=True,text=True)
+  if existing.returncode==0:raise RuntimeError('capture helper already running before archive replacement')
+  if existing.returncode!=1:raise RuntimeError('capture helper process check unavailable')
+  # Keep bundle replacement and cleanup within the same lease so another Mac run sees only the shipped build.
+  restore_pending=True
+  installed=replace_signed_helper_bundle(native.parent.parent.parent,helper_variant['archive'],helper_variant['archive_sha256'],helper_variant['executable_sha256'],helper_variant['leaf_sha1'])
+  emit({'kind':'helper_variant_installed',**installed})
  def run_deadline(signum,frame):raise TimeoutError('measurement run exceeded its bounded time limit')
  run_started=time.monotonic();run_deadline_at=run_started+RUN_TIMEOUT_SECONDS
  signal.signal(signal.SIGALRM,run_deadline);signal.alarm(RUN_TIMEOUT_SECONDS)
@@ -357,8 +412,6 @@ try:
  stage='helper wrappers'
  consent_errors=[]
  runtime=pathlib.Path.home()/'infraternal-bench'/('wl-'+uuid.uuid4().hex[:4]);runtime.mkdir(mode=0o700);runtime_owned=True
- native=pathlib.Path(args.get('native') or '/Users/kayg/infraternal-bench/app-windows/InfraternalCaptureHelper.app/Contents/MacOS/InfraternalCaptureHelper')
- if args.get('native') and not native.resolve().is_relative_to((ROOT/'native-diagnostic').resolve()):raise RuntimeError('diagnostic companion outside owned directory')
  helper_hash=command(['shasum','-a','256',str(native)]).split()[0]
  emit({'kind':'native_helper','hash':helper_hash})
  command(['codesign','--verify','--strict',str(native.parent.parent.parent)])
@@ -1103,6 +1156,16 @@ finally:
   cleanup_remaining=sum(c['ps_exit']==0 for c in checks)
   emit({'kind':'cleanup','checks':checks,'remaining':cleanup_remaining})
   emit({'kind':'consent_monitor','errors':consent_errors if 'consent_errors' in locals() else []})
+  if restore_pending:
+   active_helpers=[pid for pid,birth in helper_births.items() if process_identity(pid)==birth] if 'helper_births' in locals() else []
+   try:
+    if active_helpers:raise RuntimeError('owned capture helper remains active')
+    restored=restore_helper_bundle(native.parent.parent.parent,helper_restore['archive'],helper_restore['archive_sha256'],helper_restore['executable_sha256'],helper_restore['leaf_sha1'])
+    restore_pending=False
+    emit({'kind':'helper_restoration','status':'restored',**restored})
+   except Exception as restore_error:
+    failed=True
+    emit({'kind':'helper_restoration','status':'failed','error_type':type(restore_error).__name__,'active_helpers':active_helpers})
   if runtime_owned:
    import shutil
    shutil.rmtree(runtime)

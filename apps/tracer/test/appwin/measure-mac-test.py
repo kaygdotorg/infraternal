@@ -14,7 +14,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-SCRATCH = pathlib.Path.home() / '.cache/codex-scratch/review-app-windows-r3b/python-tests'
+SCRATCH = pathlib.Path.home() / '.cache/codex-scratch/app-windows-r7-measure/python-tests'
 
 
 class InputCohortTests(unittest.TestCase):
@@ -149,6 +149,115 @@ class CapturePipelineTests(unittest.TestCase):
     def test_unknown_pipeline_is_refused(self):
         with self.assertRaises(ValueError):
             self.configure('other', {})
+
+
+class HelperRestorationTests(unittest.TestCase):
+    """The signed capture bundle returns to its archived build before lock release."""
+
+    def restore(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        functions = [node for node in ast.parse(source.read_text()).body
+                     if isinstance(node, ast.FunctionDef)
+                     and node.name in ('replace_signed_helper_bundle', 'restore_helper_bundle', 'validate_helper_archive_descriptor')]
+        namespace = {'pathlib': pathlib, 'subprocess': subprocess}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), 'exec'), namespace)
+        return namespace['restore_helper_bundle']
+
+    def fixture(self, root):
+        bundle = root / 'native-diagnostic' / 'InfraternalCaptureHelper.app'
+        executable = bundle / 'Contents' / 'MacOS' / 'InfraternalCaptureHelper'
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b'variant')
+        archive = root / 'infraternal-bench' / 'shipped-helper.zip'
+        archive.parent.mkdir()
+        archive.write_bytes(b'known archive bytes')
+        return bundle, executable, archive
+
+    def test_archive_hash_mismatch_preserves_the_running_variant(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            bundle, executable, archive = self.fixture(root)
+            with mock.patch('pathlib.Path.home', return_value=root):
+                with mock.patch('subprocess.run') as run:
+                    with self.assertRaisesRegex(RuntimeError, 'archive hash'):
+                        self.restore()(bundle, archive, '0' * 64, '1' * 64, '2' * 40)
+            run.assert_not_called()
+            self.assertEqual(executable.read_bytes(), b'variant')
+
+    def test_restore_verifies_archive_executable_and_designated_leaf(self):
+        import hashlib
+        leaf = '3e6ae7c6ba4cfe1e6280535eb93cf7a7959a7ba6'
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            bundle, executable, archive = self.fixture(root)
+            def run(argv, **_kwargs):
+                if argv[0] == '/usr/bin/ditto':
+                    self.assertFalse(bundle.exists())
+                    restored = bundle / 'Contents' / 'MacOS' / 'InfraternalCaptureHelper'
+                    restored.parent.mkdir(parents=True)
+                    restored.write_bytes(b'shipped')
+                    return SimpleNamespace(returncode=0, stdout='', stderr='')
+                if argv[0] == '/usr/bin/codesign' and argv[1] == '--verify':
+                    return SimpleNamespace(returncode=0, stdout='', stderr='')
+                if argv[0] == '/usr/bin/codesign' and argv[1] == '-d':
+                    requirement = f'designated => identifier "com.infraternal.desktop.helper" and certificate leaf = H"{leaf}"'
+                    return SimpleNamespace(returncode=0, stdout='', stderr=requirement)
+                raise AssertionError(argv)
+            with mock.patch('pathlib.Path.home', return_value=root):
+                with mock.patch('subprocess.run', side_effect=run):
+                    result = self.restore()(bundle, archive, hashlib.sha256(archive.read_bytes()).hexdigest(),
+                                            hashlib.sha256(b'shipped').hexdigest(), leaf)
+            self.assertEqual(executable.read_bytes(), b'shipped')
+            self.assertEqual(result['executable_sha256'], hashlib.sha256(b'shipped').hexdigest())
+            self.assertEqual(result['leaf_sha1'], leaf)
+
+    def test_restore_runs_before_the_macbook_lock_is_removed(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        tree = ast.parse(source.read_text())
+        restore = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name) and node.func.id == 'restore_helper_bundle'
+                       and node.lineno > 1000)
+        release = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Attribute) and node.func.attr == 'rmdir'
+                       and node.lineno > restore.lineno)
+        self.assertLess(restore.lineno, release.lineno)
+        self.assertEqual(ast.unparse(release.func.value), 'lock')
+
+    def test_archive_descriptor_rejects_incomplete_or_relative_paths(self):
+        source = pathlib.Path(__file__).with_name('measure-mac.py')
+        function = next(node for node in ast.parse(source.read_text()).body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'validate_helper_archive_descriptor')
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        valid = {'archive': '/Users/kayg/infraternal-bench/job/variant.zip',
+                 'archive_sha256': 'A' * 64, 'executable_sha256': 'B' * 64, 'leaf_sha1': 'C' * 40}
+        self.assertEqual(namespace['validate_helper_archive_descriptor'](valid)['leaf_sha1'], 'c' * 40)
+        with self.assertRaises(ValueError):
+            namespace['validate_helper_archive_descriptor']({**valid, 'archive': 'variant.zip'})
+
+    def test_wrong_leaf_fails_even_when_the_restored_executable_hash_matches(self):
+        import hashlib
+        leaf = '3e6ae7c6ba4cfe1e6280535eb93cf7a7959a7ba6'
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            bundle, executable, archive = self.fixture(root)
+            def run(argv, **_kwargs):
+                if argv[0] == '/usr/bin/ditto':
+                    restored = bundle / 'Contents' / 'MacOS' / 'InfraternalCaptureHelper'
+                    restored.parent.mkdir(parents=True)
+                    restored.write_bytes(b'shipped')
+                    return SimpleNamespace(returncode=0, stdout='', stderr='')
+                if argv[0] == '/usr/bin/codesign' and argv[1] == '--verify':
+                    return SimpleNamespace(returncode=0, stdout='', stderr='')
+                if argv[0] == '/usr/bin/codesign' and argv[1] == '-d':
+                    requirement = 'designated => identifier "com.infraternal.desktop.helper" and certificate leaf = H"' + 'a' * 40 + '"'
+                    return SimpleNamespace(returncode=0, stdout='', stderr=requirement)
+                raise AssertionError(argv)
+            with mock.patch('pathlib.Path.home', return_value=root):
+                with mock.patch('subprocess.run', side_effect=run):
+                    with self.assertRaisesRegex(RuntimeError, 'leaf hash'):
+                        self.restore()(bundle, archive, hashlib.sha256(archive.read_bytes()).hexdigest(),
+                                       hashlib.sha256(b'shipped').hexdigest(), leaf)
 
 
 class FirstPictureTests(unittest.TestCase):

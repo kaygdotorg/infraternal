@@ -45,3 +45,22 @@ test("the ten-window idle and single-window flood cohorts have fixed shapes", ()
   expect(() => validate({ env: { APP_WINDOW_TEN_WINDOW_IDLE: "1", APP_WINDOW_STABILITY_SECONDS: "180" } })).toThrow("soak cohorts require exactly ten minutes");
   expect(() => validate({ env: { APP_WINDOW_FLOOD: "1", APP_WINDOW_INPUT_ONLY: "1" } })).toThrow("flood cohort cannot include another phase");
 });
+
+test("a signed helper variant always carries a checked shipped-bundle restoration", () => {
+  const configuration = source.slice(source.indexOf("const variantArchive="), source.indexOf("const job="));
+  const validate = new Function("process", "native", "nativeHash", new Bun.Transpiler({ loader: "ts" }).transformSync(configuration + "return {helperVariant,helperRestore};"));
+  expect(validate({ env: {} }, undefined, undefined)).toEqual({ helperVariant: undefined, helperRestore: undefined });
+  const env = {
+    APP_WINDOW_VARIANT_ARCHIVE: "/Users/kayg/infraternal-bench/job/r7.zip",
+    APP_WINDOW_VARIANT_ARCHIVE_SHA256: "b".repeat(64),
+    APP_WINDOW_RESTORE_HELPER_ARCHIVE: "/Users/kayg/infraternal-bench/job/shipped.zip",
+    APP_WINDOW_RESTORE_HELPER_ARCHIVE_SHA256: "c".repeat(64),
+    APP_WINDOW_RESTORE_HELPER_EXECUTABLE_SHA256: "d".repeat(64),
+    APP_WINDOW_HELPER_LEAF_SHA1: "e".repeat(40),
+  };
+  expect(validate({ env }, "/Users/kayg/infraternal-bench/native-diagnostic/InfraternalCaptureHelper.app/Contents/MacOS/InfraternalCaptureHelper", "a".repeat(64))).toEqual({
+    helperVariant: { archive: env.APP_WINDOW_VARIANT_ARCHIVE, archive_sha256: env.APP_WINDOW_VARIANT_ARCHIVE_SHA256, executable_sha256: "a".repeat(64), leaf_sha1: env.APP_WINDOW_HELPER_LEAF_SHA1 },
+    helperRestore: { archive: env.APP_WINDOW_RESTORE_HELPER_ARCHIVE, archive_sha256: env.APP_WINDOW_RESTORE_HELPER_ARCHIVE_SHA256, executable_sha256: env.APP_WINDOW_RESTORE_HELPER_EXECUTABLE_SHA256, leaf_sha1: env.APP_WINDOW_HELPER_LEAF_SHA1 },
+  });
+  expect(() => validate({ env: { APP_WINDOW_VARIANT_ARCHIVE: env.APP_WINDOW_VARIANT_ARCHIVE } }, undefined, undefined)).toThrow("helper variant and restoration archives must be supplied together");
+});

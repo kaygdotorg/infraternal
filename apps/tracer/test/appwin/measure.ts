@@ -51,6 +51,25 @@ if(!['h264','hevc'].includes(codec))throw Error('invalid codec candidate');
 const native=process.env.APP_WINDOW_NATIVE;
 const nativeHash=process.env.APP_WINDOW_NATIVE_HASH;
 if(Boolean(native)!==Boolean(nativeHash)||(nativeHash&&!/^[a-f0-9]{64}$/.test(nativeHash)))throw Error('diagnostic path and SHA-256 must be supplied together');
+const variantArchive=process.env.APP_WINDOW_VARIANT_ARCHIVE;
+const variantArchiveHash=process.env.APP_WINDOW_VARIANT_ARCHIVE_SHA256;
+const restoreArchive=process.env.APP_WINDOW_RESTORE_HELPER_ARCHIVE;
+const restoreArchiveHash=process.env.APP_WINDOW_RESTORE_HELPER_ARCHIVE_SHA256;
+const restoreExecutableHash=process.env.APP_WINDOW_RESTORE_HELPER_EXECUTABLE_SHA256;
+const helperLeafSha1=process.env.APP_WINDOW_HELPER_LEAF_SHA1;
+const variantRequested=[variantArchive,variantArchiveHash].some(Boolean);
+const restoreRequested=[restoreArchive,restoreArchiveHash,restoreExecutableHash].some(Boolean);
+if(variantRequested!==restoreRequested)throw Error('helper variant and restoration archives must be supplied together');
+if(variantRequested&&(!native||!nativeHash||!variantArchive||!variantArchiveHash||!restoreArchive||!restoreArchiveHash||!restoreExecutableHash||!helperLeafSha1))throw Error('helper variant restoration settings are incomplete');
+for(const [path,name] of [[variantArchive,'variant'],[restoreArchive,'restoration']] as const){
+ if(path&&!path.startsWith('/'))throw Error(`helper ${name} archive path must be absolute`);
+}
+for(const [hash,name] of [[variantArchiveHash,'variant archive'],[restoreArchiveHash,'restoration archive'],[restoreExecutableHash,'restoration executable']] as const){
+ if(hash&&!/^[a-f0-9]{64}$/.test(hash))throw Error(`invalid helper ${name} SHA-256`);
+}
+if(helperLeafSha1&&!/^[a-f0-9]{40}$/.test(helperLeafSha1))throw Error('invalid helper leaf SHA-1');
+const helperVariant=variantRequested?{archive:variantArchive!,archive_sha256:variantArchiveHash!,executable_sha256:nativeHash!,leaf_sha1:helperLeafSha1!}:undefined;
+const helperRestore=restoreRequested?{archive:restoreArchive!,archive_sha256:restoreArchiveHash!,executable_sha256:restoreExecutableHash!,leaf_sha1:helperLeafSha1!}:undefined;
 const job=process.env.APP_WINDOW_JOB??'app-windows-latency';
 if(!/^[a-z0-9-]{1,48}$/.test(job))throw Error('invalid job name');
 const requireIdle=process.env.APP_WINDOW_REQUIRE_IDLE==='1';
@@ -123,7 +142,7 @@ try{
  const [built]=await once(build,'exit');if(built!==0)throw Error('production frontend build failed');
  const bundle=await Bun.build({entrypoints:[worktree+'/apps/tracer/test/appwin/bench-probe.ts'],target:'browser',format:'iife',minify:true});
  if(!bundle.success)throw Error('probe build failed');
- const manifest:Record<string,string|boolean|number>={head:new TextDecoder().decode(Bun.spawnSync(['git','rev-parse','HEAD'],{cwd:worktree}).stdout).trim(),desynchronized,resourcesOnly,pipeline,capturePath:pipeline==='owned'?'owned-copy':'signed-surface',pipelineDiagnostics,codec,hardwareHint,job,macOnly,demoOnly,requireIdle,port,soak,recovery,stabilitySeconds,tenWindowIdle,flood,fixtureWindowCount,ownerPreview,ownerPreviewSeconds,...(native?{native,nativeHash:nativeHash!}:{})};
+ const manifest:Record<string,unknown>={head:new TextDecoder().decode(Bun.spawnSync(['git','rev-parse','HEAD'],{cwd:worktree}).stdout).trim(),desynchronized,resourcesOnly,pipeline,capturePath:pipeline==='owned'?'owned-copy':'signed-surface',pipelineDiagnostics,codec,hardwareHint,job,macOnly,demoOnly,requireIdle,port,soak,recovery,stabilitySeconds,tenWindowIdle,flood,fixtureWindowCount,ownerPreview,ownerPreviewSeconds,...(native?{native,nativeHash:nativeHash!}:{}),...(helperVariant?{helperVariant,helperRestore}:{})};
  for(const [name,path] of Object.entries({binary:process.env.INFRATERNAL_BIN!,controller:import.meta.path,macDriver:import.meta.dirname+'/measure-mac.py',companionLauncher:import.meta.dirname+'/launch-companion.py',processIdentity:import.meta.dirname+'/process_identity.py',pixelObserver:import.meta.dirname+'/worker-pixel-observer.js',probe:import.meta.dirname+'/bench-probe.ts',nativeFixture:worktree+'/crates/plugins/desktop/tests/fixtures/latency-window.swift',worker:workerOverride??worktree+'/apps/tracer/dist/decode.worker.on-demand.js'}))manifest[name]=new Bun.CryptoHasher('sha256').update(await readFile(path)).digest('hex');
  manifest.worktreeDiffSha256=new Bun.CryptoHasher('sha256').update(Bun.spawnSync(['git','diff','HEAD'],{cwd:worktree}).stdout).digest('hex');
  manifest.probeBundle=new Bun.CryptoHasher('sha256').update(await bundle.outputs[0]!.text()).digest('hex');
@@ -141,7 +160,7 @@ try{
  identity.stdin!.end(await readFile(import.meta.dirname+'/process_identity.py'));identity.stderr!.resume();
  const [identityCode]=await once(identity,'exit');if(identityCode!==0)throw Error('process identity staging refused');
  mac=spawn('netbird',['ssh','--no-browser','kayg@10.69.69.101','~/infraternal-bench/app-windows-latency/tools/bin/python -u ~/infraternal-bench/app-windows-latency/venue-mac.py'],{stdio:['pipe','pipe','pipe']});
- mac.stdin!.write(JSON.stringify({controller_pid:process.pid,port,pipeline,label,codec,job,input_only:inputOnly,demo_only:demoOnly,soak,recovery,stability_seconds:stabilitySeconds,ten_window_idle:tenWindowIdle,flood,fixture_window_count:fixtureWindowCount,owner_preview:ownerPreview,owner_preview_seconds:ownerPreviewSeconds,require_idle:requireIdle,native,native_hash:nativeHash,resources_only:resourcesOnly,pipeline_diagnostics:pipelineDiagnostics,fixture_source:await readFile(worktree+'/crates/plugins/desktop/tests/fixtures/latency-window.swift','utf8'),diagnostic_only:process.env.APP_WINDOW_DIAGNOSTIC_ONLY==='1',probe:(hardwareHint?'window.__benchHardwareHint='+JSON.stringify(hardwareHint)+';\n':'')+(resourcesOnly?'window.__benchResourcesOnly=true;\n':'')+await bundle.outputs[0]!.text(),observer:(desynchronized?'self.__benchDesynchronized=true;\n':'')+(flood?'self.__benchFlood=true;\n':'')+await readFile(import.meta.dirname+'/worker-pixel-observer.js','utf8'),worker:await readFile(workerOverride??worktree+'/apps/tracer/dist/decode.worker.on-demand.js','utf8')})+'\n');
+ mac.stdin!.write(JSON.stringify({controller_pid:process.pid,port,pipeline,label,codec,job,input_only:inputOnly,demo_only:demoOnly,soak,recovery,stability_seconds:stabilitySeconds,ten_window_idle:tenWindowIdle,flood,fixture_window_count:fixtureWindowCount,owner_preview:ownerPreview,owner_preview_seconds:ownerPreviewSeconds,require_idle:requireIdle,native,native_hash:nativeHash,helper_variant:helperVariant,helper_restore:helperRestore,resources_only:resourcesOnly,pipeline_diagnostics:pipelineDiagnostics,fixture_source:await readFile(worktree+'/crates/plugins/desktop/tests/fixtures/latency-window.swift','utf8'),diagnostic_only:process.env.APP_WINDOW_DIAGNOSTIC_ONLY==='1',probe:(hardwareHint?'window.__benchHardwareHint='+JSON.stringify(hardwareHint)+';\n':'')+(resourcesOnly?'window.__benchResourcesOnly=true;\n':'')+await bundle.outputs[0]!.text(),observer:(desynchronized?'self.__benchDesynchronized=true;\n':'')+(flood?'self.__benchFlood=true;\n':'')+await readFile(import.meta.dirname+'/worker-pixel-observer.js','utf8'),worker:await readFile(workerOverride??worktree+'/apps/tracer/dist/decode.worker.on-demand.js','utf8')})+'\n');
  const prepare=async()=>{
   if(!macOnly){
    const vm=spawn('netbird',['ssh','--no-browser','calternal@10.69.69.21','top -l 3 -s 1 -n 0'],{stdio:['ignore','pipe','pipe']});
