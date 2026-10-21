@@ -88,3 +88,76 @@ async fn retries_whose_select_waits_stay_within_the_authority_cap() {
          the cap promises at most 4"
     );
 }
+
+/// Count real socket outcomes when the shared store cannot serve any access
+/// check. Use the per-person ceiling of sixteen sockets. Transport pings
+/// remain serviced so liveness cannot explain a Close.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep socket setup, all outcomes and cleanup together.
+async fn every_socket_in_a_full_place_storm_fails_closed_without_a_reply() {
+    let _guard = SERIAL.lock().await;
+    let (f, address, server) =
+        socket_fixture_from_fixture(fixture().await, Some(Duration::from_millis(25))).await;
+    let browsers = futures_util::future::join_all((0..16).map(|_| async {
+        let cookie = format!("__Host-infraternal={}", f.session);
+        let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
+            .await
+            .unwrap();
+        assert_server_hello(&mut socket).await;
+        client_ws_send(
+            &mut socket,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                client_info: "access check storm",
+            },
+        )
+        .await;
+        read_welcome(&mut socket).await;
+        socket
+    }))
+    .await;
+    let held = f.auth.pool.acquire().await.unwrap();
+    let outcomes =
+        futures_util::future::join_all(browsers.into_iter().map(|mut socket| async move {
+            client_ws_send(&mut socket, 0, &call(1)).await;
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    match socket.next().await {
+                        Some(Ok(Message::Close(_))) => break true,
+                        Some(Ok(Message::Ping(bytes))) => {
+                            socket.send(Message::Pong(bytes)).await.unwrap();
+                        }
+                        Some(Ok(Message::Pong(_))) => {}
+                        Some(Ok(Message::Binary(bytes))) => {
+                            let decoded = decode_muxed_frame(&bytes).unwrap();
+                            match decoded.frame {
+                                Frame::Ping { nonce, sent_us } => {
+                                    client_ws_send(
+                                        &mut socket,
+                                        decoded.stream_id,
+                                        &Frame::Pong { nonce, sent_us },
+                                    )
+                                    .await;
+                                }
+                                Frame::Result { .. } => panic!(
+                                    "an access-checked action replied while every place was stalled"
+                                ),
+                                _ => {}
+                            }
+                        }
+                        _ => break false,
+                    }
+                }
+            })
+            .await
+            .unwrap_or(false)
+        }))
+        .await;
+    // Release only after all socket outcomes have been observed. Detached
+    // access checks must not keep the transport open until pool acquisition.
+    drop(held);
+    server.abort();
+    assert_eq!(outcomes.iter().filter(|&&closed| closed).count(), 16);
+}
