@@ -141,7 +141,7 @@ impl Drop for RenewalHold {
     }
 }
 
-/// Keep a read's server-wide place until its query returns the connection to the pool.
+/// Keep a server-wide read place until its SELECT future completes.
 struct AuthorityReadHold(Arc<AuthorityLimits>);
 
 impl AuthorityReadHold {
@@ -205,8 +205,9 @@ where
 {
     fn drop(&mut self) {
         if let Some(query) = self.0.take() {
-            // The attempt timeout drops this wrapper; the query keeps its read
-            // place until SQLite returns the pooled connection.
+            // The attempt timeout drops this wrapper; the detached SELECT keeps
+            // its place until its future completes. Pool health checks may finish
+            // afterward, so the place counts active queries, not idle connections.
             detach_authority_query(query);
         }
     }
@@ -2430,9 +2431,10 @@ async fn authority_deadline(
 /// wait seconds for that lock; it never runs here (`renew_soon`). Each attempt
 /// obtains one of the `AUTHORITY_READS` places within its deadline. Fast SELECTs
 /// run inline. If one misses its deadline, `DetachOnDrop` moves its pinned
-/// future into a task with the place until `live_expiry` returns its pooled
-/// connection. A retry cannot spend another place while that SQLite read
-/// remains in flight.
+/// future into a task with its place until the SELECT future completes. Pool
+/// return and health checks may finish afterward, so the place bounds active
+/// queries rather than an instantaneous pool-idle count. A retry cannot start
+/// another SELECT while its previous query future remains in flight.
 ///
 /// Expiry is monotonic: once a session's end has passed it is never found live
 /// again. Every attempt reads the wall clock when it starts, so a retry after a

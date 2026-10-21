@@ -160,8 +160,8 @@ impl Auth {
     }
 
     /// Read a socket's actual deadline without sliding it during idle checks.
-    /// `hold` stays with the query until its pooled connection is returned,
-    /// even if the caller drops its wait after a deadline.
+    /// `hold` stays with the SELECT future until it completes, even if the
+    /// caller's wait expires. Pool return and health checks may finish afterward.
     pub(crate) fn live_expiry(
         &self,
         token: &str,
