@@ -346,6 +346,25 @@ the same SQLite transaction as their state changes. Rows contain only account ID
 event and Unix time. Invalid requests, reissues and repeat cancellation cannot
 invent completion or duplicate start evidence. Notification is after commit.
 
+## Account-scoped authority notifications (#240, D28)
+
+Session revocation and recovery-state notifications must use independent watch
+generations per account. Logout carries the account returned by its committed
+session deletion and, when known, the private session hash; recovery completion
+invalidates the account. These internal hints never enter browser events or logs.
+
+Subscribe before the entry authority read, including after socket admission.
+Every unseen generation means recheck that account. Coalesced intermediate events
+cannot be discarded based on the latest session hash: an earlier logout may have
+revoked this socket. A lost source fails closed as unavailable authority. Remove
+an account's channel when its last subscription ends, including concurrent drops.
+
+Logout, recovery start/cancel/rotation and recovery completion all know their
+affected account; none requires a server-wide authority event. Test-only all-account
+notifications may model database changes whose account scope is unknown. Server
+shutdown and component disable retain their separate lifecycle signals. Ordinary
+account changes must never wake another account's sockets or pending operations.
+
 ## Browser-only recovery derivation v2 (#45, D151 owner task)
 
 This revision enforces browser-only words for all production paths. It reuses WebCrypto HKDF-SHA256/AES-256-GCM and the
