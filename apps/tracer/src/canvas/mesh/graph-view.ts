@@ -200,6 +200,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
 
   /** Where each graph view's cards are drawn from, in pin coordinates (`MeshLayout.origin`), as of the last refresh. */
   const origins = new WeakMap<ViewRec, Pt>();
+  const ZERO: Pt = { x: 0, y: 0 };
   /**
    * Fits the view to its nodes once a card is dropped. Only the dropped card's pin was written (while it moved): pins
    * may be negative, and the layout model draws the graph shifted by `origin` so the leftmost/topmost card is at or
@@ -228,23 +229,30 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     const pill = rec.card.pill;
     pill.style.touchAction = "none";
     pill.dataset.grab = "";
-    let d: { id: number; x: number; y: number; nx: number; ny: number; n: NodeModel; ox: number; oy: number; at?: { x: number; y: number }; frame: number } | undefined;
+    // The drag is anchored in pin space (`px`,`py`: the pin at pointerdown), not in drawn coordinates: the drawn shift
+    // (`origins`) can change while a finger is down (a remote pin moves it), and a captured shift would make the card jump.
+    let d: { id: number; x: number; y: number; px: number; py: number; n: NodeModel; moved: boolean; at?: { x: number; y: number }; frame: number } | undefined;
     // A drag is applied once per frame, from the last pointer position: a pointer that reports faster than the screen
     // draws would move the card and redraw its arrows several times for one frame.
     const apply = (): void => {
       if (!d) return;
       d.frame = 0;
       if (!d.at) return;
-      const { n } = d;
+      // A refresh during the drag may have rebound the card to a new model: follow it, so the model drawn is the one moved.
+      const n = boundTo.get(rec) ?? d.n;
+      d.n = n;
       // No wall: the view is as big as its nodes as placed, so a card can go anywhere; the view is fitted once, on drop
       // (`fitAfterDrag`), because a resize per pointer move would re-frame the camera under the finger.
-      n.x = d.nx + (d.at.x - d.x) / cam.z;
-      n.y = d.ny + (d.at.y - d.y) / cam.z;
+      const o = origins.get(rec.owner) ?? ZERO; // the shift as drawn now: one WeakMap read per frame
+      const px = d.px + (d.at.x - d.x) / cam.z, py = d.py + (d.at.y - d.y) / cam.z;
+      if (px !== d.px || py !== d.py) d.moved = true;
+      n.x = px + o.x;
+      n.y = py + o.y;
       n.pinned = true; // a node the person moved stays where it is (D180); the canvas document keeps it
       const pins = rec.owner.view.graphPins ??= Object.fromEntries(source.data().pins);
       // The pin is where the card is minus the shift the graph is drawn with (it may be negative).
-      pins[n.id] = { x: Math.round(n.x - d.ox), y: Math.round(n.y - d.oy) };
-      if (rec.owner.view.id === "mesh") source.pin(n.id, n.x - d.ox, n.y - d.oy);
+      pins[n.id] = { x: Math.round(px), y: Math.round(py) };
+      if (rec.owner.view.id === "mesh") source.pin(n.id, px, py);
       rec.card.root.style.transform = `translate(${n.x}px, ${n.y}px)`;
       // Arrows stay attached to the card they belong to while it moves.
       for (const t of topoOf(rec.owner)) if (t.grant.from === n.id || t.grant.to === n.id) drawTopoArrow(rec.owner, t);
@@ -253,8 +261,8 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       const n = boundTo.get(rec);
       if (camera.lod === "thumb" || !n) return;
       pill.setPointerCapture(e.pointerId);
-      const o = origins.get(rec.owner) ?? { x: 0, y: 0 }; // read once: nothing is looked up per pointer move
-      d = { id: e.pointerId, x: e.clientX, y: e.clientY, nx: n.x, ny: n.y, n, ox: o.x, oy: o.y, frame: 0 };
+      const o = origins.get(rec.owner) ?? ZERO;
+      d = { id: e.pointerId, x: e.clientX, y: e.clientY, px: n.x - o.x, py: n.y - o.y, n, moved: false, frame: 0 };
       rec.card.root.dataset.lifted = "";
     }, { signal });
     pill.addEventListener("pointermove", (e) => {
@@ -266,8 +274,8 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       if (!d || e.pointerId !== d.id) return;
       cancelAnimationFrame(d.frame);
       apply();
-      const { n } = d;
-      const moved = d.nx !== n.x || d.ny !== n.y;
+      const n = d.n;
+      const moved = d.moved;
       d = undefined;
       delete rec.card.root.dataset.lifted;
       if (moved) { fitAfterDrag(rec.owner, n); cx.store.changed(); }
