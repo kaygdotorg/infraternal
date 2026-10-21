@@ -73,9 +73,14 @@ export async function reconcile(cx: Ctx, read: () => SharedPaint, resolve: (targ
   }
   // Saved cells can overlap the current footprint after a cached Console grows,
   // even on desktop. Settle every view, including generated Settings, for display.
+  // Keep the current camera's view fixed first, then visit disconnected desktop groups too.
   // Another device can remove the view this camera last used; the fixed view must still exist.
   const anchor = cx.views.has(cx.state.currentView) ? cx.state.currentView : cx.views.keys().next().value;
-  if (anchor) cx.view.settle(anchor, undefined, true);
+  if (anchor) {
+    cx.view.settle(anchor, undefined, true);
+    // Touch keeps the current view fixed for its wider drawn columns; desktop has no draw floor and can settle each group.
+    if (cx.state.metrics.minW === 0) for (const id of cx.views.keys()) if (id !== anchor) cx.view.settle(id, undefined, true);
+  }
   if (!cx.state.activeWin) { const first = cx.views.get(cx.state.currentView)?.wins.values().next().value; if (first) cx.win.setActive(first); }
   cx.store.reset(protectedIds, new Set([...protectedViews].filter((id) => !document.views.some((v) => v.id === id))));
   cx.adapters.inventory?.setLayout?.(document);
