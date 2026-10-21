@@ -1068,7 +1068,7 @@ async fn revocation_stall(stall: RevocationStall) {
 
 /// Application progress is a stronger barrier than a content-free proof: the
 /// result requires authority and runs after previously queued terminal work.
-async fn authorized_result(
+pub(super) async fn authorized_result(
     browser: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
