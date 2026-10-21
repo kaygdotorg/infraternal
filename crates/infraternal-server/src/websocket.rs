@@ -1369,9 +1369,10 @@ where
                 .await
                 .is_ok();
             attachments.remove(&stream_id);
-            if gone {
-                ended.insert(stream_id)?;
-            }
+            // Every host close races frames already queued by the browser,
+            // including the initial Credit/Resize. Absorb them until Close or
+            // reattach, just as for a final close, without losing sibling streams.
+            ended.insert(stream_id)?;
             sent
         }
     };
