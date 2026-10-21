@@ -195,9 +195,46 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
 
 export interface ParsedTarget { user: string | undefined; host: string; port: number | undefined }
 
-/** Parses `user@host[:port]`; undefined for text that cannot name a host. */
+/**
+ * Parses `user@host[:port]`; undefined for text that cannot name a host. A pasted `ssh://user@host:port` address or
+ * `ssh [-p port] [-l user] [user@]host` command is normalised into the same fields. Only those two options are
+ * read: any other option (`-o…`, `-J`, `-i`) or trailing remote command is refused rather than guessed at.
+ */
 export function parseTarget(raw: string): ParsedTarget | undefined {
-  const match = /^(?:([a-z_][a-z0-9_.-]*)@)?([a-z0-9][a-z0-9.-]*|\[[0-9a-f:]+\])(?::(\d{1,5}))?$/i.exec(raw.trim());
+  const text = raw.trim();
+  if (/^ssh:\/\//i.test(text)) return parseDestination(text.slice(6).replace(/\/$/, ""));
+  if (!/^ssh\s/i.test(text)) return parseDestination(text);
+  let port: string | undefined;
+  let login: string | undefined;
+  const rest: string[] = [];
+  const words = text.split(/\s+/).slice(1);
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i]!;
+    const flag = /^-([pl])(.*)$/.exec(word);
+    if (flag) {
+      const value = flag[2] || words[++i];
+      if (value === undefined) return undefined;
+      if (flag[1] === "p") port = value; else login = value;
+    } else if (word.startsWith("-")) return undefined;
+    else rest.push(word);
+  }
+  if (rest.length !== 1) return undefined;
+  const target = parseDestination(rest[0]!);
+  if (!target) return undefined;
+  if (port !== undefined) {
+    if (target.port !== undefined || !/^\d{1,5}$/.test(port)) return undefined;
+    target.port = Number(port);
+    if (target.port < 1 || target.port > 65535) return undefined;
+  }
+  if (login !== undefined) {
+    if (target.user !== undefined || !parseDestination(`${login}@x`)) return undefined;
+    target.user = login;
+  }
+  return target;
+}
+
+function parseDestination(raw: string): ParsedTarget | undefined {
+  const match = /^(?:([a-z_][a-z0-9_.-]*)@)?([a-z0-9][a-z0-9.-]*|\[[0-9a-f:]+\])(?::(\d{1,5}))?$/i.exec(raw);
   if (!match) return undefined;
   const port = match[3] ? Number(match[3]) : undefined;
   if (port !== undefined && (port < 1 || port > 65535)) return undefined;
