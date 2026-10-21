@@ -1,16 +1,16 @@
 //! Independent control and capture workers prevent snapshot/encode latency from delaying input [D200,D203,D208].
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 use crate::capture::{Capture, CapturedFrame};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 use crate::macos::MacCapture;
 use crate::{
     capture::Rect,
     native::Native,
     protocol::{self, Kind, Size, Start},
 };
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 use std::hash::Hasher;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 #[derive(serde::Deserialize)]
 struct Clock {
     capture_ticks: u64,
@@ -84,13 +84,13 @@ impl Worker {
         // Retain owned pixels only for explicit diagnostics; normal capture
         // never takes the full-image copy/hash/pipe or polling path.
         let surface = std::env::var_os("INFRATERNAL_DESKTOP_OWNED").is_none();
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", test))]
         let capture = if surface {
             None
         } else {
             Some(MacCapture::start(&start.target, start.size, rect)?)
         };
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", test)))]
         let capture = {
             if !surface {
                 return Err(io::Error::other(
@@ -112,7 +112,7 @@ impl Worker {
         let screen = matches!(start.target, protocol::Target::Screen { .. });
         let start = start.clone();
         let thread = thread::spawn(move || {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", test))]
             let result = if let Some(capture) = capture {
                 produce(
                     capture,
@@ -142,7 +142,7 @@ impl Worker {
                     },
                 )
             };
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", test)))]
             let result = {
                 let _ = capture;
                 produce_surface(
@@ -203,7 +203,58 @@ struct Production<'a> {
     frames: &'a mpsc::SyncSender<io::Result<Vec<u8>>>,
     wake: &'a Wake,
 }
-#[cfg(target_os = "macos")]
+
+/// Coalesces repair signals and retries only while an IDR is still missing.
+/// The 300 ms floor matches the browser repair throttle without idle requests.
+struct SurfaceRecovery {
+    waiting_keyframe: bool,
+    repair_pending: bool,
+    last_request: Option<Instant>,
+}
+
+impl SurfaceRecovery {
+    const REPAIR_INTERVAL: Duration = Duration::from_millis(300);
+
+    fn new() -> Self {
+        Self {
+            waiting_keyframe: true,
+            repair_pending: false,
+            last_request: None,
+        }
+    }
+
+    fn request(&mut self) {
+        self.waiting_keyframe = true;
+        self.repair_pending = true;
+    }
+
+    fn request_due(&mut self, now: Instant) -> bool {
+        if !self.repair_pending
+            || self
+                .last_request
+                .is_some_and(|last| now.saturating_duration_since(last) < Self::REPAIR_INTERVAL)
+        {
+            return false;
+        }
+        self.last_request = Some(now);
+        true
+    }
+
+    fn admit(&mut self, keyframe: bool) -> bool {
+        if self.waiting_keyframe && !keyframe {
+            self.request();
+            return false;
+        }
+        if keyframe {
+            self.waiting_keyframe = false;
+            self.repair_pending = false;
+            self.last_request = None;
+        }
+        true
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn produce(
     mut capture: MacCapture,
     mut size: Size,
@@ -408,6 +459,34 @@ mod startup_recovery_tests {
             "one startup gap needs one repair request"
         );
     }
+
+    #[test]
+    fn surface_repair_is_coalesced_rate_limited_and_idle_when_recovered() {
+        let start = Instant::now();
+        let mut recovery = SurfaceRecovery::new();
+
+        assert!(
+            !recovery.request_due(start),
+            "startup alone is not a repair"
+        );
+        assert!(!recovery.admit(false), "a delta cannot start the stream");
+        recovery.request();
+        assert!(
+            recovery.request_due(start),
+            "first observed gap repairs now"
+        );
+        assert!(
+            !recovery.admit(false),
+            "deltas remain unusable until an IDR"
+        );
+        assert!(!recovery.request_due(start + Duration::from_millis(299)));
+        assert!(recovery.request_due(start + Duration::from_millis(300)));
+
+        assert!(recovery.admit(true), "an IDR ends the recovery episode");
+        assert!(!recovery.request_due(start + Duration::from_secs(1)));
+        assert!(recovery.admit(false), "healthy deltas remain deliverable");
+        assert!(!recovery.request_due(start + Duration::from_secs(1)));
+    }
 }
 
 fn produce_surface(
@@ -436,7 +515,7 @@ fn produce_surface(
         Ok(native)
     };
     let mut native = open(&start, rect)?;
-    let mut waiting_keyframe = true;
+    let mut recovery = SurfaceRecovery::new();
     while !stop.load(Ordering::Acquire) {
         if congested.swap(false, Ordering::AcqRel) {
             let _ = native.call(Kind::Congested, b"{}")?;
@@ -449,35 +528,34 @@ fn produce_surface(
             start.size = size;
             rect = changed;
             native = open(&start, rect)?;
-            waiting_keyframe = true;
+            recovery = SurfaceRecovery::new();
         }
         if force_keyframe.swap(false, Ordering::AcqRel) {
+            recovery.request();
+        }
+        if native.take_surface_gap() {
+            recovery.request();
+        }
+        if recovery.request_due(Instant::now()) {
             let (kind, _) = native.call(Kind::Keyframe, b"{}")?;
             if kind == Kind::Error {
                 return Err(io::Error::other("Desktop surface repair unavailable."));
             }
-            waiting_keyframe = true;
-        }
-        if native.take_surface_gap() && !waiting_keyframe {
-            waiting_keyframe = true;
-            force_keyframe.store(true, Ordering::Release);
         }
         let Some(body) = native.surface_video()? else {
             continue;
         };
         crate::measurement::helper_frame("helper_native_read", &body);
         let keyframe = body.get(8) == Some(&1);
-        if waiting_keyframe && !keyframe {
+        if !recovery.admit(keyframe) {
             continue;
         }
         match frames.try_send(Ok(body)) {
             Ok(()) => {
-                waiting_keyframe = false;
                 wake.notify();
             }
             Err(mpsc::TrySendError::Full(_)) => {
-                waiting_keyframe = true;
-                force_keyframe.store(true, Ordering::Release);
+                recovery.request();
             }
             Err(mpsc::TrySendError::Disconnected(_)) => break,
         }

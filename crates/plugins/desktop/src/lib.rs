@@ -4,6 +4,50 @@
 pub mod capture;
 #[cfg(feature = "desktop")]
 pub mod component;
+#[cfg(all(feature = "desktop", test, not(target_os = "macos")))]
+mod macos {
+    //! Supplies inert owned capture bindings to Linux unit builds of the helper.
+    use crate::{
+        capture::{Capture, CapturedFrame, Rect},
+        protocol::{Size, Target},
+    };
+    use std::io;
+
+    pub struct MacCapture(Size);
+
+    pub struct Frame;
+
+    impl CapturedFrame for Frame {
+        fn capture_ticks(&self) -> u64 {
+            0
+        }
+    }
+
+    impl Capture for MacCapture {
+        type Frame = Frame;
+
+        fn start(_: &Target, size: Size, _: Rect) -> io::Result<Self> {
+            Ok(Self(size))
+        }
+
+        fn resize(&mut self, size: Size, _: Rect) -> io::Result<()> {
+            self.0 = size;
+            Ok(())
+        }
+
+        fn copy_pixels(&self) -> io::Result<Vec<u8>> {
+            Ok(vec![0; self.0.width as usize * self.0.height as usize * 4])
+        }
+
+        fn take_latest(&self) -> Option<Self::Frame> {
+            Some(Frame)
+        }
+
+        fn stop(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+}
 #[cfg(all(feature = "desktop", any(target_os = "macos", test)))]
 pub mod helper;
 #[cfg(all(feature = "desktop", target_os = "macos"))]
