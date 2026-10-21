@@ -943,11 +943,22 @@ async fn revocation_stall(stall: RevocationStall) {
             },
         )
         .await;
-        let wire = read_client_frame(&mut browser).await;
-        assert!(matches!(
-            decode_muxed_frame(&wire).unwrap().frame,
-            Frame::Pong { nonce: 240, .. }
-        ));
+        // Attached-terminal notices can precede the correlated control reply.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let wire = read_client_frame(&mut browser).await;
+                let decoded = decode_muxed_frame(&wire).unwrap();
+                match decoded.frame {
+                    Frame::Pong { nonce: 240, .. } if decoded.stream_id == 0 => break,
+                    Frame::Close { .. } => {
+                        panic!("the terminal closed before the visibility fence")
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the visibility proof must complete before the stall");
     }
     // The pool has one connection: holding it makes every authority read wait out its bound.
     let mut held = f.auth.pool.acquire().await.unwrap();
