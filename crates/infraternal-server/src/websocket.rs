@@ -2402,20 +2402,7 @@ pub(super) async fn probe_deadline(
     user: &str,
     token: &str,
 ) -> Result<tokio::time::Instant, AuthorityMiss> {
-    let started = tokio::time::Instant::now();
-    let wall = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| AuthorityMiss::Unavailable)?;
-    let expiry = read_expiry(state, user, token, false, AUTHORITY_WAIT).await?;
-    let wall_deadline =
-        Duration::from_secs(u64::try_from(expiry).map_err(|_| AuthorityMiss::Refused)?);
-    started
-        .checked_add(
-            wall_deadline
-                .checked_sub(wall)
-                .ok_or(AuthorityMiss::Refused)?,
-        )
-        .ok_or(AuthorityMiss::Unavailable)
+    authority_deadline(state, user, token, false).await
 }
 
 async fn socket_deadline(
@@ -2435,11 +2422,21 @@ async fn authority_deadline(
     renew: bool,
 ) -> Result<tokio::time::Instant, AuthorityMiss> {
     let expiry = read_expiry(state, user_id, token, renew, AUTHORITY_WAIT).await?;
-    // The wait may have taken up to AUTHORITY_WAIT: measure the deadline from the
-    // wall clock after the read, so a slow store can never extend a session.
-    let now = unix_seconds().map_err(|()| AuthorityMiss::Unavailable)?;
-    let remaining = u64::try_from(expiry - now).map_err(|_| AuthorityMiss::Refused)?;
-    Ok(tokio::time::Instant::now() + Duration::from_secs(remaining))
+    // Pair the clocks after the read and retain fractional wall seconds. Neither
+    // SQL delay nor truncation may extend authority beyond the stored expiry.
+    let started = tokio::time::Instant::now();
+    let wall = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| AuthorityMiss::Unavailable)?;
+    let wall_deadline =
+        Duration::from_secs(u64::try_from(expiry).map_err(|_| AuthorityMiss::Refused)?);
+    started
+        .checked_add(
+            wall_deadline
+                .checked_sub(wall)
+                .ok_or(AuthorityMiss::Refused)?,
+        )
+        .ok_or(AuthorityMiss::Unavailable)
 }
 
 /// Read the session's expiry, and start its renewal when `renew` is set and it
