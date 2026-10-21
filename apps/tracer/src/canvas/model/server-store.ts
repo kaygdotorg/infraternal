@@ -34,9 +34,10 @@ export class ServerCanvasStore implements CanvasStore {
     this.#off = transport.subscribe({ topic: "canvas.layout" }, (event) => this.#event(event), () => {
       this.#journal.restart();
       this.#resyncing = true;
-      // A reconnect already sent Subscribe. Give its snapshot a full backoff
-      // interval before retrying, replacing any prior generation's watchdog.
+      // Subscribe is already in flight. Leave room for a normal 300 ms round
+      // trip before replacing it; newly detected gaps still start at 250 ms.
       clearTimeout(this.#resyncTimer); this.#resyncTimer = undefined;
+      this.#resyncDelay = Math.max(500, this.#resyncDelay);
       this.#resync();
     });
   }

@@ -388,3 +388,26 @@ test("recovery coalesces gaps and errors, ignores operations until a snapshot, a
     store.dispose(); expect(timers.size).toBe(0);
   } finally { store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
 });
+
+// The normal 300 ms fixture RTT must not race the first snapshot watchdog into another Subscribe.
+test("a normal reconnect snapshot arrives before any replacement is requested", () => {
+  const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  const originalRandom = Math.random;
+  const timers = new Map<number, { run: () => void; at: number }>(); let id = 0, now = 0;
+  globalThis.setTimeout = ((run: () => void, delay: number) => { timers.set(++id, { run, at: now + delay }); return id; }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: number) => { timers.delete(timer); }) as unknown as typeof clearTimeout;
+  Math.random = () => 0;
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "normal-reconnect");
+  try {
+    transport.snapshot(); store.flush(); transport.open();
+    const head = document(); head.revision = 1;
+    setTimeout(() => transport.snapshot(head), 300);
+    while (true) {
+      const next = [...timers].sort((a, b) => a[1].at - b[1].at)[0];
+      if (!next || next[1].at > 300) break;
+      now = next[1].at; timers.delete(next[0]); next[1].run();
+    }
+    expect(transport.resyncs).toBe(0); expect(store.current().revision).toBe(1);
+    store.flush(); expect(timers.size).toBe(0);
+  } finally { store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
+});
