@@ -72,7 +72,7 @@ const STYLE = `
 .ui-confirm-tip-text { display: grid; gap: 3px; }
 .ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 var(--text-body, 13px)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
 .ui-confirm-tip-detail { margin: 0; color: var(--fg-2); font: 450 var(--text-secondary, 12px)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
-.ui-confirm-tip-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.ui-confirm-tip-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .ui-confirm-tip button { display: inline-grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent;
   color: var(--fg-2); cursor: pointer;
   transition: transform 120ms cubic-bezier(0.23, 1, 0.32, 1), background-color 120ms ease, color 120ms ease; }
@@ -93,7 +93,7 @@ const STYLE = `
 .ui-confirm-tip[data-named] button { width: auto; min-width: 28px; padding: 0 12px; font: 500 var(--text-secondary, 12px)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
 @media (pointer: coarse) {
   .ui-confirm-tip { gap: 14px; padding: 16px; }
-  .ui-confirm-tip[data-named] button { width: auto; padding: 0 16px; }
+  .ui-confirm-tip[data-named] button { width: auto; padding: 0 12px; }
   .ui-confirm-tip button { width: 44px; height: 44px; }
   .ui-confirm-tip button svg { width: 18px; height: 18px; }
 }
@@ -233,10 +233,12 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
   const place = (): void => {
     if (tip.hidden) return;
     const anchorRect = anchor.getBoundingClientRect();
+    const bound = options.boundary?.getBoundingClientRect();
+    // A narrow card (a phone window) is narrower than the tip's own cap: the tip never outgrows its 9 px insets.
+    if (bound) tip.style.maxWidth = `${Math.max(160, Math.floor(bound.width - 18))}px`;
     // Layout size: the open animation scales the tip, and a scaled rect would misplace it.
     const width = tip.offsetWidth;
     const height = tip.offsetHeight;
-    const bound = options.boundary?.getBoundingClientRect();
     const minX = bound ? bound.left + 9 : 12, maxX = (bound ? bound.right - 9 : innerWidth - 12) - width;
     const minY = bound ? bound.top + 9 : 12, maxY = (bound ? bound.bottom - 9 : innerHeight - 12) - height;
     const left = Math.max(minX, Math.min(maxX, anchorRect.left + anchorRect.width / 2 - width / 2));
