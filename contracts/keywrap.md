@@ -351,7 +351,7 @@ invent completion or duplicate start evidence. Notification is after commit.
 Session revocation and recovery-state notifications must use independent watch
 generations per account. Logout carries the account returned by its committed
 session deletion and, when known, the private session hash; recovery completion
-invalidates the account. These internal hints never enter browser events or logs.
+invalidates its old sessions. These internal hints never enter browser events or logs.
 
 Subscribe before the entry authority read, including after socket admission.
 Every unseen generation means recheck that account. Coalesced intermediate events
