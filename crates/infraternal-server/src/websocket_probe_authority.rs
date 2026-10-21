@@ -10,6 +10,36 @@ pub(crate) struct Lease {
     expiry: Instant,
 }
 
+#[cfg(test)]
+mod review_closed_watch {
+    //! A lost notification source is unavailable authority, without a guarded write (#240).
+
+    use super::*;
+    use crate::auth::tests::socket_clock::FrozenSocketTime;
+    use crate::websocket::writer_tests::busy_edges::{TOKEN, fixture};
+
+    #[tokio::test(start_paused = true)]
+    async fn closed_revocation_watch_is_unavailable_and_never_polls_the_write() {
+        let _clock = FrozenSocketTime::new().await;
+        let (state, user) = fixture().await;
+        let mut lease = Lease::new(&state, &user, TOKEN).await.unwrap();
+        // Auth owns the production sender for the state's entire lifetime.
+        // Replace only this test receiver to exercise unexpected source loss.
+        let (sender, receiver) = watch::channel(());
+        lease.revoked = receiver;
+        drop(sender);
+        let mut wrote = false;
+        let result = lease
+            .run(&state, &user, TOKEN, async {
+                wrote = true;
+                Ok::<(), ()>(())
+            })
+            .await;
+        assert_eq!(result, Err(AuthorityMiss::Unavailable));
+        assert!(!wrote);
+    }
+}
+
 impl Lease {
     pub(crate) async fn new(state: &WebSocketState, user: &str, token: &str) -> Result<Self, ()> {
         // Subscribe before SQL so a commit racing the read remains observable.
