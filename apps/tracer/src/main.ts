@@ -85,6 +85,14 @@ declare global {
       rendererMetrics: () => TerminalClient["rendererMetrics"] | undefined;
       currentView: () => string;
     };
+    /** Controlled shared-layout hooks for mock-browser break-it specs. */
+    __tracerLayoutReviewDouble?: {
+      revisions: () => { server: number; client: number };
+      currentView: () => string;
+      viewIds: () => string[];
+      removeConsole: () => number;
+      skipRevision: () => number;
+    };
   }
 }
 
@@ -364,6 +372,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   const clustersMode = __CLUSTERS_PREVIEW__ && mockMode && proto === "clusters";
   const probeMode = query.get("probe") === "1";
   const predictiveEcho = query.get("predict") === "1";
+  const reviewLayout = productTestMode && query.get("reviewLayout") === "1";
   // The canvas is the product screen. The test double's plain page and the latency probe keep the single
   // terminal screen: the terminal specs and the probe drive that one terminal.
   const useCanvas = (!mockMode || productTestMode) && !probeMode;
@@ -425,11 +434,16 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     screen.setRecoveryPending(identity?.recovery_pending?.ready_at);
     try {
       const { mountProductCanvas } = await import("./canvas/product");
+      const layoutReview = reviewLayout
+        ? await import("./canvas/model/layout-review-double").then(({ createLayoutReviewDouble }) => createLayoutReviewDouble(
+          activeUserId ?? "account", hostName, query.get("reviewSession") ?? "review-session", query.get("reviewWide") === "1",
+        ))
+        : undefined;
       productCanvas = await mountProductCanvas(screen, {
         host: { name: hostName },
         accountId: activeUserId ?? "account",
         predictiveEcho,
-        ...(__CLUSTERS_PREVIEW__ && productTestMode ? { previewStore: new (await import("./canvas/model/store")).LocalCanvasStore(activeUserId ?? "account") } : {}),
+        ...(__CLUSTERS_PREVIEW__ && productTestMode ? { previewStore: layoutReview?.store ?? new (await import("./canvas/model/store")).LocalCanvasStore(activeUserId ?? "account") } : {}),
         ...(productTestMode ? { onFirstClient: (client: TerminalClient) => {
           window.__tracerProductTestDouble = {
             isConnected: () => client.isConnected,
@@ -443,6 +457,13 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
         } } : {}),
         onRecoveryPending: (readyAt) => { recoveryNoticeGeneration++; screen.setRecoveryPending(readyAt); },
       });
+      if (layoutReview) window.__tracerLayoutReviewDouble = {
+        revisions: layoutReview.revision,
+        currentView: () => (productCanvas as unknown as { canvas?: { cx?: { state?: { currentView?: string }; views?: Map<string, unknown> } } } | undefined)?.canvas?.cx?.state?.currentView ?? "",
+        viewIds: () => [...((productCanvas as unknown as { canvas?: { cx?: { views?: Map<string, unknown> } } } | undefined)?.canvas?.cx?.views?.keys() ?? [])],
+        removeConsole: layoutReview.removeConsole,
+        skipRevision: layoutReview.skipRevision,
+      };
     } catch (error: unknown) {
       console.error("canvas failed to start", error);
       screen.dispose();

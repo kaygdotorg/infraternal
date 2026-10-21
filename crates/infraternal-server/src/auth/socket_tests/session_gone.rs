@@ -1,5 +1,4 @@
-//! A terminal stream for a session that no longer exists ends with the final Close 4404,
-//! and the browser socket and its other streams stay up (#158).
+//! Final and transient host closes absorb late terminal frames while the shared socket stays up (#158, #250).
 //!
 //! Before this, the browser's attach either closed the whole socket (a session whose
 //! exit was recorded), so the page reconnected and attached again at once, or reached
@@ -34,7 +33,12 @@ async fn welcomed(
 
 /// Sends what a browser sends to attach (`AttachTerm`, `Credit`, `Resize`), then a late
 /// `Input` and its own `Close`, then a control `Ping`. Returns the frames up to the Pong.
-async fn attach_and_fence<S>(socket: &mut S, session: &[u8; 16]) -> Vec<(u32, String)>
+async fn attach_and_fence<S>(
+    socket: &mut S,
+    session: &[u8; 16],
+    expected_code: u16,
+    expected_reason: &str,
+) -> Vec<(u32, String)>
 where
     S: Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
         + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
@@ -69,10 +73,10 @@ where
         match decoded.frame {
             Frame::Close { code, reason } => {
                 assert_eq!(
-                    code, CLOSE_SESSION_GONE,
-                    "the close must be the final, typed one"
+                    code, expected_code,
+                    "the close must retain its typed reason"
                 );
-                assert_eq!(reason, SESSION_GONE_REASON);
+                assert_eq!(reason, expected_reason);
                 seen.push((decoded.stream_id, "gone".to_owned()));
                 break;
             }
@@ -80,7 +84,20 @@ where
             other => panic!("unexpected frame before the final close: {other:?}"),
         }
     }
-    // Typing that crossed the Close, then the browser's own Close: both are absorbed.
+    // Credit and geometry can already be in flight when the host closes.
+    client_ws_send(socket, 1, &Frame::Credit { bytes: 4096 }).await;
+    client_ws_send(
+        socket,
+        1,
+        &Frame::Resize {
+            cols: 80,
+            rows: 24,
+            px_w: 0,
+            px_h: 0,
+        },
+    )
+    .await;
+    // Typing that crossed the Close, then the browser's own Close: all are absorbed.
     client_ws_send(
         socket,
         1,
@@ -133,7 +150,13 @@ async fn an_ended_or_unknown_session_gets_the_final_close_without_losing_the_soc
         .unwrap();
     for session in [ended, [0x52_u8; 16]] {
         let mut socket = welcomed(address, &f.session).await;
-        let seen = attach_and_fence(&mut socket, &session).await;
+        let seen = attach_and_fence(
+            &mut socket,
+            &session,
+            CLOSE_SESSION_GONE,
+            SESSION_GONE_REASON,
+        )
+        .await;
         assert_eq!(
             seen,
             vec![(1, "gone".to_owned())],
@@ -145,6 +168,16 @@ async fn an_ended_or_unknown_session_gets_the_final_close_without_losing_the_soc
 
 #[tokio::test]
 async fn the_infraternal_agent_saying_gone_reaches_the_browser_as_the_final_close() {
+    host_close_preserves_socket(CLOSE_SESSION_GONE, SESSION_GONE_REASON).await;
+}
+
+#[tokio::test]
+async fn transient_host_close_absorbs_inflight_credit_resize_and_input() {
+    host_close_preserves_socket(1, "terminal shim disconnected").await;
+}
+
+/// Exercise the real socket with one deterministic host-side close before late browser frames.
+async fn host_close_preserves_socket(code: u16, reason: &'static str) {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
     let (socket, mut agent) = UnixStream::pair().unwrap();
@@ -192,10 +225,7 @@ async fn the_infraternal_agent_saying_gone_reaches_the_browser_as_the_final_clos
                 if let Frame::AttachTerm { session_id, .. } = decoded.frame {
                     assert_eq!(session_id, &[0x53_u8; 16]);
                     encoded.clear();
-                    let gone = Frame::Close {
-                        code: CLOSE_SESSION_GONE,
-                        reason: SESSION_GONE_REASON,
-                    };
+                    let gone = Frame::Close { code, reason };
                     encode_muxed_frame_into(stream, &gone, &mut encoded).unwrap();
                     agent.write_all(&encoded).await.unwrap();
                 }
@@ -204,7 +234,7 @@ async fn the_infraternal_agent_saying_gone_reaches_the_browser_as_the_final_clos
         }
     });
     let mut socket = welcomed(address, &f.session).await;
-    let seen = attach_and_fence(&mut socket, &session).await;
+    let seen = attach_and_fence(&mut socket, &session, code, reason).await;
     assert_eq!(seen, vec![(1, "ack".to_owned()), (1, "gone".to_owned())]);
     host.abort();
     server.abort();

@@ -144,6 +144,12 @@ frame IDs or change the frozen frame codec.
 `Close` on stream 0 closes the connection. On a nonzero mux stream it retires
 only that logical stream; code 1000 is a normal detach. This lets a socketpair
 peer release one terminal attachment while keeping the user's session alive.
+After any host/server terminal-stream close, the server discards already-in-flight
+Input (including reply-marked Input), Credit and Resize until the viewer's own
+Close or a replacement AttachTerm. Retirement metadata stays bounded by the
+attachment limit; unknown streams still fail admission. A viewer sends Close
+only after introducing that stream with AttachTerm, never for a local window
+that left before attachment (#250).
 
 Code 4404 on a terminal stream (reason `session ended`) is final: the session
 no longer exists on its host, either because its shim is gone or because the
@@ -607,6 +613,12 @@ its revision set to N. Cameras, focus, terminal content and credentials are
 excluded. Reconnect resubscribes and receives a fresh canonical snapshot.
 A reader overtaken by compaction gets another snapshot rather than a partial
 history. Apply Results and events may interleave; deduplicate by revision.
+An error/withdrawal event, a skipped revision, or a receipt ahead of the client's
+canonical head requires a replacement snapshot. Repeat Subscribe with the same
+subscription ID so its generation replaces the existing bounded server slot.
+Coalesce recovery retries with positive, capped backoff and stop when history
+catches up or a valid snapshot arrives. Pending intents retain their original
+operation IDs and input across resubscription (#250).
 
 `Call canvas.layout.apply` input is `{op_id,base_revision,intent}`. IDs are
 nonempty strings of at most 200 UTF-16 code units; op_id is unique per account

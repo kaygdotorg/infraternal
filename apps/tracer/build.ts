@@ -33,8 +33,8 @@ const build = await Bun.build({
     // Without the preview flag the mockups resolve to empty modules (their calls are unreachable: the define is false).
     name: "leave-out-mockups",
     setup(builder) {
-      builder.onResolve({ filter: /^\.\/(canvas\/mock(\/windows-proto\/canvas)?|add-host-prototype|perf-hud\.on-demand)$/ }, (args) => ({ path: args.path, namespace: "left-out" }));
-      builder.onLoad({ filter: /.*/, namespace: "left-out" }, () => ({ contents: "export const mountMockup = undefined; export const mountAddHostPrototype = undefined; export const mountCanvas = undefined; export const mountPerfHud = undefined;", loader: "js" }));
+      builder.onResolve({ filter: /^\.\/(canvas\/mock(\/windows-proto\/canvas)?|canvas\/model\/layout-review-double|add-host-prototype|perf-hud\.on-demand)$/ }, (args) => ({ path: args.path, namespace: "left-out" }));
+      builder.onLoad({ filter: /.*/, namespace: "left-out" }, () => ({ contents: "export const mountMockup = undefined; export const mountAddHostPrototype = undefined; export const mountCanvas = undefined; export const mountPerfHud = undefined; export const createLayoutReviewDouble = undefined;", loader: "js" }));
     },
   }],
 });

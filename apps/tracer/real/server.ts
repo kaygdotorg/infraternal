@@ -94,6 +94,8 @@ export async function startRealServer(options: {
   latencyMs?: number;
   /** Record public control timestamps only for an explicitly enabled VM measurement. */
   timedControls?: boolean;
+  /** Retain every stream Close for functional ordering assertions without timing traces. */
+  recordCloses?: boolean;
   /** The bridge does not decode or keep the server's output (benchmarks with busy terminals). */
   lean?: boolean;
   address?: string;
@@ -196,6 +198,7 @@ export async function startRealServer(options: {
       const bridge: Bridge = { id: bridges.length, closed: false, attached: new Map(), output: new Map(), acked: new Map(), replays: 0, replyAttempts: 0, detached: [], control: [], cookie: request.headers.cookie ?? "" };
       // Harness stage markers contain only fixed labels and timestamps, never terminal text.
       bridge.markers = [];
+      if (options.recordCloses) bridge.terminalCloses = [];
       if (process.env.REAL_OUTPUT_TIMES === "1") {
         bridge.outputTimes = [];
         bridge.outputRanges = [];

@@ -172,6 +172,11 @@ Reviews and fixes run at the same time as the next lane's build.
   (D243). The existing TLS engine and features stay selected; no protocol or
   build-profile change is included. Receipts and compatibility gates are on #24.
 
+  The RUSTSEC-2026-0382 lockfile update to rustls-webpki 0.103.16 measures
+  21,387,248 / 19,559,400 bytes with the same pinned static recipe: +1,024 /
+  +1,408 bytes versus release 9. Both exact caps ratchet to these measured
+  values; the receipts are on #24.
+
   The reply-reservation production fix (#24, D307) measures 21,387,120 /
   19,558,856 bytes with the same pinned static recipe: -64 / -256 bytes
   against release 8. Replies expire while older typing waits or the queue

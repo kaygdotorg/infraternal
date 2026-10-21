@@ -160,6 +160,10 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     for (const c of cx.views.values()) cx.view.fitWidths(c, previous);
     for (const c of cx.views.values()) cx.view.geometry(c);
     for (const c of cx.views.values()) for (const rec of c.wins.values()) rec.binding?.refit();
+    // Reflow changes each view's drawn footprint; settle the display geometry before framing the canvas. This keeps
+    // saved shared cells intact while preventing width changes from leaving overlapping views (D178, D309).
+    const anchor = cx.views.has(state.currentView) ? state.currentView : cx.views.keys().next().value;
+    if (anchor) cx.view.settle(anchor, undefined, true);
     if (animate) {
       first.forEach((m) => cx.flip.play(m, true));
       animatingUntil = performance.now() + 700;

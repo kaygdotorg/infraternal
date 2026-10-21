@@ -1,6 +1,6 @@
 /** Placement rules of the clusters mockup: grid snapping, pushing and grant reach (src/canvas/layout/geometry.ts). */
 import { expect, test } from "bun:test";
-import { CELL, COLUMN_GAP, MIN_TOUCH_COLUMN, contentSize, defaultWidth, drawnWidth, isDefaultWidth, metricsFor, resolve, snapToGrid, type Box } from "./geometry";
+import { CELL, COLUMN_GAP, MIN_TOUCH_COLUMN, boxOf, contentSize, defaultWidth, drawnWidth, isDefaultWidth, metricsFor, resolve, snapToGrid, type Box } from "./geometry";
 import { DEFAULT_SIZES, PEEK } from "../window-sizes";
 import { reach } from "../mesh/grants";
 import { INITIAL_GRANTS, TAGS } from "../mock/data";
@@ -34,6 +34,47 @@ test("a chain of neighbours is pushed in turn", () => {
   const at = resolve(boxes.map((b) => (b.id === "a" ? { ...b, x: CELL } : b)), "a");
   expect(at.get("b")!.x).toBe(3 * CELL);
   expect(at.get("c")!.x).toBe(5 * CELL);
+});
+
+test("display settlement clears disconnected overlaps while keeping its one anchor fixed", () => {
+  const boxes: Box[] = [
+    { id: "settings", x: 0, y: 0, w: 29 * CELL, h: 9 * CELL },
+    { id: "console", x: -3 * CELL, y: -2 * CELL, w: 5 * CELL, h: 9 * CELL },
+    { id: "mesh", x: 21 * CELL, y: 8 * CELL, w: 9 * CELL, h: 5 * CELL },
+    { id: "a", x: -8 * CELL, y: -8 * CELL, w: 5 * CELL, h: 7 * CELL },
+    { id: "b", x: -7 * CELL, y: -11 * CELL, w: 5 * CELL, h: 7 * CELL },
+    { id: "c", x: 2 * CELL, y: -11 * CELL, w: 5 * CELL, h: 7 * CELL },
+    { id: "d", x: -2 * CELL, y: 0, w: 5 * CELL, h: 7 * CELL },
+    { id: "e", x: 0, y: 16 * CELL, w: 5 * CELL, h: 7 * CELL },
+    { id: "f", x: 23 * CELL, y: 20 * CELL, w: 5 * CELL, h: 7 * CELL },
+  ];
+  const at = resolve(boxes, "settings", true);
+  expect(at.get("settings")).toEqual({ x: 0, y: 0 });
+  for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) expect(overlaps(boxes[i]!, boxes[j]!, at)).toBe(false);
+});
+
+test("review: a viewport width increase after settlement keeps the Settings anchor clear", () => {
+  const desktop = metricsFor(1440, 900, false);
+  const phone = metricsFor(400, 852, true);
+  const consoleView = {
+    id: "console", name: "Console", layout: "tiled" as const, nodes: [], x: 0, y: 0,
+    cols: Array.from({ length: 20 }, (_, i) => ({ id: `c${i}`, w: 47, wins: [] })),
+  };
+  const settingsView = {
+    id: "settings", name: "Settings", layout: "tiled" as const, nodes: [], x: 6 * CELL, y: 0,
+    cols: [{ id: "settings", w: desktop.colW, wins: [] }],
+  };
+  const settled = [boxOf(consoleView, desktop), boxOf(settingsView, desktop)];
+  const positions = resolve(settled, "settings", true);
+  const resized = [boxOf(consoleView, phone), boxOf(settingsView, phone)].map((box) => ({
+    ...box,
+    ...positions.get(box.id),
+  }));
+  const at = new Map(resized.map((box) => [box.id, { x: box.x, y: box.y }]));
+
+  expect(overlaps(resized[0]!, resized[1]!, at)).toBe(true);
+  const reflowed = resolve(resized, "settings", true);
+  expect(overlaps(resized[0]!, resized[1]!, reflowed)).toBe(false);
 });
 
 test("snapping rounds to whole cells", () => {

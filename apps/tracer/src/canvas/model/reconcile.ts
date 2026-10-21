@@ -21,6 +21,9 @@ export async function reconcile(cx: Ctx, read: () => SharedPaint, resolve: (targ
   // Imports may have yielded to input; capture the latest projection only after those boundaries.
   const { document, protectedIds, protectedViews } = read();
   if (!current()) return;
+  const previousOrder = [...cx.views.keys()];
+  const previousCurrent = cx.state.currentView;
+  const previousIndex = previousOrder.indexOf(previousCurrent);
   const keep = new Set([...document.views.map((v) => v.id), ...protectedViews]);
   for (const c of [...cx.views.values()]) if (c.view.id !== "settings" && !keep.has(c.view.id)) cx.view.remove(c);
   for (const view of document.views) {
@@ -71,8 +74,24 @@ export async function reconcile(cx: Ctx, read: () => SharedPaint, resolve: (targ
     place(c, view);
     cx.view.geometry(c); cx.view.paintEmpty(c);
   }
+  if (!cx.views.has(cx.state.currentView)) {
+    let fallback: string | undefined;
+    // Keep the camera near its former place in the view order when another device removes its selection.
+    if (previousIndex >= 0) {
+      for (let i = previousIndex + 1; i < previousOrder.length && !fallback; i++) {
+        const candidate = previousOrder[i]!;
+        if (cx.views.has(candidate)) fallback = candidate;
+      }
+      for (let i = previousIndex - 1; i >= 0 && !fallback; i--) {
+        const candidate = previousOrder[i]!;
+        if (cx.views.has(candidate)) fallback = candidate;
+      }
+    }
+    fallback ??= cx.views.has("console") ? "console" : cx.views.keys().next().value;
+    if (fallback) cx.nav.flyView(fallback, true);
+  }
   // Saved cells can overlap the current footprint after a cached Console grows,
-  // even on desktop. Settle every view, including generated Settings, for display.
+  // even on desktop. Settle all views in one pass with the current camera's view fixed.
   // Another device can remove the view this camera last used; the fixed view must still exist.
   const anchor = cx.views.has(cx.state.currentView) ? cx.state.currentView : cx.views.keys().next().value;
   if (anchor) cx.view.settle(anchor, undefined, true);

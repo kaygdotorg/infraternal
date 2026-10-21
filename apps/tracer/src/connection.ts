@@ -87,6 +87,8 @@ interface Subscription {
   /** The subscription is (re)established: the owner refetches its snapshot, since events may have been missed. */
   onOpen?: (() => void) | undefined;
 }
+/** Refresh keeps the subscription ID, so retries replace its bounded server slot. */
+export type SubscriptionHandle = (() => void) & { resync(): void };
 const encoder = new TextEncoder();
 
 /** What a stream gives the connection. All callbacks run on the socket's event task. */
@@ -182,6 +184,8 @@ export class MuxConnection {
   private attachedCount = 0;
   /** Streams that attached on this server-side connection: the server keeps a writer row for each, up to its cap. */
   private readonly writersUsed = new Set<number>();
+  /** Streams that sent AttachTerm on the current WebSocket; resume retains writers but replaces attachments. */
+  private readonly attachedOnSocket = new Set<number>();
 
   private readonly onVisibility = (): void => this.pageVisibilityChanged();
 
@@ -238,7 +242,8 @@ export class MuxConnection {
   closeStream(id: number): void {
     if (!this.streams.delete(id)) return;
     this.unacknowledgedInput.delete(id);
-    this.send(id, { type: "Close", code: 1000, reason: "window closed" });
+    // A retained writer can belong to the resumed connection's old socket; Close requires a new AttachTerm first.
+    if (this.attachedOnSocket.delete(id)) this.send(id, { type: "Close", code: 1000, reason: "window closed" });
   }
 
   /** Sends one frame on a stream. Frames are dropped while the socket is not open (the stream resends on attach). */
@@ -259,6 +264,8 @@ export class MuxConnection {
       }
       onEncoded?.(performance.now());
       socket.send(this.sendScratch.subarray(0, length));
+      // Server writer identity survives resume, but the attached route is recreated on each WebSocket.
+      if (frame.type === "AttachTerm") this.attachedOnSocket.add(streamId);
       onSent?.(performance.now());
     } catch {
       this.fail("could not encode an infraternal wire frame");
@@ -279,13 +286,15 @@ export class MuxConnection {
    * welcome (a new socket has none), and `onOpen` runs each time so the owner can resync: events sent while the
    * socket was down are not replayed. Returns the unsubscribe function.
    */
-  subscribe(filter: { topic: string }, onEvent: (event: Record<string, unknown>) => void, onOpen?: () => void): () => void {
+  subscribe(filter: { topic: string }, onEvent: (event: Record<string, unknown>) => void, onOpen?: () => void): SubscriptionHandle {
     const subId = this.nextSubscription++;
     this.subscriptions.set(subId, { filter, onEvent, onOpen });
     if (this.isWelcomed) this.openSubscription(subId);
     // Account state must load before any terminal window exists (D248).
     if (!this.socket && !this.closed) this.connect();
-    return () => { this.subscriptions.delete(subId); };
+    return Object.assign(() => { this.subscriptions.delete(subId); }, {
+      resync: () => { if (this.isWelcomed) this.openSubscription(subId); },
+    });
   }
 
   /**
@@ -453,6 +462,7 @@ export class MuxConnection {
     socket.binaryType = "arraybuffer";
     this.socket = socket;
     this.decoder = new WebSocketFrameDecoder();
+    this.attachedOnSocket.clear();
     this.serverVisibility = false;
     this.welcomed = false;
 
@@ -553,6 +563,7 @@ export class MuxConnection {
     this.socket = undefined;
     this.decoder = undefined;
     this.welcomed = false;
+    this.attachedOnSocket.clear();
     this.attachedCount = 0;
     this.config.onConnectionChange?.(false);
     this.resetPings();
