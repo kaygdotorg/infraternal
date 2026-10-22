@@ -261,6 +261,11 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     setCamera: (cx_: number, cy: number, z: number) => { cx.nav.applyCanvasLock(false); camera.set({ cx: cx_, cy, z }); },
     flyCamera: (cx_: number, cy: number, z: number) => { cx.nav.applyCanvasLock(false); camera.flyTo(() => ({ cx: cx_, cy, z })); },
     views: () => [...cx.views.values()].map((c) => ({ id: c.view.id, name: c.view.name, team: Boolean(c.view.team), x: c.x, y: c.y, w: boxOf(c.view, state.metrics).w, h: boxOf(c.view, state.metrics).h, windows: [...c.wins.keys()] })),
+    /** Lets the Mesh spec exercise graph pinning when its view id is outside the Mesh source. */
+    setGraphViewId: (from: string, to: string) => {
+      const c = cx.views.get(from as ViewId);
+      if (c?.view.layout === "graph") c.view.id = to as ViewId;
+    },
     /** The focused window's id (specs check where a flow handed the keys). */
     activeWindow: (): string | undefined => state.activeWin?.model.id,
     /** A new session on the host in its own window (the inventory creates it, as a split does). */
