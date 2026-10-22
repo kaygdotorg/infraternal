@@ -87,6 +87,9 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
     if (retryTimer) { window.clearTimeout(retryTimer); retryTimer = 0; }
     rev = s.rev; access = s.access;
     if (!access.view) { generation += 1; status = "unavailable"; notify(true); return; }
+    // A node that left the mesh takes its pin with it: a pin a drag wrote for it before it went must not outlive it.
+    const present = new Set(s.nodes.map((n) => n.name));
+    for (const name of nodes.keys()) if (!present.has(name)) pins.delete(name);
     nodes = new Map(s.nodes.map((n) => [n.name, n]));
     idOf = new Map(s.nodes.map((n) => [n.name, n.id]));
     tags = s.tags;

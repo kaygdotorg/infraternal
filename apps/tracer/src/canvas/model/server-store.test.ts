@@ -17,6 +17,58 @@ class Transport implements LayoutTransport {
   snapshot(doc = document(), initialized = true): void { this.event({ type: "canvas.layout.snapshot", document: doc, revision: doc.revision, initialized }); }
 }
 const tick = async (): Promise<void> => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
+/** Models the production pin bound and stale-base acceptance while broadcasting accepted operations to every device. */
+class PinLimitTransport implements LayoutTransport {
+  readonly isWelcomed = true;
+  readonly listeners = new Set<(event: Record<string, unknown>) => void>();
+  readonly document: CanvasDocument = {
+    format: "infraternal.canvas", version: 1, revision: 1,
+    views: [{ id: "mesh", kind: "mesh", name: "Mesh", cell: { x: 0, y: 0 }, layout: { type: "graph", pinned: {} } }],
+  };
+  accepted = 0;
+  refused = 0;
+  processed = 0;
+  #tail: Promise<void> = Promise.resolve();
+
+  subscribe(_filter: { topic: string }, event: (e: Record<string, unknown>) => void, open?: () => void) {
+    this.listeners.add(event); open?.();
+    event({ type: "canvas.layout.snapshot", document: structuredClone(this.document), revision: this.document.revision, initialized: true });
+    return Object.assign(() => { this.listeners.delete(event); }, { resync: () => event({ type: "canvas.layout.snapshot", document: structuredClone(this.document), revision: this.document.revision, initialized: true }) });
+  }
+
+  call(action: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return new Promise((resolve, reject) => {
+      this.#tail = this.#tail.then(() => {
+        this.processed++;
+        const intent = input.intent as Intent | undefined;
+        if (action !== "canvas.layout.apply" || !intent || typeof input.base_revision !== "number" || input.base_revision > this.document.revision) {
+          this.refused++; reject(new ActionRefused(undefined, "invalid input")); return;
+        }
+        const next = structuredClone(this.document);
+        reduce(next, intent);
+        const view = next.views.find((candidate) => candidate.id === "mesh")!;
+        const invalidPins = view.layout.type !== "graph"
+          || Object.keys(view.layout.pinned).length > 256
+          || Object.values(view.layout.pinned).some(({ x, y }) =>
+            !Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 100_000 || Math.abs(y) > 100_000);
+        if (invalidPins) {
+          this.refused++; reject(new ActionRefused(undefined, "invalid input")); return;
+        }
+        next.revision++;
+        Object.assign(this.document, next);
+        this.accepted++;
+        const event = { type: "canvas.layout.operation", revision: this.document.revision, op_id: input.op_id, intent, noop: false };
+        for (const listener of this.listeners) listener(event);
+        resolve({ revision: this.document.revision });
+      });
+    });
+  }
+
+  async drain(expected: number): Promise<void> {
+    for (let turn = 0; turn < 2000 && this.processed < expected; turn++) { await this.#tail; await tick(); }
+    if (this.processed !== expected) throw new Error(`processed ${this.processed} of ${expected} layout intents`);
+  }
+}
 beforeEach(() => {
   const values = new Map<string, string>();
   const area = { getItem: (k: string) => values.get(k) ?? null, setItem: (k: string, v: string) => values.set(k, v), removeItem: (k: string) => values.delete(k), key: (i: number) => [...values.keys()][i] ?? null, get length() { return values.size; } };
@@ -24,6 +76,70 @@ beforeEach(() => {
   Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: area });
 });
 const opened: Intent = { type: "open", view_id: "console", column_id: "c", window: { id: "w", target: { type: "settings", section: "appearance" } } };
+test("a negative drop on a 1,025-node mesh writes one pin, and the peer ends with every pin (#24)", async () => {
+  const transport = new PinLimitTransport();
+  const first = new ServerCanvasStore(transport, "mesh-owner"), second = new ServerCanvasStore(transport, "mesh-peer");
+  try {
+    const initial = await first.load(); await second.load();
+    const graphOf = (doc: CanvasDocument) => {
+      const view = doc.views.find((candidate) => candidate.id === "mesh")!;
+      if (view.layout.type !== "graph") throw new Error("graph view missing");
+      return view.layout;
+    };
+    // 200 cards moved earlier; a 1,000-host mesh with 25 tags has 1,025 nodes, almost all unmoved.
+    const before = structuredClone(initial!);
+    for (let n = 0; n < 200; n++) graphOf(before).pinned[`node-${n}`] = { x: n * 16, y: n * 16 };
+    await first.save(before); first.flush();
+    await transport.drain(200); // one intent per earlier pin
+    const baseline = transport.processed;
+    // The drop: the card is now left of and above the auto layout. Pins may be negative; no other pin is rewritten.
+    const dropped = structuredClone(before);
+    graphOf(dropped).pinned["node-1000"] = { x: -1280, y: -480 };
+    const saved = first.save(dropped);
+    first.flush();
+    const raw = localStorage.getItem(canvasKey("mesh-owner"));
+    const cached = JSON.parse(raw ?? "{}") as { pending?: unknown[] };
+    expect(cached.pending).toHaveLength(1);
+    await saved;
+    await transport.drain(baseline + 1);
+    expect(transport.refused).toBe(0);
+    const peer = await second.load();
+    // The count and moved point alone miss a peer that changed or lost any earlier coordinates.
+    expect(graphOf(peer!).pinned).toEqual(graphOf(dropped).pinned);
+  } finally { first.dispose(); second.dispose(); }
+});
+test("repeated pin moves reach both coordinate limits; the next move is refused and rolled back", async () => {
+  const transport = new PinLimitTransport(), notices: boolean[] = [];
+  const first = new ServerCanvasStore(transport, "mesh-bound-owner", (definitive) => notices.push(definitive === true));
+  const second = new ServerCanvasStore(transport, "mesh-bound-peer");
+  const graphOf = (doc: CanvasDocument) => {
+    const view = doc.views.find((candidate) => candidate.id === "mesh")!;
+    if (view.layout.type !== "graph") throw new Error("graph view missing");
+    return view.layout;
+  };
+  try {
+    await first.load(); await second.load();
+    let expected = 0;
+    for (let step = 1; step <= 10; step++) {
+      const next = structuredClone(first.current());
+      graphOf(next).pinned["node-0"] = { x: -step * 10_000, y: step * 10_000 };
+      const saved = first.save(next); first.flush(); await saved;
+      await transport.drain(++expected);
+      expect(graphOf(second.current()).pinned["node-0"]).toEqual({ x: -step * 10_000, y: step * 10_000 });
+    }
+
+    const outside = structuredClone(first.current());
+    graphOf(outside).pinned["node-0"] = { x: -100_001, y: 100_001 };
+    const saved = first.save(outside); first.flush(); await saved;
+    await transport.drain(++expected);
+
+    expect(transport.accepted).toBe(10);
+    expect(transport.refused).toBe(1);
+    expect(notices).toEqual([true]);
+    expect(graphOf(first.current()).pinned["node-0"]).toEqual({ x: -100_000, y: 100_000 });
+    expect(graphOf(second.current()).pinned["node-0"]).toEqual({ x: -100_000, y: 100_000 });
+  } finally { first.dispose(); second.dispose(); }
+});
 test("a layout gap or withdrawn worker requests one fresh snapshot with bounded backoff", async () => {
   const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
   const originalRandom = Math.random;

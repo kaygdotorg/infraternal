@@ -55,7 +55,7 @@ export function createMockMesh(world: MockWorld): MockMesh {
       pins: Object.fromEntries(pinned),
       ...(state === "ready" ? { prime: parseSnapshot(server.listJson())! } : {}),
     });
-    offs = [inner.onChange(() => { syncWorld(); for (const l of [...listeners]) l(); }), inner.onFailure((m) => { for (const f of [...failures]) f(m); })];
+    offs = [inner.onChange(() => { for (const id of [...pinned.keys()]) if (!inner.data().pins.has(id)) pinned.delete(id); syncWorld(); for (const l of [...listeners]) l(); }), inner.onFailure((m) => { for (const f of [...failures]) f(m); })];
   };
   const syncWorld = (): void => { world.grants = inner.grants().map((g) => ({ id: g.id, from: g.from, to: g.to, ...(g.via ? { via: g.via } : {}) })); };
   build();
