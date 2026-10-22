@@ -833,9 +833,9 @@ test("a remote remove and re-add that rebinds the dragged card follows its new N
 
   // Waiting for the card to disappear makes the layout model discard its old NodeModel; the re-added node gets a new
   // object while the card record is taken back out of the pool.
-  await server(page, (s) => s.removeNode("nix-cache"));
-  await expect(page.locator('.ui-window[data-window-id="n-nix-cache"]')).toHaveCount(0);
-  await server(page, (s) => s.addNode({ name: "nix-cache" }));
+  // Both changes in one call, so the card is not left detached between them (a detached card loses pointer capture).
+  await server(page, (s) => { s.removeNode("nix-cache"); s.addNode({ name: "nix-cache" }); });
+  await page.waitForTimeout(300);
   await expect(pill).toBeVisible();
   const rebound = (await pill.boundingBox())!;
   const drop = { x: rebound.x + rebound.width / 2 + 24, y: rebound.y + rebound.height / 2 + 16 };
@@ -882,7 +882,9 @@ test("a Mesh drag stays under the pointer when zoom changes before its next move
   const target = { x: start.x + 24, y: start.y + 16 };
   await page.mouse.move(target.x, target.y);
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
-  const card = (await page.locator('.ui-window[data-window-id="n-nix-cache"]').boundingBox())!;
+  // The grabbed element is the pill: the card's own centre sits a fixed distance in world units from it, so it would
+  // move on screen with the zoom whatever the drag does.
+  const card = (await page.locator(selector).boundingBox())!;
   const beforeDropView = (await meshBox(page))!;
   await page.mouse.up();
   await page.waitForTimeout(40);
@@ -943,6 +945,60 @@ test("a second pointer cannot replace the Mesh card's active pointer", async ({ 
   await dispatchPointer(page, selector, "pointermove", 71, start.x + 44, start.y + 28);
   await dispatchPointer(page, selector, "pointerup", 71, start.x + 44, start.y + 28);
   await expect(page.locator('.ui-window[data-window-id="n-nix-cache"]')).not.toHaveAttribute("data-lifted", "");
+});
+
+test("a card dropped mid-drag does not leave a drag behind that moves a later host on hover", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  await probe(page, (p) => p.setCanvasLock(false));
+  const selector = '.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill';
+  const from = await centre(page, selector);
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(from.x + 10, from.y + 6, { steps: 2 });
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await server(page, (s) => s.removeNode("nix-cache"));
+  await expect(page.locator('.ui-window[data-window-id="n-nix-cache"]')).toHaveCount(0);
+  // Let go over empty canvas: the removed card cannot hear it, so its gesture never ends by itself.
+  await page.mouse.move(from.x, from.y + 400, { steps: 3 });
+  await page.mouse.up();
+  const before = (await probe(page, (p) => p.mesh.document()))!.views.find((v) => v.id === "mesh")!.layout.pinned!;
+  await server(page, (s) => s.addNode({ name: "review-hover-host" }));
+  const added = page.locator('.ui-window[data-window-id="n-review-hover-host"] .ui-window-pill');
+  await expect(added).toBeVisible();
+  const at = await centre(page, '.ui-window[data-window-id="n-review-hover-host"] .ui-window-pill');
+  // No button is down: hovering the new card must never move it.
+  await page.mouse.move(at.x, at.y, { steps: 3 });
+  await page.mouse.move(at.x + 30, at.y + 20, { steps: 3 });
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await page.waitForTimeout(100);
+  const moved = (await added.boundingBox())!;
+  expect.soft(moved.x + moved.width / 2).toBeCloseTo(at.x, 0);
+  const pins = (await probe(page, (p) => p.mesh.pins()))!;
+  expect.soft(Object.keys(pins)).not.toContain("review-hover-host");
+  expect.soft(Object.keys(before)).not.toContain("review-hover-host");
+});
+
+test("a second finger that taps the card mid-drag does not lose the first finger's move", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  await probe(page, (p) => p.setCanvasLock(false));
+  const selector = '.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill';
+  const start = await centre(page, selector);
+  await dispatchPointer(page, selector, "pointerdown", 91, start.x, start.y);
+  await dispatchPointer(page, selector, "pointermove", 91, start.x + 40, start.y + 30);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  const passesBefore = (await probe(page, (p) => p.mesh.stats()))!.passes;
+  await dispatchPointer(page, selector, "pointerdown", 92, start.x + 40, start.y + 30, false);
+  await dispatchPointer(page, selector, "pointerup", 92, start.x + 40, start.y + 30, false);
+  await dispatchPointer(page, selector, "pointerup", 91, start.x + 40, start.y + 30);
+  await page.waitForTimeout(100);
+  await expect(page.locator('.ui-window[data-window-id="n-nix-cache"]')).not.toHaveAttribute("data-lifted", "");
+  // The card was moved and its pin written to the source; the drop must also fit the view and save the document.
+  expect(Object.keys(await probe(page, (p) => p.mesh.pins()))).toEqual(["nix-cache"]);
+  const doc = await probe(page, (p) => p.mesh.document());
+  expect(Object.keys(doc!.views.find((v) => v.id === "mesh")!.layout.pinned!)).toEqual(["nix-cache"]);
+  expect((await probe(page, (p) => p.mesh.stats()))!.passes).toBeGreaterThan(passesBefore);
 });
 
 test("a graph drag outside the Mesh view saves its pin without writing to the Mesh source", async ({ page }) => {
