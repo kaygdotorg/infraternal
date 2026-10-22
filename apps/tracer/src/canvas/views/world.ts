@@ -345,7 +345,7 @@ export function createViews(cx: Ctx): ViewsModule {
     // On touch, the current view stays fixed as wider drawn columns push neighbours. Desktop display settlement visits
     // every overlap group in one resolver pass, keeping only the camera's current view fixed.
     const root = local && state.metrics.minW > 0 && views.has(state.currentView) ? state.currentView : fixedId;
-    const next = resolve(trial, root, displayOnly && state.metrics.minW === 0);
+    const next = resolve(trial, root, displayOnly);
     for (const c of views.values()) {
       const p = next.get(c.view.id);
       if (!p || (p.x === c.view.x && p.y === c.view.y)) continue;
