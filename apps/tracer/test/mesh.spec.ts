@@ -1001,6 +1001,149 @@ test("a second finger that taps the card mid-drag does not lose the first finger
   expect((await probe(page, (p) => p.mesh.stats()))!.passes).toBeGreaterThan(passesBefore);
 });
 
+// ---- round 4: a drag belongs to its node; pruning on a snapshot --------------------------------------------------
+async function pinOfCardAfterDrag(page: Page): Promise<{ x: number; y: number }> {
+  await probe(page, (p) => p.setCanvasLock(false));
+  const view = (await meshBox(page))!;
+  await setCamera(page, view.x + 100, view.y + 100, 1);
+  await page.waitForTimeout(400);
+  const at = await centre(page, '.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill');
+  await dragCard(page, "nix-cache", { x: at.x + 60, y: at.y + 40 });
+  const pin = (await probe(page, (p) => p.mesh.pins()))!["nix-cache"];
+  expect(pin).toBeDefined();
+  return pin!;
+}
+const cardAt = async (page: Page) => page.locator('.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"]').evaluate((el) => (el as HTMLElement).style.transform);
+const docPins = async (page: Page) => (await probe(page, (p) => p.mesh.document()))!.views.find((v) => v.id === "mesh")!.layout.pinned!;
+
+test("a node that leaves the mesh and rejoins keeps its pin in the canvas document and its place", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  const pin = await pinOfCardAfterDrag(page);
+  const placed = await cardAt(page);
+  await server(page, (s) => s.removeNode("nix-cache"));
+  await expect(page.locator('.ui-window[data-window-id="n-nix-cache"]')).toHaveCount(0);
+  await server(page, (s) => s.addNode({ name: "nix-cache" }));
+  await expect(page.locator('.ui-window[data-window-id="n-nix-cache"]')).toBeVisible();
+  await page.waitForTimeout(500);
+  // The pin is the person's choice of place for that host: it is in the document they saved, whatever the client's own map did.
+  expect.soft((await docPins(page))["nix-cache"]).toEqual(pin);
+  expect.soft(await cardAt(page)).toEqual(placed);
+});
+
+test("a snapshot with no nodes after a reconnect does not wipe the pins", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  const pin = await pinOfCardAfterDrag(page);
+  const placed = await cardAt(page);
+  await server(page, (s) => { const all = [...(s as unknown as { nodes: Map<number, { name: string }> }).nodes.values()].map((n) => n.name); (window as unknown as { __names: string[] }).__names = all; for (const n of all) s.removeNode(n); });
+  await page.waitForTimeout(500);
+  await server(page, (s) => { s.reconnect(); });
+  await page.waitForTimeout(500);
+  const pinsEmpty = await probe(page, (p) => p.mesh.pins());
+  await server(page, (s) => { for (const name of (window as unknown as { __names: string[] }).__names) s.addNode({ name }); });
+  await page.waitForTimeout(800);
+  void pinsEmpty;
+  expect.soft((await docPins(page))["nix-cache"]).toEqual(pin);
+  expect.soft(await cardAt(page)).toEqual(placed);
+});
+
+test("a snapshot without view access, then access again, keeps the pins", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  const pin = await pinOfCardAfterDrag(page);
+  await server(page, (s) => s.setAccess({ view: false, manageGrants: false }));
+  await page.waitForTimeout(500);
+  await server(page, (s) => s.setAccess({ view: true, manageGrants: true }));
+  await page.waitForTimeout(800);
+  expect.soft((await probe(page, (p) => p.mesh.pins()))!["nix-cache"]).toEqual(pin);
+  expect.soft((await docPins(page))["nix-cache"]).toEqual(pin);
+});
+
+test("touch moves report buttons 1, and a touch drag survives them (Chromium)", async ({ browser }) => {
+  const port = Number(process.env.TRACER_TEST_PORT ?? "4621");
+  const context = await browser.newContext({ baseURL: `http://localhost:${port}`, viewport: PHONE, deviceScaleFactor: 3, hasTouch: true, isMobile: true });
+  const page = await context.newPage();
+  const cdp = await context.newCDPSession(page);
+  try {
+    await open(page, "", PHONE);
+    await intoMesh(page);
+    await probe(page, (p) => p.setCanvasLock(false));
+    const view = (await meshBox(page))!;
+    await setCamera(page, view.x + 100, view.y + 100, 1);
+    await page.waitForTimeout(400);
+    const pill = '.ui-window[data-window-id="n-tag:ci"] .ui-window-pill';
+    const seen = await page.locator(pill).evaluate((el) => { const log: Array<[string, number, string]> = []; (window as unknown as { __log: typeof log }).__log = log; for (const t of ["pointerdown", "pointermove", "pointerup"]) el.addEventListener(t, (e) => log.push([t, (e as PointerEvent).buttons, (e as PointerEvent).pointerType]), true); return 0; });
+    void seen;
+    const at = await centre(page, pill);
+    const touch = (type: "touchStart" | "touchMove" | "touchEnd", points: Array<{ x: number; y: number; id: number }>) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points });
+    await touch("touchStart", [{ ...at, id: 0 }]);
+    for (let i = 1; i <= 8; i++) { await touch("touchMove", [{ x: at.x + 3 * i, y: at.y + 2 * i, id: 0 }]); await page.waitForTimeout(16); }
+    await touch("touchEnd", []);
+    await page.waitForTimeout(600);
+    const log = await page.evaluate(() => (window as unknown as { __log: Array<[string, number, string]> }).__log);
+    const moves = log.filter((e) => e[0] === "pointermove");
+    expect(moves.length).toBeGreaterThan(0);
+    expect(moves.map((e) => e[1]).filter((b) => b === 0)).toEqual([]);
+    expect(moves.every((e) => e[2] === "touch")).toBe(true);
+    expect(Object.keys((await probe(page, (p) => p.mesh.pins()))!)).toEqual(["tag:ci"]);
+  } finally {
+    await cdp.detach();
+    await context.close();
+  }
+});
+
+test("a pen stroke keeps buttons 1 while it draws, and its drag is not cut short (Chromium)", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  await probe(page, (p) => p.setCanvasLock(false));
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    const pill = '.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill';
+    await page.locator(pill).evaluate((el) => { const log: number[] = []; (window as unknown as { __b: number[] }).__b = log; el.addEventListener("pointermove", (e) => log.push((e as PointerEvent).buttons), true); });
+    const at = await centre(page, pill);
+    const ev = (type: string, x: number, y: number, buttons: number) => cdp.send("Input.dispatchMouseEvent", { type, x, y, button: buttons ? "left" : "none", buttons, clickCount: type === "mouseMoved" ? 0 : 1, pointerType: "pen" });
+    await ev("mousePressed", at.x, at.y, 1);
+    for (let i = 1; i <= 8; i++) { await ev("mouseMoved", at.x + 4 * i, at.y + 3 * i, 1); await page.waitForTimeout(16); }
+    await ev("mouseReleased", at.x + 32, at.y + 24, 0);
+    await page.waitForTimeout(600);
+    const b = await page.evaluate(() => (window as unknown as { __b: number[] }).__b);
+    expect(b.filter((v) => v === 0)).toEqual([]);
+    expect(Object.keys((await probe(page, (p) => p.mesh.pins()))!)).toEqual(["nix-cache"]);
+  } finally { await cdp.detach(); }
+});
+
+test("a card detached and re-pooled for the same node id does not resume the old drag", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  await probe(page, (p) => p.setCanvasLock(false));
+  const sel = '.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill';
+  const from = await centre(page, sel);
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(from.x + 12, from.y + 8, { steps: 2 });
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await server(page, (s) => s.removeNode("nix-cache"));
+  await expect(page.locator('.ui-window[data-window-id="n-nix-cache"]')).toHaveCount(0);
+  await server(page, (s) => s.addNode({ name: "nix-cache" }));
+  await expect(page.locator(sel)).toBeVisible();
+  await expect(page.locator('.ui-window[data-window-id="n-nix-cache"]')).not.toHaveAttribute("data-lifted", "");
+  const at = await centre(page, sel);
+  await page.mouse.move(at.x + 40, at.y + 30, { steps: 4 }); // the button is still down: the old gesture is over
+  await page.waitForTimeout(100);
+  const moved = await centre(page, sel);
+  expect.soft(moved.x).toBeCloseTo(at.x, 0);
+  expect.soft(moved.y).toBeCloseTo(at.y, 0);
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  await page.mouse.move(at.x, at.y, { steps: 3 });
+  await page.mouse.move(at.x + 50, at.y + 30, { steps: 3 });
+  await page.waitForTimeout(100);
+  const hovered = await centre(page, sel);
+  expect.soft(hovered.x).toBeCloseTo(at.x, 0);
+  expect.soft(Object.keys((await docPins(page)))).not.toContain("nix-cache");
+});
+
 test("a graph drag outside the Mesh view saves its pin without writing to the Mesh source", async ({ page }) => {
   await open(page);
   await intoMesh(page);
