@@ -1,5 +1,5 @@
 /** Production-browser onboarding evidence at the approved phone and desktop viewports. */
-import { expect, test, type Page, type TestInfo } from "playwright/test";
+import { expect, test, type Page, type Route, type TestInfo } from "playwright/test";
 
 const viewports = [
   { id: "iphone-15", width: 393, height: 852 },
@@ -281,3 +281,24 @@ async function installShiftObserver(page: Page): Promise<void> {
     }).observe({ type: "layout-shift", buffered: false });
   });
 }
+
+test("a setup chunk that fails to load shows a retry card, never a blank screen (#247)", async ({ page }, testInfo) => {
+  test.setTimeout(60_000);
+  await page.context().request.post("/__mock/reset", { maxRetries: 1 });
+  // Fail only the setup chunk: the one whose text holds the first step's lede.
+  const blocked = async (route: Route) => {
+    const response = await route.fetch();
+    if ((await response.text()).includes("Paste the one-time setup token")) await route.abort(); else await route.fulfill({ response });
+  };
+  await page.route(/\/chunk-[0-9a-z]{8}\.js$/, blocked);
+  for (const viewport of viewports) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto("/?mock=1");
+    await expect(page.locator("#auth-error")).toHaveText("Could not load setup. Check your connection; it will retry.");
+    await page.screenshot({ path: testInfo.outputPath(`setup-load-failed-${viewport.id}.png`) });
+    console.log("SETUP_LOAD_FAILED_SCREENSHOT", testInfo.outputPath(`setup-load-failed-${viewport.id}.png`));
+  }
+  await page.unroute(/\/chunk-[0-9a-z]{8}\.js$/, blocked);
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.locator("#setup-token")).toBeVisible();
+});
