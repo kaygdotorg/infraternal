@@ -35,6 +35,7 @@ type Probe = {
   camera(): { cx: number; cy: number; z: number; lod: string; zoomBand: string };
   views(): Array<{ id: string; name: string; x: number; y: number; w: number; h: number; windows: string[] }>;
   grants(): Array<{ id: string; from: string; to: string }>;
+  setGraphViewId(from: string, to: string): void;
   setCamera(cx: number, cy: number, z: number): void;
   flyView(id: string): void;
   canvasLock(): { on: boolean; index: number; stops: number; view: string };
@@ -614,6 +615,18 @@ const meshBox = (page: Page) => probe(page, (p) => p.views().find((v) => v.id ==
 // Probe callbacks are serialized into the browser, so camera coordinates must be passed as values rather than captured.
 const setCamera = (page: Page, x: number, y: number, z: number): Promise<void> => page.evaluate(({ cx, cy, zoom }) =>
   (window as unknown as { __tracerClusters: Probe }).__tracerClusters.setCamera(cx, cy, zoom), { cx: x, cy: y, zoom: z });
+async function dispatchPointer(page: Page, selector: string, type: "pointerdown" | "pointermove" | "pointerup" | "pointercancel", pointerId: number, x: number, y: number, isPrimary = true): Promise<void> {
+  await page.locator(selector).evaluate((node, event) => {
+    const target = node as HTMLElement;
+    if (event.type === "pointerdown") Object.defineProperty(target, "setPointerCapture", { configurable: true, value: () => undefined });
+    // Keep the synthetic stream on the card; the real pointer listeners on ancestors are outside this gesture test.
+    target.addEventListener(event.type, (e) => e.stopPropagation(), { once: true });
+    target.dispatchEvent(new PointerEvent(event.type, {
+      bubbles: true, cancelable: true, pointerId: event.pointerId, pointerType: "mouse", isPrimary: event.isPrimary,
+      clientX: event.x, clientY: event.y, button: 0, buttons: event.type === "pointerup" || event.type === "pointercancel" ? 0 : 1,
+    }));
+  }, { type, pointerId, x, y, isPrimary });
+}
 // On a phone only the first card column is on screen (the rest is a pan away), so the phone drags that one.
 for (const [label, size, card] of [["desktop", DESKTOP, "nix-cache"], ["phone", PHONE, "tag:ci"]] as const) {
   test(`drag bounds ${label}: a card dragged right and down past the old edge stays there and the view grows around it`, async ({ page }, testInfo) => {
@@ -718,6 +731,9 @@ test("drag bounds: a remote negative pin during a drag keeps the moved card unde
   const moving = page.locator('.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill');
   await expect(moving).toBeVisible();
   const start = await centre(page, '.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill');
+  const initialTransform = await moving.evaluate((el) => el.closest<HTMLElement>(".ui-window")!.style.transform);
+  const initial = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(initialTransform)!;
+  const startPin = { x: Number(initial[1]), y: Number(initial[2]) };
   await page.mouse.move(start.x, start.y);
   await page.mouse.down();
 
@@ -743,7 +759,17 @@ test("drag bounds: a remote negative pin during a drag keeps the moved card unde
   expect(afterMove).not.toBeNull();
   expect(afterMove!.x + afterMove!.width / 2).toBeCloseTo(start.x + 24, 0);
   expect(afterMove!.y + afterMove!.height / 2).toBeCloseTo(start.y + 16, 0);
+  const afterRemoteView = (await meshBox(page))!;
   await page.mouse.up();
+  await page.waitForTimeout(40);
+  const saved = await probe(page, (p) => p.mesh.document());
+  const savedPins = saved!.views.find((candidate) => candidate.id === "mesh")!.layout.pinned!;
+  expect(savedPins).toMatchObject({ "build-01": { x: -1300, y: -490 } });
+  expect(Object.keys(savedPins).sort()).toEqual(["build-01", "nix-cache"]);
+  expect(savedPins["nix-cache"]).toEqual({ x: Math.round(startPin.x + 24 / cameraBefore.z), y: Math.round(startPin.y + 16 / cameraBefore.z) });
+  const afterDropView = (await meshBox(page))!;
+  expect(afterDropView.x).toBe(afterRemoteView.x);
+  expect(afterDropView.y).toBe(afterRemoteView.y);
 });
 
 test("dragging a node left in a 1,000-host mesh stays within the shared pin limit", async ({ page }) => {
@@ -778,13 +804,217 @@ test("removing and adding a node during its drag does not persist a pin for the 
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
   await server(page, (s) => { s.removeNode("nix-cache"); s.addNode({ name: "review-added-mid-drag" }); });
   await expect(page.locator('.ui-window[data-window-id="n-nix-cache"]')).toHaveCount(0);
-  await expect(page.locator('.ui-window[data-window-id="n-review-added-mid-drag"]')).toBeVisible();
-  await page.mouse.move(from.x + 90, from.y + 60, { steps: 4 });
+  const added = page.locator('.ui-window[data-window-id="n-review-added-mid-drag"] .ui-window-pill');
+  await expect(added).toBeVisible();
+  // The removed card can be reused for the new node. Moving the still-down pointer over that card must not carry the
+  // removed node's gesture onto a different host.
+  const replacement = (await added.boundingBox())!;
+  await page.mouse.move(replacement.x + replacement.width / 2, replacement.y + replacement.height / 2, { steps: 4 });
   await page.mouse.up();
   await page.waitForTimeout(900);
   const doc = await probe(page, (p) => p.mesh.document());
   const pins = doc!.views.find((v) => v.id === "mesh")!.layout.pinned!;
-  expect(pins).not.toHaveProperty("nix-cache");
+  expect.soft(pins).toEqual({});
+  expect.soft(await probe(page, (p) => p.mesh.pins())).toEqual({});
+});
+
+test("a remote remove and re-add that rebinds the dragged card follows its new NodeModel", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  await probe(page, (p) => p.setCanvasLock(false));
+  const before = (await probe(page, (p) => p.camera()))!;
+  const pill = page.locator('.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill');
+  const start = await centre(page, '.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill');
+  const initialTransform = await pill.evaluate((el) => el.closest<HTMLElement>(".ui-window")!.style.transform);
+  const initial = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(initialTransform)!;
+  const startPin = { x: Number(initial[1]), y: Number(initial[2]) };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+
+  // Waiting for the card to disappear makes the layout model discard its old NodeModel; the re-added node gets a new
+  // object while the card record is taken back out of the pool.
+  // Both changes in one call, so the card is not left detached between them (a detached card loses pointer capture).
+  await server(page, (s) => { s.removeNode("nix-cache"); s.addNode({ name: "nix-cache" }); });
+  await page.waitForTimeout(300);
+  await expect(pill).toBeVisible();
+  const rebound = (await pill.boundingBox())!;
+  const drop = { x: rebound.x + rebound.width / 2 + 24, y: rebound.y + rebound.height / 2 + 16 };
+  await page.mouse.move(drop.x, drop.y);
+  await page.waitForTimeout(40);
+  const moved = (await pill.boundingBox())!;
+  const beforeDropView = (await meshBox(page))!;
+  await page.mouse.up();
+  await page.waitForTimeout(40);
+
+  const doc = await probe(page, (p) => p.mesh.document());
+  const pins = doc!.views.find((v) => v.id === "mesh")!.layout.pinned!;
+  expect.soft(moved.x + moved.width / 2).toBeCloseTo(drop.x, 0);
+  expect.soft(moved.y + moved.height / 2).toBeCloseTo(drop.y, 0);
+  expect.soft(Object.keys(pins)).toEqual(["nix-cache"]);
+  expect.soft(pins["nix-cache"]).toEqual({ x: Math.round(startPin.x + (drop.x - start.x) / before.z), y: Math.round(startPin.y + (drop.y - start.y) / before.z) });
+  const afterDropView = (await meshBox(page))!;
+  expect.soft(afterDropView.x).toBe(beforeDropView.x);
+  expect.soft(afterDropView.y).toBe(beforeDropView.y);
+});
+
+test("a Mesh drag stays under the pointer when zoom changes before its next move", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  await probe(page, (p) => p.setCanvasLock(false));
+  const view = (await meshBox(page))!;
+  await setCamera(page, view.x + 100, view.y + 100, 1);
+  await page.waitForTimeout(400);
+  const selector = '.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill';
+  const start = await centre(page, selector);
+  const cam = await probe(page, (p) => p.camera());
+  const initialTransform = await page.locator(selector).evaluate((el) => el.closest<HTMLElement>(".ui-window")!.style.transform);
+  const initial = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(initialTransform)!;
+  const startPin = { x: Number(initial[1]), y: Number(initial[2]) };
+  const viewport = (await page.locator(".cl-viewport").boundingBox())!;
+  const centreX = viewport.x + viewport.width / 2, centreY = viewport.y + viewport.height / 2;
+  const worldAtStart = { x: cam.cx + (start.x - centreX) / cam.z, y: cam.cy + (start.y - centreY) / cam.z };
+  const zoom = 0.8;
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  // Keep the pointer-down world point under the pointer while zooming, as a pinch does.
+  await setCamera(page, worldAtStart.x - (start.x - centreX) / zoom, worldAtStart.y - (start.y - centreY) / zoom, zoom);
+  expect((await probe(page, (p) => p.camera()))!.z).toBeCloseTo(zoom, 3);
+  const target = { x: start.x + 24, y: start.y + 16 };
+  await page.mouse.move(target.x, target.y);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  // The grabbed element is the pill: the card's own centre sits a fixed distance in world units from it, so it would
+  // move on screen with the zoom whatever the drag does.
+  const card = (await page.locator(selector).boundingBox())!;
+  const beforeDropView = (await meshBox(page))!;
+  await page.mouse.up();
+  await page.waitForTimeout(40);
+  expect.soft(card.x + card.width / 2).toBeCloseTo(target.x, 0);
+  expect.soft(card.y + card.height / 2).toBeCloseTo(target.y, 0);
+  const doc = await probe(page, (p) => p.mesh.document());
+  const pins = doc!.views.find((candidate) => candidate.id === "mesh")!.layout.pinned!;
+  expect.soft(Object.keys(pins)).toEqual(["nix-cache"]);
+  expect.soft(pins["nix-cache"]).toEqual({ x: Math.round(startPin.x + (target.x - start.x) / zoom), y: Math.round(startPin.y + (target.y - start.y) / zoom) });
+  const afterDropView = (await meshBox(page))!;
+  expect.soft(afterDropView.x).toBe(beforeDropView.x);
+  expect.soft(afterDropView.y).toBe(beforeDropView.y);
+});
+
+test("a Mesh click without movement writes no pin and skips the post-drag fit", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  await probe(page, (p) => p.setCanvasLock(false));
+  await page.waitForTimeout(400);
+  const selector = '.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill';
+  const at = await centre(page, selector);
+  const passesBefore = (await probe(page, (p) => p.mesh.stats()))!.passes;
+  await dispatchPointer(page, selector, "pointerdown", 51, at.x, at.y);
+  await dispatchPointer(page, selector, "pointerup", 51, at.x, at.y);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  const passesAfter = (await probe(page, (p) => p.mesh.stats()))!.passes;
+  const doc = await probe(page, (p) => p.mesh.document());
+  expect(doc!.views.find((candidate) => candidate.id === "mesh")!.layout.pinned).toEqual({});
+  expect(await probe(page, (p) => p.mesh.pins())).toEqual({});
+  expect(passesAfter).toBe(passesBefore);
+});
+
+test("pointer cancellation finishes the active Mesh drag and releases the card", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  await probe(page, (p) => p.setCanvasLock(false));
+  const selector = '.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill';
+  const start = await centre(page, selector);
+  await dispatchPointer(page, selector, "pointerdown", 61, start.x, start.y);
+  await dispatchPointer(page, selector, "pointermove", 61, start.x + 20, start.y + 12);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await dispatchPointer(page, selector, "pointercancel", 61, start.x + 20, start.y + 12);
+  await expect(page.locator('.ui-window[data-window-id="n-nix-cache"]')).not.toHaveAttribute("data-lifted", "");
+  const doc = await probe(page, (p) => p.mesh.document());
+  expect(Object.keys(doc!.views.find((candidate) => candidate.id === "mesh")!.layout.pinned!)).toEqual(["nix-cache"]);
+});
+
+test("a second pointer cannot replace the Mesh card's active pointer", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  await probe(page, (p) => p.setCanvasLock(false));
+  const selector = '.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill';
+  const start = await centre(page, selector);
+  await dispatchPointer(page, selector, "pointerdown", 71, start.x, start.y);
+  await dispatchPointer(page, selector, "pointermove", 71, start.x + 20, start.y + 12);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await dispatchPointer(page, selector, "pointerdown", 72, start.x + 20, start.y + 12, false);
+  await dispatchPointer(page, selector, "pointermove", 71, start.x + 44, start.y + 28);
+  await dispatchPointer(page, selector, "pointerup", 71, start.x + 44, start.y + 28);
+  await expect(page.locator('.ui-window[data-window-id="n-nix-cache"]')).not.toHaveAttribute("data-lifted", "");
+});
+
+test("a card dropped mid-drag does not leave a drag behind that moves a later host on hover", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  await probe(page, (p) => p.setCanvasLock(false));
+  const selector = '.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill';
+  const from = await centre(page, selector);
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(from.x + 10, from.y + 6, { steps: 2 });
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await server(page, (s) => s.removeNode("nix-cache"));
+  await expect(page.locator('.ui-window[data-window-id="n-nix-cache"]')).toHaveCount(0);
+  // Let go over empty canvas: the removed card cannot hear it, so its gesture never ends by itself.
+  await page.mouse.move(from.x, from.y + 400, { steps: 3 });
+  await page.mouse.up();
+  const before = (await probe(page, (p) => p.mesh.document()))!.views.find((v) => v.id === "mesh")!.layout.pinned!;
+  await server(page, (s) => s.addNode({ name: "review-hover-host" }));
+  const added = page.locator('.ui-window[data-window-id="n-review-hover-host"] .ui-window-pill');
+  await expect(added).toBeVisible();
+  const at = await centre(page, '.ui-window[data-window-id="n-review-hover-host"] .ui-window-pill');
+  // No button is down: hovering the new card must never move it.
+  await page.mouse.move(at.x, at.y, { steps: 3 });
+  await page.mouse.move(at.x + 30, at.y + 20, { steps: 3 });
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await page.waitForTimeout(100);
+  const moved = (await added.boundingBox())!;
+  expect.soft(moved.x + moved.width / 2).toBeCloseTo(at.x, 0);
+  const pins = (await probe(page, (p) => p.mesh.pins()))!;
+  expect.soft(Object.keys(pins)).not.toContain("review-hover-host");
+  expect.soft(Object.keys(before)).not.toContain("review-hover-host");
+});
+
+test("a second finger that taps the card mid-drag does not lose the first finger's move", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  await probe(page, (p) => p.setCanvasLock(false));
+  const selector = '.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill';
+  const start = await centre(page, selector);
+  await dispatchPointer(page, selector, "pointerdown", 91, start.x, start.y);
+  await dispatchPointer(page, selector, "pointermove", 91, start.x + 40, start.y + 30);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  const passesBefore = (await probe(page, (p) => p.mesh.stats()))!.passes;
+  await dispatchPointer(page, selector, "pointerdown", 92, start.x + 40, start.y + 30, false);
+  await dispatchPointer(page, selector, "pointerup", 92, start.x + 40, start.y + 30, false);
+  await dispatchPointer(page, selector, "pointerup", 91, start.x + 40, start.y + 30);
+  await page.waitForTimeout(100);
+  await expect(page.locator('.ui-window[data-window-id="n-nix-cache"]')).not.toHaveAttribute("data-lifted", "");
+  // The card was moved and its pin written to the source; the drop must also fit the view and save the document.
+  expect(Object.keys(await probe(page, (p) => p.mesh.pins()))).toEqual(["nix-cache"]);
+  const doc = await probe(page, (p) => p.mesh.document());
+  expect(Object.keys(doc!.views.find((v) => v.id === "mesh")!.layout.pinned!)).toEqual(["nix-cache"]);
+  expect((await probe(page, (p) => p.mesh.stats()))!.passes).toBeGreaterThan(passesBefore);
+});
+
+test("a graph drag outside the Mesh view saves its pin without writing to the Mesh source", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  await probe(page, (p) => p.setGraphViewId("mesh", "review-graph"));
+  const selector = '.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill';
+  const start = await centre(page, selector);
+  await dispatchPointer(page, selector, "pointerdown", 81, start.x, start.y);
+  await dispatchPointer(page, selector, "pointermove", 81, start.x + 24, start.y + 16);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await dispatchPointer(page, selector, "pointerup", 81, start.x + 24, start.y + 16);
+  const doc = await probe(page, (p) => p.mesh.document());
+  const graph = doc!.views.find((candidate) => candidate.id === "review-graph")!;
+  expect(Object.keys(graph.layout.pinned!)).toEqual(["nix-cache"]);
+  expect(await probe(page, (p) => p.mesh.pins())).toEqual({});
 });
 
 // ---- states and captures ----------------------------------------------------------------------------------------
