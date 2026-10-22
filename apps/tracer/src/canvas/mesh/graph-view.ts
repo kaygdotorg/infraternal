@@ -155,7 +155,12 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
   const cardPool: WinRec[] = [];
   const boundTo = new WeakMap<WinRec, NodeModel>();
   const nodeStatus = (n: NodeModel): "none" | "offline" | "connecting" | "live" => (n.kind === "tag" ? "none" : n.state === "offline" ? "offline" : n.state === "behind" ? "connecting" : "live");
+  /** Ends a card's open drag without writing anything: set by `wireNode`, called when the card stops being that node's. */
+  const endDrag = new WeakMap<WinRec, () => void>();
   const bindNode = (rec: WinRec, n: NodeModel): void => {
+    // A drag belongs to a node, not to a card: a card rebound to another node (the pool reuses cards) must not carry it.
+    // The same id with a new model (a refresh) keeps the drag.
+    if (boundTo.get(rec)?.id !== n.id) endDrag.get(rec)?.();
     boundTo.set(rec, n);
     rec.model.id = `n-${n.id}`;
     rec.model.host = n.label;
@@ -192,6 +197,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     return rec;
   };
   const dropNode = (rec: WinRec): void => {
+    endDrag.get(rec)?.();
     rec.card.root.remove();
     for (const flag of ["data-lifted", "data-drop", "data-linking", "data-active"]) rec.card.root.removeAttribute(flag);
     boundTo.delete(rec);
@@ -234,12 +240,22 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     let d: { id: number; x: number; y: number; px: number; py: number; n: NodeModel; moved: boolean; at?: { x: number; y: number }; frame: number } | undefined;
     // A drag is applied once per frame, from the last pointer position: a pointer that reports faster than the screen
     // draws would move the card and redraw its arrows several times for one frame.
+    const cancel = (): void => {
+      if (!d) return;
+      cancelAnimationFrame(d.frame);
+      if (pill.hasPointerCapture(d.id)) pill.releasePointerCapture(d.id);
+      d = undefined;
+      delete rec.card.root.dataset.lifted;
+    };
+    endDrag.set(rec, cancel);
     const apply = (): void => {
       if (!d) return;
       d.frame = 0;
       if (!d.at) return;
-      // A refresh during the drag may have rebound the card to a new model: follow it, so the model drawn is the one moved.
-      const n = boundTo.get(rec) ?? d.n;
+      // A refresh during the drag may have rebound the card to a new model of the same node: follow it, so the model
+      // drawn is the one moved. A card that is no longer this node's (removed) ends the drag and writes no pin.
+      const n = boundTo.get(rec);
+      if (!n || n.id !== d.n.id) { cancel(); return; }
       d.n = n;
       // No wall: the view is as big as its nodes as placed, so a card can go anywhere; the view is fitted once, on drop
       // (`fitAfterDrag`), because a resize per pointer move would re-frame the camera under the finger.
@@ -259,7 +275,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     };
     pill.addEventListener("pointerdown", (e) => {
       const n = boundTo.get(rec);
-      if (camera.lod === "thumb" || !n) return;
+      if (d || camera.lod === "thumb" || !n) return; // a second finger must not reset or steal the drag
       pill.setPointerCapture(e.pointerId);
       const o = origins.get(rec.owner) ?? ZERO;
       d = { id: e.pointerId, x: e.clientX, y: e.clientY, px: n.x - o.x, py: n.y - o.y, n, moved: false, frame: 0 };
@@ -267,17 +283,18 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     }, { signal });
     pill.addEventListener("pointermove", (e) => {
       if (!d || e.pointerId !== d.id) return;
+      if (e.buttons === 0) { up(e); return; } // the release was missed: a stale drag must not follow a bare pointer
       d.at = { x: e.clientX, y: e.clientY };
       if (!d.frame) d.frame = requestAnimationFrame(apply);
     }, { signal });
     const up = (e: PointerEvent): void => {
       if (!d || e.pointerId !== d.id) return;
       cancelAnimationFrame(d.frame);
-      apply();
+      apply(); // may end the drag (node gone)
+      if (!d) return;
       const n = d.n;
       const moved = d.moved;
-      d = undefined;
-      delete rec.card.root.dataset.lifted;
+      cancel();
       if (moved) { fitAfterDrag(rec.owner, n); cx.store.changed(); }
     };
     pill.addEventListener("pointerup", up, { signal });
