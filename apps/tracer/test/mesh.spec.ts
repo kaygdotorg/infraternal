@@ -1102,7 +1102,7 @@ test("a pen stroke keeps buttons 1 while it draws, and its drag is not cut short
     const pill = '.cl[data-view="mesh"] .ui-window[data-window-id="n-nix-cache"] .ui-window-pill';
     await page.locator(pill).evaluate((el) => { const log: number[] = []; (window as unknown as { __b: number[] }).__b = log; el.addEventListener("pointermove", (e) => log.push((e as PointerEvent).buttons), true); });
     const at = await centre(page, pill);
-    const ev = (type: string, x: number, y: number, buttons: number) => cdp.send("Input.dispatchMouseEvent", { type, x, y, button: buttons ? "left" : "none", buttons, clickCount: type === "mouseMoved" ? 0 : 1, pointerType: "pen" });
+    const ev = (type: "mousePressed" | "mouseReleased" | "mouseMoved", x: number, y: number, buttons: number) => cdp.send("Input.dispatchMouseEvent", { type, x, y, button: buttons ? "left" : "none", buttons, clickCount: type === "mouseMoved" ? 0 : 1, pointerType: "pen" });
     await ev("mousePressed", at.x, at.y, 1);
     for (let i = 1; i <= 8; i++) { await ev("mouseMoved", at.x + 4 * i, at.y + 3 * i, 1); await page.waitForTimeout(16); }
     await ev("mouseReleased", at.x + 32, at.y + 24, 0);
