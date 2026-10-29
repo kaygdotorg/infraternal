@@ -13,10 +13,10 @@ test("invalid setup token stays on step 1 with focused guidance", async ({ page 
   const resetResponse = await context.request.post("/__mock/reset", { maxRetries: 1 });
   const setupBody = await resetResponse.json() as { setup_token: string };
   await page.emulateMedia({ colorScheme: "dark", reducedMotion: "no-preference" });
-  await page.goto("/?mock=1");
+  await page.goto("/install?mock=1");
   await expect(page.getByRole("heading", { name: "Make this server yours" })).toBeVisible();
-  // The command says as whom to run it and how long the token lives (the socket is private to the server's user).
-  await expect(page.locator(".auth-hint")).toContainText("as the user the server runs as. The token expires after 24 hours.");
+  await expect(page.locator("[data-setup-token-command]")).toHaveText("infraternal server setup-token");
+  await expect(page.locator(".auth-hint")).toContainText("Run the command on the server. The token expires after 24 hours.");
 
   // Hold the validation response long enough to check the 400 ms count-up threshold.
   await page.route("**/auth/setup-check", async (route) => {
@@ -32,7 +32,7 @@ test("invalid setup token stays on step 1 with focused guidance", async ({ page 
   await expect(page.locator("#setup-next .busy-count")).toBeVisible();
   await expect(page.locator("#setup-next .busy-count")).toContainText(/\d+\.\d+s/);
   await expect(page.locator("#setup-token-error")).toContainText(
-    "That token doesn't match. Run infraternal server setup-token on the server.",
+    "That token doesn't match. Run the command shown above on the server.",
   );
   await expect(page.locator("#setup-token")).toBeFocused();
   await expect(page.locator("#setup-username")).toHaveCount(0);
@@ -51,6 +51,31 @@ test("invalid setup token stays on step 1 with focused guidance", async ({ page 
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByRole("heading", { name: "Who are you?" })).toBeVisible();
   console.log(`SETUP_TOKEN_ERROR_SCREENSHOTS ${screenshots.join(" ")}`);
+});
+
+test("system-service setup shows and copies its sudo command", async ({ page }, testInfo) => {
+  const context = page.context();
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.route("**/auth/status", (route) => route.fulfill({
+    status: 200,
+    json: {
+      setup_required: true,
+      setup_token_command: "sudo infraternal server setup-token",
+    },
+  }));
+
+  await page.goto("/install?mock=1");
+  const command = "sudo infraternal server setup-token";
+  await expect(page.locator("[data-setup-token-command]")).toHaveText(command);
+  await page.setViewportSize({ width: 393, height: 852 });
+  const screenshot = testInfo.outputPath("system-service-setup-token-command.png");
+  await page.screenshot({ path: screenshot, fullPage: true, animations: "disabled" });
+  await testInfo.attach("system-service-setup-token-command", {
+    path: screenshot,
+    contentType: "image/png",
+  });
+  await page.getByRole("button", { name: "Copy setup token command" }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(command);
 });
 
 test("setup, recovery acknowledgement, welcome and returning sign-in match the browser contract", async ({ page }, testInfo) => {

@@ -700,7 +700,10 @@ async function authAction(
   response.setHeader("Cache-Control", "no-store");
   switch (action) {
     case "status":
-      return sendJson(response, 200, { setup_required: !owner });
+      return sendJson(response, 200, {
+        setup_required: !owner,
+        setup_token_command: "infraternal server setup-token",
+      });
     case "setup-check": {
       if (Object.keys(body).length !== 1 || typeof body.token !== "string") {
         return sendJson(response, 400, { error: "invalid request" });
@@ -1203,15 +1206,23 @@ async function serveDist(pathname: string, headOnly: boolean, response: ServerRe
   const relative = decoded === "/" ? "index.html" : decoded.slice(1);
   const path = resolve(DIST_ROOT, relative);
   if (!path.startsWith(`${DIST_ROOT}${sep}`) && path !== DIST_ROOT) return sendJson(response, 404, { error: "not found" });
+  let file = path;
+  let bytes: Buffer;
   try {
-    const bytes = await readFile(path);
-    response.statusCode = 200;
-    response.setHeader("Content-Type", contentType(extname(path)));
-    response.setHeader("Cache-Control", "no-store");
-    response.end(headOnly ? undefined : bytes);
+    bytes = await readFile(file);
   } catch {
-    sendJson(response, 404, { error: "not found" });
+    if (extname(path)) return sendJson(response, 404, { error: "not found" });
+    file = resolve(DIST_ROOT, "index.html");
+    try {
+      bytes = await readFile(file);
+    } catch {
+      return sendJson(response, 404, { error: "not found" });
+    }
   }
+  response.statusCode = 200;
+  response.setHeader("Content-Type", contentType(extname(file)));
+  response.setHeader("Cache-Control", "no-store");
+  response.end(headOnly ? undefined : bytes);
 }
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown> | undefined> {
