@@ -145,8 +145,16 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,389,424 bytes |
-  | `aarch64-unknown-linux-musl` | 19,562,168 bytes |
+  | `x86_64-unknown-linux-musl` | 21,386,512 bytes |
+  | `aarch64-unknown-linux-musl` | 19,563,608 bytes |
+
+  The RUSTSEC-2026-0386 repair (#255) pins Tokio 1.53.3 and keeps reactor
+  descriptors owned until deregistration inside the audited shim boundary.
+  The unchanged pinned static recipe on 8by64-compute02 measures
+  21,386,512 / 19,563,608 bytes (x86_64 / aarch64), -2,912 / +1,440 bytes
+  versus merged base `f069bb2a9`. Both exact caps above ratchet to these
+  measured images with no allowance (D243); receipts are on #255. Other
+  dependency versions and the release profile stay unchanged.
 
   Release jobs (not `scripts/verify fast`, which every job runs) also run
   `scripts/test-static-reproducibility.py`. It builds both targets again from a detached checkout with separate
