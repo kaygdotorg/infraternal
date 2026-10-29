@@ -145,8 +145,15 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,386,512 bytes |
-  | `aarch64-unknown-linux-musl` | 19,563,608 bytes |
+  | `x86_64-unknown-linux-musl` | 21,396,368 bytes |
+  | `aarch64-unknown-linux-musl` | 19,573,928 bytes |
+
+  Replay fences now carry the captured screen dimensions (#257). The same
+  pinned `scripts/static-cargo` recipe on 8by64-compute02 measures
+  21,396,368 / 19,573,928 bytes (x86_64 / aarch64), +9,856 / +10,320 bytes
+  versus dev `4a6202a52`. Both exact caps ratchet to these images (D243);
+  receipts are on #257. Dependencies, features and the release profile are
+  unchanged.
 
   The RUSTSEC-2026-0386 repair (#255) pins Tokio 1.53.3 and keeps reactor
   descriptors owned until deregistration inside the audited shim boundary.
