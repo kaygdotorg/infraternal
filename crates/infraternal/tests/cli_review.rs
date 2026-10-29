@@ -330,6 +330,17 @@ fn root_help_fits_80_columns() {
 }
 
 #[test]
+fn root_help_lists_server_init() {
+    let home = home("help-server-init");
+    let output = cli(&home, &["--help"]);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.lines().any(|line| line.contains("server init")),
+        "top-level help should expose the first server setup command"
+    );
+}
+
+#[test]
 fn a_dry_run_plan_keeps_its_line_breaks() {
     let home = home("dry-run");
     let output = cli(&home, &["server", "init", "--dry-run"]);

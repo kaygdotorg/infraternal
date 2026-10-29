@@ -604,7 +604,7 @@ test("status failure, invalid setup token, and cancelled passkey have distinct g
   await page.locator("#setup-token").fill("invalid-input");
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.locator("#setup-token-error")).toContainText(
-    "That token doesn't match. Run infraternal server setup-token on the server.",
+    "That token doesn't match. Run the command shown above on the server.",
   );
   await expect(page.locator("#setup-token")).toBeFocused();
   await expect(page.locator("#setup-username")).toHaveCount(0);

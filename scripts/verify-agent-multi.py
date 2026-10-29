@@ -12,7 +12,7 @@ state = fixture_state('mw')
 state.mkdir(mode=0o700)
 c = Binary(Path(sys.argv[sys.argv.index('--binary') + 1]).resolve(), state)
 try:
-    c.open(); c.attach(); c.until(b'shim-test')
+    c.open(); c.attach(); c.wait_for_shell()
     c.input(b"stty raw -echo; printf 'MULTI_%s' READY; cat\n")
     c.until(b'MULTI_READY'); c.wait_ack()
     start = c.entered

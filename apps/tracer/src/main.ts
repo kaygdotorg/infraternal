@@ -1,5 +1,5 @@
 /** Starts auth and the terminal, keeping the terminal bundle off the unauthenticated path. */
-import { AuthError, checkStatus, checkSession, recoveryAuth } from "./auth";
+import { AuthError, checkStatus, checkSession, recoveryAuth, type AuthStatus } from "./auth";
 import { registerSignOut } from "./sign-out";
 import { cacheDrawingIdentity } from "./offline-cache";
 import type { DrawingIdentity } from "./offline-drawing";
@@ -152,12 +152,12 @@ async function start(): Promise<void> {
     new Promise<void>((resolve) => window.setTimeout(resolve, 800)),
   ]).catch(() => undefined);
   try {
-    const [setupRequired] = await Promise.all([
+    const [status] = await Promise.all([
       checkStatus(),
       fontsReady,
     ]);
     installTooltips();
-    await showAuthState(setupRequired);
+    await showAuthState(status);
   } catch (error: unknown) {
     await fontsReady;
     installTooltips();
@@ -177,13 +177,13 @@ async function refreshAuth(): Promise<void> {
   }
 }
 
-async function showAuthState(setupRequired: boolean): Promise<void> {
-  const session = setupRequired ? undefined : await checkSession();
+async function showAuthState(status: AuthStatus): Promise<void> {
+  const session = status.setupRequired ? undefined : await checkSession();
   if (session) {
     activeUserId = session.user_id;
     await showTerminal(session);
   } else {
-    renderAuth(setupRequired);
+    renderAuth(status.setupRequired, "", status.setupTokenCommand);
   }
 }
 
@@ -252,7 +252,11 @@ function renderUnavailable(message: string): void {
   scheduleBackdrop();
 }
 
-function renderAuth(setupRequired: boolean, message = ""): void {
+function renderAuth(
+  setupRequired: boolean,
+  message = "",
+  setupTokenCommand = "infraternal server setup-token",
+): void {
   authLight();
   document.documentElement.removeAttribute("data-ui-font");
   mountOnboarding(app, setupRequired, message, (userId, firstSetup, welcomeName, instant) => {
@@ -261,7 +265,7 @@ function renderAuth(setupRequired: boolean, message = ""): void {
     activeUserId = userId;
     if (firstSetup) showWelcome(welcomeName ?? "", instant);
     else void showTerminal(undefined, instant);
-  });
+  }, setupTokenCommand);
   scheduleBackdrop();
 }
 

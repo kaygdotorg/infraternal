@@ -14,9 +14,11 @@ and physical iPhone review remain external, not self-approved.
 
 ## Contract and security choices
 
-- POST `status` returns exactly `{setup_required: bool}` with no-store, exact
-  Origin enforcement and existing admission limits. The indexed owner lookup
-  reveals no identity, credential list or device information.
+- POST `status` originally returned exactly `{setup_required: bool}`. Issue #252
+  adds only `setup_token_command`, derived from the installed service scope; the
+  indexed owner lookup still reveals no identity, credential list or device
+  information. The response keeps no-store, exact Origin enforcement and the
+  existing admission limits.
 - Omitted `user_id` starts webauthn-rs discoverable authentication with an empty
   allowCredentials list and required UV. Conditional mediation is removed for
   a normal button-triggered prompt. Missing or malformed 16-byte UUID handles

@@ -17,11 +17,11 @@ def run(binary):
     client = Binary(binary.resolve(), state)
     try:
         client.open()
-        # Open has retained the shell's prompt. Deliberately separate Attach and
-        # Credit: production has separate queues/tasks and must tolerate either
-        # leg's scheduling without a free implicit grant.
+        # Send a shell marker before granting output Credit so this remains
+        # independent of the login shell's prompt format.
         client.send(1, 0x16, client.id.bytes + struct.pack('<QQ', 0, 0))
         assert client.process(credit=False) == 0x13, 'attach must confirm the input cursor'
+        client.input(b"printf 'shell-ready-%s\\n' check\n")
         deadline = time.monotonic() + 0.35
         while time.monotonic() < deadline:
             if select.select([client.sock], [], [], deadline - time.monotonic())[0]:
@@ -39,7 +39,7 @@ def run(binary):
         while select.select([client.sock], [], [], 0.02)[0]:
             assert client.process(credit=False) == 0x13, 'replay borrowed implicit credit'
         client.send(1, 0x14, struct.pack('<I', 1048575))
-        client.until(b'shim-test', credit=False)
+        client.until(b'shell-ready-check', credit=False)
         assert client.out > 0, 'funded replay omitted retained prompt'
         print(f'Attach without Credit: no Output/Snapshot for 350 ms; control responsive; funded replay {client.out} bytes in {(time.monotonic()-start)*1000:.1f} ms: PASS')
     finally:

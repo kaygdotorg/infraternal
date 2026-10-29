@@ -12,8 +12,9 @@ export function mountOnboarding(
   setupRequired: boolean,
   message: string,
   onAuthenticated: (userId: string, firstSetup: boolean, welcomeName?: string, instant?: boolean) => void,
+  setupTokenCommand = "infraternal server setup-token",
 ): void {
-  if (setupRequired) loadSetup(host, message, onAuthenticated);
+  if (setupRequired) loadSetup(host, message, onAuthenticated, setupTokenCommand);
   else mountSignIn(host, message, onAuthenticated);
 }
 
@@ -27,9 +28,14 @@ type Authenticated = (userId: string, firstSetup: boolean, welcomeName?: string,
  * what happened in the message line sign-in uses for errors, offers "Try again", and retries once by itself when the
  * browser comes back online (the session manager's on-demand load recovers the same way, #249).
  */
-export function loadSetup(host: HTMLElement, message: string, onAuthenticated: Authenticated): void {
+export function loadSetup(
+  host: HTMLElement,
+  message: string,
+  onAuthenticated: Authenticated,
+  setupTokenCommand = "infraternal server setup-token",
+): void {
   onDemand((): Promise<SetupModule> => import("./onboarding-setup.on-demand")).then(
-    ({ mountSetup }) => mountSetup(host, message, onAuthenticated),
+    ({ mountSetup }) => mountSetup(host, message, setupTokenCommand, onAuthenticated),
     () => {
       host.innerHTML = `<section class="auth-screen" aria-label="Set up infraternal"><section class="auth-card auth-signin ui-overlay-surface" aria-labelledby="setup-title">
         <div class="auth-mark">${BRAND_MARK}<span>infraternal</span></div>

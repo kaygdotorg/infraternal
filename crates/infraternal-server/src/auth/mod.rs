@@ -150,6 +150,7 @@ pub struct Auth {
     pool: SqlitePool,
     webauthn: Arc<Webauthn>,
     origin: String,
+    system_service: bool,
     pending: Arc<Mutex<Pending>>,
     ingress: Arc<Mutex<http::Ingress>>,
     recovery_changes: Arc<tokio::sync::watch::Sender<()>>,
@@ -170,6 +171,28 @@ impl Auth {
     #[must_use]
     pub fn origin(&self) -> &str {
         &self.origin
+    }
+
+    /// Mark the server's public setup instructions for its installed service scope.
+    pub(crate) fn with_system_service(mut self, system_service: bool) -> Self {
+        self.system_service = system_service;
+        self
+    }
+
+    /// Command shown beside the first-run token, derived from the action definition.
+    fn setup_token_command(&self) -> String {
+        #[cfg(feature = "cli-plugin")]
+        {
+            crate::cli::setup_token_command(self.system_service)
+        }
+        #[cfg(not(feature = "cli-plugin"))]
+        {
+            if self.system_service {
+                "sudo infraternal server setup-token".to_owned()
+            } else {
+                "infraternal server setup-token".to_owned()
+            }
+        }
     }
 
     /// Subscribe to the successful owner-enrollment event used to retire its CLI socket.
@@ -201,6 +224,7 @@ impl Auth {
             pool,
             webauthn: Arc::new(webauthn),
             origin: url.origin().ascii_serialization(),
+            system_service: false,
             pending: Arc::default(),
             ingress: Arc::default(),
             recovery_changes: Arc::new(tokio::sync::watch::channel(()).0),

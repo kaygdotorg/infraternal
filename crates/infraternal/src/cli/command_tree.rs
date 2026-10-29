@@ -39,6 +39,17 @@ pub fn build(registry: &ActionRegistry) -> Command {
     for child in &tree.children {
         root = root.subcommand(build_node(child, &[]));
     }
+    if let Some(action) = registry
+        .plugins()
+        .flat_map(|plugin| &plugin.actions)
+        .find(|action| action.visible && action.command == ["server", "init"])
+    {
+        root = root.after_help(format!(
+            "Server setup:\n  {}  {}",
+            action.command.join(" "),
+            action.description,
+        ));
+    }
     root
 }
 

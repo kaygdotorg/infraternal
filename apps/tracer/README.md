@@ -20,9 +20,12 @@ bun run build
 ```
 
 Serve `dist/` from the infraternal server. The public `status` action chooses the
-screen before session lookup. When setup is required, enter the current one-time
-token from `infraternal server setup-token`, choose a username and display name,
-create a passkey, and save the recovery words before opening the terminal.
+screen before session lookup and supplies the setup-token command for this
+install. When setup is required, run and copy that command on the server, then
+enter the current one-time token, choose a username and display name, create a
+passkey, and save the recovery words before opening the terminal. A system
+service shows `sudo infraternal server setup-token`; an account service shows
+`infraternal server setup-token`.
 Otherwise, choose **Continue with passkey**. No account UUID or device name is
 required; the browser supplies a device label.
 

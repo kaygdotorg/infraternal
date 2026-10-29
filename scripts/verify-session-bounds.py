@@ -92,7 +92,7 @@ def run(binary):
         client.open()
         counts(1, 1)
         client.attach()
-        client.until(b'shim-test')
+        client.wait_for_shell()
         counts(1, 0)
         client.send(1, 0x0f, struct.pack('<H', 0) + varint(4) + b'done')
         counts(1, 1)
