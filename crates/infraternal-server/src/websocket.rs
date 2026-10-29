@@ -158,61 +158,6 @@ impl Drop for AuthorityReadHold {
     }
 }
 
-/// Retain a timed-out query in a unit-output task after its caller has left.
-fn detach_authority_query<F>(query: std::pin::Pin<Box<F>>)
-where
-    F: std::future::Future + Send + 'static,
-{
-    let detached: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> =
-        Box::pin(async move {
-            let _ = query.await;
-        });
-    tokio::spawn(detached);
-}
-
-/// Keep a pinned query alive when its enclosing authority attempt is cancelled.
-struct DetachOnDrop<F: std::future::Future + Send + 'static>(Option<std::pin::Pin<Box<F>>>)
-where
-    F::Output: Send;
-
-impl<F: std::future::Future + Send + 'static> std::future::Future for DetachOnDrop<F>
-where
-    F::Output: Send,
-{
-    type Output = F::Output;
-
-    fn poll(
-        self: std::pin::Pin<&mut Self>,
-        context: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        let this = self.get_mut();
-        let Some(query) = this.0.as_mut() else {
-            return std::task::Poll::Pending;
-        };
-        match std::future::Future::poll(query.as_mut(), context) {
-            std::task::Poll::Ready(result) => {
-                this.0.take();
-                std::task::Poll::Ready(result)
-            }
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
-    }
-}
-
-impl<F: std::future::Future + Send + 'static> Drop for DetachOnDrop<F>
-where
-    F::Output: Send,
-{
-    fn drop(&mut self) {
-        if let Some(query) = self.0.take() {
-            // The attempt timeout drops this wrapper; the detached SELECT keeps
-            // its place until its future completes. Pool health checks may finish
-            // afterward, so the place counts active queries, not idle connections.
-            detach_authority_query(query);
-        }
-    }
-}
-
 /// State shared by the authenticated browser socket route.
 #[derive(Clone)]
 pub(crate) struct WebSocketState {
@@ -2524,9 +2469,9 @@ async fn read_expiry(
                 return Some(Err(AuthorityMiss::Unavailable));
             };
             let hold = AuthorityReadHold::take(Arc::clone(&state.authority), place);
-            let query = DetachOnDrop(Some(Box::pin(
+            let query = crate::completion::DetachOnDrop::new(Box::pin(
                 state.auth.live_expiry(token, user_id, now, hold),
-            )));
+            ));
             Some(query.await.map_err(|error| match error {
                 crate::auth::Error::Denied => AuthorityMiss::Refused,
                 _ => AuthorityMiss::Unavailable,
