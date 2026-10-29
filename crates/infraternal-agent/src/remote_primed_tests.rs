@@ -3,13 +3,18 @@ use super::*;
 use crate::sessions::Reader;
 use infraternal_shim::frame::{Frame as Shim, MULTI_WRITER, SEQUENCED_INPUT, SHARED_WRITER};
 use std::{os::unix::fs::DirBuilderExt, path::PathBuf};
-use tokio::{io::AsyncWriteExt, sync::mpsc, task::JoinHandle};
+use tokio::{
+    io::AsyncWriteExt,
+    sync::mpsc,
+    task::{JoinHandle, JoinSet},
+};
 
 struct Fixture {
     state: PathBuf,
     task: JoinHandle<()>,
     seen: mpsc::Receiver<Shim>,
     id: [u8; 16],
+    size: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -34,39 +39,48 @@ impl Fixture {
         assert!(socket.as_os_str().len() <= 107);
         let listener = tokio::net::UnixListener::bind(socket).unwrap();
         let (observed, seen) = mpsc::channel(8);
+        let size = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0x0050_0018));
+        let geometry = size.clone();
         let task = tokio::spawn(async move {
-            let (mut peer, _) = listener.accept().await.unwrap();
-            peer.write_all(
-                &Shim::Hello {
-                    version: 1,
-                    caps: SEQUENCED_INPUT | MULTI_WRITER | SHARED_WRITER,
-                    session: id,
-                    pid: std::process::id(),
-                    created: 0,
-                    cols: 80,
-                    rows: 24,
-                    head: 9,
-                    start: 0,
-                }
-                .encode()
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-            let mut reader = Reader::default();
-            while let Ok(frame) = reader.read(&mut peer).await {
-                observed.send(frame.clone()).await.unwrap();
-                let reply = match frame {
-                    Shim::InputStateRequest => Some(Shim::InputState(0, 0)),
-                    Shim::ReadFrom(seq) => Some(Shim::Output(seq, b"abc".to_vec())),
-                    Shim::SequencedInput(seq, bytes) => {
-                        Some(Shim::InputAck(seq + bytes.len() as u64))
+            let mut peers = JoinSet::new();
+            loop {
+                let (mut peer, _) = listener.accept().await.unwrap();
+                let observed = observed.clone();
+                let size = geometry.load(std::sync::atomic::Ordering::SeqCst);
+                peers.spawn(async move {
+                    peer.write_all(
+                        &Shim::Hello {
+                            version: 1,
+                            caps: SEQUENCED_INPUT | MULTI_WRITER | SHARED_WRITER,
+                            session: id,
+                            pid: std::process::id(),
+                            created: 0,
+                            cols: u16::try_from(size >> 16).unwrap(),
+                            rows: u16::try_from(size & 0xffff).unwrap(),
+                            head: 9,
+                            start: 0,
+                        }
+                        .encode()
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                    let mut reader = Reader::default();
+                    while let Ok(frame) = reader.read(&mut peer).await {
+                        observed.send(frame.clone()).await.unwrap();
+                        let reply = match frame {
+                            Shim::InputStateRequest => Some(Shim::InputState(0, 0)),
+                            Shim::ReadFrom(seq) => Some(Shim::Output(seq, b"abc".to_vec())),
+                            Shim::SequencedInput(seq, bytes) => {
+                                Some(Shim::InputAck(seq + bytes.len() as u64))
+                            }
+                            _ => None,
+                        };
+                        if let Some(reply) = reply {
+                            peer.write_all(&reply.encode().unwrap()).await.unwrap();
+                        }
                     }
-                    _ => None,
-                };
-                if let Some(reply) = reply {
-                    peer.write_all(&reply.encode().unwrap()).await.unwrap();
-                }
+                });
             }
         });
         Self {
@@ -74,6 +88,7 @@ impl Fixture {
             task,
             seen,
             id,
+            size,
         }
     }
 }
@@ -149,6 +164,9 @@ async fn primed_writer_acknowledges_before_reading_credit_funded_cursor() {
             .is_err(),
         "priming must not serialize output before a delivered cursor"
     );
+    fixture
+        .size
+        .store(0x0078_0028, std::sync::atomic::Ordering::SeqCst);
     tx.send(
         &server,
         42,
@@ -196,6 +214,8 @@ async fn primed_writer_acknowledges_before_reading_credit_funded_cursor() {
                             "type": "terminal.replay_complete",
                             "session_id": uuid::Uuid::from_bytes(fixture.id),
                             "out_seq": "9",
+                            "cols": 120,
+                            "rows": 40,
                         })
                     );
                     replay_complete = true;

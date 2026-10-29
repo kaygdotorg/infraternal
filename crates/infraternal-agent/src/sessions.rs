@@ -76,6 +76,8 @@ pub struct Session {
     pub path: PathBuf,
     pub peer: UnixStream,
     pub head: u64,
+    /// Authoritative screen geometry at the Hello capture, before this peer resizes.
+    pub size: (u16, u16),
     pub pid: u32,
     /// Selected capabilities, never inferred from the binary version.
     pub caps: u64,
@@ -277,6 +279,17 @@ pub async fn connect_shared_writer(
 }
 
 async fn connect_with(path: PathBuf, id: [u8; 16], requested: u64) -> io::Result<Session> {
+    handshake(path, id, Some(requested)).await
+}
+
+/// Read fresh replay metadata without attaching, selecting a writer or changing geometry.
+#[cfg(feature = "remote")]
+pub(crate) async fn replay_size(path: PathBuf, id: [u8; 16]) -> io::Result<(u16, u16)> {
+    let hello = handshake(path, id, None).await?;
+    Ok(hello.size)
+}
+
+async fn handshake(path: PathBuf, id: [u8; 16], requested: Option<u64>) -> io::Result<Session> {
     timeout(HANDSHAKE, async {
         let mut peer = UnixStream::connect(&path).await?;
         let uid = peer.peer_cred()?.uid();
@@ -291,22 +304,32 @@ async fn connect_with(path: PathBuf, id: [u8; 16], requested: u64) -> io::Result
             start,
             pid,
             caps,
+            cols,
+            rows,
             ..
         } = hello
         else {
             return Err(invalid("invalid shim Hello"));
         };
-        if session != id || start > head {
+        if session != id
+            || start > head
+            || cols == 0
+            || rows == 0
+            || usize::from(cols) * usize::from(rows) > 200_000
+        {
             return Err(invalid("shim identity or ring range mismatch"));
         }
         let supports_owner = caps & infraternal_shim::frame::SESSION_OWNER != 0;
-        let caps = caps & requested;
-        send(&mut peer, &Frame::Attach(caps)).await?;
+        let caps = caps & requested.unwrap_or(0);
+        if requested.is_some() {
+            send(&mut peer, &Frame::Attach(caps)).await?;
+        }
         Ok(Session {
             id,
             path,
             peer,
             head,
+            size: (cols, rows),
             pid,
             caps,
             supports_owner,

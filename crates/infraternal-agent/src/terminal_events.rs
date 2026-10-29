@@ -18,6 +18,8 @@ pub(super) enum Notice<'a> {
         session_id: Uuid,
         #[serde(serialize_with = "cursor")]
         out_seq: u64,
+        cols: u16,
+        rows: u16,
     },
     #[serde(rename = "terminal.query_replies_unavailable")]
     QueryRepliesUnavailable { session_id: Uuid },
@@ -84,6 +86,8 @@ mod tests {
         let replay = Notice::ReplayComplete {
             session_id: id,
             out_seq: u64::MAX,
+            cols: 80,
+            rows: 24,
         }
         .json()
         .unwrap();

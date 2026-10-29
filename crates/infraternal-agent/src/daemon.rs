@@ -1030,10 +1030,13 @@ async fn replay_complete(
     stream: u32,
     id: [u8; 16],
     out_seq: u64,
+    (cols, rows): (u16, u16),
 ) -> io::Result<()> {
     let json = terminal_events::Notice::ReplayComplete {
         session_id: uuid::Uuid::from_bytes(id),
         out_seq,
+        cols,
+        rows,
     }
     .json()?;
     emit(tx, Message::Event(stream, json)).await
@@ -1188,6 +1191,9 @@ async fn terminal_run(
     } else {
         None
     };
+    // Keep geometry paired with this replay's Hello even if queued Resize
+    // commands reach the shim before credit allows the completion event.
+    let mut replay_size = link.session.size;
     let mut session = Some(link);
     // Hello.head is a stable split between bytes already present on this shim
     // link and output produced while the attach is being established.
@@ -1231,7 +1237,7 @@ async fn terminal_run(
     let _window = crate::lifecycle::windows::Attachment::new(path.clone());
     let mut output = relay::Output::attach(cursor);
     if replay_until.is_some_and(|fence| output.cursor() >= fence) {
-        replay_complete(&tx, stream, id, output.cursor()).await?;
+        replay_complete(&tx, stream, id, output.cursor(), replay_size).await?;
         replay_until = None;
     }
     let mut pending: Option<Shim> = None;
@@ -1266,7 +1272,8 @@ async fn terminal_run(
                                 .forward(length)
                                 .map_err(|_| sessions::invalid("output credit invariant"))?;
                             if replay_until.is_some_and(|fence| output.cursor() >= fence) {
-                                replay_complete(&tx, stream, id, output.cursor()).await?;
+                                replay_complete(&tx, stream, id, output.cursor(), replay_size)
+                                    .await?;
                                 replay_until = None;
                             }
                             continue;
@@ -1284,7 +1291,7 @@ async fn terminal_run(
                             .map_err(|_| sessions::invalid("output credit invariant"))?;
                     }
                     if replay_until.is_some_and(|fence| output.cursor() >= fence) {
-                        replay_complete(&tx, stream, id, output.cursor()).await?;
+                        replay_complete(&tx, stream, id, output.cursor(), replay_size).await?;
                         replay_until = None;
                     }
                     if end < frame_len {
@@ -1320,7 +1327,7 @@ async fn terminal_run(
                         if replay_until.is_some_and(|fence| seq >= fence) {
                             // Repaint bytes contain state through seq, so the
                             // ordered completion event uses the repaint cursor.
-                            replay_complete(&tx, stream, id, seq).await?;
+                            replay_complete(&tx, stream, id, seq, replay_size).await?;
                             replay_until = None;
                         }
                     } else {
@@ -1354,9 +1361,10 @@ async fn terminal_run(
             // first, then faithful or negotiated approximate repaint on a gap.
             next.send(&Shim::ReadFrom(output.cursor())).await?;
             output.resume_replay();
+            replay_size = next.session.size;
             replay_until = Some(next.session.head.max(output.cursor()));
             if replay_until.is_some_and(|fence| output.cursor() >= fence) {
-                replay_complete(&tx, stream, id, output.cursor()).await?;
+                replay_complete(&tx, stream, id, output.cursor(), replay_size).await?;
                 replay_until = None;
             }
             session = Some(next);
@@ -1408,10 +1416,14 @@ async fn terminal_run(
                         let link = session.as_mut().ok_or_else(|| sessions::invalid("missing shim"))?;
                         // Primed relays begin their replay fence only when a delivered
                         // cursor subscribes to output, never while parked for input.
+                        // A primed link may have waited while another viewer
+                        // resized. Hello-only observation cannot replace its
+                        // durable writer or consume pending output/input Acks.
+                        replay_size = sessions::replay_size(path.clone(), id).await?;
                         replay_until = Some(link.session.head.max(cursor));
                         link.send(&Shim::ReadFrom(cursor)).await?;
                         if replay_until.is_some_and(|fence| cursor >= fence) {
-                            replay_complete(&tx, stream, id, cursor).await?;
+                            replay_complete(&tx, stream, id, cursor, replay_size).await?;
                             replay_until = None;
                         }
                     }
