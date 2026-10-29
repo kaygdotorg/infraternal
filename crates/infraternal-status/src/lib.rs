@@ -299,10 +299,10 @@ pub fn server_data_directory(roots: &Roots) -> Option<PathBuf> {
             let Some(unit) = read_unit(Scope::System, directory, &name, true) else {
                 continue;
             };
-            if unit.kind == Kind::Server {
-                if let Some(data) = unit.data.filter(|path| path.is_absolute()) {
-                    return Some(data);
-                }
+            if let (Kind::Server, Some(data)) =
+                (unit.kind, unit.data.filter(|path| path.is_absolute()))
+            {
+                return Some(data);
             }
         }
     }
