@@ -6,7 +6,7 @@
 
 use std::{fs, path::Path};
 
-use super::{Activity, Kind, NodeStatus, Role, Roots, Scope, probe};
+use super::{Activity, Kind, NodeStatus, Role, Roots, Scope, probe, server_data_directory};
 
 const IDS: [&str; 8] = [
     "release", "server", "agent", "mesh", "host", "relay", "backup", "ssh",
@@ -89,6 +89,28 @@ fn production_server(fixture: &Fixture) {
     fixture.write("var-lib/infraternal.sqlite", "");
     fixture.write("run/mesh-public.json", MESH);
     fixture.write("net/infraternal0/.keep", "");
+}
+
+#[test]
+fn installed_system_server_data_comes_from_its_effective_execstart() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "etc/custom-name.service",
+        "[Service]\nExecStart=\"/usr/bin/infraternal\" \"server\" \"--data\" \"/var/lib/infraternal state\"\n",
+    );
+    fixture.write(
+        "etc/custom-name.service.d/data.conf",
+        "[Service]\nExecStart=\nExecStart=\"/usr/bin/infraternal\" \"server\" \"--data\" \"/srv/infraternal state\"\n",
+    );
+    fixture.write(
+        "user/infraternal-server.service",
+        "[Service]\nExecStart=\"/home/user/infraternal\" \"server\" \"--data\" \"/home/user/data\"\n",
+    );
+
+    assert_eq!(
+        server_data_directory(&fixture.roots()),
+        Some(Path::new("/srv/infraternal state").to_owned())
+    );
 }
 
 #[test]
