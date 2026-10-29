@@ -327,3 +327,21 @@ test("a setup chunk that fails to load shows a retry card, never a blank screen 
   await page.getByRole("button", { name: "Try again" }).click();
   await expect(page.locator("#setup-token")).toBeVisible();
 });
+
+test("system-service setup stays within the phone viewport", async ({ page }) => {
+  const viewport = { width: 375, height: 667 };
+  await page.setViewportSize(viewport);
+  await page.route("**/auth/status", (route) => route.fulfill({
+    status: 200,
+    json: {
+      setup_required: true,
+      setup_token_command: "sudo infraternal server setup-token",
+    },
+  }));
+  await page.goto("/install?mock=1");
+  await expect(page.locator("[data-setup-token-command]")).toHaveText("sudo infraternal server setup-token");
+  await page.evaluate(() => document.fonts.ready);
+  const bounds = await page.locator("#setup-card").boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
+});

@@ -3397,3 +3397,26 @@ mod remote_removal_tests;
 mod terminal_refusal_tests;
 #[path = "tls_tests.rs"]
 mod tls_tests;
+/// Keep the canonical public-status result documentation aligned with the HTTP boundary.
+#[tokio::test]
+async fn public_status_result_fields_are_listed_in_the_auth_contract() {
+    let _guard = SERIAL.lock().await;
+    let (auth, _) = empty().await;
+    let app = router(auth);
+    let (status, _, body) = http_post_json(&app, "status", json!({})).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let contract = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/keywrap.md"
+    ));
+    let result_row = contract
+        .lines()
+        .find(|line| line.starts_with("| status |"))
+        .expect("canonical public status result");
+    for field in body.as_object().expect("public status object").keys() {
+        assert!(
+            result_row.contains(field.as_str()),
+            "public status field {field} is absent from the canonical result contract"
+        );
+    }
+}
