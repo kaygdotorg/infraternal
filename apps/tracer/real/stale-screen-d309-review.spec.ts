@@ -45,18 +45,20 @@ test("a reload of an idle shell at an unchanged size never shows the note", asyn
     await f.page.keyboard.type("echo idle-ready", { delay: 10 });
     await f.page.keyboard.press("Enter");
     await expect.poll(() => f.server.bridges.flatMap((bridge) => [...bridge.output.values()]).join(""), { timeout: 10_000 }).toContain("idle-ready");
-    // The first reload settles the shell at this viewer's size; the second one is the unchanged-size case.
+    const textarea = f.page.locator('.cl[data-view="console"] .terminal-host textarea');
+    // The first reload settles the shell at this viewer's size; the second one is the unchanged-size reattach.
     await f.page.reload();
-    await expect(f.page.locator('.cl[data-view="console"] .terminal-host textarea')).toHaveCount(1, { timeout: 15_000 });
-    await expect.poll(() => f.page.evaluate(() => document.querySelector('.cl[data-view="console"] .terminal-host canvas') !== null), { timeout: 15_000 }).toBe(true);
+    await expect(textarea).toHaveCount(1, { timeout: 15_000 });
     await f.page.waitForTimeout(2_000);
-    await f.page.reload();
     await recordNote(f.page);
-    await expect(f.page.locator('.cl[data-view="console"] .terminal-host textarea')).toHaveCount(1, { timeout: 15_000 });
+    await f.page.reload();
+    await expect(textarea).toHaveCount(1, { timeout: 15_000 });
     // Past the longest wait the client allows (1.5 s), so a late note would have shown.
     await f.page.waitForTimeout(3_000);
     expect(await everShown(f.page)).toBe(0);
     await expect(f.page.locator('.ui-terminal-note[data-shown]')).toHaveCount(0);
+    // Every reload reattached to the one shell; a fresh shell would have nothing to be out of date.
+    expect(new Set(f.server.bridges.flatMap((bridge) => [...bridge.attached.values()].flat())).size).toBe(1);
     await f.page.screenshot({ path: tracerEvidencePath("stale-review-real-pty-reload-idle.png") });
   } finally { await f.dispose(); }
 });
