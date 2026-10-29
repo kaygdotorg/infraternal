@@ -449,12 +449,15 @@ pub fn process_birth_ticks(record: &[u8]) -> Option<u64> {
 /// Directory retirement events keep the registry fresh without idle timers.
 pub(crate) struct SessionEvents(tokio::io::unix::AsyncFd<Watch>);
 impl SessionEvents {
+    // The workspace forbids unsafe code; `Watch` owns its descriptor for registration lifetime.
+    #[allow(deprecated)]
     pub(crate) fn new(state: &Path) -> io::Result<Self> {
         let watch = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC)
             .map_err(io::Error::from)?;
         watch
             .add_watch(state.join("sessions").as_path(), AddWatchFlags::IN_DELETE)
             .map_err(io::Error::from)?;
+        // `Watch` owns the inotify descriptor for its entire registration lifetime.
         Ok(Self(tokio::io::unix::AsyncFd::new(Watch(watch))?))
     }
     pub(crate) async fn changed(&self) -> io::Result<()> {
@@ -482,6 +485,8 @@ fn isolated(program: &Path) -> Command {
 
 // bind emits IN_CREATE before listen, so a refused early connection must
 // also wake on chmod. The shim chmods to 0600 only after listen succeeds.
+// The workspace forbids unsafe code; `Watch` owns its descriptor for registration lifetime.
+#[allow(deprecated)]
 fn socket_readiness(state: &Path) -> io::Result<tokio::io::unix::AsyncFd<Watch>> {
     let watch =
         Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC).map_err(io::Error::from)?;
@@ -491,6 +496,7 @@ fn socket_readiness(state: &Path) -> io::Result<tokio::io::unix::AsyncFd<Watch>>
             AddWatchFlags::IN_CREATE | AddWatchFlags::IN_ATTRIB,
         )
         .map_err(io::Error::from)?;
+    // `Watch` owns the inotify descriptor for its entire registration lifetime.
     tokio::io::unix::AsyncFd::new(Watch(watch))
 }
 

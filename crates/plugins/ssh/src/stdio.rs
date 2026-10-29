@@ -23,6 +23,8 @@ impl Stdio {
         })
     }
 }
+// The workspace forbids unsafe code; `OwnedFd` keeps the registered descriptor stable.
+#[allow(deprecated)]
 fn watched(fd: OwnedFd) -> io::Result<AsyncFd<OwnedFd>> {
     // dup does not preserve CLOEXEC. Subsequent manager/shim children must
     // never retain the bridge's trusted protocol descriptors.

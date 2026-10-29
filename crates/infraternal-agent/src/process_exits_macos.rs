@@ -55,10 +55,13 @@ fn delete(queue: &Kqueue, pid: u32) -> io::Result<()> {
     }
 }
 impl ProcessExits {
+    // The workspace forbids unsafe code; `Queue` owns its descriptor for registration lifetime.
+    #[allow(deprecated)]
     pub(crate) fn watch(&mut self, id: [u8; 16], pid: u32) -> io::Result<bool> {
         if self.queue.is_none() {
             let queue = Kqueue::new()?;
             fcntl(&queue, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+            // `Queue` owns the kqueue descriptor and keeps its raw fd stable until drop.
             self.queue = Some(AsyncFd::new(Queue(queue))?);
         }
         let queue = self

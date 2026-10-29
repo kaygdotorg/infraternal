@@ -226,6 +226,8 @@ async fn detached_shim_is_discovered_and_replays_from_the_last_observed_offset()
 
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::too_many_lines)]
+// This test owns the pidfd until the readiness registration is dropped.
+#[allow(deprecated)]
 async fn restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill() {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let base = fixture_root(&format!("e{}", &suffix[..8]));
@@ -320,10 +322,8 @@ async fn restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill() 
     .unwrap();
     let killed_session_id = killed.id;
     let killed_process_id = i32::try_from(killed.pid).unwrap();
-    let death = tokio::io::unix::AsyncFd::new(
-        infraternal_shim::process_exit_descriptor(killed.pid).unwrap(),
-    )
-    .unwrap();
+    let descriptor = infraternal_shim::process_exit_descriptor(killed.pid).unwrap();
+    let death = tokio::io::unix::AsyncFd::new(descriptor).unwrap();
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(killed_process_id),
         nix::sys::signal::Signal::SIGKILL,

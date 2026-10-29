@@ -7,7 +7,7 @@
 
 use super::*;
 use infraternal_protocol::{CLOSE_SESSION_GONE, decode_muxed_frame, encode_muxed_frame_into};
-use std::os::fd::IntoRawFd;
+use std::os::fd::AsRawFd;
 use tokio::io::AsyncReadExt;
 
 /// What the server side of the channel saw, owned so the read buffer can move on.
@@ -65,7 +65,8 @@ async fn a_vanished_session_gets_a_final_close_and_the_channel_stays_up() {
     let (agent, server) = std::os::unix::net::UnixStream::pair().unwrap();
     agent.set_nonblocking(true).unwrap();
     server.set_nonblocking(true).unwrap();
-    let socket = Socket::inherited(agent.into_raw_fd()).unwrap();
+    // `agent` remains open in this test until its channel task has joined.
+    let socket = Socket::inherited(agent.as_raw_fd()).unwrap();
     let task_state = state.clone();
     let task = tokio::spawn(async move {
         let service = crate::plugin_control::Service::start(

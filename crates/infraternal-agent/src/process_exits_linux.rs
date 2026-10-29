@@ -30,6 +30,8 @@ impl ProcessExits {
         self.watch_with(id, pid, infraternal_shim::process_exit_descriptor)
     }
 
+    // The workspace forbids unsafe code; `Queue` owns its descriptor for registration lifetime.
+    #[allow(deprecated)]
     fn watch_with(
         &mut self,
         id: [u8; 16],
@@ -52,9 +54,9 @@ impl ProcessExits {
             Err(error) => return Err(error),
         };
         if self.queue.is_none() {
-            self.queue = Some(AsyncFd::new(Queue(Epoll::new(
-                EpollCreateFlags::EPOLL_CLOEXEC,
-            )?))?);
+            let queue = Queue(Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC)?);
+            // `Queue` owns the epoll descriptor and keeps its raw fd stable until drop.
+            self.queue = Some(AsyncFd::new(queue)?);
         }
         let queue = self
             .queue

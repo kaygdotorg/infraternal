@@ -32,6 +32,8 @@ impl Socket {
     /// Register readiness once on the runtime's reactor.
     /// # Errors
     /// Rejects invalid descriptors and reactor registration errors.
+    // The workspace forbids unsafe code; callers keep the inherited descriptor open while used.
+    #[allow(deprecated)]
     pub fn inherited(fd: RawFd) -> io::Result<Self> {
         if fd < 3 {
             return Err(io::Error::new(
@@ -40,6 +42,7 @@ impl Socket {
             ));
         }
         Ok(Self {
+            // The launcher keeps the borrowed inherited fd open and unchanged for this channel.
             descriptor: AsyncFd::new(Descriptor(fd))?,
         })
     }
