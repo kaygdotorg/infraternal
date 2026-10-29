@@ -145,8 +145,24 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,386,512 bytes |
-  | `aarch64-unknown-linux-musl` | 19,563,608 bytes |
+  | `x86_64-unknown-linux-musl` | 21,401,712 bytes |
+  | `aarch64-unknown-linux-musl` | 19,583,480 bytes |
+
+  Account-scoped revocation round 2 (#240) retains final commit and publication
+  through caller cancellation and closes bootstrap/setup sockets with 1013 on
+  notification-source loss. The pinned stripped static recipe on shared build
+  VM 6by32-compute02 measures 21,401,712 / 19,583,480 bytes (x86_64 / aarch64).
+  Versus task baseline `9896d3a85` at 21,389,424 / 19,562,296 bytes, total growth
+  is +12,288 / +21,184 bytes; x86_64 baseline was reproduced byte for byte.
+  ARM exceeds 16 KiB by 4,800 bytes: this retains the required cancellation
+  ownership and typed unavailable close across bootstrap/setup waits. Reusing
+  the existing completion owner removes the success-path task and result
+  channel, saving 1,760 / 1,824 bytes versus the first corrected implementation.
+  No dependency, feature, profile, protocol or schema changes were added by
+  these fixes. The required dev merge includes #255, so these are whole-branch
+  deltas, not isolated helper costs. Target-specific measurements and the ARM
+  justification are recorded on #240 under the task's justified-growth allowance
+  (D243); both caps use exact measured images with no slack.
 
   The RUSTSEC-2026-0386 repair (#255) pins Tokio 1.53.3 and keeps reactor
   descriptors owned until deregistration inside the audited shim boundary.
