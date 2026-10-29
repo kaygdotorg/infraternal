@@ -209,3 +209,57 @@ async fn setup_event(
         .unwrap();
     serde_json::from_str::<serde_json::Value>(message.to_text().unwrap()).unwrap()["setup"].clone()
 }
+
+#[tokio::test]
+async fn review_r2_restored_setup_source_still_reports_unavailable() {
+    let (auth, owner, cookie, _, address, serving, pool, api) = fixture(false).await;
+    let host = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootless',1002,1)")
+        .bind(host.as_bytes().as_slice()).bind(&owner).execute(&pool).await.unwrap();
+    let status = api.runner.setup_status();
+    status.begin(&owner, host, uuid::Uuid::new_v4()).unwrap();
+    status
+        .emit(&owner, host, Stage::Install, State::Done, None)
+        .unwrap();
+    let (mut socket, _) = connect_async(setup_request(address, ORIGIN, Some(&cookie)))
+        .await
+        .unwrap();
+    socket
+        .send(ClientMessage::Text(
+            serde_json::json!({"action":"subscribe","host_id":host,"window_id":"source-loss","after":0})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    // Receiving replay fences subscription installation and entry authority.
+    let _ = setup_event(&mut socket).await;
+    let source = auth.revocation_events(&owner);
+    source.close_source_for_test();
+    // Replace the source without yielding; old subscriptions must still stop.
+    let replacement = auth.revocation_events(&owner);
+    assert!(source.has_changed().is_err());
+    assert!(!replacement.has_changed().unwrap());
+    let closed = tokio::time::timeout(Duration::from_secs(2), socket.next()).await;
+    // Explicit cleanup also retires a faulty upgrade before asserting the result.
+    auth.logout(cookie.split_once('=').unwrap().1)
+        .await
+        .unwrap();
+    let retired = tokio::time::timeout(Duration::from_secs(6), async {
+        while api.setup_sockets.available_permits()
+            != infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    serving.abort();
+    assert!(
+        retired.is_ok(),
+        "setup upgrade retained its admission permit"
+    );
+    assert!(matches!(
+        closed.unwrap(),
+        Some(Ok(ClientMessage::Close(Some(frame)))) if u16::from(frame.code) == 1013
+    ));
+}

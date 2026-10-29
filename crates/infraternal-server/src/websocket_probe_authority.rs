@@ -101,3 +101,32 @@ mod review_closed_watch {
         assert!(!wrote);
     }
 }
+
+#[cfg(test)]
+mod review_r2_restore {
+    //! A replacement source cannot repair an old proof cursor after revocation (#240).
+
+    use super::*;
+    use crate::auth::tests::socket_clock::FrozenSocketTime;
+    use crate::websocket::writer_tests::busy_edges::{TOKEN, fixture};
+
+    #[tokio::test(start_paused = true)]
+    async fn review_r2_revoked_lease_with_restored_source_never_polls_work() {
+        let _clock = FrozenSocketTime::new().await;
+        let (state, user) = fixture().await;
+        let mut lease = Lease::new(&state, &user, TOKEN).await.unwrap();
+        lease.revoked.close_source_for_test();
+        let replacement = state.auth.revocation_events(&user);
+        state.auth.logout(TOKEN).await.unwrap();
+        assert!(replacement.has_changed().unwrap());
+        let mut wrote = false;
+        let result = lease
+            .run(&state, &user, TOKEN, async {
+                wrote = true;
+                Ok::<(), ()>(())
+            })
+            .await;
+        assert_eq!(result, Err(AuthorityMiss::Unavailable));
+        assert!(!wrote);
+    }
+}
