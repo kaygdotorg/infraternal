@@ -145,8 +145,17 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,399,568 bytes |
-  | `aarch64-unknown-linux-musl` | 19,574,552 bytes |
+  | `x86_64-unknown-linux-musl` | 21,400,400 bytes |
+  | `aarch64-unknown-linux-musl` | 19,575,064 bytes |
+
+  The setup-token review repairs (#252, R252-01–R252-05) measure
+  21,400,400 / 19,575,064 bytes (x86_64 / aarch64), using the pinned stripped
+  static recipe on 8by64-compute02, one target at a time. Against the
+  reviewed setup-token head, the repair deltas are +832 / +512 bytes.
+  A fresh x86_64 build of merge base `4a6202a52` measures 21,386,512 bytes,
+  making the complete branch delta +13,888 bytes. The exact caps above follow
+  these measurements without allowance (D243). No dependencies, features or
+  release settings changed; receipts and final gate output are on #252.
 
   The installed-service setup command and data resolver (#252), merged onto
   dev `4a6202a52`, measure 21,399,568 / 19,574,552 bytes (x86_64 / aarch64)
