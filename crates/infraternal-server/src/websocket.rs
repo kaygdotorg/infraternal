@@ -158,61 +158,6 @@ impl Drop for AuthorityReadHold {
     }
 }
 
-/// Retain a timed-out query in a unit-output task after its caller has left.
-fn detach_authority_query<F>(query: std::pin::Pin<Box<F>>)
-where
-    F: std::future::Future + Send + 'static,
-{
-    let detached: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> =
-        Box::pin(async move {
-            let _ = query.await;
-        });
-    tokio::spawn(detached);
-}
-
-/// Keep a pinned query alive when its enclosing authority attempt is cancelled.
-struct DetachOnDrop<F: std::future::Future + Send + 'static>(Option<std::pin::Pin<Box<F>>>)
-where
-    F::Output: Send;
-
-impl<F: std::future::Future + Send + 'static> std::future::Future for DetachOnDrop<F>
-where
-    F::Output: Send,
-{
-    type Output = F::Output;
-
-    fn poll(
-        self: std::pin::Pin<&mut Self>,
-        context: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        let this = self.get_mut();
-        let Some(query) = this.0.as_mut() else {
-            return std::task::Poll::Pending;
-        };
-        match std::future::Future::poll(query.as_mut(), context) {
-            std::task::Poll::Ready(result) => {
-                this.0.take();
-                std::task::Poll::Ready(result)
-            }
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
-    }
-}
-
-impl<F: std::future::Future + Send + 'static> Drop for DetachOnDrop<F>
-where
-    F::Output: Send,
-{
-    fn drop(&mut self) {
-        if let Some(query) = self.0.take() {
-            // The attempt timeout drops this wrapper; the detached SELECT keeps
-            // its place until its future completes. Pool health checks may finish
-            // afterward, so the place counts active queries, not idle connections.
-            detach_authority_query(query);
-        }
-    }
-}
-
 /// State shared by the authenticated browser socket route.
 #[derive(Clone)]
 pub(crate) struct WebSocketState {
@@ -558,12 +503,12 @@ async fn run_socket(
     #[cfg(not(test))]
     let handshake_timeout = HANDSHAKE_TIMEOUT;
     let handshake_deadline = tokio::time::Instant::now() + handshake_timeout;
-    let mut recovery_events = state.auth.recovery_events();
+    let mut recovery_events = state.auth.recovery_events(&user_id);
     let mut recovery_subscribed = false;
     let mut recovery_snapshot = RecoverySnapshot::Unread;
     let mut session_changes = state.session_changes.subscribe();
     let mut terminal_sessions_subscribed = None;
-    let mut revocations = state.auth.revocation_events();
+    let mut revocations = state.auth.revocation_events(&user_id);
     let (mut sink, mut source) = socket.split();
     let mut receive = BytesMut::with_capacity(4096);
     let mut encode = Vec::with_capacity(4096);
@@ -740,12 +685,7 @@ async fn run_socket(
                     ).await.is_err() { break; }
             }
             changed = revocations.changed() => {
-                if changed.is_err() {
-                    teardown_reason = AUTHORITY_UNAVAILABLE;
-                    authority_unavailable_known = true;
-                    loop_result = Err(());
-                    break;
-                }
+                if changed.is_err() { break; }
                 match authority_deadline(&state, &user_id, &session_token, false).await {
                     Ok(deadline) => expiry = deadline,
                     Err(miss) => {
@@ -954,6 +894,17 @@ async fn run_socket(
             }
         }
     }
+    // A closed account cursor stays closed even if its registry entry is replaced.
+    // Share the known-unavailable teardown for recovery, revocation and guarded
+    // work exits: source loss must report 1013 without another authority read,
+    // preserving the same unavailable outcome as bootstrap/setup sockets (#240 R2-1).
+    if revocations.has_changed().is_err()
+        || (recovery_subscribed && recovery_events.has_changed().is_err())
+    {
+        teardown_reason = AUTHORITY_UNAVAILABLE;
+        authority_unavailable_known = true;
+        loop_result = Err(());
+    }
     pending_plugin_calls.shutdown().await;
     drop(plugins);
     if !close_already_logged && !attachments.is_empty() {
@@ -1081,7 +1032,7 @@ async fn while_authorized_operation(
     renew: bool,
     operation: infraternal_plugin_api::Operation<'_, Result<(), ()>>,
 ) -> Result<(), ()> {
-    let mut revocations = state.auth.revocation_events();
+    let mut revocations = state.auth.revocation_events(user);
     let mut expiry = authority_deadline(state, user, token, renew)
         .await
         .map_err(|_| ())?;
@@ -2524,9 +2475,9 @@ async fn read_expiry(
                 return Some(Err(AuthorityMiss::Unavailable));
             };
             let hold = AuthorityReadHold::take(Arc::clone(&state.authority), place);
-            let query = DetachOnDrop(Some(Box::pin(
+            let query = crate::completion::DetachOnDrop::new(Box::pin(
                 state.auth.live_expiry(token, user_id, now, hold),
-            )));
+            ));
             Some(query.await.map_err(|error| match error {
                 crate::auth::Error::Denied => AuthorityMiss::Refused,
                 _ => AuthorityMiss::Unavailable,

@@ -4,9 +4,12 @@
 //! Restarting invalidates pending ceremonies, never credentials. SQLite transactions serialize
 //! owner creation, recovery replacement, passkey limits and capability redemption.
 
+mod account_events;
+pub(crate) use account_events::AccountSubscription;
 mod binding;
 #[path = "../bootstrap_authorization.rs"]
 mod bootstrap_authorization;
+mod committed;
 pub(crate) mod cookies;
 mod crypto;
 mod devices;
@@ -153,11 +156,13 @@ pub struct Auth {
     system_service: bool,
     pending: Arc<Mutex<Pending>>,
     ingress: Arc<Mutex<http::Ingress>>,
-    recovery_changes: Arc<tokio::sync::watch::Sender<()>>,
-    revocations: Arc<tokio::sync::watch::Sender<()>>,
+    recovery_changes: Arc<account_events::AccountEvents>,
+    revocations: Arc<account_events::AccountEvents>,
     setup_consumed: Arc<watch::Sender<()>>,
     #[cfg(test)]
     recovery_pause: Arc<Mutex<Option<Arc<RecoveryPause>>>>,
+    #[cfg(test)]
+    authority_reads: Arc<std::sync::Mutex<HashMap<String, usize>>>,
     // i64::MIN leaves HTTP on wall time; tests opt into a shared, advanceable clock.
     #[cfg(test)]
     test_http_time: Arc<AtomicI64>,
@@ -227,14 +232,26 @@ impl Auth {
             system_service: false,
             pending: Arc::default(),
             ingress: Arc::default(),
-            recovery_changes: Arc::new(tokio::sync::watch::channel(()).0),
-            revocations: Arc::new(tokio::sync::watch::channel(()).0),
+            recovery_changes: Arc::default(),
+            revocations: Arc::default(),
             setup_consumed: Arc::new(setup_consumed),
             #[cfg(test)]
             recovery_pause: Arc::default(),
             #[cfg(test)]
+            authority_reads: Arc::default(),
+            #[cfg(test)]
             test_http_time: Arc::new(AtomicI64::new(i64::MIN)),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authority_reads(&self, user: &str) -> usize {
+        self.authority_reads
+            .lock()
+            .unwrap()
+            .get(user)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Set the HTTP time shared by cloned test routers.

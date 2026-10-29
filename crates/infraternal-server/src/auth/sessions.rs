@@ -107,20 +107,35 @@ impl Auth {
 
     /// Revoke the current session immediately.
     pub async fn logout(&self, token: &str) -> Result<()> {
-        let changed = sqlx::query("DELETE FROM sessions WHERE token_hash=?")
-            .bind(hash(token))
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
-        if changed != 0 {
-            self.revocations.send_replace(());
-        }
-        Ok(())
+        let session_hash = hash(token);
+        let revocations = self.revocations.clone();
+        // Pool waiters remain cancellable. Only work that already owns a connection
+        // is detached, so the pool also bounds unfinished logout tasks.
+        let mut connection = self.pool.acquire().await?;
+        // RETURNING binds the affected account to the committed deletion in one statement.
+        // A separate lookup could race recovery or another logout and lose its scope.
+        // Drain through statement completion before acknowledging/publishing: a single-row
+        // RETURNING read can hide a deferred commit refusal. The unique hash bounds this
+        // result to one row, so draining cannot collect an unbounded account list.
+        super::committed::run(Box::pin(async move {
+            // Keep connection ownership through publication. Returning it to the pool
+            // also fences the notification, even after the requesting future is gone.
+            let mut users: Vec<String> =
+                sqlx::query_scalar("DELETE FROM sessions WHERE token_hash=? RETURNING user_id")
+                    .bind(&session_hash)
+                    .fetch_all(&mut *connection)
+                    .await?;
+            if let Some(user) = users.pop() {
+                revocations.publish(&user, Some(session_hash));
+            }
+            Ok(())
+        }))
+        .await
     }
 
     /// Wake live sockets on committed revocation without periodic idle database polling.
-    pub(crate) fn revocation_events(&self) -> tokio::sync::watch::Receiver<()> {
-        self.revocations.subscribe()
+    pub(crate) fn revocation_events(&self, user: &str) -> super::AccountSubscription {
+        self.revocations.subscribe(user)
     }
 
     /// Whether a live session read at `now` with this `expiry` is due for its
@@ -172,7 +187,13 @@ impl Auth {
         let pool = self.pool.clone();
         let token_hash = hash(token);
         let user = user.to_owned();
+        #[cfg(test)]
+        let reads = self.authority_reads.clone();
         async move {
+            #[cfg(test)]
+            {
+                *reads.lock().unwrap().entry(user.clone()).or_default() += 1;
+            }
             let _hold = hold;
             sqlx::query_scalar("SELECT expires FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>?")
                 .bind(token_hash).bind(user).bind(now).fetch_optional(&pool).await?.ok_or(Error::Denied)
