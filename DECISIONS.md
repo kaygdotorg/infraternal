@@ -3297,3 +3297,50 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        and are not limited by it. When the pool is full, a new session is
        refused with a clear message instead of pushing the machine into
        swap.
+311. **Client-side mux and mesh: the app is the mux, the CLI automates
+     (owner, 2026-10-29, #251; extends D288, D241, D201, D169, D27):**
+     - **The app is the mux:** sessions are used interactively only in the
+       web client and the native apps. The `infraternal` CLI is for
+       automation only: no terminal attach, no prefix keys, no in-terminal
+       tabs or status rows ("a prefix again puts us in the keyboard warrior
+       category"). Rejected: a `Ctrl-B d` attach, a status row, a terminal
+       tab bar.
+     - **Human-friendly CLI:** plain output, and errors that name the fix
+       and the next step (for example `No session called "biuld". Did you
+       mean "build"?`). `--json` on every command (D299 envelope). Every
+       command ships a short skill, plus `infraternal mux mcp` (D288).
+     - **Mux verbs:** sessions `ls`, `new`, `send`, `capture`, `wait`
+       (`--until-idle`, `--match`), `watch` (read-only), `rename`, `close`.
+       Canvas: `split --beside|--below`, `open`, `focus`, `close-window`,
+       pushed through the server to the person's open devices. There are no
+       pixel positions or free layouts; the canvas places windows. D288's
+       host and account boundaries and approvals apply unchanged.
+     - **tmux-compatible subset for AI tools (D288 Q3):** `new-session`,
+       `send-keys`, `capture-pane`, `list-sessions`, `kill-session`,
+       `split-window`, mapped onto the verbs above. Anything else fails with
+       a clear "not supported"; attach is never part of it.
+     - **Laptop sign-in:** `infraternal sign-in <server>` shows a link, a
+       code and a terminal QR code. The QR pre-fills the code; approval
+       always needs the passkey. The code is single use and expires in 10
+       minutes. The laptop gets its own revocable credential, scoped to
+       automation. The native apps sign in with the passkey directly.
+     - **One-command join:** `curl -fsSL https://<server>/install | sh`,
+       served by the person's own server. It installs, verifies the binary
+       against the signed release manifest with a release key built into the
+       script (not only a checksum from the same server), reads a join code
+       from the terminal (never argv or history; single use, one machine,
+       10 minutes), joins and starts. Afterwards, `infraternal up <server>`
+       joins. SSH add-host stays as the fallback (D291).
+     - **Mesh on laptops, CLI first:** Linux already works. On macOS,
+       `infraternal up` asks for sudo once and installs a launchd system
+       service that runs the userspace peer (D169 GotaTun on utun); the
+       native app later reuses that service. Windows follows later the same
+       way, with a Windows service. The CLI works on its own on every
+       platform.
+     - **App windows (#146) and macOS builds** run in the lume VM
+       `macos-02-std` (paravirtualized Metal). Perf numbers from it are
+       labelled "VM"; release-gate perf numbers come from real Mac hardware,
+       only with the owner's OK.
+     - **Order:** D241 shell marker → `mux` sessions with `--json`, skill and
+       MCP → canvas verbs and the tmux subset → laptop sign-in → one-command
+       join → macOS mesh service → native apps and app windows.
