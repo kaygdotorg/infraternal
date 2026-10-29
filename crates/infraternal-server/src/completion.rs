@@ -1,7 +1,7 @@
 //! Retain owned database work and its admission bounds through waiter cancellation (#240, D243).
 
 /// Discard the result after cancellation, reusing the existing unit-output task (D243).
-fn detach<F>(query: std::pin::Pin<Box<F>>)
+fn detach<F>(query: std::pin::Pin<Box<F>>, runtime: Option<tokio::runtime::Handle>)
 where
     F: std::future::Future + Send + 'static + ?Sized,
 {
@@ -9,22 +9,37 @@ where
         Box::pin(async move {
             let _ = query.await;
         });
-    tokio::spawn(detached);
+    if let Some(runtime) = runtime {
+        runtime.spawn(detached);
+    } else {
+        tokio::spawn(detached);
+    }
 }
 
 /// Keep owned work alive when its waiter is cancelled; ordinary completion stays inline.
-pub(crate) struct DetachOnDrop<F: std::future::Future + Send + 'static + ?Sized>(
-    Option<std::pin::Pin<Box<F>>>,
-)
+pub(crate) struct DetachOnDrop<F: std::future::Future + Send + 'static + ?Sized>
 where
-    F::Output: Send;
+    F::Output: Send,
+{
+    operation: Option<std::pin::Pin<Box<F>>>,
+    runtime: Option<tokio::runtime::Handle>,
+}
 
 impl<F: std::future::Future + Send + 'static + ?Sized> DetachOnDrop<F>
 where
     F::Output: Send,
 {
     pub(crate) fn new(operation: std::pin::Pin<Box<F>>) -> Self {
-        Self(Some(operation))
+        Self {
+            operation: Some(operation),
+            runtime: None,
+        }
+    }
+
+    /// Retain the scheduling context when a public waiter can be dropped on another thread.
+    pub(crate) fn on_runtime(mut self, runtime: tokio::runtime::Handle) -> Self {
+        self.runtime = Some(runtime);
+        self
     }
 }
 
@@ -39,12 +54,12 @@ where
         context: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         let this = self.get_mut();
-        let Some(query) = this.0.as_mut() else {
+        let Some(query) = this.operation.as_mut() else {
             return std::task::Poll::Pending;
         };
         match std::future::Future::poll(query.as_mut(), context) {
             std::task::Poll::Ready(result) => {
-                this.0.take();
+                this.operation.take();
                 std::task::Poll::Ready(result)
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
@@ -57,10 +72,10 @@ where
     F::Output: Send,
 {
     fn drop(&mut self) {
-        if let Some(query) = self.0.take() {
+        if let Some(query) = self.operation.take() {
             // Ownership, including any admission permits, stays with the operation
             // until it completes. Dropping its waiter must not release that bound.
-            detach(query);
+            detach(query, self.runtime.take());
         }
     }
 }

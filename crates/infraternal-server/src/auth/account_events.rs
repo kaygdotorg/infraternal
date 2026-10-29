@@ -170,7 +170,24 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_commit_waiter_still_commits_and_wakes_both_account_sources() {
-        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let root = std::env::var_os("CARGO_TARGET_DIR")
+            .map_or_else(
+                || std::path::PathBuf::from("target"),
+                std::path::PathBuf::from,
+            )
+            .join("account-event-commit");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(format!("{}.sqlite", uuid::Uuid::new_v4()));
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete)
+            .busy_timeout(std::time::Duration::from_secs(5));
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options.clone())
+            .await
+            .unwrap();
         sqlx::query("CREATE TABLE state(id INTEGER PRIMARY KEY)")
             .execute(&pool)
             .await
@@ -181,6 +198,18 @@ mod tests {
         let mut revoked = revocations.subscribe("a");
         let other_change = changes.subscribe("b");
         let other_revocation = revocations.subscribe("b");
+        let observer = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let mut reader = observer.begin().await.unwrap();
+        // Rollback-journal readers permit the INSERT but block its final COMMIT,
+        // making cancellation deterministic even when ordinary completion is inline.
+        let _: i64 = sqlx::query_scalar("SELECT count(*) FROM state")
+            .fetch_one(&mut *reader)
+            .await
+            .unwrap();
         let mut tx = pool.begin().await.unwrap();
         sqlx::query("INSERT INTO state VALUES(1)")
             .execute(&mut *tx)
@@ -188,7 +217,9 @@ mod tests {
             .unwrap();
         let mut commit = Box::pin(changes.commit(tx, "a", Some(revocations.clone())));
         assert!(commit.as_mut().now_or_never().is_none());
-        drop(commit);
+        // Public auth futures may be dropped from a thread with no runtime entered.
+        std::thread::scope(|scope| scope.spawn(move || drop(commit)).join().unwrap());
+        reader.rollback().await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             revoked.changed().await.unwrap();
             events.changed().await.unwrap();
@@ -203,6 +234,8 @@ mod tests {
         assert!(!other_change.has_changed().unwrap());
         assert!(!other_revocation.has_changed().unwrap());
         pool.close().await;
+        observer.close().await;
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]

@@ -5,13 +5,11 @@ use infraternal_plugin_api::Operation;
 
 /// Once polled, the write runs to completion even if its caller stops waiting.
 /// The owned operation must publish only after a successful commit. Reuse the
-/// unit-returning task already used by node work rather than spawning each
-/// database future as a separate task type (D243).
+/// authority-query retention: ordinary completion runs inline, and cancellation
+/// moves the pinned operation into the existing unit-output task (D243).
 pub(super) async fn run(write: Operation<'static, Result<()>>) -> Result<()> {
-    let (finished, waiting) = tokio::sync::oneshot::channel();
-    let completion: Operation<'static, ()> = Box::pin(async move {
-        let _ = finished.send(write.await);
-    });
-    tokio::spawn(completion);
-    waiting.await.map_err(|_| sqlx::Error::WorkerCrashed)?
+    // Cancellation may happen on a thread with no runtime entered.
+    crate::completion::DetachOnDrop::new(write)
+        .on_runtime(tokio::runtime::Handle::current())
+        .await
 }
