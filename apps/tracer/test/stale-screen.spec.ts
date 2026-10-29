@@ -1,7 +1,9 @@
 /**
- * The stale-screen note on the production build against the test double (D309): after a reattach, a
- * program that repaints never shows it (not even for a frame), a shell that stays silent shows it,
- * and output arriving later takes it down. The screenshots are review evidence outside the checkout.
+ * The stale-screen note on the production build against the test double (D309): after a reattach that
+ * resized the session, a program that repaints never shows it (not even for a frame), a shell that
+ * stays silent shows it, and output arriving later takes it down. A reattach at the size the session
+ * already had expects no repaint, so an idle shell there never shows it (#257). The screenshots are
+ * review evidence outside the checkout.
  */
 import { expect, test, type Page } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
@@ -37,6 +39,11 @@ async function openAttachedTerminal(page: Page, theme: "ink" | "paper"): Promise
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain("README.md");
 }
 
+/** Another device resizes the session while this page is away, so the reattach changes the size again. */
+async function resizeWhileAway(page: Page): Promise<void> {
+  await page.context().request.post("/__mock/resize-session", { data: { cols: 50, rows: 12 } });
+}
+
 async function reattach(page: Page): Promise<void> {
   await page.evaluate(() => window.__tracerTestDouble?.dropConnection());
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === false)).toBe(true);
@@ -50,11 +57,12 @@ for (const [name, viewport] of [["desktop", { width: 1440, height: 900 }], ["pho
   test.describe(name, () => {
     test.use({ viewport, ...(name === "phone" ? { hasTouch: true, isMobile: true } : {}) });
 
-    test("a shell that cannot redraw shows the note after reattach, and new output clears it", async ({ page }) => {
+    test("a shell that cannot redraw shows the note after a resized reattach, and new output clears it", async ({ page }) => {
       test.setTimeout(60_000);
       await openAttachedTerminal(page, "ink");
       await expect(page.locator(NOTE)).toHaveCount(1);
       await expect(noteShown(page)).toHaveCount(0);
+      await resizeWhileAway(page);
       await reattach(page);
       await expect(noteShown(page)).toHaveCount(1, { timeout: 5_000 });
       await expect(page.locator(NOTE)).toHaveText("screen may be out of date");
@@ -75,9 +83,24 @@ for (const [name, viewport] of [["desktop", { width: 1440, height: 900 }], ["pho
       await expect(page.locator(NOTE)).toBeHidden();
     });
 
+    test("an idle shell reattached at the same size never shows the note, not for a frame", async ({ page }) => {
+      test.setTimeout(60_000);
+      await openAttachedTerminal(page, "ink");
+      await recordNote(page);
+      await reattach(page);
+      // The replay is the screen; the shell stays silent because nothing asked it to redraw.
+      await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain("README.md");
+      // Wait past the longest wait the client allows, so a late note would have shown.
+      await page.waitForTimeout(2_000);
+      expect(await everShown(page)).toBe(0);
+      await expect(noteShown(page)).toHaveCount(0);
+      await page.screenshot({ path: tracerEvidencePath(`stale-note-${name}-same-size.png`) });
+    });
+
     test("a shell that cannot redraw shows the note in the paper theme", async ({ page }) => {
       test.setTimeout(60_000);
       await openAttachedTerminal(page, "paper");
+      await resizeWhileAway(page);
       await reattach(page);
       await expect(noteShown(page)).toHaveCount(1, { timeout: 5_000 });
       await page.screenshot({ path: tracerEvidencePath(`stale-note-${name}-paper.png`) });
@@ -87,6 +110,7 @@ for (const [name, viewport] of [["desktop", { width: 1440, height: 900 }], ["pho
       test.setTimeout(60_000);
       await openAttachedTerminal(page, "ink");
       await recordNote(page);
+      await resizeWhileAway(page);
       await page.context().request.post("/__mock/redraw-on-attach", { data: { text: "\u001b[2J\u001b[H$ ls\r\nREADME.md  src  target\r\n$ ", delay_ms: 30 } });
       await reattach(page);
       await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? ""), { timeout: 5_000 }).toContain("README.md");

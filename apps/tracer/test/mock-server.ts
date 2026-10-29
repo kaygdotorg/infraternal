@@ -644,6 +644,15 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     appendEchoOutput(session, new TextEncoder().encode(body.text));
     return sendJson(response, 200, { output_sequence: String(session.outputLength) });
   }
+  // Another viewer resized the session while this one was away: the next replay fence reports that size.
+  if (request.method === "POST" && url.pathname === "/__mock/resize-session") {
+    const body = await readJson(request);
+    const valid = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= 1000;
+    if (!valid(body?.cols) || !valid(body?.rows)) return sendJson(response, 400, { error: "size needs integer cols and rows" });
+    session.cols = body.cols;
+    session.rows = body.rows;
+    return sendJson(response, 200, {});
+  }
   if (request.method === "POST" && url.pathname === "/__mock/redraw-on-attach") {
     const body = await readJson(request);
     if (body?.text === null) { redrawOnAttach = undefined; return sendJson(response, 200, {}); }
