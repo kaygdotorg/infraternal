@@ -92,6 +92,8 @@ const text = new TextDecoder();
  */
 export async function startRealServer(options: {
   latencyMs?: number;
+  /** Delay the real protocol upgrade so cached renderers can register before socket open (#257). */
+  upgradeDelayMs?: number;
   /** Record public control timestamps only for an explicitly enabled VM measurement. */
   timedControls?: boolean;
   /** Retain every stream Close for functional ordering assertions without timing traces. */
@@ -191,7 +193,13 @@ export async function startRealServer(options: {
   const retainedBrowsers = new Set<WebSocket>();
   const activeBrowsers = new Set<WebSocket>();
   const front = new WebSocketServer({ noServer: true });
-  tls.on("upgrade", (request, socket, head) => {
+  tls.on("upgrade", async (request, socket, head) => {
+    // Frame delay starts after open. This separate fixture control models the handshake ordering;
+    // every subsequent byte still travels through the real server and PTY unchanged.
+    if (request.url === "/v1/ws" && options.upgradeDelayMs) {
+      await new Promise((resolve) => setTimeout(resolve, options.upgradeDelayMs));
+      if (socket.destroyed) return;
+    }
     front.handleUpgrade(request, socket, head, (browser) => {
       activeBrowsers.add(browser);
       const upstream = new WebSocket(backend.replace("http:", "ws:") + (request.url ?? "/v1/ws"), { headers: { Origin: origin, Cookie: request.headers.cookie ?? "" } });
