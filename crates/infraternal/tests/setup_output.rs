@@ -142,3 +142,45 @@ fn unreadable_system_service_data_prints_one_sudo_command_line() {
         "The server data directory is not readable. Run: sudo infraternal server setup-token"
     );
 }
+#[test]
+fn setup_token_reads_a_traversable_directory_without_listing_access() {
+    let root = std::path::PathBuf::from(std::env::var_os("HOME").expect("fixture home"))
+        .join(".cache/codex-scratch/review-setup-token-data/fixtures")
+        .join(format!("execute-{}", std::process::id()));
+    let data = root.join("data");
+    fs::create_dir_all(&data).expect("create socket fixture");
+    let socket_path = data.join("setup-token.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind fixture socket");
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
+        .expect("set private socket permissions");
+    let worker = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("local connection");
+        let mut request = [0; 4];
+        if socket.read_exact(&mut request).is_ok() {
+            assert_eq!(&request, b"GET\n");
+            socket
+                .write_all("C".repeat(43).as_bytes())
+                .expect("synthetic response");
+            socket.write_all(b"\n").expect("response delimiter");
+        }
+    });
+    // Connecting to a known socket requires directory traversal, not listing.
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o300))
+        .expect("set traversal permissions");
+    let output = Command::new(env!("CARGO_BIN_EXE_infraternal"))
+        .args(["server", "setup-token", "--data"])
+        .arg(&data)
+        .output()
+        .expect("run setup-token");
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o700))
+        .expect("restore directory permissions");
+    if !output.status.success() {
+        let _ = UnixStream::connect(&socket_path);
+    }
+    worker.join().expect("finish socket fixture");
+    fs::remove_dir_all(&root).expect("remove fixture");
+    assert!(
+        output.status.success(),
+        "a reachable private socket must remain usable without directory listing access"
+    );
+}
