@@ -184,3 +184,31 @@ fn setup_token_reads_a_traversable_directory_without_listing_access() {
         "a reachable private socket must remain usable without directory listing access"
     );
 }
+#[test]
+fn setup_token_permission_hint_covers_a_private_socket_in_a_readable_directory() {
+    let root = std::path::PathBuf::from(std::env::var_os("HOME").expect("fixture home"))
+        .join(".cache/codex-scratch/review-setup-token-data/fixtures")
+        .join(format!("socket-{}", std::process::id()));
+    fs::create_dir_all(&root).expect("create readable fixture directory");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755))
+        .expect("set readable directory permissions");
+    let socket_path = root.join("setup-token.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind fixture socket");
+    // A different service owner can list the directory while the private socket refuses access.
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o000))
+        .expect("refuse socket access");
+    let output = Command::new(env!("CARGO_BIN_EXE_infraternal"))
+        .args(["server", "setup-token", "--data"])
+        .arg(&root)
+        .output()
+        .expect("run setup-token");
+    drop(listener);
+    fs::remove_dir_all(&root).expect("remove fixture");
+    assert!(!output.status.success());
+    assert_eq!(output.stdout.as_slice(), b"");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("sudo infraternal server setup-token"),
+        "a refused socket connection must identify the elevated command even when its directory is readable"
+    );
+}
