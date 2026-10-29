@@ -213,13 +213,15 @@ impl Auth {
         }
         let token = random();
         insert_session(&mut tx, &token, user, "enrollment", now, Some(&key_id)).await?;
-        tx.commit().await?;
+        if matches!(registration.authority, Authority::Recovery(_)) {
+            self.recovery_changes
+                .commit(tx, user, Some(self.revocations.clone()))
+                .await?;
+        } else {
+            tx.commit().await?;
+        }
         if setup_consumed {
             self.setup_consumed.send_replace(());
-        }
-        if matches!(registration.authority, Authority::Recovery(_)) {
-            self.revocations.publish(user, None);
-            self.recovery_changes.publish(user, None);
         }
         Ok(token)
     }

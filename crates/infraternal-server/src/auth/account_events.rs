@@ -33,6 +33,28 @@ pub(crate) struct AccountSubscription {
 }
 
 impl AccountEvents {
+    /// Transfer the final commit and its account wakes together. Earlier validation
+    /// and writes may still roll back on cancellation; an enqueued commit cannot
+    /// outlive the code responsible for notifying its subscribers.
+    pub(super) async fn commit(
+        self: &Arc<Self>,
+        transaction: sqlx::Transaction<'static, sqlx::Sqlite>,
+        account: &str,
+        revocations: Option<Arc<Self>>,
+    ) -> super::Result<()> {
+        let changes = self.clone();
+        let account = account.to_owned();
+        super::committed::run(Box::pin(async move {
+            transaction.commit().await?;
+            if let Some(revocations) = revocations {
+                revocations.publish(&account, None);
+            }
+            changes.publish(&account, None);
+            Ok(())
+        }))
+        .await
+    }
+
     fn accounts(&self) -> std::sync::MutexGuard<'_, Channels> {
         // No user code or await runs under this lock. Recovering bookkeeping after a panic
         // preserves existing generations; replacing them could hide a committed revocation.
@@ -145,6 +167,76 @@ impl Drop for AccountSubscription {
 mod tests {
     use super::*;
     use futures_util::FutureExt;
+
+    #[tokio::test]
+    async fn cancelled_commit_waiter_still_commits_and_wakes_both_account_sources() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE state(id INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let changes = Arc::new(AccountEvents::default());
+        let revocations = Arc::new(AccountEvents::default());
+        let mut events = changes.subscribe("a");
+        let mut revoked = revocations.subscribe("a");
+        let other_change = changes.subscribe("b");
+        let other_revocation = revocations.subscribe("b");
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("INSERT INTO state VALUES(1)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let mut commit = Box::pin(changes.commit(tx, "a", Some(revocations.clone())));
+        assert!(commit.as_mut().now_or_never().is_none());
+        drop(commit);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            revoked.changed().await.unwrap();
+            events.changed().await.unwrap();
+        })
+        .await
+        .unwrap();
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM state")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1);
+        assert!(!other_change.has_changed().unwrap());
+        assert!(!other_revocation.has_changed().unwrap());
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn refused_transaction_commit_wakes_neither_account_source() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE state(id INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE dependent(id INTEGER REFERENCES state(id) DEFERRABLE INITIALLY DEFERRED)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let changes = Arc::new(AccountEvents::default());
+        let revocations = Arc::new(AccountEvents::default());
+        let events = changes.subscribe("a");
+        let revoked = revocations.subscribe("a");
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("INSERT INTO dependent VALUES(1)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        assert!(changes.commit(tx, "a", Some(revocations)).await.is_err());
+        assert!(!events.has_changed().unwrap());
+        assert!(!revoked.has_changed().unwrap());
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM dependent")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+        pool.close().await;
+    }
 
     #[test]
     fn coalesced_changes_remain_pending_for_each_affected_account() {

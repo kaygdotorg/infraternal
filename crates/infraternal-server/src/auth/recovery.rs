@@ -130,8 +130,7 @@ impl Auth {
         if !existed {
             record(&mut tx, user, "start", authority_now).await?;
         }
-        tx.commit().await?;
-        self.recovery_changes.publish(user, None);
+        self.recovery_changes.commit(tx, user, None).await?;
         Ok((token, ready, delay))
     }
 
@@ -163,8 +162,9 @@ impl Auth {
         if deleted != 0 {
             record(&mut tx, &session.user_id, "cancel", now).await?;
         }
-        tx.commit().await?;
-        self.recovery_changes.publish(&session.user_id, None);
+        self.recovery_changes
+            .commit(tx, &session.user_id, None)
+            .await?;
         Ok(())
     }
 
