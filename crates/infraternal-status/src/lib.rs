@@ -340,8 +340,8 @@ fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) ->
         }
     }
     let words = exec.as_deref().and_then(exec_words)?;
-    let program = Path::new(words.first()?).file_name()?;
-    if require_infraternal && program != "infraternal" {
+    let program = Path::new(words.first()?);
+    if require_infraternal && !is_infraternal_program(program) {
         return None;
     }
     // Exact subcommand words preserve support for global flags before the
@@ -358,6 +358,20 @@ fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) ->
         data: option(&words, "--data"),
         state: option(&words, "--state"),
     })
+}
+
+/// The installer records the resolved executable, which may have a versioned name.
+/// Accept that identity as well as the ordinary command name; an arbitrary
+/// program with a `server` argument must not select this CLI's data directory.
+fn is_infraternal_program(program: &Path) -> bool {
+    program
+        .file_name()
+        .is_some_and(|name| name == "infraternal")
+        || (program.is_absolute()
+            && std::env::current_exe().is_ok_and(|current| {
+                program == current
+                    || fs::canonicalize(program).is_ok_and(|resolved| resolved == current)
+            }))
 }
 
 /// Split the installer-generated systemd command into its arguments.

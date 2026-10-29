@@ -298,3 +298,25 @@ fn a_manager_that_does_not_answer_is_unknown_not_down() {
     let stopped = fixture.status(&[]);
     assert_eq!(stopped.confirmed_down().len(), 1);
 }
+
+#[test]
+fn installed_server_discovery_recognizes_the_running_executable_identity() {
+    let fixture = Fixture::new();
+    let current = std::env::current_exe().expect("running test executable");
+    fixture.write(
+        "etc/custom.service",
+        &format!(
+            "[Service]\nExecStart=\"{}\" server --data /srv/server\n",
+            current.display()
+        ),
+    );
+    assert_eq!(
+        server_data_directory(&fixture.roots()),
+        Some(Path::new("/srv/server").to_owned())
+    );
+    fixture.write(
+        "etc/custom.service",
+        "[Service]\nExecStart=/unrelated/infraternal-versioned server --data /srv/other\n",
+    );
+    assert_eq!(server_data_directory(&fixture.roots()), None);
+}
