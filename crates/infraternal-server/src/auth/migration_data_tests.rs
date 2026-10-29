@@ -135,34 +135,52 @@ async fn fresh_schemas_defaults_indexes_and_foreign_keys_match_original_sql() {
 }
 
 #[tokio::test]
-async fn original_v29_database_upgrades_without_retagging_checksums_or_ownership() {
-    let pool = database().await;
-    let mut original = sqlx::migrate!("./migrations");
-    original.migrations.to_mut().retain(|m| m.version <= 29);
-    original.run(&pool).await.unwrap();
-    sqlx::raw_sql("INSERT INTO users(id,name,username,display_name,owner,recovery_hash) VALUES('history-user','history','history','History',1,'synthetic-hash'); INSERT INTO canvas_heads(account,revision,document,initialized) VALUES('history-user',2,'{}',1); INSERT INTO canvas_receipts VALUES('history-user','one','digest',1),('history-user','two','digest',2);")
+async fn dev_v29_and_production_v30_upgrade_without_retagging_or_losing_ownership() {
+    // The histories share immutable 0001–0029; production already has 0030.
+    for version in [29, 30] {
+        let pool = database().await;
+        let mut original = sqlx::migrate!("./migrations");
+        original
+            .migrations
+            .to_mut()
+            .retain(|m| m.version <= version);
+        original.run(&pool).await.unwrap();
+        sqlx::raw_sql("INSERT INTO users(id,name,username,display_name,owner,recovery_hash) VALUES('history-user','history','history','History',1,'synthetic-hash'); INSERT INTO canvas_heads(account,revision,document,initialized) VALUES('history-user',2,'{}',1); INSERT INTO canvas_receipts VALUES('history-user','one','digest',1),('history-user','two','digest',2);")
         .execute(&pool).await.unwrap();
-    MIGRATIONS.run(&pool).await.unwrap();
-    let row: (String, i64) =
-        sqlx::query_as("SELECT username,owner FROM users WHERE id='history-user'")
+        if version == 30 {
+            // Production's trigger maintains historical receipts before this restart.
+            let count: i64 = sqlx::query_scalar(
+                "SELECT receipt_count FROM canvas_heads WHERE account='history-user'",
+            )
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(row, ("history".into(), 1));
-    let count: i64 =
-        sqlx::query_scalar("SELECT receipt_count FROM canvas_heads WHERE account='history-user'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(count, 2);
-    let stored: Vec<(i64, Vec<u8>)> = sqlx::query_as(
-        "SELECT version,checksum FROM _sqlx_migrations WHERE version<=29 ORDER BY version",
-    )
-    .fetch_all(&pool)
-    .await
-    .unwrap();
-    for ((version, checksum), source) in stored.iter().zip(original.iter()) {
-        assert_eq!(*version, source.version);
-        assert_eq!(checksum.as_slice(), source.checksum.as_ref());
+            assert_eq!(count, 2);
+        }
+        MIGRATIONS.run(&pool).await.unwrap();
+        let row: (String, i64) =
+            sqlx::query_as("SELECT username,owner FROM users WHERE id='history-user'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row, ("history".into(), 1));
+        let count: i64 = sqlx::query_scalar(
+            "SELECT receipt_count FROM canvas_heads WHERE account='history-user'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 2);
+        let stored: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT version,checksum FROM _sqlx_migrations WHERE version<=? ORDER BY version",
+        )
+        .bind(version)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        for ((version, checksum), source) in stored.iter().zip(original.iter()) {
+            assert_eq!(*version, source.version);
+            assert_eq!(checksum.as_slice(), source.checksum.as_ref());
+        }
     }
 }

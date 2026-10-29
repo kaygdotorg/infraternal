@@ -1554,5 +1554,26 @@ mod temporal_admission_tests {
 pub(crate) async fn test_open_database(
     data_dir: &std::path::Path,
 ) -> Result<SqlitePool, ServerError> {
-    open_database(data_dir).await
+    // This test-only copy preserves production pool setup while allowing shared-disk startup slack.
+    std::fs::create_dir_all(data_dir).map_err(|_| ServerError::InvalidConfiguration)?;
+    set_private_directory(data_dir).map_err(|_| ServerError::InvalidConfiguration)?;
+    let database = data_dir.join("infraternal.sqlite");
+    let options = SqliteConnectOptions::new()
+        .filename(database)
+        .create_if_missing(true)
+        .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(5));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(8)
+        .acquire_timeout(Duration::from_secs(60))
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .connect_with(options)
+        .await
+        .map_err(ServerError::Storage)?;
+    set_private_file(&data_dir.join("infraternal.sqlite"))
+        .map_err(|_| ServerError::InvalidConfiguration)?;
+    Ok(pool)
 }

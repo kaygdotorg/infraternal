@@ -36,6 +36,8 @@ async fn refusal_ends_subscription(case: Refusal) {
     let path = root.join(format!("mesh-refusal-{}.sqlite", Uuid::new_v4()));
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
+        // Private SQLite fixtures can open slowly while workspace jobs share disk I/O.
+        .acquire_timeout(Duration::from_secs(60))
         .connect_with(
             SqliteConnectOptions::new()
                 .filename(&path)

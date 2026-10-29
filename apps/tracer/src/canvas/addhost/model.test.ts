@@ -100,6 +100,33 @@ describe("parseTarget", () => {
     expect(parseTarget("o1")).toEqual({ user: undefined, host: "o1", port: undefined });
     expect(parseTarget("root@[fe80::1]:22")?.host).toBe("[fe80::1]");
   });
+  test("reads a pasted ssh command into the same fields", () => {
+    expect(parseTarget("ssh user@1.2.3.4")).toEqual({ user: "user", host: "1.2.3.4", port: undefined });
+    expect(parseTarget("  ssh   user@host  ")).toEqual({ user: "user", host: "host", port: undefined });
+    expect(parseTarget("ssh -p 2222 user@host")).toEqual({ user: "user", host: "host", port: 2222 });
+    expect(parseTarget("ssh -p2222 host")).toEqual({ user: undefined, host: "host", port: 2222 });
+    expect(parseTarget("ssh -l ops -p 22 host")).toEqual({ user: "ops", host: "host", port: 22 });
+    expect(parseTarget("ssh user@host:2200")).toEqual({ user: "user", host: "host", port: 2200 });
+  });
+  test("reads an ssh:// address", () => {
+    expect(parseTarget("ssh://user@host:2222")).toEqual({ user: "user", host: "host", port: 2222 });
+    expect(parseTarget("ssh://host/")).toEqual({ user: undefined, host: "host", port: undefined });
+    expect(parseTarget("SSH://root@[fe80::1]:22")).toEqual({ user: "root", host: "[fe80::1]", port: 22 });
+  });
+  test("refuses garbage around an ssh command", () => {
+    expect(parseTarget("ssh -p")).toBeUndefined();
+    expect(parseTarget("ssh -p 2222")).toBeUndefined();
+    expect(parseTarget("ssh -p abc host")).toBeUndefined();
+    expect(parseTarget("ssh -p 99999 host")).toBeUndefined();
+    expect(parseTarget("ssh -oProxyCommand=x host")).toBeUndefined();
+    expect(parseTarget("ssh -p 22 host:2200")).toBeUndefined();
+    expect(parseTarget("ssh user@host ls -la")).toBeUndefined();
+    expect(parseTarget("ssh a@b c@d")).toBeUndefined();
+    expect(parseTarget("ssh://")).toBeUndefined();
+    expect(parseTarget("ssh://host/path")).toBeUndefined();
+    expect(parseTarget("http://host")).toBeUndefined();
+    expect(parseTarget("sshfoo user@host")).toBeUndefined();
+  });
   test("refuses what cannot name a host", () => {
     expect(parseTarget("two words")).toBeUndefined();
     expect(parseTarget("host:99999")).toBeUndefined();
@@ -220,7 +247,7 @@ test("an already added host says so and offers opening its existing terminal", (
 
 test("release payload verification names the architecture step and plain reason", () => {
   const failure = { kind: "install" as const, message: "the binary does not match the signed checksum.", failed_step: "get-arm64-binary" as const, log_tail: [] };
-  expect(failureLine(failure)).toBe("Get the arm64 binary: the binary does not match the signed checksum.");
+  expect(failureLine(failure)).toBe("Download infraternal (arm64): the binary does not match the signed checksum.");
 });
 
 describe("leftovers pause (#169)", () => {

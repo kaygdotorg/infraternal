@@ -1,9 +1,50 @@
 //! Frame regression and measurement harness, separated from production code [40].
 use super::*;
+
+#[cfg(feature = "process-per-user")]
+#[test]
+fn borrowed_output_keeps_frozen_bytes_and_refuses_before_batch_mutation() {
+    let frozen = [12, 0, 0, 0, 0x11, 42, 0, 0, 0, 0, 0, 0, 0, b'a', b'b', b'c'];
+    let mut wire = Vec::new();
+    Frame::output_slices_into::<false>(42, b"a", b"bc", &mut wire).unwrap();
+    assert_eq!(wire, frozen);
+    Frame::output_slices_into::<true>(42, b"ab", b"c", &mut wire).unwrap();
+    assert_eq!(wire, [frozen, frozen].concat());
+    let before = wire.clone();
+    let oversized = vec![0; MAX_FRAME];
+    assert!(Frame::output_slices_into::<true>(0, &oversized, &[], &mut wire).is_err());
+    assert_eq!(wire, before);
+    assert!(Frame::output_slices_into::<false>(0, &[], &oversized, &mut wire).is_err());
+    assert_eq!(wire, before);
+}
 #[cfg(test)]
 mod tests {
     //! Exercises frame invariants against real data and frozen expectations.
     use super::*;
+    #[cfg(feature = "process-per-user")]
+    #[test]
+    fn batch_append_preserves_prefix_and_refuses_invalid_frames() {
+        let state = Frame::InputState(17, 19);
+        let output = Frame::Output(42, b"reply".to_vec());
+        let mut wire = state.encode().unwrap();
+        Frame::output_slices_into::<true>(42, b"reply", &[], &mut wire).unwrap();
+        let mut expected = state.encode().unwrap();
+        expected.extend(output.encode().unwrap());
+        assert_eq!(wire, expected);
+        let before = wire.clone();
+        assert!(
+            Frame::Input(vec![0; MAX_FRAME])
+                .encode_into(&mut wire)
+                .is_err()
+        );
+        assert_eq!(wire, before);
+        assert!(
+            Frame::SnapshotWithFlags(0, 2, vec![])
+                .encode_into(&mut wire)
+                .is_err()
+        );
+        assert_eq!(wire, before);
+    }
     #[test]
     fn golden_and_fragmented() {
         let fixtures = [

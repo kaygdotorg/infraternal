@@ -149,7 +149,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
           inventory.attach(hostId, host.sessionId);
           // The shell is attachable now; install, join and start go on behind it and show in this window's machine pill.
           const rec = canvas.cx.win.openSession(hostId, host.sessionId);
-          if (rec) void attachSetup(rec, { host: host.name, hostId, status, onComplete: () => { setupPendingHostIds.delete(hostId); } });
+          if (rec) void attachSetup(rec, { host: host.name, hostId, status, remove: () => { const label = removal.label(); return label ? { label, run: (anchor) => removal.remove(hostId, host.name, anchor) } : undefined; }, onComplete: () => { setupPendingHostIds.delete(hostId); } });
         } else canvas.cx.win.open(hostId);
         applyIdentities([{ id: hostId, name: host.name, ...(host.user ? { user: host.user } : {}), os: host.os }]);
       }

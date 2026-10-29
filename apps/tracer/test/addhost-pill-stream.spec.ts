@@ -37,7 +37,7 @@ test("a failure after the prompt is explained in the pill, and Try again finishe
   const tip = page.getByRole("dialog", { name: "Setup of instant-fail.lab" });
   await expect(tip).toBeVisible();
   await expect(tip).toContainText("couldn't join this server");
-  await expect(tip).toContainText("Your terminal keeps working.");
+  await expect(tip).toContainText("Your other sessions keep working.");
   await tip.getByRole("button", { name: "Try again" }).click();
 
   // The retry's events fill the arcs again, then tick, then the system icon.
@@ -105,8 +105,8 @@ for (const [width, height] of [[1440, 900], [393, 852], [375, 667]] as const) {
       await expect(tip).toBeVisible();
       await expect(tip.getByRole("button", { name: "Try again", disabled: false })).toHaveCount(0);
       await expect(tip).toContainText("retry limit");
-      await expect(tip).toContainText("Remove host in the command palette");
-      await expect(tip).toContainText("Add host to start again");
+      await expect(tip).toContainText("Remove this host, then add it again");
+      await expect(tip.getByRole("button", { name: "Remove host" })).toBeVisible();
       expect(errors).toEqual([]);
       await page.screenshot({ path: tracerEvidencePath(`exhausted-retry-${width}-${theme}.png`) });
     });

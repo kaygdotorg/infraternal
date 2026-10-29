@@ -49,10 +49,10 @@ describe("foldSetup", () => {
 });
 
 describe("setupGuide", () => {
-  test("says the terminal keeps working and what to do next, in plain words", () => {
+  test("says the other sessions keep working and what to do next, in plain words", () => {
     const guide = setupGuide("o2", foldSetup(freshSetup(), ev("join", "failed", { failedStep: "join" })));
     expect(guide.title).toBe("o2 couldn't join this server");
-    expect(guide.effect).toContain("Your terminal keeps working.");
+    expect(guide.effect).toContain("Your other sessions keep working.");
     expect(guide.effect).toContain("Try again in a moment.");
   });
 });
@@ -77,7 +77,6 @@ test("exhausted setup preserves eligibility and explains a new setup", () => {
   }
   expect(setupGuide("o2", view).effect).toContain("retry limit");
   const next = setupGuide("o2", view).effect;
-  expect(next).toContain("Remove host in the command palette");
-  expect(next.indexOf("Remove host")).toBeLessThan(next.indexOf("Add host"));
+  expect(next).toContain("Remove this host, then add it again");
   expect(foldSetup(view, ev("join", "running")).retryAvailable).toBeUndefined();
 });

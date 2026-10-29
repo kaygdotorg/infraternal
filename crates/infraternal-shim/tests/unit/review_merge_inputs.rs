@@ -2,6 +2,66 @@
 use super::*;
 
 #[test]
+fn reply_promotion_preserves_staged_legacy_geometry_and_partial_credit() {
+    let original = (81, 25, 0, 0);
+    let requested = (120, 40, 4, 8);
+    let mut inputs = Inputs::with_geometry(original);
+    let mut queue = VecDeque::new();
+    inputs.active_writer = Some(0);
+    inputs.accept(0, 0, b"abcd", &mut queue).unwrap();
+    inputs.advance(1).unwrap();
+    queue.pop_front();
+    inputs.request_resize(Some(0), requested).unwrap();
+
+    // In the shared host, the first reply promotes the inline cursor while
+    // legacy typing and an uncommitted resize still belong to writer zero.
+    assert!(inputs.reply(false, b"rr", &mut queue));
+    let state = inputs.get(Some(0)).unwrap();
+    assert_eq!((state.accepted, state.written), (4, 1));
+    assert_eq!(state.requested_size, requested);
+    assert_eq!(state.accepted_size, original);
+    assert_eq!(inputs.active_writer, Some(0));
+    inputs.accept(0, 2, b"cdef", &mut queue).unwrap();
+    assert_eq!(queue.iter().copied().collect::<Vec<_>>(), b"bcdrref");
+    inputs.advance(4).unwrap();
+    queue.drain(..4);
+    assert_eq!(inputs.get(Some(0)).unwrap().written, 4);
+    assert_eq!(inputs.cursors.get(&u64::MAX).unwrap().written, 1);
+    assert_eq!(inputs.finish_resize(Some(0), false).unwrap(), original);
+    inputs.advance(queue.len()).unwrap();
+    assert_eq!(inputs.get(Some(0)).unwrap().written, 6);
+    assert_eq!(inputs.cursors.get(&u64::MAX).unwrap().written, 2);
+}
+
+#[test]
+fn refused_first_replies_do_not_promote_or_reset_legacy_state() {
+    let mut inputs = Inputs::default();
+    let mut queue = VecDeque::new();
+    inputs.active_writer = Some(0);
+    inputs
+        .accept(0, 0, &vec![b't'; MAX_FRAME - 1], &mut queue)
+        .unwrap();
+    let segments = inputs.segments.clone();
+    for (reserved, bytes) in [(true, b"r".as_slice()), (false, b"rr"), (false, b"")] {
+        assert!(!inputs.reply(reserved, bytes, &mut queue));
+        assert!(!inputs.cursors.contains_key(&u64::MAX));
+        assert_eq!(inputs.cursors.len(), 1);
+        assert_eq!(inputs.segments, segments);
+        assert_eq!(queue.len(), MAX_FRAME - 1);
+        assert_eq!(
+            inputs.get(Some(0)).unwrap().accepted,
+            (MAX_FRAME - 1) as u64
+        );
+        assert_eq!(inputs.active_writer, Some(0));
+    }
+    assert!(inputs.reply(false, b"r", &mut queue));
+    assert_eq!(queue.len(), MAX_FRAME);
+    inputs.advance(MAX_FRAME).unwrap();
+    assert_eq!(inputs.get(Some(0)).unwrap().written, (MAX_FRAME - 1) as u64);
+    assert_eq!(inputs.cursors.get(&u64::MAX).unwrap().written, 1);
+}
+
+#[test]
 fn interleaved_replies_and_replays_match_partial_write_model() {
     let mut inputs = Inputs::default();
     let mut queue = VecDeque::new();

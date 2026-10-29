@@ -10,6 +10,8 @@ mod embedded_cli;
 mod host_remove;
 #[cfg(feature = "release")]
 mod release_cli;
+#[cfg(feature = "process-per-user")]
+mod user_host_cli;
 
 #[cfg(any(
     feature = "remote",
@@ -1148,6 +1150,15 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    #[cfg(feature = "process-per-user")]
+    if matches.get_one::<i64>("host_sessions").is_some() {
+        return user_host_cli::run(matches);
+    }
+    #[cfg(feature = "process-per-user")]
+    if matches.get_one::<String>("host_accounting").is_some() {
+        eprintln!("--host-accounting requires --host-sessions");
+        return ExitCode::from(2);
+    }
     match options.run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -1353,19 +1364,43 @@ mod setup_token_tests {
     //! Verifies the explicit CLI handoff uses the private local request protocol.
 
     use super::read_setup_token;
+    use std::{
+        os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+        path::{Path, PathBuf},
+    };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::UnixListener,
     };
 
+    struct PrivateDirectory(PathBuf);
+
+    impl PrivateDirectory {
+        /// Keep Unix socket fixture paths short even when `TMPDIR` is nested deeply.
+        fn new() -> Self {
+            let path = Path::new("/tmp").join(format!("itok-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).expect("create token test directory");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .expect("set token test directory permissions");
+            Self(path)
+        }
+    }
+
+    impl Drop for PrivateDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[tokio::test]
     async fn setup_token_command_reads_only_the_expected_socket_response() {
-        let data_dir =
-            std::env::temp_dir().join(format!("infraternal-token-cli-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&data_dir);
-        std::fs::create_dir_all(&data_dir).expect("create token test directory");
-        let listener =
-            UnixListener::bind(data_dir.join("setup-token.sock")).expect("bind token test socket");
+        let data_dir = PrivateDirectory::new();
+        let socket = data_dir.0.join("setup-token.sock");
+        assert!(
+            socket.as_os_str().as_bytes().len() < 108,
+            "token test socket path exceeds the Unix socket path limit"
+        );
+        let listener = UnixListener::bind(socket).expect("bind token test socket");
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept token request");
             let mut request = [0; 4];
@@ -1380,11 +1415,12 @@ mod setup_token_tests {
                 .expect("write token response");
         });
         assert_eq!(
-            read_setup_token(&data_dir).await.expect("read setup token"),
+            read_setup_token(&data_dir.0)
+                .await
+                .expect("read setup token"),
             "A".repeat(43)
         );
         server.await.expect("token test socket server");
-        std::fs::remove_dir_all(data_dir).expect("remove token test directory");
     }
 }
 

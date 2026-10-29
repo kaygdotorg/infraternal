@@ -49,19 +49,41 @@ impl Drop for CleanupMany {
     }
 }
 
-/// Session fixtures prefer the agent-specific root when the shared root is too long for socket names.
-fn fixture_root() -> PathBuf {
-    let root = std::env::var_os("INFRATERNAL_AGENT_TEST_STATE_ROOT")
-        .or_else(|| std::env::var_os("INFRATERNAL_TEST_STATE_ROOT"))
-        .map_or_else(
-            || {
-                PathBuf::from(std::env::var_os("HOME").expect("test requires HOME"))
-                    .join(".cache/codex-scratch/infraternal")
-            },
-            PathBuf::from,
-        );
+/// Runtime fixtures keep their generated session socket within Linux `sun_path`.
+fn fixture_root(directory: &str) -> PathBuf {
+    let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
+        || {
+            PathBuf::from(std::env::var_os("HOME").expect("test requires HOME"))
+                .join(".cache/codex-scratch/infraternal")
+        },
+        PathBuf::from,
+    );
+    let fallback = PathBuf::from(std::env::var_os("HOME").expect("test requires HOME"))
+        .join(".cache/codex-scratch/infraternal");
+    let session_socket = |root: &Path| {
+        root.join(directory)
+            .join("sessions")
+            .join(format!("{}.sock", "a".repeat(32)))
+    };
+    let root = if session_socket(&root).as_os_str().as_bytes().len() < 108 {
+        root
+    } else {
+        static LONG_ROOT_WARNING: std::sync::Once = std::sync::Once::new();
+        LONG_ROOT_WARNING.call_once(|| {
+            eprintln!(
+                "agent session test state root exceeds the Linux socket path limit; using {}",
+                fallback.display()
+            );
+        });
+        fallback
+    };
+    let socket = session_socket(&root);
+    assert!(
+        socket.as_os_str().as_bytes().len() < 108,
+        "fallback agent session socket path exceeds the Unix socket path limit"
+    );
     fs::create_dir_all(&root).unwrap();
-    root
+    root.join(directory)
 }
 
 async fn until(peer: &mut UnixStream, cursor: &mut u64, marker: &[u8]) {
@@ -100,7 +122,7 @@ async fn until(peer: &mut UnixStream, cursor: &mut u64, marker: &[u8]) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn detached_shim_is_discovered_and_replays_from_the_last_observed_offset() {
-    let directory = fixture_root().join(format!("ar{}", std::process::id()));
+    let directory = fixture_root(&format!("ar{}", std::process::id()));
     // Validate the actual rendezvous after applying the configured fixture root.
     let socket = directory
         .join("sessions")
@@ -206,7 +228,7 @@ async fn detached_shim_is_discovered_and_replays_from_the_last_observed_offset()
 #[allow(clippy::too_many_lines)]
 async fn restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill() {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
-    let base = fixture_root().join(format!("e{}", &suffix[..8]));
+    let base = fixture_root(&format!("e{}", &suffix[..8]));
     let directory = state(Some(base)).unwrap();
     let mut cleanup = CleanupMany {
         state: directory.clone(),
@@ -298,7 +320,7 @@ async fn restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill() 
     .unwrap();
     let killed_session_id = killed.id;
     let killed_process_id = i32::try_from(killed.pid).unwrap();
-    let death = tokio::io::unix::AsyncFd::new(
+    let death = infraternal_shim::readiness::Registration::new(
         infraternal_shim::process_exit_descriptor(killed.pid).unwrap(),
     )
     .unwrap();
@@ -310,12 +332,10 @@ async fn restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill() 
     // Signal submission is not process death. Await kernel readiness before
     // testing a restart census so an in-flight listener teardown cannot reset
     // the discovery handshake. The separate exit-latency probe starts at kill.
-    drop(
-        timeout(Duration::from_secs(5), death.readable())
-            .await
-            .unwrap()
-            .unwrap(),
-    );
+    let _ = timeout(Duration::from_secs(5), death.readable())
+        .await
+        .unwrap()
+        .unwrap();
     drop(death);
     cleanup.pids.retain(|pid| *pid != killed.pid);
     drop(killed);
@@ -378,25 +398,32 @@ fn latency_fixture_accepts_the_unsolicited_startup_inventory() {
     // Use the real shared verification fixture. Construct it separately from
     // initialization so a refused greeting still releases its owned daemon.
     let script = r#"
-import sys
+import os, sys, tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path('scripts').resolve()))
 from agent_fixture import Binary, fixture_state, cleanup
-state = fixture_state('ir')
-state.mkdir(mode=0o700)
-client = Binary.__new__(Binary)
-try:
-    client.__init__(Path(sys.argv[1]), state)
-    client.open()
-    assert str(client.id) in client.inventory['session_ids'], 'open Result overtook its live census'
-    client.attach()
-    client.input(b"printf 'CENSUS_FIXTURE_OK\\n'\n")
-    client.until(b'CENSUS_FIXTURE_OK')
-    client.ping(168, 0)
-finally:
-    if hasattr(client, 'child'):
-        client.kill()
-    cleanup(state)
+with tempfile.TemporaryDirectory(prefix='ir', dir='/tmp') as root:
+    # A private short root keeps every fixture socket within AF_UNIX limits,
+    # independently of the caller's HOME and worktree path.
+    os.environ['INFRATERNAL_AGENT_TEST_STATE_ROOT'] = root
+    state = fixture_state('ir')
+    socket_path = state / 'sessions' / ('a' * 32 + '.sock')
+    upstream_path = socket_path.with_suffix('.upstream')
+    assert max(len(os.fsencode(path)) for path in (socket_path, upstream_path)) < 108
+    state.mkdir(mode=0o700)
+    client = Binary.__new__(Binary)
+    try:
+        client.__init__(Path(sys.argv[1]), state)
+        client.open()
+        assert str(client.id) in client.inventory['session_ids'], 'open Result overtook its live census'
+        client.attach()
+        client.input(b"printf 'CENSUS_FIXTURE_OK\\n'\n")
+        client.until(b'CENSUS_FIXTURE_OK')
+        client.ping(168, 0)
+    finally:
+        if hasattr(client, 'child'):
+            client.kill()
+        cleanup(state)
 "#;
     let result = std::process::Command::new("python3")
         .arg("-c")

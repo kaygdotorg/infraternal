@@ -28,6 +28,90 @@ pub struct Pty {
 fn errno(error: nix::errno::Errno) -> io::Error {
     io::Error::from_raw_os_error(error as i32)
 }
+
+/// Establish waitable child ownership for the shared host before its first PTY.
+/// The caller has validated single-threaded startup and blocked SIGCHLD. A
+/// blocked ignored disposition (or `SA_NOCLDWAIT`) still lets the kernel discard
+/// exit status; replacing the entire action removes both auto-reaping forms.
+#[cfg(feature = "process-per-user")]
+pub(crate) fn reset_host_child_notifications() -> io::Result<()> {
+    let action = nix::sys::signal::SigAction::new(
+        nix::sys::signal::SigHandler::SigDfl,
+        nix::sys::signal::SaFlags::empty(),
+        nix::sys::signal::SigSet::empty(),
+    );
+    // SAFETY: no user handler is installed; the caller has one thread, blocks
+    // SIGCHLD, and has not created children. sigaction copies the valid action.
+    unsafe { nix::sys::signal::sigaction(Signal::SIGCHLD, &action) }
+        .map(|_| ())
+        .map_err(errno)
+}
+
+/// Read the same kernel monotonic clock used by numeric scheduler receipts.
+#[cfg(feature = "host-diagnostics")]
+pub(crate) fn monotonic_ns() -> io::Result<u64> {
+    let mut stamp = nix::libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: the kernel synchronously fills this valid timespec. CLOCK_MONOTONIC
+    // needs no process authority and retains no pointer after the call.
+    if unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_MONOTONIC, &raw mut stamp) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    u64::try_from(stamp.tv_sec)
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1_000_000_000))
+        .and_then(|ns| ns.checked_add(u64::try_from(stamp.tv_nsec).ok()?))
+        .ok_or_else(|| io::Error::other("monotonic clock overflow"))
+}
+
+/// Classify already-ready PTY output without consuming or reordering bytes.
+/// The shared reactor uses this hint to read short interactive replies before
+/// bulk output. Read readiness remains authoritative if the hint changes.
+#[cfg(feature = "process-per-user")]
+pub(crate) fn available_output(master: &File) -> io::Result<usize> {
+    let mut count: nix::libc::c_int = 0;
+    // SAFETY: FIONREAD synchronously writes one c_int through this valid
+    // pointer. The borrowed PTY master stays open throughout the ioctl.
+    let result =
+        unsafe { nix::libc::ioctl(master.as_raw_fd(), nix::libc::FIONREAD, &raw mut count) };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    usize::try_from(count).map_err(|_| io::Error::other("negative PTY readable byte count"))
+}
+
+#[cfg(all(test, feature = "process-per-user"))]
+mod output_readiness_tests {
+    //! Readable-byte classification borrows a real PTY without consuming data.
+    use super::*;
+    use nix::poll::{PollFd, PollFlags, poll};
+    use std::{io::Read, os::fd::AsFd};
+
+    #[test]
+    fn readable_byte_hint_preserves_the_complete_output_stream() {
+        let terminal = openpty(None, None).unwrap();
+        let mut master = File::from(terminal.master);
+        assert_eq!(available_output(&master).unwrap(), 0);
+        unistd::write(&terminal.slave, b"short-reply").unwrap();
+        assert_eq!(
+            poll(
+                &mut [PollFd::new(master.as_fd(), PollFlags::POLLIN)],
+                5000_u16
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(available_output(&master).unwrap(), 11);
+        assert_eq!(available_output(&master).unwrap(), 11);
+        let mut bytes = [0; 11];
+        master.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"short-reply");
+        assert_eq!(available_output(&master).unwrap(), 0);
+    }
+}
+
 impl Pty {
     #[cfg(test)]
     pub fn spawn(uid: u32, cols: u16, rows: u16) -> io::Result<Self> {
@@ -638,25 +722,52 @@ mod child_environment_tests {
         }
     }
 
+    /// Read one process environment snapshot into owned pairs for bounded startup polling.
+    fn read_environment(pid: u32) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let raw = std::fs::read(format!("/proc/{pid}/environ"))?;
+        Ok(raw
+            .split(|byte| *byte == 0)
+            .filter_map(|entry| {
+                let separator = entry.iter().position(|byte| *byte == b'=')?;
+                Some((entry[..separator].to_vec(), entry[separator + 1..].to_vec()))
+            })
+            .collect())
+    }
+
     #[test]
     fn spawned_login_shell_receives_selected_environment_without_other_host_variables() {
         let expected = crate::locale::environment();
         let pty = Pty::spawn(Uid::effective().as_raw(), 80, 24).unwrap();
         let child = ChildGuard(pty.child);
-        let raw = std::fs::read(format!("/proc/{}/environ", child.0.id())).unwrap();
-        let actual = raw
-            .split(|byte| *byte == 0)
-            .filter_map(|entry| {
-                let separator = entry.iter().position(|byte| *byte == b'=')?;
-                Some((&entry[..separator], &entry[separator + 1..]))
-            })
-            .collect::<Vec<_>>();
+        // The spawned shell can start after this test resumes; avoid treating one
+        // early procfs snapshot as the shell's final environment.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let actual = loop {
+            let actual = read_environment(child.0.id()).unwrap();
+            let has_locale = expected.iter().all(|(name, value)| {
+                let name = name.as_os_str().as_encoded_bytes();
+                let value = value.as_os_str().as_encoded_bytes();
+                actual
+                    .iter()
+                    .any(|(actual_name, actual_value)| actual_name == name && actual_value == value)
+            });
+            let has_terminal = actual
+                .iter()
+                .any(|(name, value)| name == b"TERM" && value == b"xterm-256color")
+                && actual
+                    .iter()
+                    .any(|(name, value)| name == b"COLORTERM" && value == b"truecolor");
+            if (has_locale && has_terminal) || std::time::Instant::now() >= deadline {
+                break actual;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
         for (name, value) in expected {
             let name = name.as_os_str().as_encoded_bytes();
             let value = value.as_os_str().as_encoded_bytes();
             assert!(
                 actual.iter().any(|(actual_name, actual_value)| {
-                    *actual_name == name && *actual_value == value
+                    actual_name == name && actual_value == value
                 }),
                 "the login shell must receive the selected locale variable"
             );
@@ -664,24 +775,28 @@ mod child_environment_tests {
         assert!(
             actual
                 .iter()
-                .any(|(name, value)| *name == b"TERM" && *value == b"xterm-256color")
+                .any(|(name, value)| name == b"TERM" && value == b"xterm-256color")
         );
         assert!(
             actual
                 .iter()
-                .any(|(name, value)| *name == b"COLORTERM" && *value == b"truecolor")
+                .any(|(name, value)| name == b"COLORTERM" && value == b"truecolor")
         );
         assert!(actual.iter().all(|(name, _)| {
-            *name == b"HOME"
-                || *name == b"USER"
-                || *name == b"LOGNAME"
-                || *name == b"SHELL"
-                || *name == b"TERM"
-                || *name == b"COLORTERM"
-                || *name == b"PATH"
-                || *name == b"ZDOTDIR"
-                || *name == b"LANG"
+            name == b"HOME"
+                || name == b"USER"
+                || name == b"LOGNAME"
+                || name == b"SHELL"
+                || name == b"TERM"
+                || name == b"COLORTERM"
+                || name == b"PATH"
+                || name == b"ZDOTDIR"
+                || name == b"LANG"
                 || name.starts_with(b"LC_")
         }));
     }
 }
+
+#[cfg(feature = "process-per-user")]
+#[path = "pty_handoff.rs"]
+pub(crate) mod handoff;

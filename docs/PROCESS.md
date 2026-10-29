@@ -115,7 +115,9 @@ Reviews and fixes run at the same time as the next lane's build.
   limit.
 - `python3 scripts/latency_proxy.py self-test --samples 31` measures the
   configured loopback RTT and prints `METRIC name=network_rtt_selftest ...`.
-  `scripts/verify fast` runs the short three-sample version. The full
+  `scripts/verify fast` runs a three-sample zero-delay byte-forwarding check
+  without a timing bound; the configured RTT measurement stays in the latency
+  profile. The full
   `scripts/verify latency` profile runs the relay self-test, a real agent/PTy
   echo and flood gate, `verify-auth-browser`, and the production tracer browser
   suite. Playwright uses `TRACER_TEST_PORT` (default 4621); concurrent runs
@@ -143,15 +145,62 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,395,728 bytes |
-  | `aarch64-unknown-linux-musl` | 19,572,056 bytes |
+  | `x86_64-unknown-linux-musl` | 21,386,512 bytes |
+  | `aarch64-unknown-linux-musl` | 19,563,608 bytes |
 
-  Account-scoped authority notifications (#240) measure 21,395,728 /
-  19,572,056 bytes with the pinned static recipe. The x86_64 change is
-  +6,304 bytes against the reproduced `auth-busy-1013` merge base
-  (21,389,424 bytes). Per-account coalescing generations replace the global
-  logout and recovery wakes; no dependency, feature or build-profile change
-  is added. Both ceilings track the exact artifacts with no allowance (D243).
+  The RUSTSEC-2026-0386 repair (#255) pins Tokio 1.53.3 and keeps reactor
+  descriptors owned until deregistration inside the audited shim boundary.
+  The unchanged pinned static recipe on 8by64-compute02 measures
+  21,386,512 / 19,563,608 bytes (x86_64 / aarch64), -2,912 / +1,440 bytes
+  versus merged base `f069bb2a9`. Both exact caps above ratchet to these
+  measured images with no allowance (D243); receipts are on #255. Other
+  dependency versions and the release profile stay unchanged.
+
+  Release jobs (not `scripts/verify fast`, which every job runs) also run
+  `scripts/test-static-reproducibility.py`. It builds both targets again from a detached checkout with separate
+  Cargo registry, Rustup and target roots. It forces compilation through the
+  shared sccache server, compares the shipping bytes and checks that the cache
+  wrapper receives Rust and native C path-remap flags before compilation. Rust
+  flags keep registry source mappings after the enclosing `CARGO_HOME` mapping;
+  rustc applies the later match, which keeps sources under `/cargo/<crate>`.
+  This catches release output that depends on a job's build locations.
+
+  The release-9 merge back into dev (#24) retains the optional per-user host
+  and updates only the existing `rustls-webpki` dependency to 0.103.16 for
+  RUSTSEC-2026-0382. Fresh builds of dev `fe047e2d3` and the merged source use
+  the same pinned static recipe on infraternal-dev:
+
+  | Source | x86_64 bytes | aarch64 bytes |
+  | --- | ---: | ---: |
+  | Dev before | 21,385,264 | 19,570,256 |
+  | Release 9 merged, with the TLS patch | 21,387,248 | 19,559,400 |
+  | Delta | +1,984 | −10,856 |
+
+  Both exact caps above use the measured merge bytes, with no allowance
+  (D243). The existing TLS engine and features stay selected; no protocol or
+  build-profile change is included. Receipts and compatibility gates are on #24.
+
+  The RUSTSEC-2026-0382 lockfile update to rustls-webpki 0.103.16 measures
+  21,387,248 / 19,559,400 bytes with the same pinned static recipe: +1,024 /
+  +1,408 bytes versus release 9. Both exact caps ratchet to these measured
+  values; the receipts are on #24.
+
+  The release 9.4 merge back into dev (#24, #240, #254) brings in the
+  busy-store authority close handling and the Mesh drag and overlap fixes.
+  Fresh builds of the merged source with the same pinned static recipe, on
+  the build VM 8by64-compute02, measure:
+
+  | Source | x86_64 bytes | aarch64 bytes |
+  | --- | ---: | ---: |
+  | Dev before (`81962ab09`) | 21,389,232 | 19,561,656 |
+  | Release 9.4 caps as recorded (`db4add238`) | 21,389,424 | 19,562,296 |
+  | Merged | 21,389,424 | 19,562,168 |
+  | Delta versus dev | +192 | +512 |
+
+  The x86_64 image matches release 9.4 byte for byte; the aarch64 image is
+  128 bytes below it. Both exact caps are set to the merged measurements,
+  with no allowance (D243). The growth over dev is release 9.4's reviewed
+  close-path code, within the 16 KiB band. Receipts are on #24.
 
   Busy-store wake classification and fractional session deadlines (#240)
   measure 21,389,040 / 19,561,912 bytes with the pinned static recipe:
@@ -161,12 +210,23 @@ Reviews and fixes run at the same time as the next lane's build.
   busy/refused distinction and shares the fractional deadline conversion;
   dependencies, features, query limits and retry budgets are unchanged.
 
+  Release 9.4's close-path change (5280c44d4, #240) then measured 21,389,424 /
+  19,562,296 bytes, +384 bytes per target; it raised both caps to those
+  artifacts within D243's 16 KiB band.
+
   Release 9.3's socket authority read cap (#240) measured 21,389,296 /
   19,561,656 bytes with the same pinned static recipe: +2,048 / +2,256 bytes
   versus release 9.2. Both exact caps were set to those measurements with no
   allowance (D243); the release artifacts and receipts are on #24. The
   rustls-webpki 0.103.16 lockfile update measured 21,387,248 / 19,559,400
   bytes for release 9.2, +1,024 / +1,408 versus release 9.
+
+  The release 9.3 merge back into dev (#24, #240) keeps dev's optional
+  per-user host and brings in the authority read cap unchanged; dev had not
+  touched the auth or websocket sources since the merge base. The merged
+  source measures 21,389,232 / 19,561,656 bytes with the same pinned static
+  recipe: -64 / +0 bytes versus release 9.3. The x86_64 cap ratchets down to
+  that measurement and the aarch64 cap stays (D243).
 
   The reply-reservation production fix (#24, D307) measures 21,387,120 /
   19,558,856 bytes with the same pinned static recipe: -64 / -256 bytes

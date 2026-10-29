@@ -72,7 +72,7 @@ const STYLE = `
 .ui-confirm-tip-text { display: grid; gap: 3px; }
 .ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 var(--text-body, 13px)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
 .ui-confirm-tip-detail { margin: 0; color: var(--fg-2); font: 450 var(--text-secondary, 12px)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
-.ui-confirm-tip-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.ui-confirm-tip-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .ui-confirm-tip button { display: inline-grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent;
   color: var(--fg-2); cursor: pointer;
   transition: transform 120ms cubic-bezier(0.23, 1, 0.32, 1), background-color 120ms ease, color 120ms ease; }
@@ -87,11 +87,21 @@ const STYLE = `
 .ui-confirm-tip, .ui-confirm-tip * { text-shadow: none; }
 .ui-confirm-tip .ui-confirm-yes { background: var(--fg); color: var(--bg); }
 .ui-confirm-tip .ui-confirm-yes svg { stroke-width: 2; }
-/* Named actions: the two buttons carry their words. */
+/* The secondary action keeps to the start of the row so the answer and the dismissal stay together on the right. */
+.ui-confirm-tip .ui-confirm-alt { margin-right: auto; }
+/* With three actions a phone-width card stacks them full width in priority order (answer, way out, dismiss), never a ragged wrap. */
+@media (max-width: 480px) {
+  .ui-confirm-tip[data-stack] .ui-confirm-tip-actions { display: grid; grid-template-columns: minmax(0, 1fr); justify-content: stretch; gap: 4px; }
+  .ui-confirm-tip[data-stack] .ui-confirm-yes { order: 1; }
+  .ui-confirm-tip[data-stack] .ui-confirm-alt { order: 2; margin-right: 0; }
+  .ui-confirm-tip[data-stack] .ui-confirm-no { order: 3; }
+  .ui-confirm-tip[data-stack][data-named] button { width: 100%; }
+}
+/* Named actions: the buttons carry their words. */
 .ui-confirm-tip[data-named] button { width: auto; min-width: 28px; padding: 0 12px; font: 500 var(--text-secondary, 12px)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
 @media (pointer: coarse) {
   .ui-confirm-tip { gap: 14px; padding: 16px; }
-  .ui-confirm-tip[data-named] button { width: auto; padding: 0 16px; }
+  .ui-confirm-tip[data-named] button { width: auto; padding: 0 12px; }
   .ui-confirm-tip button { width: 44px; height: 44px; }
   .ui-confirm-tip button svg { width: 18px; height: 18px; }
 }
@@ -145,6 +155,12 @@ export interface ConfirmTipOptions {
    * an action that is not a yes (try again) names itself with its own glyph.
    */
   confirmIcon?: string;
+  /**
+   * A third, quiet action for a way out that is neither the answer nor a dismissal (for example "Remove host" when
+   * retrying is no longer possible). It sits at the start of the row, in the ghost style of the cancel button, and
+   * closes the tip like the others. Only drawn with `named`: an icon needs a glyph this action does not have.
+   */
+  secondary?: { label: string; onSelect(): void };
   onConfirm(): void;
   onCancel?(): void;
   /** A card the confirmation must stay inside (a window), with the same 9 px inset the window's own overlays keep. */
@@ -204,6 +220,15 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
   confirm.dataset.tip = options.confirmLabel;
   confirm.innerHTML = options.named ? `<span></span>` : `<svg viewBox="0 0 24 24" aria-hidden="true">${options.confirmIcon ?? '<path d="m5.5 12.5 4 4 9-9"/>'}</svg>`;
   if (options.named) confirm.querySelector("span")!.textContent = options.confirmLabel;
+  if (options.named && options.secondary) {
+    const alt = document.createElement("button");
+    alt.type = "button";
+    alt.className = "ui-confirm-alt";
+    alt.textContent = options.secondary.label;
+    tip.dataset.stack = "";
+    alt.addEventListener("click", () => { instance.close(false); options.secondary!.onSelect(); });
+    actions.append(alt);
+  }
   actions.append(cancel, confirm);
   tip.append(arrow, text, actions);
   document.body.append(tip);
@@ -217,10 +242,12 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
   const place = (): void => {
     if (tip.hidden) return;
     const anchorRect = anchor.getBoundingClientRect();
+    const bound = options.boundary?.getBoundingClientRect();
+    // A narrow card (a phone window) is narrower than the tip's own cap: the tip never outgrows its 9 px insets.
+    if (bound) tip.style.maxWidth = `${Math.max(160, Math.floor(bound.width - 18))}px`;
     // Layout size: the open animation scales the tip, and a scaled rect would misplace it.
     const width = tip.offsetWidth;
     const height = tip.offsetHeight;
-    const bound = options.boundary?.getBoundingClientRect();
     const minX = bound ? bound.left + 9 : 12, maxX = (bound ? bound.right - 9 : innerWidth - 12) - width;
     const minY = bound ? bound.top + 9 : 12, maxY = (bound ? bound.bottom - 9 : innerHeight - 12) - height;
     const left = Math.max(minX, Math.min(maxX, anchorRect.left + anchorRect.width / 2 - width / 2));

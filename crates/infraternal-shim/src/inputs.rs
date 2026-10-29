@@ -12,12 +12,75 @@ mod merge_review;
 
 const MAX_WRITERS: usize = 512;
 
+#[cfg(not(feature = "process-per-user"))]
+type Cursors = HashMap<u64, InputCursors>;
+
+/// Most shared sessions have only writer zero. Its inline state avoids one
+/// allocation per idle session; selecting another writer promotes it exactly
+/// once without resetting accepted/written offsets or staged geometry.
+#[cfg(feature = "process-per-user")]
+enum Cursors {
+    Legacy(InputCursors),
+    Multiple(HashMap<u64, InputCursors>),
+}
+#[cfg(feature = "process-per-user")]
+impl From<[(u64, InputCursors); 1]> for Cursors {
+    fn from([(writer, cursor)]: [(u64, InputCursors); 1]) -> Self {
+        debug_assert_eq!(writer, 0);
+        Self::Legacy(cursor)
+    }
+}
+#[cfg(feature = "process-per-user")]
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "retain HashMap's borrowed-key API so production callers stay identical"
+)]
+impl Cursors {
+    fn get(&self, writer: &u64) -> Option<&InputCursors> {
+        match self {
+            Self::Legacy(cursor) => (*writer == 0).then_some(cursor),
+            Self::Multiple(cursors) => cursors.get(writer),
+        }
+    }
+    fn get_mut(&mut self, writer: &u64) -> Option<&mut InputCursors> {
+        match self {
+            Self::Legacy(cursor) => (*writer == 0).then_some(cursor),
+            Self::Multiple(cursors) => cursors.get_mut(writer),
+        }
+    }
+    fn contains_key(&self, writer: &u64) -> bool {
+        self.get(writer).is_some()
+    }
+    fn len(&self) -> usize {
+        match self {
+            Self::Legacy(_) => 1,
+            Self::Multiple(cursors) => cursors.len(),
+        }
+    }
+    fn capacity(&self) -> usize {
+        match self {
+            Self::Legacy(_) => 0,
+            Self::Multiple(cursors) => cursors.capacity(),
+        }
+    }
+    fn insert(&mut self, writer: u64, cursor: InputCursors) {
+        if let Self::Legacy(legacy) = self {
+            *self = Self::Multiple(HashMap::from([(0, std::mem::take(legacy))]));
+        }
+        if let Self::Multiple(cursors) = self {
+            cursors.insert(writer, cursor);
+        }
+    }
+}
+
 /// Queue ownership follows byte segments so a partial PTY write credits only
 /// the writers whose bytes were actually written. Identity zero preserves v1.
 pub(super) struct Inputs {
     pub(super) active_writer: Option<u32>,
-    cursors: HashMap<u64, InputCursors>,
+    cursors: Cursors,
     segments: VecDeque<(u64, usize)>,
+    #[cfg(feature = "process-per-user")]
+    segment_limit: usize,
 }
 impl Default for Inputs {
     fn default() -> Self {
@@ -28,7 +91,7 @@ impl Inputs {
     pub(super) fn with_geometry(size: (u16, u16, u16, u16)) -> Self {
         Self {
             active_writer: None,
-            cursors: HashMap::from([(
+            cursors: Cursors::from([(
                 0,
                 InputCursors {
                     requested_size: size,
@@ -37,7 +100,39 @@ impl Inputs {
                 },
             )]),
             segments: VecDeque::new(),
+            #[cfg(feature = "process-per-user")]
+            segment_limit: MAX_FRAME,
         }
+    }
+    #[cfg(feature = "process-per-user")]
+    pub(super) fn for_host(size: (u16, u16, u16, u16)) -> Self {
+        Self {
+            segment_limit: 1024,
+            ..Self::with_geometry(size)
+        }
+    }
+    #[cfg(feature = "process-per-user")]
+    pub(super) fn allocated_bytes(&self) -> usize {
+        let buckets = if self.cursors.capacity() == 0 {
+            0
+        } else {
+            (self.cursors.capacity() + 1).next_power_of_two()
+        };
+        buckets * (std::mem::size_of::<(u64, InputCursors)>() + 1)
+            + if buckets == 0 { 0 } else { 32 }
+            + self.segments.capacity() * std::mem::size_of::<(u64, usize)>()
+    }
+    #[cfg(feature = "process-per-user")]
+    pub(super) fn available(&self, writer: u32, queued: usize) -> usize {
+        if self.segments.len() >= self.segment_limit
+            && self
+                .segments
+                .back()
+                .is_some_and(|(last, _)| *last != u64::from(writer))
+        {
+            return 0;
+        }
+        MAX_FRAME - queued
     }
     pub(super) fn select(&mut self, writer: u32, size: (u16, u16, u16, u16)) -> io::Result<()> {
         if self.cursors.contains_key(&u64::from(writer)) {
@@ -108,6 +203,16 @@ impl Inputs {
             .cursors
             .get_mut(&writer)
             .ok_or_else(super::invalid_input)?;
+        #[cfg(feature = "process-per-user")]
+        if seq.saturating_add(bytes.len() as u64) > state.accepted
+            && self.segments.len() >= self.segment_limit
+            && self
+                .segments
+                .back()
+                .is_some_and(|(last, _)| *last != writer)
+        {
+            return Err(super::invalid_input());
+        }
         let before = queue.len();
         state.accept(seq, bytes, queue)?;
         let added = queue.len() - before;
@@ -139,8 +244,18 @@ impl Inputs {
         }
         // The internal key is outside the full u32 peer-writer namespace.
         // Widening keys leaves the aligned segment layout unchanged.
-        let state = self.cursors.entry(u64::MAX).or_default();
-        let seq = state.accepted;
+        #[cfg(not(feature = "process-per-user"))]
+        let seq = self.cursors.entry(u64::MAX).or_default().accepted;
+        #[cfg(feature = "process-per-user")]
+        let seq = {
+            if !self.cursors.contains_key(&u64::MAX) {
+                self.cursors.insert(u64::MAX, InputCursors::default());
+            }
+            let Some(state) = self.cursors.get(&u64::MAX) else {
+                return false;
+            };
+            state.accepted
+        };
         self.accept_owned(u64::MAX, seq, bytes, queue).is_ok()
     }
     pub(super) fn advance(&mut self, mut bytes: usize) -> io::Result<()> {
@@ -155,6 +270,10 @@ impl Inputs {
                 .written
                 .checked_add(used as u64)
                 .ok_or_else(super::invalid_input)?;
+            #[cfg(feature = "host-diagnostics")]
+            if let Ok(writer) = u32::try_from(*writer) {
+                crate::host_trace::credit(writer, state.written, used);
+            }
             *count -= used;
             bytes -= used;
             if *count == 0 {
@@ -169,6 +288,47 @@ impl Inputs {
 mod tests {
     //! Verify writer ownership at actual partial-write boundaries and retained identity limits.
     use super::*;
+    #[cfg(feature = "host-diagnostics")]
+    #[test]
+    fn diagnostic_credits_follow_partial_writes_across_writers() {
+        let mut inputs = Inputs::default();
+        let mut pending = VecDeque::new();
+        for writer in [1, 2] {
+            inputs.select(writer, (80, 24, 0, 0)).unwrap();
+        }
+        inputs.accept(1, 0, b"one", &mut pending).unwrap();
+        inputs.accept(2, 0, b"xy", &mut pending).unwrap();
+        inputs.accept(1, 3, b"more", &mut pending).unwrap();
+        crate::host_trace::enable(true).unwrap();
+        crate::host_trace::dump(&mut io::sink()).unwrap();
+        crate::host_trace::context([8; 16], 55);
+        inputs.advance(4).unwrap();
+        assert_eq!(crate::host_trace::credited_ranges(), [(1, 3, 3), (2, 1, 1)]);
+        inputs.advance(5).unwrap();
+        assert_eq!(
+            crate::host_trace::credited_ranges(),
+            [(1, 3, 3), (2, 1, 1), (2, 2, 1), (1, 7, 4)]
+        );
+        crate::host_trace::enable(false).unwrap();
+    }
+
+    #[cfg(feature = "process-per-user")]
+    #[test]
+    fn host_legacy_writer_needs_no_heap_table() {
+        let (mut inputs, allocation) =
+            crate::heap_accounting::measure(|| Inputs::for_host((81, 25, 0, 0)));
+        assert_eq!(allocation.bytes, 0, "idle legacy cursor allocated a table");
+        assert_eq!(inputs.get(Some(0)).unwrap().requested_size, (81, 25, 0, 0));
+        let mut queue = VecDeque::new();
+        inputs.accept(0, 0, b"ab", &mut queue).unwrap();
+        inputs.advance(1).unwrap();
+        inputs.select(7, (80, 24, 0, 0)).unwrap();
+        assert_eq!(inputs.get(Some(0)).unwrap().written, 1);
+        assert_eq!(inputs.get(Some(0)).unwrap().accepted, 2);
+        assert_eq!(inputs.get(Some(7)).unwrap().accepted, 0);
+        inputs.advance(1).unwrap();
+        assert_eq!(inputs.get(Some(0)).unwrap().written, 2);
+    }
     #[test]
     fn partial_writes_credit_only_the_owner_and_replay_trims_per_writer() {
         let mut inputs = Inputs::default();
@@ -206,10 +366,126 @@ mod tests {
     }
 }
 
+#[cfg(all(test, feature = "process-per-user"))]
+mod host_budget_tests {
+    //! Segment refusal preserves accepted offsets and resumes when a slot drains.
+    use super::*;
+    #[test]
+    fn alternating_writers_cannot_expand_shared_host_bookkeeping_without_bound() {
+        let mut inputs = Inputs::for_host((80, 24, 0, 0));
+        inputs.select(7, (80, 24, 0, 0)).unwrap();
+        inputs.select(9, (80, 24, 0, 0)).unwrap();
+        let mut queue = VecDeque::new();
+        for index in 0..1024 {
+            let writer = if index % 2 == 0 { 7 } else { 9 };
+            let accepted = inputs.get(Some(writer)).unwrap().accepted;
+            inputs.accept(writer, accepted, b"x", &mut queue).unwrap();
+        }
+        assert_eq!(inputs.available(7, queue.len()), 0);
+        let accepted = inputs.get(Some(7)).unwrap().accepted;
+        assert!(inputs.accept(7, accepted, b"x", &mut queue).is_err());
+        assert_eq!(inputs.get(Some(7)).unwrap().accepted, accepted);
+        assert_eq!(queue.len(), 1024);
+        assert!(inputs.segments.capacity() <= 1024);
+        // A duplicate remains idempotent even at the cap.
+        inputs.accept(7, accepted - 1, b"x", &mut queue).unwrap();
+        inputs.advance(1).unwrap();
+        queue.pop_front();
+        inputs.accept(7, accepted, b"x", &mut queue).unwrap();
+        assert_eq!(inputs.get(Some(7)).unwrap().accepted, accepted + 1);
+    }
+}
+
 #[cfg(test)]
 mod reply_tests {
     //! Replies share the bounded PTY queue while leaving keyboard offsets and geometry intact.
     use super::*;
+    #[cfg(feature = "host-diagnostics")]
+    #[test]
+    fn reply_segments_never_publish_typing_credit() {
+        let mut inputs = Inputs::default();
+        let mut queue = VecDeque::new();
+        inputs.select(u32::MAX, (80, 24, 0, 0)).unwrap();
+        inputs.accept(u32::MAX, 0, b"ab", &mut queue).unwrap();
+        assert!(inputs.reply(false, b"reply", &mut queue));
+        crate::host_trace::enable(true).unwrap();
+        crate::host_trace::dump(&mut io::sink()).unwrap();
+        crate::host_trace::context([9; 16], 56);
+        inputs.advance(3).unwrap();
+        assert_eq!(
+            crate::host_trace::credited_ranges(),
+            [(u32::MAX as usize, 2, 2)]
+        );
+        inputs.advance(4).unwrap();
+        assert_eq!(
+            crate::host_trace::credited_ranges(),
+            [(u32::MAX as usize, 2, 2)]
+        );
+        crate::host_trace::enable(false).unwrap();
+    }
+
+    #[test]
+    fn reply_identity_is_outside_peer_namespace_and_writer_limit() {
+        let mut inputs = Inputs::default();
+        let mut queue = VecDeque::new();
+        assert!(inputs.reply(false, b"r", &mut queue));
+        for writer in 1..512 {
+            inputs.select(writer, (80, 24, 0, 0)).unwrap();
+        }
+        inputs.select(u32::MAX, (120, 40, 0, 0)).unwrap();
+        assert!(inputs.select(512, (80, 24, 0, 0)).is_err());
+        inputs.accept(u32::MAX, 0, b"ab", &mut queue).unwrap();
+        assert!(inputs.reply(false, b"s", &mut queue));
+        assert_eq!(queue.iter().copied().collect::<Vec<_>>(), b"rabs");
+        inputs.advance(2).unwrap();
+        assert_eq!(inputs.get(Some(u32::MAX)).unwrap().written, 1);
+        assert_eq!(inputs.cursors.get(&u64::MAX).unwrap().written, 1);
+        inputs.advance(2).unwrap();
+        assert_eq!(inputs.get(Some(u32::MAX)).unwrap().written, 2);
+        assert_eq!(inputs.cursors.get(&u64::MAX).unwrap().written, 2);
+    }
+
+    #[cfg(feature = "process-per-user")]
+    #[test]
+    fn host_replies_preserve_segment_budget_and_account_for_promoted_storage() {
+        let mut inputs = Inputs::for_host((81, 25, 0, 0));
+        let mut queue = VecDeque::with_capacity(2048);
+        let ((), allocation) = crate::heap_accounting::measure(|| {
+            for seq in 0..512 {
+                inputs.accept(0, seq, b"x", &mut queue).unwrap();
+                assert!(inputs.reply(false, b"r", &mut queue));
+            }
+        });
+        assert_eq!(inputs.segments.len(), 1024);
+        assert!(inputs.segments.capacity() <= 1024);
+        assert_eq!(inputs.available(0, queue.len()), 0);
+        let accounted = i64::try_from(inputs.allocated_bytes()).unwrap();
+        assert!(accounted >= allocation.bytes);
+        assert!(accounted <= allocation.bytes + 32);
+        println!(
+            "reply queue bookkeeping: measured={} accounted={accounted} segments={} key_bytes={} segment_bytes={}",
+            allocation.bytes,
+            inputs.segments.len(),
+            std::mem::size_of::<u64>(),
+            std::mem::size_of::<(u64, usize)>()
+        );
+        // The final reply can coalesce; a new typing segment needs a free slot.
+        assert!(inputs.reply(false, b"s", &mut queue));
+        assert!(inputs.accept(0, 512, b"x", &mut queue).is_err());
+        assert_eq!(inputs.get(Some(0)).unwrap().accepted, 512);
+        inputs.advance(1).unwrap();
+        queue.pop_front();
+        inputs.accept(0, 512, b"x", &mut queue).unwrap();
+        let before = queue.clone();
+        let reply_accepted = inputs.cursors.get(&u64::MAX).unwrap().accepted;
+        assert!(!inputs.reply(false, b"t", &mut queue));
+        assert_eq!(queue, before);
+        assert_eq!(
+            inputs.cursors.get(&u64::MAX).unwrap().accepted,
+            reply_accepted
+        );
+    }
+
     #[test]
     fn replies_preserve_selected_writer_cursor_and_geometry() {
         let mut cursors = Inputs::default();

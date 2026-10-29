@@ -221,17 +221,18 @@ async fn post_listen_chmod_wakes_a_connection_refused_at_bind() {
     .unwrap();
     // Consume creation before listen, guaranteeing the startup race rather
     // than hoping scheduler timing exercises it during real shell launches.
-    let mut ready = watch.readable().await.unwrap();
-    let events = ready
-        .try_io(|fd| fd.get_ref().0.read_events().map_err(std::io::Error::from))
-        .unwrap()
-        .unwrap();
-    assert!(events.iter().any(|event| {
-        event
-            .mask
-            .contains(nix::sys::inotify::AddWatchFlags::IN_CREATE)
-    }));
-    drop(ready);
+    {
+        let mut ready = watch.readable().await.unwrap();
+        let events = ready
+            .try_io(|fd| fd.read_events().map_err(std::io::Error::from))
+            .unwrap()
+            .unwrap();
+        assert!(events.iter().any(|event| {
+            event
+                .mask
+                .contains(nix::sys::inotify::AddWatchFlags::IN_CREATE)
+        }));
+    }
     assert_eq!(
         super::connect(path.clone(), [1; 16])
             .await
@@ -247,7 +248,7 @@ async fn post_listen_chmod_wakes_a_connection_refused_at_bind() {
         .unwrap()
         .unwrap();
     let events = ready
-        .try_io(|fd| fd.get_ref().0.read_events().map_err(std::io::Error::from))
+        .try_io(|fd| fd.read_events().map_err(std::io::Error::from))
         .unwrap()
         .unwrap();
     assert!(events.iter().any(|event| {

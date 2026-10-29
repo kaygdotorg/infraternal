@@ -20,7 +20,7 @@ export const STAGES: ReadonlyArray<{ id: StageId; label: string }> = [
   { id: "detect", label: "Find a way to sign in" },
   { id: "connect", label: "Connect and check the host" },
   { id: "install", label: "Install the infraternal agent" },
-  { id: "enrol", label: "Let the host join" },
+  { id: "enrol", label: "Connect the host to this server" },
   { id: "session", label: "Open a terminal on the host" },
 ];
 
@@ -45,7 +45,7 @@ export function failureLine(failure: FailureDetail | undefined): string {
     case "setup_running": return "Setup is already running on this host";
     case "install":
       if (failure.failed_step === "get-arm64-binary" || failure.failed_step === "get-x86-64-binary") {
-        return `Get the ${failure.failed_step === "get-arm64-binary" ? "arm64" : "x86_64"} binary: ${failure.message}`;
+        return `Download infraternal (${failure.failed_step === "get-arm64-binary" ? "arm64" : "x86_64"}): ${failure.message}`;
       }
       if (failure.already_added) return failure.message;
       if (failure.missing_binary) return `The ${failure.missing_binary.architecture} static infraternal binary is unavailable. Put it at ${failure.missing_binary.path} on the server, then try again.`;
@@ -195,9 +195,46 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
 
 export interface ParsedTarget { user: string | undefined; host: string; port: number | undefined }
 
-/** Parses `user@host[:port]`; undefined for text that cannot name a host. */
+/**
+ * Parses `user@host[:port]`; undefined for text that cannot name a host. A pasted `ssh://user@host:port` address or
+ * `ssh [-p port] [-l user] [user@]host` command is normalised into the same fields. Only those two options are
+ * read: any other option (`-o…`, `-J`, `-i`) or trailing remote command is refused rather than guessed at.
+ */
 export function parseTarget(raw: string): ParsedTarget | undefined {
-  const match = /^(?:([a-z_][a-z0-9_.-]*)@)?([a-z0-9][a-z0-9.-]*|\[[0-9a-f:]+\])(?::(\d{1,5}))?$/i.exec(raw.trim());
+  const text = raw.trim();
+  if (/^ssh:\/\//i.test(text)) return parseDestination(text.slice(6).replace(/\/$/, ""));
+  if (!/^ssh\s/i.test(text)) return parseDestination(text);
+  let port: string | undefined;
+  let login: string | undefined;
+  const rest: string[] = [];
+  const words = text.split(/\s+/).slice(1);
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i]!;
+    const flag = /^-([pl])(.*)$/.exec(word);
+    if (flag) {
+      const value = flag[2] || words[++i];
+      if (value === undefined) return undefined;
+      if (flag[1] === "p") port = value; else login = value;
+    } else if (word.startsWith("-")) return undefined;
+    else rest.push(word);
+  }
+  if (rest.length !== 1) return undefined;
+  const target = parseDestination(rest[0]!);
+  if (!target) return undefined;
+  if (port !== undefined) {
+    if (target.port !== undefined || !/^\d{1,5}$/.test(port)) return undefined;
+    target.port = Number(port);
+    if (target.port < 1 || target.port > 65535) return undefined;
+  }
+  if (login !== undefined) {
+    if (target.user !== undefined || !parseDestination(`${login}@x`)) return undefined;
+    target.user = login;
+  }
+  return target;
+}
+
+function parseDestination(raw: string): ParsedTarget | undefined {
+  const match = /^(?:([a-z_][a-z0-9_.-]*)@)?([a-z0-9][a-z0-9.-]*|\[[0-9a-f:]+\])(?::(\d{1,5}))?$/i.exec(raw);
   if (!match) return undefined;
   const port = match[3] ? Number(match[3]) : undefined;
   if (port !== undefined && (port < 1 || port > 65535)) return undefined;

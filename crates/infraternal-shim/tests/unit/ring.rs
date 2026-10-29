@@ -4,6 +4,41 @@ use super::*;
 mod tests {
     //! Exercises ring invariants against real data and frozen expectations.
     use super::*;
+
+    #[cfg(feature = "process-per-user")]
+    #[test]
+    fn merge_review_pool_refusal_retains_exact_suffix_and_releases_charge() {
+        let pool = crate::terminal_memory::HostBudget::new(8, 0);
+        let mut ring = Ring::new(32);
+        ring.set_budget(pool.clone());
+        ring.append(b"abcd").unwrap();
+        assert_eq!(pool.total_used(), 4);
+        // The pool cannot fund growth for this batch. Retention may shrink,
+        // but offsets must still identify the original stream's exact suffix.
+        ring.append(b"efghijkl").unwrap();
+        assert_eq!((ring.start(), ring.head()), (8, 12));
+        assert!(ring.origin_slices().is_none());
+        assert!(ring.read(7, 1).is_none());
+        assert_eq!(ring.read(8, 99).unwrap(), b"ijkl");
+        let (first, second) = ring.read_slices(9, 99).unwrap();
+        let mut wire = Vec::new();
+        crate::frame::Frame::output_slices_into::<false>(9, first, second, &mut wire).unwrap();
+        assert_eq!(
+            crate::frame::Decoder::default().feed(&wire).unwrap(),
+            [crate::frame::Frame::Output(9, b"jkl".to_vec())]
+        );
+        assert_eq!(pool.total_used(), 4);
+        let mut sibling = Ring::new(4);
+        sibling.set_budget(pool.clone());
+        sibling.append(b"peer").unwrap();
+        assert_eq!(pool.total_used(), 8);
+        drop(ring);
+        assert_eq!(pool.total_used(), 4);
+        assert_eq!(sibling.read(0, 99).unwrap(), b"peer");
+        drop(sibling);
+        assert_eq!(pool.total_used(), 0);
+    }
+
     #[test]
     fn wrap_and_exact_offsets() {
         let mut ring = Ring::new(4);
@@ -17,6 +52,55 @@ mod tests {
         ring.append(b"0123456789").unwrap();
         assert_eq!(ring.read(12, 99), Some(b"6789".to_vec()));
     }
+
+    #[cfg(feature = "process-per-user")]
+    #[test]
+    fn borrowed_ranges_obey_absolute_offsets_across_physical_wrap() {
+        let mut ring = Ring::new(8);
+        for byte in 0..43 {
+            ring.append(&[byte]).unwrap();
+        }
+        assert!(
+            !ring.bytes.as_slices().1.is_empty(),
+            "exercise a physical wrap"
+        );
+        for seq in 34..=44 {
+            for limit in 0..=12 {
+                let expected = (35..=43).contains(&seq).then(|| {
+                    (seq..43)
+                        .take(limit)
+                        .map(|n| u8::try_from(n).unwrap())
+                        .collect::<Vec<_>>()
+                });
+                let actual = ring
+                    .read_slices(seq, limit)
+                    .map(|(first, second)| [first, second].concat());
+                assert_eq!(actual, expected, "seq={seq} limit={limit}");
+            }
+        }
+    }
+
+    #[cfg(feature = "process-per-user")]
+    #[test]
+    fn shared_history_reservation_never_rounds_past_its_share() {
+        let mut ring = Ring::new(67_108);
+        for _ in 0..40 {
+            ring.append(&[b'x'; 4096]).unwrap();
+            assert!(ring.allocated_bytes() <= 67_108);
+        }
+        assert_eq!(ring.head() - ring.start(), 67_108);
+        assert_eq!(ring.read(ring.start(), 4), Some(b"xxxx".to_vec()));
+    }
+
+    #[cfg(feature = "process-per-user")]
+    #[test]
+    fn empty_append_keeps_lazy_storage_unallocated() {
+        let mut ring = Ring::new(65536);
+        ring.append(&[]).unwrap();
+        assert_eq!(ring.allocated_bytes(), 0);
+        assert_eq!((ring.start(), ring.head()), (0, 0));
+    }
+
     #[test]
     fn merge_review_head_and_retained_bytes_match_after_every_append() {
         for capacity in [0, 1, 3, 8, 31, 4097] {

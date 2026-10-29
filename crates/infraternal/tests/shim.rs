@@ -333,8 +333,9 @@ fn ring_wrap_snapshot_repaints_real_vim() {
     let mut peer = session.attach(0);
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../infraternal-shim/tests/fixtures/capture.py");
+    // The post-editor fence requires the fixture prompt on every login shell.
     let command = format!(
-        "printf '\\033c'; seq 1 4000; vim -u NONE -i NONE -n '{}'\n",
+        "PS1='shim-'test'% '; printf '\\033c'; seq 1 4000; vim -u NONE -i NONE -n '{}'\n",
         fixture.display()
     );
     send(&mut peer, Frame::Input(command.into_bytes()));

@@ -1,0 +1,633 @@
+<!-- Design and reproducible experiments for a non-default per-person session host [D268, #205]. -->
+# One process per person login: research prototype
+
+Status: D270 selects this design for hardening. The prototype remains opt-in;
+D13's default process per terminal is unchanged. D268 Q20 and D270 authorize
+measurement and hardening, without changing D7/D13/D128/D240/D247. No new
+terminal engine or foundational dependency was selected.
+The r6 work fixes inherited child-exit notification loss. The r7 reactor bounds
+the shared short-output cohort and can combine an ordered input Ack with ready
+output. Mixed-soak latency and whole-host upgrade survival have separate
+admission gates. Passing focused tests and the cold-history footprint does not
+authorize adoption. Current results and failures are recorded on issue #205.
+
+D296 replaces the five-millisecond merge threshold with a matched shipping
+comparison: pooled native echo p99 must be no higher than the shipping terminal
+on the same venue and workload, with three runs of each in a round. The original
+five-millisecond outcome remains in historical and raw reports as a long-term
+aim; it does not decide admission. Report each run, retained sample counts,
+contention exclusions, exact image identities and the pooled comparison.
+Whole-host upgrade survival and production login integration remain separate
+requirements; a native socket fixture cannot certify either.
+
+Recompute a round from its three explicit shipping/prototype cell pairs:
+
+```sh
+python3 scripts/bench/ppu_d296_report.py "$receipts" \
+  --pair d0:p0 --pair d1:p1 --pair d2:p2
+```
+
+Use the actual cell names under the external receipt directory. Each cell has
+`samples.jsonl` and a sibling `<cell>s/segments.jsonl` directory. The reporter
+reuses the lock/scope audit, rejects diagnostic, incomplete or mismatched cells,
+and emits each run's p50/p99, exclusions, identities and the pooled comparison.
+It regenerates derived `comparison-report.json` files, without changing raw
+samples or their legacy outcomes. A shorter round does not recertify the
+historical two-hour aging result.
+
+## Boundary and identity
+
+`cargo build -p infraternal --features process-per-user` adds the hidden
+`__shim --host-sessions N` option, with N from 1 through 1,000. The same binary
+hosts the batch; normal `__shim` calls still create one process per session.
+Launch must occur in a single-threaded process. The research entry checks
+`/proc/self/task` before changing signal masks, binding sockets or creating
+PTYs: an unblocked sibling thread could consume process-directed SIGCHLD
+instead of the reactor's signalfd. Reliability tests launch the real host through
+a standalone feature-gated example, outside the threaded test harness.
+After blocking SIGCHLD and before creating any PTY, startup replaces its entire
+disposition with the default action and no flags. An inherited ignore or
+SA_NOCLDWAIT handler would otherwise let the kernel discard child exit status.
+Real-process regressions cover both dispositions, including a custom handler
+installed inside the fixture after exec.
+
+The PPU-R1 regression is retained as
+`review_ignored_child_notifications_do_not_lose_terminal_exit` in
+`crates/infraternal-shim/tests/ppu_reliability.rs`.
+`inherited_child_dispositions_are_reset_before_sessions_start` additionally
+requires successful startup, the default disposition, ordered exit status 7 and
+continued sibling input for both ignored and custom auto-reaping dispositions.
+Run the standalone real-PTY fixture with
+`cargo test -p infraternal-shim --features process-per-user --test ppu_reliability -- --test-threads=1`.
+The custom handler is installed after exec because exec clears caught handlers;
+installing it only in an exec launcher would leave that case untested.
+
+Every session retains its own mode-0600 socket under the mode-0700 runtime
+sessions directory. The production decoder, SO_PEERCRED check, wire layouts,
+capabilities, input cursors, writer handling, and PTY launcher are reused.
+The existing `shim_frame_decode` fuzz target covers the unchanged parser.
+SO_PEERCRED proves a local UID, not a person identity. People sharing an account
+already share that account's Unix authority; the control plane must still bind
+session IDs and revocation to the person, and never treat the UID as that binding.
+
+The experiment accepts only the host's effective UID. It has no login
+authority and does not alter the infraternal agent's launcher. An adoption
+must key hosts by **(person ID, Unix account, host)**, never Unix UID alone.
+Alice and Bob using the same account require two hosts and two real login
+units (D240). Each host runs in the login's `PAMName=` systemd unit (D247),
+with the host account's groups, limits and environment. Non-systemd hosts
+must use the already-decided host `su`/`login` path. Merely dropping UID in
+this measurement is not a PAM-login integration test.
+
+A rootful integration also needs an explicit peer-authentication seam:
+`infraternal-agent/src/sessions.rs::connect_with` currently accepts a shim peer
+only if its UID is root or the infraternal agent's own UID. A host inside a
+non-root account's PAM unit would be refused by a rootful infraternal agent.
+Do not solve this by accepting arbitrary UIDs or trusting Hello. Bind the
+expected host UID to authenticated person/account launch metadata, validate
+that UID against SO_PEERCRED, and keep the root-owned discovery index separate
+from the person's private socket/state directory. This is an adoption
+integration requirement; frozen frame layouts need no change. Rootless
+same-UID connections remain covered by the prototype.
+
+### Mesh SSH prerequisites (#221)
+
+This branch supplies an optional PTY runtime inside an **already authorized**
+person login. Its session bounds and child-exit handling do not supply the
+production identity or access controller. The dependency boundary is:
+
+| Production requirement | Supplied here | Integration still required |
+| --- | --- | --- |
+| Login authority and spawner | Same-UID research entry and existing PTY launcher. | Connect authenticated person/account metadata to the real login lifetime from #172, validate the expected peer UID, and hold current Login access checks through registration. |
+| Target-user file handling | None. | A file provider running as the selected account, with ownership and access-removal checks. |
+| Session ownership and retirement | Bounded session IDs, terminal state, child reaping and local socket lifetime within the optional host. | Person ownership on every SSH attachment and reattachment; retire shells, attachments and file handles when applicable access is removed. |
+| All-shell enforcement | Caller must provide an already authorized login. | One current Login access evaluator across app terminals, mesh SSH shell/exec and files; no separate access store for this prototype. |
+
+The #221 transport interfaces and the #172 login implementation live on their
+own branches. This branch neither installs their production adapters nor
+enables mesh SSH. Whole-host restart handoff remains a separate D128 acceptance
+requirement. Passing native echo admission does not certify these integrations.
+
+The feature lives in the existing shim crate as a research implementation,
+not a new shipping node component. Adoption must expose launch/lifecycle
+through the SSH plugin and its shared action definitions (D198/D202), not
+add a core role. No work starts when this feature is compiled out.
+
+## State and idle behavior
+
+One thread waits on indexed readiness for listeners, PTY masters and peer sockets. A session gets
+one bounded PTY read budget per reactor round. Ready input is dispatched before
+readable-byte classification. Across the host, incoming input and promoted
+short replies share at most 64 4-KiB read budgets per round, with a 500-µs
+active-output deadline checked before each attempt; unread output
+retains a rotating continuation. A separate bulk turn reads at most 16 KiB across
+four nonblocking attempts, then feeds the parser and ring once. Ready input/control
+requests precede that queue; a global one-bulk-session quantum rotates through
+sessions so 1,000 flooding PTYs cannot monopolize one round.
+Attached PTYs with at most 1 KiB waiting are promoted ahead of that queue using
+a non-consuming readiness hint. Detached producers avoid that classification
+syscall. Read-attempt deduplication prevents a promoted session from spending
+another budget through an older bulk entry. Slot-indexed membership uses one
+byte for queued/cancelled bulk work and retention-timer membership, plus a
+four-byte read generation per session.
+The output deadline starts after ready input dispatch and includes byte-hint
+classification. It is an elapsed-work bound checked between operations, not a
+preemption guarantee for a single native call. It adds no timer or idle wakeup.
+Only a granted short-read attempt cancels its older bulk entry; denied
+promotions retain their rotating turn. One host-wide counter and deadline track
+the short allowance, with no per-session allocation or timer. Generation wrap clears old
+read marks and restores the allowance. A promoted entry can be revived in place;
+cancelled entries are discarded when popped, without scanning
+the whole bulk backlog on every turn. PTY and viewer backpressure keep bulk
+producers from allocating an unbounded transmit queue.
+
+A session's first two ready descriptors stay inline in its readiness row;
+additional descriptors use a bounded spill list whose capacity survives the
+next turn.
+Rows are indexed by immutable session slots. A current-generation active list
+visits only touched rows, and generation wrap invalidates every old row before
+reuse. Descriptor registrations keep the fd only in their generation key and
+use a checked 16-bit session index under the 1,000-session admission ceiling.
+Registration updates and peer readiness borrow arrays sized by the existing
+32-peer admission cap. Healthy peer sockets flush immediately:
+each housekeeping visit shares a 32-KiB/four-write budget across pending, state
+and output frames. Partial frames retain their byte cursor and ordering; logical
+replay work keeps writable interest after an inline frame has drained. Large
+completed repaint buffers release storage before an indefinite idle wait.
+A fresh input Ack for a subscribed data viewer at the current output head can
+remain logical while the reactor prepares a bounded read. Available output
+shares the existing ordered Ack/output batch. Fresh input gets one deduplicated
+local next-turn continuation, using a spare bit in the existing slot membership
+byte. The host collects kernel readiness and dispatches ready input before
+servicing it. A due continuation finishes the Ack even when more input arrives,
+so a silent program cannot renew its deferral indefinitely. The host queue is
+bounded by admitted slots and its capacity is recorded as `ack_fallback_bytes`.
+Neither a fresh held logical Ack nor one waiting for a queued PTY read requests
+writable polling. Actual pending wire bytes and non-coalescible replies still
+do. The queued read always finishes the Ack, including an empty attempt. Input-only viewers, state fences,
+pending replay/snapshot/deferred work and ended sessions retain prompt replies.
+The final settle after a read sends the Ack even when that read is empty.
+Retained output is borrowed across physical ring wrap and encoded directly
+into that peer's reusable wire buffer. A partial frame keeps stable bytes while
+the ring changes; no borrowed ring pointer survives the housekeeping visit.
+Ready rows and work lists reuse bounded host-wide capacity between turns.
+Ordinary PTY-plus-viewer readiness requires no transient allocation, and the
+indexed rows plus active indices reserve at most 64 requested bytes per slot.
+This host-wide ownership is included in the independent PSS slope, separately
+from the per-session terminal ledger.
+Blocked/drained PTYs are omitted to prevent level-triggered HUP spin. Live
+idle sessions have no timers: the readiness wait sleeps indefinitely until socket, PTY or
+child-exit readiness. Exited sessions alone use the existing ten-minute
+retention ceiling. Only coalesced child-exit readiness reconciles all owned children. Other events
+visit ready sessions; live child status is polled only on exit readiness or a
+drained PTY. One descriptor index carries generation-checked registration keys,
+preventing a reused descriptor from inheriting a closed peer's readiness. Retired exit timers are discarded before
+waiting, so live idle sessions do not inherit stale deadlines.
+Timer membership is independent of which path first observes child exit:
+SIGCHLD can establish the deadline before housekeeping. Repeated readiness
+must register it exactly once, including when a viewer retains session ownership.
+
+VT is initially absent. A complete origin prefix up to 4 KiB and at most 32
+ordered resize events are retained, with at most 65,536 destination cells across
+those events. Reaching any bound or requesting a snapshot allocates the selected
+production engine at the original geometry, then replays each byte range and
+resize in order. Small quiet geometry changes need no native screen pools;
+large viewports can materialize earlier to avoid accumulating reflow work in a
+later snapshot. Materialization releases
+both transcript buffers. Their capacities are charged to the session budget;
+numeric receipts expose resize-event capacity as `geometry_bytes`.
+Snapshot still retains unfinished parser
+sequences. State never becomes an evicting raw-byte approximation. VT remains
+allocated once materialized; dropping it would require exact state export.
+
+The cell-work cap limits deferred reflows; it does not eliminate their CPU cost.
+A single native operation, a coalesced control-frame batch and snapshot
+serialization still run on the reactor thread. This cap alone cannot certify
+the mixed-soak echo target. Admission and diagnostic receipts remain distinct
+on issue #205.
+
+The prototype divides **64 MiB of output-ring retention** and **64 MiB of VT
+scrollback retention** over the initial batch. Each session gets the smaller
+of its requested ring capacity and the host share; VT history is capped at
+17 MiB per session. Screen pages, parser carry, writer queues, peers, snapshots,
+allocator overhead and shell/kernel memory are additional. These history
+shares are retention limits, not a total host RSS budget. At 1,000 sessions each history share is 67,108 bytes. This is a
+retention trade-off, not a free process-sharing win; a smaller ring triggers
+more snapshots and provides less replay history. Native VT memory of all
+sessions together is bounded by one host budget: each session owns its first
+256 KiB (an idle 80x24 terminal measures 60,574 B), and bytes above that come
+from one shared pool of 64 MiB of history, an eighth for page headers and one
+8 MiB screen reservation. At 1,000 sessions the ceiling is 330 MiB. With
+the pool empty, history growth recycles the session's own oldest page, which
+keeps state exact; other native requests are refused as at a full
+per-session reservation. A production adoption still needs admission limits
+against the machine budget, including rings, peers, shell and kernel PTY memory.
+
+The opt-in native page quantum is 80 columns by 32 rows, with one preheated
+pool item. Larger geometries still use the existing capacity/reflow algorithm.
+This removes the large minimum pool that otherwise multiplies small retention
+shares. Rings never round a non-power-of-two host share beyond its byte limit.
+Small shares reserve their full bounded capacity after the first 4 KiB of
+output; this settles residency during activity rather than touching more ring
+pages gradually over hours. Larger rings grow lazily within the same limit.
+Empty appends allocate nothing, and the last viewer's removal releases vacant
+peer slots. First attachment reserves only the next peer record. After binding,
+the socket owns its full pathname; the session releases its separate startup
+directory copy.
+
+## Ownership diagnosis and idle bookkeeping
+
+`__shim --host-sessions N --host-accounting PATH` optionally creates a new
+mode-0600 numeric receipt file. An explicit SIGUSR2 request records each
+session's native ordinary, mapped, resident and encoded bytes, carry/prefix,
+ring, input/writer and peer capacities. Mapping residency uses `mincore`
+without faulting in payload pages. No terminal content is recorded. Existing
+files are refused before PTY creation; a write failure disables only the
+receipt. Without the option there is no file, profiling timer or signal work.
+Session rows separate the structure, socket/config paths and lazy geometry
+capacities. The first live row also includes a `reactor` object with shared
+vector capacities, registration-map usable capacity and pair layout. It adds
+neither a synthetic session row nor an independent memory estimate. Hash-table
+bucket/control bytes and allocator slack require separate allocation/PSS
+measurements; usable entry capacity alone is not an allocation-byte count.
+
+The `idle_session_ownership_ledger` ignored unit probe runs at 1, 10, 100 and
+1,000 sessions on the perf VM. It separately counts the session vector,
+constructor paths/cursors, lazy prompt/raw ring, retired viewers, and indexed
+descriptor registrations. Its test allocator forwards unchanged allocation
+layouts. Requested owned bytes, allocator resident slack, fixed executable
+pages, shell processes and kernel PTYs are distinct costs; total host PSS
+divided by session count cannot identify the incremental idle-session floor.
+The byte ledger and paired before/after PSS receipts are on issue #205.
+
+## Numeric stage diagnostics
+
+`host-diagnostics` is a separate, non-default build feature requiring
+`process-per-user`. With a `--host-accounting` file, SIGUSR1 flushes a bounded
+65,536-record numeric stage buffer; SIGUSR2 retains the ownership receipt.
+The collector records monotonic times, session IDs, descriptors,
+input/output byte offsets and sizes. It records no terminal bytes. File errors
+stop profiling; live sessions continue. No collector is compiled into ordinary
+or admission images, and the diagnostic build's memory/scheduling costs must
+be reported separately.
+Each flush marks its own synchronous I/O span so a recorder stall remains
+visible in the diagnosis. The driver validates the private format header
+before sending SIGUSR1 and limits a diagnostic profile to 900 seconds. This permits an aged capture
+after the admission warmup while remaining inside one short perf-lock hold.
+The multi-role tail collector streams numeric events to disk instead of
+retaining the longer scheduler capture in the workload interpreter.
+
+Input credit is recorded inside the existing per-writer ledger, including
+partial writes across ownership segments. Output records distinguish PTY read,
+VT completion, frame construction and socket writes. Full encoded queue size
+and write cursor certify a complete frame rather than a nearby partial write.
+A post-write timestamp can be recorded after the reader has already run; reader
+delay therefore has explicit lower/upper bounds, never a negative duration.
+
+`scripts/bench/ppu_stages.py` runs the original mixed workload with these extra
+receipts and private off-CPU tracing. `ppu_stage_report.py` matches probes by
+writer/input range, PTY output range and socket identity, refusing missing or
+dropped records. Traced profiles are diagnostic only: no stage percentile or
+reader-delay estimate can be subtracted from the uninstrumented soak's budget.
+Release profiles correlate the same slow probe with scheduler transitions of
+the host, its shell and the reader. They expose runnable delays across this
+path, rather than assigning the entire written-to-read span to VT parsing.
+Scheduler-priority, CPU grouping and independent-session comparisons remain
+diagnostics: none supplied an admitted fix or changed runtime scheduling.
+
+## Compact cold history experiment
+
+`compact-history` is a separate build feature that requires `process-per-user`;
+both remain disabled by default. Cold pages store bounded UTF-8 blocks and
+run-length raw cell attributes. Reversible codepoint deltas between
+physical rows and XOR against canonical row offsets expose repetition to the
+existing codec while preserving arbitrary row permutations. Codepoint deltas
+are used only when every delta is a valid Unicode scalar. A bounded outer
+compression pass uses spare caller scratch and never nests on decode. Nontext union bits, wide cells, graphemes,
+styles, links, protection and opaque native metadata remain exact. Invalid
+text falls back to the existing codec. Allocation-free decoding rejects bad
+dimensions, run counts, UTF-8, truncation and trailing bytes; native tests
+include a coverage-guided malformed-input target.
+The outer envelope is eight bytes and accepts at most 32 KiB of plain codec
+data. Larger pages can still use the plain bounded format. Sparse native pool
+mappings request `MADV_NOHUGEPAGE` before publication: touching one live page
+must not promote an otherwise cold reservation into a huge resident page.
+This hint changes neither allocation addresses nor their charged reservation;
+failure leaves correctness intact. Ordinary heap allocations are unaffected.
+
+Encoded copies have a separate charged history share. An opportunistic
+encoding refusal keeps the original page and its exact-state certificate.
+Virtual page reservations remain for infallible restore; their ownership and
+resident backing are reported separately. One candidate is compacted after
+each nonempty write. The direct-terminal resident probe explicitly requests
+full compaction, whereas the reactor currently has no idle continuation.
+Snapshot/search/reflow can restore cold pages; a full-compacted measurement
+does not prove the same retained footprint after those operations.
+
+The fidelity fixture verifies every numbered 72-column line in 10,000-line
+history, full replay, reconstructed search/selection spans and reflow. Another
+fixture checks Unicode, styles and links before and after future input. The
+paired resident increment excludes the raw wire ring. Its comparison with
+the published reference, allocator/header breakdown and limitations are on
+issue #205; no reference-memory parity is assumed.
+These direct-terminal fixtures use a 17-MiB history share for each terminal.
+They do not use the shared host's divided 64-MiB pool; that smaller per-session
+share must be disclosed when interpreting real-host retention and viewer costs.
+The standalone `scripts/bench/ppu-fuzz-build --compact-history` option enables
+the codec in the existing bounded real-terminal parser fuzz harness. Build it
+through the build slot into job scratch, then run its campaign on the perf VM.
+
+`scripts/bench/ppu_idle.py` independently measures host PSS at 1/10/100/1,000
+sessions and separates fixed image residency from the session slope. It records
+native ownership, zero-work idle windows and a separately fenced raw-kernel PTY
+probe. Requested bytes and allocator resident pages are distinct measurements.
+`scripts/bench/ppu_trace.py` records only numeric scheduler transitions and
+syscall names/timestamps in a private trace instance, flags overflow, and labels
+its runs diagnostic. Tracing changes the workload's timing and cannot be used
+for admission. `ppu_delivery.py` correlates successful sends to the fixture's
+own sockets with those same probes. It decodes decimal event fields and the
+syscall printer's hexadecimal fields separately, discards raw arguments, and
+refuses a run with no correlated writes. Its conservative reader-delay bounds
+cannot be subtracted from admission latency.
+`ppu_stages.py` observes the registered unfinished probe waiter and ends its
+output range at the same marker bytes as the timed echo. A following delimiter
+is a different stream position and may arrive in a later frame. The reporter
+requires finite active-clock bounds whose receipt span cannot exceed the original
+RTT; it refuses legacy newline-based captures. Host-wide budget start/denial
+records use no peer identity and distinguish elapsed expiry from count exhaustion.
+The denial reason is authoritative; the start receipt follows the runtime clock
+sample and cannot certify a precise deadline age if descheduled between them.
+These diagnostic records do not change the normal admission reader or thresholds.
+`ppu_raw_echo.py` compares the same synthetic shell markers over
+direct masters; its different reader prevents treating that result as a hard
+latency lower bound. The unchanged two-hour `ppu-run --phase soak` remains the
+admission workload. Before/after tables and raw receipts live on #205.
+
+The current-dev control uses `scripts/bench/ppu_compare.py
+--independent-sessions` with a separately built shipping image. The adapter
+launches one ordinary shim per session and preserves the original timed echo,
+shell commands, mix, seed and cadence. Resource rows sum shim processes and
+exclude shells; the wakeup counter observes only the first baseline shim, so
+its count is not comparable with the shared host's total. Aggregate resource
+sampling and lock metadata are outside timed cohorts but still add observer
+work. Use equal durations and warmups; do not treat a short control as a
+completed admission run.
+
+Both comparison modes append lock inode/holder, owner file, load and scope CPU
+snapshots after each native echo cohort. Captured process ancestry identifies
+the fixture's control connection. `ppu_compare_report.py` reports each completed
+lock segment separately, retains native outcomes and records every exclusion.
+Missing ownership, observed foreign scope CPU activity and ambiguous windows
+cannot become clean timing rows. Snapshots do not continuously certify that
+arbitrary work outside the flock was absent. A baseline miss establishes a
+measured comparison, not permission to change D41 or to subtract percentiles.
+An own queued coordinator can consume small amounts of CPU outside the active
+fixture's ancestor scope. Reporters accept an explicit `--observer-scope` only
+after its PID, saved birth, script and unit have been verified separately.
+Every declaration is retained in the report and its CPU counters remain in raw
+receipts as observer overhead. Unknown scope activity is still excluded; a
+waiting own coordinator must not be silently labelled another job.
+
+`ppu_tail.py` combines corrected host stages with scheduler events for the
+host, reader and all 100 probed shells. Syscalls, kernel wait stacks, fault and
+reclaim events cover the host, reader and two selected shells. Per-task fault,
+run-queue and timer-slack counters accompany completed cohorts. A private
+collector process discards syscall arguments and fault addresses; it retains
+kernel symbols, not user stack unwinds. `ppu_tail_report.py` intersects exact
+probe windows, retains unknown scheduler coverage and treats scheduled-running
+as an upper bound that can include interrupts or virtual CPU steal. PID setup,
+stage flushing and tracing affect scheduling; these are diagnostic captures,
+never admission results or a substitute for the uninstrumented control.
+Read events retain numeric descriptor, requested count and signed result, but
+discard buffer addresses and contents. Pair those syscall bounds with the
+session's next PTY-read stage before deciding whether a kernel wait occurred
+on a productive read or a speculative retry. Nonblocking PTY reads can still
+wait for kernel terminal work; a byte budget cannot preempt such a syscall.
+Diagnostic send/receipt pairs also retain the main reader thread's accounted
+CPU clock, sampled inside the original RTT. This excludes the counter thread
+and waits, while including diagnostic observer work and other event-loop tasks
+inside that probe. Reports refuse missing halves, reversed clocks or CPU spans
+longer than the RTT. Older captures without these clocks have no measured
+reader-CPU value; overlapping probe intervals must never be added together.
+
+`ppu_aged_tail.py` keeps one original mixed-workload invocation running for
+6,920 active seconds, retaining its readers, tasks, RNG and accumulated sample
+history. Full kernel tracing starts only after 6,020 seconds and stays within
+the existing 900-second limit. Wrap the whole fixture with `ppu_segment.py`;
+the full capture still fits one short hold. No intermediate survivor census,
+task restart or resize resets the observer or terminal state. Marker observation,
+the boundary fence, stage flushing and tracing still make this diagnostic rather
+than unchanged admission. The native stage ring remains bounded while aging. Preserve its raw prefix,
+including any preconditioning overflow, and use `preconditioning.json`'s fenced
+byte offset with `stage_window` to derive a separate capture-only log. Never
+truncate the native process's open file or ignore overflow inside the capture.
+
+`ppu_baseline_tail.py` observes the shipping control without requesting a
+native stage header or sending profiling signals to it. Independent launch
+records bind each shim to its own shell; the same marker matcher and batch
+ownership audit are reused. `ppu_baseline_tail_report.py` reports overlapping
+shim/shell/reader scheduler intervals and kernel off-CPU spans. It explicitly
+omits native VT/frame timestamps, which the shipping image cannot supply.
+Diagnostic observer costs differ between these captures and must stay visible
+when comparing their locations with the uninstrumented admission distributions.
+
+The native `ppu_wire_probe` example is a diagnostic observer. It opens additional
+viewer sockets with a distinct durable writer, finishes setup before timing,
+and checks output offsets and shell-generated markers. Those extra connections
+change the workload, so it cannot replace the original soak's admission result.
+Its `watch` mode receives the original probes without sending extra input or
+switching the active writer. Monotonic receive timestamps correlate the same
+markers across processes; result serialization waits until the original probes
+and survivor census finish. Additional fan-out remains diagnostic overhead.
+
+The long soak runner now retains the same fixture across short locked segments.
+An external coordinator confirms that its private cgroup is fully frozen,
+releases the perf lock, then reacquires it before thawing. A shared numeric clock
+subtracts only the certified frozen interval from fixture deadlines and probes.
+The receipt preserves wall times and every freeze/thaw; the active duration is
+not uninterrupted wall time. No workload runs while another job owns the lock.
+Resume transitions remain visible when interpreting latency. A failed
+coordinator thaws and retires only its own named scope, never another job's.
+
+`scripts/bench/ppu_viewers.py` measures additional native viewers with 50
+filled terminals. Each viewer has one distinct writer/socket on every
+terminal, drains continuously and must observe every typed marker. Receipts
+separate attach/repaint fences, idle CPU ticks, resident increments and echo
+delivery. This is host-side socket cost: it excludes browser, shell and kernel
+memory. The fixture validates all fill output but discloses bounded retained
+history rather than claiming that each terminal still holds every fill line.
+
+## Crash containment and revocation
+
+Each session's reactor work is inside `catch_unwind`. A Rust panic or session
+I/O failure removes that session, closes its peers/master/listener and retires
+its owned shell. The partially mutated session is never reused. Other sessions
+continue under ordinary child retirement. The prototype synchronously reaps
+its own killed shell; an uninterruptible child exit can stall that reactor.
+Adoption needs a nonblocking child reaper. A panic hook must never include PTY output or input in diagnostics.
+
+Shared terminals own every native allocation through a stable boxed allocator.
+The hard per-terminal reservation is **8 MiB plus the history share plus an
+eighth of it** for the one header page each screen-pool item is charged. The
+8 MiB covers both screens, parser state, transient reflow pages, intrusive
+ownership headers and mapping prefixes, so every share the host hands out
+(up to 17 MiB) fits. Screen-pool items are separate allocations with a reserve
+of two free items; pages released by erased history, a reset or a smaller
+geometry return to the allocator at once. Growth asks the allocator whether
+another item fits and otherwise recycles its oldest history page, so neither
+the per-terminal reservation nor the host budget makes ordinary output refuse
+an allocation. Ordinary native
+payload/metadata allocations share a **256 KiB** ceiling; explicitly tagged
+page-pool allocations use the remaining reservation. Size/alignment alone
+cannot identify a page request. Native page backing is zero-filled anonymous
+memory, and its complete mapping is charged before allocation.
+With `compact-history`, the reservation ceiling additionally permits twice the
+configured history share for cold-page virtual mappings and exact restore.
+Encoded bytes still have their separate charged history share. This larger
+virtual reservation is bounded and is not resident-memory savings by itself.
+
+OSC, DCS, APC, PM and SOS strings forward at most **4 KiB** to the native
+parser. Excess payload is discarded until the true terminator. The limiter
+retains syntax across fragmentation, UTF-8/C1 controls and an ST split between
+ESC and backslash; early cancellation would render the discarded suffix as
+text when a viewer continued a snapshot. Allocation refusal makes snapshots
+explicitly approximate. A native resize error releases the terminal's owned
+allocation list without traversing a potentially damaged native graph. The
+default per-session implementation keeps its existing native behavior.
+
+Shared-session pending input remains capped at **1 MiB**, with at most
+**1,024 ownership segments**; a refused new segment cannot advance an input
+cursor. Aggregate decoder, trailing and queued-transmit buffers across one
+session's peers are capped at **4 MiB**. Completed oversized transmit buffers
+release their capacity. The reactor accounts native ownership, lazy prefix,
+parser carry, ring capacity, input capacity/cursors/segments and peers against
+**16 MiB plus the configured retention shares** per session. This accounting
+bounds in-process ownership; it does not include the person's shell processes,
+kernel PTYs or allocator-wide resident fragmentation.
+
+This does not isolate the native VT engine: a segmentation fault, abort,
+allocator OOM or shared-process bug affects every session in that person's
+login. A per-session-process fallback retains today's isolation but gives up
+some shared memory. A monitored VT worker is another option, adding IPC and
+state copies; no engine/process fallback was selected. The independent reviewer
+must audit the native boundary and fallback criteria before adoption.
+
+Revocation must target the **person login**, not every process with an account's
+UID. The control plane first refuses new opens and cuts all of that person's
+streams (including direct paths/leases), then stops only the person's login
+unit/cgroup and retires its runtime sockets. Another person's login using the
+same UID stays intact. The measurement host has no new authenticated management
+channel or revocation integration; these stay with the existing authority.
+
+## Restart and upgrade survival
+
+Infraternal agent restarts need no PTY transfer: the session host stays alive
+outside the restarting daemon's termination group, and the new infraternal
+agent reconnects to the existing per-session sockets and durable input cursors.
+Like today's shims, old hosts can retain their image until their sessions end;
+new logins use the new image. Never stop the old host simply because a newer
+infraternal agent arrives.
+
+Replacing the **session host itself** requires an all-or-nothing handoff:
+
+1. Authenticate a private inherited socketpair. Freeze the old reactor at a
+   completed syscall boundary, including accepted input and output offsets.
+2. Transfer every PTY master and listener, child identity/lifetime descriptor,
+   accepted input/ownership segments, writer cursors/geometries, ring bytes,
+   exit/retention state, and terminal/parser state with a versioned manifest.
+   Large descriptor lists use numbered batches of at most 64; Linux's maximum
+   is 253 descriptors per message ([unix(7)](https://man7.org/linux/man-pages/man7/unix.7.html)).
+3. Validate the complete manifest, unique session IDs, byte/resource bounds,
+   ownership, descriptor types and exact state import in the replacement.
+   A partial batch never authorizes dropping any original descriptor.
+4. Acknowledge preparation for the whole host, transfer reactor authority once,
+   then acknowledge commit before the old host releases originals. On refusal,
+   timeout or pre-commit replacement crash, the old host resumes all sessions.
+   Only one reactor may read/write any PTY at a time.
+5. Reconnect viewers with their existing output/input cursors. Define child-exit
+   status ownership explicitly: a replacement is not the shells' waitpid parent.
+
+The isolated [carry checkpoint candidate](vt-carry/README.md) preserves the
+selected Rust parser algorithm's private logical state, including partial UTF-8,
+grouped parameters and bounded control strings. It has no application
+dependency. Its component tests and measurements cannot certify exact native
+terminal state or a host transaction. For same-process exec, the kernel would
+preserve shell-parent ownership and queued PTY/socket bytes; the replacement
+still needs every userspace queue and exact terminal state before that boundary.
+Arbitrary process loss additionally needs a surviving descriptor owner.
+
+`send_masters`/`receive_masters` implement and test descriptor-lifetime transfer
+with CLOEXEC through private datagrams, across multiple batches. They do not
+implement the transaction or native state import. **FD transfer alone is not
+upgrade survival.** The bounded repaint is not exact native state export (D110),
+and retained raw bytes cannot reconstruct state after ring eviction or historic
+resizes. Until exact import and exit-status handoff are available, keep old
+hosts running; do not hot-replace them. A process crash still lacks an external
+PTY guardian and cannot be represented as restart-safe. A guardian per person
+would preserve descriptors but add one process/login and require independent
+state/accepted-input ownership; this trade-off needs owner review.
+
+## Reproducing measurements
+
+Build on infraternal-dev into a job-specific cache target using the production
+static-PIE recipe, then copy just the binary and `measure.py` through NetBird SSH
+to `/root/infraternal-bench/process-per-user/`. Never build on the perf VM.
+For each N in 1/10/100/1,000 and mode in baseline/host, run:
+
+```sh
+flock -w 3600 /var/lock/perf-bench.lock \
+  python3 measure.py --binary ./infraternal --mode host --sessions 100 \
+  --state ./s --samples 1000
+```
+
+Use a short unique absolute state path. The harness records binary digest,
+machine/kernel/CPU count and load with every sample. It separately reports
+host PSS/RSS/anonymous memory, shell PSS, thread count, and per-session host
+values. Kernel PTY cost is additional; prior #205 measurements put it near
+27.9 KiB/session. Idle sampling records CPU ticks and context switches over
+five seconds. Light output emits one line/session/second for five rounds.
+All sessions receive ten seconds of sustained background output at N=1/10/100
+and in the pooled N=1,000 case. The default N=1,000 baseline instead emits a
+finite 32-KiB burst per session; it is explicitly marked non-sustained, not a
+worst-case equivalent. `--sustained-baseline` enables a separate memory-contained
+capacity run. Each run uses a unique private scope capped at 5 GiB with no swap
+and whole-group OOM termination, leaving room on the 7-GiB target. The scope's
+outer interrupt timeout bounds each flood below two minutes. Output-byte
+counters accompany CPU samples so lower CPU is not confused with throughput. Echo timing recognizes
+a marker generated by the shell's printf, not the input's terminal echo.
+Hello/snapshot/input-to-output latency is local shim overhead, not browser
+input-to-photon or a full direct/relayed network measurement.
+
+Memory and latency profiles run in separate fresh fixtures: snapshot/echo
+sampling materializes VT and must not contaminate idle/light memory rows.
+`test_measure.py` tests markers inside large output frames and across frame
+boundaries; the detector searches the whole frame before retaining its suffix.
+Snapshot timings negotiate approximation and count flagged replies; errors
+never count as snapshots. Shell and output-generator PSS are additional rows.
+
+Raw receipts, measured numbers, trade-offs and final gates live on
+[issue #205](https://git.kayg.org/kayg/infraternal/issues/205), outside this
+checkout (D262). Run the copy/locked matrix wrapper with the opt-in static image,
+a job evidence directory, and a distinct default-feature static image:
+
+```sh
+bash research/process-per-user/run-matrix.sh \
+  "$HOME/.cache/codex-scratch/process-per-user/evidence/infraternal-prototype" \
+  "$HOME/.cache/codex-scratch/process-per-user/evidence" \
+  "$HOME/.cache/codex-scratch/process-per-user/evidence/infraternal-baseline"
+```
+
+## Adoption checklist
+
+- Preserve D240 person/account isolation and prove the real PAM unit path.
+- Test real infraternal agent restart and all launch/discovery paths, including
+  multiple session identities sharing one Hello PID.
+- Test Rust panic containment and document native faults/OOM honestly.
+- Prove revocation cuts only the intended person login and all its routes.
+- Complete exact whole-host state/FD transaction and child status ownership
+  before claiming host replacement survives upgrades.
+- Measure idle/light/sustained-flood PSS, aggregate peer/input bounds and typing
+  p99 at 1/10/100/1,000 on the perf VM; compare like retention as an ablation.
+- Audit unsafe descriptor ownership, malformed ancillary data, failed startup,
+  peer replacement/deferred inputs, ring eviction, resize and final exit.
+- Keep ASLR and production defaults; independent review precedes adoption.

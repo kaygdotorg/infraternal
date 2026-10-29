@@ -19,8 +19,17 @@ remap_flags+=(
     "--remap-path-prefix=$cargo_root=/cargo"
     "--remap-path-prefix=$target_root=/build"
 )
-for registry in "$cargo_root"/registry/src/*; do
-    [[ ! -d "$registry" ]] || remap_flags+=("--remap-path-prefix=$registry=/cargo")
+# Glob order follows the caller's locale, and locale collation ignores
+# punctuation, so two hosts could order registry roots differently and produce
+# different cache keys. Bytewise order keeps the flag list identical everywhere.
+registries=()
+while IFS= read -r -d '' registry; do registries+=("$registry"); done < <(
+    for registry in "$cargo_root"/registry/src/*; do
+        [[ ! -d "$registry" ]] || printf '%s\0' "$registry"
+    done | LC_ALL=C sort -z
+)
+for registry in "${registries[@]}"; do
+    remap_flags+=("--remap-path-prefix=$registry=/cargo")
 done
 remap_flags+=("--remap-path-prefix=$rustup_root=/rustup")
 

@@ -280,3 +280,76 @@ fn approximate_repaint_keeps_complete_pending_syntax_or_omits_it_whole() {
         "oversized control string is omitted as one unit"
     );
 }
+
+// A shared host cannot let either the native parser or its carry observer
+// retain an adversarial string past the per-session control-string budget.
+#[cfg(feature = "process-per-user")]
+#[test]
+fn control_strings_cannot_grow_session_carry_without_bound() {
+    for introducer in *b"]P_^X" {
+        let mut terminal = Terminal::with_history_budget(80, 24, 65536).unwrap();
+        terminal.process(&[0x1b, introducer]);
+        for _ in 0..256 {
+            terminal.process(&[b'x'; 8192]);
+        }
+        assert!(
+            terminal.pending.capacity() <= 4096,
+            "string {introducer}: carry allocated {} bytes",
+            terminal.pending.capacity()
+        );
+        // A small Rust carry alone does not establish native isolation: the
+        // selected engine owns its own control-string and metadata storage.
+        let (ordinary, _, _, _, carry) = terminal.ownership().unwrap();
+        assert!(
+            ordinary <= 256 * 1024,
+            "native metadata exceeded its session share"
+        );
+        assert!(
+            carry <= 4096,
+            "accounted parser carry exceeded its session share"
+        );
+        assert!(
+            !terminal.memory().2,
+            "string {introducer}: streaming discard reached native allocation refusal"
+        );
+        terminal.process(b"\x1b\\after\x1b[31mred");
+        assert!(
+            terminal.pending.is_empty(),
+            "discard state failed to terminate"
+        );
+        let mut expected = Terminal::with_history_budget(80, 24, 65536).unwrap();
+        expected.process(b"after\x1b[31mred");
+        assert_eq!(
+            terminal.research_state_difference(&expected),
+            0,
+            "string {introducer}: discarded string escaped into display or lost following CSI"
+        );
+    }
+}
+
+#[cfg(feature = "process-per-user")]
+#[test]
+fn snapshot_during_discard_preserves_the_unfinished_string_boundary() {
+    for mid in [b"".as_slice(), b"\x1b".as_slice()] {
+        let mut original = Terminal::with_history_budget(80, 24, 65536).unwrap();
+        original.process(b"\x1bcVISIBLE\x1b]0;");
+        original.process(&[b'x'; 8192]);
+        original.process(mid);
+        let mut restored = Terminal::with_history_budget(80, 24, 65536).unwrap();
+        restored.process(&original.snapshot().unwrap());
+        // A snapshot in the middle of ST retains the dropped ESC too. The
+        // following live wire contains only the as-yet-unreceived suffix.
+        let suffix = if mid.is_empty() {
+            b"tail-that-must-stay-in-the-string\x1b\\AFTER".as_slice()
+        } else {
+            b"\\AFTER".as_slice()
+        };
+        original.process(suffix);
+        restored.process(suffix);
+        assert_eq!(
+            original.research_state_difference(&restored),
+            0,
+            "split ST: {mid:?}"
+        );
+    }
+}

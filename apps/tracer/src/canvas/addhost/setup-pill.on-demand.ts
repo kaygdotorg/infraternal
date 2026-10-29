@@ -45,6 +45,11 @@ export interface SetupPillOptions {
   from?: Element;
   /** How long the tick stays before the system icon returns (ms). Default 600; a mockup can lengthen it to photograph the tick. */
   tickHold?: number;
+  /**
+   * The host's own removal (the one the palette and machine details use). When setup has run out of attempts the
+   * popover offers it, because it is the only way to start over; absent when removal is unavailable.
+   */
+  remove?: () => { label: string; run(anchor: HTMLElement): void } | undefined;
   /** The server confirmed the host is joined and the final setup stage completed. */
   onComplete?(): void;
 }
@@ -173,6 +178,8 @@ export function bindSetupPill(options: SetupPillOptions): SetupPill {
       if (failedIndex(view) < 0) return false;
       if (tip) { tip.close(false); tip = undefined; return true; }
       const guide = setupGuide(host, view);
+      // Asked when the popover opens: the removal's label arrives from the server after the window does.
+      const removal = view.retryAvailable === false ? options.remove?.() : undefined;
       tip = mountConfirmTip(card.pill, {
         label: `Setup of ${host}`,
         title: guide.title,
@@ -181,6 +188,8 @@ export function bindSetupPill(options: SetupPillOptions): SetupPill {
         confirmDisabled: view.retryAvailable === false || !source.retry,
         cancelLabel: "Dismiss",
         confirmIcon: RETRY_ICON,
+        named: !!removal,
+        ...(removal ? { secondary: { label: removal.label, onSelect: () => { tip = undefined; removal.run(card.pill); } } } : {}),
         boundary: card.root,
         onConfirm: () => { tip = undefined; if (view.retryAvailable !== false) source.retry?.(hostId); },
         onCancel: () => { tip = undefined; },
