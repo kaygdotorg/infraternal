@@ -1005,23 +1005,13 @@ fn server_data_directory(
     infraternal_status::server_data_directory(&roots()).unwrap_or_else(|| PathBuf::from("./data"))
 }
 
-/// A present but unreadable service directory needs the same command with elevated access.
+/// Probe only the known socket path: connecting needs traversal, never directory listing.
 #[cfg(feature = "plugin-server")]
 fn setup_token_dir_needs_sudo(data_dir: &Path) -> bool {
-    let metadata = match std::fs::metadata(data_dir) {
-        Ok(metadata) => metadata,
-        Err(error) => return error.kind() == io::ErrorKind::PermissionDenied,
-    };
-    if !metadata.is_dir() {
-        return false;
-    }
-    match std::fs::read_dir(data_dir) {
-        Err(error) => error.kind() == io::ErrorKind::PermissionDenied,
-        Ok(mut entries) => matches!(
-            entries.next(),
-            Some(Err(error)) if error.kind() == io::ErrorKind::PermissionDenied
-        ),
-    }
+    matches!(
+        std::fs::metadata(data_dir.join("setup-token.sock")),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied
+    )
 }
 
 /// Keep the non-JSON permission diagnostic to one actionable line.
