@@ -9,6 +9,7 @@ pub(crate) use account_events::AccountSubscription;
 mod binding;
 #[path = "../bootstrap_authorization.rs"]
 mod bootstrap_authorization;
+mod committed;
 pub(crate) mod cookies;
 mod crypto;
 mod devices;

@@ -108,20 +108,29 @@ impl Auth {
     /// Revoke the current session immediately.
     pub async fn logout(&self, token: &str) -> Result<()> {
         let session_hash = hash(token);
+        let revocations = self.revocations.clone();
+        // Pool waiters remain cancellable. Only work that already owns a connection
+        // is detached, so the pool also bounds unfinished logout tasks.
+        let mut connection = self.pool.acquire().await?;
         // RETURNING binds the affected account to the committed deletion in one statement.
         // A separate lookup could race recovery or another logout and lose its scope.
         // Drain through statement completion before acknowledging/publishing: a single-row
         // RETURNING read can hide a deferred commit refusal. The unique hash bounds this
         // result to one row, so draining cannot collect an unbounded account list.
-        let mut users: Vec<String> =
-            sqlx::query_scalar("DELETE FROM sessions WHERE token_hash=? RETURNING user_id")
-                .bind(&session_hash)
-                .fetch_all(&self.pool)
-                .await?;
-        if let Some(user) = users.pop() {
-            self.revocations.publish(&user, Some(session_hash));
-        }
-        Ok(())
+        super::committed::run(Box::pin(async move {
+            // Keep connection ownership through publication. Returning it to the pool
+            // also fences the notification, even after the requesting future is gone.
+            let mut users: Vec<String> =
+                sqlx::query_scalar("DELETE FROM sessions WHERE token_hash=? RETURNING user_id")
+                    .bind(&session_hash)
+                    .fetch_all(&mut *connection)
+                    .await?;
+            if let Some(user) = users.pop() {
+                revocations.publish(&user, Some(session_hash));
+            }
+            Ok(())
+        }))
+        .await
     }
 
     /// Wake live sockets on committed revocation without periodic idle database polling.
