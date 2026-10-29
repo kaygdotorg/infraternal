@@ -258,6 +258,7 @@ rust_verify_fast() {
     rust_run_gate "CLI plugin compile-out" rust_check_cli_plugin_compile_out
     rust_run_gate "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
     rust_run_gate "SSH runtime test helper" cargo build --locked -p infraternal-plugin-ssh --example recovery-helper
+    rust_run_gate "real-binary fixture paths" python3 scripts/test-agent-fixture.py
     rust_run_gate "test" cargo test --workspace --locked
     rust_run_gate "SSH inode reuse fixture" scripts/test-ssh-inode-reuse
     # The shared host (#205) patches the native engine and its allocator;
