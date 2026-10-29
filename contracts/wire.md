@@ -222,7 +222,18 @@ frames are binary, because they carry each keystroke and each output chunk.
   `Hello.head_seq`. Replayed raw Output ends at that cursor; if an Output frame
   crosses it, the agent splits the frame and sends an ordered
   `terminal.replay_complete` Event before forwarding later live output. Its
-  JSON is `{"type":"terminal.replay_complete","session_id":"UUID","out_seq":"u64 decimal"}`.
+  JSON is `{"type":"terminal.replay_complete","session_id":"UUID","out_seq":"u64 decimal","cols":80,"rows":24}`.
+  `cols` and `rows` are additive optional u16 fields (1..65535, at most
+  200,000 cells), present together on new producers. They describe the shim's
+  screen geometry captured for this replay **before** the attaching viewer's
+  own Resize is applied, not that viewer's requested size. A later attach
+  captures the current geometry, including changes made by another viewer.
+  Primed links refresh their capture when the delivered cursor starts replay,
+  rather than reusing the size from their earlier priming handshake. Captured
+  geometry stays fixed until that replay's completion, including credit pauses.
+  Older producers omit both fields; clients then retain their existing
+  silence/repaint behavior. Unknown JSON fields are ignored by older clients
+  under D63. No binary frame layout or capability bit changes.
   Snapshot bytes are always silent. If a repaint advances beyond the current
   fence, the fence advances to that Snapshot's `out_seq` and the Event follows
   the repaint; otherwise the original fence remains until replay reaches it.
