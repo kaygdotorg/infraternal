@@ -58,10 +58,9 @@ def run(binary, exit_after_detach=False):
                 final_input = b"printf 'FINAL_%s\\n' OUTPUT; exit 7\n"
                 for body in [
                     b'\x02' + struct.pack('<Q', 0),
-                    b'\x10' + struct.pack('<Q', client.entered) + final_input,
+                    b'\x10' + final_input,
                 ]:
                     peer.sendall(struct.pack('<I', len(body)) + body)
-                client.entered += len(final_input)
         else:
             os.kill(int(children[0]), signal.SIGKILL)
         if not retained_owner:
@@ -89,7 +88,10 @@ def run(binary, exit_after_detach=False):
         assert terminal_exit['status'] == (7 if exit_after_detach else -signal.SIGKILL)
         assert terminal_exit['final_seq'] == client.out
         if exit_after_detach:
-            assert b'FINAL_OUTPUT' in received, 'final output was not delivered'
+            assert b'FINAL_OUTPUT' in received, (
+                f'final output was not delivered: cursor={client.out}, '
+                f'terminal_exit={terminal_exit!r}, tail={received[-256:]!r}'
+            )
         deadline = time.monotonic() + 1
         while path.exists():
             assert time.monotonic() < deadline, 'shim did not retire after ordered delivery'
