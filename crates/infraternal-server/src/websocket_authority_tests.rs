@@ -1,4 +1,4 @@
-//! Keeps an authorized transaction runnable while its periodic authority read waits for the same pool (#189).
+//! Checks bounded socket authority, fractional expiry and progress for transactions holding the pool (#189, #240).
 
 use super::*;
 use crate::auth::tests::socket_clock::FrozenSocketTime;
@@ -661,4 +661,41 @@ mod cap_review_r3 {
         drop(held);
         drop(clock);
     }
+}
+
+/// A frozen runtime makes this a clock-conversion assertion, independent of
+/// scheduler latency: fractional wall seconds must not extend the stored end.
+#[tokio::test(start_paused = true)]
+async fn authority_deadline_preserves_subsecond_session_expiry() {
+    let _clock = FrozenSocketTime::new().await;
+    let (pool, user, _) = database().await;
+    let auth = Auth::new(
+        pool.clone(),
+        "auth.example.test",
+        "https://auth.example.test",
+    )
+    .await
+    .unwrap();
+    let token = "subsecond-authority-fixture";
+    let end = unix_seconds().unwrap() + 3600;
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,?,'subsecond',?,?,1)")
+        .bind(crate::auth::hash(token)).bind(&user).bind(end).bind(end - 3600)
+        .execute(&pool).await.unwrap();
+    let (socket, _peer) = tokio::net::UnixStream::pair().unwrap();
+    let state = WebSocketState::new(auth, pool, EmbeddedAgent::from_test_socket(socket))
+        .await
+        .unwrap();
+    let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let started = tokio::time::Instant::now();
+    let deadline = authority_deadline(&state, &user, token, false)
+        .await
+        .unwrap();
+    let stored_remaining = Duration::from_secs(u64::try_from(end).unwrap())
+        .checked_sub(wall)
+        .unwrap();
+    assert!(
+        deadline <= started + stored_remaining,
+        "socket authority rounded its stored expiry up by {:?}",
+        deadline.saturating_duration_since(started + stored_remaining)
+    );
 }

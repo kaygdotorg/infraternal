@@ -28,6 +28,8 @@ export interface MeshLayout {
   nodes: NodeModel[];
   /** The graph's content size. */
   size: { w: number; h: number };
+  /** How far the graph is drawn right/down of the pins' own coordinates (pins may be negative); a pin is `node - origin`. */
+  origin: { x: number; y: number };
   /** Frames the far zoom draws in place of the cards; each lists the hosts it holds. */
   clusters: Cluster[];
 }

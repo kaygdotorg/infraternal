@@ -145,8 +145,8 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,389,232 bytes |
-  | `aarch64-unknown-linux-musl` | 19,561,656 bytes |
+  | `x86_64-unknown-linux-musl` | 21,389,424 bytes |
+  | `aarch64-unknown-linux-musl` | 19,562,168 bytes |
 
   Release jobs (not `scripts/verify fast`, which every job runs) also run
   `scripts/test-static-reproducibility.py`. It builds both targets again from a detached checkout with separate
@@ -177,9 +177,38 @@ Reviews and fixes run at the same time as the next lane's build.
   +1,408 bytes versus release 9. Both exact caps ratchet to these measured
   values; the receipts are on #24.
 
-  Release 9.3's socket authority read cap (#240) measures 21,389,296 /
+  The release 9.4 merge back into dev (#24, #240, #254) brings in the
+  busy-store authority close handling and the Mesh drag and overlap fixes.
+  Fresh builds of the merged source with the same pinned static recipe, on
+  the build VM 8by64-compute02, measure:
+
+  | Source | x86_64 bytes | aarch64 bytes |
+  | --- | ---: | ---: |
+  | Dev before (`81962ab09`) | 21,389,232 | 19,561,656 |
+  | Release 9.4 caps as recorded (`db4add238`) | 21,389,424 | 19,562,296 |
+  | Merged | 21,389,424 | 19,562,168 |
+  | Delta versus dev | +192 | +512 |
+
+  The x86_64 image matches release 9.4 byte for byte; the aarch64 image is
+  128 bytes below it. Both exact caps are set to the merged measurements,
+  with no allowance (D243). The growth over dev is release 9.4's reviewed
+  close-path code, within the 16 KiB band. Receipts are on #24.
+
+  Busy-store wake classification and fractional session deadlines (#240)
+  measure 21,389,040 / 19,561,912 bytes with the pinned static recipe:
+  -256 bytes against the reproduced release-9.3 x86_64 baseline, and +256
+  bytes against its recorded aarch64 ceiling. Both ceilings track these
+  exact artifacts with no allowance (D243). The proof path retains the
+  busy/refused distinction and shares the fractional deadline conversion;
+  dependencies, features, query limits and retry budgets are unchanged.
+
+  Release 9.4's close-path change (5280c44d4, #240) then measured 21,389,424 /
+  19,562,296 bytes, +384 bytes per target; it raised both caps to those
+  artifacts within D243's 16 KiB band.
+
+  Release 9.3's socket authority read cap (#240) measured 21,389,296 /
   19,561,656 bytes with the same pinned static recipe: +2,048 / +2,256 bytes
-  versus release 9.2. Both exact caps ratchet to these measurements with no
+  versus release 9.2. Both exact caps were set to those measurements with no
   allowance (D243); the release artifacts and receipts are on #24. The
   rustls-webpki 0.103.16 lockfile update measured 21,387,248 / 19,559,400
   bytes for release 9.2, +1,024 / +1,408 versus release 9.

@@ -15,7 +15,9 @@ import { PALETTE_KEYS } from "../../../../../packages/ui/src/shortcuts";
 import type { CoreScreen, PaletteEntry } from "../../core-screen";
 import { createCanvas, type CanvasController } from "../create";
 import { boxOf, type Metrics } from "../layout/geometry";
+import { reconcile } from "../model/reconcile";
 import { MemoryCanvasStore } from "../model/store";
+import type { CanvasDocument } from "../model/schema";
 import type { ViewId } from "../model/types";
 import { el } from "../dom";
 import { CONTAINERS, LOG_BACKLOG, buildViews, logLine, type Role } from "./data";
@@ -262,6 +264,11 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     setCamera: (cx_: number, cy: number, z: number) => { cx.nav.applyCanvasLock(false); camera.set({ cx: cx_, cy, z }); },
     flyCamera: (cx_: number, cy: number, z: number) => { cx.nav.applyCanvasLock(false); camera.flyTo(() => ({ cx: cx_, cy, z })); },
     views: () => [...cx.views.values()].map((c) => ({ id: c.view.id, name: c.view.name, team: Boolean(c.view.team), x: c.x, y: c.y, w: boxOf(c.view, state.metrics).w, h: boxOf(c.view, state.metrics).h, windows: [...c.wins.keys()] })),
+    /** Lets the Mesh spec exercise graph pinning when its view id is outside the Mesh source. */
+    setGraphViewId: (from: string, to: string) => {
+      const c = cx.views.get(from as ViewId);
+      if (c?.view.layout === "graph") c.view.id = to as ViewId;
+    },
     /** The focused window's id (specs check where a flow handed the keys). */
     activeWindow: (): string | undefined => state.activeWin?.model.id,
     /** A new session on the host in its own window (the inventory creates it, as a split does). */
@@ -298,6 +305,16 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       source: () => mesh,
       /** The saved canvas document (what a reload would restore). */
       document: () => cx.adapters.store.load(),
+      /** Feeds a remote Mesh view through reconciliation while retaining the other mock views. */
+      applyRemoteLayout: async (document: unknown): Promise<void> => {
+        const remote = document as CanvasDocument;
+        const kept = new Set([...cx.views.keys()].filter((id) => id !== "mesh"));
+        await reconcile(cx, () => ({
+          document: { ...remote, views: remote.views.filter((view) => view.id === "mesh") },
+          protectedIds: new Set(),
+          protectedViews: kept,
+        }), () => undefined, () => true);
+      },
     },
     sessions: () => ({ status: inventory.status(), hosts: inventory.hosts().map((host) => ({ host, sessions: inventory.list(host).map((s) => ({ id: s.id, name: s.name, state: s.state, activity: s.activity ?? null, pinned: s.pinned })) })) }),
     runSessionScene: (n: number) => sessionScenes.run(n),

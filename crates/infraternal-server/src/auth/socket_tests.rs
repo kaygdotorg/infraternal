@@ -924,3 +924,7 @@ mod canvas;
 
 #[path = "socket_tests/review_authority_cap.rs"]
 mod review_authority_cap;
+
+#[cfg(feature = "remote")]
+#[path = "socket_tests/review_busy_wake.rs"]
+mod review_busy_wake;
