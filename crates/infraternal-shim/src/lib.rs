@@ -1,6 +1,6 @@
 //! Long-lived local PTY sessions with frozen v1 resume semantics [13][17].
 //!
-//! Unsafe code is confined to the audited PTY/process and Ghostty FFI boundaries; data modules
+//! Unsafe code is confined to the audited PTY/process, readiness and Ghostty FFI boundaries; data modules
 //! forbid it. Each boundary documents descriptor, pointer and fork invariants.
 #![deny(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
@@ -27,6 +27,8 @@ pub mod ended;
 pub mod frame;
 mod locale;
 mod pty;
+#[cfg(feature = "async-fd")]
+pub mod readiness;
 pub mod ring;
 pub mod startup;
 
