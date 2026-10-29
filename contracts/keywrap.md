@@ -88,7 +88,7 @@ Argon2 work at two simultaneous calls; exhausted capacity fails closed.
 | setup-check | `{token}` | `204` if current and no owner exists; `401` for wrong/expired tokens; `404` after owner creation |
 | setup-start | legacy `{token,name}` or `{token,username,display_name?}` | `{ceremony,user_id,options,recovery_words}` |
 | registration-finish | `{ceremony,proof,passkey_wrap,recovery_wrap}` | secure session cookie |
-| status | `{}` | `{setup_required: bool}` only |
+| status | `{}` | `{setup_required: bool, setup_token_command: string}` only |
 | login-start | `{}` (legacy `{user_id}` supported) | `{ceremony,options}` |
 | login-finish | `{ceremony,proof,device}` | restricted secure session cookie and `pending_transaction` |
 | session | `{}` | `{user_id,username,display_name,device,fresh}` and refreshed cookie |
@@ -142,7 +142,11 @@ missing or blank display names default to the username. New requests use
 Legacy `{token,name}` remains accepted by treating `name` as both labels, subject
 to the username rule. WebAuthn registration uses the username for `user.name`
 and the display name for `user.displayName`. The authenticated session returns
-both labels; public status remains exactly `{setup_required}`.
+both labels; public status returns only `setup_required` and the non-secret
+`setup_token_command` [16][202], never account labels or a capability. The command
+comes from the registered action: `infraternal server setup-token`, prefixed with
+`sudo` when the server runs as an installed system service (#252). Display and
+copy use the same string; no data path or token is included.
 
 Migration 0006 preserves existing display labels. A unique legacy label that
 already matches the username rule is retained in lowercase; an invalid or
