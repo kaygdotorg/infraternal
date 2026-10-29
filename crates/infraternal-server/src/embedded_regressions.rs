@@ -226,17 +226,57 @@ fn native_input_retention_leaves_terminal_probes_to_the_route() {
     assert_eq!(attachments.len(), 1);
 }
 
+#[tokio::test]
+async fn replay_complete_notices_preserve_optional_geometry_through_server() {
+    let (mut link, _peer) = connection();
+    let (tx, mut rx) = mpsc::channel(2);
+    let mut attachments = HashMap::from([(1, attachment(tx))]);
+    let mut routes = HashMap::from([(2, 1)]);
+    for size in [None, Some((120, 40))] {
+        let mut notice = serde_json::json!({
+            "type": "terminal.replay_complete",
+            "session_id": uuid::Uuid::from_bytes([1; 16]),
+            "out_seq": "18446744073709551615",
+        });
+        if let Some((cols, rows)) = size {
+            notice["cols"] = serde_json::json!(cols);
+            notice["rows"] = serde_json::json!(rows);
+        }
+        let json = Bytes::from(serde_json::to_vec(&notice).unwrap());
+        assert!(
+            process_incoming(
+                Incoming::Event {
+                    stream_id: 2,
+                    event_json: json.clone()
+                },
+                &mut link,
+                &mut attachments,
+                &mut routes,
+                &mut HashMap::new(),
+            )
+            .await
+        );
+        let Some(TerminalOutput::Event { event_json }) = rx.recv().await else {
+            panic!("missing replay notice");
+        };
+        assert_eq!(event_json, json);
+    }
+}
+
 #[test]
-fn replay_complete_notice_is_accepted_by_embedded_server() {
-    let session_id = "00000000-0000-0000-0000-000000000001";
-    let notice = serde_json::json!({
-        "type": "terminal.replay_complete",
-        "session_id": session_id,
-        "out_seq": "18446744073709551615",
-    });
-    let parsed = serde_json::from_value::<TerminalNotice>(notice)
-        .expect("the embedded server must accept replay completion metadata");
-    assert_eq!(parsed.session_id(), session_id);
+fn replay_geometry_rejects_values_outside_u16() {
+    for value in [
+        serde_json::json!(-1),
+        serde_json::json!(65536),
+        serde_json::json!("80"),
+    ] {
+        let notice = serde_json::json!({
+            "type": "terminal.replay_complete",
+            "session_id": uuid::Uuid::from_bytes([1; 16]),
+            "out_seq": "0", "cols": value, "rows": 24,
+        });
+        assert!(serde_json::from_value::<TerminalNotice>(notice).is_err());
+    }
 }
 
 #[tokio::test]

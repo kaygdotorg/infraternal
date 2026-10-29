@@ -2096,6 +2096,10 @@ enum TerminalNotice {
         session_id: String,
         #[serde(deserialize_with = "deserialize_replay_cursor")]
         out_seq: u64,
+        #[serde(default)]
+        cols: Option<u16>,
+        #[serde(default)]
+        rows: Option<u16>,
     },
     #[serde(rename = "terminal.query_replies_unavailable")]
     QueryRepliesUnavailable { session_id: String },
@@ -2128,8 +2132,10 @@ impl TerminalNotice {
             Self::ReplayComplete {
                 session_id,
                 out_seq,
+                cols,
+                rows,
             } => {
-                let _ = out_seq;
+                let _ = (out_seq, cols, rows);
                 session_id
             }
             Self::QueryRepliesUnavailable { session_id } => session_id,
