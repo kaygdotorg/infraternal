@@ -331,15 +331,22 @@ fn real_shell_reconnect_resize_and_delivered_exit() {
 fn ring_wrap_snapshot_repaints_real_vim() {
     let mut session = Session::new(1024, false);
     let mut peer = session.attach(0);
+    let mut original_seq = 0;
+    // Session::new waits for the shim, not for the login shell; wait for
+    // shell-generated output so the first command cannot race shell startup.
+    send(
+        &mut peer,
+        Frame::Input(b"printf 'shell-ready-%s\\n' check\n".to_vec()),
+    );
+    until(&mut peer, &mut original_seq, b"shell-ready-check");
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../infraternal-shim/tests/fixtures/capture.py");
     let command = format!(
-        "printf '\\033c'; seq 1 4000; vim -u NONE -i NONE -n '{}'\n",
+        "printf '\\033c'; seq 1 4000; vim -u NONE -i NONE -n '{}'; printf 'vim-exited-%s\\n' check\n",
         fixture.display()
     );
     send(&mut peer, Frame::Input(command.into_bytes()));
     let mut expected = vt100::Parser::new(60, 200, 10000);
-    let mut original_seq = 0;
     expected.process(&until(
         &mut peer,
         &mut original_seq,
@@ -417,7 +424,9 @@ fn ring_wrap_snapshot_repaints_real_vim() {
         }
     }
     send(&mut peer, Frame::Input(b"\x1b:q!\r".to_vec()));
-    until(&mut peer, &mut seq, b"shim-test");
+    // The command's trailing marker is emitted by the shell after Vim exits,
+    // avoiding both shell-specific prompt text and a second-input race.
+    until(&mut peer, &mut seq, b"vim-exited-check");
     send(
         &mut peer,
         Frame::Input(b"printf 'AFTER_%s\\n' VIM\n".to_vec()),
