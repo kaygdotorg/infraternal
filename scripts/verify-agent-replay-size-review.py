@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Independent #257 geometry checks after daemon adoption and real ring-wrap Snapshot replay."""
 from pathlib import Path
+import socket
 import struct
 import sys
 
 sys.dont_write_bytecode = True
-from agent_fixture import Binary, cleanup, event_object, fixture_state
+from agent_fixture import Binary, cleanup, event_object, exact, fixture_state
 
 
 def run(binary):
@@ -25,9 +26,23 @@ def run(binary):
         client.until(b'SIZED_OK')
         client.wait_ack()
 
+        def current_size():
+            # Observe without Attach: this cannot select a writer or alter its staged geometry.
+            path = state / 'sessions' / f'{client.id.hex}.sock'
+            with socket.socket(socket.AF_UNIX) as peer:
+                peer.settimeout(20)
+                peer.connect(str(path))
+                hello = exact(peer, struct.unpack('<I', exact(peer, 4))[0])
+            assert hello[0] == 1 and hello[11:27] == client.id.bytes
+            return struct.unpack('<HH', hello[31:35])
+
         def adopt(snapshot):
+            before_restart = current_size()
             client.kill()
             client.start()
+            actual_size = current_size()
+            print(f'pre-attach shim geometry: snapshot={snapshot}, before_restart={before_restart}, after_restart={actual_size}', flush=True)
+            assert actual_size == (120, 40), actual_size
             cursor = 0 if snapshot else client.out
             client.out = cursor
             client.credit_pending = client.credit_available = 0
