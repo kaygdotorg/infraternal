@@ -464,13 +464,16 @@ pub(super) struct Ingress {
     devices: u32,
 }
 
-/// Keep the unauthenticated response boundary explicit: exactly one setup flag.
+/// Keep the unauthenticated response limited to first-run state and its local command.
 async fn public_status(auth: &Auth, value: Value) -> super::Result<Value> {
     let _: Empty = body(value)?;
     let required: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM users WHERE owner=1)")
         .fetch_one(&auth.pool)
         .await?;
-    Ok(json!({"setup_required":required}))
+    Ok(json!({
+        "setup_required":required,
+        "setup_token_command":auth.setup_token_command(),
+    }))
 }
 
 #[cfg(test)]

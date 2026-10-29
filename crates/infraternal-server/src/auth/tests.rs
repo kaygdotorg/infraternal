@@ -2212,15 +2212,29 @@ async fn authenticated_prf_metadata_preserves_legacy_envelopes() {
     );
 }
 
-/// Public status reveals exactly one flag; HTTP resident login establishes the resolved session.
+/// Public status reveals the first-run state and scope-correct local command.
 #[tokio::test]
 async fn public_status_and_discoverable_http_login() {
     let _guard = SERIAL.lock().await;
     let (auth, _) = empty().await;
-    let app = router(auth);
+    let app = router(auth.clone());
     let (status, headers, body) = http_post_json(&app, "status", json!({})).await;
     assert_eq!(status, axum::http::StatusCode::OK);
-    assert_eq!(body, json!({"setup_required":true}));
+    assert_eq!(
+        body,
+        json!({
+            "setup_required":true,
+            "setup_token_command":"infraternal server setup-token",
+        })
+    );
+    let system_app = router(auth.with_system_service(true));
+    assert_eq!(
+        http_post_json(&system_app, "status", json!({})).await.2,
+        json!({
+            "setup_required":true,
+            "setup_token_command":"sudo infraternal server setup-token",
+        })
+    );
     assert_eq!(headers[axum::http::header::CACHE_CONTROL], "no-store");
     assert_eq!(
         http_post_json(&app, "status", json!({"extra":true}))
@@ -2232,7 +2246,10 @@ async fn public_status_and_discoverable_http_login() {
     let app = router(f.auth.clone());
     assert_eq!(
         http_post_json(&app, "status", json!({})).await.2,
-        json!({"setup_required":false})
+        json!({
+            "setup_required":false,
+            "setup_token_command":"infraternal server setup-token",
+        })
     );
     let (status, start_headers, start) = http_post_json(&app, "login-start", json!({})).await;
     assert_eq!(status, axum::http::StatusCode::OK);

@@ -9,6 +9,9 @@ use infraternal_plugin_api::{
 pub const ID: &str = "server";
 
 #[cfg(feature = "cli-plugin")]
+const SETUP_TOKEN_COMMAND: [&str; 2] = ["server", "setup-token"];
+
+#[cfg(feature = "cli-plugin")]
 #[must_use]
 pub fn plugin() -> PluginDefinition {
     let mut plugin = PluginDefinition::new(
@@ -247,7 +250,7 @@ fn server_setup_token_action() -> ActionDefinition {
         JsonSchema::string("Compatibility alias of the one-time capability in data.token."),
     );
     ActionDefinition::new(
-        ["server", "setup-token"],
+        SETUP_TOKEN_COMMAND,
         "Print the one-time code for creating the first owner.",
         "Use this only while setting up the first owner, before anyone has signed in.",
         [
@@ -276,6 +279,18 @@ fn server_setup_token_action() -> ActionDefinition {
         dry_run_first: false,
         notes: vec!["Treat the returned setup capability as a secret.".to_owned()],
     })
+}
+
+/// Format the setup-token command using the registered action path.
+#[cfg(feature = "cli-plugin")]
+#[must_use]
+pub fn setup_token_command(system_service: bool) -> String {
+    let command = format!("infraternal {}", SETUP_TOKEN_COMMAND.join(" "));
+    if system_service {
+        format!("sudo {command}")
+    } else {
+        command
+    }
 }
 
 #[cfg(feature = "cli-plugin")]

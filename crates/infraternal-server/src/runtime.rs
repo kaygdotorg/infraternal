@@ -538,9 +538,12 @@ async fn build_router_core(
     let origin =
         url::Url::parse(&config.public_origin).map_err(|_| ServerError::InvalidConfiguration)?;
     let rp_id = origin.host_str().ok_or(ServerError::InvalidConfiguration)?;
+    let system_service =
+        std::env::var_os("INFRATERNAL_SERVER_SERVICE_SCOPE").is_some_and(|scope| scope == "system");
     let auth = Auth::new(pool.clone(), rp_id, &config.public_origin)
         .await
-        .map_err(ServerError::Auth)?;
+        .map_err(ServerError::Auth)?
+        .with_system_service(system_service);
     #[cfg(not(feature = "remote"))]
     let ca_api = Router::new();
     let now = unix_seconds()?;
