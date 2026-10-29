@@ -145,8 +145,16 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,386,512 bytes |
-  | `aarch64-unknown-linux-musl` | 19,563,608 bytes |
+  | `x86_64-unknown-linux-musl` | 21,399,568 bytes |
+  | `aarch64-unknown-linux-musl` | 19,574,552 bytes |
+
+  The installed-service setup command and data resolver (#252), merged onto
+  dev `4a6202a52`, measure 21,399,568 / 19,574,552 bytes (x86_64 / aarch64)
+  with the pinned stripped static recipe on 8by64-compute02: +13,056 / +10,944
+  bytes against dev's 21,386,512 / 19,563,608 bytes. Both deltas are below
+  16 KiB; both exact caps above use these measurements with no allowance
+  (D243). Dev's reviewed #255 Tokio and owned-descriptor code is unchanged;
+  build receipts and setup-command tests are recorded on #252.
 
   The RUSTSEC-2026-0386 repair (#255) pins Tokio 1.53.3 and keeps reactor
   descriptors owned until deregistration inside the audited shim boundary.
