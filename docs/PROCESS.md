@@ -145,8 +145,14 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,401,712 bytes |
+  | `x86_64-unknown-linux-musl` | 21,401,776 bytes |
   | `aarch64-unknown-linux-musl` | 19,583,480 bytes |
+
+  Account-source loss fix R2-1 (#240) shares the existing unavailable teardown
+  across recovery and revocation exits. The same pinned recipe on
+  6by32-compute02 measures 21,401,776 / 19,583,480 bytes: +64 / 0 bytes
+  versus round 2, with no dependency or feature changes. The caps track those
+  exact images.
 
   Account-scoped revocation round 2 (#240) retains final commit and publication
   through caller cancellation and closes bootstrap/setup sockets with 1013 on
