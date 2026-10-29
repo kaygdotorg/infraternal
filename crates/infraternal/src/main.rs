@@ -950,9 +950,6 @@ fn run_setup_token(matches: &ArgMatches, json_output: bool) -> ExitCode {
         matches.get_one::<String>("data").map(String::as_str),
         infraternal_status::Roots::detect,
     );
-    if setup_token_dir_needs_sudo(&data_dir) {
-        return setup_token_permission_failure(matches, json_output);
-    }
     let Ok(runtime) = tokio::runtime::Runtime::new() else {
         return report_failure(
             "server setup-token",
@@ -983,7 +980,10 @@ fn run_setup_token(matches: &ArgMatches, json_output: bool) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(error) => report_failure(
+        Err(SetupTokenReadError::PermissionDenied) => {
+            setup_token_permission_failure(matches, json_output)
+        }
+        Err(SetupTokenReadError::Unavailable(error)) => report_failure(
             "server setup-token",
             "The setup capability is not available.",
             error.to_owned(),
@@ -1003,15 +1003,6 @@ fn server_data_directory(
     }
 
     infraternal_status::server_data_directory(&roots()).unwrap_or_else(|| PathBuf::from("./data"))
-}
-
-/// Probe only the known socket path: connecting needs traversal, never directory listing.
-#[cfg(feature = "plugin-server")]
-fn setup_token_dir_needs_sudo(data_dir: &Path) -> bool {
-    matches!(
-        std::fs::metadata(data_dir.join("setup-token.sock")),
-        Err(error) if error.kind() == io::ErrorKind::PermissionDenied
-    )
 }
 
 /// Keep the non-JSON permission diagnostic to one actionable line.
@@ -1409,8 +1400,23 @@ fn print_result<T: Serialize>(result: &CommandResult<T>, json_output: bool, to_s
     cli::output::print(result, json_output, to_stderr && !json_output);
 }
 
+/// Preserve access refusal separately from sanitized, non-secret protocol failures.
+#[cfg(feature = "plugin-server")]
+#[derive(Debug)]
+enum SetupTokenReadError {
+    PermissionDenied,
+    Unavailable(&'static str),
+}
+
+#[cfg(feature = "plugin-server")]
+impl From<&'static str> for SetupTokenReadError {
+    fn from(message: &'static str) -> Self {
+        Self::Unavailable(message)
+    }
+}
+
 #[cfg(all(unix, feature = "plugin-server"))]
-async fn read_setup_token(data_dir: &Path) -> Result<String, &'static str> {
+async fn read_setup_token(data_dir: &Path) -> Result<String, SetupTokenReadError> {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::UnixStream,
@@ -1418,7 +1424,13 @@ async fn read_setup_token(data_dir: &Path) -> Result<String, &'static str> {
 
     let mut socket = UnixStream::connect(data_dir.join("setup-token.sock"))
         .await
-        .map_err(|_| "no active first-run token socket")?;
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::PermissionDenied {
+                SetupTokenReadError::PermissionDenied
+            } else {
+                SetupTokenReadError::Unavailable("no active first-run token socket")
+            }
+        })?;
     socket
         .write_all(b"GET\n")
         .await
@@ -1437,14 +1449,14 @@ async fn read_setup_token(data_dir: &Path) -> Result<String, &'static str> {
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
     {
-        return Err("no active first-run token");
+        return Err("no active first-run token".into());
     }
-    String::from_utf8(response[..43].to_vec()).map_err(|_| "invalid local token response")
+    String::from_utf8(response[..43].to_vec()).map_err(|_| "invalid local token response".into())
 }
 
 #[cfg(all(not(unix), feature = "plugin-server"))]
-async fn read_setup_token(_data_dir: &Path) -> Result<String, &'static str> {
-    Err("local token retrieval requires a Unix socket")
+async fn read_setup_token(_data_dir: &Path) -> Result<String, SetupTokenReadError> {
+    Err("local token retrieval requires a Unix socket".into())
 }
 
 #[cfg(feature = "plugin-server")]
