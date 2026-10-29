@@ -86,6 +86,24 @@ async fn departed_commit(departure: Departure, refuse: bool) {
             .await
             .unwrap();
     }
+    // A deferred constraint can refuse COMMIT before the reader lock matters.
+    // Fence its worker explicitly so caller departure precedes that refusal.
+    let release_commit = if refuse {
+        let (release, blocked) = std::sync::mpsc::channel();
+        let mut blocked = Some(blocked);
+        tx.lock_handle()
+            .await
+            .unwrap()
+            .set_progress_handler(1, move || {
+                if let Some(blocked) = blocked.take() {
+                    let _ = blocked.recv();
+                }
+                true
+            });
+        Some(release)
+    } else {
+        None
+    };
     let commit_changes = changes.clone();
     let mut waiting =
         Box::pin(async move { commit_changes.commit(tx, "a", Some(revocations)).await });
@@ -113,6 +131,9 @@ async fn departed_commit(departure: Departure, refuse: bool) {
     // The detached owner cannot publish while another connection still holds a read lock.
     assert!(!events.has_changed().unwrap());
     assert!(!revoked.has_changed().unwrap());
+    if let Some(release) = release_commit {
+        release.send(()).unwrap();
+    }
     reader.rollback().await.unwrap();
     if !refuse {
         tokio::time::timeout(Duration::from_secs(5), async {
