@@ -3,6 +3,7 @@
 import argparse
 import os
 from pathlib import Path
+import shlex
 import signal
 import socket
 import struct
@@ -20,9 +21,8 @@ def run(binary, exit_after_detach=False):
     try:
         client.open()
         path = state / 'sessions' / f'{client.id.hex}.sock'
-        # First observe the fixture prompt directly, so the unfunded relay has
-        # actual retained output before the shell is killed. No scheduler sleep
-        # stands in for that output barrier.
+        # Read the session receipt before attaching so the test retains the
+        # shim's ownership metadata without depending on prompt formatting.
         with socket.socket(socket.AF_UNIX) as peer:
             peer.settimeout(10)
             peer.connect(str(path))
@@ -30,15 +30,20 @@ def run(binary, exit_after_detach=False):
             assert hello[11:27] == client.id.bytes
             pid = struct.unpack('<I', hello[27:31])[0]
             retained_owner = bool(struct.unpack('<Q', hello[3:11])[0] & 8)
-            for body in [b'\x02' + struct.pack('<Q', 0), b'\x13' + struct.pack('<Q', 0)]:
-                peer.sendall(struct.pack('<I', len(body)) + body)
-            tail = b''
-            while b'shim-test' not in tail:
-                frame = exact(peer, struct.unpack('<I', exact(peer, 4))[0])
-                assert frame[0] == 0x11
-                tail = (tail + frame[9:])[-256:]
         client.send(1, 0x16, client.id.bytes + struct.pack('<QQ', 0, 0))
         assert client.process(credit=False) == 0x13
+        ready_file = state / 'shell-ready'
+        shell_command = (
+            "printf 'shell-ready-%s\\n' check; : > "
+            + shlex.quote(str(ready_file.resolve()))
+            + "\n"
+        ).encode()
+        client.input(shell_command)
+        client.wait_ack()
+        deadline = time.monotonic() + 10
+        while not ready_file.exists():
+            assert time.monotonic() < deadline, 'login shell did not execute the readiness command'
+            time.sleep(.005)
         children = Path(f'/proc/{pid}/task/{pid}/children').read_text().split()
         assert len(children) == 1
         if exit_after_detach:
@@ -50,8 +55,13 @@ def run(binary, exit_after_detach=False):
                 peer.settimeout(5)
                 peer.connect(str(path))
                 exact(peer, struct.unpack('<I', exact(peer, 4))[0])
-                for body in [b'\x02' + struct.pack('<Q', 0), b'\x10' + b"printf 'FINAL_%s\\n' OUTPUT; exit 7\n"]:
+                final_input = b"printf 'FINAL_%s\\n' OUTPUT; exit 7\n"
+                for body in [
+                    b'\x02' + struct.pack('<Q', 0),
+                    b'\x10' + struct.pack('<Q', client.entered) + final_input,
+                ]:
                     peer.sendall(struct.pack('<I', len(body)) + body)
+                client.entered += len(final_input)
         else:
             os.kill(int(children[0]), signal.SIGKILL)
         if not retained_owner:
@@ -75,6 +85,7 @@ def run(binary, exit_after_detach=False):
                 (event for event in reversed(client.events) if event.get('type') == 'terminal.exited'),
                 None,
             )
+        assert b'shell-ready-check' in received, 'retained shell output was not delivered'
         assert terminal_exit['status'] == (7 if exit_after_detach else -signal.SIGKILL)
         assert terminal_exit['final_seq'] == client.out
         if exit_after_detach:
