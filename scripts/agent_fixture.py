@@ -458,6 +458,12 @@ class Binary:
             assert time.monotonic() < deadline
             self.process(credit)
 
+    def wait_for_shell(self):
+        """Confirm the attached login shell executes input without assuming its prompt."""
+        self.input(b"printf 'shell-ready-%s\\n' check\n")
+        self.until(b"shell-ready-check")
+        self.wait_ack()
+
     def wait_ack(self):
         while self.acked < self.entered:
             self.process()
