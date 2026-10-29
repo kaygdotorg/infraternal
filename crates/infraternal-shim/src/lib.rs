@@ -126,3 +126,7 @@ pub use session::user_host::{run_host, run_host_accounted};
 
 #[cfg(feature = "process-per-user")]
 pub use pty::handoff::{receive_masters, send_masters};
+
+#[cfg(all(test, feature = "process-per-user"))]
+#[path = "../tests/unit/fixture_state.rs"]
+mod fixture_state;
