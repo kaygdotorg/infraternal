@@ -11,9 +11,36 @@
  * program that redraws never shows the note, not even for a frame. Output that arrives later clears
  * the note, because the screen is then live again.
  *
- * This module only owns the state machine; the timer is injected so the three cases are tested
+ * Silence only means "cannot redraw" when a repaint was actually expected. A program repaints because
+ * its terminal changed size (SIGWINCH), so an idle shell reattached at the size it already had is
+ * correctly silent and the host's replay is accurate: nothing to warn about. The replay fence reports
+ * the size the replayed screen was captured at, before this attach's own Resize, and the wait starts
+ * only when that differs from the size the attach sends. The client cannot remember the size itself:
+ * another viewer may have resized the session since this one last looked (and a reload remembers
+ * nothing). A server that does not report the size leaves the wait as it always was.
+ *
+ * This module only owns the state machine; the timer is injected so the cases are tested
  * without waiting, and the note element lives in `packages/ui/src/terminal-note.ts`.
  */
+
+/** A terminal grid size in cells. */
+export interface ScreenSize { cols: number; rows: number }
+
+/**
+ * The size a replay fence reports, or `undefined` when it does not (an older server) or the fields are
+ * unusable. Both fields travel together as u16 cell counts of at least 1; anything else is treated as
+ * absent, which keeps the old behaviour rather than trusting a half-formed size.
+ */
+export function replayedSize(notice: Record<string, unknown>): ScreenSize | undefined {
+  const { cols, rows } = notice;
+  const valid = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= 65535;
+  return valid(cols) && valid(rows) ? { cols, rows } : undefined;
+}
+
+/** Whether the attach changed the size the replay was captured at, so a running program is expected to repaint. */
+export function repaintExpected(replayed: ScreenSize | undefined, attached: ScreenSize): boolean {
+  return replayed === undefined || replayed.cols !== attached.cols || replayed.rows !== attached.rows;
+}
 
 /** The shortest wait: a local redraw arrives within a few milliseconds, a far host adds its round trip. */
 export const STALE_WAIT_MIN_MS = 400;
@@ -45,10 +72,12 @@ export class StaleScreenWatch {
   /**
    * The replay of a reattached session has painted up to `fence`. `received` is how far output has
    * arrived by now: when it is already past the fence, the program redrew and there is nothing to say.
+   * `replayed` is the size the replay was captured at and `attached` the size this attach sends; when
+   * they are equal no repaint is coming, silence is correct, and the wait never starts.
    */
-  begin(fence: bigint, received: bigint, waitMs: number): void {
+  begin(fence: bigint, received: bigint, waitMs: number, replayed: ScreenSize | undefined, attached: ScreenSize): void {
     this.reset();
-    if (received > fence) return;
+    if (received > fence || !repaintExpected(replayed, attached)) return;
     this.baseline = fence;
     this.handle = this.scheduler.after(waitMs, () => {
       this.handle = undefined;

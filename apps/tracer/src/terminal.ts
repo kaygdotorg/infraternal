@@ -9,7 +9,7 @@ import { reattachReason, recoveringReason } from "./close-reasons";
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
 import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../packages/ui/src/terminal-cursor-layer";
 import { mountTerminalNote, type TerminalNote } from "../../../packages/ui/src/terminal-note";
-import { StaleScreenWatch, staleWaitMs } from "./stale-screen";
+import { replayedSize, StaleScreenWatch, staleWaitMs, type ScreenSize } from "./stale-screen";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { terminalTouch } from "./terminal-touch";
 import { pulseActivity } from "./perf-activity";
@@ -326,6 +326,8 @@ export class TerminalClient {
   /** Existing-session restores suppress parser replies until the server's replay fence has painted. */
   private suppressReplayResponses = false;
   private replayResponseFence: bigint | undefined;
+  /** The size the replay was captured at, from the same fence; absent from an older server. */
+  private replayCapturedSize: ScreenSize | undefined;
   /** Scoped only around synchronous renderer writes; keyboard input arrives in later event tasks. */
   private suppressTerminalResponses = false;
   // Allocate only when output is scanned; a reset before the first write has no query state.
@@ -1048,6 +1050,7 @@ export class TerminalClient {
             this.staleWatch?.reset();
             this.connectionIsResume = true;
             this.replayResponseFence = undefined;
+            this.replayCapturedSize = undefined;
             this.suppressReplayResponses = true;
             this.setStatus(recoveringReason(typeof notice.reason === "string" ? notice.reason : undefined));
           } else if (notice.type === "terminal.link_doubt") {
@@ -1072,6 +1075,7 @@ export class TerminalClient {
             // repaint, so its cursor must equal the received PTY boundary.
             if (fence !== this.receivedOutSeq) throw new Error("replay cursor mismatch");
             this.replayResponseFence = fence;
+            this.replayCapturedSize = replayedSize(notice);
             this.releaseReplayResponsesAfterPaint();
           } else if (notice.type === "terminal.exited") {
             if (!Number.isSafeInteger(notice.status) || !Number.isSafeInteger(notice.final_seq) || (notice.final_seq as number) < 0) throw new Error("invalid exit");
@@ -1322,6 +1326,7 @@ export class TerminalClient {
     this.outputQueue.clear();
     this.staleWatch?.reset();
     this.replayResponseFence = undefined;
+    this.replayCapturedSize = undefined;
     this.suppressReplayResponses = this.sessionId !== undefined;
     this.pendingSnapshot?.bytes.fill(0);
     this.pendingSnapshot = undefined;
@@ -1787,11 +1792,15 @@ export class TerminalClient {
   private releaseReplayResponsesAfterPaint(): void {
     if (this.replayResponseFence !== undefined && this.lastOutSeq >= this.replayResponseFence) {
       const fence = this.replayResponseFence;
+      const captured = this.replayCapturedSize;
       this.suppressReplayResponses = false;
       this.replayResponseFence = undefined;
+      this.replayCapturedSize = undefined;
       if (this.attached && !this.attachmentConfirmed) {
-        // A reattached session is waiting for its program to repaint; a new shell has nothing to be out of date.
-        if (this.connectionIsResume) this.staleWatch?.begin(fence, this.receivedOutSeq, staleWaitMs(this.roundTripMs));
+        // A reattached session is waiting for its program to repaint, but only if the attach resized it
+        // (the repaint is the program's answer to the new size); a new shell has nothing to be out of date.
+        // `lastSize` is what the attach sent, or the latest size sent since, which is the size the program now has.
+        if (this.connectionIsResume) this.staleWatch?.begin(fence, this.receivedOutSeq, staleWaitMs(this.roundTripMs), captured, this.lastSize);
         this.attachmentConfirmed = true;
         this.resendUnacknowledgedInput();
         if (this.inputNeedsResend) this.showInputResendNotice();
