@@ -3,18 +3,13 @@
 use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
 
+#[path = "../../../infraternal-shim/tests/unit/fixture_state.rs"]
+mod fixture_state;
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT")
-            .map_or_else(
-                || {
-                    PathBuf::from(std::env::var_os("HOME").unwrap())
-                        .join(".cache/codex-scratch/rl230")
-                },
-                PathBuf::from,
-            )
-            .join(format!("rl{}-{}", std::process::id(), uuid_free()));
+        let root = fixture_state::fixture_state();
         fs::create_dir_all(root.join("base/sessions")).unwrap();
         for path in [&root, &root.join("base"), &root.join("base/sessions")] {
             fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
@@ -24,12 +19,6 @@ impl Fixture {
     fn state(&self) -> PathBuf {
         self.0.join("base/sessions")
     }
-}
-fn uuid_free() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()
 }
 impl Drop for Fixture {
     fn drop(&mut self) {

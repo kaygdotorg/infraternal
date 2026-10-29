@@ -7,6 +7,7 @@
 use infraternal_shim::frame::{
     APPROXIMATE_SNAPSHOT, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT, SHARED_WRITER,
 };
+use infraternal_shim::readiness::Registration;
 use nix::{
     sys::inotify::{AddWatchFlags, InitFlags, Inotify},
     unistd::Uid,
@@ -14,10 +15,7 @@ use nix::{
 use std::{
     fs::{self, DirBuilder},
     io,
-    os::{
-        fd::{AsFd, AsRawFd, RawFd},
-        unix::fs::{DirBuilderExt, MetadataExt},
-    },
+    os::unix::fs::{DirBuilderExt, MetadataExt},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -34,13 +32,6 @@ use tokio::{
 // to 32 MiB while allowing any number of live sessions (D214).
 const DISCOVERY_HANDSHAKES: usize = 32 * 1024 * 1024 / MAX_FRAME;
 const HANDSHAKE: Duration = Duration::from_secs(2);
-
-struct Watch(Inotify);
-impl AsRawFd for Watch {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0.as_fd().as_raw_fd()
-    }
-}
 
 /// Init manager detected once at startup, never periodically probed.
 #[derive(Clone, Copy, Debug)]
@@ -447,25 +438,20 @@ pub fn process_birth_ticks(record: &[u8]) -> Option<u64> {
 }
 
 /// Directory retirement events keep the registry fresh without idle timers.
-pub(crate) struct SessionEvents(tokio::io::unix::AsyncFd<Watch>);
+pub(crate) struct SessionEvents(Registration<Inotify>);
 impl SessionEvents {
-    // The workspace forbids unsafe code; `Watch` owns its descriptor for registration lifetime.
-    #[allow(deprecated)]
     pub(crate) fn new(state: &Path) -> io::Result<Self> {
         let watch = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC)
             .map_err(io::Error::from)?;
         watch
             .add_watch(state.join("sessions").as_path(), AddWatchFlags::IN_DELETE)
             .map_err(io::Error::from)?;
-        // `Watch` owns the inotify descriptor for its entire registration lifetime.
-        Ok(Self(tokio::io::unix::AsyncFd::new(Watch(watch))?))
+        Ok(Self(Registration::new(watch)?))
     }
     pub(crate) async fn changed(&self) -> io::Result<()> {
         loop {
             let mut ready = self.0.readable().await?;
-            if let Ok(result) =
-                ready.try_io(|fd| fd.get_ref().0.read_events().map_err(io::Error::from))
-            {
+            if let Ok(result) = ready.try_io(|fd| fd.read_events().map_err(io::Error::from)) {
                 result?;
                 return Ok(());
             }
@@ -485,9 +471,7 @@ fn isolated(program: &Path) -> Command {
 
 // bind emits IN_CREATE before listen, so a refused early connection must
 // also wake on chmod. The shim chmods to 0600 only after listen succeeds.
-// The workspace forbids unsafe code; `Watch` owns its descriptor for registration lifetime.
-#[allow(deprecated)]
-fn socket_readiness(state: &Path) -> io::Result<tokio::io::unix::AsyncFd<Watch>> {
+fn socket_readiness(state: &Path) -> io::Result<Registration<Inotify>> {
     let watch =
         Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC).map_err(io::Error::from)?;
     watch
@@ -496,8 +480,7 @@ fn socket_readiness(state: &Path) -> io::Result<tokio::io::unix::AsyncFd<Watch>>
             AddWatchFlags::IN_CREATE | AddWatchFlags::IN_ATTRIB,
         )
         .map_err(io::Error::from)?;
-    // `Watch` owns the inotify descriptor for its entire registration lifetime.
-    tokio::io::unix::AsyncFd::new(Watch(watch))
+    Registration::new(watch)
 }
 
 /// Launch the same binary in an independent scope, or the shim's double fork.
@@ -601,9 +584,7 @@ pub async fn launch_with_readiness(
                 Err(error) => return Err(error),
             }
             let mut readiness = watch.readable().await?;
-            if let Ok(result) =
-                readiness.try_io(|fd| fd.get_ref().0.read_events().map_err(io::Error::from))
-            {
+            if let Ok(result) = readiness.try_io(|fd| fd.read_events().map_err(io::Error::from)) {
                 result?;
             }
         }

@@ -1603,6 +1603,7 @@ dependencies = [
  "libghostty-vt",
  "nix",
  "openssl",
+ "tokio",
  "vt100",
  "vte",
 ]

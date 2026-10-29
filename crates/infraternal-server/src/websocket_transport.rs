@@ -1,8 +1,8 @@
 //! Keeps authenticated browser proofs responsive while application work awaits SQL or a host [D265, #199].
 
 use super::websocket::{
-    Inbound, MAX_ATTACHMENTS, MAX_SOCKET_BUFFER, ReceiveFailure, WebSocketState, receive_wire,
-    send_messages,
+    AuthorityMiss, Inbound, MAX_ATTACHMENTS, MAX_SOCKET_BUFFER, ReceiveFailure, WebSocketState,
+    receive_wire, send_messages,
 };
 use crate::liveness::Liveness;
 use crate::stream_close::{
@@ -47,6 +47,7 @@ pub(super) enum EndReason {
     AuthorizationRefused = 5,
     ServerWriteFailed = 6,
     FlowControlRefused = 7,
+    AuthorityUnavailable = 8,
 }
 
 impl EndReason {
@@ -59,6 +60,7 @@ impl EndReason {
             5 => Self::AuthorizationRefused,
             6 => Self::ServerWriteFailed,
             7 => Self::FlowControlRefused,
+            8 => Self::AuthorityUnavailable,
             _ => Self::Open,
         }
     }
@@ -72,6 +74,7 @@ impl EndReason {
             Self::AuthorizationRefused => RESUME_REFUSED,
             Self::ServerWriteFailed | Self::Open => SERVER_WRITE_FAILED,
             Self::FlowControlRefused => REPLY_QUEUE_FULL,
+            Self::AuthorityUnavailable => crate::stream_close::AUTHORITY_UNAVAILABLE,
         }
     }
 }
@@ -357,7 +360,7 @@ impl Transport {
         loop {
             match self.context.ended.load(Ordering::Acquire) {
                 1 => return Ok(None),
-                2..=7 => return Err(()),
+                2..=8 => return Err(()),
                 _ => {}
             }
             tokio::select! {
@@ -655,21 +658,30 @@ async fn proofs(
         }
         let active = activation_applied(active, &activity);
         let result = authority.run(&context.state, &context.user, &context.token, async {
-            tokio::select! {
+            let result = tokio::select! {
                 biased;
                 () = context.closed.notified() => Err(()),
                 result = context.transmit(first, &mut replies, active, &mut messages, &mut encoded) => result,
+            };
+            // An authorized write failure is transport failure. The outer error
+            // classification below is reserved for the authority check itself.
+            if result.is_err() && context.end_reason() == EndReason::Open {
+                context.retire(EndReason::ServerWriteFailed);
             }
+            result
         }).await;
-        if result.is_err() {
+        if let Err(miss) = result {
             if context.end_reason() == EndReason::Open {
-                context.retire(EndReason::AuthorizationRefused);
+                context.retire(match miss {
+                    AuthorityMiss::Refused => EndReason::AuthorizationRefused,
+                    AuthorityMiss::Unavailable => EndReason::AuthorityUnavailable,
+                });
             }
             break;
         }
     }
     if context.end_reason() == EndReason::Open {
-        context.retire(EndReason::AuthorizationRefused);
+        context.retire(EndReason::ServerWriteFailed);
     }
 }
 
@@ -812,6 +824,11 @@ mod tests {
                 EndReason::ClientWentAway,
                 "client_went_away",
                 "websocket_closed",
+            ),
+            (
+                EndReason::AuthorityUnavailable,
+                "server_busy",
+                "authority_unavailable",
             ),
             (EndReason::ProtocolError, "protocol_error", "invalid_frame"),
             (EndReason::SizeLimit, "size_limit", "frame_too_large"),

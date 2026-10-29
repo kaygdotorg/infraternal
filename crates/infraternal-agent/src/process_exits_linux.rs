@@ -1,4 +1,5 @@
 //! Aggregate pidfds into one epoll descriptor registered with the daemon's Tokio reactor [D81].
+use infraternal_shim::readiness::Registration;
 use nix::{
     errno::Errno,
     sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout},
@@ -6,20 +7,12 @@ use nix::{
 use std::{
     collections::HashMap,
     io,
-    os::fd::{AsRawFd, OwnedFd, RawFd},
+    os::fd::{AsRawFd, OwnedFd},
 };
-use tokio::io::unix::AsyncFd;
-
-struct Queue(Epoll);
-impl AsRawFd for Queue {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0.0.as_raw_fd()
-    }
-}
 
 #[derive(Default)]
 pub(crate) struct ProcessExits {
-    queue: Option<AsyncFd<Queue>>,
+    queue: Option<Registration<Epoll>>,
     shims: HashMap<[u8; 16], OwnedFd>,
     unavailable: bool,
 }
@@ -30,8 +23,6 @@ impl ProcessExits {
         self.watch_with(id, pid, infraternal_shim::process_exit_descriptor)
     }
 
-    // The workspace forbids unsafe code; `Queue` owns its descriptor for registration lifetime.
-    #[allow(deprecated)]
     fn watch_with(
         &mut self,
         id: [u8; 16],
@@ -54,9 +45,9 @@ impl ProcessExits {
             Err(error) => return Err(error),
         };
         if self.queue.is_none() {
-            let queue = Queue(Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC)?);
-            // `Queue` owns the epoll descriptor and keeps its raw fd stable until drop.
-            self.queue = Some(AsyncFd::new(queue)?);
+            self.queue = Some(Registration::new(Epoll::new(
+                EpollCreateFlags::EPOLL_CLOEXEC,
+            )?)?);
         }
         let queue = self
             .queue
@@ -64,7 +55,7 @@ impl ProcessExits {
             .ok_or_else(|| io::Error::other("missing exit queue"))?;
         // EPOLLONESHOT consumes the death notification even if registry refresh
         // follows later. Closing the owned pidfd automatically removes interest.
-        queue.get_ref().0.add(
+        queue.get_ref().add(
             &descriptor,
             EpollEvent::new(
                 EpollFlags::EPOLLIN | EpollFlags::EPOLLONESHOT,
@@ -87,7 +78,7 @@ impl ProcessExits {
             let mut ready = queue.readable().await?;
             if let Ok(result) = ready.try_io(|fd| {
                 let mut events = [EpollEvent::empty(); 32];
-                let count = fd.get_ref().0.wait(&mut events, EpollTimeout::ZERO)?;
+                let count = fd.wait(&mut events, EpollTimeout::ZERO)?;
                 if count == 0 {
                     return Err(io::ErrorKind::WouldBlock.into());
                 }

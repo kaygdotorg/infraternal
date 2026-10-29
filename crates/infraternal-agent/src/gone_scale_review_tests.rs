@@ -1,7 +1,6 @@
 //! Independent #158 scale diagnostic: 200 vanished-session replies must preserve the same real channel.
 
 use super::*;
-use std::os::fd::AsRawFd;
 
 #[tokio::test]
 #[ignore = "scale measurement; run alone under CPUWeight=10000"]
@@ -17,8 +16,7 @@ async fn two_hundred_vanished_sessions_preserve_the_same_channel() {
     let (host, server) = std::os::unix::net::UnixStream::pair().unwrap();
     host.set_nonblocking(true).unwrap();
     server.set_nonblocking(true).unwrap();
-    // `host` remains open in this test until its channel task has joined.
-    let socket = Socket::inherited(host.as_raw_fd()).unwrap();
+    let socket = Socket::inherited(host.into_raw_fd()).unwrap();
     let path = state.clone();
     let task = tokio::spawn(async move {
         let service = crate::plugin_control::Service::start(

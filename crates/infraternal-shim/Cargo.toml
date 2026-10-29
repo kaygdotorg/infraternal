@@ -22,11 +22,14 @@ vte.workspace = true
 # Reuse the server's pinned OpenSSL at the audited secure-allocation FFI boundary.
 openssl = { workspace = true, optional = true }
 nix.workspace = true
+tokio = { workspace = true, optional = true, features = ["net"] }
 
 vt100 = { workspace = true, optional = true }
 
 # Comparison engines are never in the default production dependency graph.
 [features]
+# Audited owned readiness registration, absent from standalone PTY builds.
+async-fd = ["dep:tokio", "nix/inotify", "nix/event"]
 cli = ["dep:clap"]
 # Executable images expose the callback-free Rust VT boundary only (D243).
 session-image = []

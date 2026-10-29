@@ -216,7 +216,9 @@ def run(binary, state, functional=False, seed=20):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--binary', type=Path, default=Path(os.environ.get('CARGO_TARGET_DIR', 'target')) / 'x86_64-unknown-linux-musl/release/infraternal')
+    target_root = os.environ.get('CARGO_TARGET_DIR')
+    default_binary = Path(target_root) / 'x86_64-unknown-linux-musl/release/infraternal' if target_root else None
+    parser.add_argument('--binary', type=Path, default=default_binary, required=default_binary is None)
     parser.add_argument("--functional", action="store_true", help="run short real-process correctness gates without release measurements")
     parser.add_argument("--seed", type=int, default=20, help="reproducible stop positions and payload sizes")
     args = parser.parse_args()

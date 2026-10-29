@@ -1274,8 +1274,7 @@ mod tests {
         let floor = crate::terminal_native::floor_for_geometry(80, 24, SESSION_SCREEN_BYTES);
         let cap = floor + 1024;
         let host = crate::terminal_memory::HostBudget::new(cap, SESSION_SCREEN_BYTES);
-        let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(format!(".cache/codex-scratch/usp-{}", std::process::id()));
+        let state = crate::fixture_state::fixture_state();
         let mut config = Config::new([0x71; 16], Uid::effective().as_raw());
         config.state = Some(state.clone());
         config.ring_capacity = 64 * 1024;
@@ -1315,12 +1314,7 @@ mod tests {
     fn zero_ring_capacity_does_not_stall_a_live_pty() {
         let floor = crate::terminal_native::floor_for_geometry(80, 24, SESSION_SCREEN_BYTES);
         let host = crate::terminal_memory::HostBudget::new(floor, SESSION_SCREEN_BYTES);
-        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
-            || PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch"),
-            PathBuf::from,
-        );
-        std::fs::create_dir_all(&root).unwrap();
-        let state = root.join(format!("zr-{}", std::process::id()));
+        let state = crate::fixture_state::fixture_state();
         let mut config = Config::new([0x73; 16], Uid::effective().as_raw());
         config.state = Some(state.clone());
         config.readiness = true;
@@ -1398,12 +1392,7 @@ mod tests {
         let floor = crate::terminal_native::floor_for_geometry(80, 24, SESSION_SCREEN_BYTES);
         let cap = floor * LIVE_SESSIONS;
         let host = crate::terminal_memory::HostBudget::new(cap, SESSION_SCREEN_BYTES);
-        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
-            || PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch"),
-            PathBuf::from,
-        );
-        std::fs::create_dir_all(&root).unwrap();
-        let state = root.join(format!("pool-churn-{}", std::process::id()));
+        let state = crate::fixture_state::fixture_state();
         let mut seed = 0x2051_0019_7a11_0c5e;
         let mut next_id = 0x7510_u128;
         let mut sessions: Vec<Option<Session>> = (0..LIVE_SESSIONS).map(|_| None).collect();
@@ -1503,12 +1492,7 @@ mod tests {
         let floor = crate::terminal_native::floor_for_geometry(80, 24, SESSION_SCREEN_BYTES);
         let cap = floor * 2;
         let host = crate::terminal_memory::HostBudget::new(cap, SESSION_SCREEN_BYTES);
-        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
-            || PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch"),
-            PathBuf::from,
-        );
-        std::fs::create_dir_all(&root).unwrap();
-        let state = root.join(format!("pool-echo-{}", std::process::id()));
+        let state = crate::fixture_state::fixture_state();
         let open = |id: u128| {
             let mut config = Config::new(id.to_le_bytes(), Uid::effective().as_raw());
             config.state = Some(state.clone());
@@ -1570,10 +1554,7 @@ mod tests {
     }
 
     pub(super) fn ack_fixture(tag: u8) -> (Session, std::os::unix::net::UnixStream, PathBuf) {
-        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/a{tag:x}{}",
-            std::process::id()
-        ));
+        let state = crate::fixture_state::fixture_state();
         let mut config = Config::new([tag; 16], Uid::effective().as_raw());
         config.state = Some(state.clone());
         config.readiness = true;
@@ -1656,10 +1637,7 @@ mod tests {
 
     #[test]
     fn steady_replay_needs_no_payload_allocation() {
-        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/br{}",
-            std::process::id()
-        ));
+        let state = crate::fixture_state::fixture_state();
         let mut config = Config::new([24; 16], Uid::effective().as_raw());
         config.state = Some(state.clone());
         config.readiness = true;
@@ -1689,10 +1667,7 @@ mod tests {
 
     #[test]
     fn blocked_state_and_output_share_one_ordered_write_batch() {
-        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/w{}",
-            std::process::id()
-        ));
+        let state = crate::fixture_state::fixture_state();
         let mut config = Config::new([15; 16], Uid::effective().as_raw());
         config.state = Some(state.clone());
         config.readiness = true;
@@ -1730,9 +1705,7 @@ mod tests {
     }
     #[test]
     fn session_constructor_retains_only_the_bound_socket_path() {
-        let state = PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(format!(".cache/codex-scratch/ppu{}", std::process::id()));
-        fs::create_dir_all(state.parent().unwrap()).unwrap();
+        let state = crate::fixture_state::fixture_state();
         // Global locale initialization is fixed process ownership, not this
         // session's constructor allocation.
         drop(crate::session_locale_environment());
@@ -1754,10 +1727,7 @@ mod tests {
     }
     #[test]
     fn bulk_turn_advances_sixteen_kib_and_yields_before_the_rest() {
-        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/b{}",
-            std::process::id()
-        ));
+        let state = crate::fixture_state::fixture_state();
         let mut config = Config::new([7; 16], Uid::effective().as_raw());
         config.state = Some(state.clone());
         config.readiness = true;
@@ -1789,10 +1759,7 @@ mod tests {
     }
     #[test]
     fn malformed_closed_peer_is_retired_once_and_keeps_its_sibling() {
-        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/d{}",
-            std::process::id()
-        ));
+        let state = crate::fixture_state::fixture_state();
         let mut config = Config::new([10; 16], Uid::effective().as_raw());
         config.state = Some(state.clone());
         config.readiness = true;
@@ -1828,10 +1795,7 @@ mod tests {
 
     #[test]
     fn writable_peer_receives_state_and_output_before_another_readiness_turn() {
-        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/f{}",
-            std::process::id()
-        ));
+        let state = crate::fixture_state::fixture_state();
         let mut config = Config::new([8; 16], Uid::effective().as_raw());
         config.state = Some(state.clone());
         config.readiness = true;
@@ -1913,10 +1877,7 @@ mod tests {
             );
             return;
         }
-        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/b{}",
-            std::process::id()
-        ));
+        let state = crate::fixture_state::fixture_state();
         let mut config = Config::new([8; 16], Uid::effective().as_raw());
         config.state = Some(state.clone());
         config.readiness = true;
@@ -2281,10 +2242,7 @@ mod tests {
     }
     #[test]
     fn vt_panic_retires_one_real_pty_and_sibling_keeps_its_output() {
-        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/p{}",
-            std::process::id()
-        ));
+        let state = crate::fixture_state::fixture_state();
         let mut config = Config::new([1; 16], Uid::effective().as_raw());
         config.state = Some(state.clone());
         config.readiness = true;

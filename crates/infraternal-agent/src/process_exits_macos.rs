@@ -1,29 +1,19 @@
 //! Register shim `NOTE_EXIT` filters in one kqueue watched by the daemon's Tokio reactor [D81].
+use infraternal_shim::readiness::Registration;
 use nix::{
     errno::Errno,
     fcntl::{FcntlArg, FdFlag, fcntl},
     sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue},
 };
-use std::{
-    collections::HashMap,
-    io,
-    os::fd::{AsFd, AsRawFd, RawFd},
-};
-use tokio::io::unix::AsyncFd;
+use std::{collections::HashMap, io};
 
-struct Queue(Kqueue);
-impl AsRawFd for Queue {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0.as_fd().as_raw_fd()
-    }
-}
 struct Lifetime {
     pid: u32,
     token: isize,
 }
 #[derive(Default)]
 pub(crate) struct ProcessExits {
-    queue: Option<AsyncFd<Queue>>,
+    queue: Option<Registration<Kqueue>>,
     shims: HashMap<[u8; 16], Lifetime>,
     token: isize,
     retired: Vec<[u8; 16]>,
@@ -55,14 +45,11 @@ fn delete(queue: &Kqueue, pid: u32) -> io::Result<()> {
     }
 }
 impl ProcessExits {
-    // The workspace forbids unsafe code; `Queue` owns its descriptor for registration lifetime.
-    #[allow(deprecated)]
     pub(crate) fn watch(&mut self, id: [u8; 16], pid: u32) -> io::Result<bool> {
         if self.queue.is_none() {
             let queue = Kqueue::new()?;
             fcntl(&queue, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
-            // `Queue` owns the kqueue descriptor and keeps its raw fd stable until drop.
-            self.queue = Some(AsyncFd::new(Queue(queue))?);
+            self.queue = Some(Registration::new(queue)?);
         }
         let queue = self
             .queue
@@ -72,7 +59,7 @@ impl ProcessExits {
         // an older NOTE_EXIT. Delete that filter before adding the replacement,
         // and deliver the old session IDs separately from the new lifetime.
         if self.shims.values().any(|life| life.pid == pid) {
-            delete(&queue.get_ref().0, pid)?;
+            delete(queue.get_ref(), pid)?;
         }
         self.shims.retain(|old_id, life| {
             if life.pid != pid {
@@ -84,13 +71,13 @@ impl ProcessExits {
             false
         });
         if let Some(old) = self.shims.remove(&id) {
-            delete(&queue.get_ref().0, old.pid)?;
+            delete(queue.get_ref(), old.pid)?;
         }
         self.token = self
             .token
             .checked_add(1)
             .ok_or_else(|| io::Error::other("exit registration tokens exhausted"))?;
-        match queue.get_ref().0.kevent(
+        match queue.get_ref().kevent(
             &[event(
                 pid,
                 EvFlags::EV_ADD | EvFlags::EV_ONESHOT,
@@ -120,7 +107,7 @@ impl ProcessExits {
                 return true;
             }
             if let Some(queue) = &self.queue {
-                let _ = delete(&queue.get_ref().0, life.pid);
+                let _ = delete(queue.get_ref(), life.pid);
             }
             false
         });
@@ -149,10 +136,7 @@ impl ProcessExits {
             let mut ready = queue.readable().await?;
             if let Ok(result) = ready.try_io(|fd| {
                 let mut events = [event(0, EvFlags::empty(), 0); 32];
-                let count = fd
-                    .get_ref()
-                    .0
-                    .kevent(&[], &mut events, Some(zero_timeout()))?;
+                let count = fd.kevent(&[], &mut events, Some(zero_timeout()))?;
                 if count == 0 {
                     return Err(io::ErrorKind::WouldBlock.into());
                 }

@@ -945,10 +945,7 @@ mod tests {
     use super::*;
     #[test]
     fn exit_observed_before_settle_still_queues_one_retention_deadline() {
-        let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/rt{}",
-            std::process::id()
-        ));
+        let state = crate::fixture_state::fixture_state();
         let mut config = crate::Config::new([19; 16], nix::unistd::Uid::effective().as_raw());
         config.state = Some(state.clone());
         config.readiness = true;
@@ -992,10 +989,7 @@ mod tests {
 
     #[test]
     fn ownership_receipt_separates_session_components_and_shared_capacities() {
-        let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/l{}",
-            std::process::id()
-        ));
+        let state = crate::fixture_state::fixture_state();
         let mut sessions = Vec::new();
         for id in [17_u8, 18] {
             let mut config = crate::Config::new([id; 16], nix::unistd::Uid::effective().as_raw());
@@ -1160,10 +1154,7 @@ mod tests {
 
     #[test]
     fn input_phase_retires_closed_identity_without_publishing_transient_interest() {
-        let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/i{}",
-            std::process::id()
-        ));
+        let state = crate::fixture_state::fixture_state();
         let mut config = crate::Config::new([16; 16], nix::unistd::Uid::effective().as_raw());
         config.state = Some(state.clone());
         config.readiness = true;
@@ -1399,10 +1390,7 @@ mod tests {
     }
     #[test]
     fn unchanged_registration_sync_needs_no_heap_allocation() {
-        let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/q{}",
-            std::process::id()
-        ));
+        let state = crate::fixture_state::fixture_state();
         let mut config = crate::Config::new([12; 16], nix::unistd::Uid::effective().as_raw());
         config.state = Some(state.clone());
         config.readiness = true;
@@ -1584,10 +1572,7 @@ mod tests {
     }
     #[test]
     fn replay_continues_after_its_frame_was_written_inline() {
-        let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/c{}",
-            std::process::id()
-        ));
+        let state = crate::fixture_state::fixture_state();
         let mut config = crate::Config::new([9; 16], nix::unistd::Uid::effective().as_raw());
         config.state = Some(state.clone());
         config.readiness = true;
@@ -1632,10 +1617,7 @@ mod tests {
     }
     #[test]
     fn one_session_readiness_fits_240_requested_bytes() {
-        let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/reg{}",
-            std::process::id()
-        ));
+        let state = crate::fixture_state::fixture_state();
         let mut config = crate::Config::new([6; 16], nix::unistd::Uid::effective().as_raw());
         config.state = Some(state.clone());
         config.readiness = true;
@@ -1659,10 +1641,7 @@ mod tests {
     }
     #[test]
     fn accounting_write_failure_disables_only_the_receipt() {
-        let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/a{}",
-            std::process::id()
-        ));
+        let state = crate::fixture_state::fixture_state();
         let mut config = crate::Config::new([5; 16], nix::unistd::Uid::effective().as_raw());
         config.state = Some(state.clone());
         config.readiness = true;
@@ -1705,10 +1684,7 @@ mod tests {
             );
             return;
         }
-        let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/ep{}",
-            std::process::id()
-        ));
+        let state = crate::fixture_state::fixture_state();
         let mut config = crate::Config::new([3; 16], nix::unistd::Uid::effective().as_raw());
         config.state = Some(state.clone());
         config.readiness = true;

@@ -3,10 +3,7 @@ use super::*;
 
 #[test]
 fn ordinary_housekeeping_does_not_probe_child_status() {
-    let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-        ".cache/codex-scratch/process-per-user/z{}",
-        std::process::id()
-    ));
+    let state = crate::fixture_state::fixture_state();
     let mut config = Config::new([11; 16], Uid::effective().as_raw());
     config.state = Some(state.clone());
     config.readiness = true;
@@ -42,10 +39,7 @@ fn ordinary_housekeeping_does_not_probe_child_status() {
 
 #[test]
 fn threaded_startup_is_refused_before_creating_session_state() {
-    let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-        ".cache/codex-scratch/process-per-user/t{}",
-        std::process::id()
-    ));
+    let state = crate::fixture_state::fixture_state();
     assert!(!state.exists());
     let (ready, started) = std::sync::mpsc::channel();
     let (quit, stop) = std::sync::mpsc::channel();
