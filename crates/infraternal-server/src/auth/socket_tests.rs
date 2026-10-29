@@ -931,3 +931,6 @@ mod review_busy_wake;
 
 #[path = "socket_tests/per_account_revocation.rs"]
 mod per_account_revocation;
+
+#[path = "socket_tests/review_account_scope.rs"]
+mod review_account_scope;
