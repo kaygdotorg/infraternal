@@ -205,8 +205,9 @@ async fn account_deletion_retires_open_sockets_without_affecting_other_accounts(
     server.abort();
 }
 
-#[tokio::test(start_paused = true)]
-async fn review_r2_lost_recovery_source_reports_unavailable_or_reads_authority() {
+/// Keep proof timers parked so only the lost account notification can stop this socket.
+#[allow(clippy::too_many_lines)] // Keep the review reproduction and its I/O fences together.
+async fn lost_account_source(recovery: bool) -> (Vec<u16>, bool) {
     let _serial = SERIAL.lock().await;
     let _clock = FrozenSocketTime::new().await;
     let (f, address, server) = socket_fixture().await;
@@ -269,9 +270,16 @@ async fn review_r2_lost_recovery_source_reports_unavailable_or_reads_authority()
         }
     }
     let reads = f.auth.authority_reads(&f.user);
-    let lost = f.auth.recovery_events(&f.user);
+    let subscribe = || {
+        if recovery {
+            f.auth.recovery_events(&f.user)
+        } else {
+            f.auth.revocation_events(&f.user)
+        }
+    };
+    let lost = subscribe();
     lost.close_source_for_test();
-    let replacement = f.auth.recovery_events(&f.user);
+    let replacement = subscribe();
     assert!(!replacement.has_changed().unwrap());
     let mut codes = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -283,11 +291,16 @@ async fn review_r2_lost_recovery_source_reports_unavailable_or_reads_authority()
                     }
                     break;
                 }
-                Message::Binary(wire) => {
-                    if let Frame::Close { code, .. } = decode_muxed_frame(&wire).unwrap().frame {
+                Message::Binary(wire) => match decode_muxed_frame(&wire).unwrap().frame {
+                    Frame::Close { code, reason } => {
+                        assert_eq!(
+                            reason,
+                            crate::stream_close::AUTHORITY_UNAVAILABLE.client_text
+                        );
                         codes.push(code);
                     }
-                }
+                    frame => panic!("lost account source kept serving: {frame:?}"),
+                },
                 _ => {}
             }
         }
@@ -296,8 +309,35 @@ async fn review_r2_lost_recovery_source_reports_unavailable_or_reads_authority()
     .unwrap();
     let reread = f.auth.authority_reads(&f.user) > reads;
     server.abort();
+    eprintln!("account_source_loss recovery={recovery} codes={codes:?} reread={reread}");
+    (codes, reread)
+}
+
+#[tokio::test(start_paused = true)]
+async fn review_r2_lost_recovery_source_reports_unavailable_or_reads_authority() {
+    let (codes, reread) = lost_account_source(true).await;
     assert!(
         codes.contains(&1013) || reread,
         "lost recovery source stopped without unavailable outcome or authority read: codes={codes:?}, reread={reread}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn lost_recovery_source_closes_with_1013_without_another_authority_read() {
+    let (codes, reread) = lost_account_source(true).await;
+    assert!(codes.contains(&1013), "lost recovery source: {codes:?}");
+    assert!(
+        !reread,
+        "known source loss performed another authority read"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn lost_revocation_source_closes_with_1013_without_another_authority_read() {
+    let (codes, reread) = lost_account_source(false).await;
+    assert!(codes.contains(&1013), "lost revocation source: {codes:?}");
+    assert!(
+        !reread,
+        "known source loss performed another authority read"
     );
 }

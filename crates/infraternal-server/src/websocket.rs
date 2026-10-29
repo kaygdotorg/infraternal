@@ -685,12 +685,7 @@ async fn run_socket(
                     ).await.is_err() { break; }
             }
             changed = revocations.changed() => {
-                if changed.is_err() {
-                    teardown_reason = AUTHORITY_UNAVAILABLE;
-                    authority_unavailable_known = true;
-                    loop_result = Err(());
-                    break;
-                }
+                if changed.is_err() { break; }
                 match authority_deadline(&state, &user_id, &session_token, false).await {
                     Ok(deadline) => expiry = deadline,
                     Err(miss) => {
@@ -898,6 +893,17 @@ async fn run_socket(
                 ).await.is_err() { break; }
             }
         }
+    }
+    // A closed account cursor stays closed even if its registry entry is replaced.
+    // Share the known-unavailable teardown for recovery, revocation and guarded
+    // work exits: source loss must report 1013 without another authority read,
+    // preserving the same unavailable outcome as bootstrap/setup sockets (#240 R2-1).
+    if revocations.has_changed().is_err()
+        || (recovery_subscribed && recovery_events.has_changed().is_err())
+    {
+        teardown_reason = AUTHORITY_UNAVAILABLE;
+        authority_unavailable_known = true;
+        loop_result = Err(());
     }
     pending_plugin_calls.shutdown().await;
     drop(plugins);
