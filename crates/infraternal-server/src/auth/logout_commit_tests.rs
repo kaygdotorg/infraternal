@@ -1,6 +1,46 @@
-//! Real SQLite commit refusals must neither acknowledge logout nor publish a revocation.
+//! Real SQLite logout completion, rollback and publication checks, plus an opt-in perf measurement.
 
 use super::*;
+
+#[tokio::test]
+#[ignore = "measurement only; run on a perf VM under perf-run.sh"]
+async fn logout_publication_measurement() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let affected: Vec<_> = (0..16).map(|_| f.auth.revocation_events(&f.user)).collect();
+    let auth = &f.auth;
+    let unrelated: Vec<_> = (0..60)
+        .flat_map(|account| {
+            let user = format!("unrelated-{account}");
+            (0..4).map(move |_| auth.revocation_events(&user))
+        })
+        .collect();
+    let mut samples = Vec::with_capacity(1000);
+    for _ in 0..1000 {
+        let token = random();
+        let mut tx = f.auth.pool.begin().await.unwrap();
+        insert_session(&mut tx, &token, &f.user, "measurement", NOW, None)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let began = std::time::Instant::now();
+        f.auth.logout(&token).await.unwrap();
+        samples.push(began.elapsed().as_micros());
+    }
+    samples.sort_unstable();
+    assert!(affected.iter().all(|events| events.has_changed().unwrap()));
+    assert!(
+        unrelated
+            .iter()
+            .all(|events| !events.has_changed().unwrap())
+    );
+    eprintln!(
+        "logout_publication samples={} affected_cursors=16 unrelated_cursors=240 accounts=61 p50_us={} p99_us={}",
+        samples.len(),
+        samples[500],
+        samples[990]
+    );
+}
 
 #[tokio::test]
 async fn logout_commit_failure_does_not_publish_revocation_or_report_success() {
