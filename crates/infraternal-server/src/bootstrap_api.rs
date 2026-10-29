@@ -8,7 +8,7 @@ use axum::{
     Json, Router,
     extract::{
         State, WebSocketUpgrade,
-        ws::{Message, WebSocket},
+        ws::{CloseFrame, Message, WebSocket},
     },
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
@@ -179,16 +179,29 @@ fn upgrade_admitted(
     permit: tokio::sync::OwnedSemaphorePermit,
     mode: SocketMode,
 ) -> Response {
-    ws.on_upgrade(move |socket| async move {
+    ws.on_upgrade(move |mut socket| async move {
         // Retire stream and admission before publishing this lifetime inactive.
         let _activity = activity;
         let _permit = permit;
-        match mode {
-            SocketMode::Bootstrap => run(socket, api, owner, token).await,
+        let result = match mode {
+            SocketMode::Bootstrap => run(&mut socket, api, owner, token).await,
             #[cfg(feature = "remote")]
-            SocketMode::Setup => {
-                let _ = setup_api::run(socket, api, owner, token).await;
-            }
+            SocketMode::Setup => setup_api::run(&mut socket, api, owner, token).await,
+        };
+        if matches!(result, Err(SocketFailure::AuthorityUnavailable)) {
+            // The notification source is part of live authority. Once it is lost,
+            // stop all socket work before sending the same unavailable outcome as
+            // the multiplexed socket; a still-live database row cannot repair it.
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                socket.send(Message::Close(Some(CloseFrame {
+                    code: 1013,
+                    reason: crate::stream_close::AUTHORITY_UNAVAILABLE
+                        .client_text
+                        .into(),
+                }))),
+            )
+            .await;
         }
     })
 }
@@ -270,6 +283,18 @@ async fn authorized(api: &Api, token: &str, owner: &str) -> bool {
         .is_ok_and(|id| id == owner)
 }
 
+/// Preserve source loss across pending writes so the upgrade owner can close with 1013.
+enum SocketFailure {
+    Closed,
+    AuthorityUnavailable,
+}
+
+impl From<()> for SocketFailure {
+    fn from((): ()) -> Self {
+        Self::Closed
+    }
+}
+
 async fn send_live(
     socket: &mut WebSocket,
     api: &Api,
@@ -277,42 +302,48 @@ async fn send_live(
     token: &str,
     revocation: &mut crate::auth::AccountSubscription,
     encoded: Option<String>,
-) -> Result<(), ()> {
+) -> Result<(), SocketFailure> {
     // Keep the same write future after another session's revocation. Dropping and
     // restarting a partially buffered frame would duplicate sequence delivery.
     // Serialize before this shared async boundary: event and error types must
     // not instantiate the full WebSocket writer and revocation loop twice.
     let mut enabled = api.runner.enabled_changes();
     if !*enabled.borrow() {
-        return Err(());
+        return Err(SocketFailure::Closed);
     }
     let writing = send(socket, encoded.ok_or(())?);
     tokio::pin!(writing);
     loop {
         tokio::select! {
             biased;
-            _ = enabled.changed() => return Err(()),
+            _ = enabled.changed() => return Err(SocketFailure::Closed),
             change = revocation.changed() => {
-                if change.is_err() || !authorized(api, token, owner).await { return Err(()); }
+                change.map_err(|_| SocketFailure::AuthorityUnavailable)?;
+                if !authorized(api, token, owner).await { return Err(SocketFailure::Closed); }
             }
-            result = &mut writing => return result,
+            result = &mut writing => return result.map_err(SocketFailure::from),
         }
     }
 }
 
 #[allow(clippy::too_many_lines)]
-async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret) {
+async fn run(
+    socket: &mut WebSocket,
+    api: Arc<Api>,
+    owner: String,
+    token: Secret,
+) -> Result<(), SocketFailure> {
     let Ok(token) = std::str::from_utf8(token.expose()) else {
-        return;
+        return Ok(());
     };
     let mut enabled = api.runner.enabled_changes();
     if !*enabled.borrow() {
-        return;
+        return Ok(());
     }
     let mut revocation = api.auth.revocation_events(&owner);
     // Admission preceded this subscription; recheck so an intervening logout cannot be missed.
     if !authorized(&api, token, &owner).await {
-        return;
+        return Ok(());
     }
     let mut batch: Option<Batch> = None;
     let mut changed: Option<tokio::sync::watch::Receiver<u64>> = None;
@@ -324,7 +355,8 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
             biased;
             _ = enabled.changed() => break,
             () = &mut expiry => break,
-            _ = revocation.changed() => {
+            change = revocation.changed() => {
+                change.map_err(|_| SocketFailure::AuthorityUnavailable)?;
                 if !authorized(&api, token, &owner).await { break; }
             }
             incoming = socket.recv() => {
@@ -337,7 +369,7 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
                 // JSON is retained by batch state, helper tasks or replay history.
                 drop(text);
                 let Ok(request) = decoded else {
-                    if send_live(&mut socket, &api, &owner, token, &mut revocation, serde_json::to_string(&serde_json::json!({"error":"invalid bootstrap request"})).ok()).await.is_err() { break; }
+                    send_live(socket, &api, &owner, token, &mut revocation, serde_json::to_string(&serde_json::json!({"error":"invalid bootstrap request"})).ok()).await?;
                     continue;
                 };
                 let result = match request {
@@ -363,7 +395,8 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
                                         _ = enabled.changed() => break 'connection,
                                         () = &mut expiry => break 'connection,
                                         change = revocation.changed() => {
-                                            if change.is_err() || !authorized(&api,token,&owner).await { break 'connection; }
+                                            change.map_err(|_| SocketFailure::AuthorityUnavailable)?;
+                                            if !authorized(&api,token,&owner).await { break 'connection; }
                                         }
                                         incoming = socket.recv() => {
                                             match incoming {
@@ -371,7 +404,7 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
                                                     // Refuse concurrent requests without retaining private inputs
                                                     // or cancelling the batch that owns this confirmation.
                                                     let busy = serde_json::to_string(&serde_json::json!({"error":"host-key confirmation busy; retry after confirmation"})).ok();
-                                                    if send_live(&mut socket,&api,&owner,token,&mut revocation,busy).await.is_err() { break 'connection; }
+                                                    send_live(socket,&api,&owner,token,&mut revocation,busy).await?;
                                                 },
                                                 Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Binary(_))) => {},
                                                 Some(Ok(Message::Close(_)) | Err(_)) | None => break 'connection,
@@ -384,7 +417,7 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
                             match confirmed {
                                 Ok(())=>{
                                     let reply=serde_json::to_string(&serde_json::json!({"host_key_confirmed":{"target":target,"fingerprint":fingerprint}})).ok();
-                                    if send_live(&mut socket,&api,&owner,token,&mut revocation,reply).await.is_err() {break;}
+                                    send_live(socket,&api,&owner,token,&mut revocation,reply).await?;
                                     Ok(())
                                 }
                                 Err(error)=>Err(error),
@@ -394,8 +427,9 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
                     Request::Replay { after: sequence } => { after = sequence; Ok(()) }
                     Request::Start { .. } => Err(infraternal_plugin_ssh::model::Failure::unsupported("A host batch is already running.")),
                 };
-                if let Err(error) = result
-                    && send_live(&mut socket, &api, &owner, token, &mut revocation, serde_json::to_string(&serde_json::json!({"error":error})).ok()).await.is_err() { break; }
+                if let Err(error) = result {
+                    send_live(socket, &api, &owner, token, &mut revocation, serde_json::to_string(&serde_json::json!({"error":error})).ok()).await?;
+                }
                     }
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
                     _ => break,
@@ -405,41 +439,35 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
         }
         if let Some(batch) = &batch {
             let (oldest, events) = batch.events(after);
-            if after.saturating_add(1) < oldest
-                && send_live(
-                    &mut socket,
+            if after.saturating_add(1) < oldest {
+                send_live(
+                    socket,
                     &api,
                     &owner,
                     token,
                     &mut revocation,
                     serde_json::to_string(&serde_json::json!({"resync":true,"oldest":oldest})).ok(),
                 )
-                .await
-                .is_err()
-            {
-                break;
+                .await?;
             }
             for event in events {
                 // Revocation interrupts a stalled five-second send too. No remote
                 // mutation is admitted by a socket that has lost owner authority.
-                if send_live(
-                    &mut socket,
+                send_live(
+                    socket,
                     &api,
                     &owner,
                     token,
                     &mut revocation,
                     serde_json::to_string(&event).ok(),
                 )
-                .await
-                .is_err()
-                {
-                    return;
-                }
+                .await?;
                 after = event.sequence;
             }
         }
     }
     // Dropping Batch signals cancellation; host attempts finish their rollback.
+    Ok(())
 }
 
 fn now() -> Result<i64, ()> {

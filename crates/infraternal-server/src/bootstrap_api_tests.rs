@@ -1056,5 +1056,8 @@ async fn review_account_scope_lost_bootstrap_source_retires_instead_of_spinning(
         closed.is_ok(),
         "lost revocation source retained bootstrap instead of failing closed"
     );
-    assert!(!matches!(closed.unwrap(), Some(Ok(ClientMessage::Text(_)))));
+    assert!(matches!(
+        closed.unwrap(),
+        Some(Ok(ClientMessage::Close(Some(frame)))) if u16::from(frame.code) == 1013
+    ));
 }

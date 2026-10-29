@@ -1,6 +1,6 @@
 //! Streams retained host setup events under current owner/host authority, independently of wizard lifetime (D255).
 
-use super::{Api, authenticate_headers, authorized, send_live};
+use super::{Api, SocketFailure, authenticate_headers, authorized, send_live};
 use axum::{
     extract::{
         State, WebSocketUpgrade,
@@ -62,26 +62,52 @@ async fn host_owned(api: &Api, owner: &str, token: &str, host: Uuid) -> bool {
     authorized(api, token, owner).await && api.auth.bootstrap_host(owner, host).await
 }
 
+/// Bound initial subscription admission while retaining revocation and component shutdown.
+async fn first_request(
+    socket: &mut WebSocket,
+    api: &Api,
+    owner: &str,
+    token: &str,
+    enabled: &mut tokio::sync::watch::Receiver<bool>,
+    revocation: &mut crate::auth::AccountSubscription,
+) -> Result<Message, SocketFailure> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            tokio::select! {
+                biased;
+                _ = enabled.changed() => return Err(SocketFailure::Closed),
+                change = revocation.changed() => {
+                    change.map_err(|_| SocketFailure::AuthorityUnavailable)?;
+                    if !authorized(api, token, owner).await {
+                        return Err(SocketFailure::Closed);
+                    }
+                }
+                incoming = socket.recv() => {
+                    return incoming.ok_or(())?.map_err(|_| SocketFailure::Closed);
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| SocketFailure::Closed)?
+}
+
 pub(super) async fn run(
-    mut socket: WebSocket,
+    socket: &mut WebSocket,
     api: Arc<Api>,
     owner: String,
     token: Secret,
-) -> Result<(), ()> {
+) -> Result<(), SocketFailure> {
     let token = std::str::from_utf8(token.expose()).map_err(|_| ())?;
     let mut enabled = api.runner.enabled_changes();
     let mut revocation = api.auth.revocation_events(&owner);
     // Admission preceded this subscription; recheck so an intervening logout cannot be missed.
     if !authorized(&api, token, &owner).await {
-        return Err(());
+        return Err(SocketFailure::Closed);
     }
-    let first = tokio::time::timeout(Duration::from_secs(5), socket.recv())
-        .await
-        .map_err(|_| ())?
-        .ok_or(())?
-        .map_err(|_| ())?;
+    let first = first_request(socket, &api, &owner, token, &mut enabled, &mut revocation).await?;
     let Message::Text(first) = first else {
-        return Err(());
+        return Err(SocketFailure::Closed);
     };
     let Request::Subscribe {
         host_id,
@@ -89,10 +115,10 @@ pub(super) async fn run(
         mut after,
     } = serde_json::from_str(&first).map_err(|_| ())?
     else {
-        return Err(());
+        return Err(SocketFailure::Closed);
     };
     if !identifier(&window_id) || !host_owned(&api, &owner, token, host_id).await {
-        return Err(());
+        return Err(SocketFailure::Closed);
     }
     let status = api.runner.setup_status();
     // Watch before replay closes the gap between snapshot and live delivery.
@@ -103,12 +129,12 @@ pub(super) async fn run(
     tokio::pin!(expiry);
     loop {
         if !*enabled.borrow() || !host_owned(&api, &owner, token, host_id).await {
-            return Err(());
+            return Err(SocketFailure::Closed);
         }
         let (resync, events) = status.events(&owner, host_id, after).map_err(|_| ())?;
         if resync {
             send_live(
-                &mut socket,
+                socket,
                 &api,
                 &owner,
                 token,
@@ -122,13 +148,13 @@ pub(super) async fn run(
         }
         for event in events {
             if !host_owned(&api, &owner, token, host_id).await {
-                return Err(());
+                return Err(SocketFailure::Closed);
             }
             let sequence = event.sequence;
             let mut event = serde_json::to_value(event).map_err(|_| ())?;
             event["window_id"] = window_id.clone().into();
             send_live(
-                &mut socket,
+                socket,
                 &api,
                 &owner,
                 token,
@@ -140,22 +166,24 @@ pub(super) async fn run(
         }
         tokio::select! {
             biased;
-            _ = enabled.changed() => return Err(()),
-            _ = &mut retired => return Err(()),
-            () = &mut expiry => return Err(()),
-            _ = revocation.changed() => {},
+            _ = enabled.changed() => return Err(SocketFailure::Closed),
+            _ = &mut retired => return Err(SocketFailure::Closed),
+            () = &mut expiry => return Err(SocketFailure::Closed),
+            change = revocation.changed() => {
+                change.map_err(|_| SocketFailure::AuthorityUnavailable)?;
+            },
             _ = changed.changed() => {},
             incoming = socket.recv() => {
                 let Some(Ok(Message::Text(text))) = incoming else { return Ok(()); };
-                if !host_owned(&api, &owner, token, host_id).await { return Err(()); }
+                if !host_owned(&api, &owner, token, host_id).await { return Err(SocketFailure::Closed); }
                 match serde_json::from_str::<Request>(&text).map_err(|_| ())? {
                     Request::Replay {after: cursor} => after = cursor,
                     Request::Retry {host_id: requested} if requested == host_id => {
                         let result = api.runner.retry_setup(owner.clone(), Secret::new(token.as_bytes().to_vec()), host_id);
                         let reply = match result { Ok(()) => serde_json::json!({"retry":host_id}), Err(failure) => serde_json::json!({"error":failure.message}) };
-                        send_live(&mut socket, &api, &owner, token, &mut revocation, serde_json::to_string(&reply).ok()).await?;
+                        send_live(socket, &api, &owner, token, &mut revocation, serde_json::to_string(&reply).ok()).await?;
                     },
-                    _ => return Err(()),
+                    _ => return Err(SocketFailure::Closed),
                 }
             },
         }
