@@ -1061,3 +1061,54 @@ async fn review_account_scope_lost_bootstrap_source_retires_instead_of_spinning(
         Some(Ok(ClientMessage::Close(Some(frame)))) if u16::from(frame.code) == 1013
     ));
 }
+
+#[tokio::test]
+async fn review_r2_restored_bootstrap_source_still_reports_unavailable() {
+    let (auth, owner, cookie, _, address, serving, _, api) = fixture(false).await;
+    let (mut socket, _) = connect_async(request(address, ORIGIN, Some(&cookie)))
+        .await
+        .unwrap();
+    socket
+        .send(ClientMessage::Text(
+            serde_json::json!({"action":"review-invalid"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap(),
+        Some(Ok(ClientMessage::Text(_)))
+    ));
+    let source = auth.revocation_events(&owner);
+    source.close_source_for_test();
+    // Restore the registry synchronously before the upgrade gets another executor turn.
+    // The old cursor must remember source loss even when a new source is available.
+    let replacement = auth.revocation_events(&owner);
+    assert!(source.has_changed().is_err());
+    assert!(!replacement.has_changed().unwrap());
+    let closed = tokio::time::timeout(Duration::from_secs(2), socket.next()).await;
+    // An upgrade has its own task. Retire it even when the source-loss assertion
+    // fails; aborting only the listener would leave the fixture's loop alive.
+    auth.logout(cookie.split_once('=').unwrap().1)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while api.sockets.available_permits() != 16 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    serving.abort();
+    assert!(
+        closed.is_ok(),
+        "lost revocation source retained bootstrap instead of failing closed"
+    );
+    assert!(matches!(
+        closed.unwrap(),
+        Some(Ok(ClientMessage::Close(Some(frame)))) if u16::from(frame.code) == 1013
+    ));
+}

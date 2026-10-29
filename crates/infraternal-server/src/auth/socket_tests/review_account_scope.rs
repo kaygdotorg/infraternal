@@ -204,3 +204,100 @@ async fn account_deletion_retires_open_sockets_without_affecting_other_accounts(
     assert!(!other.has_changed().unwrap());
     server.abort();
 }
+
+#[tokio::test(start_paused = true)]
+async fn review_r2_lost_recovery_source_reports_unavailable_or_reads_authority() {
+    let _serial = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
+    let (f, address, server) = socket_fixture().await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut browser, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .unwrap();
+    assert_server_hello(&mut browser).await;
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 4,
+            client_info: "source-loss-review",
+        },
+    )
+    .await;
+    read_welcome(&mut browser).await;
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Subscribe {
+            sub_id: 45,
+            filter_json: br#"{"topic":"auth.recovery"}"#,
+        },
+    )
+    .await;
+    let snapshot = read_client_frame(&mut browser).await;
+    assert!(matches!(
+        decode_muxed_frame(&snapshot).unwrap().frame,
+        Frame::Event { sub_id: 45, .. }
+    ));
+    // Park content-free probes; the following Pong fences the visibility notice.
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Event {
+            sub_id: 0,
+            event_json: br#"{"topic":"connection.visibility","hidden":true}"#,
+        },
+    )
+    .await;
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Ping {
+            nonce: 240,
+            sent_us: 0,
+        },
+    )
+    .await;
+    loop {
+        let wire = read_client_frame(&mut browser).await;
+        if matches!(
+            decode_muxed_frame(&wire).unwrap().frame,
+            Frame::Pong { nonce: 240, .. }
+        ) {
+            break;
+        }
+    }
+    let reads = f.auth.authority_reads(&f.user);
+    let lost = f.auth.recovery_events(&f.user);
+    lost.close_source_for_test();
+    let replacement = f.auth.recovery_events(&f.user);
+    assert!(!replacement.has_changed().unwrap());
+    let mut codes = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(Ok(message)) = browser.next().await {
+            match message {
+                Message::Close(frame) => {
+                    if let Some(frame) = frame {
+                        codes.push(u16::from(frame.code));
+                    }
+                    break;
+                }
+                Message::Binary(wire) => {
+                    if let Frame::Close { code, .. } = decode_muxed_frame(&wire).unwrap().frame {
+                        codes.push(code);
+                    }
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let reread = f.auth.authority_reads(&f.user) > reads;
+    server.abort();
+    assert!(
+        codes.contains(&1013) || reread,
+        "lost recovery source stopped without unavailable outcome or authority read: codes={codes:?}, reread={reread}"
+    );
+}

@@ -426,3 +426,7 @@ mod tests {
         assert!(registry.accounts().is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "review_revocation_r2_tests.rs"]
+mod review_revocation_r2;
