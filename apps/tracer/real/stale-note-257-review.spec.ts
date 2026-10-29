@@ -91,9 +91,9 @@ for (const surface of ["canvas", "network", "probe", "restart"] as const) for (c
   } finally { await context.close(); await server.dispose(); }
 });
 
-test("review: a resized silent real canvas restore shows the stale note", async ({ browser }) => {
+for (const upgradeDelayMs of [0, 500]) test(`review: a resized silent real canvas restore shows the stale note${upgradeDelayMs ? " after delayed upgrade" : ""}`, async ({ browser }) => {
   test.setTimeout(90_000);
-  const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4857) });
+  const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4857), upgradeDelayMs });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
   try {
     const page = await context.newPage();
@@ -118,10 +118,13 @@ test("review: a resized silent real canvas restore shows the stale note", async 
     await expect.poll(() => connections.at(-1)?.fences.length ?? 0).toBeGreaterThan(0);
     await page.waitForTimeout(3_000);
     const current = connections.at(-1)!;
-    console.log("RESIZED_RESTORE_RECEIPT", JSON.stringify(current));
+    console.log("RESIZED_RESTORE_RECEIPT", JSON.stringify({ upgradeDelayMs, ...current }));
     expect(current.sizes.at(-1)).not.toEqual({ cols: current.fences.at(-1)?.cols, rows: current.fences.at(-1)?.rows });
     expect(current.suffixes).toBe(0);
-    await page.screenshot({ path: tracerEvidencePath("review-real-canvas-resized-restore.png") });
+    await page.screenshot({ path: tracerEvidencePath(`review-real-canvas-resized-restore${upgradeDelayMs ? "-delayed" : ""}.png`) });
     await expect(page.locator(".ui-terminal-note[data-shown]")).toHaveCount(1);
+    await host.locator("textarea").focus();
+    await page.keyboard.press("Control+C");
+    await expect(page.locator(".ui-terminal-note[data-shown]")).toHaveCount(0);
   } finally { await context.close(); await server.dispose(); }
 });
