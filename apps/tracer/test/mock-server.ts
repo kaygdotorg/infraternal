@@ -44,6 +44,8 @@ interface MockOwner {
 }
 
 interface MockSession {
+  cols: number;
+  rows: number;
   queries: QueryReplies;
   sessionId: Uint8Array;
   sessionIdText: string;
@@ -78,6 +80,7 @@ interface Connection {
   outputCursor: bigint;
   inputCursor: bigint;
   replayUntil: bigint | undefined;
+  replaySize: { cols: number; rows: number } | undefined;
   attached: boolean;
   /** The client stream the terminal uses (1 until a new shell opens another). */
   stream: number;
@@ -195,6 +198,7 @@ webSockets.on("connection", (socket, request) => {
     outputCursor: 0n,
     inputCursor: 0n,
     replayUntil: undefined,
+    replaySize: undefined,
     attached: false,
     stream: 1,
     goneStreams: new Set(),
@@ -978,6 +982,7 @@ function handleTerminalFrame(connection: Connection, streamId: number, frame: Wi
       connection.attached = true;
       connection.outputCursor = frame.lastOutSeq;
       connection.replayUntil = BigInt(connection.session.outputLength);
+      connection.replaySize = { cols: connection.session.cols, rows: connection.session.rows };
       sendFrame(connection.socket, connection.stream, { type: "Ack", inSeqAcked: connection.inputCursor });
       flushOutput(connection);
       if (redrawOnAttach) {
@@ -1017,6 +1022,8 @@ function handleTerminalFrame(connection: Connection, streamId: number, frame: Wi
       acceptInput(connection, frame.inSeq, frame.bytes);
       return;
     case "Resize":
+      connection.session.cols = frame.cols;
+      connection.session.rows = frame.rows;
       return;
     case "Close":
       // The window detached; the session keeps running.
@@ -1141,6 +1148,7 @@ function flushReplayComplete(connection: Connection): void {
       type: "terminal.replay_complete",
       session_id: connection.session.sessionIdText,
       out_seq: connection.outputCursor.toString(),
+      ...connection.replaySize,
     })),
   });
   connection.replayUntil = undefined;
@@ -1325,6 +1333,8 @@ function createSession(resumeFrom?: MockSession, fixtureOutput: Uint8Array = new
   const sessionIdText = randomUuid();
   liveSessionIds.add(sessionIdText);
   return {
+    cols: 80,
+    rows: 24,
     queries: new QueryReplies(),
     sessionId: uuidBytes(sessionIdText),
     sessionIdText,
