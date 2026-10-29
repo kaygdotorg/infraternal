@@ -18,8 +18,11 @@ async function openAttachedTerminal(page: Page, theme: "ink" | "paper"): Promise
   await page.goto(`/?mock=1&theme=${theme}&bg=none`);
   await expect(page.getByText("TEST DOUBLE")).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
-  // The double accepts a fixture only for a fresh attached terminal; the previous test's socket may still be closing.
-  await expect.poll(async () => (await context.request.post("/__mock/text-output", { data: { text: SCREEN } })).status(), { timeout: 10_000 }).toBe(200);
+  // The double accepts a fixture only for a fresh attached terminal; the previous test's socket may still be closing,
+  // and a request on a connection the double just dropped fails with "socket hang up", which is worth another try.
+  await expect.poll(async () => {
+    try { return (await context.request.post("/__mock/text-output", { data: { text: SCREEN } })).status(); } catch { return 0; }
+  }, { timeout: 10_000 }).toBe(200);
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain("README.md");
 }
 
