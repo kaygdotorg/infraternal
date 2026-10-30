@@ -11,7 +11,7 @@
 //!    works. `--state` comes from the same line, so a node with a
 //!    non-default runtime directory is read where it really keeps its state.
 //! 2. Ask the owning manager for the runtime properties of only those units (at most
-//!    a few `systemctl show` calls). A manager that does not answer makes that
+//!    two observations per unit, four concurrent `systemctl show` calls). A manager that does not answer makes that
 //!    unit "Unknown"; it never makes the whole node unknown, because the
 //!    other manager's units are still readable.
 //! 3. Read mesh facts from the public snapshot the mesh writes next to the
@@ -133,6 +133,8 @@ pub struct Unit {
     pub state: Option<PathBuf>,
     /// A canonical installer unit masked on disk cannot have a running process.
     masked: bool,
+    /// Plain local query failure, without manager output or sensitive arguments.
+    pub query_error: Option<&'static str>,
 }
 
 /// Every location the probe reads; tests substitute a temporary tree.
@@ -296,31 +298,67 @@ fn assemble(roots: &Roots, ids: &[String], units: Vec<(Unit, Activity)>) -> Node
     }
 }
 
-/// Query units concurrently so a stalled manager or unit cannot spend another
-/// unit's deadline. Each query includes its own immediate restart observation.
+/// Query with at most four 128 KiB workers and four manager children. Each
+/// scope reserves two workers, so a stalled system manager cannot exhaust the
+/// user's capacity. Admission ends after 40 ms; each admitted unit has its own
+/// 40 ms deadline (including any second observation). Unqueried/refused work
+/// stays Unknown with a reason; neither spawn nor join is a panic path.
 #[must_use]
 pub fn probe_local(roots: &Roots, ids: &[String]) -> NodeStatus {
-    let units = std::thread::scope(|scope| {
-        let pending: Vec<_> = discover(roots)
-            .into_iter()
-            .map(|unit| {
-                let name = unit.name.clone();
-                let manager = unit.scope;
-                let masked = unit.masked;
-                let query = scope.spawn(move || {
-                    if masked {
-                        Activity::Inactive
-                    } else {
-                        manager_activity(manager, &name)
-                    }
-                });
-                (unit, query)
-            })
-            .collect();
-        pending
-            .into_iter()
-            .map(|(unit, query)| (unit, query.join().unwrap_or(Activity::Unknown)))
-            .collect()
+    let mut units: Vec<_> = discover(roots)
+        .into_iter()
+        .map(|mut unit| {
+            let state = if unit.masked {
+                Activity::Inactive
+            } else {
+                Activity::Unknown
+            };
+            if !unit.masked {
+                unit.query_error = Some("service query worker unavailable");
+            }
+            (unit, state)
+        })
+        .collect();
+    let admission = std::time::Instant::now() + std::time::Duration::from_millis(40);
+    // Discovery orders system units before user units. Keep observations in
+    // that order, so component rows and diagnostics use the same first unit.
+    let system = units.partition_point(|(unit, _)| unit.scope == Scope::System);
+    std::thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(4);
+        let (system, user) = units.split_at_mut(system);
+        for group in [system, user] {
+            let chunk_size = group.len().div_ceil(2).max(1);
+            for chunk in group.chunks_mut(chunk_size) {
+                let worker = std::thread::Builder::new()
+                    .stack_size(128 * 1024)
+                    .spawn_scoped(scope, move || {
+                        for (unit, state) in chunk {
+                            if unit.masked {
+                                continue;
+                            }
+                            if std::time::Instant::now() >= admission {
+                                unit.query_error = Some("service query capacity exhausted");
+                                continue;
+                            }
+                            match manager_activity_result(unit.scope, &unit.name) {
+                                Ok(activity) => {
+                                    *state = activity;
+                                    unit.query_error = None;
+                                }
+                                Err(reason) => unit.query_error = Some(reason),
+                            }
+                        }
+                    });
+                if let Ok(worker) = worker {
+                    workers.push(worker);
+                }
+            }
+        }
+        // Explicitly join even a panicked worker, preventing scope's automatic
+        // join from unwinding the status command. Its unfinished rows stay unknown.
+        for worker in workers {
+            let _ = worker.join();
+        }
     });
     assemble(roots, ids, units)
 }
@@ -408,6 +446,7 @@ fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) ->
             data: None,
             state: None,
             masked: true,
+            query_error: None,
         });
     }
     let mut exec: Option<String> = None;
@@ -457,6 +496,7 @@ fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) ->
         data: option(&words, "--data"),
         state: option(&words, "--state"),
         masked: false,
+        query_error: None,
     })
 }
 
@@ -564,6 +604,8 @@ fn component(id: &str, role: Role, units: &[(Unit, Activity)], roots: &Roots) ->
                 2 | 3 => format!("{scope} service; last signal {status}"),
                 _ => format!("{scope} service; last exit unavailable"),
             }
+        } else if let Some(reason) = unit.query_error {
+            format!("{scope} service; {reason}")
         } else {
             format!("{scope} service")
         }
@@ -764,6 +806,10 @@ impl<'a> Observation<'a> {
 /// for a newly started process, without a sampling sleep or network request.
 #[must_use]
 pub fn manager_activity(scope: Scope, unit: &str) -> Activity {
+    manager_activity_result(scope, unit).unwrap_or(Activity::Unknown)
+}
+
+fn manager_activity_result(scope: Scope, unit: &str) -> Result<Activity, &'static str> {
     manager_activity_before(
         scope,
         unit,
@@ -771,10 +817,12 @@ pub fn manager_activity(scope: Scope, unit: &str) -> Activity {
     )
 }
 
-fn manager_activity_before(scope: Scope, unit: &str, deadline: std::time::Instant) -> Activity {
-    let Some(first) = manager_properties(scope, unit, deadline) else {
-        return Activity::Unknown;
-    };
+fn manager_activity_before(
+    scope: Scope,
+    unit: &str,
+    deadline: std::time::Instant,
+) -> Result<Activity, &'static str> {
+    let first = manager_properties(scope, unit, deadline)?;
     let first = Observation::read(&first);
     // systemd reports this property in microseconds of CLOCK_MONOTONIC.
     // Wall time and boot time include different clock adjustments/suspends.
@@ -789,17 +837,27 @@ fn manager_activity_before(scope: Scope, unit: &str, deadline: std::time::Instan
     if activity == Activity::Active && first.recent(now) {
         // Only a fresh start needs another immediate look. Old healthy services
         // cost one local query; the restart window expires without saved state.
-        if let Some(second) = manager_properties(scope, unit, deadline) {
-            return Observation::read(&second).activity(Some(&first), now);
-        }
-        return Activity::Unknown;
+        let second = manager_properties(scope, unit, deadline)?;
+        return known_activity(Observation::read(&second).activity(Some(&first), now));
     }
-    activity
+    known_activity(activity)
 }
 
-fn manager_properties(scope: Scope, unit: &str, deadline: std::time::Instant) -> Option<String> {
+fn known_activity(activity: Activity) -> Result<Activity, &'static str> {
+    if activity == Activity::Unknown {
+        Err("service manager did not provide a readable runtime state")
+    } else {
+        Ok(activity)
+    }
+}
+
+fn manager_properties(
+    scope: Scope,
+    unit: &str,
+    deadline: std::time::Instant,
+) -> Result<String, &'static str> {
     if std::time::Instant::now() >= deadline {
-        return None;
+        return Err("service manager query timed out");
     }
     let mut command = Command::new("systemctl");
     if scope == Scope::User {
@@ -810,14 +868,18 @@ fn manager_properties(scope: Scope, unit: &str, deadline: std::time::Instant) ->
         "--property=ActiveState,SubState,NRestarts,MainPID,ExecMainStartTimestampMonotonic,ExecMainCode,ExecMainStatus",
         "--no-pager", unit,
     ]).env("LC_ALL", "C").env("SYSTEMD_COLORS", "0")
-        .stdin(Stdio::null()).stderr(Stdio::null()).stdout(Stdio::piped()).spawn().ok()?;
+        .stdin(Stdio::null()).stderr(Stdio::null()).stdout(Stdio::piped()).spawn().map_err(|_| "could not start the service manager query")?;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let output = child.wait_with_output().ok()?;
-                return status
-                    .success()
-                    .then(|| String::from_utf8_lossy(&output.stdout).into_owned());
+                let output = child
+                    .wait_with_output()
+                    .map_err(|_| "could not read the service manager response")?;
+                return if status.success() {
+                    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+                } else {
+                    Err("service manager query was refused")
+                };
             }
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(1));
@@ -827,7 +889,7 @@ fn manager_properties(scope: Scope, unit: &str, deadline: std::time::Instant) ->
                 // manager is unknown, never grounds to claim a running service.
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Err("service manager query timed out");
             }
         }
     }
