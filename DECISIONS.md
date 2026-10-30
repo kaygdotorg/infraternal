@@ -3445,3 +3445,23 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      to copy, plus a button that adds that line to the startup file after
      the person confirms, with undo. Every session still exports
      `INFRATERNAL_SESSION`. The per-host and global switches from D241 stay.
+316. **Mesh path finding, names and the reverse proxy (owner, 2026-10-30,
+     #220; answers D313's Q8, confirms D165, refines D219):**
+     - **Path finding uses str0m's ICE core** for host-to-host mesh paths,
+       the same engine D192 chose for the browser-to-host direct path, so
+       the binary carries one implementation. Measured on #220: +207,840 B
+       x86_64 / +184,240 B aarch64, accepted by the owner; it drives a
+       caller-owned raw socket next to the kernel WireGuard port (seam C,
+       proven on the perf VM). Port mapping (PCP, NAT-PMP, minimal UPnP-IGD)
+       is our own (~9 KB estimated), with a fuzzed parser for router replies.
+       Rejected: our own checker (two implementations once #103 lands),
+       rtc-ice, portmapper and igd-next (0.4–2.1 MB).
+     - **Mesh names:** `<host>.internal` by default (D165). A person can add
+       their own subdomain (for example `mesh.kayg.org`) as an extra suffix.
+     - **Reverse proxy: integrate Traefik, never write our own.** Exposing a
+       service on a name with HTTPS is built now, on Traefik, which already
+       runs in the owner's setups. Infraternal manages the routes; it does
+       not reimplement proxying. TLS certificates use the **DNS-01**
+       challenge as the built-in default, so names behind NAT or on the
+       mesh-only network still get valid certificates. Rejected: our own
+       proxy and an HTTP-01-only default.
