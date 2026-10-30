@@ -3423,9 +3423,13 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        `split` → `canvas open --beside/--below`, `close-window` → `canvas
        close`, `mux mcp` → `sessions mcp`; D304's `sessions open --name`
        → `sessions new`, since "open" means "show on screen".
-     - **AI tools** use MCP and `sessions` only; there is no tmux-compatible
-       command subset (it would add a second surface and another product's
-       name to our CLI). This replaces D311's tmux subset.
+     - **AI tools** get MCP, `sessions`, and D311's tmux-compatible subset
+       (`new-session`, `send-keys`, `capture-pane`, `list-sessions`,
+       `kill-session`, `split-window`), mapped onto the verbs above. Owner:
+       "support tmux style commands yes because lots of training data on it
+       for LLMs". Anything outside the subset fails with a clear "not
+       supported"; attach is never part of it. The tmux name appears in code
+       only where it names that compatible command set.
      - Errors name the fix and the next step, for example
        `No session called "biuld" on web01. Did you mean "build"?`, exit 4
        (D303 codes).
