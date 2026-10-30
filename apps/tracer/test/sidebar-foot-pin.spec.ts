@@ -77,3 +77,23 @@ for (const size of SIZES) {
     await expectPinned(page, "after idle", reference);
   });
 }
+
+// Review screenshots of the pinned pill in the state that used to break it (`RENAME_CAPTURES=1`, external evidence directory).
+for (const [name, size, theme, touch] of [["desktop-ink", { width: 1773, height: 2000 }, "ink", false], ["desktop-paper", { width: 1440, height: 900 }, "paper", false], ["phone-ink", { width: 393, height: 852 }, "ink", true]] as const) {
+  test(`capture: the pill after the inbox card has gone (${name})`, async ({ browser }) => {
+    test.skip(!process.env.RENAME_CAPTURES, "review captures only");
+    const context = await browser.newContext({ viewport: size, deviceScaleFactor: touch ? 3 : 1, ...(touch ? { hasTouch: true, isMobile: true } : {}) });
+    const page = await context.newPage();
+    await page.goto(`/?mock=1&proto=clusters&scene=3&theme=${theme}&ca=locked`);
+    await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+    await page.locator("#sidebar-toggle").click();
+    await page.locator(".ui-toast:not([hidden])").getByRole("button", { name: "Dismiss" }).click({ timeout: 8000 });
+    await page.locator(".ui-inbox:not([hidden])").getByRole("button", { name: "Unlock host connections" }).click();
+    await page.locator(".ui-inbox:not([hidden])").getByRole("button", { name: "Unlock", exact: true }).click();
+    await expect(page.locator(".ui-inbox:not([hidden])")).toHaveCount(0);
+    await page.waitForTimeout(800);
+    const { tracerEvidencePath } = await import("./evidence-path");
+    await page.screenshot({ path: tracerEvidencePath("sidebar-pill-259", `pill-${name}.png`) });
+    await context.close();
+  });
+}
