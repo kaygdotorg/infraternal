@@ -1,4 +1,5 @@
 /** Builds the accessible host/session tree and updates its current-host indicators. */
+import { beginInlineRename, onDoubleActivate, placeOverName, type InlineRename } from "./inline-rename";
 
 export interface BranchLeaf {
   id: string;
@@ -15,6 +16,8 @@ export interface BranchLeaf {
   heading?: boolean;
   /** A quiet note after the label: new output (a dot), or the result of a finished command. */
   mark?: "output" | "ok" | "fail";
+  /** The label is a name the person may change by double click or double tap (the tree's `rename` option saves it). */
+  renamable?: boolean;
 }
 
 export interface BranchSection {
@@ -27,6 +30,18 @@ export interface BranchSection {
   open?: boolean;
   disabled?: boolean;
   leaves: BranchLeaf[];
+}
+
+export interface BranchedOptions {
+  active: string;
+  onSelect?: (id: string) => void;
+  /**
+   * Saves a renamed leaf: resolves when accepted, rejects when refused (the caller says why). The tree shows the new
+   * name at once and puts the old one back when this rejects.
+   */
+  rename?: (id: string, name: string) => Promise<void>;
+  /** A rename field opened (`true`) or closed (`false`): a tree that is rebuilt while one is open would drop it. */
+  onRenaming?: (renaming: boolean) => void;
 }
 
 export interface BranchedMenu {
@@ -108,6 +123,7 @@ function makeSection(section: BranchSection): HTMLElement {
     const button = el("button", "bm-leaf");
     button.type = "button";
     button.dataset.id = leaf.id;
+    if (leaf.renamable) button.dataset.renamable = "";
     button.disabled = Boolean(leaf.disabled);
     const spoken = [leaf.label, leaf.state, leaf.mark ? MARK_NAME[leaf.mark] : "", leaf.meta].filter(Boolean);
     button.setAttribute("aria-label", spoken.join(", "));
@@ -142,7 +158,7 @@ function makeSection(section: BranchSection): HTMLElement {
 export function branchedMenu(
   host: HTMLElement,
   sections: BranchSection[],
-  opts: { active: string; onSelect?: (id: string) => void },
+  opts: BranchedOptions,
 ): BranchedMenu {
   host.replaceChildren();
   host.classList.add("bm");
@@ -247,6 +263,38 @@ export function branchedMenu(
   };
   host.addEventListener("click", onClick);
 
+  // Renaming in place: a double click or double tap on a renamable leaf's name. The click that comes first still
+  // selects the leaf (a single click keeps its meaning); the field is placed over the name, never inside the button.
+  let renaming: InlineRename | undefined;
+  const leafOf = (event: Event): HTMLElement | undefined => (event.target instanceof Element ? event.target.closest<HTMLElement>(".bm-leaf[data-renamable]") ?? undefined : undefined);
+  const abort = new AbortController();
+  if (opts.rename) {
+    onDoubleActivate(host, (event) => {
+      const leaf = leafOf(event);
+      const label = leaf?.querySelector<HTMLElement>(".bm-label");
+      const id = leaf?.dataset.id;
+      if (!leaf || !label || !id || renaming) return;
+      const was = label.textContent ?? "";
+      let restore = (): void => undefined;
+      opts.onRenaming?.(true);
+      renaming = beginInlineRename({
+        value: was,
+        label: "Host name",
+        place: (input) => { restore = placeOverName(label, leaf.parentElement!, input); },
+        commit: (value) => {
+          const next = value.trim();
+          if (!next || next === was) return;
+          label.textContent = next;
+          leaf.dataset.pending = "";
+          leaf.setAttribute("aria-busy", "true");
+          const settle = (): void => { delete leaf.dataset.pending; leaf.removeAttribute("aria-busy"); };
+          opts.rename!(id, next).then(settle, () => { label.textContent = was; settle(); });
+        },
+        close: () => { restore(); renaming = undefined; opts.onRenaming?.(false); },
+      });
+    }, abort.signal, (event) => leafOf(event)?.dataset.id); // by id: the tree is rebuilt between the two taps, its buttons are new
+  }
+
   // Observe folds as well as the host so branch geometry stays aligned after a fold toggles.
   const observer = new ResizeObserver(() => layout(false));
   observer.observe(host);
@@ -262,6 +310,7 @@ export function branchedMenu(
       disposed = true;
       observer.disconnect();
       host.removeEventListener("click", onClick);
+      abort.abort();
     },
   };
   // No first layout here: the observer above reports the host after the browser's own layout and before paint, so the

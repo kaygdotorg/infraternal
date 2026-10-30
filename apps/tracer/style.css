@@ -474,6 +474,9 @@ button { color: inherit; }
 .bm-leaf:disabled { opacity: 0.56; cursor: default; }
 .glyph { width: 18px; flex: none; color: var(--fg-3); font: var(--fw-label) var(--text-caption)/1 var(--font-mono); }
 .bm-leaf[aria-current] { color: var(--fg); }
+/* A renamed host shows its new name at once and settles to full strength when the server accepts it. */
+.bm-label { transition: opacity 140ms ease; }
+.bm-leaf[data-pending] .bm-label { opacity: 0.6; }
 .bm-leaf[aria-current] .glyph { color: var(--accent); }
 
 /* Palette open from the keyboard is immediate; pointer-open uses only opacity/transform. */
