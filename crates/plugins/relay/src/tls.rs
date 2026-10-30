@@ -21,10 +21,14 @@ pub const KEEP_ALIVE: Duration = Duration::from_secs(1);
 /// A relay connection with no authenticated packet for this long is gone.
 pub const IDLE: Duration = Duration::from_secs(3);
 
-/// Largest UDP payload either end probes for. A full `WireGuard` data packet at
-/// the mesh MTU (1380 + 32) plus the 4-byte link id and QUIC framing fits in
-/// it; 1452 is the largest payload a 1500-byte IPv6 path carries.
-const MAX_UDP_PAYLOAD: u16 = 1452;
+/// Largest UDP payload either end probes for: 1472 is the most a 1500-byte
+/// IPv4 path carries, and discovery finds less on smaller paths. quinn keeps
+/// 38 bytes of each packet for QUIC (flags, 8-byte connection id, worst-case
+/// packet number and frame header, AEAD tag), so a full mesh-MTU `WireGuard`
+/// packet (1380 + 32) plus the 4-byte link id needs a discovered payload of
+/// at least 1454. A 1500-byte IPv6 path (1452) is two bytes short: such pairs
+/// need a lower route MTU, which the low-MTU slice adds.
+const MAX_UDP_PAYLOAD: u16 = 1472;
 /// Received DATAGRAM bytes buffered per connection before the oldest is
 /// dropped. Forwarding reads promptly; a deep buffer would only add latency.
 const DATAGRAM_RECEIVE: usize = 512 * 1024;
