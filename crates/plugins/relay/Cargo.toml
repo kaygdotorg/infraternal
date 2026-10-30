@@ -1,12 +1,25 @@
-# The metadata-only relay plugin package; relay behavior is built in a separate lane.
+# Relay component: CLI metadata always; the datagram relay runtime behind `runtime` [131,163,198,313].
 [package]
 name = "infraternal-plugin-relay"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Ciphertext-only relay over QUIC DATAGRAM frames, its client and the
+# authenticated address probe codec. Every engine is already in the binary
+# (quinn, rustls, ring, openssl; D176); the feature only gates our code.
+runtime = ["dep:bytes", "dep:openssl", "dep:quinn", "dep:ring", "dep:rustls", "dep:tokio"]
+
 [dependencies]
 infraternal-plugin-api = { path = "../../infraternal-plugin-api", version = "0.1.0" }
+bytes = { workspace = true, optional = true }
+openssl = { workspace = true, optional = true }
+quinn = { workspace = true, optional = true }
+ring = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 
 [lints]
 workspace = true

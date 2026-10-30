@@ -1509,7 +1509,13 @@ dependencies = [
 name = "infraternal-plugin-relay"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "infraternal-plugin-api",
+ "openssl",
+ "quinn",
+ "ring",
+ "rustls",
+ "tokio",
 ]
 
 [[package]]
