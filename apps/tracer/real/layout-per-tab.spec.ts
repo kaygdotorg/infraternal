@@ -91,3 +91,23 @@ test("failed logout preserves the signed-in queue; successful logout invalidates
     await a.locator("#login-passkey").click(); await expect(windows(a)).toHaveCount(1); await settled(a); await noPrivateStorage(a); await noPrivateStorage(b);
   } finally { resumeLogout(); await context.close(); await server.dispose(); }
 });
+test("throwing storage at cold startup and recovered storage never create a private layout cache", async ({ browser }) => {
+  const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4450) });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
+  try {
+    await context.addInitScript(() => {
+      for (const name of ["localStorage", "sessionStorage"]) {
+        const descriptor = Object.getOwnPropertyDescriptor(window, name)!;
+        Object.defineProperty(window, name, { configurable: true, get() { throw new DOMException("Storage unavailable", "SecurityError"); } });
+        window.addEventListener("test:restore-storage", () => Object.defineProperty(window, name, descriptor), { once: true });
+      }
+    });
+    const page = watchLayout(await context.newPage()), gate = await holdApplies(page), errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message)); await enrol(page, server); await settled(page);
+    gate.hold(); await page.keyboard.press("Control+Shift+E"); await expect(windows(page)).toHaveCount(2); await expect(pending(page)).toBeVisible();
+    await page.evaluate(() => window.dispatchEvent(new Event("test:restore-storage")));
+    gate.release(); await settled(page); await noPrivateStorage(page); expect(errors).toEqual([]);
+    await page.reload(); await expect(windows(page)).toHaveCount(2); await settled(page);
+    await page.evaluate(() => window.dispatchEvent(new Event("test:restore-storage"))); await noPrivateStorage(page);
+  } finally { await context.close(); await server.dispose(); }
+});
