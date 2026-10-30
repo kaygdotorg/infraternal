@@ -439,3 +439,44 @@ fn consecutive_observations_detect_restart_count_and_pid_churn() {
         Activity::Unknown
     );
 }
+
+#[test]
+fn a_restarting_role_does_not_describe_a_stopped_or_failed_role_as_restarting() {
+    let fixture = Fixture::new();
+    production_server(&fixture);
+    fixture.write(
+        "user/infraternal-agent.service",
+        "[Service]\nExecStart=/usr/bin/infraternal agent run\n",
+    );
+    let restarting = Activity::Restarting { code: 1, status: 1 };
+    for restarting_scope in [Scope::System, Scope::User] {
+        for other in [Activity::Inactive, Activity::Failed] {
+            let status = probe(&fixture.roots(), &IDS.map(str::to_owned), &|scope, _| {
+                if scope == restarting_scope {
+                    restarting
+                } else {
+                    other
+                }
+            });
+            assert_eq!(
+                status.headline().1,
+                "Part of this machine's setup is restarting repeatedly."
+            );
+            let (restarting_role, other_role) = if restarting_scope == Scope::System {
+                ("server", "agent")
+            } else {
+                ("agent", "server")
+            };
+            assert_eq!(state(&status, restarting_role).0, "Restarting repeatedly");
+            assert_eq!(state(&status, other_role).0, super::word(other));
+            assert_eq!(status.confirmed_down().len(), 2);
+        }
+    }
+    let both = probe(&fixture.roots(), &IDS.map(str::to_owned), &|_, _| {
+        restarting
+    });
+    assert_eq!(
+        both.headline().1,
+        "The server and the infraternal agent are restarting repeatedly on this machine."
+    );
+}

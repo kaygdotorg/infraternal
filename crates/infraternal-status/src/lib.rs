@@ -806,6 +806,16 @@ impl NodeStatus {
             "Part of this machine's setup is not running.".to_owned()
         } else if has_unknown {
             "Part of this machine's setup is not running; another status is unknown.".to_owned()
+        } else if plural
+            && matches!(overall, Activity::Restarting { .. })
+            && self
+                .units
+                .iter()
+                .any(|(_, state)| !matches!(state, Activity::Restarting { .. }))
+        {
+            // A grouped headline must not turn another stopped/failed role
+            // into a second restart loop; component rows keep their own facts.
+            "Part of this machine's setup is restarting repeatedly.".to_owned()
         } else {
             let state = match (overall, plural) {
                 (Activity::Restarting { .. }, false) => "is restarting repeatedly",
