@@ -447,6 +447,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
       const mounted = await mountProductCanvas(screen, {
         host: { name: hostName },
         accountId: activeUserId ?? "account",
+        ...(identity && "session_incarnation" in identity && identity.session_incarnation ? { sessionIncarnation: identity.session_incarnation } : {}),
         predictiveEcho,
         isCurrent: () => generation === sessionGeneration,
         onSessionCheck: () => { void checkForegroundSession(); },

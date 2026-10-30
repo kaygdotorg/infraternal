@@ -72,6 +72,11 @@ pub struct CanvasPlugin(pub Arc<dyn LayoutStore>);
 struct Filter {
     topic: String,
 }
+/// Borrow only the lifetime label; skip the document without allocating a second tree.
+#[derive(Deserialize)]
+struct SessionBinding<'a> {
+    session_incarnation: Option<&'a str>,
+}
 #[derive(Clone)]
 struct Subscription {
     id: u32,
@@ -103,6 +108,13 @@ impl Plugin for CanvasPlugin {
                         let Ok(decoded) = decode_muxed_frame(&request) else { break; };
                         match decoded.frame {
                             Frame::Call { call_id,action_id,input_json } => host.authorized(Box::pin(async {
+                                // Admission precedes receipts too: an old session must not learn or replay a result.
+                                if let Some(incarnation) = host.session_incarnation() {
+                                    let binding = serde_json::from_slice::<SessionBinding<'_>>(input_json).ok();
+                                    if binding.and_then(|v| v.session_incarnation) != Some(incarnation) {
+                                        return send(&replies, 0, Frame::Result { call_id, ok: false, json: br#"{"error":"layout session changed","reason":"layout_session_changed"}"# }).await;
+                                    }
+                                }
                                 let result = match action_id {
                                     "canvas.layout.apply" | "canvas.layout.initialize" => store.call(action_id=="canvas.layout.initialize",host.user_id(),input_json).await,
                                     _=>Err(()),

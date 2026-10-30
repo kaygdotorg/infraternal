@@ -1722,6 +1722,7 @@ where
             connection_id,
             resume_token,
             resume_window_seconds,
+            ..
         } => {
             assert_eq!(resume_window_seconds, 120);
             (*connection_id, *resume_token)

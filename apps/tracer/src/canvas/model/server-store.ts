@@ -10,6 +10,7 @@ import type { CanvasStore } from "./store";
 
 export interface LayoutTransport {
   readonly isWelcomed?: boolean;
+  readonly sessionIncarnation?: string | undefined;
   readonly roundTripMs?: number | undefined;
   readonly recoveryRoundTrips?: 1 | 4;
   onRoundTrip?(listener: (ms: number | undefined) => void): () => void;
@@ -40,9 +41,12 @@ export class ServerCanvasStore implements CanvasStore {
   readonly #first: Promise<void>;
   readonly #legacyKey: string;
   #imported = false;
+  #incarnation: string | undefined;
+  #revoked = false;
 
   constructor(private readonly transport: LayoutTransport, account: string, private readonly refused: (definitive?: boolean, delayed?: boolean, capacity?: boolean) => void = () => {}) {
     this.#offAccount = registerAccountWork(account, { pause: (value) => { this.#paused = value; if (!value) this.#pump(); }, dispose: () => this.dispose() });
+    this.#incarnation = transport.sessionIncarnation;
     this.#legacyKey = canvasKey(account);
     // Read only the shipped v1 import. Unconfirmed/unreadable journals remain untouched for explicit export/discard.
     const legacy = parseDocument(readStoredJson(this.#legacyKey));
@@ -52,6 +56,13 @@ export class ServerCanvasStore implements CanvasStore {
     this.#offRtt = transport.onRoundTrip?.((ms) => { this.#rtt = ms; this.#pendingChanged(); });
     this.#off = transport.subscribe({ topic: "canvas.layout" }, (event) => this.#event(event), () => {
       if (this.#disposed) return;
+      const incarnation = this.transport.sessionIncarnation;
+      if (this.#incarnation !== undefined && incarnation !== this.#incarnation) {
+        const lost = this.pending;
+        this.#journal.clear(); this.#revoked = true;
+        this.#publish(); this.#pendingChanged();
+        if (lost) this.refused(true);
+      } else this.#incarnation = incarnation;
       this.#journal.restart(); this.#resyncing = true; this.#waiting = true;
       clearTimeout(this.#retry); this.#retry = undefined;
       this.#watch();
@@ -68,7 +79,7 @@ export class ServerCanvasStore implements CanvasStore {
   unresolvedWindow(id: string): boolean { return this.#journal.unresolved.has(id); }
   /** Local acceptance only: drawing and typing never await confirmation. */
   async save(doc: CanvasDocument, hints?: ReadonlyMap<string, LayoutEdit>, before?: CanvasDocument, unresolved: ReadonlySet<string> = new Set()): Promise<void> {
-    if (this.#disposed) return;
+    if (this.#disposed || this.#revoked) return;
     // Input is frozen by the screen during logout; admitted asynchronous references may
     // still finish in RAM. The pump stays paused until revocation fails or disposal clears it.
     try { if (this.#journal.capture(doc, hints, before, unresolved)) this.#publish(); }
@@ -139,10 +150,11 @@ export class ServerCanvasStore implements CanvasStore {
   }
   #publish(): void { for (const listener of this.#listeners) listener(); }
   #pump(): void {
-    if (this.#disposed || this.#paused || this.#resyncing || this.transport.isWelcomed === false) return;
+    if (this.#disposed || this.#revoked || this.#paused || this.#resyncing || this.transport.isWelcomed === false) return;
     const entry = this.#journal.next(); if (!entry) return;
     const migration = "document" in entry, epoch = this.#journal.epoch;
-    const input = "document" in entry ? { op_id: entry.op_id, document: entry.document } : { op_id: entry.op_id, base_revision: entry.base_revision, intent: entry.intent };
+    const binding = this.#incarnation === undefined ? {} : { session_incarnation: this.#incarnation };
+    const input = "document" in entry ? { ...binding, op_id: entry.op_id, document: entry.document } : { ...binding, op_id: entry.op_id, base_revision: entry.base_revision, intent: entry.intent };
     void this.transport.call(migration ? "canvas.layout.initialize" : "canvas.layout.apply", input).then((result) => {
       if (this.#disposed || !this.#journal.release(entry, epoch)) return;
       if (!Number.isSafeInteger(result.revision) || Number(result.revision) < 0) { this.#journal.fail(entry, epoch); this.#recover(); return; }

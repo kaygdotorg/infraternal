@@ -21,8 +21,8 @@ mod setup;
 mod webauthn;
 mod wraps;
 
-pub(crate) use crypto::hash;
 use crypto::{constant_prf_input, prf_salt, random, recovery_hash};
+pub(crate) use crypto::{hash, session_incarnation};
 #[cfg(feature = "remote")]
 pub(crate) use http::cookie as session_cookie_from_headers;
 pub use sessions::Session;

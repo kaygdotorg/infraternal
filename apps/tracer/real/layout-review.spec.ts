@@ -1,4 +1,5 @@
 /** Independent real-server review of split admission, offline journals and durable account layouts (D178, D183, D248; #243). */
+import { layoutRequestJson } from "./layout-devices";
 import { cache } from "./layout-observer";
 import { watchLayout } from "./layout-observer";
 import { devices, expect, test, type Page, type BrowserContext, type Browser } from "playwright/test";
@@ -50,11 +51,11 @@ async function request(server: RealServer, context: BrowserContext, action: stri
       const timer = setTimeout(() => reject(Error("review protocol response absent")), 15_000);
       socket.on("error", () => { clearTimeout(timer); reject(Error("review protocol connection failed")); });
       socket.on("message", (bytes) => decoder.feed(new Uint8Array(Buffer.from(bytes as Buffer)), (_stream, frame) => {
-        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: 0n, clientInfo: "layout-review" });
+        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: 16n, clientInfo: "layout-review" });
         if (frame.type === "Ping") send({ ...frame, type: "Pong" });
         if (frame.type === "Welcome") {
           if (snapshot) send({ type: "Subscribe", subId: 1, filterJson: Buffer.from('{"topic":"canvas.layout"}') });
-          else send({ type: "Call", callId: 1, actionId: action, inputJson: Buffer.from(typeof input === "string" ? input : JSON.stringify(input)) });
+          else send({ type: "Call", callId: 1, actionId: action, inputJson: layoutRequestJson(input, frame.sessionIncarnation) });
         }
         if (frame.type === "Result" || snapshot && frame.type === "Event") {
           clearTimeout(timer);
@@ -285,15 +286,16 @@ test("layout event latency reaches two protocol subscribers at scale", async ({ 
       // A failed private route is bounded by the awaited operation's deadline,
       // so teardown still runs instead of leaving a detached fixture behind.
       socket.on("error", () => {});
+      let incarnation: string | undefined;
       let callId = 0, revision = -1, ready: () => void = () => {};
       const loaded = new Promise<void>((resolve) => { ready = resolve; });
       const calls = new Map<number, (revision: number) => void>();
       const waiting = new Set<{ revision: number; resolve(): void }>();
       const send = (frame: Parameters<typeof encodeMuxedFrame>[1]): void => { socket.send(encodeMuxedFrame(0, frame)); };
       socket.on("message", (bytes) => decoder.feed(new Uint8Array(Buffer.from(bytes as Buffer)), (_stream, frame) => {
-        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: 0n, clientInfo: "layout-event-measurement" });
+        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: 16n, clientInfo: "layout-event-measurement" });
         else if (frame.type === "Ping") send({ ...frame, type: "Pong" });
-        else if (frame.type === "Welcome") send({ type: "Subscribe", subId: 1, filterJson: Buffer.from('{"topic":"canvas.layout"}') });
+        else if (frame.type === "Welcome") { incarnation = frame.sessionIncarnation; send({ type: "Subscribe", subId: 1, filterJson: Buffer.from('{"topic":"canvas.layout"}') }); }
         else if (frame.type === "Event") {
           const event = JSON.parse(new TextDecoder().decode(frame.eventJson)) as { revision?: number };
           if (Number.isSafeInteger(event.revision)) {
@@ -309,7 +311,7 @@ test("layout event latency reaches two protocol subscribers at scale", async ({ 
       clients.push({
         apply: (intent) => bounded(new Promise<number>((resolve) => {
           const id = ++callId; calls.set(id, resolve);
-          send({ type: "Call", callId: id, actionId: "canvas.layout.apply", inputJson: Buffer.from(JSON.stringify({ op_id: randomUUID(), base_revision: 0, intent })) });
+          send({ type: "Call", callId: id, actionId: "canvas.layout.apply", inputJson: Buffer.from(JSON.stringify({ session_incarnation: incarnation, op_id: randomUUID(), base_revision: 0, intent })) });
         })),
         wait: (target) => revision >= target ? Promise.resolve() : bounded(new Promise<void>((resolve) => waiting.add({ revision: target, resolve }))),
         close: () => socket.terminate(),

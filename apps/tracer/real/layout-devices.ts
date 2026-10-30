@@ -34,6 +34,12 @@ export async function enrol(page: Page, server: RealServer): Promise<void> {
   await expect(windows(page)).toHaveCount(1);
   await settled(page);
 }
+/** Bind valid test requests to the welcome while preserving intentionally invalid wire input. */
+export function layoutRequestJson(input: unknown, incarnation: string | undefined): Buffer {
+  let value: unknown = input;
+  if (typeof value === "string") { try { value = JSON.parse(value); } catch { return Buffer.from(String(value)); } }
+  return Buffer.from(JSON.stringify(value && typeof value === "object" && !Array.isArray(value) ? { ...value, session_incarnation: incarnation } : value));
+}
 /** Public actions use the same authenticated protocol; cookies and replies stay in memory. */
 export async function request(server: RealServer, context: BrowserContext, action: string, input: unknown, snapshot = false): Promise<{ ok: boolean; value: Record<string, unknown> }> {
   const cookie = (await context.cookies()).map((c) => `${c.name}=${c.value}`).join("; ");
@@ -45,11 +51,11 @@ export async function request(server: RealServer, context: BrowserContext, actio
       const timer = setTimeout(() => reject(Error("review protocol response absent")), 15_000);
       socket.on("error", () => { clearTimeout(timer); reject(Error("review protocol connection failed")); });
       socket.on("message", (bytes) => decoder.feed(new Uint8Array(Buffer.from(bytes as Buffer)), (_stream, frame) => {
-        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: 0n, clientInfo: "layout-review" });
+        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: 16n, clientInfo: "layout-review" });
         if (frame.type === "Ping") send({ ...frame, type: "Pong" });
         if (frame.type === "Welcome") {
           if (snapshot) send({ type: "Subscribe", subId: 1, filterJson: Buffer.from('{"topic":"canvas.layout"}') });
-          else send({ type: "Call", callId: 1, actionId: action, inputJson: Buffer.from(typeof input === "string" ? input : JSON.stringify(input)) });
+          else send({ type: "Call", callId: 1, actionId: action, inputJson: layoutRequestJson(input, frame.sessionIncarnation) });
         }
         if (frame.type === "Result" || snapshot && frame.type === "Event") {
           clearTimeout(timer);

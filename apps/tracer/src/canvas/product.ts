@@ -50,6 +50,7 @@ export interface ProductCanvasOptions {
   host: { name: string; user?: string };
   /** Layouts are kept per account. */
   accountId: string;
+  sessionIncarnation?: string;
   predictiveEcho?: boolean;
   /** Terminal hooks for the first window (the latency probe). */
   firstHooks?: TerminalHooks;
@@ -74,6 +75,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const embedded: { name: string; user?: string; os?: HostPlatform } = { name: options.host.name };
   let canvasReady: (() => void) | undefined, osAsked = false;
   const connection: MuxConnection = new MuxConnection({
+    ...(options.sessionIncarnation ? { sessionIncarnation: options.sessionIncarnation } : {}),
     ...(options.onRecoveryPending ? { onRecoveryPending: options.onRecoveryPending } : {}),
     onConnectionChange: (connected) => {
       core.setConnection(connected);
