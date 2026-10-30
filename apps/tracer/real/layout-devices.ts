@@ -2,6 +2,9 @@
  * Shared two-device fixture for the layout presentation specs (#243): one real server, one desktop browser and one
  * phone browser signed in as the same account, so a layout drawn on one device is read on the other from the server.
  */
+import { cache } from "./layout-observer";
+export { cache } from "./layout-observer";
+import { watchLayout } from "./layout-observer";
 import { devices, expect, type Page, type BrowserContext, type Browser } from "playwright/test";
 import { WebSocket } from "ws";
 import { encodeMuxedFrame, WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
@@ -9,14 +12,9 @@ import { startRealServer, type RealServer } from "./server";
 import type { CanvasDocument } from "../src/canvas/model/schema";
 
 export const windows = (page: Page) => page.locator('.cl[data-view="console"] .ui-window');
-export interface Cache { canonical: CanvasDocument; document: CanvasDocument; pending: Array<{ intent: { type: string }; op_id: string }> }
-export async function cache(page: Page): Promise<Cache> {
-  return page.evaluate(() => {
-    const key = Object.keys(localStorage).find((key) => key.startsWith("infraternal.canvas."));
-    return key ? JSON.parse(localStorage.getItem(key)!) : undefined;
-  });
-}
 export const settled = async (page: Page): Promise<void> => {
+  await expect.poll(async () => (await cache(page)).initialized, { timeout: 30_000 }).toBe(true);
+  await expect(page.getByText("Not saved — keep this tab open", { exact: true })).toBeHidden();
   await expect.poll(async () => (await cache(page))?.pending.length, { timeout: 15_000 }).toBe(0);
 };
 export async function enrol(page: Page, server: RealServer): Promise<void> {
@@ -68,9 +66,9 @@ export async function pair(browser: Browser): Promise<{ server: RealServer; desk
   const desktop = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
   const phone = await browser.newContext({ ...devices["iPhone 15"], viewport: { width: 393, height: 852 }, ignoreHTTPSErrors: true });
   try {
-    const page = await desktop.newPage(); await enrol(page, server);
+    const page = watchLayout(await desktop.newPage()); await enrol(page, server);
     await phone.addCookies(await desktop.cookies());
-    const mobile = await phone.newPage(); await mobile.goto(server.origin + "/?theme=ink&bg=none");
+    const mobile = watchLayout(await phone.newPage()); await mobile.goto(server.origin + "/?theme=ink&bg=none");
     await expect(windows(mobile)).toHaveCount(1); await settled(mobile);
     return { server, desktop, phone, page, mobile, async dispose() { await phone.close(); await desktop.close(); await server.dispose(); } };
   } catch (error) { await phone.close(); await desktop.close(); await server.dispose(); throw error; }

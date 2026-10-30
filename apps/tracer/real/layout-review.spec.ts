@@ -1,4 +1,6 @@
 /** Independent real-server review of split admission, offline journals and durable account layouts (D178, D183, D248; #243). */
+import { cache } from "./layout-observer";
+import { watchLayout } from "./layout-observer";
 import { devices, expect, test, type Page, type BrowserContext, type Browser } from "playwright/test";
 import { WebSocket } from "ws";
 import { isMacPlatform } from "../../../packages/ui/src/platform";
@@ -14,13 +16,10 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 test.setTimeout(180_000);
 const windows = (page: Page) => page.locator('.cl[data-view="console"] .ui-window');
 interface Cache { canonical: CanvasDocument; document: CanvasDocument; pending: Array<{ intent: { type: string }; op_id: string }> }
-async function cache(page: Page): Promise<Cache> {
-  return page.evaluate(() => {
-    const key = Object.keys(localStorage).find((key) => key.startsWith("infraternal.canvas."));
-    return key ? JSON.parse(localStorage.getItem(key)!) : undefined;
-  });
-}
+
 const settled = async (page: Page): Promise<void> => {
+  await expect.poll(async () => (await cache(page)).initialized).toBe(true);
+  await expect(page.getByText("Not saved — keep this tab open", { exact: true })).toBeHidden();
   await expect.poll(async () => (await cache(page))?.pending.length, { timeout: 15_000 }).toBe(0);
 };
 async function enrol(page: Page, server: RealServer): Promise<void> {
@@ -72,9 +71,9 @@ async function pair(browser: Browser): Promise<{ server: RealServer; desktop: Br
   const desktop = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
   const phone = await browser.newContext({ ...devices["iPhone 15"], ignoreHTTPSErrors: true });
   try {
-    const page = await desktop.newPage(); await enrol(page, server);
+    const page = watchLayout(await desktop.newPage()); await enrol(page, server);
     await phone.addCookies(await desktop.cookies());
-    const mobile = await phone.newPage(); await mobile.goto(server.origin + "/?theme=ink&bg=none");
+    const mobile = watchLayout(await phone.newPage()); await mobile.goto(server.origin + "/?theme=ink&bg=none");
     await expect(windows(mobile)).toHaveCount(1); await settled(mobile);
     return { server, desktop, phone, page, mobile, async dispose() { await phone.close(); await desktop.close(); await server.dispose(); } };
   } catch (error) { await phone.close(); await desktop.close(); await server.dispose(); throw error; }
@@ -176,7 +175,7 @@ test("a second account cannot read or retarget the first account layout", async 
     await secondAccount(server, other);
     const isolated = (await request(server, other, "", {}, true)).value;
     expect((isolated.document as CanvasDocument).views).toEqual([]);
-    const victim = await other.newPage(); await victim.goto(server.origin + "/?theme=ink&bg=none");
+    const victim = watchLayout(await other.newPage()); await victim.goto(server.origin + "/?theme=ink&bg=none");
     await expect(windows(victim)).toHaveCount(1); await settled(victim);
     const base = Number((await request(server, other, "", {}, true)).value.revision);
     for (const intent of [

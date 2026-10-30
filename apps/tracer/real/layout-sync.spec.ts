@@ -1,4 +1,6 @@
 /** Two independent devices share real production layout state; no browser-local document seeds the phone (#243). */
+import { cache } from "./layout-observer";
+import { watchLayout } from "./layout-observer";
 import { devices, expect, test, type Page } from "playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { startRealServer, type RealServer } from "./server";
@@ -14,10 +16,10 @@ const outerDropX = (page: Page) => page.locator('.cl[data-view="console"] .cl-co
   const box = frame.getBoundingClientRect();
   return box.left - 20 * box.width / frame.offsetWidth - 1;
 });
-async function cache(page: Page): Promise<unknown> {
-  return page.evaluate(() => { const key = Object.keys(localStorage).find((k) => k.startsWith("infraternal.canvas.")); return key ? JSON.parse(localStorage.getItem(key)!) : undefined; });
-}
+
 async function settled(page: Page): Promise<void> {
+  await expect.poll(async () => (await cache(page)).initialized, { timeout: 30_000 }).toBe(true);
+  await expect(page.getByText("Not saved — keep this tab open", { exact: true })).toBeHidden();
   await expect.poll(async () => (await cache(page) as { pending?: unknown[] } | undefined)?.pending?.length, { timeout: 30_000 }).toBe(0);
 }
 async function enrol(page: Page, server: RealServer): Promise<void> {
@@ -50,7 +52,7 @@ test("fresh phone restores ten split windows and both devices converge", async (
   let receiptAt = 0, phoneEdits = 0;
   let timing: { workMs: number; remotePaintMs: number; receiptMs: number } | undefined;
   let mobileCache: () => Promise<unknown> = async () => undefined;
-  const page = await desktop.newPage();
+  const page = watchLayout(await desktop.newPage());
   page.on("requestfailed", (request) => failedRequests.push(new URL(request.url()).pathname));
   page.on("pageerror", (error) => { errors.push(error.message); console.log(`BROWSER_ERROR ${error.stack}`); });
   try {
@@ -70,7 +72,7 @@ test("fresh phone restores ten split windows and both devices converge", async (
     const order = await ids(page); expect(new Set(order).size).toBe(10);
     await page.screenshot({ path: `${evidence}/desktop-ten.png` });
     await phone.addCookies(await desktop.cookies());
-    const mobile = await phone.newPage();
+    const mobile = watchLayout(await phone.newPage());
     mobileCache = () => cache(mobile);
     if (perf) mobile.on("websocket", (socket) => {
       const sent = new WebSocketFrameDecoder(), received = new WebSocketFrameDecoder();
@@ -164,24 +166,26 @@ test("fresh phone restores ten split windows and both devices converge", async (
     await page.locator("#palette-results [role=option]").first().click();
     await page.locator('.ui-confirm-tip[data-open="true"]').getByRole("button", { name: "Sign out", exact: true }).click();
     await expect(page.locator("#login-passkey")).toBeVisible();
-    expect(await cache(page)).toBeUndefined();
+    expect(await page.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("infraternal.canvas.")))).toEqual([]);
     await page.locator("#login-passkey").click();
     await expect(windows(page)).toHaveCount(8); expect(await ids(page)).toEqual(final); await settled(page);
     await expect.poll(() => page.evaluate(async () => Boolean(await (await caches.open("infraternal-drawing-v1")).match("/"))), { timeout: 30_000 }).toBe(true);
     peer = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
     await peer.addCookies(await desktop.cookies());
-    const other = await peer.newPage(); await other.goto(server.origin + "/?theme=ink&bg=none");
+    const other = watchLayout(await peer.newPage()); await other.goto(server.origin + "/?theme=ink&bg=none");
     await expect(windows(other)).toHaveCount(8); await settled(other);
     offlinePhase = true;
     await desktop.setOffline(true);
     await windows(other).last().locator('[data-action="close"]').evaluate((el) => (el as HTMLElement).click());
     await expect(windows(other)).toHaveCount(7); await settled(other);
-    await page.reload(); await expect(windows(page)).toHaveCount(8); expect(await ids(page)).toEqual(final);
-    await page.screenshot({ path: `${evidence}/offline-cache.png` });
-    await desktop.setOffline(false); await expect(windows(page)).toHaveCount(7); await settled(page); expect(await ids(page)).toEqual(await ids(other));
+    await expect(windows(page)).toHaveCount(8);
+    await page.reload(); await expect(page.getByRole("heading", { name: "Connect to load your layout" })).toBeVisible();
+    await expect(windows(page)).toHaveCount(0);
+    await page.screenshot({ path: `${evidence}/offline-connect.png` });
+    await desktop.setOffline(false); await page.getByRole("button", { name: "Try again" }).click(); await expect(windows(page)).toHaveCount(7); await settled(page); expect(await ids(page)).toEqual(await ids(other));
     await peer.close(); peer = undefined;
     expect(errors).toEqual([]);
-    await writeFile(`${evidence}/functional.json`, JSON.stringify({ desktopOrder: order, freshPhoneOrder: phoneOrder, afterConcurrentClose: final, reconciledOrder: await ids(page), initialDesktop: order.length, freshPhone: order.length, concurrentClose: final.length, equalOrder: true, restoredAfterReload: true, restoredAfterSignIn: true, offlineCacheDraw: true, reconciledAfterOffline: 7, detachedOnFreshPhone: 0 }, null, 2));
+    await writeFile(`${evidence}/functional.json`, JSON.stringify({ desktopOrder: order, freshPhoneOrder: phoneOrder, afterConcurrentClose: final, reconciledOrder: await ids(page), initialDesktop: order.length, freshPhone: order.length, concurrentClose: final.length, equalOrder: true, restoredAfterReload: true, restoredAfterSignIn: true, coldOfflineConnect: true, warmOfflineDrawing: true, reconciledAfterOffline: 7, detachedOnFreshPhone: 0 }, null, 2));
     if (timing) { expect(timing.workMs).toBeLessThanOrEqual(16); expect(timing.remotePaintMs).toBeLessThanOrEqual(timing.receiptMs + 34); }
   } catch (error) {
     if (offlinePhase) await page.screenshot({ path: `${evidence}/offline-failure.png` }).catch(() => undefined);
@@ -196,21 +200,19 @@ test("an overlapping legacy cache keeps the canonical view on both devices", asy
   const first = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
   const second = await browser.newContext({ ...devices["iPhone 15"], viewport: { width: 393, height: 852 }, ignoreHTTPSErrors: true });
   try {
-    const page = await first.newPage(); await enrol(page, server); await settled(page);
+    const page = watchLayout(await first.newPage()); await enrol(page, server); await settled(page);
     // Built-in Mesh registration is independent of the import; finish it before taking the no-op baseline.
     await expect.poll(async () => (await cache(page) as { canonical: { views: Array<{ id: string }> } }).canonical.views.some((view) => view.id === "mesh")).toBe(true);
     await settled(page);
     const before = (await cache(page) as { canonical: import("../src/canvas/model/schema").CanvasDocument }).canonical;
-    const legacy = await page.evaluate(() => {
-      const key = Object.keys(localStorage).find((key) => key.startsWith("infraternal.canvas."))!;
-      const document = JSON.parse(localStorage.getItem(key)!).canonical;
-      const console = document.views.find((view: { id: string }) => view.id === "console");
-      console.name = "Local Console"; console.cell.x += 2;
-      return { key, document };
-    });
+    const account = await page.evaluate(async () => (await (await fetch("/auth/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).json()).user_id as string);
+    const legacyDocument = structuredClone(before);
+    const consoleView = legacyDocument.views.find((view) => view.id === "console")!;
+    consoleView.name = "Local Console"; consoleView.cell.x += 2;
+    const legacy = { key: `infraternal.canvas.${account}`, document: legacyDocument };
     await second.addCookies(await first.cookies());
     await second.addInitScript(({ key, document }) => localStorage.setItem(key, JSON.stringify(document)), legacy);
-    const phone = await second.newPage(); await phone.goto(server.origin + "/?theme=ink&bg=none");
+    const phone = watchLayout(await second.newPage()); await phone.goto(server.origin + "/?theme=ink&bg=none");
     await expect.poll(async () => {
       const value = await cache(phone) as { canonical?: { views: Array<{ name: string }> }; migration?: unknown };
       return value?.migration === undefined && value?.canonical?.views.every((view) => !view.name.startsWith("Recovered: "));
@@ -220,10 +222,7 @@ test("an overlapping legacy cache keeps the canonical view on both devices", asy
     await expect(page.locator('.cl-label-name').filter({ hasText: "Recovered: Local Console" })).toHaveCount(0);
     await expect(windows(page)).toHaveCount(1); await expect(windows(phone)).toHaveCount(1);
     expect(server.bridges.flatMap((bridge) => bridge.control).filter((frame) => frame.type === "Call" && frame.detail === "ssh.session.open")).toHaveLength(1);
-    const views = await phone.evaluate(() => {
-      const key = Object.keys(localStorage).find((key) => key.startsWith("infraternal.canvas."))!;
-      return JSON.parse(localStorage.getItem(key)!).canonical.views.map((view: { id: string; name: string }) => ({ id: view.id, name: view.name }));
-    });
+    const views = (await cache(phone)).canonical.views.map(({ id, name }) => ({ id, name }));
     await writeFile(tracerEvidencePath("layout-sync", "legacy-recovery.json"), JSON.stringify({ sessionOpens: 1, originalConsoleWindows: 1, views }, null, 2));
     await page.screenshot({ path: tracerEvidencePath("layout-sync", "recovered-layout.png") });
   } finally { await second.close(); await first.close(); await server.dispose(); }

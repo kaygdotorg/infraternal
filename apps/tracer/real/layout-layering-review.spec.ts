@@ -1,4 +1,5 @@
 /** Verifies settled cross-view geometry on a production-shaped recovered account (#243, D119, D248). */
+import { watchLayout } from "./layout-observer";
 import { devices, expect, test } from "playwright/test";
 import { spawnSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
@@ -15,7 +16,7 @@ for (const profile of [
   const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4387) });
   const context = await browser.newContext({ ...profile.options, ignoreHTTPSErrors: true });
   try {
-    const page = await context.newPage();
+    const page = watchLayout(await context.newPage());
     await enrol(page, server);
     const doc = structuredClone((await cache(page)).canonical);
     const consoleView = doc.views.find((view) => view.id === "console")!;
@@ -83,7 +84,7 @@ test("removing the current shared view still reconciles the surviving views", as
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
   const errors: string[] = [];
   try {
-    const page = await context.newPage();
+    const page = watchLayout(await context.newPage());
     page.on("pageerror", (error) => errors.push(error.message));
     await enrol(page, server);
     await expect.poll(async () => (await cache(page)).canonical.views.some((view) => view.id === "mesh")).toBe(true);
