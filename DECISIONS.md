@@ -3361,3 +3361,44 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - Plan: `docs/plans/250-layout-journal.md` (branch plan-250-journal).
        Rejected after three review rounds: a cross-tab Web Lock journal
        (sign-out privacy and lost-entry interleavings kept recurring).
+313. **Mesh direct paths and relays: grill round 1 (owner, 2026-10-30, #220;
+     extends D163, D176, D185, D196, D197, D201):** answers to the #220 design
+     questions Q1–Q7; Q8 (port mapping and connection checklist code) waits
+     for the size/RSS/idle comparison job.
+     - **Q1 socket seam C:** direct paths stay entirely in the kernel
+       WireGuard socket (raw send plus packet receive on its port for
+       discovery); only relayed or hard-NAT pairs go through the userspace
+       shim, where the relay hop costs more than the copy. A perf-VM job
+       measures seam A (all userspace) against seam B (kernel only) in µs
+       per packet and CPU per Gbit/s first; the numbers go on #220.
+       Rejected: A (about a core per Gbit/s on direct paths), B alone (rules
+       out hard-NAT techniques later).
+     - **Q2 rendezvous signalling:** through the pair's home relay, with
+       tickets the coordinator signed in advance, after the coordinator-only
+       path works; it keeps working while the coordinator restarts (D166).
+       Rejected: both at once (a duplicate exchange on every setup).
+     - **Q3 relays:** a pair may use any relay in the same mesh; relays
+       forward ciphertext only. An admin allow-list exists only as an
+       override. Rejected: owner-controlled relays only (India↔India pairs
+       fall back to Germany, about 396 ms).
+     - **Q4 hard-NAT prediction:** built only when two weeks of production
+       counters show at least 10% of relayed pair-hours with one
+       endpoint-independent side and a relay cost of at least 30 ms over the
+       estimated direct RTT; then sequential port prediction (one socket)
+       first, the many-socket technique only after it.
+     - **Q5 switch rule:** switch when the saving is at least max(5 ms, 15%)
+       over 5 samples spanning at least 3 s, with a 10 s dwell between
+       switches; direct wins inside that band. The same numbers as the #201
+       selector.
+     - **Q6 port-443 fallback, first release:** TLS on 443 with ALPN next to
+       HTTPS, plus a WebSocket upgrade for networks that only pass
+       web-looking traffic. Rejected for now: HTTP CONNECT proxies (they
+       need proxy credentials, against the fewest-secrets rule).
+     - **Q7 relay framing:** QUIC DATAGRAM frames (no head-of-line
+       blocking, matches WireGuard). Rejected: one reliable stream per pair
+       (one loss stalls all of a pair's flows for about one RTT).
+     - **Order:** seam measurement → real-socket observation (seam C) →
+       relay with QUIC DATAGRAM and TLS/WebSocket 443 → rendezvous and
+       simultaneous open → upgrade and flip-back on the #201 selector →
+       PCP/NAT-PMP/UPnP (after Q8) → node-relay qualification → hard-NAT
+       experiments only if Q4 triggers.
