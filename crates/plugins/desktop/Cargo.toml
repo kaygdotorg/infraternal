@@ -12,7 +12,9 @@ default = []
 source = ["infraternal-protocol/desktop", "infraternal-plugin-api/native-streams", "desktop", "dep:infraternal-protocol", "dep:bytes", "dep:uuid"]
 # Reuse the authenticated transport engines already selected by the owner [D198,D232].
 server = ["infraternal-protocol/desktop", "infraternal-plugin-api/native-streams", "infraternal-plugin-api/socket-host", "dep:infraternal-plugin-api", "dep:infraternal-protocol", "dep:tokio", "dep:quinn", "dep:bytes", "dep:uuid"]
-desktop = ["dep:infraternal-plugin-api", "dep:nix", "dep:tokio", "dep:screencapturekit"]
+# The standalone helper binary uses Tokio's default multi-thread runtime; without
+# naming it here the crate only builds when another workspace member unifies it.
+desktop = ["dep:infraternal-plugin-api", "dep:nix", "dep:tokio", "tokio/rt-multi-thread", "dep:screencapturekit"]
 
 [dependencies]
 uuid = { workspace = true, optional = true }
