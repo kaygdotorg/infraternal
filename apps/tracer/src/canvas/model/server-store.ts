@@ -57,7 +57,7 @@ export class ServerCanvasStore implements CanvasStore {
     this.#off = transport.subscribe({ topic: "canvas.layout" }, (event) => this.#event(event), () => {
       if (this.#disposed) return;
       const incarnation = this.transport.sessionIncarnation;
-      if (this.#incarnation !== undefined && incarnation !== this.#incarnation) {
+      if (incarnation !== this.#incarnation && (this.#incarnation !== undefined || this.pending)) {
         const lost = this.pending;
         this.#journal.clear(); this.#revoked = true;
         this.#publish(); this.#pendingChanged();

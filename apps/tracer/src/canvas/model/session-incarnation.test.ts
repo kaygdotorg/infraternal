@@ -5,7 +5,7 @@ import type { CanvasDocument } from "./schema";
 
 const document = (): CanvasDocument => ({ format: "infraternal.canvas", version: 1, revision: 1, views: [{ id: "console", kind: "console", name: "Saved", cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [] } }] });
 class Transport implements LayoutTransport {
-  sessionIncarnation = "original";
+  sessionIncarnation: string | undefined = "original";
   isWelcomed = true;
   calls: Record<string, unknown>[] = [];
   event: (event: Record<string, unknown>) => void = () => {};
@@ -31,5 +31,18 @@ for (const replacement of ["original", "replacement"]) test(`reconnect ${replace
       expect(transport.calls).toHaveLength(0); expect(store.pending).toBe(false); expect(lost).toBe(1); expect(store.current()).toEqual(document());
       await store.save(next); expect(transport.calls).toHaveLength(0);
     }
+  } finally { store.dispose(); }
+});
+
+test("queued work with no original binding cannot adopt a later incarnation", async () => {
+  const transport = new Transport(); transport.sessionIncarnation = undefined;
+  let lost = 0;
+  const store = new ServerCanvasStore(transport, "session-test", (definitive) => { if (definitive) lost++; });
+  try {
+    transport.snapshot(); transport.isWelcomed = false;
+    const next = document(); next.views[0]!.name = "Unbound edit"; await store.save(next);
+    transport.sessionIncarnation = "replacement"; transport.isWelcomed = true; transport.open(); transport.snapshot();
+    expect(transport.calls).toHaveLength(0); expect(store.pending).toBe(false); expect(lost).toBe(1);
+    expect(store.current()).toEqual(document());
   } finally { store.dispose(); }
 });
