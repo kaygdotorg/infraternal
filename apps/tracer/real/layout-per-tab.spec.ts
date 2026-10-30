@@ -33,6 +33,13 @@ async function noPrivateStorage(page: Page): Promise<void> {
   expect(await page.evaluate(() => Object.keys(localStorage).filter((key) => /^(infraternal\.canvas|tracer\.(drawing-identity|sessions|session\.|user-id))/.test(key)))).toEqual([]);
   expect(await page.evaluate(() => Object.keys(sessionStorage).filter((key) => key.startsWith("tracer.session.")))).toEqual([]);
 }
+async function separateNotices(page: Page, waitForRecovery = true): Promise<void> {
+  if (waitForRecovery) await expect(page.getByText("Your layout is waiting for the server. Keep this tab open.", { exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => {
+    const notices = [...document.querySelectorAll<HTMLElement>('.ui-toast[data-open="true"]')].map((el) => el.getBoundingClientRect());
+    return notices.every((a, i) => notices.slice(i + 1).every((b) => a.bottom <= b.top || b.bottom <= a.top || a.right <= b.left || b.right <= a.left));
+  }), "persistent pending status stays separate from a wrapped recovery notice").toBe(true);
+}
 async function signOut(page: Page): Promise<void> {
   await page.keyboard.press("Control+Shift+K"); await page.locator("#palette-input").fill("sign out");
   await page.locator("#palette-results [role=option]").first().click();
@@ -63,13 +70,13 @@ test("three tabs keep edits local until confirmation and recover confirmed state
       await a.keyboard.press("Control+Shift+K"); await a.locator("#palette-input").fill(theme === "ink" ? "Ink" : "Paper");
       await a.locator(`#palette-results [data-action="theme:${theme}"]`).click();
       await expect(a.locator("html")).toHaveAttribute("data-theme", theme);
-      await a.setViewportSize({ width: 1440, height: 900 }); await a.screenshot({ path: `${evidence}/desktop-${theme}.png` });
+      await a.setViewportSize({ width: 1440, height: 900 }); await separateNotices(a, theme === "ink"); await a.screenshot({ path: `${evidence}/desktop-${theme}.png` });
       phoneGate.discard(); await mobile.goto(`${server.origin}/?theme=${theme}&bg=none`);
       await expect(windows(mobile)).toHaveCount(1); phoneGate.release(); await settled(mobile); phoneGate.hold();
       await mobile.getByRole("button", { name: "Split right", exact: true }).tap();
       await expect(windows(mobile)).toHaveCount(2); await expect(pending(mobile)).toBeVisible();
       await expect.poll(() => phoneGate.count).toBeGreaterThan(0);
-      await mobile.screenshot({ path: `${evidence}/phone-${theme}.png` }); await noPrivateStorage(mobile);
+      await separateNotices(mobile); await mobile.screenshot({ path: `${evidence}/phone-${theme}.png` }); await noPrivateStorage(mobile);
     }
     phoneGate.discard(); await phone.close();
     await noPrivateStorage(a); await noPrivateStorage(b); await noPrivateStorage(c);

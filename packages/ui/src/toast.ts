@@ -64,7 +64,6 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
     // view. Parent notices stay at the window's inline start.
     host.style.marginInline = "0";
   }
-  if (options.aboveNotifications) host.style.bottom = "calc(var(--ui-toast-bottom, 28px) + 72px)";
   host.hidden = true;
   host.setAttribute("aria-label", "Notification");
   host.setAttribute("role", "group");
@@ -110,20 +109,30 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
   actions.append(action, secondaryAction);
   host.append(marker, glyph, label, actions, close);
   parent.append(host);
+  // Wrapped text and touch targets change a notification's height. Reserve its
+  // measured space using the same CSS anchor, including the mobile key tray.
+  const neighbors = options.aboveNotifications ? [...parent.children].filter((el): el is HTMLElement => el !== host && el instanceof HTMLElement && el.classList.contains("ui-toast")) : [];
+  const spacing = neighbors.length ? new ResizeObserver(() => {
+    const height = Math.max(0, ...neighbors.map((el) => el.hidden ? 0 : el.offsetHeight));
+    host.style.setProperty("--ui-toast-stack-offset", `${height ? height + 12 : 0}px`);
+  }) : undefined;
+  for (const neighbor of neighbors) spacing?.observe(neighbor);
 
   let hideTimer = 0;
+  let generation = 0;
   let selectAction: ToastAction["onSelect"] | undefined;
   let selectSecondaryAction: ToastAction["onSelect"] | undefined;
   let closeHandler: (() => void) | undefined;
   const finish = (): void => { const run = closeHandler; closeHandler = undefined; run?.(); };
   const dismiss = (): void => {
+    const epoch = ++generation;
     window.clearTimeout(hideTimer);
     hideTimer = 0;
     selectAction = undefined;
     selectSecondaryAction = undefined;
     host.dataset.open = "false";
     window.setTimeout(() => {
-      if (host.dataset.open === "false") host.hidden = true;
+      if (epoch === generation && host.dataset.open === "false") host.hidden = true;
     }, 190);
     finish();
   };
@@ -143,6 +152,7 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
 
   return {
     show(value) {
+      const epoch = ++generation;
       window.clearTimeout(hideTimer);
       finish();
       closeHandler = value.onClose;
@@ -172,7 +182,8 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
       host.dataset.stacked = String(Boolean(value.action || value.secondaryAction) && value.message.length > STACK_AFTER);
       host.hidden = false;
       host.dataset.open = "false";
-      requestAnimationFrame(() => { if (!host.hidden) host.dataset.open = "true"; });
+      // A fast receipt can dismiss this message before its first animation frame.
+      requestAnimationFrame(() => { if (epoch === generation && !host.hidden) host.dataset.open = "true"; });
       const duration = value.duration ?? 4200;
       if (duration > 0) hideTimer = window.setTimeout(dismiss, duration);
     },
@@ -186,10 +197,12 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
     },
     dismiss,
     dispose() {
+      generation++;
       window.clearTimeout(hideTimer);
       action.removeEventListener("click", primaryClick);
       secondaryAction.removeEventListener("click", secondaryClick);
       close.removeEventListener("click", dismiss);
+      spacing?.disconnect();
       host.remove();
     },
   };
