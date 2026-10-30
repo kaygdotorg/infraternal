@@ -145,8 +145,24 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,431,472 bytes |
-  | `aarch64-unknown-linux-musl` | 19,605,896 bytes |
+  | `x86_64-unknown-linux-musl` | 21,438,224 bytes |
+  | `aarch64-unknown-linux-musl` | 19,611,368 bytes |
+
+  Crash-loop status reporting (#237, D299/D303) uses the pinned
+  `scripts/static-cargo` stripped static recipe on 8by64-compute02, one
+  target at a time:
+
+  | Source | x86_64 bytes | aarch64 bytes |
+  | --- | ---: | ---: |
+  | Dev (`0c8639496`) | 21,431,472 | 19,605,896 |
+  | #237 (`60c5b6e3e`) | 21,438,224 | 19,611,368 |
+  | Delta versus dev | +6,752 | +5,472 |
+
+  Both increases are below 16 KiB. The exact caps above follow the measured
+  images without allowance (D243). Growth retains local manager-property
+  parsing, restart/exit diagnostics and bounded, shared-deadline process
+  observation; no dependencies, features or release settings changed.
+  Reproduction, both target receipts and the final gate output are on #237.
 
   Replay geometry and stale-note repairs (#257, R257-01/R257-02) measure
   21,431,472 / 19,605,896 bytes (x86_64 / aarch64), using the pinned
