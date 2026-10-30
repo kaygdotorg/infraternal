@@ -780,7 +780,9 @@ Ordinary legacy Input remains available. No session is automatically ended.
 Hello capability bit 4 (`16`) requests an additive Welcome suffix: a length-prefixed
 43-byte base64url `session_incarnation`. The label is opaque and non-secret; it is
 stable only for the authenticated browser session, including reconnects and server
-restarts. It is separate from both bearer and resume credentials. Keep it in RAM;
+restarts. Authenticated HTTP session responses include the same label so the tab
+binds its store before its first WebSocket handshake. It is separate from both
+bearer and resume credentials. Keep it in RAM;
 never put it in logs, URLs or browser storage.
 
 Every `canvas.layout.apply` and `canvas.layout.initialize` request carries
