@@ -305,7 +305,7 @@ test("review r2: refusal drains independent edits waiting behind four in-flight 
     let previous = store.current();
     const birth = structuredClone(previous); reduce(birth, opened); await store.save(birth, undefined, previous); previous = birth;
     for (let n = 0; n < 6; n++) {
-      const next = structuredClone(previous); next.views[0]!.name = `Queued ${n}`;
+      const next = structuredClone(previous); next.views[0]!.name = `Queued ${n}`; if (n % 2) next.views[0]!.cell = { x: n, y: 0 };
       await store.save(next, undefined, previous); previous = next;
     }
     expect(transport.calls).toHaveLength(4);

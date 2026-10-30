@@ -87,17 +87,17 @@ test("review: a snapshot arriving after newer deltas never rolls back canonical 
 
 test("review: outage edits wait for snapshot then send each identity once in order", async () => {
   const { transport, store } = setup(); transport.isWelcomed = false;
-  await rename(store, "First"); await rename(store, "Second"); expect(transport.calls).toHaveLength(0);
+  await rename(store, "First"); const next = store.current(); next.views[0]!.cell.x = 2; await store.save(next); expect(transport.calls).toHaveLength(0);
   transport.isWelcomed = true; transport.open(); expect(transport.calls).toHaveLength(0);
   transport.snapshot(baseline(2)); expect(transport.calls).toHaveLength(2);
-  expect(transport.calls.map((call) => (call.input.intent as Extract<Intent, { type: "view.update" }>).name)).toEqual(["First", "Second"]);
+  expect(transport.calls.map((call) => (call.input.intent as Extract<Intent, { type: "view.update" }>).name)).toEqual(["First", undefined]);
   expect(new Set(transport.calls.map((call) => call.input.op_id)).size).toBe(2);
   for (const [index, call] of transport.calls.entries()) {
     transport.event({ type: "canvas.layout.operation", revision: index + 3, op_id: call.input.op_id, intent: call.input.intent });
     call.resolve({ revision: index + 3 });
   }
   await tick(); transport.open(); transport.snapshot(store.current());
-  expect(transport.calls).toHaveLength(2); expect(store.current().views[0]!.name).toBe("Second");
+  expect(transport.calls).toHaveLength(2); expect(store.current().views[0]!.name).toBe("First"); expect(store.current().views[0]!.cell.x).toBe(2);
 });
 
 test("review: a 3 s RTT fresh route stays quiet until its complete recovery budget", async () => {

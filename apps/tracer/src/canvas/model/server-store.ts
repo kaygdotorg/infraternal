@@ -5,7 +5,7 @@ import type { LayoutEdit } from "./operations";
 import { ActionRefused, type SubscriptionHandle } from "../../connection";
 import { registerAccountWork } from "../../account-lifetime";
 import { randomUuid } from "../../identifiers";
-import { LayoutJournal } from "./journal";
+import { LayoutJournal, LayoutQueueFull } from "./journal";
 import type { CanvasStore } from "./store";
 
 export interface LayoutTransport {
@@ -41,7 +41,7 @@ export class ServerCanvasStore implements CanvasStore {
   readonly #legacyKey: string;
   #imported = false;
 
-  constructor(private readonly transport: LayoutTransport, account: string, private readonly refused: (definitive?: boolean, delayed?: boolean) => void = () => {}) {
+  constructor(private readonly transport: LayoutTransport, account: string, private readonly refused: (definitive?: boolean, delayed?: boolean, capacity?: boolean) => void = () => {}) {
     this.#offAccount = registerAccountWork(account, { pause: (value) => { this.#paused = value; if (!value) this.#pump(); }, dispose: () => this.dispose() });
     this.#legacyKey = canvasKey(account);
     // Read only the shipped v1 import. Unconfirmed/unreadable journals remain untouched for explicit export/discard.
@@ -58,7 +58,7 @@ export class ServerCanvasStore implements CanvasStore {
     });
   }
   get pending(): boolean { return this.#journal.pending.length > 0 || this.#journal.migration !== undefined; }
-  onPending(listener: () => void): () => void { this.#status.add(listener); return () => { this.#status.delete(listener); }; }
+  onPending(listener: () => void): () => void { if (!this.#disposed) this.#status.add(listener); return () => { this.#status.delete(listener); }; }
   async load(): Promise<CanvasDocument | undefined> {
     await this.#first;
     if (this.#disposed) return undefined;
@@ -69,11 +69,12 @@ export class ServerCanvasStore implements CanvasStore {
   /** Local acceptance only: drawing and typing never await confirmation. */
   async save(doc: CanvasDocument, hints?: ReadonlyMap<string, LayoutEdit>, before?: CanvasDocument, unresolved: ReadonlySet<string> = new Set()): Promise<void> {
     if (this.#disposed || this.#paused) return;
-    if (this.#journal.capture(doc, hints, before, unresolved)) this.#publish();
+    try { if (this.#journal.capture(doc, hints, before, unresolved)) this.#publish(); }
+    catch (error) { if (!(error instanceof LayoutQueueFull)) throw error; this.refused(false, false, true); this.#publish(); }
     this.#pendingChanged(); this.#pump();
   }
   current(): CanvasDocument { return this.#journal.current(); }
-  subscribe(listener: () => void): () => void { this.#listeners.add(listener); return () => { this.#listeners.delete(listener); }; }
+  subscribe(listener: () => void): () => void { if (!this.#disposed) this.#listeners.add(listener); return () => { this.#listeners.delete(listener); }; }
   #event(event: Record<string, unknown>): void {
     if (this.#disposed) return;
     if (event.type === "error") {
