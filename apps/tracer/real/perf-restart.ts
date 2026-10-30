@@ -1,13 +1,14 @@
 /** Measures the shared real restart fixture only in an isolated perf-VM mount namespace (#199, D259). */
-import { readFile, readlink } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { cpus, hostname, totalmem } from "node:os";
 import { chromium } from "playwright";
 import { exerciseRestart } from "./restart-fixture";
+import { requirePrivateRuntime } from "./restart-namespace";
 
-if (process.env.RESTART_MEASURE !== "1" || process.env.REAL_ROOT_NAMESPACE !== "1"
-  || await readlink("/proc/self/ns/mnt") === await readlink("/proc/1/ns/mnt")) {
+if (process.env.RESTART_MEASURE !== "1" || process.env.REAL_ROOT_NAMESPACE !== "1") {
   throw new Error("restart measurements require the perf-VM driver and its private mount namespace");
 }
+await requirePrivateRuntime();
 console.log(`ENVIRONMENT machine=${hostname()} cores=${cpus().length} memory_bytes=${totalmem()} load=${(await readFile("/proc/loadavg", "utf8")).trim()} sessions=${process.env.RESTART_SESSIONS}`);
 // The private TLS front has a fixture certificate, unlike production's trusted certificate.
 // Trust it before the first handshake so certificate rejection/retry is not measured as recovery.
