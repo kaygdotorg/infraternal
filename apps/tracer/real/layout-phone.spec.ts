@@ -166,7 +166,7 @@ for (const size of [{ width: 393, height: 852 }, { width: 375, height: 667 }]) {
   });
 }
 
-test("phone pass: offline then back shows the saved layout truthfully and converges", async ({ browser }) => {
+test("phone pass: a warm offline edit is advertised and discarded by reload before confirmation", async ({ browser }) => {
   const f = await pair(browser);
   try {
     for (let n = 1; n < 3; n++) { await f.page.keyboard.press("Control+Shift+E"); await expect(windows(f.page)).toHaveCount(n + 1); await settled(f.page); }
@@ -182,18 +182,18 @@ test("phone pass: offline then back shows the saved layout truthfully and conver
     await windows(f.mobile).first().locator('[data-action="close"]').tap();
     await expect(windows(f.mobile)).toHaveCount(2);
     await f.mobile.waitForTimeout(600);
-    const waiting = await cache(f.mobile);
+    await expect(f.mobile.getByText("Not saved — keep this tab open", { exact: true })).toBeVisible();
     await shot(f.mobile, "offline-edit");
     // Meanwhile the desktop adds a window.
     await f.page.keyboard.press("Control+Shift+D"); await expect(windows(f.page)).toHaveCount(4); await settled(f.page);
     blocked = false;
     await f.mobile.reload();
-    await expect(windows(f.mobile)).toHaveCount(3, { timeout: 20_000 }); await settled(f.mobile);
+    await expect(windows(f.mobile)).toHaveCount(4, { timeout: 20_000 }); await settled(f.mobile);
     await expect.poll(async () => (await cache(f.mobile)).canonical.revision).toBe((await cache(f.page)).canonical.revision);
     expect((await cache(f.mobile)).canonical).toEqual((await cache(f.page)).canonical);
     await f.mobile.waitForTimeout(1200);
     await shot(f.mobile, "offline-back");
-    await writeFile(tracerEvidencePath("phone-pass-offline.json"), JSON.stringify({ pendingWhileOffline: waiting.pending.map((p) => p.intent.type) }, null, 2));
-    console.log(JSON.stringify({ pendingWhileOffline: waiting.pending.map((p) => p.intent.type), desktopWindows: await windows(f.page).count(), phoneWindows: await windows(f.mobile).count() }));
+    await writeFile(tracerEvidencePath("phone-pass-offline.json"), JSON.stringify({ advertisedUnsaved: true, unconfirmedCloseLostOnReload: true }, null, 2));
+    console.log(JSON.stringify({ advertisedUnsaved: true, desktopWindows: await windows(f.page).count(), phoneWindows: await windows(f.mobile).count() }));
   } finally { await f.dispose(); }
 });
