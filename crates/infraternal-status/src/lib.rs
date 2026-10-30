@@ -728,8 +728,8 @@ fn manager_properties(scope: Scope, unit: &str, deadline: std::time::Instant) ->
         command.arg("--user");
     }
     let mut child = command.args([
-        "show", "--timestamp=unix",
-        "--property=ActiveState,SubState,NRestarts,MainPID,ExecMainStartTimestamp,ExecMainCode,ExecMainStatus",
+        "show",
+        "--property=ActiveState,SubState,NRestarts,MainPID,ExecMainStartTimestamp,ExecMainStartTimestampMonotonic,ExecMainCode,ExecMainStatus",
         "--no-pager", unit,
     ]).env("LC_ALL", "C").env("SYSTEMD_COLORS", "0")
         .stdin(Stdio::null()).stderr(Stdio::null()).stdout(Stdio::piped()).spawn().ok()?;
