@@ -657,6 +657,16 @@
 .ui-window[data-resize="touch"] .ui-window-resize[data-edge="sw"]::after { bottom: 6px; left: 6px; border-width: 0 0 3px 3px; border-bottom-left-radius: 14px; }
 @keyframes ui-grip-in { from { opacity: 0; } to { opacity: 1; } }
 
+/* Renaming in place (inline-rename.ts): a flat field in the name's own type, tinted like a hovered row. No ring from
+   mouse or touch (TASTE §1); the tint and the caret say where you are. Surfaces add only size and position. */
+.ui-inline-rename {
+  box-sizing: border-box; min-width: 0; height: 22px; padding: 0 6px; border: 0; border-radius: 6px; outline: 0;
+  background: var(--hover); color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking);
+  -webkit-user-select: text; user-select: text; text-shadow: none;
+}
+/* 16 px on touch so iOS never zooms into the field (the one type scale, TASTE §2). */
+@media (pointer: coarse) { .ui-inline-rename { height: 32px; font-size: var(--text-input, 16px); } }
+
 /* Sidebar footer (sidebar-foot.ts): the person's pill and the settings pill share one height, so
    their centres sit on one line. Pills are the shared `.ui-pill`; only layout lives here. */
 .ui-sidebar-foot { --pill-h: 40px; display: flex; flex: none; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; padding: 9px 0 0; box-shadow: 0 -1px 0 var(--line); }
