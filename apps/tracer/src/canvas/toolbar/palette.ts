@@ -1,6 +1,6 @@
 /**
  * The canvas in the command palette (⌘K): go to a view, open Settings sections, canvas actions (lock, overview,
- * split, share), and "Open shell on <host>" for every host the sessions adapter lists. Rows are computed each
+ * split, share), "Open shell on <host>" for every host the sessions adapter lists, and "Rename <host>" for the Mesh's hosts. Rows are computed each
  * time the palette opens, so they follow the state (the lock, the active window, the hosts that exist).
  *
  * Every row carries a `canvas:` action; the core screen forwards them as `tracer:canvas-action` events, which
@@ -18,6 +18,7 @@ import { SETTINGS_SECTIONS } from "../views/settings";
 import { ICON, SECTION_ICON, SESSION_ICON, viewIcon } from "../views/icons";
 import { byFrecency } from "../sessions/inventory";
 import { isTerminal } from "../views/body";
+import { isFreeView } from "../layout/stops";
 import { viewKeys } from "./viewlist";
 import { bindingText } from "./shortcuts";
 
@@ -80,6 +81,12 @@ export function installPalette(cx: Ctx): () => void {
     for (const host of cx.adapters.sessions.hosts()) {
       if (host.id !== "embedded" && cx.adapters.hostRemoval?.label()) out.push({ group: "Hosts", glyph: "×", label: `${cx.adapters.hostRemoval.label()}: ${host.name}`, hint: "revoke access · uninstall", action: `canvas:removehost:${host.id}` });
       out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${host.name}`, hint: `terminal · ssh · console${host.online === false ? " · offline" : ""}`, action: `canvas:open:${host.id}` });
+    }
+    // Mesh hosts by name, so "rename build-01" finds the way to the host's name field (D-rule: the palette reaches
+    // everything). Only while the Mesh draws each host as a card; a big mesh has no card to put the field on.
+    const meshView = views.get("mesh");
+    if (cx.mesh && cx.adapters.mesh?.status() === "ready" && meshView && !isFreeView(meshView.view)) {
+      for (const name of cx.adapters.mesh.data().nodes.keys()) out.push({ group: "Mesh", glyph: "✎", icon: SESSION_ICON.rename, label: `Rename ${name}`, hint: "mesh · host · name", action: `canvas:rename:${encodeURIComponent(name)}` });
     }
     for (const row of cx.adapters.containers?.rows() ?? []) out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${row.name}`, hint: "container · terminal · console", action: `canvas:ctr:${row.name}` });
     // Every session on every host (D178), by name, with its state in the hint so "detached" or "exited" finds them.

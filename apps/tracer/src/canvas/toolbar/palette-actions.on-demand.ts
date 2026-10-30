@@ -37,6 +37,12 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
     const host = cx.adapters.sessions.hosts().find((entry) => entry.id === value);
     if (host) cx.adapters.hostRemoval?.remove(host.id, host.name, active?.card.pill ?? core.stage);
   }
+  else if (kind === "rename" && value) {
+    // Goes to the Mesh view, where the host's card opens its name field as soon as the card is on screen.
+    const host = decodeURIComponent(value);
+    if (detail?.source === "keyboard") cx.camera.keyFlight(() => cx.nav.flyView("mesh")); else cx.nav.flyView("mesh");
+    cx.mesh?.beginRename(host);
+  }
   else if (kind === "open" && value) cx.win.open(value);
   else if (kind === "session" && value) { const [host, sid] = value.split("/"); if (host && sid) cx.win.openSession(host, sid); }
   else if (kind === "sessions") {

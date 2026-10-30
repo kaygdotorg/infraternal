@@ -23,3 +23,11 @@ test.each(["split:right", "new:below", "close"])("a deferred %s selection retain
   dispatchCanvasAction(cx, { action: `canvas:${action}` }, selected);
   expect(targets).toEqual([]);
 });
+
+test("a rename row flies to the Mesh and asks its card for the name field, with the host's own name", () => {
+  const flown: string[] = [], asked: string[] = [];
+  const cx = { state: {}, core: {}, views: new Map(), nav: { flyView: (id: string) => flown.push(id) }, mesh: { beginRename: (id: string) => asked.push(id) } } as unknown as Ctx;
+  dispatchCanvasAction(cx, { action: `canvas:rename:${encodeURIComponent("build:01 é")}` }, undefined);
+  expect(flown).toEqual(["mesh"]);
+  expect(asked).toEqual(["build:01 é"]);
+});
