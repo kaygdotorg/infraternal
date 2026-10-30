@@ -48,8 +48,19 @@ A service in an automatic restart loop reports `restarting`, with
 "Restarting repeatedly" in its component row, its last observed exit status
 or signal (or an explicit unavailable value), and a `journalctl` next step for
 its system or user manager. Recent repeated starts are treated as unstable
-for ten seconds; historical restart counts on a stable process do not change
-its Running state. Status reads local state only.
+for ten seconds using the manager's monotonic start timestamp; wall-clock
+changes cannot shorten that window. Historical restart counts on a stable
+process do not change its Running state. Repeated starts without a comparable
+monotonic timestamp remain Unknown. Queries use raw properties available to
+older systemd clients, without requiring a timestamp-format option.
+
+Status reads local state only. Each unit has independent observations and a
+query deadline; concurrent queries keep a stalled unit or manager from hiding
+another unit's state. A failed query remains Unknown, with a scoped diagnostic
+next step; it does not by itself prove the service is down. Retained server
+data without a readable service unit is Stopped, exits 5, and asks the operator
+to restore the service. Masking, disabling or removing a unit cannot create a
+Running headline without evidence of a running service.
 
 Exit codes (D303): 0 done, 1 failed, 2 wrong command line, 3 not allowed,
 4 not found, 5 off or unreachable, 6 partly done, 130 interrupted by Ctrl-C
