@@ -127,6 +127,9 @@ test("offline close races and later edits survive restart without duplicate wind
     expect((await cache(page)).canonical).toEqual((await cache(mobile)).canonical);
     await page.screenshot({ path: tracerEvidencePath("review-restart-desktop.png") });
     await mobile.screenshot({ path: tracerEvidencePath("review-restart-phone.png") });
+  } catch (error) {
+    await writeFile(tracerEvidencePath("review-offline-recovery-failure.json"), JSON.stringify({ desktop: await cache(page), phone: await cache(mobile), controls: server.bridges.map((bridge) => ({ closed: bridge.closed, control: bridge.control })) }, null, 2));
+    throw error;
   } finally { await desktop.setOffline(false); await fixture.dispose(); }
 });
 
@@ -453,6 +456,7 @@ for (const reconnect of [false, true]) test(`review r2: a raced split refusal pr
     await expect.poll(async () => (await cache(page)).canonical.revision).toBe(baseline.revision + 1);
     let held = false, armed = true;
     const queued: Array<string | Buffer> = [];
+    const captured: Array<{ intent?: { type?: string } }> = [];
     let release = (): void => {};
     let disconnect = (): void => {};
     // Hold the real split and its ordered suffix while the other device changes
@@ -466,6 +470,7 @@ for (const reconnect of [false, true]) test(`review r2: a raced split refusal pr
         if (armed && typeof bytes !== "string") decoder.feed(new Uint8Array(bytes), (_stream, frame) => {
           if (frame.type !== "Call" || frame.actionId !== "canvas.layout.apply") return;
           const input = JSON.parse(new TextDecoder().decode(frame.inputJson)) as { intent?: { type?: string } };
+          captured.push(input);
           if (input.intent?.type === "split") held = true;
         });
         if (held) queued.push(bytes); else upstream.send(bytes);
@@ -476,8 +481,9 @@ for (const reconnect of [false, true]) test(`review r2: a raced split refusal pr
     await expect.poll(() => held).toBe(true);
     await windows(page).first().locator('[data-action="close"]').evaluate((el) => (el as HTMLElement).click());
     await expect(windows(page)).toHaveCount(2);
-    await expect.poll(async () => (await cache(page)).pending.length).toBeGreaterThanOrEqual(2);
-    const pending = await cache(page);
+    // Routed frames are held before the upstream wire observer can see them.
+    await expect.poll(() => captured.length).toBeGreaterThanOrEqual(2);
+    const pending = structuredClone(captured);
     expect((await request(server, phone, "canvas.layout.apply", { op_id: randomUUID(), base_revision: baseline.revision, intent: { type: "weight", view_id: view.id, column_id: column.id, weight: 0.1 } })).ok).toBe(true);
     const notice = page.getByText("That layout change was not saved. The saved layout is back.", { exact: true }).waitFor({ state: "visible" });
     void notice.catch(() => undefined);
