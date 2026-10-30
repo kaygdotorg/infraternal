@@ -1,5 +1,5 @@
 /** D312 production-browser loss boundary, delayed confirmation, peer revocation and private-storage controls. */
-import { expect, test, type Page } from "playwright/test";
+import { devices, expect, test, type Page } from "playwright/test";
 import { mkdir } from "node:fs/promises";
 import { WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
 import { enrol, settled, windows } from "./layout-devices";
@@ -11,16 +11,23 @@ const pending = (page: Page) => page.getByText("Not saved — keep this tab open
 /** Hold only layout applies; all terminal frames and unrelated calls still reach the real server. */
 async function holdApplies(page: Page) {
   let holding = false;
-  const held: Array<() => void> = [];
+  let generation = 0;
+  const held: Array<{ generation: number; send(): void }> = [];
+  page.on("request", (request) => { if (request.isNavigationRequest() && request.frame() === page.mainFrame()) generation++; });
   await page.routeWebSocket("**/v1/ws", (route) => {
-    const upstream = route.connectToServer();
+    const epoch = generation, upstream = route.connectToServer();
     route.onMessage((message) => {
       let layout = false;
       if (typeof message !== "string") new WebSocketFrameDecoder().feed(new Uint8Array(message), (_id, frame) => { if (frame.type === "Call" && frame.actionId === "canvas.layout.apply") layout = true; });
-      if (layout && holding) held.push(() => upstream.send(message)); else upstream.send(message);
+      if (layout && holding) held.push({ generation: epoch, send: () => upstream.send(message) }); else upstream.send(message);
     });
   });
-  return { hold() { holding = true; }, release() { holding = false; for (const send of held.splice(0)) send(); }, discard() { holding = false; held.length = 0; } };
+  return {
+    get count() { return held.filter((entry) => entry.generation === generation).length; },
+    hold() { holding = true; },
+    release() { holding = false; for (const entry of held.splice(0)) if (entry.generation === generation) entry.send(); },
+    discard() { held.length = 0; },
+  };
 }
 async function noPrivateStorage(page: Page): Promise<void> {
   expect(await page.evaluate(() => Object.keys(localStorage).filter((key) => /^(infraternal\.canvas|tracer\.(drawing-identity|sessions|session\.|user-id))/.test(key)))).toEqual([]);
@@ -35,13 +42,21 @@ async function signOut(page: Page): Promise<void> {
 test("three tabs keep edits local until confirmation and recover confirmed state after reload", async ({ browser }) => {
   const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4450) });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
+  const phone = await browser.newContext({ ...devices["iPhone 15"], ignoreHTTPSErrors: true });
   try {
     const a = watchLayout(await context.newPage()), gate = await holdApplies(a); await enrol(a, server); await settled(a);
     const b = watchLayout(await context.newPage()), c = watchLayout(await context.newPage());
     await b.goto(server.origin); await c.goto(server.origin); await expect(windows(b)).toHaveCount(1); await expect(windows(c)).toHaveCount(1);
     gate.hold(); await a.bringToFront(); await a.keyboard.press("Control+Shift+E");
     await expect(windows(a)).toHaveCount(2); await expect(pending(a)).toBeVisible();
+    await expect.poll(() => gate.count).toBeGreaterThan(0);
+    await windows(a).last().locator(".terminal-host").click();
+    await a.keyboard.type("printf 'LAYOUT_PENDING_%s\\n' TYPING_OK"); await a.keyboard.press("Enter");
+    await expect.poll(() => server.bridges.some((bridge) => [...bridge.output.values()].some((text) => text.includes("LAYOUT_PENDING_TYPING_OK")))).toBe(true);
+    await expect(pending(a)).toBeVisible();
     await expect(windows(b)).toHaveCount(1); await expect(windows(c)).toHaveCount(1);
+    await phone.addCookies(await context.cookies());
+    const mobile = watchLayout(await phone.newPage()), phoneGate = await holdApplies(mobile);
     const evidence = tracerEvidencePath("per-tab"); await mkdir(evidence, { recursive: true });
     for (const theme of ["ink", "paper"]) {
       await a.setViewportSize({ width: 1440, height: 900 });
@@ -49,13 +64,19 @@ test("three tabs keep edits local until confirmation and recover confirmed state
       await a.locator(`#palette-results [data-action="theme:${theme}"]`).click();
       await expect(a.locator("html")).toHaveAttribute("data-theme", theme);
       await a.setViewportSize({ width: 1440, height: 900 }); await a.screenshot({ path: `${evidence}/desktop-${theme}.png` });
-      await a.setViewportSize({ width: 393, height: 852 }); await a.screenshot({ path: `${evidence}/phone-${theme}.png` });
+      phoneGate.discard(); await mobile.goto(`${server.origin}/?theme=${theme}&bg=none`);
+      await expect(windows(mobile)).toHaveCount(1); phoneGate.release(); await settled(mobile); phoneGate.hold();
+      await mobile.getByRole("button", { name: "Split right", exact: true }).tap();
+      await expect(windows(mobile)).toHaveCount(2); await expect(pending(mobile)).toBeVisible();
+      await expect.poll(() => phoneGate.count).toBeGreaterThan(0);
+      await mobile.screenshot({ path: `${evidence}/phone-${theme}.png` }); await noPrivateStorage(mobile);
     }
+    phoneGate.discard(); await phone.close();
     await noPrivateStorage(a); await noPrivateStorage(b); await noPrivateStorage(c);
     gate.release(); await settled(a); await expect(pending(a)).toBeHidden(); await expect(windows(b)).toHaveCount(2); await expect(windows(c)).toHaveCount(2);
     await a.reload(); await expect(windows(a)).toHaveCount(2); await settled(a); await noPrivateStorage(a);
     expect((await cache(a)).canonical).toEqual((await cache(b)).canonical);
-  } finally { await context.close(); await server.dispose(); }
+  } finally { await phone.close(); await context.close(); await server.dispose(); }
 });
 
 test("unconfirmed tab loss restores only server state and warm offline drawing survives until cold reload", async ({ browser }) => {
@@ -64,7 +85,8 @@ test("unconfirmed tab loss restores only server state and warm offline drawing s
   try {
     const page = watchLayout(await context.newPage()), gate = await holdApplies(page); await enrol(page, server); await settled(page);
     gate.hold(); await page.keyboard.press("Control+Shift+E"); await expect(windows(page)).toHaveCount(2); await expect(pending(page)).toBeVisible();
-    gate.discard(); await page.reload(); await expect(windows(page)).toHaveCount(1); await settled(page);
+    await expect.poll(() => gate.count).toBeGreaterThan(0);
+    gate.discard(); await page.reload(); await expect(windows(page)).toHaveCount(1); gate.release(); await settled(page);
     await expect.poll(() => page.evaluate(async () => Boolean(await (await caches.open("infraternal-drawing-v1")).match("/"))), { timeout: 30_000 }).toBe(true);
     await context.setOffline(true); await expect(windows(page)).toHaveCount(1);
     await page.reload(); await expect(page.getByRole("heading", { name: "Connect to load your layout" })).toBeVisible(); await expect(windows(page)).toHaveCount(0);
