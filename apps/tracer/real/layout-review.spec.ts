@@ -467,22 +467,27 @@ for (const reconnect of [false, true]) test(`review r2: a raced split refusal pr
       disconnect = () => route.close();
       release = () => { armed = false; held = false; for (const bytes of queued.splice(0)) upstream.send(bytes); };
       route.onMessage((bytes) => {
+        let layout = false;
         if (armed && typeof bytes !== "string") decoder.feed(new Uint8Array(bytes), (_stream, frame) => {
           if (frame.type !== "Call" || frame.actionId !== "canvas.layout.apply") return;
+          layout = true;
           const input = JSON.parse(new TextDecoder().decode(frame.inputJson)) as { intent?: { type?: string } };
           captured.push(input);
           if (input.intent?.type === "split") held = true;
         });
-        if (held) queued.push(bytes); else upstream.send(bytes);
+        // Terminal credit and liveness proofs must keep flowing while layout waits.
+        if (held && layout) queued.push(bytes); else upstream.send(bytes);
       });
     });
     await page.reload(); await expect(windows(page)).toHaveCount(2); await settled(page);
     await page.keyboard.press("Control+Shift+D"); await expect(windows(page)).toHaveCount(3);
     await expect.poll(() => held).toBe(true);
-    await windows(page).first().locator('[data-action="close"]').evaluate((el) => (el as HTMLElement).click());
+    // Close a confirmed membership by identity. The new split can become the
+    // first DOM window, where closing it would exercise cancellation instead.
+    await page.locator(`[data-window-id="${column.windows[0]!.id}"] [data-action="close"]`).evaluate((el) => (el as HTMLElement).click());
     await expect(windows(page)).toHaveCount(2);
     // Routed frames are held before the upstream wire observer can see them.
-    await expect.poll(() => captured.length).toBeGreaterThanOrEqual(2);
+    await expect.poll(() => captured.slice(0, 2).map((input) => input.intent?.type)).toEqual(["split", "close"]);
     const pending = structuredClone(captured);
     expect((await request(server, phone, "canvas.layout.apply", { op_id: randomUUID(), base_revision: baseline.revision, intent: { type: "weight", view_id: view.id, column_id: column.id, weight: 0.1 } })).ok).toBe(true);
     const notice = page.getByText("That layout change was not saved. The saved layout is back.", { exact: true }).waitFor({ state: "visible" });
