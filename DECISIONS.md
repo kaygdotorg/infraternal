@@ -3402,3 +3402,42 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        simultaneous open → upgrade and flip-back on the #201 selector →
        PCP/NAT-PMP/UPnP (after Q8) → node-relay qualification → hard-NAT
        experiments only if Q4 triggers.
+314. **One CLI command set for sessions and canvas (owner, 2026-10-30,
+     #251; amends D311's names, keeps D303/D304):** "agreed, love it".
+     D311's `mux` verbs fold into D303/D304's nouns, one name per idea and
+     `--json` on every command:
+     - **Here, in this terminal:** `status`, `machines`, `logs`, `mesh`,
+       `access`, `update`, `skill`, `sign-in <server>` (link, code and QR),
+       `up <server>`, and `open <machine>`: a plain one-off shell here, not
+       a saved session and without prefix keys.
+     - **Sessions (automation only, never interactive):** `sessions
+       [<machine>]` lists; `sessions new <machine> --name <n> [-- cmd]`;
+       `sessions send <machine>:<session> '<text>'`; `sessions read …
+       --last N`; `sessions wait … --until-idle <d> | --match <re>
+       [--timeout <d>]`; `sessions watch …` (read-only); `sessions rename
+       … <new>`; `sessions close …`; `sessions mcp` for AI tools.
+     - **Canvas (the person's screens in the app):** `canvas windows`,
+       `canvas open <machine>:<session> [--beside|--below <window>]
+       [--note '…']`, `canvas focus …`, `canvas close …`.
+     - **Renames from D311:** `ls` → bare `sessions`, `capture` → `read`,
+       `split` → `canvas open --beside/--below`, `close-window` → `canvas
+       close`, `mux mcp` → `sessions mcp`; D304's `sessions open --name`
+       → `sessions new`, since "open" means "show on screen".
+     - **AI tools** use MCP and `sessions` only; there is no tmux-compatible
+       command subset (it would add a second surface and another product's
+       name to our CLI). This replaces D311's tmux subset.
+     - Errors name the fix and the next step, for example
+       `No session called "biuld" on web01. Did you mean "build"?`, exit 4
+       (D303 codes).
+315. **Auto-started multiplexers: never interfere, offer the guard line
+     (owner, 2026-10-30, #251; replaces D241's transparent skip):**
+     "agreed" (option B). Infraternal never changes a shell's startup to
+     skip a multiplexer: three review rounds showed a transparent skip
+     cannot be made safe (stock snippets read the multiplexer's own
+     variables, a startup `exec` keeps the PID, and a skipped test under
+     `set -e` can end the login). Instead, the first time a session on a
+     host starts tmux or zellij from its startup files, one quiet line says
+     so and offers the guard `[ -n "$INFRATERNAL_SESSION" ] || <command>`
+     to copy, plus a button that adds that line to the startup file after
+     the person confirms, with undo. Every session still exports
+     `INFRATERNAL_SESSION`. The per-host and global switches from D241 stay.
