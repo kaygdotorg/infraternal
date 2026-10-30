@@ -145,8 +145,16 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,420,592 bytes |
-  | `aarch64-unknown-linux-musl` | 19,592,504 bytes |
+  | `x86_64-unknown-linux-musl` | 21,431,472 bytes |
+  | `aarch64-unknown-linux-musl` | 19,605,896 bytes |
+
+  Replay geometry and stale-note repairs (#257, R257-01/R257-02) measure
+  21,431,472 / 19,605,896 bytes (x86_64 / aarch64), using the pinned
+  `scripts/static-cargo` recipe on 8by64-compute02, one target at a time.
+  Against dev `8f88bf086` at 21,420,592 / 19,592,504 bytes, the deltas are
+  +10,880 / +13,392 bytes, both below 16 KiB. The exact caps above follow
+  these images without allowance (D243); no dependencies, features or release
+  settings changed. Build receipts and replay/browser regressions are on #257.
 
   The release 9.5 integration (#24, #240, #252) merges reviewed account-scoped
   revocation `820890478` into dev `07c5da77b`, retaining the installed-service
