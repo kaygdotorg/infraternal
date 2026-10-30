@@ -28,7 +28,8 @@ export type SignOutToast = Pick<ToastController, "show">;
 
 let announce: (account: string) => void = () => {};
 let freezing: (value: boolean) => void = () => {};
-let signingOut: Promise<void> | undefined;
+let currentLifetime: () => unknown = () => undefined;
+let signingOut: { lifetime: unknown; promise: Promise<void> } | undefined;
 let teardown: (() => void) | undefined;
 let currentAccount: () => string | undefined = () => undefined;
 
@@ -36,7 +37,7 @@ let currentAccount: () => string | undefined = () => undefined;
  * main.ts hands over the teardown (dispose every live part of the signed-in app and show the sign-in screen) and a
  * way to read which account is signed in.
  */
-export function registerSignOut(run: () => void, account: () => string | undefined, freeze: (value: boolean) => void = () => {}, notify: (account: string) => void = () => {}): void { teardown = run; currentAccount = account; freezing = freeze; announce = notify; }
+export function registerSignOut(run: () => void, account: () => string | undefined, freeze: (value: boolean) => void = () => {}, notify: (account: string) => void = () => {}, lifetime: () => unknown = () => undefined): void { teardown = run; currentAccount = account; freezing = freeze; announce = notify; currentLifetime = lifetime; }
 
 /** A `?session=` in the address would reattach the old terminal as soon as the next person signs in. */
 function forgetSessionAddress(): void {
@@ -49,12 +50,15 @@ function forgetSessionAddress(): void {
 
 /** Signs this device out. Rejects, leaving the screen untouched, when the server could not end the session. */
 export function signOut(): Promise<void> {
-  if (signingOut) return signingOut;
+  const lifetime = currentLifetime();
+  if (signingOut && signingOut.lifetime === lifetime) return signingOut.promise;
   const account = currentAccount();
   freezing(true); pauseAccountWork(account, true);
-  signingOut = (async () => {
+  const promise: Promise<void> = (async () => {
     try { await logout(); }
-    catch (error) { pauseAccountWork(account, false); freezing(false); throw error; }
+    catch (error) { if (currentLifetime() === lifetime) { pauseAccountWork(account, false); freezing(false); } throw error; }
+    // Another screen may have signed in while this response was delayed. It owns its own work.
+    if (currentLifetime() !== lifetime) return;
     if (account) announce(account);
     forgetAccountWork(account); teardown?.();
     if (!clearAccountStorage(account)) {
@@ -65,8 +69,9 @@ export function signOut(): Promise<void> {
       console.warn("Some legacy layout data could not be removed from this browser.");
     }
     forgetSessionAddress();
-  })().finally(() => { signingOut = undefined; });
-  return signingOut;
+  })().finally(() => { if (signingOut?.promise === promise) signingOut = undefined; });
+  signingOut = { lifetime, promise };
+  return promise;
 }
 
 /**

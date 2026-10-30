@@ -657,7 +657,7 @@ function endSession(message = ""): void {
   activeUserId = undefined;
   renderAuth(false, message);
 }
-registerSignOut(() => endSession(), () => activeUserId, (value) => { if (coreScreen) coreScreen.stage.inert = value; }, (account) => peerSessions.forget(account));
+registerSignOut(() => endSession(), () => activeUserId, (value) => { if (coreScreen) coreScreen.stage.inert = value; }, (account) => peerSessions.forget(account), () => sessionGeneration);
 
 async function checkForegroundSession(): Promise<void> {
   if (checkingResume || !activeUserId) return;
