@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Role: assemble (and optionally sign) the macOS capture companion app bundle from the desktop crate's release build (#146, D203).
+#
+# The bundle's only executable is the Swift companion that crates/plugins/desktop/build.rs
+# compiles into OUT_DIR for the `desktop` feature. macOS attributes Screen Recording,
+# Accessibility and event posting to this bundle's designated requirement, so the bundle
+# ID and executable name are fixed. The script never requests or changes a privacy
+# permission and never touches any keychain other than the one passed with --keychain.
+set -euo pipefail
+usage() {
+    printf 'Usage: scripts/desktop-helper-bundle /absolute/output/InfraternalCaptureHelper.app [--sign <identity-sha1> --keychain <absolute keychain path>]\n' >&2
+    exit 2
+}
+[[ $# -ge 1 && "$1" = /* && "$1" = */InfraternalCaptureHelper.app ]] || usage
+bundle="$1"
+shift
+identity="" keychain=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --sign) [[ $# -ge 2 ]] || usage; identity="$2"; shift 2 ;;
+        --keychain) [[ $# -ge 2 && "$2" = /* ]] || usage; keychain="$2"; shift 2 ;;
+        *) usage ;;
+    esac
+done
+# An identity without an explicit keychain would search the login keychain.
+[[ -z "$identity" && -z "$keychain" ]] || [[ -n "$identity" && -n "$keychain" ]] || usage
+[[ "$(uname -s)" = Darwin && "$(uname -m)" = arm64 ]] || { printf 'Build the companion on an arm64 Mac\n' >&2; exit 1; }
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+
+# Cargo reports the build script's OUT_DIR; its hashed name is not stable.
+out_dir="$(cargo build --locked --release -p infraternal-plugin-desktop --features desktop \
+    --message-format=json-render-diagnostics | /usr/bin/python3 -I -c '
+import json, sys
+dirs = [m["out_dir"] for m in map(json.loads, sys.stdin)
+        if m.get("reason") == "build-script-executed" and "#infraternal-plugin-desktop@" in m["package_id"]]
+if len(dirs) != 1: sys.exit("expected one desktop build-script output, found %d" % len(dirs))
+print(dirs[0])')"
+native="$out_dir/infraternal-desktop-native"
+[[ -f "$native" && -x "$native" ]] || { printf 'desktop companion missing from %s\n' "$out_dir" >&2; exit 1; }
+version="$(cargo metadata --locked --no-deps --format-version 1 | /usr/bin/python3 -I -c '
+import json, sys
+print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "infraternal-plugin-desktop"))')"
+# Declare the deployment target the compiler actually recorded, not a hoped-for one.
+minos="$(/usr/bin/vtool -show-build "$native" | /usr/bin/awk '$1 == "minos" { print $2; exit }')"
+[[ -n "$minos" ]] || { printf 'companion has no deployment target\n' >&2; exit 1; }
+
+rm -rf -- "$bundle"
+mkdir -p -- "$bundle/Contents/MacOS"
+install -m 0755 "$native" "$bundle/Contents/MacOS/InfraternalCaptureHelper"
+# LSUIElement: a background companion with no Dock icon or menu bar of its own;
+# its only UI is the nonactivating control indicator panel.
+cat >"$bundle/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key><string>en</string>
+	<key>CFBundleExecutable</key><string>InfraternalCaptureHelper</string>
+	<key>CFBundleIdentifier</key><string>com.infraternal.desktop.helper</string>
+	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+	<key>CFBundleName</key><string>InfraternalCaptureHelper</string>
+	<key>CFBundleDisplayName</key><string>infraternal capture helper</string>
+	<key>CFBundlePackageType</key><string>APPL</string>
+	<key>CFBundleShortVersionString</key><string>${version}</string>
+	<key>CFBundleVersion</key><string>${version}</string>
+	<key>LSMinimumSystemVersion</key><string>${minos}</string>
+	<key>LSUIElement</key><true/>
+	<key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+PLIST
+/usr/bin/plutil -lint -s "$bundle/Contents/Info.plist"
+
+if [[ -n "$identity" ]]; then
+    # One executable and no nested code: sign the bundle once, hardened runtime,
+    # no entitlements (the companion needs no runtime exceptions).
+    /usr/bin/codesign --force --options runtime --timestamp=none \
+        --keychain "$keychain" -s "$identity" "$bundle"
+    /usr/bin/codesign --verify --deep --strict "$bundle"
+fi
+printf '%s\n' "$bundle"
