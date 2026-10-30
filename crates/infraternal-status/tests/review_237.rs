@@ -8,8 +8,14 @@ fn isolated(name: &str, manager: &str, check: impl FnOnce(PathBuf)) {
         check(PathBuf::from(root));
         return;
     }
-    let root = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").expect("target directory"))
-        .join(format!("review-237-{name}-{}", std::process::id()));
+    let base = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || {
+            PathBuf::from(std::env::var_os("HOME").expect("home directory"))
+                .join(".cache/codex-scratch/status-crash-loop-237-review/fixtures")
+        },
+        PathBuf::from,
+    );
+    let root = base.join(format!("review-237-{name}-{}", std::process::id()));
     fs::create_dir_all(root.join("bin")).unwrap();
     let executable = root.join("bin/systemctl");
     let future = std::time::SystemTime::now()
@@ -126,6 +132,38 @@ printf '%s\n' ActiveState=failed SubState=failed NRestarts=45 MainPID=0 ExecMain
                 manager_activity(Scope::User, "infraternal-agent.service"),
                 Activity::Failed,
                 "a timestamp-format refusal must not hide a failed service"
+            );
+        },
+    );
+}
+
+#[test]
+fn masked_server_with_retained_data_is_not_described_as_running() {
+    isolated(
+        "masked_server_with_retained_data_is_not_described_as_running",
+        "exit 1",
+        |root| {
+            let units = root.join("system");
+            let data = root.join("data");
+            fs::create_dir_all(&units).unwrap();
+            fs::create_dir_all(&data).unwrap();
+            std::os::unix::fs::symlink("/dev/null", units.join("infraternal-server.service"))
+                .unwrap();
+            fs::write(data.join("infraternal.sqlite"), []).unwrap();
+            let roots = Roots {
+                system_units: vec![units],
+                user_units: None,
+                run_dir: None,
+                data_dirs: vec![data],
+                net_class: root.join("net"),
+            };
+            let status = probe_local(&roots, &["server".to_owned()]);
+            assert_eq!(status.components[0].state, "Stopped");
+            assert_eq!(status.overall(), Activity::Inactive);
+            assert!(
+                !status.headline().1.contains("is running"),
+                "a masked server cannot be running: {}",
+                status.headline().1
             );
         },
     );
