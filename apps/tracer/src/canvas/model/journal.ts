@@ -39,6 +39,7 @@ export class LayoutJournal {
     } else return false;
     this.#prune(); return true;
   }
+  clear(): void { this.restart(); this.pending = []; this.unresolved.clear(); this.migration = undefined; this.canonical = { format: "infraternal.canvas", version: 1, revision: 0, views: [] }; this.#projection = undefined; }
   restart(): void { this.#ready = false; this.#inflight.clear(); this.epoch++; }
   /** Reserve a bounded ready request; sent inputs remain immutable across reconnects. */
   next(): Pending | Migration | undefined {

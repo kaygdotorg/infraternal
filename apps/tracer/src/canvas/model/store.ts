@@ -2,7 +2,7 @@
  * The canvas store adapter: where the canvas document lives (D178, D180, D183).
  *
  * Product uses ServerCanvasStore: revisions and semantic intents over the existing connection.
- * LocalCanvasStore remains for isolated previews. Local storage is only a drawing cache in production.
+ * LocalCanvasStore remains for isolated previews. Production never writes private layout data to browser storage (D312).
  * Cameras and focus belong to each device and never enter this interface.
  */
 import { parseDocument, type CanvasDocument } from "./schema";
@@ -11,6 +11,8 @@ import { canvasKey } from "../../account-storage";
 
 export interface CanvasStore {
   readonly acceptsPendingReferences?: boolean;
+  readonly pending?: boolean;
+  onPending?(listener: () => void): () => void;
   load(): Promise<CanvasDocument | undefined>;
   save(doc: CanvasDocument, splits?: ReadonlyMap<string, LayoutEdit>, before?: CanvasDocument, unresolved?: ReadonlySet<string>): Promise<void>;
   current?(): CanvasDocument;
@@ -23,15 +25,17 @@ export interface CanvasStore {
 
 export class LocalCanvasStore implements CanvasStore {
   private readonly key: string;
+  private document: CanvasDocument | undefined;
   constructor(account: string) { this.key = canvasKey(account); }
   async load(): Promise<CanvasDocument | undefined> {
+    if (this.document) return this.document;
     try {
       const raw = localStorage.getItem(this.key);
       return raw ? parseDocument(JSON.parse(raw)) : undefined;
     } catch { return undefined; }
   }
   async save(doc: CanvasDocument): Promise<void> {
-    try { localStorage.setItem(this.key, JSON.stringify(doc)); } catch { /* storage unavailable: the layout lives for this tab only */ }
+    this.document = structuredClone(doc);
   }
   subscribe(): () => void { return () => undefined; }
 }

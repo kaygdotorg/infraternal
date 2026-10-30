@@ -47,6 +47,8 @@ export interface ToastController {
 export interface ToastOptions {
   /** Window notices anchor to the inline start of a positioned, unscrolled parent. */
   placement?: "viewport" | "parent";
+  /** Persistent status can sit above transient notifications without sharing their replacement slot. */
+  aboveNotifications?: boolean;
 }
 
 /** Messages longer than this stack their actions beneath the text; shorter ones keep the actions beside it. */
@@ -62,6 +64,7 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
     // view. Parent notices stay at the window's inline start.
     host.style.marginInline = "0";
   }
+  if (options.aboveNotifications) host.style.bottom = "calc(var(--ui-toast-bottom, 28px) + 72px)";
   host.hidden = true;
   host.setAttribute("aria-label", "Notification");
   host.setAttribute("role", "group");

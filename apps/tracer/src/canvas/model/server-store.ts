@@ -3,6 +3,7 @@ import { canvasKey, readStoredJson } from "../../account-storage";
 import { parseDocument, type CanvasDocument } from "./schema";
 import type { LayoutEdit } from "./operations";
 import { ActionRefused, type SubscriptionHandle } from "../../connection";
+import { registerAccountWork } from "../../account-lifetime";
 import { randomUuid } from "../../identifiers";
 import { LayoutJournal } from "./journal";
 import type { CanvasStore } from "./store";
@@ -21,6 +22,8 @@ export class ServerCanvasStore implements CanvasStore {
   readonly #listeners = new Set<() => void>();
   readonly #status = new Set<() => void>();
   #disposed = false;
+  #paused = false;
+  readonly #offAccount: () => void;
   #resyncing = false;
   #waiting = false;
   #off: SubscriptionHandle | undefined;
@@ -39,6 +42,7 @@ export class ServerCanvasStore implements CanvasStore {
   #imported = false;
 
   constructor(private readonly transport: LayoutTransport, account: string, private readonly refused: (definitive?: boolean, delayed?: boolean) => void = () => {}) {
+    this.#offAccount = registerAccountWork(account, { pause: (value) => { this.#paused = value; if (!value) this.#pump(); }, dispose: () => this.dispose() });
     this.#legacyKey = canvasKey(account);
     // Read only the shipped v1 import. Unconfirmed/unreadable journals remain untouched for explicit export/discard.
     const legacy = parseDocument(readStoredJson(this.#legacyKey));
@@ -64,7 +68,7 @@ export class ServerCanvasStore implements CanvasStore {
   unresolvedWindow(id: string): boolean { return this.#journal.unresolved.has(id); }
   /** Local acceptance only: drawing and typing never await confirmation. */
   async save(doc: CanvasDocument, hints?: ReadonlyMap<string, LayoutEdit>, before?: CanvasDocument, unresolved: ReadonlySet<string> = new Set()): Promise<void> {
-    if (this.#disposed) return;
+    if (this.#disposed || this.#paused) return;
     if (this.#journal.capture(doc, hints, before, unresolved)) this.#publish();
     this.#pendingChanged(); this.#pump();
   }
@@ -130,7 +134,7 @@ export class ServerCanvasStore implements CanvasStore {
   }
   #publish(): void { for (const listener of this.#listeners) listener(); }
   #pump(): void {
-    if (this.#disposed || this.#resyncing || this.transport.isWelcomed === false) return;
+    if (this.#disposed || this.#paused || this.#resyncing || this.transport.isWelcomed === false) return;
     const entry = this.#journal.next(); if (!entry) return;
     const migration = "document" in entry, epoch = this.#journal.epoch;
     const input = "document" in entry ? { op_id: entry.op_id, document: entry.document } : { op_id: entry.op_id, base_revision: entry.base_revision, intent: entry.intent };
@@ -163,8 +167,8 @@ export class ServerCanvasStore implements CanvasStore {
     if (this.#disposed) return;
     this.#disposed = true;
     clearTimeout(this.#retry); clearTimeout(this.#watchdog); clearTimeout(this.#notice);
-    this.#offRtt?.(); this.#off?.(); this.#listeners.clear(); this.#status.clear();
-    this.#journal.restart(); this.#journal.pending = []; this.#journal.unresolved.clear(); this.#journal.migration = undefined;
+    this.#offAccount(); this.#offRtt?.(); this.#off?.(); this.#listeners.clear(); this.#status.clear();
+    this.#journal.clear();
     this.#loaded?.(); this.#loaded = undefined;
   }
 }
