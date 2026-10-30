@@ -24,7 +24,7 @@ interface Vector {
 describe("wire protocol golden vectors", () => {
   test("encodes and decodes each frame exactly as the shared manifest describes", async () => {
     const vectors = await readVectors();
-    expect(vectors.length).toBe(20);
+    expect(vectors.length).toBe(22);
     for (const vector of vectors) {
       const bytes = new Uint8Array(await Bun.file(new URL(vector.file, manifestUrl)).arrayBuffer());
       expect(encodeFrame(vector.frame)).toEqual(bytes);
@@ -128,6 +128,7 @@ function readFrame(value: Record<string, unknown>): WireFrame {
         connectionId: hexField(value, "connectionId"),
         resumeToken: hexField(value, "resumeToken"),
         resumeWindowSeconds: numberField(value, "resumeWindowSeconds"),
+        ...(typeof value.sessionIncarnation === "string" ? { sessionIncarnation: value.sessionIncarnation } : {}),
       };
     case "Resume":
       return {

@@ -21,6 +21,7 @@ export type WireFrame =
       connectionId: Uint8Array;
       resumeToken: Uint8Array;
       resumeWindowSeconds: number;
+      sessionIncarnation?: string;
     }
   | { type: "Resume"; connectionId: Uint8Array; resumeToken: Uint8Array }
   | { type: "Ping" | "Pong"; nonce: bigint; sentUs: bigint }
@@ -288,8 +289,10 @@ function decodeBody(type: number, body: Uint8Array): WireFrame {
       const connectionId = reader.fixed(16);
       const resumeToken = reader.fixed(32);
       const resumeWindowSeconds = reader.u32();
+      const sessionIncarnation = reader.remaining ? reader.varString() : undefined;
+      if (sessionIncarnation !== undefined && !/^[-_A-Za-z0-9]{43}$/.test(sessionIncarnation)) throw decodeError("invalid-body", "invalid session incarnation");
       reader.ensureEnd();
-      return { type: "Welcome", connectionId, resumeToken, resumeWindowSeconds };
+      return { type: "Welcome", connectionId, resumeToken, resumeWindowSeconds, ...(sessionIncarnation === undefined ? {} : { sessionIncarnation }) };
     }
     case 0x02: {
       const connectionId = reader.fixed(16);
@@ -450,6 +453,8 @@ class BodyReader {
     return value;
   }
 
+  get remaining(): number { return this.body.byteLength - this.offset; }
+
   ensureEnd(): void {
     if (this.offset !== this.body.byteLength) {
       throw this.invalid("frame body has unexpected trailing bytes");
@@ -481,7 +486,8 @@ function measureFrame(frame: WireFrame): FrameMeasure {
       requireLength(frame.connectionId, 16, "connection id");
       requireLength(frame.resumeToken, 32, "resume token");
       checkedU32(frame.resumeWindowSeconds, "resume window");
-      bodyLength = 52;
+      if (frame.sessionIncarnation !== undefined && !/^[-_A-Za-z0-9]{43}$/.test(frame.sessionIncarnation)) throw new WireEncodeError("length-overflow", "invalid session incarnation");
+      bodyLength = 52 + (frame.sessionIncarnation === undefined ? 0 : stringFieldLength(frame.sessionIncarnation));
       type = 0x01;
       break;
     case "Resume":
@@ -596,6 +602,7 @@ function writeFrameAt(frame: WireFrame, output: Uint8Array, offset: number, meas
       output.set(frame.resumeToken, cursor);
       cursor += 32;
       view.setUint32(cursor, frame.resumeWindowSeconds, true);
+      if (frame.sessionIncarnation !== undefined) writeStringAt(frame.sessionIncarnation, output, cursor + 4);
       break;
     case "Resume":
       output.set(frame.connectionId, cursor);

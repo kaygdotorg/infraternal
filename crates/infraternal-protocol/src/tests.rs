@@ -27,6 +27,7 @@ enum OwnedFrame {
         connection_id: Vec<u8>,
         resume_token: Vec<u8>,
         resume_window_seconds: u32,
+        session_incarnation: Option<String>,
     },
     Resume {
         connection_id: Vec<u8>,
@@ -115,10 +116,12 @@ impl OwnedFrame {
                 connection_id,
                 resume_token,
                 resume_window_seconds,
+                session_incarnation,
             } => Frame::Welcome {
                 connection_id: connection_id.as_slice().try_into().expect("16-byte id"),
                 resume_token: resume_token.as_slice().try_into().expect("32-byte token"),
                 resume_window_seconds: *resume_window_seconds,
+                session_incarnation: session_incarnation.as_deref(),
             },
             Self::Resume {
                 connection_id,
@@ -388,6 +391,10 @@ fn read_frame(frame: &Value) -> OwnedFrame {
             connection_id: hex(frame, "connectionId"),
             resume_token: hex(frame, "resumeToken"),
             resume_window_seconds: number(frame, "resumeWindowSeconds"),
+            session_incarnation: frame
+                .get("sessionIncarnation")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
         },
         "Resume" => OwnedFrame::Resume {
             connection_id: hex(frame, "connectionId"),
