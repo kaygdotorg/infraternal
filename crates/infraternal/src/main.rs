@@ -432,7 +432,12 @@ fn status_result(
     for step in next {
         result = result.with_next_step(step);
     }
-    (result, node.confirmed_down().len())
+    // Retained server data with no readable service is also known stopped;
+    // an empty unit list must not turn that state into a successful exit.
+    let down = node.confirmed_down().len().max(usize::from(
+        activity == Activity::Inactive && node.role != infraternal_status::Role::None,
+    ));
+    (result, down)
 }
 
 fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {

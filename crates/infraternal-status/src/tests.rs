@@ -497,3 +497,40 @@ fn restart_age_uses_only_comparable_monotonic_microseconds() {
         Activity::Unknown
     );
 }
+
+#[test]
+fn retained_data_has_an_honest_headline_and_repair_step() {
+    for masked in [false, true] {
+        let fixture = Fixture::new();
+        fixture.write("var-lib/infraternal.sqlite", "");
+        if masked {
+            std::os::unix::fs::symlink(
+                "/dev/null",
+                fixture.root.join("etc/infraternal-server.service"),
+            )
+            .unwrap();
+        }
+        let status = fixture.status(&[]);
+        let (activity, headline, next) = status.headline();
+        assert_eq!(activity, Activity::Inactive);
+        assert_eq!(headline, "The server is not running on this machine.");
+        assert_eq!(state(&status, "server").0, "Stopped");
+        assert!(next[0].contains("Restore the server service"));
+    }
+}
+
+#[test]
+fn stopped_and_failed_services_keep_distinct_headlines_and_diagnostics() {
+    let fixture = Fixture::new();
+    production_server(&fixture);
+    for activity in [Activity::Inactive, Activity::Failed, Activity::Unknown] {
+        let status = probe(&fixture.roots(), &IDS.map(str::to_owned), &|_, _| activity);
+        let (_, headline, next) = status.headline();
+        assert!(headline.contains(match activity {
+            Activity::Inactive => "not running",
+            Activity::Failed => "has failed",
+            _ => "unknown",
+        }));
+        assert_eq!(next, ["systemctl status infraternal-server.service"]);
+    }
+}

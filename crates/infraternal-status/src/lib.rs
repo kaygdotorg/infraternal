@@ -819,7 +819,7 @@ impl NodeStatus {
             Role::Both => "The server and the infraternal agent",
         };
         let plural = self.role == Role::Both;
-        let message = if down.is_empty() {
+        let message = if down.is_empty() && (overall == Activity::Active || has_unknown) {
             if has_unknown {
                 "The status of part of this machine's setup is unknown.".to_owned()
             } else {
@@ -855,7 +855,8 @@ impl NodeStatus {
             };
             format!("{who} {state} on this machine.")
         };
-        let next = down
+        let mut next: Vec<_> = self
+            .down()
             .iter()
             .take(3)
             .map(|unit| {
@@ -876,6 +877,12 @@ impl NodeStatus {
                 }
             })
             .collect();
+        if next.is_empty() && self.units.is_empty() {
+            next.push(
+                "Restore the server service for the existing data, then run infraternal status."
+                    .to_owned(),
+            );
+        }
         (overall, message, next)
     }
 
