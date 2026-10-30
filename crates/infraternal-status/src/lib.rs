@@ -131,7 +131,7 @@ pub struct Unit {
     pub data: Option<PathBuf>,
     /// `--state` argument, when given.
     pub state: Option<PathBuf>,
-    /// A canonical installer unit masked on disk cannot have a running process.
+    /// A canonical installer unit masked on disk is unavailable by configuration.
     masked: bool,
     /// Plain local query failure, without manager output or sensitive arguments.
     pub query_error: Option<&'static str>,
