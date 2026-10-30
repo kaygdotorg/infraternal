@@ -13,6 +13,7 @@
  * | `mesh.grant.move`   | `{ name, side: "from" \| "to", endpoint }`          | `{ revision }`            |
  * | `mesh.grant.rename` | `{ name, new_name }`                               | `{ revision }`            |
  * | `mesh.grant.delete` | `{ name }`                                         | `{ revision }`            |
+ * | `mesh.node.rename`  | `{ node_id, name }`                                | `{ revision }`            |
  *
  * An endpoint is `{ "Node": <id> }` or `{ "Tag": "<name>" }`. A grant is referenced by its name (D180); its arrow id
  * is stable across renames, so the canvas keys arrows by it. A subscription is `{ "topic": "mesh" }`; its events are
@@ -90,6 +91,7 @@ export const ACTION = {
   move: "mesh.grant.move",
   rename: "mesh.grant.rename",
   remove: "mesh.grant.delete",
+  nodeRename: "mesh.node.rename",
 } as const;
 export const TOPIC = "mesh";
 

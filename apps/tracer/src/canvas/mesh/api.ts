@@ -213,6 +213,41 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
       inflight -= 1; settled();
     });
   };
+  /**
+   * A host's name is its identity on the canvas (grant ends, `via`, tag members, pins), so a rename the server accepted
+   * is written through all of them at once, in place (objects stay, so cards and arrows keep their identity). The
+   * next list says the same; this only spares the screen a second with a name that is no longer true.
+   */
+  const rekeyNode = (from: string, to: string): void => {
+    const node = nodes.get(from);
+    if (!node || from === to) return;
+    node.name = to;
+    nodes = new Map([...nodes].map(([k, v]) => [k === from ? to : k, v] as const));
+    idOf = new Map([...idOf].map(([k, v]) => [k === from ? to : k, v] as const));
+    const swap = (v: string): string => (v === from ? to : v);
+    for (const n of nodes.values()) if (n.via === from) n.via = to;
+    tags = Object.fromEntries(Object.entries(tags).map(([tag, members]) => [tag, members.map(swap)]));
+    for (const g of grants) {
+      g.from = swap(g.from); g.to = swap(g.to);
+      if (g.via === from) g.via = to;
+      g.auto = g.name === derivedName(g.from, g.to);
+    }
+    const pin = pins.get(from);
+    if (pin) { pins.delete(from); pins.set(to, pin); }
+  };
+  /** What a refused rename says, in plain words: the reason first, never the server's own code. */
+  const nodeRenameRefusal = (from: string, to: string, error: unknown): string => {
+    const head = `Could not rename ${from}`;
+    if (!(error instanceof ActionRefused)) return `${head}. Check your connection and try again.`;
+    switch (error.reason) {
+      case "forbidden": return `${head}: you are not allowed to rename hosts.`;
+      case "conflict": return `${head}: another host is already called ${to}.`;
+      case "reserved for the server": return `${head}: ${to} is the name of the server.`;
+      case "not found": return `${head}: it is no longer in the mesh.`;
+      case "invalid input": return `${head}: ${to} is not a name the server accepts.`;
+      default: return `${head}. The mesh is busy; please try again in a moment.`;
+    }
+  };
   /** A grant's ends are known to the server only through ids: an unknown host cannot be an endpoint. */
   const end = (name: string): Record<string, unknown> | undefined => endpointJson(name, idOf);
 
@@ -270,6 +305,26 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
       grants = grants.filter((o) => o !== grant); grantById.delete(grant.id);
       notify(true);
       send(`stop ${endName(grant.from)} reaching ${endName(grant.to)}`, ACTION.remove, { name: grant.name }, () => { grants.splice(Math.min(at, grants.length), 0, grant); grantById.set(grant.id, grant); }, () => undefined);
+    },
+    renameNode(name, newName) {
+      const wanted = newName.trim();
+      const id = idOf.get(name);
+      return new Promise<void>((resolve, reject) => {
+        if (id === undefined) { reject(new Error(`Could not rename ${name}: it is no longer in the mesh.`)); return; }
+        inflight += 1;
+        transport.call(ACTION.nodeRename, { node_id: id, name: wanted }).then((raw) => {
+          if (disposed) return;
+          const answer = parseAnswer(raw);
+          if (!answer) { dirty = true; reject(new Error(`Could not rename ${name}. The server's answer was not understood; try again in a moment.`)); }
+          else { rekeyNode(name, wanted); advance(answer.rev); notify(true); resolve(); }
+          inflight -= 1; settled();
+        }, (error: unknown) => {
+          if (disposed) return;
+          reject(new Error(nodeRenameRefusal(name, wanted, error)));
+          dirty = true; // what the server holds may differ from what was tried
+          inflight -= 1; settled();
+        });
+      });
     },
     pin(id, x, y) { pins.set(id, { x: Math.round(x), y: Math.round(y) }); },
     onChange(l) { listeners.add(l); return () => { listeners.delete(l); }; },

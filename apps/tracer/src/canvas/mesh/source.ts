@@ -64,6 +64,13 @@ export interface MeshSource {
   moveGrant(grant: Grant, to: { from?: string; to?: string }): void;
   renameGrant(grant: Grant, name: string): void;
   removeGrant(grant: Grant): void;
+  /**
+   * Renames a host (`mesh.node.rename`). Settles once the server has answered: it resolves after the new name is on
+   * every grant, tag and pin that carried the old one, and rejects with a sentence for the person (a duplicate name,
+   * no permission, the host gone) after leaving everything as it was. The source never shows the new name before the
+   * server accepted it, because a name is a host's identity here (D180): arrows, tags and pins refer to it.
+   */
+  renameNode(name: string, newName: string): Promise<void>;
   /** A person dragged a node: remember where it stays. */
   pin(nodeId: string, x: number, y: number): void;
   onChange(listener: () => void): () => void;
