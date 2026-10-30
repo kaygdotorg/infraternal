@@ -145,23 +145,26 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,438,608 bytes |
-  | `aarch64-unknown-linux-musl` | 19,611,752 bytes |
+  | `x86_64-unknown-linux-musl` | 21,447,376 bytes |
+  | `aarch64-unknown-linux-musl` | 19,631,192 bytes |
 
-  Crash-loop status reporting (#237, D299/D303) uses the pinned
-  `scripts/static-cargo` stripped static recipe on 8by64-compute02, one
-  target at a time:
+  Crash-loop status reporting and review fixes (#237, D299/D303) use the
+  pinned `scripts/static-cargo` stripped static recipe on 6by32-compute02,
+  one target at a time:
 
   | Source | x86_64 bytes | aarch64 bytes |
   | --- | ---: | ---: |
-  | Dev (`0c8639496`) | 21,431,472 | 19,605,896 |
-  | #237 (`d96c0a0e0`) | 21,438,608 | 19,611,752 |
-  | Delta versus dev | +7,136 | +5,856 |
+  | Dev (`2fb412d01`) | 21,431,472 | 19,605,896 |
+  | #237 (`f61d3a686`) | 21,447,376 | 19,631,192 |
+  | Delta versus dev | +15,904 | +25,296 |
 
-  Both increases are below 16 KiB. The exact caps above follow the measured
-  images without allowance (D243). Growth retains local manager-property
-  parsing, restart/exit diagnostics, mixed-role headlines and bounded, shared-deadline process
-  observation; no dependencies, features or release settings changed.
+  ARM growth above 16 KiB retains independent bounded unit queries and honest
+  restart/stopped diagnostics. The measured, target-specific justification is
+  recorded on #237.
+  Exact caps follow the measured images without allowance (D243). Growth
+  retains independent unit deadlines and observations, monotonic restart/exit
+  diagnostics and honest masked/missing-service headlines. The existing nix
+  clock API is reused; no dependency versions or release settings changed.
   Reproduction, both target receipts and the final gate output are on #237.
 
   Replay geometry and stale-note repairs (#257, R257-01/R257-02) measure
