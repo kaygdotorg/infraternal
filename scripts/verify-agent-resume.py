@@ -65,7 +65,7 @@ def run(binary):
         client.open()
         barrier = StateBarrier(state, client.id)
         client.attach()
-        client.until(b'shim-test')
+        client.wait_for_shell()
         fifo = state.resolve() / 'read-gate'
         os.mkfifo(fifo)
         payload = b'z' * 524288

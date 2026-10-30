@@ -1,19 +1,19 @@
 //! Non-renewing authority for content-free socket proofs, watched by committed revocation and absolute expiry [D81, D265], #199.
 
 use super::{AuthorityMiss, WebSocketState, probe_deadline};
-use tokio::{sync::watch, time::Instant};
+use tokio::time::Instant;
 
 /// This lease authorizes only content-free Ping/Pong bookkeeping. Payloads, application requests
 /// and backend rebinds retain fresh authority reads in their existing gates.
 pub(crate) struct Lease {
-    revoked: watch::Receiver<()>,
+    revoked: crate::auth::AccountSubscription,
     expiry: Instant,
 }
 
 impl Lease {
     pub(crate) async fn new(state: &WebSocketState, user: &str, token: &str) -> Result<Self, ()> {
         // Subscribe before SQL so a commit racing the read remains observable.
-        let revoked = state.auth.revocation_events();
+        let revoked = state.auth.revocation_events(user);
         let expiry = probe_deadline(state, user, token).await.map_err(|_| ())?;
         Ok(Self { revoked, expiry })
     }
@@ -87,11 +87,38 @@ mod review_closed_watch {
         let _clock = FrozenSocketTime::new().await;
         let (state, user) = fixture().await;
         let mut lease = Lease::new(&state, &user, TOKEN).await.unwrap();
-        // Auth owns the production sender for the state's entire lifetime.
-        // Replace only this test receiver to exercise unexpected source loss.
-        let (sender, receiver) = watch::channel(());
-        lease.revoked = receiver;
-        drop(sender);
+        // Production keeps the source for this subscription's entire lifetime.
+        // Close only the test account's source to exercise unexpected loss.
+        lease.revoked.close_source_for_test();
+        let mut wrote = false;
+        let result = lease
+            .run(&state, &user, TOKEN, async {
+                wrote = true;
+                Ok::<(), ()>(())
+            })
+            .await;
+        assert_eq!(result, Err(AuthorityMiss::Unavailable));
+        assert!(!wrote);
+    }
+}
+
+#[cfg(test)]
+mod review_r2_restore {
+    //! A replacement source cannot repair an old proof cursor after revocation (#240).
+
+    use super::*;
+    use crate::auth::tests::socket_clock::FrozenSocketTime;
+    use crate::websocket::writer_tests::busy_edges::{TOKEN, fixture};
+
+    #[tokio::test(start_paused = true)]
+    async fn review_r2_revoked_lease_with_restored_source_never_polls_work() {
+        let _clock = FrozenSocketTime::new().await;
+        let (state, user) = fixture().await;
+        let mut lease = Lease::new(&state, &user, TOKEN).await.unwrap();
+        lease.revoked.close_source_for_test();
+        let replacement = state.auth.revocation_events(&user);
+        state.auth.logout(TOKEN).await.unwrap();
+        assert!(replacement.has_changed().unwrap());
         let mut wrote = false;
         let result = lease
             .run(&state, &user, TOKEN, async {

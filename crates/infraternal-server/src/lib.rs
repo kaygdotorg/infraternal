@@ -26,6 +26,7 @@ pub mod ca_memory;
 pub mod canvas_store;
 #[cfg(feature = "cli-plugin")]
 pub mod cli;
+mod completion;
 #[cfg(feature = "remote")]
 pub mod csr;
 mod embedded;

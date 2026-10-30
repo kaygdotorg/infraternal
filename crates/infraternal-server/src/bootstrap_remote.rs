@@ -384,7 +384,7 @@ impl Backend for RemoteBackend {
     fn authority_cancelled<'a>(&'a self, authority: &'a Authority) -> Operation<'a, ()> {
         Box::pin(async move {
             let auth = self.base.auth.as_ref().ok_or_else(unavailable)?;
-            let mut events = auth.revocation_events();
+            let mut events = auth.revocation_events(&authority.owner);
             loop {
                 self.authorize(authority).await?;
                 events.changed().await.map_err(|_| unavailable())?;

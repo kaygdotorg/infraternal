@@ -11,7 +11,7 @@ state = fixture_state('mz')
 state.mkdir(mode=0o700)
 c = Binary(Path(sys.argv[sys.argv.index('--binary') + 1]).resolve(), state)
 try:
-    c.open(); c.attach(); c.until(b'shim-test')
+    c.open(); c.attach(); c.wait_for_shell()
     c.send(2, 0x16, c.id.bytes + struct.pack('<QQ', c.out, 0))
     c.send(2, 0x14, struct.pack('<I', 1048576))
     output = {1: bytearray(), 2: bytearray()}
@@ -30,7 +30,7 @@ try:
     while receive() != (2, 0): pass
     c.send(1, 0x12, struct.pack('<HHHH', 80, 24, 0, 0))
     c.send(2, 0x12, struct.pack('<HHHH', 120, 40, 0, 0))
-    c.send(1, 0x10, struct.pack('<Q', 0) + b'stty size\n')
+    c.send(1, 0x10, struct.pack('<Q', c.entered) + b'stty size\n')
     while any(b'24 80' not in value for value in output.values()): receive()
     c.send(2, 0x10, struct.pack('<Q', 0) + b'stty size\n')
     while any(b'40 120' not in value for value in output.values()): receive()

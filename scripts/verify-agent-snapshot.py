@@ -18,7 +18,7 @@ def run(binary):
     try:
         client.open()
         client.attach()
-        client.until(b'shim-test')
+        client.wait_for_shell()
         client.input(b"stty -echo -opost; PS1=''; printf 'READY_%s' OK\n")
         client.until(b'READY_OK')
         client.wait_ack()

@@ -24,7 +24,7 @@ def run(binary):
         for index in range(12):
             session = client.open()
             client.attach()
-            client.until(b'shim-test')
+            client.wait_for_shell()
             client.input(b"stty raw -echo; printf 'QUEUE_%s' READY; cat\n")
             client.until(b'QUEUE_READY')
             client.wait_ack()

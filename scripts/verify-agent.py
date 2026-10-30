@@ -43,7 +43,7 @@ def run(binary, state, functional=False, seed=20):
             )
         session = client.open()
         client.attach()
-        client.until(b'shim-test')
+        client.wait_for_shell()
         if not functional:
             shim_pid = session_shim_pid(session)
             attached_agent = assert_process_idle(
@@ -70,7 +70,7 @@ def run(binary, state, functional=False, seed=20):
         client.open()
         barrier = AckBarrier(state, client.id)
         client.attach()
-        client.until(b'shim-test')
+        client.wait_for_shell()
         client.input(b"stty raw -echo; printf 'RAW_%s' READY; cat\n")
         client.until(b'RAW_READY')
         client.wait_ack()
@@ -135,7 +135,7 @@ def run(binary, state, functional=False, seed=20):
         barrier = None
         client.open()
         client.attach()
-        client.until(b'shim-test')
+        client.wait_for_shell()
         client.input(b"stty raw -echo; printf 'BENCH_%s' READY; cat\n")
         client.until(b'BENCH_READY')
         client.wait_ack()
@@ -161,7 +161,7 @@ def run(binary, state, functional=False, seed=20):
         client.send(1, 0x0f, struct.pack('<H', 0) + varint(4) + b'done')
         client.open()
         client.attach()
-        client.until(b'shim-test')
+        client.wait_for_shell()
         client.input(b"stty -echo -opost; printf 'FLOOD_%s' READY\n")
         client.until(b'FLOOD_READY')
         client.wait_ack()

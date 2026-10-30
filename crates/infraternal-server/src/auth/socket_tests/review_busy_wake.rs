@@ -36,7 +36,7 @@ async fn idle_busy_revocation_wake_sends_server_busy_close_code() {
     let mut browser = idle_browser(address, &f).await;
     super::close_logging::authorized_result(&mut browser, 239).await;
     let held = f.auth.pool.acquire().await.unwrap();
-    f.auth.revocations.send_replace(());
+    f.auth.revocations.publish(&f.user, None);
     let mut codes = Vec::new();
     let mut closed = false;
     // Only explicit runtime time passes. Real SQL/network work gets runnable
@@ -111,7 +111,7 @@ async fn sixteen_woken_sockets_recover_application_authority_after_a_short_stall
         browsers.push(browser);
     }
     let held = f.auth.pool.acquire().await.unwrap();
-    f.auth.revocations.send_replace(());
+    f.auth.revocations.publish(&f.user, None);
     while pending_reads() < 4 {
         tokio::task::yield_now().await;
     }

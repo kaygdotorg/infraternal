@@ -4,7 +4,6 @@ use infraternal_plugin_release::descriptor::{CHANNEL_GET, CHANNEL_SET, EDGE_WARN
 use serde_json::json;
 use std::{
     io::{BufRead, IsTerminal, Read, Write},
-    path::Path,
     process::ExitCode,
 };
 
@@ -66,9 +65,10 @@ pub(crate) fn run(
     } else {
         CHANNEL_GET.id
     };
-    let data = matches
-        .get_one::<String>("data")
-        .map_or_else(|| Path::new("./data"), |data| Path::new(data));
+    let data = crate::server_data_directory(
+        matches.get_one::<String>("data").map(String::as_str),
+        infraternal_status::Roots::detect,
+    );
     let Ok(runtime) = tokio::runtime::Runtime::new() else {
         return refusal(
             &command,
@@ -85,7 +85,7 @@ pub(crate) fn run(
     let result = crate::block_on(&runtime, async {
         use std::os::unix::fs::MetadataExt;
         let directory =
-            std::fs::symlink_metadata(data).map_err(|_| "existing server unavailable")?;
+            std::fs::symlink_metadata(&data).map_err(|_| "existing server unavailable")?;
         let file = data.join("infraternal.sqlite");
         let metadata =
             std::fs::symlink_metadata(&file).map_err(|_| "existing server unavailable")?;
@@ -112,7 +112,7 @@ pub(crate) fn run(
             .await
             .map_err(|_| "existing server unavailable")?;
         let bytes = serde_json::to_vec(&input).map_err(|_| "invalid input")?;
-        let result = infraternal_server::release_service(pool.clone(), data)
+        let result = infraternal_server::release_service(pool.clone(), &data)
             .call(action, &bytes, None)
             .await;
         pool.close().await;
