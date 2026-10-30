@@ -227,6 +227,11 @@ pub fn probe(
             (unit, state)
         })
         .collect();
+    assemble(roots, ids, units)
+}
+
+/// Assemble component facts after every unit has kept its own observation.
+fn assemble(roots: &Roots, ids: &[String], units: Vec<(Unit, Activity)>) -> NodeStatus {
     let has = |kind| units.iter().any(|(unit, _)| unit.kind == kind);
     let server_data = has(Kind::Server)
         || roots
@@ -250,15 +255,26 @@ pub fn probe(
     }
 }
 
-/// Probe local services with one shared manager deadline, leaving headroom in
-/// the 50 ms status budget. A cold first manager query may use the whole budget;
-/// splitting it evenly would report Unknown while a manager is responding.
+/// Query units concurrently so a stalled manager or unit cannot spend another
+/// unit's deadline. Each query includes its own immediate restart observation.
 #[must_use]
 pub fn probe_local(roots: &Roots, ids: &[String]) -> NodeStatus {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(40);
-    probe(roots, ids, &|scope, unit| {
-        manager_activity_before(scope, unit, deadline)
-    })
+    let units = std::thread::scope(|scope| {
+        let pending: Vec<_> = discover(roots)
+            .into_iter()
+            .map(|unit| {
+                let name = unit.name.clone();
+                let manager = unit.scope;
+                let query = scope.spawn(move || manager_activity(manager, &name));
+                (unit, query)
+            })
+            .collect();
+        pending
+            .into_iter()
+            .map(|(unit, query)| (unit, query.join().unwrap_or(Activity::Unknown)))
+            .collect()
+    });
+    assemble(roots, ids, units)
 }
 
 /// Units in discovery order: system directories first, then the user's. A
