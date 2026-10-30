@@ -387,11 +387,7 @@ fn status_result(
         .filter(|plugin| plugin.id != "cli")
         .map(|plugin| plugin.id.clone())
         .collect();
-    let node = infraternal_status::probe(
-        &infraternal_status::Roots::detect(),
-        &ids,
-        &infraternal_status::manager_activity,
-    );
+    let node = infraternal_status::probe_local(&infraternal_status::Roots::detect(), &ids);
     let (activity, message, next) = node.headline();
     let state = match activity {
         Activity::Active => CommandState::Running,

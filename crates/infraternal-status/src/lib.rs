@@ -220,17 +220,10 @@ pub fn probe(
     ids: &[String],
     activity: &dyn Fn(Scope, &str) -> Activity,
 ) -> NodeStatus {
-    // Stop issuing manager queries after 20 ms. Each real manager query has
-    // its own 20 ms deadline, leaving headroom in the 50 ms local-status budget.
-    let started = std::time::Instant::now();
     let units: Vec<_> = discover(roots)
         .into_iter()
         .map(|unit| {
-            let state = if started.elapsed() < std::time::Duration::from_millis(20) {
-                activity(unit.scope, &unit.name)
-            } else {
-                Activity::Unknown
-            };
+            let state = activity(unit.scope, &unit.name);
             (unit, state)
         })
         .collect();
@@ -255,6 +248,17 @@ pub fn probe(
         units,
         components,
     }
+}
+
+/// Probe local services with one shared manager deadline, leaving headroom in
+/// the 50 ms status budget. A cold first manager query may use the whole budget;
+/// splitting it evenly would report Unknown while a manager is responding.
+#[must_use]
+pub fn probe_local(roots: &Roots, ids: &[String]) -> NodeStatus {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(40);
+    probe(roots, ids, &|scope, unit| {
+        manager_activity_before(scope, unit, deadline)
+    })
 }
 
 /// Units in discovery order: system directories first, then the user's. A
@@ -672,7 +676,14 @@ impl<'a> Observation<'a> {
 /// for a newly started process, without a sampling sleep or network request.
 #[must_use]
 pub fn manager_activity(scope: Scope, unit: &str) -> Activity {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
+    manager_activity_before(
+        scope,
+        unit,
+        std::time::Instant::now() + std::time::Duration::from_millis(40),
+    )
+}
+
+fn manager_activity_before(scope: Scope, unit: &str, deadline: std::time::Instant) -> Activity {
     let Some(first) = manager_properties(scope, unit, deadline) else {
         return Activity::Unknown;
     };
@@ -693,6 +704,9 @@ pub fn manager_activity(scope: Scope, unit: &str) -> Activity {
 }
 
 fn manager_properties(scope: Scope, unit: &str, deadline: std::time::Instant) -> Option<String> {
+    if std::time::Instant::now() >= deadline {
+        return None;
+    }
     let mut command = Command::new("systemctl");
     if scope == Scope::User {
         command.arg("--user");

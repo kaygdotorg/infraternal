@@ -52,6 +52,17 @@ fn service_states_are_truthful_in_text_and_json() {
             "restarting",
             5,
         ),
+        (
+            "delayed",
+            "auto-restart",
+            45,
+            now,
+            1,
+            1,
+            "Restarting repeatedly",
+            "restarting",
+            5,
+        ),
         ("active", "running", 0, 1, 0, 0, "Running", "running", 0),
         ("active", "running", 46, 1, 0, 0, "Running", "running", 0),
         ("inactive", "dead", 0, 1, 0, 0, "Stopped", "stopped", 5),
@@ -82,6 +93,18 @@ fn service_states_are_truthful_in_text_and_json() {
                 } else {
                     "test \"$1\" = show || exit 1\n"
                 };
+                // A response taking more than half the total query budget still
+                // answers; it must not be cut off by an arbitrary per-unit split.
+                let delay = if active == "delayed" {
+                    "/bin/sleep 0.025\n"
+                } else {
+                    ""
+                };
+                let active = if active == "delayed" {
+                    "activating"
+                } else {
+                    active
+                };
                 let response = if active == "unknown" {
                     "exit 1".to_owned()
                 } else {
@@ -89,7 +112,11 @@ fn service_states_are_truthful_in_text_and_json() {
                         "printf '%s\\n' ActiveState={active} SubState={sub} MainPID=42 Result=exit-code NRestarts={restarts} ExecMainStartTimestamp=@{started} ExecMainStartTimestampMonotonic=1000000 ExecMainCode={code} ExecMainStatus={status}"
                     )
                 };
-                fs::write(&manager, format!("#!/bin/sh\n{scope_check}{response}\n")).unwrap();
+                fs::write(
+                    &manager,
+                    format!("#!/bin/sh\n{scope_check}{delay}{response}\n"),
+                )
+                .unwrap();
                 fs::set_permissions(&manager, fs::Permissions::from_mode(0o755)).unwrap();
                 for json in [false, true] {
                     let mut cmd = Command::new(env!("CARGO_BIN_EXE_infraternal"));
