@@ -38,6 +38,13 @@ export interface MeshModule {
   countText(c: ViewRec): string;
   /** The grants as they are now (a copy). */
   grants(): Grant[];
+  /**
+   * Renames a host (a double click or tap on its name, or the palette). Resolves when the server accepted; rejects, after
+   * saying why in the shared toast, when it refused. Every pin the canvas keeps under the old name moves to the new one.
+   */
+  renameHost(id: string, name: string): Promise<void>;
+  /** Opens the inline name field on a host's card in the Mesh view (the palette's "rename <host>"); waits for the card if it is not drawn yet. */
+  beginRename(id: string): void;
   /** What the Mesh view has on screen right now (specs and the frame-time benchmark read this). */
   graphStats(): ReturnType<GraphViewModule["stats"]>;
   dispose(): void;
@@ -84,6 +91,7 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
       quiet.clear();
       for (const c of pending) gv.buildGraph(c);
       pending.clear();
+      if (wantRename) { gv.beginRename(wantRename); wantRename = undefined; }
     }, () => {
       // The code did not arrive (the network dropped, a new build replaced the chunk): try again at the next frame on screen.
       loading = false;
@@ -97,6 +105,8 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
   };
   const redraw = (): void => { gv?.rest(); if (!gv) wantGraph(); };
 
+  /** A rename the palette asked for before the graph code or the card was there; the graph applies it when the card is. */
+  let wantRename: string | undefined;
   let canEdit = source.canEdit();
   const offChange = source.onChange(() => {
     const rights = source.canEdit() !== canEdit;
@@ -105,7 +115,22 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
   });
   const offFailure = source.onFailure((message) => cx.toast.show({ message }));
   const hostCount = (): number => source.data().nodes.size;
+  const renameHost = async (id: string, name: string): Promise<void> => {
+    try { await source.renameNode(id, name); } catch (error) { cx.toast.show({ message: error instanceof Error ? error.message : `Could not rename ${id}.`, tone: "error" }); throw error; }
+    // Positions the person set are saved under a host's name; they follow the host to its new name, so it does not jump.
+    const next = name.trim();
+    for (const c of cx.views.values()) {
+      const pins = c.view.graphPins;
+      if (!pins || !(id in pins)) continue;
+      pins[next] = pins[id]!;
+      delete pins[id];
+      if (c.view.layout === "graph") gv?.refresh(c);
+    }
+    cx.store.changed();
+  };
   return {
+    renameHost,
+    beginRename: (id) => { if (gv) gv.beginRename(id); else wantRename = id; },
     buildGraph, redraw, updateOverlay, refreshLayout: (c) => gv?.refresh(c),
     summaryRows: () => [["Hosts", String(hostCount())], ["Allowed access", String(source.grants().length)], ["Through another host", String(source.grants().filter((g) => g.via).length)]],
     countText: () => `${hostCount()} host${hostCount() === 1 ? "" : "s"} · ${source.grants().length} allowed`,

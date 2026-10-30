@@ -82,3 +82,7 @@
 /* The connector on a Mesh card (D194: drawn only in the Mesh view): it appears while the pill is hovered and stays while it is dragged; on touch it is always there. */
 .cl-graph .ui-window-pill:hover + .cl-port, .cl-graph .cl-port:hover, .cl-graph .ui-window[data-linking] .cl-port { opacity: 1; transform: none; pointer-events: auto; }
 @media (pointer: coarse) { .cl-graph .cl-port { opacity: 0.9; transform: none; pointer-events: auto; } }
+
+/* A host's new name is on the card while the server decides; it settles to full strength when the server accepts it (and the old name returns with the refusal). */
+.cl-graph .ui-window[data-renaming="pending"] .ui-window-host { opacity: 0.6; }
+.cl-graph .ui-window-host { transition: opacity 140ms ease; }
