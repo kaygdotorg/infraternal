@@ -7,6 +7,7 @@
  * - The web root is a copy of `TRACER_DIST` (default `dist`), frozen so a rebuild cannot change it mid-run.
  * - State lives in a private temporary directory; the certificate stays in memory; nothing secret is logged.
  */
+import { recordAttachment } from "./attachment-bookkeeping";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { randomUUID } from "node:crypto";
@@ -35,7 +36,7 @@ export interface Bridge {
   closedAt?: number;
   /** The reason of the last `Close` frame the server sent on this socket (stream 0 or a terminal stream). */
   serverClose?: string;
-  /** AttachTerm frames by client stream id: the session each stream attached to (hex). */
+  /** Explicit or server-restored attachments by client stream id (session hex). */
   attached: Map<number, string[]>;
   /** Terminal output text by client stream id. */
   output: Map<number, string>;
@@ -98,7 +99,7 @@ export async function startRealServer(options: {
   timedControls?: boolean;
   /** Retain every stream Close for functional ordering assertions without timing traces. */
   recordCloses?: boolean;
-  /** The bridge does not decode or keep the server's output (benchmarks with busy terminals). */
+  /** Decode attachment metadata but retain no terminal output (busy-terminal measurements). */
   lean?: boolean;
   address?: string;
   port?: number;
@@ -243,7 +244,7 @@ export async function startRealServer(options: {
           if (f.type === "Hello" && stream === 0) bridge.helloResume = (f.caps & 1n) !== 0n;
           if (f.type === "Input" && f.replyTo !== undefined) bridge.replyAttempts = (bridge.replyAttempts ?? 0) + 1;
           if (f.type === "AttachTerm") {
-            bridge.attached.set(stream, [...(bridge.attached.get(stream) ?? []), Buffer.from(f.sessionId).toString("hex")]);
+            recordAttachment(bridge.attached, stream, f);
             bridge.attachTimes?.push({ stream, at: Date.now() });
             bridge.attachCursors?.push({ stream, lastOutSeq: f.lastOutSeq.toString(), lastInSeq: f.lastInSeq.toString(), at: Date.now() });
           }
@@ -257,7 +258,9 @@ export async function startRealServer(options: {
       upstream.on("message", (data, binary) => {
         pendingUpstreamMessages++;
         const bytes = Buffer.from(data as Buffer);
-        if (!lean && protocol && binary) outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
+        if (protocol && binary) outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
+          recordAttachment(bridge.attached, stream, f);
+          if (lean) return;
           if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Output" && f.type !== "Ack") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} down s${stream} ${f.type}`);
           if (f.type === "Output") {
             const chunkText = text.decode(f.bytes, { stream: true });

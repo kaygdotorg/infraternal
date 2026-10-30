@@ -145,6 +145,8 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
         throw error;
       }
     }
+    // Every requested window must own a real live terminal before attachment accounting.
+    for (let i = 0; i < visibleSessions; i++) await expect(windows.nth(i)).toHaveAttribute("data-status", "live");
     // All three windows share a real multiplexed route, rather than merely
     // counting unattached PTYs. Preserve identities to check isolation after restart.
     await expect.poll(() => new Set(server.bridges.filter((bridge) => !bridge.closed)
