@@ -8,6 +8,8 @@ import { tracerEvidencePath } from "./test/evidence-path";
 // The owner demo binds to a private interface while retaining a DNS name for passkey setup.
 const demoHost = process.env.TERMINAL_LINKS_DEMO_HOST;
 const demoAddress = process.env.TERMINAL_LINKS_DEMO_ADDRESS;
+const browserName = process.env.TRACER_TEST_BROWSER ?? "chromium";
+if (browserName !== "chromium" && browserName !== "webkit" && browserName !== "firefox") throw Error("unsupported production test browser");
 
 export default defineConfig({
   testDir: "./real",
@@ -20,16 +22,17 @@ export default defineConfig({
   outputDir: tracerEvidencePath("playwright-real"),
   use: {
     ...devices["Desktop Chrome"],
+    browserName,
     ignoreHTTPSErrors: true,
     trace: "off",
     screenshot: "off",
     launchOptions: {
-      args: [
+      args: browserName === "chromium" ? [
         "--disable-renderer-backgrounding",
         // The private fixture certificate also covers service-worker fetches.
         "--ignore-certificate-errors",
         ...(demoHost && demoAddress ? [`--host-resolver-rules=MAP ${demoHost} ${demoAddress}`] : []),
-      ],
+      ] : [],
     },
   },
 });
