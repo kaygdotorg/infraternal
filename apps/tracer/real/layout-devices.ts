@@ -55,7 +55,7 @@ export async function request(server: RealServer, context: BrowserContext, actio
         if (frame.type === "Ping") send({ ...frame, type: "Pong" });
         if (frame.type === "Welcome") {
           if (snapshot) send({ type: "Subscribe", subId: 1, filterJson: Buffer.from('{"topic":"canvas.layout"}') });
-          else send({ type: "Call", callId: 1, actionId: action, inputJson: layoutRequestJson(input, frame.sessionIncarnation) });
+          else send({ type: "Call", callId: 1, actionId: action, inputJson: action.startsWith("canvas.layout.") ? layoutRequestJson(input, frame.sessionIncarnation) : Buffer.from(typeof input === "string" ? input : JSON.stringify(input)) });
         }
         if (frame.type === "Result" || snapshot && frame.type === "Event") {
           clearTimeout(timer);
