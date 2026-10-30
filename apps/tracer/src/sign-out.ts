@@ -26,6 +26,7 @@ import { mountConfirmTip, type ConfirmTipController } from "../../../packages/ui
 /** The screen's transient message surface, narrowed to what a failed sign-out needs. */
 export type SignOutToast = Pick<ToastController, "show">;
 
+let announce: (account: string) => void = () => {};
 let freezing: (value: boolean) => void = () => {};
 let signingOut: Promise<void> | undefined;
 let teardown: (() => void) | undefined;
@@ -35,7 +36,7 @@ let currentAccount: () => string | undefined = () => undefined;
  * main.ts hands over the teardown (dispose every live part of the signed-in app and show the sign-in screen) and a
  * way to read which account is signed in.
  */
-export function registerSignOut(run: () => void, account: () => string | undefined, freeze: (value: boolean) => void = () => {}): void { teardown = run; currentAccount = account; freezing = freeze; }
+export function registerSignOut(run: () => void, account: () => string | undefined, freeze: (value: boolean) => void = () => {}, notify: (account: string) => void = () => {}): void { teardown = run; currentAccount = account; freezing = freeze; announce = notify; }
 
 /** A `?session=` in the address would reattach the old terminal as soon as the next person signs in. */
 function forgetSessionAddress(): void {
@@ -54,6 +55,7 @@ export function signOut(): Promise<void> {
   signingOut = (async () => {
     try { await logout(); }
     catch (error) { pauseAccountWork(account, false); freezing(false); throw error; }
+    if (account) announce(account);
     forgetAccountWork(account); teardown?.();
     if (!clearAccountStorage(account)) {
       // Cleanup is transitional only. No new private writer exists while these retries wait.

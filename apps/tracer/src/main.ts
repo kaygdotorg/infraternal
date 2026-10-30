@@ -3,7 +3,7 @@ import { AuthError, checkStatus, checkSession, recoveryAuth, type AuthStatus } f
 import { registerSignOut } from "./sign-out";
 import { warmOfflineShell } from "./offline-cache";
 import type { DrawingIdentity } from "./offline-drawing";
-import { forgetAccountWork } from "./account-lifetime";
+import { forgetAccountWork, sessionNotifications } from "./account-lifetime";
 import { recordSignIn } from "./hints";
 import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/src/faulty-terminal";
 import { glitchText } from "../../../packages/ui/src/glitch";
@@ -257,6 +257,7 @@ function renderAuth(
   document.documentElement.removeAttribute("data-ui-font");
   mountOnboarding(app, setupRequired, message, (userId, firstSetup, welcomeName, instant) => {
     recordSignIn(userId);
+    peerSessions.forget(userId);
     activeUserId = userId;
     if (firstSetup) showWelcome(welcomeName ?? "", instant);
     else void showTerminal(undefined, instant);
@@ -334,6 +335,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   // Startup already authenticated this snapshot. Reuse it rather than adding
   // another network round trip; the socket still checks authority on connection.
   const generation = ++sessionGeneration;
+  sessionStarted = performance.timeOrigin + performance.now();
   const identity = knownSession ?? await checkSession();
   if (generation !== sessionGeneration) return;
   const hostName = sessionHostname(identity);
@@ -579,6 +581,7 @@ async function showRecovery(): Promise<void> {
   delete window.__tracerTestDouble;
   document.documentElement.removeAttribute("data-ui-font");
   mountRecovery(app, () => { void showTerminal(); }, (userId, _, displayName, instant) => {
+    peerSessions.forget(userId);
     activeUserId = userId;
     recordSignIn(userId);
     showWelcome(displayName ?? "", instant);
@@ -628,6 +631,10 @@ let productCanvas: { dispose(): void } | undefined;
  * removes the account's stored data afterwards (sign-out.ts).
  */
 let sessionGeneration = 0;
+let sessionStarted = 0;
+const peerSessions = sessionNotifications((account, before) => {
+  if (activeUserId === account && sessionStarted <= before) endSession("Your session ended. Sign in again to reconnect.");
+});
 function endSession(message = ""): void {
   sessionGeneration++; forgetAccountWork(activeUserId);
   welcomeEffect?.destroy();
@@ -650,7 +657,7 @@ function endSession(message = ""): void {
   activeUserId = undefined;
   renderAuth(false, message);
 }
-registerSignOut(() => endSession(), () => activeUserId, (value) => { if (coreScreen) coreScreen.stage.inert = value; });
+registerSignOut(() => endSession(), () => activeUserId, (value) => { if (coreScreen) coreScreen.stage.inert = value; }, (account) => peerSessions.forget(account));
 
 async function checkForegroundSession(): Promise<void> {
   if (checkingResume || !activeUserId) return;
