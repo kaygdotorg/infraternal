@@ -1,5 +1,6 @@
 //! Local manager-property regressions for both service roles and scopes (#237, D299, D303).
 #![allow(clippy::unwrap_used)]
+use nix::sys::time::TimeValLike;
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
 #[test]
@@ -14,10 +15,9 @@ fn service_states_are_truthful_in_text_and_json() {
             std::path::PathBuf::from,
         )
         .join(format!("status-restart-fixture-{}", std::process::id()));
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
         .unwrap()
-        .as_secs();
+        .num_microseconds();
     let cases = [
         (
             "activating",
@@ -109,7 +109,7 @@ fn service_states_are_truthful_in_text_and_json() {
                     "exit 1".to_owned()
                 } else {
                     format!(
-                        "printf '%s\\n' ActiveState={active} SubState={sub} MainPID=42 Result=exit-code NRestarts={restarts} ExecMainStartTimestamp=@{started} ExecMainStartTimestampMonotonic=1000000 ExecMainCode={code} ExecMainStatus={status}"
+                        "printf '%s\\n' ActiveState={active} SubState={sub} MainPID=42 Result=exit-code NRestarts={restarts} ExecMainStartTimestampMonotonic={started} ExecMainCode={code} ExecMainStatus={status}"
                     )
                 };
                 fs::write(

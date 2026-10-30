@@ -338,27 +338,27 @@ fn manager_properties_report_each_role_and_scope_truthfully() {
     use super::Observation;
     let fixtures = [
         (
-            "ActiveState=activating\nSubState=auto-restart\nMainPID=0\nResult=exit-code\nNRestarts=45\nExecMainStartTimestamp=@100\nExecMainCode=1\nExecMainStatus=1\n",
+            "ActiveState=activating\nSubState=auto-restart\nMainPID=0\nResult=exit-code\nNRestarts=45\nExecMainStartTimestampMonotonic=100000000\nExecMainCode=1\nExecMainStatus=1\n",
             "Restarting repeatedly",
         ),
         (
-            "ActiveState=active\nSubState=running\nMainPID=42\nNRestarts=46\nExecMainStartTimestamp=@100\nExecMainCode=2\nExecMainStatus=11\n",
+            "ActiveState=active\nSubState=running\nMainPID=42\nNRestarts=46\nExecMainStartTimestampMonotonic=100000000\nExecMainCode=2\nExecMainStatus=11\n",
             "Restarting repeatedly",
         ),
         (
-            "ActiveState=active\nSubState=running\nMainPID=42\nNRestarts=0\nExecMainStartTimestamp=@100\n",
+            "ActiveState=active\nSubState=running\nMainPID=42\nNRestarts=0\nExecMainStartTimestampMonotonic=100000000\n",
             "Running",
         ),
         (
-            "ActiveState=active\nSubState=running\nMainPID=42\nNRestarts=46\nExecMainStartTimestamp=@80\n",
+            "ActiveState=active\nSubState=running\nMainPID=42\nNRestarts=46\nExecMainStartTimestampMonotonic=80000000\n",
             "Running",
         ),
         (
-            "ActiveState=inactive\nSubState=dead\nNRestarts=45\nExecMainStartTimestamp=@100\n",
+            "ActiveState=inactive\nSubState=dead\nNRestarts=45\nExecMainStartTimestampMonotonic=100000000\n",
             "Stopped",
         ),
         (
-            "ActiveState=failed\nSubState=failed\nNRestarts=45\nExecMainStartTimestamp=@100\nExecMainCode=1\nExecMainStatus=1\n",
+            "ActiveState=failed\nSubState=failed\nNRestarts=45\nExecMainStartTimestampMonotonic=100000000\nExecMainCode=1\nExecMainStatus=1\n",
             "Failed",
         ),
         ("", "Unknown"),
@@ -377,7 +377,7 @@ fn manager_properties_report_each_role_and_scope_truthfully() {
                     &format!("{directory}/{name}"),
                     &format!("[Service]\nExecStart=/usr/bin/infraternal {role}\n"),
                 );
-                let activity = Observation::read(properties).activity(None, 101);
+                let activity = Observation::read(properties).activity(None, 101_000_000);
                 let status = probe(&fixture.roots(), &IDS.map(str::to_owned), &|s, n| {
                     assert_eq!(s, scope);
                     assert_eq!(n, name);
@@ -421,21 +421,21 @@ fn manager_properties_report_each_role_and_scope_truthfully() {
 fn consecutive_observations_detect_restart_count_and_pid_churn() {
     use super::Observation;
     let first = Observation::read(
-        "ActiveState=active\nSubState=running\nNRestarts=1\nMainPID=41\nExecMainStartTimestamp=@100\n",
+        "ActiveState=active\nSubState=running\nNRestarts=1\nMainPID=41\nExecMainStartTimestampMonotonic=100000000\n",
     );
     for properties in [
-        "ActiveState=active\nSubState=running\nNRestarts=2\nMainPID=41\nExecMainStartTimestamp=@100\n",
-        "ActiveState=active\nSubState=running\nNRestarts=1\nMainPID=42\nExecMainStartTimestamp=@100\n",
-        "ActiveState=activating\nSubState=auto-restart\nNRestarts=1\nMainPID=0\nExecMainStartTimestamp=@100\n",
+        "ActiveState=active\nSubState=running\nNRestarts=2\nMainPID=41\nExecMainStartTimestampMonotonic=100000000\n",
+        "ActiveState=active\nSubState=running\nNRestarts=1\nMainPID=42\nExecMainStartTimestampMonotonic=100000000\n",
+        "ActiveState=activating\nSubState=auto-restart\nNRestarts=1\nMainPID=0\nExecMainStartTimestampMonotonic=100000000\n",
     ] {
         assert!(matches!(
-            Observation::read(properties).activity(Some(&first), 101),
+            Observation::read(properties).activity(Some(&first), 101_000_000),
             Activity::Restarting { .. }
         ));
     }
-    assert_eq!(first.activity(Some(&first), 101), Activity::Active);
+    assert_eq!(first.activity(Some(&first), 101_000_000), Activity::Active);
     assert_eq!(
-        Observation::read("ActiveState=activating\nSubState=start\n").activity(None, 101),
+        Observation::read("ActiveState=activating\nSubState=start\n").activity(None, 101_000_000),
         Activity::Unknown
     );
 }
@@ -478,5 +478,22 @@ fn a_restarting_role_does_not_describe_a_stopped_or_failed_role_as_restarting() 
     assert_eq!(
         both.headline().1,
         "The server and the infraternal agent are restarting repeatedly on this machine."
+    );
+}
+
+#[test]
+fn restart_age_uses_only_comparable_monotonic_microseconds() {
+    let observation = super::Observation::read(
+        "ActiveState=active\nSubState=running\nNRestarts=3\nExecMainStartTimestampMonotonic=100000000\nExecMainStartTimestamp=@9999999999\n",
+    );
+    assert!(matches!(
+        observation.activity(None, 110_000_000),
+        Activity::Restarting { .. }
+    ));
+    assert_eq!(observation.activity(None, 110_000_001), Activity::Active);
+    assert_eq!(observation.activity(None, 99_000_000), Activity::Unknown);
+    assert_eq!(
+        super::Observation::read("ActiveState=active\nNRestarts=3\n").activity(None, 110_000_000),
+        Activity::Unknown
     );
 }

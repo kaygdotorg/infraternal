@@ -639,12 +639,8 @@ impl<'a> Observation<'a> {
                 "ActiveState" => value.active = field,
                 "SubState" => value.sub = field,
                 "NRestarts" => value.restarts = field.parse().unwrap_or(0),
-                "ExecMainStartTimestamp" => {
-                    value.started = field
-                        .strip_prefix('@')
-                        .and_then(|s| s.split('.').next())
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
+                "ExecMainStartTimestampMonotonic" => {
+                    value.started = field.parse().unwrap_or(0);
                 }
                 "MainPID" => value.pid = field.parse().unwrap_or(0),
                 "ExecMainCode" => value.code = field.parse().unwrap_or(0),
@@ -656,7 +652,10 @@ impl<'a> Observation<'a> {
     }
 
     fn recent(&self, now: u64) -> bool {
-        self.started != 0 && now.checked_sub(self.started).is_some_and(|age| age <= 10)
+        self.started != 0
+            && now
+                .checked_sub(self.started)
+                .is_some_and(|age| age <= 10_000_000)
     }
 
     fn activity(&self, previous: Option<&Self>, now: u64) -> Activity {
@@ -676,6 +675,11 @@ impl<'a> Observation<'a> {
                     code: self.code,
                     status: self.status,
                 };
+            }
+            // Without a comparable start time, historical restart counts cannot
+            // prove either a stable process or a recent loop. Preserve unknown.
+            if self.restarts >= 2 && (self.started == 0 || now < self.started) {
+                return Activity::Unknown;
             }
         }
         match self.active {
@@ -704,9 +708,15 @@ fn manager_activity_before(scope: Scope, unit: &str, deadline: std::time::Instan
         return Activity::Unknown;
     };
     let first = Observation::read(&first);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |t| t.as_secs());
+    // systemd reports this property in microseconds of CLOCK_MONOTONIC.
+    // Wall time and boot time include different clock adjustments/suspends.
+    let now = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
+        .ok()
+        .and_then(|time| {
+            use nix::sys::time::TimeValLike;
+            u64::try_from(time.num_microseconds()).ok()
+        })
+        .unwrap_or(0);
     let activity = first.activity(None, now);
     if activity == Activity::Active && first.recent(now) {
         // Only a fresh start needs another immediate look. Old healthy services
@@ -729,7 +739,7 @@ fn manager_properties(scope: Scope, unit: &str, deadline: std::time::Instant) ->
     }
     let mut child = command.args([
         "show",
-        "--property=ActiveState,SubState,NRestarts,MainPID,ExecMainStartTimestamp,ExecMainStartTimestampMonotonic,ExecMainCode,ExecMainStatus",
+        "--property=ActiveState,SubState,NRestarts,MainPID,ExecMainStartTimestampMonotonic,ExecMainCode,ExecMainStatus",
         "--no-pager", unit,
     ]).env("LC_ALL", "C").env("SYSTEMD_COLORS", "0")
         .stdin(Stdio::null()).stderr(Stdio::null()).stdout(Stdio::piped()).spawn().ok()?;
