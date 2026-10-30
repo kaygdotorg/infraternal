@@ -198,6 +198,11 @@ The responsibility/PID/pipe fixture is verified on macOS 27.0.1 with SDK 27.0.
 object with boolean `screen_recording` and `device_control` keys from
 `CGPreflightScreenCaptureAccess()` and `AXIsProcessTrusted()`, then exits before
 AppKit setup. It never requests permissions, creates capture or injects input.
+Observed on macOS 26.5.2: the first preflight of a signed bundle that is not
+trusted still makes the system's accessibility service add that bundle to the
+Accessibility list as denied, bound to its designated requirement. No window
+appears. No Screen Recording or PostEvent entry is created. The person using
+the Mac still turns the entry on; the preflight grants nothing.
 
 `--capture-still <window-id> <owner-pid> <absolute.png>` is a local native
 companion diagnostic. It follows the same responsibility bootstrap, requires
