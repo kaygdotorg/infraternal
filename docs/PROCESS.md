@@ -233,6 +233,16 @@ Reviews and fixes run at the same time as the next lane's build.
   rustc applies the later match, which keeps sources under `/cargo/<crate>`.
   This catches release output that depends on a job's build locations.
 
+  Release jobs also run the full browser suite twice in a row on the exact
+  candidate head, with the pinned static binary and its production web
+  build (owner, 2026-10-30, #207: "fine by me"). They run after `scripts/verify
+  fast` and before the reproducibility check, with at most 2 workers, retries
+  0, distinct ports, short private roots and evidence outside the checkout.
+  Both runs must have zero failures and zero missing reports, and every skip
+  must name its reason (an issue or decision). Any fix to the candidate
+  resets the pair. A retry that passes once can no longer let a broken user
+  flow into production.
+
   The release-9 merge back into dev (#24) retains the optional per-user host
   and updates only the existing `rustls-webpki` dependency to 0.103.16 for
   RUSTSEC-2026-0382. Fresh builds of dev `fe047e2d3` and the merged source use
