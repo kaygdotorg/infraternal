@@ -70,30 +70,58 @@ export function beginInlineRename(options: InlineRenameOptions): InlineRename {
   return { input, finish };
 }
 
+/**
+ * Puts the field exactly over a name that sits inside something that must not hold a field itself (a button, a
+ * pill): the field is a child of `container`, which becomes the positioned parent, and the name is hidden under it
+ * (it keeps its space, so nothing around it moves). `scale` is the zoom the container is drawn at. Returns what
+ * `close` calls: it takes the field off and shows the name again.
+ */
+export function placeOverName(name: HTMLElement, container: HTMLElement, input: HTMLInputElement, scale = 1): () => void {
+  const at = name.getBoundingClientRect(), box = container.getBoundingClientRect();
+  const positioned = getComputedStyle(container).position !== "static";
+  if (!positioned) container.style.position = "relative";
+  // The text starts where the name's text started: the field's own padding is taken back from its left edge.
+  const left = (at.left - box.left) / scale - 6;
+  input.style.cssText = `position:absolute;z-index:2;left:${left}px;top:${(at.top - box.top + at.height / 2) / scale}px;transform:translateY(-50%);width:${Math.max(at.width / scale + 12, 120)}px;max-width:calc(100% - ${Math.max(left, 0)}px)`;
+  const hidden = name.style.visibility;
+  name.style.visibility = "hidden";
+  container.append(input);
+  return () => {
+    input.remove();
+    name.style.visibility = hidden;
+    if (!positioned) container.style.position = "";
+  };
+}
+
 /** A second tap this soon after the first, and this close to it, is a double tap. */
 const DOUBLE_TAP_MS = 320;
 const DOUBLE_TAP_SLOP = 24;
 
 /**
  * Calls `handler` on a double click (mouse) or a double tap (touch, pen). A tap that moved is a drag or a scroll and
- * does not count. The element opts out of the browser's double-tap zoom, so the second tap is ours.
+ * does not count. The element opts out of the browser's double-tap zoom, so the second tap is ours. `keyOf` names the
+ * thing under the finger (a row of a list that one listener serves; `undefined`: nothing to rename here): both taps
+ * must land on the same one.
  */
-export function onDoubleActivate(target: HTMLElement, handler: (event: Event) => void, signal: AbortSignal): void {
+/** The last tap per element, kept outside the listeners: a list that is rebuilt after the first tap re-attaches them. */
+const lastTaps = new WeakMap<HTMLElement, { x: number; y: number; at: number; key: unknown } | undefined>();
+
+export function onDoubleActivate(target: HTMLElement, handler: (event: Event) => void, signal: AbortSignal, keyOf: (event: Event) => unknown = () => target): void {
   target.style.touchAction ||= "manipulation";
-  target.addEventListener("dblclick", (event) => { event.preventDefault(); handler(event); }, { signal });
+  target.addEventListener("dblclick", (event) => { if (keyOf(event) === undefined) return; event.preventDefault(); handler(event); }, { signal });
   let down: { x: number; y: number } | undefined;
-  let last: { x: number; y: number; at: number } | undefined;
   target.addEventListener("pointerdown", (event) => { down = event.pointerType === "mouse" ? undefined : { x: event.clientX, y: event.clientY }; }, { signal });
   target.addEventListener("pointerup", (event) => {
     if (!down || event.pointerType === "mouse") return;
     const moved = Math.hypot(event.clientX - down.x, event.clientY - down.y) > DOUBLE_TAP_SLOP / 2;
     down = undefined;
-    if (moved) { last = undefined; return; }
-    const now = event.timeStamp;
-    if (last && now - last.at <= DOUBLE_TAP_MS && Math.hypot(event.clientX - last.x, event.clientY - last.y) <= DOUBLE_TAP_SLOP) {
-      last = undefined;
+    if (moved) { lastTaps.delete(target); return; }
+    const now = event.timeStamp, key = keyOf(event), last = lastTaps.get(target);
+    if (key === undefined) { lastTaps.delete(target); return; }
+    if (last && last.key === key && now - last.at <= DOUBLE_TAP_MS && Math.hypot(event.clientX - last.x, event.clientY - last.y) <= DOUBLE_TAP_SLOP) {
+      lastTaps.delete(target);
       handler(event);
-    } else last = { x: event.clientX, y: event.clientY, at: now };
+    } else lastTaps.set(target, { x: event.clientX, y: event.clientY, at: now, key });
   }, { signal });
   target.addEventListener("pointercancel", () => { down = undefined; }, { signal });
 }
