@@ -145,27 +145,32 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,447,376 bytes |
-  | `aarch64-unknown-linux-musl` | 19,631,192 bytes |
+  | `x86_64-unknown-linux-musl` | 21,444,656 bytes |
+  | `aarch64-unknown-linux-musl` | 19,629,880 bytes |
 
-  Crash-loop status reporting and review fixes (#237, D299/D303) use the
-  pinned `scripts/static-cargo` stripped static recipe on 6by32-compute02,
-  one target at a time:
+  Crash-loop status reporting and final review fixes (#237, D299/D303) use the
+  pinned `scripts/static-cargo` stripped static recipe on build host
+  6by32-compute02, one target at a time in one build slot:
 
   | Source | x86_64 bytes | aarch64 bytes |
   | --- | ---: | ---: |
-  | Dev (`2fb412d01`) | 21,431,472 | 19,605,896 |
-  | #237 (`f61d3a686`) | 21,447,376 | 19,631,192 |
-  | Delta versus dev | +15,904 | +25,296 |
+  | origin/dev (`2fb412d01`) | 21,431,472 | 19,605,896 |
+  | #237 source (`cb2e6d1bd`) | 21,444,656 | 19,629,880 |
+  | Delta versus dev | +13,184 | +23,984 |
 
-  ARM growth above 16 KiB retains independent bounded unit queries and honest
-  restart/stopped diagnostics. The measured, target-specific justification is
-  recorded on #237.
-  Exact caps follow the measured images without allowance (D243). Growth
-  retains independent unit deadlines and observations, monotonic restart/exit
-  diagnostics and honest masked/missing-service headlines. The existing nix
-  clock API is reused; no dependency versions or release settings changed.
-  Reproduction, both target receipts and the final gate output are on #237.
+  Exact caps follow these measured images without allowance (D243). The
+  whole-branch growth retains monotonic restart/exit diagnostics, configured-role
+  headlines and D303 exits, including masked/missing services beside a healthy
+  companion. Queries use at most four fallible 128 KiB workers, with two reserved
+  per manager scope, bounded admission and independent per-unit deadlines;
+  resource refusal remains Unknown with a plain reason.
+  Written reasons for growth above 16 KiB, actual healthy-service timings labelled
+  "build host", both target receipts and the final gate output are on #237.
+  Relative to dev, the earlier fix enables the existing nix dependency's `time`
+  feature in the normal shipping graph for CLOCK_MONOTONIC; dev had it only in
+  development dependencies. This final fix adds no dependency or feature, and no
+  dependency versions or release settings changed. These deltas cover the whole
+  branch, without claiming per-helper size attribution.
 
   Replay geometry and stale-note repairs (#257, R257-01/R257-02) measure
   21,431,472 / 19,605,896 bytes (x86_64 / aarch64), using the pinned
