@@ -3458,10 +3458,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        rtc-ice, portmapper and igd-next (0.4–2.1 MB).
      - **Mesh names:** `<host>.internal` by default (D165). A person can add
        their own subdomain (for example `mesh.kayg.org`) as an extra suffix.
-     - **Reverse proxy: integrate Traefik, never write our own.** Exposing a
-       service on a name with HTTPS is built now, on Traefik, which already
-       runs in the owner's setups. Infraternal manages the routes; it does
-       not reimplement proxying. TLS certificates use the **DNS-01**
-       challenge as the built-in default, so names behind NAT or on the
-       mesh-only network still get valid certificates. Rejected: our own
-       proxy and an HTTP-01-only default.
+     - **Reverse proxy: every client runs it, and we never write our own
+       proxy engine.** Exposing a service on a name with HTTPS is built now.
+       Every infraternal node can serve it, without root when it listens
+       above port 1024. TLS certificates use the **DNS-01** challenge as the
+       built-in default, so names behind NAT or on the mesh-only network
+       still get valid certificates. Traefik itself can't be embedded in the
+       single static Rust binary (it is a Go program, not a library), so the
+       engine is chosen by the owner after measurement: embeddable Rust
+       engines (Pingora, Sozu, rpxy) against Traefik as a managed sidecar,
+       on size, memory, speed, TLS stack and licence. Rejected: our own
+       proxy engine and an HTTP-01-only default.
