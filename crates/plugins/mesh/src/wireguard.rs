@@ -43,6 +43,11 @@ pub struct Counters {
     pub handshake_nanos: u32,
     pub received_bytes: u64,
     pub sent_bytes: u64,
+    /// Where the kernel currently sends this peer's packets: the configured
+    /// endpoint, or the source of its latest authenticated packet (roaming).
+    /// It is not discovery evidence by itself (contracts/mesh-discovery.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<SocketAddr>,
 }
 /// Interface name is fixed: ownership never includes an operator's other interfaces.
 pub const INTERFACE: &str = "infraternal0";
@@ -477,6 +482,7 @@ impl Device {
                     let mut nanos = None;
                     let mut received = None;
                     let mut sent = None;
+                    let mut endpoint = None;
                     for field in netlink::attributes(peer.payload)? {
                         match field.kind {
                             1 if field.payload.len() == 32 => {
@@ -496,6 +502,7 @@ impl Device {
                                     field.payload.try_into().map_err(io::Error::other)?,
                                 ));
                             }
+                            4 => endpoint = Some(decode_sockaddr(field.payload)?),
                             7 => received = Some(scalar64(field.payload)?),
                             8 => sent = Some(scalar64(field.payload)?),
                             _ => {}
@@ -522,11 +529,51 @@ impl Device {
                         if let Some(value) = sent {
                             stats.sent_bytes = value;
                         }
+                        if endpoint.is_some() {
+                            stats.endpoint = endpoint;
+                        }
                     }
                 }
             }
         }
         Ok(counters)
+    }
+}
+/// Decode `WGPEER_A_ENDPOINT`: a kernel `sockaddr_in` (16 bytes) or
+/// `sockaddr_in6` (28 bytes). Family and scope are native-endian, port and
+/// flow information network order. Any other size or family is refused.
+fn decode_sockaddr(payload: &[u8]) -> io::Result<SocketAddr> {
+    let family = u16::from_ne_bytes(
+        payload
+            .get(..2)
+            .ok_or(io::ErrorKind::InvalidData)?
+            .try_into()
+            .map_err(io::Error::other)?,
+    );
+    let port = u16::from_be_bytes(
+        payload
+            .get(2..4)
+            .ok_or(io::ErrorKind::InvalidData)?
+            .try_into()
+            .map_err(io::Error::other)?,
+    );
+    match (family, payload.len()) {
+        (2, 16) => {
+            let octets: [u8; 4] = payload[4..8].try_into().map_err(io::Error::other)?;
+            Ok(SocketAddr::new(Ipv4Addr::from(octets).into(), port))
+        }
+        (10, 28) => {
+            let octets: [u8; 16] = payload[8..24].try_into().map_err(io::Error::other)?;
+            let flow = u32::from_be_bytes(payload[4..8].try_into().map_err(io::Error::other)?);
+            let scope = u32::from_ne_bytes(payload[24..28].try_into().map_err(io::Error::other)?);
+            Ok(SocketAddr::V6(std::net::SocketAddrV6::new(
+                Ipv6Addr::from(octets),
+                port,
+                flow,
+                scope,
+            )))
+        }
+        _ => Err(io::ErrorKind::InvalidData.into()),
     }
 }
 fn scalar64(payload: &[u8]) -> io::Result<u64> {
@@ -714,5 +761,43 @@ impl Client {
             flush(&mut self.socket, self.family, &peers)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod endpoint_tests {
+    //! The kernel endpoint decoder accepts exactly what `sockaddr` encodes and refuses every other shape.
+    use super::*;
+
+    #[test]
+    fn kernel_endpoints_round_trip_through_the_encoder() {
+        for endpoint in [
+            "198.51.100.7:51000".parse::<SocketAddr>().unwrap(),
+            "127.0.0.1:1".parse().unwrap(),
+            SocketAddr::V6(std::net::SocketAddrV6::new(
+                "2001:db8::7".parse().unwrap(),
+                65_535,
+                0x000a_bcde,
+                3,
+            )),
+        ] {
+            assert_eq!(decode_sockaddr(&sockaddr(endpoint)).unwrap(), endpoint);
+        }
+    }
+
+    #[test]
+    fn other_sizes_and_families_are_refused() {
+        let v4 = sockaddr("198.51.100.7:1".parse().unwrap());
+        let v6 = sockaddr("[2001:db8::7]:1".parse().unwrap());
+        for bad in [&v4[..15], &v6[..27], &v6[..16], &[][..], &[2, 0][..]] {
+            assert!(decode_sockaddr(bad).is_err());
+        }
+        let mut wrong = v4.clone();
+        wrong.extend([0; 12]);
+        assert!(decode_sockaddr(&wrong).is_err(), "IPv4 family at IPv6 size");
+        let mut unknown = v4;
+        unknown[..2].copy_from_slice(&1_u16.to_ne_bytes());
+        assert!(decode_sockaddr(&unknown).is_err());
     }
 }

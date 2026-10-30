@@ -906,6 +906,7 @@ mod peer_page_tests {
                             sent_bytes: 925_000,
                             #[cfg(feature = "test-support")]
                             handshake_nanos: 0,
+                            endpoint: None,
                         },
                     )
                 })
