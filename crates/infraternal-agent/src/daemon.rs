@@ -1193,7 +1193,10 @@ async fn terminal_run(
     };
     // Keep geometry paired with this replay's Hello even if queued Resize
     // commands reach the shim before credit allows the completion event.
-    let mut replay_size = link.session.size;
+    let replay_size = link.session.size;
+    // Only a delivered cursor on a primed link starts a new replay capture.
+    #[cfg(feature = "remote")]
+    let mut replay_size = replay_size;
     let mut session = Some(link);
     // Hello.head is a stable split between bytes already present on this shim
     // link and output produced while the attach is being established.
@@ -1361,7 +1364,9 @@ async fn terminal_run(
             // first, then faithful or negotiated approximate repaint on a gap.
             next.send(&Shim::ReadFrom(output.cursor())).await?;
             output.resume_replay();
-            replay_size = next.session.size;
+            // Recovery continues this attach's replay. The new Hello may
+            // already reflect its Resize, so retain the original geometry
+            // through raw retries and Snapshot restarts alike (#257).
             replay_until = Some(next.session.head.max(output.cursor()));
             if replay_until.is_some_and(|fence| output.cursor() >= fence) {
                 replay_complete(&tx, stream, id, output.cursor(), replay_size).await?;
