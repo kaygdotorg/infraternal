@@ -46,8 +46,14 @@ fn stalled_units_preserve_other_units_in_each_manager() {
         }
         return;
     }
-    let root = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").expect("job target directory"))
-        .join(format!("independent-units-{}", uuid::Uuid::new_v4()));
+    let base = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || {
+            PathBuf::from(std::env::var_os("HOME").expect("home directory"))
+                .join(".cache/codex-scratch/status-crash-loop-fix/fixtures")
+        },
+        PathBuf::from,
+    );
+    let root = base.join(format!("independent-units-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(root.join("bin")).unwrap();
     let executable = root.join("bin/systemctl");
     fs::write(
