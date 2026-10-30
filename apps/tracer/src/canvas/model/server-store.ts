@@ -68,7 +68,9 @@ export class ServerCanvasStore implements CanvasStore {
   unresolvedWindow(id: string): boolean { return this.#journal.unresolved.has(id); }
   /** Local acceptance only: drawing and typing never await confirmation. */
   async save(doc: CanvasDocument, hints?: ReadonlyMap<string, LayoutEdit>, before?: CanvasDocument, unresolved: ReadonlySet<string> = new Set()): Promise<void> {
-    if (this.#disposed || this.#paused) return;
+    if (this.#disposed) return;
+    // Input is frozen by the screen during logout; admitted asynchronous references may
+    // still finish in RAM. The pump stays paused until revocation fails or disposal clears it.
     try { if (this.#journal.capture(doc, hints, before, unresolved)) this.#publish(); }
     catch (error) { if (!(error instanceof LayoutQueueFull)) throw error; this.refused(false, false, true); this.#publish(); }
     this.#pendingChanged(); this.#pump();

@@ -384,3 +384,19 @@ test("refused import and refused cleanup preserve their legacy source until conf
     localStorage.removeItem = remove; next.snapshot({ ...document(), revision: 2 }); expect(localStorage.getItem(key)).toBeNull();
   } finally { localStorage.removeItem = remove; imported.dispose(); }
 });
+test("reference completion during failed logout is retained without sending until edits resume", async () => {
+  const { pauseAccountWork } = await import("../../account-lifetime");
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "logout-completion");
+  try {
+    transport.snapshot();
+    const shell = store.current(); reduce(shell, opened); await store.save(shell, undefined, undefined, new Set(["w"]));
+    expect(transport.calls).toHaveLength(0); pauseAccountWork("logout-completion", true);
+    const resolved = store.current(), layout = resolved.views[0]!.layout;
+    if (layout.type !== "tiled") throw Error("expected tiled view");
+    layout.columns[0]!.windows[0]!.target = { type: "settings", section: "account" };
+    await store.save(resolved); expect(transport.calls).toHaveLength(0);
+    pauseAccountWork("logout-completion", false);
+    expect(transport.calls).toHaveLength(1);
+    expect((transport.calls[0]!.input.intent as Extract<Intent, { type: "open" }>).window.target).toEqual({ type: "settings", section: "account" });
+  } finally { store.dispose(); }
+});

@@ -785,6 +785,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const scrimClick = (): void => setPalette(false, "pointer");
 
   const keydown = (event: KeyboardEvent): void => {
+    // Inert descendants cannot block global shortcuts while logout is in flight.
+    if (stage.inert) { event.preventDefault(); event.stopImmediatePropagation(); return; }
     if (event.key === "F6") {
       if (event.shiftKey || keytray.contains(event.target as Node)) {
         if (client) client.focus();
