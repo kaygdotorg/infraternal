@@ -12,7 +12,8 @@ const entryBytes = (intent: Intent): number => JSON.stringify(intent).length * 2
 function field(intent: Intent): string | undefined {
   if (!["view.update", "target", "resize", "weight", "pin"].includes(intent.type)) return undefined;
   const row = intent as unknown as Record<string, unknown>;
-  return [intent.type, row.view_id, row.window_id, row.column_id, row.node_id, Object.keys(row).sort().join(",")].join("/");
+  // Tuple encoding preserves identifier boundaries even when an identifier contains a separator.
+  return JSON.stringify([intent.type, row.view_id, row.window_id, row.column_id, row.node_id, Object.keys(row).sort()]);
 }
 export class LayoutJournal {
   #queuedBytes = 0;
