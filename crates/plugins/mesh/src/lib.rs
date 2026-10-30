@@ -33,6 +33,9 @@ pub mod netlink;
 pub mod wireguard;
 
 #[cfg(all(feature = "agent", target_os = "linux"))]
+pub mod seam;
+
+#[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod connection_state;
 
 #[cfg(feature = "server")]
