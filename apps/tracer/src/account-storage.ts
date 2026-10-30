@@ -25,11 +25,7 @@ export const drawingIdentityKey = (account: string): string => DRAWING_IDENTITY 
 export const inventoryKey = (account: string): string => INVENTORY + account;
 /** sessionStorage: the public id of the terminal this tab last had open for one account. */
 export const tabSessionKey = (account: string): string => TAB_SESSION + account;
-/**
- * localStorage: how often one account has signed in on this device and which explanatory hints it was already
- * shown (`hints.ts`). It is deliberately not swept by `clearAccountStorage`: a sign-out followed by a sign-in is
- * the next sign-in, not a fresh start, and the hint rule counts sign-ins. It holds two small numbers per hint.
- */
+/** Legacy account-scoped hint key, read only for sign-out cleanup. */
 export const hintsKey = (account: string): string => HINTS + account;
 /** localStorage: the public id of the account that last signed in on this device. */
 export const lastAccountKey = LAST_ACCOUNT;
@@ -48,6 +44,7 @@ export function clearAccountStorage(account: string | undefined): boolean {
     sweep(localStorage, "infraternal.canvas-lifetime.", account);
     sweep(localStorage, DRAWING_IDENTITY, account);
     sweep(localStorage, INVENTORY, account);
+    sweep(localStorage, HINTS, account);
     sweep(sessionStorage, TAB_SESSION, account);
     // The last-account pointer names a person; it goes unless another account has since replaced it.
     if (account === undefined || localStorage.getItem(LAST_ACCOUNT) === account) localStorage.removeItem(LAST_ACCOUNT);
