@@ -28,19 +28,51 @@ beforeEach(() => {
 afterEach(() => { for (const store of stores.splice(0)) store.dispose(); });
 function setup(account = "a") { const transport = new Transport(), store = new ServerCanvasStore(transport, account); stores.push(store); transport.snapshot(); return { store, transport }; }
 async function rename(store: ServerCanvasStore, name: string) { const before = store.current(), next = structuredClone(before); next.views[0]!.name = name; await store.save(next, undefined, before); }
-for (const sequence of [
-  "Hunt 1 offline peer overwrite", "R1 adopter deletes newer live write", "R1 failed replacement deletes sole source",
-  "R1 stale unresolved duplicate suppresses completed birth", "R1 live peer recreates signed-out journal",
-  "R2 concurrent first tabs invalidate lifetime", "R2 sign-out between check and write", "R2 unreadable source retired",
-  "R2 33+33 columns source retirement", "R2 21 failed-cleanup generations", "R2 8192-entry full-history flush",
-  "R2 failed initial marker", "R3 no-Web-Locks fallback", "R3 startup queued after sign-out", "R3 cleanup refusal 8195 reads",
-]) test(`${sequence}: independent tabs perform zero live layout storage operations`, async () => {
-  for (let n = 0; n < 21; n++) values.set(`infraternal.canvas-journal.a.old-${n}`, "unreadable");
+test("Hunt 1 / R1 adoption: online peers cannot overwrite or retire a live offline queue", async () => {
   const a = setup(), b = setup(); const initialReads = reads;
   a.transport.isWelcomed = false; await rename(a.store, "A offline"); await rename(b.store, "B online");
-  b.store.flush(); a.store.flush(); b.store.dispose();
+  b.transport.calls[0]!.resolve({ revision: 2 }); b.transport.snapshot(2, "B online"); await tick();
+  b.store.dispose(); a.store.flush();
   expect(a.store.current().views[0]!.name).toBe("A offline"); expect(a.store.pending).toBe(true);
-  expect(reads).toBe(initialReads); expect(writes).toBe(0); expect(values.size).toBe(21);
+  expect(reads).toBe(initialReads); expect(writes).toBe(0);
+});
+test("R1 failed replacement / R2 unreadable source / 33+33 legacy columns: sources never retire without import confirmation", async () => {
+  const oversized = document(); const view = oversized.views[0]!;
+  view.layout = { type: "tiled", columns: Array.from({ length: 66 }, (_, n) => ({ id: `c${n}`, weight: 1, windows: [] })) };
+  for (const source of ["unreadable", JSON.stringify(oversized)]) {
+    values.set("infraternal.canvas.a", source);
+    const { store, transport } = setup(); await rename(store, "Independent"); store.flush();
+    expect(transport.calls).toHaveLength(1); expect(values.get("infraternal.canvas.a")).toBe(source); expect(writes).toBe(0);
+    store.dispose();
+  }
+});
+for (const count of [8192, 32768]) test(`R2 full-history flush / R3 refused cleanup: ${count} queued intents do zero storage work`, async () => {
+  for (let n = 0; n < 8195; n++) values.set(`infraternal.canvas-journal.a.old-${n}`, "unreadable");
+  const { store, transport } = setup(); transport.isWelcomed = false; const initialReads = reads;
+  for (let n = 0; n < count; n++) {
+    const before = store.current(), next = structuredClone(before);
+    if (n % 2) next.views[0]!.cell.x = n % 1000; else next.views[0]!.name = `Name ${n}`;
+    await store.save(next, undefined, before);
+  }
+  for (let n = 0; n < 3; n++) store.flush();
+  expect(store.pending).toBe(true); expect(reads).toBe(initialReads); expect(writes).toBe(0); expect(values.size).toBe(8195);
+}, 120_000);
+test("R2 concurrent first tabs / failed marker / R3 missing locks: no lifetime creation or lock fallback exists", async () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "navigator"); let lockReads = 0;
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { get locks() { lockReads++; throw Error("unavailable"); } } });
+  try {
+    const a = setup(), b = setup(); await rename(a.store, "A"); await rename(b.store, "B");
+    expect(a.store.pending).toBe(true); expect(b.store.pending).toBe(true); expect(lockReads).toBe(0); expect(writes).toBe(0);
+  } finally { if (original) Object.defineProperty(globalThis, "navigator", original); else Reflect.deleteProperty(globalThis, "navigator"); }
+});
+test("R2 sign-out between check/write / R3 delayed startup: teardown invalidates old callbacks before later login", async () => {
+  for (let n = 0; n < 21; n++) values.set(`infraternal.canvas-journal.a.old-${n}`, "unreadable");
+  const old = setup(); await rename(old.store, "Old"); const late = old.transport.calls[0]!;
+  const callback = old.transport.event; old.store.dispose(); const fresh = setup();
+  callback({ type: "canvas.layout.snapshot", revision: 2, initialized: true, document: document(2, "Old") });
+  late.resolve({ revision: 2 }); await old.store.save(document(2, "Late")); await tick();
+  expect(old.store.current().views).toEqual([]); expect(fresh.store.current().views[0]!.name).toBe("Console");
+  expect(values.size).toBe(21); expect(writes).toBe(0);
 });
 test("R2 completed capture before 300 ms: unconfirmed tab loss is explicit; confirmed state restores from server", async () => {
   const a = setup(); await rename(a.store, "Unconfirmed"); expect(a.store.pending).toBe(true); a.store.dispose();
@@ -57,13 +89,32 @@ test("R2 100 snapshots and 50 ms do not establish a receipt identity or expire u
   transport.calls.at(-1)!.resolve({ revision: 2 }); await tick(); expect(store.pending).toBe(false);
 });
 test("absent, throwing and recovered storage cannot change live edit acceptance", async () => {
+  const available = Object.getOwnPropertyDescriptor(globalThis, "localStorage")!;
   for (const kind of ["absent", "throwing", "recovered"]) {
-    Object.defineProperty(globalThis, "localStorage", { configurable: true, get: () => { throw Error(kind); } });
-    const { store } = setup(); await rename(store, kind); store.flush(); expect(store.current().views[0]!.name).toBe(kind); expect(store.pending).toBe(true); store.dispose();
+    if (kind === "absent") Reflect.deleteProperty(globalThis, "localStorage");
+    else Object.defineProperty(globalThis, "localStorage", { configurable: true, get: () => { throw Error(kind); } });
+    const { store } = setup();
+    if (kind === "recovered") Object.defineProperty(globalThis, "localStorage", available);
+    await rename(store, kind); store.flush(); expect(store.current().views[0]!.name).toBe(kind); expect(store.pending).toBe(true); store.dispose();
   }
+  Object.defineProperty(globalThis, "localStorage", available);
 });
 test("refused individual intents leave independent tabs and later edits live", async () => {
   const a = setup(), b = setup("b"); await rename(a.store, "Refused"); a.transport.calls[0]!.reject(new ActionRefused(undefined, "invalid input")); await tick();
   expect(a.store.pending).toBe(false); await rename(b.store, "Independent"); await rename(a.store, "Later");
   expect(b.store.current().views[0]!.name).toBe("Independent"); expect(a.transport.calls).toHaveLength(2);
+});
+test("R1 stale unresolved duplicate cannot suppress a completed same-tab birth", async () => {
+  for (const unresolved of [[], ["w"]]) values.set(`infraternal.canvas-journal.a.${unresolved.length}`, JSON.stringify({ pending: [{ op_id: "old", intent: { type: "open", window: { id: "w" } } }], unresolved }));
+  const { store, transport } = setup(), before = store.current(), shell = structuredClone(before);
+  const layout = shell.views[0]!.layout; if (layout.type !== "tiled") throw Error("expected tiled view");
+  layout.columns.push({ id: "c", weight: 1, windows: [{ id: "w", target: { type: "settings", section: "pending" } }] });
+  await store.save(shell, undefined, before, new Set(["w"])); expect(transport.calls).toHaveLength(0);
+  const completed = store.current(), completedLayout = completed.views[0]!.layout;
+  if (completedLayout.type !== "tiled") throw Error("expected tiled view");
+  completedLayout.columns[0]!.windows[0]!.target = { type: "settings", section: "appearance" };
+  await store.save(completed);
+  expect(transport.calls).toHaveLength(1);
+  expect((transport.calls[0]!.input.intent as { window: { target: unknown } }).window.target).toEqual({ type: "settings", section: "appearance" });
+  expect(values.size).toBe(2); expect(writes).toBe(0);
 });

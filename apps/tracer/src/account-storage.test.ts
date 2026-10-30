@@ -58,3 +58,11 @@ test("legacy generation sweep is account scoped and reports refused erasure", ()
   g.localStorage.removeItem = () => { throw Error("blocked"); };
   expect(clearAccountStorage("b")).toBe(false);
 });
+test("R2: 21 legacy generations survive refused cleanup and disappear only after a successful retry", () => {
+  for (let n = 0; n < 21; n++) g.localStorage.setItem(`infraternal.canvas-journal.a.generation.${n}`, "old");
+  const remove = g.localStorage.removeItem.bind(g.localStorage);
+  g.localStorage.removeItem = () => { throw Error("blocked"); };
+  expect(clearAccountStorage("a")).toBe(false); expect(g.localStorage.keys()).toHaveLength(21);
+  g.localStorage.removeItem = remove;
+  expect(clearAccountStorage("a")).toBe(true); expect(g.localStorage.keys()).toEqual([]);
+});
