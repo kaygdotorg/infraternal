@@ -15,7 +15,7 @@ agent = ["dep:nix", "dep:openssl", "dep:socket2", "dep:zeroize"]
 # Relayed pairs through the seam C shim and relay address observation [313].
 relay = ["agent", "dep:infraternal-plugin-relay", "infraternal-plugin-relay/runtime"]
 # Kernel timestamp precision is used by opt-in transport measurement fixtures only.
-test-support = ["agent"]
+test-support = ["agent", "infraternal-plugin-relay?/test-support"]
 # Default-off resolver prototype until DNS integration is enabled [#266].
 mesh-dns-spike = ["agent", "server", "dep:hickory-proto", "dep:url"]
 
@@ -49,3 +49,8 @@ workspace = true
 [[example]]
 name = "coordinator_fixture"
 required-features = ["server"]
+
+# Namespace fixture for the seam C relay proof (scripts/mesh-relay-proof.py).
+[[example]]
+name = "relay_fixture"
+required-features = ["relay", "test-support"]
