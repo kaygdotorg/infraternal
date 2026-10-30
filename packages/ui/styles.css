@@ -980,7 +980,9 @@
 .ui-inbox, .ui-inbox * { text-shadow: none; }
 .ui-inbox[hidden] { display: none; }
 .ui-inbox[data-open="false"] { opacity: 0; transform: translateY(6px); pointer-events: none; }
-.ui-inbox ~ .ui-sidebar-foot { margin-top: 0; }
+/* Only a card that takes part in the layout hands the footer's auto margin to itself. A card that was shown and then
+   hidden stays in the DOM as `display: none`; matching it here would leave nothing to push the footer down (#259). */
+.ui-inbox:not([hidden]) ~ .ui-sidebar-foot { margin-top: 0; }
 .ui-inbox-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 6px 0; color: var(--ui-text-secondary); font-size: var(--text-caption); font-weight: var(--fw-label); line-height: 1.4; }
 .ui-inbox-count { font-variant-numeric: tabular-nums; }
 .ui-inbox-list { display: grid; gap: 2px; }
