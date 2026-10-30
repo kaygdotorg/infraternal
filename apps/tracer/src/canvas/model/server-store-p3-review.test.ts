@@ -72,7 +72,7 @@ async function failedEdit(transport: Transport, store: ServerCanvasStore): Promi
 
 test("review: two successive gaps coalesce while each snapshot is outstanding", async () => {
   const { transport, store } = setup();
-  transport.operation(3, "Gap"); transport.operation(9, "Later gap");
+  transport.operation(3, "Gap"); expect(transport.resyncs).toBe(1); transport.operation(9, "Later gap");
   await advance(10_000); expect(transport.resyncs).toBe(1); expect(store.current().revision).toBe(1);
   transport.snapshot(baseline(9)); transport.operation(11, "Second gap"); transport.operation(12, "Still waiting");
   await advance(20_000); expect(transport.resyncs).toBe(2); expect(store.current().revision).toBe(9);
@@ -137,4 +137,15 @@ test("review: a first-connect outage with no RTT sample cannot hide pending edit
   const transport = new Transport(); transport.roundTripMs = undefined;
   const { store, notices } = setup(transport); await failedEdit(transport, store);
   await advance(60_000); expect(notices).toEqual([{ definitive: false, delayed: true }]);
+});
+test("hunt 4: slow snapshots own one watchdog; bounded retries pause offline and disposal cancels them", async () => {
+  const { transport, store } = setup(); transport.sample(3000);
+  transport.operation(3, "Gap"); expect(transport.resyncs).toBe(1);
+  await advance(29_999); expect(transport.resyncs).toBe(1); expect(transport.subscriptions).toBe(1);
+  await advance(30_249); expect(transport.resyncs).toBe(1);
+  await advance(30_250); expect(transport.resyncs).toBe(2); expect(transport.subscriptions).toBe(1);
+  transport.isWelcomed = false; await advance(90_000); expect(transport.resyncs).toBe(2);
+  expect(timers.size).toBe(0);
+  transport.isWelcomed = true; transport.open(); expect(timers.size).toBe(1);
+  store.dispose(); await advance(200_000); expect(timers.size).toBe(0); expect(transport.subscriptions).toBe(0);
 });
