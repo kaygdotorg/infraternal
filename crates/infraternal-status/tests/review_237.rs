@@ -1,5 +1,6 @@
 //! Independent manager-observation regressions for #237 (D299/D303).
-use infraternal_status::{Activity, Roots, Scope, probe_local};
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+use infraternal_status::{Activity, Roots, Scope, manager_activity, probe_local};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 
 fn isolated(name: &str, manager: &str, check: impl FnOnce(PathBuf)) {
@@ -88,6 +89,23 @@ printf '%s\n' ActiveState=activating SubState=auto-restart NRestarts=45 MainPID=
                 status.confirmed_down().len(),
                 1,
                 "D303 must retain the down service"
+            );
+        },
+    );
+}
+
+#[test]
+fn repeated_starts_with_a_future_wall_clock_timestamp_are_not_running() {
+    isolated(
+        "repeated_starts_with_a_future_wall_clock_timestamp_are_not_running",
+        r#"
+printf '%s\n' ActiveState=active SubState=running NRestarts=45 MainPID=42 ExecMainStartTimestamp=@FUTURE_TIMESTAMP ExecMainCode=1 ExecMainStatus=1
+"#,
+        |_| {
+            assert_ne!(
+                manager_activity(Scope::User, "infraternal-agent.service"),
+                Activity::Active,
+                "a backward clock step must not turn a recent restart loop into Running"
             );
         },
     );
