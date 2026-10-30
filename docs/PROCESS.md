@@ -145,8 +145,8 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,438,224 bytes |
-  | `aarch64-unknown-linux-musl` | 19,611,368 bytes |
+  | `x86_64-unknown-linux-musl` | 21,438,608 bytes |
+  | `aarch64-unknown-linux-musl` | 19,611,752 bytes |
 
   Crash-loop status reporting (#237, D299/D303) uses the pinned
   `scripts/static-cargo` stripped static recipe on 8by64-compute02, one
@@ -155,12 +155,12 @@ Reviews and fixes run at the same time as the next lane's build.
   | Source | x86_64 bytes | aarch64 bytes |
   | --- | ---: | ---: |
   | Dev (`0c8639496`) | 21,431,472 | 19,605,896 |
-  | #237 (`60c5b6e3e`) | 21,438,224 | 19,611,368 |
-  | Delta versus dev | +6,752 | +5,472 |
+  | #237 (`d96c0a0e0`) | 21,438,608 | 19,611,752 |
+  | Delta versus dev | +7,136 | +5,856 |
 
   Both increases are below 16 KiB. The exact caps above follow the measured
   images without allowance (D243). Growth retains local manager-property
-  parsing, restart/exit diagnostics and bounded, shared-deadline process
+  parsing, restart/exit diagnostics, mixed-role headlines and bounded, shared-deadline process
   observation; no dependencies, features or release settings changed.
   Reproduction, both target receipts and the final gate output are on #237.
 
