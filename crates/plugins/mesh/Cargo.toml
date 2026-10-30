@@ -12,6 +12,8 @@ ee = []
 # Diagnostic stage logging is removable and never enabled by a shipping role.
 cutoff-measure = ["nix?/time"]
 agent = ["dep:nix", "dep:openssl", "dep:socket2", "dep:zeroize"]
+# Relayed pairs through the seam C shim and relay address observation [313].
+relay = ["agent", "dep:infraternal-plugin-relay", "infraternal-plugin-relay/runtime"]
 # Kernel timestamp precision is used by opt-in transport measurement fixtures only.
 test-support = ["agent"]
 # Default-off resolver prototype until DNS integration is enabled [#266].
@@ -21,6 +23,7 @@ mesh-dns-spike = ["agent", "server", "dep:hickory-proto", "dep:url"]
 infraternal-plugin-api = { workspace = true, features = ["socket-host"] }
 infraternal-protocol.workspace = true
 infraternal-mesh = { version = "0.1.0", path = "../../infraternal-mesh" }
+infraternal-plugin-relay = { version = "0.1.0", path = "../relay", optional = true }
 bytes.workspace = true
 futures-util.workspace = true
 serde.workspace = true

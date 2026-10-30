@@ -1492,6 +1492,7 @@ dependencies = [
  "hickory-proto",
  "infraternal-mesh",
  "infraternal-plugin-api",
+ "infraternal-plugin-relay",
  "infraternal-protocol",
  "nix",
  "openssl",

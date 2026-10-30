@@ -2,6 +2,10 @@
 
 pub mod cli;
 
+/// The QUIC engine the relay API speaks (D176), for callers of its types.
+#[cfg(feature = "runtime")]
+pub use quinn;
+
 #[cfg(feature = "runtime")]
 pub mod client;
 #[cfg(feature = "runtime")]
