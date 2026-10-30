@@ -3,6 +3,14 @@
 pub mod cli;
 
 #[cfg(feature = "runtime")]
+pub mod client;
+#[cfg(feature = "runtime")]
 pub mod probe;
+#[cfg(feature = "runtime")]
+pub mod relay;
+#[cfg(feature = "test-support")]
+pub mod testing;
+#[cfg(feature = "runtime")]
+pub mod tls;
 #[cfg(feature = "runtime")]
 pub mod wire;

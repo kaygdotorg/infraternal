@@ -11,6 +11,8 @@ default = []
 # authenticated address probe codec. Every engine is already in the binary
 # (quinn, rustls, ring, openssl; D176); the feature only gates our code.
 runtime = ["dep:bytes", "dep:openssl", "dep:quinn", "dep:ring", "dep:rustls", "dep:tokio"]
+# Disposable certificates for tests and namespace fixtures; never shipped.
+test-support = ["runtime"]
 
 [dependencies]
 infraternal-plugin-api = { path = "../../infraternal-plugin-api", version = "0.1.0" }
@@ -20,6 +22,11 @@ quinn = { workspace = true, optional = true }
 ring = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+bytes.workspace = true
+quinn.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 
 [lints]
 workspace = true
