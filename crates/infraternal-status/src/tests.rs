@@ -320,3 +320,122 @@ fn installed_server_discovery_recognizes_the_running_executable_identity() {
     );
     assert_eq!(server_data_directory(&fixture.roots()), None);
 }
+
+#[test]
+#[ignore = "requires the job-owned transient crash-loop user unit"]
+fn real_user_crash_loop_is_not_running() {
+    assert_eq!(
+        super::word(super::manager_activity(
+            Scope::User,
+            "status-crash-loop-237.service"
+        )),
+        "Restarting repeatedly"
+    );
+}
+
+#[test]
+fn manager_properties_report_each_role_and_scope_truthfully() {
+    use super::Observation;
+    let fixtures = [
+        (
+            "ActiveState=activating\nSubState=auto-restart\nMainPID=0\nResult=exit-code\nNRestarts=45\nExecMainStartTimestamp=@100\nExecMainCode=1\nExecMainStatus=1\n",
+            "Restarting repeatedly",
+        ),
+        (
+            "ActiveState=active\nSubState=running\nMainPID=42\nNRestarts=46\nExecMainStartTimestamp=@100\nExecMainCode=2\nExecMainStatus=11\n",
+            "Restarting repeatedly",
+        ),
+        (
+            "ActiveState=active\nSubState=running\nMainPID=42\nNRestarts=0\nExecMainStartTimestamp=@100\n",
+            "Running",
+        ),
+        (
+            "ActiveState=active\nSubState=running\nMainPID=42\nNRestarts=46\nExecMainStartTimestamp=@80\n",
+            "Running",
+        ),
+        (
+            "ActiveState=inactive\nSubState=dead\nNRestarts=45\nExecMainStartTimestamp=@100\n",
+            "Stopped",
+        ),
+        (
+            "ActiveState=failed\nSubState=failed\nNRestarts=45\nExecMainStartTimestamp=@100\nExecMainCode=1\nExecMainStatus=1\n",
+            "Failed",
+        ),
+        ("", "Unknown"),
+    ];
+    for scope in [Scope::System, Scope::User] {
+        for role in ["server", "agent"] {
+            for (properties, expected) in fixtures {
+                let fixture = Fixture::new();
+                let directory = if scope == Scope::System {
+                    "etc"
+                } else {
+                    "user"
+                };
+                let name = format!("infraternal-{role}.service");
+                fixture.write(
+                    &format!("{directory}/{name}"),
+                    &format!("[Service]\nExecStart=/usr/bin/infraternal {role}\n"),
+                );
+                let activity = Observation::read(properties).activity(None, 101);
+                let status = probe(&fixture.roots(), &IDS.map(str::to_owned), &|s, n| {
+                    assert_eq!(s, scope);
+                    assert_eq!(n, name);
+                    activity
+                });
+                assert_eq!(
+                    state(&status, role).0,
+                    expected,
+                    "{scope:?}/{role}: {properties}"
+                );
+                assert_eq!(
+                    status.role,
+                    if role == "server" {
+                        Role::Server
+                    } else {
+                        Role::Host
+                    }
+                );
+                let (_, message, next) = status.headline();
+                if expected == "Restarting repeatedly" {
+                    assert_eq!(status.confirmed_down().len(), 1);
+                    assert!(message.contains("restarting repeatedly"));
+                    assert!(next[0].starts_with("journalctl"));
+                    assert_eq!(next[0].contains("--user"), scope == Scope::User);
+                    let detail = state(&status, role).1;
+                    assert!(detail.contains(if properties.contains("ExecMainCode=2") {
+                        "last signal 11"
+                    } else {
+                        "last exit status 1"
+                    }));
+                    if role == "server" {
+                        assert_eq!(state(&status, "agent").0, expected);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn consecutive_observations_detect_restart_count_and_pid_churn() {
+    use super::Observation;
+    let first = Observation::read(
+        "ActiveState=active\nSubState=running\nNRestarts=1\nMainPID=41\nExecMainStartTimestamp=@100\n",
+    );
+    for properties in [
+        "ActiveState=active\nSubState=running\nNRestarts=2\nMainPID=41\nExecMainStartTimestamp=@100\n",
+        "ActiveState=active\nSubState=running\nNRestarts=1\nMainPID=42\nExecMainStartTimestamp=@100\n",
+        "ActiveState=activating\nSubState=auto-restart\nNRestarts=1\nMainPID=0\nExecMainStartTimestamp=@100\n",
+    ] {
+        assert!(matches!(
+            Observation::read(properties).activity(Some(&first), 101),
+            Activity::Restarting { .. }
+        ));
+    }
+    assert_eq!(first.activity(Some(&first), 101), Activity::Active);
+    assert_eq!(
+        Observation::read("ActiveState=activating\nSubState=start\n").activity(None, 101),
+        Activity::Unknown
+    );
+}

@@ -34,7 +34,7 @@ bumps the version. `ok` is true exactly when the exit code is 0. `error` is
 present exactly when `ok` is false: `code` is stable, `argument` names the
 argument at fault and never its value. `next_step` repeats the first entry of
 `next`. `data` is shaped by the action's output schema. States are `ready`,
-`running`, `stopped`, `pending`, `unavailable`, `refused`, `failed` and
+`running`, `restarting`, `stopped`, `pending`, `unavailable`, `refused`, `failed` and
 `unknown`. A test walks the whole command tree and fails when a command lacks
 `--json` or prints anything that is not this envelope.
 
@@ -44,6 +44,12 @@ Bare `infraternal` is the same overview as `infraternal status`, plus one line
 pointing to `--help` (a machine with nothing installed is told how to join or
 to run a server). A group typed alone, such as `infraternal mesh`, lists its
 commands. `status` exits 5 when an installed service is not running.
+A service in an automatic restart loop reports `restarting`, with
+"Restarting repeatedly" in its component row, its last observed exit status
+or signal (or an explicit unavailable value), and a `journalctl` next step for
+its system or user manager. Recent repeated starts are treated as unstable
+for ten seconds; historical restart counts on a stable process do not change
+its Running state. Status reads local state only.
 
 Exit codes (D303): 0 done, 1 failed, 2 wrong command line, 3 not allowed,
 4 not found, 5 off or unreachable, 6 partly done, 130 interrupted by Ctrl-C

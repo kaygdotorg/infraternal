@@ -435,7 +435,7 @@ fn status_text_does_not_call_an_unanswered_unit_not_running() {
     let manager = bin.join("systemctl");
     std::fs::write(
         &manager,
-        "#!/bin/sh\nfor last; do :; done\ncase \"$last\" in *server*) echo active ;; *) exit 1 ;; esac\n",
+        "#!/bin/sh\nfor last; do :; done\ncase \"$last\" in *server*) echo ActiveState=active ;; *) exit 1 ;; esac\n",
     )
     .unwrap();
     std::fs::set_permissions(&manager, std::fs::Permissions::from_mode(0o755)).unwrap();

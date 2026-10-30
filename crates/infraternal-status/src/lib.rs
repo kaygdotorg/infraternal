@@ -10,7 +10,7 @@
 //!    subcommand (`server` or `agent`), so any unit name and any description
 //!    works. `--state` comes from the same line, so a node with a
 //!    non-default runtime directory is read where it really keeps its state.
-//! 2. Ask the owning manager for the `ActiveState` of only those units (at most
+//! 2. Ask the owning manager for the runtime properties of only those units (at most
 //!    a few `systemctl show` calls). A manager that does not answer makes that
 //!    unit "Unknown"; it never makes the whole node unknown, because the
 //!    other manager's units are still readable.
@@ -68,6 +68,13 @@ pub enum Kind {
 pub enum Activity {
     /// Running.
     Active,
+    /// Repeated restarts, with the last observed main-process exit.
+    Restarting {
+        /// systemd wait code: 1 exited, 2 signalled, 3 core dumped; 0 unavailable.
+        code: u32,
+        /// Exit status or signal number.
+        status: i32,
+    },
     /// Installed and not running.
     Inactive,
     /// Exited with an error.
@@ -213,10 +220,17 @@ pub fn probe(
     ids: &[String],
     activity: &dyn Fn(Scope, &str) -> Activity,
 ) -> NodeStatus {
+    // Stop issuing manager queries after 20 ms. Each real manager query has
+    // its own 20 ms deadline, leaving headroom in the 50 ms local-status budget.
+    let started = std::time::Instant::now();
     let units: Vec<_> = discover(roots)
         .into_iter()
         .map(|unit| {
-            let state = activity(unit.scope, &unit.name);
+            let state = if started.elapsed() < std::time::Duration::from_millis(20) {
+                activity(unit.scope, &unit.name)
+            } else {
+                Activity::Unknown
+            };
             (unit, state)
         })
         .collect();
@@ -437,6 +451,7 @@ fn option(words: &[String], flag: &str) -> Option<PathBuf> {
 fn word(activity: Activity) -> &'static str {
     match activity {
         Activity::Active => "Running",
+        Activity::Restarting { .. } => "Restarting repeatedly",
         Activity::Inactive => "Stopped",
         Activity::Failed => "Failed",
         Activity::Unknown => "Unknown",
@@ -453,10 +468,21 @@ fn row(name: &str, state: &str, detail: impl Into<String>) -> Component {
 
 fn component(id: &str, role: Role, units: &[(Unit, Activity)], roots: &Roots) -> Component {
     let of = |kind| units.iter().find(|(unit, _)| unit.kind == kind);
-    let unit_detail = |unit: &Unit| format!("{} service", unit.scope.label());
+    let unit_detail = |unit: &Unit, activity: Activity| {
+        let scope = unit.scope.label();
+        if let Activity::Restarting { code, status } = activity {
+            match code {
+                1 => format!("{scope} service; last exit status {status}"),
+                2 | 3 => format!("{scope} service; last signal {status}"),
+                _ => format!("{scope} service; last exit unavailable"),
+            }
+        } else {
+            format!("{scope} service")
+        }
+    };
     match id {
         "server" => match of(Kind::Server) {
-            Some((unit, state)) => row(id, word(*state), unit_detail(unit)),
+            Some((unit, state)) => row(id, word(*state), unit_detail(unit, *state)),
             None if matches!(role, Role::Server | Role::Both) => {
                 row(id, "Stopped", "data found, no service unit")
             }
@@ -466,8 +492,15 @@ fn component(id: &str, role: Role, units: &[(Unit, Activity)], roots: &Roots) ->
             // The server embeds an agent as its own subprocess, so it is
             // up exactly while the server is.
             let (state, detail) = match (of(Kind::Agent), of(Kind::Server)) {
-                (Some((unit, state)), _) => (word(*state), unit_detail(unit)),
-                (None, Some((_, state))) => (word(*state), "embedded in the server".to_owned()),
+                (Some((unit, state)), _) => (word(*state), unit_detail(unit, *state)),
+                (None, Some((unit, state))) => (
+                    word(*state),
+                    if matches!(state, Activity::Restarting { .. }) {
+                        unit_detail(unit, *state) + "; embedded in the server"
+                    } else {
+                        "embedded in the server".to_owned()
+                    },
+                ),
                 (None, None) => ("Not installed", String::new()),
             };
             row(id, state, detail)
@@ -563,38 +596,132 @@ fn mesh(units: &[(Unit, Activity)], roots: &Roots) -> Component {
     }
 }
 
-/// Ask the owning manager for one unit's `ActiveState`; a missing manager is
-/// "Unknown" for that unit only. Runs without a shell and with no secrets.
+/// A single manager observation. Borrowed properties keep the CLI-only parser small.
+#[derive(Default)]
+struct Observation<'a> {
+    active: &'a str,
+    sub: &'a str,
+    restarts: u64,
+    started: u64,
+    pid: u32,
+    code: u32,
+    status: i32,
+}
+
+impl<'a> Observation<'a> {
+    fn read(text: &'a str) -> Self {
+        let mut value = Self::default();
+        for line in text.lines() {
+            let Some((key, field)) = line.split_once('=') else {
+                continue;
+            };
+            match key {
+                "ActiveState" => value.active = field,
+                "SubState" => value.sub = field,
+                "NRestarts" => value.restarts = field.parse().unwrap_or(0),
+                "ExecMainStartTimestamp" => {
+                    value.started = field
+                        .strip_prefix('@')
+                        .and_then(|s| s.split('.').next())
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                }
+                "MainPID" => value.pid = field.parse().unwrap_or(0),
+                "ExecMainCode" => value.code = field.parse().unwrap_or(0),
+                "ExecMainStatus" => value.status = field.parse().unwrap_or(0),
+                _ => {}
+            }
+        }
+        value
+    }
+
+    fn recent(&self, now: u64) -> bool {
+        self.started != 0 && now.checked_sub(self.started).is_some_and(|age| age <= 10)
+    }
+
+    fn activity(&self, previous: Option<&Self>, now: u64) -> Activity {
+        // A failed/stopped unit stays failed/stopped, even if it restarted before.
+        // Historical restart counts alone never condemn a recovered service.
+        if matches!(self.active, "active" | "activating" | "reloading") {
+            let changed = previous.is_some_and(|old| {
+                self.restarts > old.restarts
+                    || (old.pid != 0 && self.pid != 0 && self.pid != old.pid)
+            });
+            if self.sub == "auto-restart"
+                || self.sub == "auto-restart-queued"
+                || changed
+                || (self.restarts >= 2 && self.recent(now))
+            {
+                return Activity::Restarting {
+                    code: self.code,
+                    status: self.status,
+                };
+            }
+        }
+        match self.active {
+            "active" | "reloading" => Activity::Active,
+            "failed" => Activity::Failed,
+            "inactive" | "deactivating" => Activity::Inactive,
+            // Starting is not evidence that a process is running yet.
+            _ => Activity::Unknown,
+        }
+    }
+}
+
+/// Ask only the owning local manager. The deadline includes a second observation
+/// for a newly started process, without a sampling sleep or network request.
 #[must_use]
 pub fn manager_activity(scope: Scope, unit: &str) -> Activity {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
+    let Some(first) = manager_properties(scope, unit, deadline) else {
+        return Activity::Unknown;
+    };
+    let first = Observation::read(&first);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |t| t.as_secs());
+    let activity = first.activity(None, now);
+    if activity == Activity::Active && first.recent(now) {
+        // Only a fresh start needs another immediate look. Old healthy services
+        // cost one local query; the restart window expires without saved state.
+        if let Some(second) = manager_properties(scope, unit, deadline) {
+            return Observation::read(&second).activity(Some(&first), now);
+        }
+        return Activity::Unknown;
+    }
+    activity
+}
+
+fn manager_properties(scope: Scope, unit: &str, deadline: std::time::Instant) -> Option<String> {
     let mut command = Command::new("systemctl");
     if scope == Scope::User {
         command.arg("--user");
     }
-    let Ok(output) = command
-        .args([
-            "show",
-            "--property=ActiveState",
-            "--value",
-            "--no-pager",
-            unit,
-        ])
-        .env("LC_ALL", "C")
-        .env("SYSTEMD_COLORS", "0")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-    else {
-        return Activity::Unknown;
-    };
-    if !output.status.success() {
-        return Activity::Unknown;
-    }
-    match String::from_utf8_lossy(&output.stdout).trim() {
-        "active" | "reloading" | "activating" => Activity::Active,
-        "failed" => Activity::Failed,
-        "inactive" | "deactivating" => Activity::Inactive,
-        _ => Activity::Unknown,
+    let mut child = command.args([
+        "show", "--timestamp=unix",
+        "--property=ActiveState,SubState,NRestarts,MainPID,ExecMainStartTimestamp,ExecMainCode,ExecMainStatus",
+        "--no-pager", unit,
+    ]).env("LC_ALL", "C").env("SYSTEMD_COLORS", "0")
+        .stdin(Stdio::null()).stderr(Stdio::null()).stdout(Stdio::piped()).spawn().ok()?;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = child.wait_with_output().ok()?;
+                return status
+                    .success()
+                    .then(|| String::from_utf8_lossy(&output.stdout).into_owned());
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            _ => {
+                // Reap only the process this probe started. An unresponsive
+                // manager is unknown, never grounds to claim a running service.
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
     }
 }
 
@@ -609,13 +736,18 @@ impl NodeStatus {
             .collect()
     }
 
-    /// Units that are confirmed not running (stopped or failed). A unit whose manager gave no
+    /// Units that are confirmed unavailable (stopped, failed or restarting). A unit whose manager gave no
     /// answer is unknown, not down: `status` exits 5 only for what is known to be down (D303).
     #[must_use]
     pub fn confirmed_down(&self) -> Vec<&Unit> {
         self.units
             .iter()
-            .filter(|(_, state)| matches!(state, Activity::Inactive | Activity::Failed))
+            .filter(|(_, state)| {
+                matches!(
+                    state,
+                    Activity::Inactive | Activity::Failed | Activity::Restarting { .. }
+                )
+            })
             .map(|(unit, _)| unit)
             .collect()
     }
@@ -662,6 +794,8 @@ impl NodeStatus {
             "Part of this machine's setup is not running; another status is unknown.".to_owned()
         } else {
             let state = match (overall, plural) {
+                (Activity::Restarting { .. }, false) => "is restarting repeatedly",
+                (Activity::Restarting { .. }, true) => "are restarting repeatedly",
                 (Activity::Failed, false) => "has failed",
                 (Activity::Failed, true) => "have failed",
                 (Activity::Unknown, false) => "is not answering",
@@ -674,9 +808,22 @@ impl NodeStatus {
         let next = down
             .iter()
             .take(3)
-            .map(|unit| match unit.scope {
-                Scope::System => format!("systemctl status {}", unit.name),
-                Scope::User => format!("systemctl --user status {}", unit.name),
+            .map(|unit| {
+                let restarting = self.units.iter().any(|(u, a)| {
+                    u.scope == unit.scope
+                        && u.name == unit.name
+                        && matches!(a, Activity::Restarting { .. })
+                });
+                match (restarting, unit.scope) {
+                    (true, Scope::System) => {
+                        format!("journalctl -u {} -n 30 --no-pager", unit.name)
+                    }
+                    (true, Scope::User) => {
+                        format!("journalctl --user -u {} -n 30 --no-pager", unit.name)
+                    }
+                    (false, Scope::System) => format!("systemctl status {}", unit.name),
+                    (false, Scope::User) => format!("systemctl --user status {}", unit.name),
+                }
             })
             .collect();
         (overall, message, next)
@@ -691,6 +838,12 @@ impl NodeStatus {
             .any(|(_, state)| *state == Activity::Active)
         {
             Activity::Active
+        } else if let Some((_, state)) = self
+            .units
+            .iter()
+            .find(|(_, state)| matches!(state, Activity::Restarting { .. }))
+        {
+            *state
         } else if self
             .units
             .iter()

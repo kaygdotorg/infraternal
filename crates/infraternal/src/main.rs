@@ -395,6 +395,7 @@ fn status_result(
     let (activity, message, next) = node.headline();
     let state = match activity {
         Activity::Active => CommandState::Running,
+        Activity::Restarting { .. } => CommandState::Restarting,
         Activity::Inactive => CommandState::Stopped,
         Activity::Failed => CommandState::Failed,
         Activity::Unknown => CommandState::Unknown,
