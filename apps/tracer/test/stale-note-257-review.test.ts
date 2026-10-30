@@ -4,7 +4,11 @@ import { TerminalClient } from "../src/terminal";
 import { StaleScreenWatch } from "../src/stale-screen";
 import type { StreamHandler } from "../src/connection";
 
-for (const socketOpenedFirst of [false, true]) test(`a resized silent restore starts its note watch when socketOpenedFirst=${socketOpenedFirst}`, () => {
+for (const socketOpenedFirst of [false, true]) for (const scenario of [
+  { name: "resized", captured: { cols: 80, rows: 24 }, shown: true },
+  { name: "same-size", captured: { cols: 120, rows: 40 }, shown: false },
+  { name: "legacy", captured: undefined, shown: true },
+]) test(`a ${scenario.name} silent restore decides its note watch when socketOpenedFirst=${socketOpenedFirst}`, () => {
   let expire: (() => void) | undefined;
   const changes: boolean[] = [];
   const watch = new StaleScreenWatch((shown) => changes.push(shown), {
@@ -16,7 +20,7 @@ for (const socketOpenedFirst of [false, true]) test(`a resized silent restore st
     closed: false, sessionGone: false, sessionId: new Uint8Array(16),
     connectionIsResume: false, attached: true, attachmentConfirmed: false,
     lastOutSeq: 10n, receivedOutSeq: 10n, replayResponseFence: 10n,
-    replayCapturedSize: { cols: 80, rows: 24 }, lastSize: { cols: 120, rows: 40 },
+    replayCapturedSize: scenario.captured, lastSize: { cols: 120, rows: 40 },
     staleWatch: watch, config: { hooks: {}, status: { textContent: "Catching up…" } },
     conn: { streamAttached: () => {} },
     cancelStreamRetry: () => {}, tryAttach: () => {}, resendUnacknowledgedInput: () => {},
@@ -27,5 +31,7 @@ for (const socketOpenedFirst of [false, true]) test(`a resized silent restore st
   handler.onWelcome(true);
   client.releaseReplayResponsesAfterPaint();
   expire?.();
-  expect(changes).toEqual([true]);
+  expect(changes).toEqual(scenario.shown ? [true] : []);
+  watch.output(11n);
+  expect(changes).toEqual(scenario.shown ? [true, false] : []);
 });

@@ -983,6 +983,9 @@ export class TerminalClient {
       onWelcome: (resumed) => {
         if (this.closed || (this.pendingExit && !this.pendingExit.retired) || this.sessionGone) return;
         this.cancelStreamRetry();
+        // A restored renderer may join an already-open shared socket and miss
+        // onSocketOpen. Session identity, not callback order, determines resume.
+        this.connectionIsResume = this.sessionId !== undefined;
         // A connection the server does not know starts every writer at zero, like a page reload.
         if (!resumed && this.hasAttached) this.restartCursors(true);
         if (!this.sessionId) this.openSession();
