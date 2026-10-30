@@ -3344,3 +3344,20 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Order:** D241 shell marker → `mux` sessions with `--json`, skill and
        MCP → canvas verbs and the tmux subset → laptop sign-in → one-command
        join → macOS mesh service → native apps and app windows.
+312. **Layout edits live per tab; the server is the only saved copy
+     (owner, 2026-10-30, #250; replaces the multi-tab layout journal):**
+     - Each tab keeps its unconfirmed canvas layout edits in memory and
+       sends them to the server; only server receipts confirm them. There
+       is no shared multi-tab journal in browser storage, so nothing can be
+       written or resurrected after sign-out.
+     - While edits wait for confirmation, the tab says so plainly ("Not
+       saved, keep this tab open"). If that tab closes, crashes or is
+       discarded before confirmation, those unconfirmed edits are lost
+       (owner: "this is 100% on the user"); confirmed edits and terminal
+       sessions are unaffected.
+     - Opening the app offline shows "Connect to load your layout"; a tab
+       that is already open keeps its drawing when the connection drops.
+       Owner: this matters for the planned canvas decoupling.
+     - Plan: `docs/plans/250-layout-journal.md` (branch plan-250-journal).
+       Rejected after three review rounds: a cross-tab Web Lock journal
+       (sign-out privacy and lost-entry interleavings kept recurring).
