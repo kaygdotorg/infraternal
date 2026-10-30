@@ -97,12 +97,14 @@ export class ServerCanvasStore implements CanvasStore {
     if (event.type === "canvas.layout.snapshot" || this.#journal.canonical.revision >= this.#target) {
       clearTimeout(this.#retry); this.#retry = undefined; this.#target = 0; this.#delay = 250;
     }
-    // Only initialize's receipt plus its canonical revision permits retiring the read-only import.
-    if (this.#imported && !this.#journal.migration) {
-      try { localStorage.removeItem(this.#legacyKey); this.#imported = false; }
-      catch { this.refused(false, true); }
-    }
+    this.#retireImport();
     this.#publish(); this.#pendingChanged(); this.#loaded?.(); this.#loaded = undefined; this.#pump();
+  }
+  /** Both receipt/snapshot orderings must reach canonical before retiring a confirmed import. */
+  #retireImport(): void {
+    if (!this.#imported || this.#journal.migration) return;
+    try { localStorage.removeItem(this.#legacyKey); this.#imported = false; }
+    catch { this.refused(false, true); }
   }
   /** First gap/withdrawal requests immediately. One outstanding snapshot owns its bounded watchdog. */
   #recover(revision = Infinity): void {
@@ -144,7 +146,7 @@ export class ServerCanvasStore implements CanvasStore {
       if (!Number.isSafeInteger(result.revision) || Number(result.revision) < 0) { this.#journal.fail(entry, epoch); this.#recover(); return; }
       if (migration) this.#imported = true;
       if (this.#journal.acknowledge(entry, Number(result.revision), migration)) this.#publish();
-      this.#pendingChanged();
+      this.#retireImport(); this.#pendingChanged();
       // A receipt ahead of canonical can still be followed by its ordinary ordered event.
       if (Number(result.revision) > this.#journal.canonical.revision) {
         this.#target = Math.max(this.#target, Number(result.revision));

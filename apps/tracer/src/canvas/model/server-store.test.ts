@@ -353,3 +353,34 @@ test("a normal reconnect snapshot arrives before any replacement is requested", 
     store.flush(); expect(timers.size).toBe(0);
   } finally { store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
 });
+for (const receiptFirst of [false, true]) test(`legacy import retires only after receipt and canonical coverage, receipt first=${receiptFirst}`, async () => {
+  const key = canvasKey("legacy-order"), legacy = document(); localStorage.setItem(key, JSON.stringify(legacy));
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "legacy-order");
+  try {
+    transport.snapshot({ ...document(), views: [] }, false);
+    const call = transport.calls[0]!; expect(call.action).toBe("canvas.layout.initialize");
+    const canonical = { ...legacy, revision: 2 };
+    if (receiptFirst) { call.resolve({ revision: 2 }); await tick(); expect(localStorage.getItem(key)).not.toBeNull(); transport.snapshot(canonical); }
+    else { transport.snapshot(canonical); expect(localStorage.getItem(key)).not.toBeNull(); call.resolve({ revision: 2 }); await tick(); }
+    expect(localStorage.getItem(key)).toBeNull(); expect(store.pending).toBe(false);
+  } finally { store.dispose(); }
+});
+test("refused import and refused cleanup preserve their legacy source until confirmed removal succeeds", async () => {
+  const key = canvasKey("legacy-refusal"), source = JSON.stringify(document()); localStorage.setItem(key, source);
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "legacy-refusal");
+  try {
+    transport.snapshot({ ...document(), views: [] }, false); transport.snapshot({ ...document(), revision: 2 });
+    transport.calls[0]!.reject(new ActionRefused()); await tick();
+    expect(localStorage.getItem(key)).toBe(source);
+  } finally { store.dispose(); }
+  const next = new Transport(); let cleanupNotices = 0;
+  const imported = new ServerCanvasStore(next, "legacy-refusal", (_definitive, delayed) => { if (delayed) cleanupNotices++; });
+  const remove = localStorage.removeItem.bind(localStorage);
+  try {
+    next.snapshot({ ...document(), views: [] }, false);
+    localStorage.removeItem = () => { throw Error("cleanup refused"); };
+    next.calls[0]!.resolve({ revision: 2 }); await tick(); next.snapshot({ ...document(), revision: 2 });
+    expect(localStorage.getItem(key)).toBe(source); expect(cleanupNotices).toBe(1);
+    localStorage.removeItem = remove; next.snapshot({ ...document(), revision: 2 }); expect(localStorage.getItem(key)).toBeNull();
+  } finally { localStorage.removeItem = remove; imported.dispose(); }
+});
