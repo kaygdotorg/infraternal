@@ -17,6 +17,41 @@
 //! 3. Read mesh facts from the public snapshot the mesh writes next to the
 //!    runtime state, and the kernel's interface list under `/sys`.
 //!
+//! Headline/exit contract for configured roles (D299/D303). A retained server
+//! database establishes the server role even when its unit is masked/missing.
+//! A host role needs an installed infraternal-agent unit; an absent unconfigured
+//! role is not a failed component. Disabled below means disabled and inactive;
+//! disabling autostart alone never overrides an observed running process.
+//!
+//! Standalone server or infraternal agent:
+//!
+//! | State | Headline predicate | Exit |
+//! | --- | --- | --- |
+//! | active | is running | 0 |
+//! | crash-looping | is restarting repeatedly | 5 |
+//! | failed | has failed | 5 |
+//! | masked / missing / disabled | is not running | 5 |
+//! | unknown | status of part of this machine's setup is unknown | 0 |
+//!
+//! Both configured roles; rows=server, columns=infraternal agent:
+//!
+//! | | active | looping | failed | masked | missing | disabled | unknown |
+//! | --- | --- | --- | --- | --- | --- | --- | --- |
+//! | active | R/0 | P/5 | P/5 | P/5 | P/5 | P/5 | U/0 |
+//! | looping | P/5 | L/5 | Q/5 | Q/5 | Q/5 | Q/5 | X/5 |
+//! | failed | P/5 | Q/5 | F/5 | P/5 | P/5 | P/5 | X/5 |
+//! | masked | P/5 | Q/5 | P/5 | D/5 | D/5 | D/5 | X/5 |
+//! | missing | P/5 | Q/5 | P/5 | D/5 | D/5 | D/5 | X/5 |
+//! | disabled | P/5 | Q/5 | P/5 | D/5 | D/5 | D/5 | X/5 |
+//! | unknown | U/0 | X/5 | X/5 | X/5 | X/5 | X/5 | U/0 |
+//!
+//! R/L/F/D: both running/restarting repeatedly/failed/not running on this
+//! machine. P: "Part of this machine's setup is not running." Q: "Part of
+//! this machine's setup is restarting repeatedly." U: "The status of part of
+//! this machine's setup is unknown." X: "Part of this machine's setup is not
+//! running; another status is unknown." Any known down role prevents a Running
+//! envelope; an unanswered manager alone retains the established Unknown/0.
+//!
 //! No network is touched and no file is written. Every path is injected through
 //! [`Roots`] so tests build whole nodes in a temporary directory.
 //!
@@ -96,6 +131,8 @@ pub struct Unit {
     pub data: Option<PathBuf>,
     /// `--state` argument, when given.
     pub state: Option<PathBuf>,
+    /// A canonical installer unit masked on disk cannot have a running process.
+    masked: bool,
 }
 
 /// Every location the probe reads; tests substitute a temporary tree.
@@ -223,7 +260,11 @@ pub fn probe(
     let units: Vec<_> = discover(roots)
         .into_iter()
         .map(|unit| {
-            let state = activity(unit.scope, &unit.name);
+            let state = if unit.masked {
+                Activity::Inactive
+            } else {
+                activity(unit.scope, &unit.name)
+            };
             (unit, state)
         })
         .collect();
@@ -265,7 +306,14 @@ pub fn probe_local(roots: &Roots, ids: &[String]) -> NodeStatus {
             .map(|unit| {
                 let name = unit.name.clone();
                 let manager = unit.scope;
-                let query = scope.spawn(move || manager_activity(manager, &name));
+                let masked = unit.masked;
+                let query = scope.spawn(move || {
+                    if masked {
+                        Activity::Inactive
+                    } else {
+                        manager_activity(manager, &name)
+                    }
+                });
                 (unit, query)
             })
             .collect();
@@ -345,6 +393,23 @@ pub fn server_data_directory(roots: &Roots) -> Option<PathBuf> {
 
 /// Classify a unit by its effective `ExecStart`.
 fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) -> Option<Unit> {
+    // A mask erases ExecStart, but canonical installer names still identify
+    // their configured role. Never guess the role of a masked custom name.
+    if fs::canonicalize(dir.join(name)).is_ok_and(|path| path == Path::new("/dev/null")) {
+        let kind = match name {
+            "infraternal-server.service" => Kind::Server,
+            "infraternal-agent.service" => Kind::Agent,
+            _ => return None,
+        };
+        return Some(Unit {
+            scope,
+            name: name.to_owned(),
+            kind,
+            data: None,
+            state: None,
+            masked: true,
+        });
+    }
     let mut exec: Option<String> = None;
     let mut apply = |text: &str| {
         for line in text.lines() {
@@ -391,6 +456,7 @@ fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) ->
         kind,
         data: option(&words, "--data"),
         state: option(&words, "--state"),
+        masked: false,
     })
 }
 
@@ -490,7 +556,9 @@ fn component(id: &str, role: Role, units: &[(Unit, Activity)], roots: &Roots) ->
     let of = |kind| units.iter().find(|(unit, _)| unit.kind == kind);
     let unit_detail = |unit: &Unit, activity: Activity| {
         let scope = unit.scope.label();
-        if let Activity::Restarting { code, status } = activity {
+        if unit.masked {
+            format!("{scope} service; service is masked")
+        } else if let Activity::Restarting { code, status } = activity {
             match code {
                 1 => format!("{scope} service; last exit status {status}"),
                 2 | 3 => format!("{scope} service; last signal {status}"),
@@ -766,6 +834,28 @@ fn manager_properties(scope: Scope, unit: &str, deadline: std::time::Instant) ->
 }
 
 impl NodeStatus {
+    /// Installed observations plus configured roles whose service disappeared.
+    fn activities(&self) -> impl Iterator<Item = Activity> + '_ {
+        self.units.iter().map(|(_, state)| *state).chain(
+            (matches!(self.role, Role::Server | Role::Both)
+                && !self.units.iter().any(|(unit, _)| unit.kind == Kind::Server))
+            .then_some(Activity::Inactive),
+        )
+    }
+
+    /// Count every configured role known down, including a missing server unit.
+    #[must_use]
+    pub fn confirmed_down_count(&self) -> usize {
+        self.activities()
+            .filter(|state| {
+                matches!(
+                    state,
+                    Activity::Inactive | Activity::Failed | Activity::Restarting { .. }
+                )
+            })
+            .count()
+    }
+
     /// Units that are installed here and not running: what a script should be told about.
     #[must_use]
     pub fn down(&self) -> Vec<&Unit> {
@@ -808,7 +898,8 @@ impl NodeStatus {
             );
         }
         let overall = self.overall();
-        let down = self.confirmed_down();
+        let down = self.confirmed_down_count();
+        let active = self.activities().any(|state| state == Activity::Active);
         let has_unknown = self
             .units
             .iter()
@@ -819,7 +910,7 @@ impl NodeStatus {
             Role::Both => "The server and the infraternal agent",
         };
         let plural = self.role == Role::Both;
-        let message = if down.is_empty() && (overall == Activity::Active || has_unknown) {
+        let message = if down == 0 && (overall == Activity::Active || has_unknown) {
             if has_unknown {
                 "The status of part of this machine's setup is unknown.".to_owned()
             } else {
@@ -828,20 +919,24 @@ impl NodeStatus {
                     if plural { "are" } else { "is" }
                 )
             }
-        } else if overall == Activity::Active {
+        } else if active {
             "Part of this machine's setup is not running.".to_owned()
         } else if has_unknown {
             "Part of this machine's setup is not running; another status is unknown.".to_owned()
         } else if plural
             && matches!(overall, Activity::Restarting { .. })
             && self
-                .units
-                .iter()
-                .any(|(_, state)| !matches!(state, Activity::Restarting { .. }))
+                .activities()
+                .any(|state| !matches!(state, Activity::Restarting { .. }))
         {
             // A grouped headline must not turn another stopped/failed role
             // into a second restart loop; component rows keep their own facts.
             "Part of this machine's setup is restarting repeatedly.".to_owned()
+        } else if plural
+            && !matches!(overall, Activity::Restarting { .. })
+            && self.activities().any(|state| state != overall)
+        {
+            "Part of this machine's setup is not running.".to_owned()
         } else {
             let state = match (overall, plural) {
                 (Activity::Restarting { .. }, false) => "is restarting repeatedly",
@@ -877,8 +972,14 @@ impl NodeStatus {
                 }
             })
             .collect();
-        if next.is_empty() && self.units.is_empty() {
-            next.push(
+        if matches!(self.role, Role::Server | Role::Both)
+            && !self
+                .units
+                .iter()
+                .any(|(unit, _)| unit.kind == Kind::Server && !unit.masked)
+        {
+            next.insert(
+                0,
                 "Restore the server service for the existing data, then run infraternal status."
                     .to_owned(),
             );
@@ -886,32 +987,22 @@ impl NodeStatus {
         (overall, message, next)
     }
 
-    /// Overall activity: any running unit means the node is up.
+    /// Overall activity follows configured roles: a healthy companion cannot
+    /// hide a known down role. Unknown alone is not proof of a stopped service.
     #[must_use]
     pub fn overall(&self) -> Activity {
-        if self
-            .units
-            .iter()
-            .any(|(_, state)| *state == Activity::Active)
+        if let Some(state) = self
+            .activities()
+            .find(|state| matches!(state, Activity::Restarting { .. }))
         {
-            Activity::Active
-        } else if let Some((_, state)) = self
-            .units
-            .iter()
-            .find(|(_, state)| matches!(state, Activity::Restarting { .. }))
-        {
-            *state
-        } else if self
-            .units
-            .iter()
-            .any(|(_, state)| *state == Activity::Failed)
-        {
+            state
+        } else if self.activities().any(|state| state == Activity::Failed) {
             Activity::Failed
-        } else if self
-            .units
-            .iter()
-            .any(|(_, state)| *state == Activity::Unknown)
-        {
+        } else if self.activities().any(|state| state == Activity::Inactive) {
+            Activity::Inactive
+        } else if self.activities().any(|state| state == Activity::Active) {
+            Activity::Active
+        } else if self.activities().any(|state| state == Activity::Unknown) {
             Activity::Unknown
         } else {
             Activity::Inactive

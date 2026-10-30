@@ -534,3 +534,142 @@ fn stopped_and_failed_services_keep_distinct_headlines_and_diagnostics() {
         assert_eq!(next, ["systemctl status infraternal-server.service"]);
     }
 }
+
+/// The module's role/state table is checked for both standalone roles and all
+/// 49 server/companion combinations, including absent and masked server files.
+#[test]
+#[allow(clippy::too_many_lines)] // Keep the complete documented contract in one table.
+fn configured_role_state_table_controls_headline_and_exit() {
+    use Activity::{Active, Failed, Inactive, Restarting, Unknown};
+    let activities = [
+        Active,
+        Restarting { code: 1, status: 7 },
+        Failed,
+        Inactive,
+        Inactive,
+        Inactive,
+        Unknown,
+    ];
+    // R=running, L=all looping, F=all failed, D=all stopped,
+    // P=part stopped, Q=part looping, U=unknown, X=down plus unknown.
+    let matrix = [
+        ['R', 'P', 'P', 'P', 'P', 'P', 'U'],
+        ['P', 'L', 'Q', 'Q', 'Q', 'Q', 'X'],
+        ['P', 'Q', 'F', 'P', 'P', 'P', 'X'],
+        ['P', 'Q', 'P', 'D', 'D', 'D', 'X'],
+        ['P', 'Q', 'P', 'D', 'D', 'D', 'X'],
+        ['P', 'Q', 'P', 'D', 'D', 'D', 'X'],
+        ['U', 'X', 'X', 'X', 'X', 'X', 'U'],
+    ];
+    for (server_index, server) in activities.iter().enumerate() {
+        for (agent_index, agent) in activities.iter().enumerate() {
+            let fixture = Fixture::new();
+            fixture.write("var-lib/infraternal.sqlite", "");
+            match server_index {
+                3 => std::os::unix::fs::symlink(
+                    "/dev/null",
+                    fixture.root.join("etc/infraternal-server.service"),
+                )
+                .unwrap(),
+                4 => {}
+                _ => fixture.write(
+                    "etc/infraternal-server.service",
+                    "[Service]\nExecStart=/usr/bin/infraternal server\n",
+                ),
+            }
+            // A standalone host has an installed unit even when the manager
+            // reports missing/masked; without it no local host role is known.
+            fixture.write(
+                "user/infraternal-agent.service",
+                "[Service]\nExecStart=/usr/bin/infraternal agent run\n",
+            );
+            if agent_index == 3 {
+                fs::remove_file(fixture.root.join("user/infraternal-agent.service")).unwrap();
+                std::os::unix::fs::symlink(
+                    "/dev/null",
+                    fixture.root.join("user/infraternal-agent.service"),
+                )
+                .unwrap();
+            }
+            let node = probe(&fixture.roots(), &IDS.map(str::to_owned), &|scope, _| {
+                if scope == Scope::System {
+                    *server
+                } else if let Restarting { .. } = agent {
+                    Restarting {
+                        code: 2,
+                        status: 11,
+                    }
+                } else {
+                    *agent
+                }
+            });
+            let label = matrix[server_index][agent_index];
+            let expected = match label {
+                'R' => "The server and the infraternal agent are running on this machine.",
+                'L' => {
+                    "The server and the infraternal agent are restarting repeatedly on this machine."
+                }
+                'F' => "The server and the infraternal agent have failed on this machine.",
+                'D' => "The server and the infraternal agent are not running on this machine.",
+                'Q' => "Part of this machine's setup is restarting repeatedly.",
+                'U' => "The status of part of this machine's setup is unknown.",
+                'X' => "Part of this machine's setup is not running; another status is unknown.",
+                _ => "Part of this machine's setup is not running.",
+            };
+            assert_eq!(
+                node.headline().1,
+                expected,
+                "server={server_index}, infraternal agent={agent_index}"
+            );
+            let exit = if node.confirmed_down_count() == 0 {
+                0
+            } else {
+                5
+            };
+            assert_eq!(exit, if matches!(label, 'R' | 'U') { 0 } else { 5 });
+            if exit == 5 {
+                assert_ne!(node.headline().0, Active);
+            }
+        }
+    }
+    for (kind, role) in [(Kind::Server, "server"), (Kind::Agent, "infraternal agent")] {
+        for (index, activity) in activities.iter().enumerate() {
+            let fixture = Fixture::new();
+            fixture.write(
+                "etc/infraternal.service",
+                &format!(
+                    "[Service]\nExecStart=/usr/bin/infraternal {}\n",
+                    if kind == Kind::Server {
+                        "server"
+                    } else {
+                        "agent run"
+                    }
+                ),
+            );
+            let node = probe(&fixture.roots(), &IDS.map(str::to_owned), &|_, _| *activity);
+            let (phrase, exit) = match index {
+                0 => ("is running", 0),
+                1 => ("is restarting repeatedly", 5),
+                2 => ("has failed", 5),
+                6 => ("unknown", 0),
+                _ => ("is not running", 5),
+            };
+            assert_eq!(
+                node.headline().1,
+                if index == 6 {
+                    "The status of part of this machine's setup is unknown.".to_owned()
+                } else {
+                    format!("The {role} {phrase} on this machine.")
+                }
+            );
+            assert_eq!(
+                if node.confirmed_down_count() == 0 {
+                    0
+                } else {
+                    5
+                },
+                exit
+            );
+        }
+    }
+}
