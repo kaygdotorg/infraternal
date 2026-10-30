@@ -98,14 +98,34 @@ printf '%s\n' ActiveState=activating SubState=auto-restart NRestarts=45 MainPID=
 fn repeated_starts_with_a_future_wall_clock_timestamp_are_not_running() {
     isolated(
         "repeated_starts_with_a_future_wall_clock_timestamp_are_not_running",
-        r#"
+        r"
 printf '%s\n' ActiveState=active SubState=running NRestarts=45 MainPID=42 ExecMainStartTimestamp=@FUTURE_TIMESTAMP ExecMainCode=1 ExecMainStatus=1
-"#,
+",
         |_| {
             assert_ne!(
                 manager_activity(Scope::User, "infraternal-agent.service"),
                 Activity::Active,
                 "a backward clock step must not turn a recent restart loop into Running"
+            );
+        },
+    );
+}
+
+#[test]
+fn older_manager_clients_preserve_failed_service_observation() {
+    isolated(
+        "older_manager_clients_preserve_failed_service_observation",
+        r#"
+for argument do
+    if [ "$argument" = --timestamp=unix ]; then exit 1; fi
+done
+printf '%s\n' ActiveState=failed SubState=failed NRestarts=45 MainPID=0 ExecMainCode=1 ExecMainStatus=1
+"#,
+        |_| {
+            assert_eq!(
+                manager_activity(Scope::User, "infraternal-agent.service"),
+                Activity::Failed,
+                "a timestamp-format refusal must not hide a failed service"
             );
         },
     );
