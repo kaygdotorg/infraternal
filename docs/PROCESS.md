@@ -143,16 +143,20 @@ Reviews and fixes run at the same time as the next lane's build.
 - `scripts/verify fast` checks the stripped, static release binaries against
   exact measured ceilings, with no growth allowance (D243):
 
-  | Target | Measured ceiling |
-  | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,445,296 bytes |
-  | `aarch64-unknown-linux-musl` | 19,604,184 bytes |
+  | Build host | Target | Measured ceiling |
+  | --- | --- | ---: |
+  | `x86_64` | `x86_64-unknown-linux-musl` | 21,444,656 bytes |
+  | `aarch64` | `x86_64-unknown-linux-musl` | 21,445,296 bytes |
+  | `aarch64` | `aarch64-unknown-linux-musl` | 19,604,184 bytes |
 
-  The #146 integration onto requested dev `42ab33035` measures 21,445,296 /
-  19,604,184 bytes (x86_64 / aarch64) with app windows off by default. The
-  x86_64 artifact grows 13,824 bytes from the 42ab33035 baseline of 21,431,472;
-  this is 2,560 bytes below D243's 16 KiB limit. Both exact ceilings follow
-  the stripped images with no spare allowance. The desktop backend is
+  The #146 integration onto requested dev `42ab33035` measures 21,444,656 bytes
+  on native x86_64 and 21,445,296 bytes for the aarch64-hosted x86_64
+  cross-build. Against the 42ab33035 x86_64 baseline of 21,431,472 bytes, the
+  flag-off deltas are +13,184 and +13,824 bytes respectively, both below D243's
+  16 KiB limit. The aarch64-hosted native image measures 19,604,184 bytes.
+  The x86_64 host-target pairs use separate exact ceilings because the
+  measured artifacts differ by 640 bytes; neither ceiling has spare allowance.
+  The desktop backend is
   optional, production ignores the `?appwin=1` preview flag, and the Settings
   preference starts off and requires the server capability. Receipts and the
   final gate are recorded on #146.

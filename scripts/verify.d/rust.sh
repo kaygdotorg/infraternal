@@ -44,6 +44,7 @@ rust_check_static_binary() {
     local size_bytes
     local delta_bytes
     local max_size_bytes
+    local build_host
 
     if [[ ! -x "$binary" ]]; then
         printf 'expected executable not found: %s\n' "$binary" >&2
@@ -63,14 +64,16 @@ rust_check_static_binary() {
         return 1
     fi
 
-    # D243 ratchets each ceiling to the measured stripped artifact. J16's
-    # flag-off x86 delta is 13,824 bytes, within its <16 KiB exception; keep
-    # both ceilings exact so this adds no further size allowance.
-    case "$target" in
-        x86_64-unknown-linux-musl) max_size_bytes=21445296 ;;
-        aarch64-unknown-linux-musl) max_size_bytes=19604184 ;;
+    # D243 records exact stripped sizes by build host and target. The x86
+    # image differs by 640 bytes between native and aarch64-hosted builds.
+    build_host="$(uname -m)"
+    case "$build_host:$target" in
+        x86_64:x86_64-unknown-linux-musl) max_size_bytes=21444656 ;;
+        aarch64:x86_64-unknown-linux-musl) max_size_bytes=21445296 ;;
+        *:aarch64-unknown-linux-musl) max_size_bytes=19604184 ;;
         *)
-            printf 'no static binary size baseline configured for target: %s\n' "$target" >&2
+            printf 'no static binary size baseline configured for host %s and target %s\n' \
+                "$build_host" "$target" >&2
             return 1
             ;;
     esac
