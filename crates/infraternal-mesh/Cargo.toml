@@ -5,6 +5,11 @@ version.workspace = true
 edition.workspace = true
 license = "AGPL-3.0-only"
 
+[features]
+default = []
+# Peer-socket observations are used only by the opt-in mesh relay path [220,313].
+relay = []
+
 [dependencies]
 infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
 serde.workspace = true
@@ -13,6 +18,10 @@ thiserror.workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 nix = { workspace = true, features = ["time"] }
+
+[[test]]
+name = "discovery"
+required-features = ["relay"]
 
 [lints]
 workspace = true

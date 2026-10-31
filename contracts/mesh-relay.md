@@ -7,8 +7,9 @@ D196, D197, D201, D313 and D316. It does not select a new transport, crypto
 engine or path selector.
 
 The relay runtime is opt-in at build time: `infraternal-plugin-relay/runtime`
-contains the service and client, and `infraternal-plugin-mesh/relay` contains
-the seam C shim. Neither feature is enabled by the default `infraternal`
+contains the service and client, `infraternal-mesh/relay` contains the bounded
+peer-socket discovery book, and `infraternal-plugin-mesh/relay` contains the
+seam C shim. None of these features is enabled by the default `infraternal`
 shipping feature set. The relay CLI declarations can be compiled without the
 runtime. The D243 release check must confirm that this slice adds no bytes to
 the default shipping image.
