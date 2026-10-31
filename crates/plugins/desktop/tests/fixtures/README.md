@@ -61,3 +61,21 @@ per-run symlinks: `pixel-reader.py` reports its PID and never drains input;
 `reply-ordering.py` emits an old inventory reply before the next status reply.
 The executable is checked in so concurrent tests never write the script they
 are about to execute. Each run exclusively creates its receipt directory.
+
+`measure-app-window.py` measures one real app window end to end (#146). Its
+preferred transport launches the signed companion bundle itself with
+`open -n -W -g --stdin FIFO --stdout FILE --stderr FILE --env
+INFRATERNAL_DESKTOP_MEASURE=1 <bundle> --args --surface-capture`, so macOS
+attributes capture to the bundle's own grant. Do not run capture under `sudo`
+on a test Mac: a companion spawned by the Rust helper under `sudo` passed TCC as
+its bundle, yet macOS asked the owner whether "sudo" may bypass the private
+window picker (macOS 26.5, #146). `--socket` speaks
+to a running helper instead, for the production socket path. Phases are
+warmup, idle, typing (tagged text input through the companion), optional
+scroll (tagged wheel events over a long document) and settled; the target app
+must be frontmost for typing. `summarize RUN STDERR` joins frame receipts with
+the companion's METRIC lines by capture stamp: capture-to-encoded and
+capture-to-client percentiles exclude sharp refreshes of the retained picture
+(`surface_delivery fresh=false`), whose stamp age is not latency. CPU covers the
+companion plus `VTEncoderXPCService`, `replayd` and `WindowServer`, which also
+serve other clients. Decode `stream.h264` with any H.264 decoder for pixels.
