@@ -30,10 +30,21 @@
         let
           # Channel, components and musl targets come from rust-toolchain.toml.
           rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          # .cargo/rustc.sh asks `rustup which rustc` for the compiler. The
+          # toolchain is already pinned by nix, so answer that one query and
+          # refuse everything else; real rustup would download a compiler.
+          rustupShim = pkgs.writeShellScriptBin "rustup" ''
+            if [ "$1" = which ] && [ -n "$2" ]; then
+              command -v "$2"
+              exit
+            fi
+            echo "rustup shim: only 'rustup which <tool>' is supported (nix provides the toolchain)" >&2
+            exit 1
+          '';
         in {
           default = pkgs.mkShell {
             packages = [
-              rust
+              rust rustupShim
               pkgs.cargo-deny          # cargo-deny gate (deny.toml)
               pkgs.bun                 # TypeScript tests, tracer build
               pkgs.python3             # release and fixture scripts
