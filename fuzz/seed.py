@@ -54,6 +54,7 @@ def seed_relay():
         ('unlinked', bytes([0x82]) + host),
         ('link-trailing-byte', bytes([0x01]) + host + b'\x00'),
         ('datagram', (1).to_bytes(4, 'big') + b'\x01\x00\x00\x00ciphertext'),
+        ('datagram-empty-payload', (1).to_bytes(4, 'big')),
         ('datagram-zero-id', bytes(4) + b'ciphertext'),
         ('datagram-short-id', b'\x00\x00\x01'),
         ('host-uri', b'urn:infraternal:host:01234567-89ab-cdef-0123-456789abcdef'),

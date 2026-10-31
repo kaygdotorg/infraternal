@@ -188,7 +188,7 @@ impl Notice {
 #[must_use]
 pub fn split(datagram: &[u8]) -> Option<(LinkId, &[u8])> {
     let id = u32::from_be_bytes(datagram.get(..HEADER)?.try_into().ok()?);
-    (id != 0).then(|| (LinkId(id), &datagram[HEADER..]))
+    (id != 0 && datagram.len() > HEADER).then(|| (LinkId(id), &datagram[HEADER..]))
 }
 
 #[cfg(test)]
@@ -255,9 +255,9 @@ mod tests {
     }
 
     #[test]
-    fn datagram_header_needs_a_nonzero_id() {
+    fn datagram_needs_a_nonzero_id_and_ciphertext() {
         assert_eq!(split(&[0, 0, 0, 9, 1, 2]), Some((LinkId(9), &[1, 2][..])));
-        assert_eq!(split(&[0, 0, 0, 9]), Some((LinkId(9), &[][..])));
+        assert_eq!(split(&[0, 0, 0, 9]), None);
         assert_eq!(split(&[0, 0, 0, 0, 1]), None);
         assert_eq!(split(&[0, 0, 9]), None);
     }

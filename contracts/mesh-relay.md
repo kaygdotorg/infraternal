@@ -54,7 +54,8 @@ Each QUIC DATAGRAM begins with a four-byte big-endian nonzero link ID. The
 remainder is forwarded unchanged as opaque WireGuard ciphertext. The relay
 does not decrypt, re-encode or copy it. The receiver removes the four-byte
 link ID and sends the ciphertext to its local kernel WireGuard socket. The
-frame parser checks the header and link ID; WireGuard validates the packet.
+frame parser rejects a zero link ID and a header-only DATAGRAM; WireGuard
+validates the non-empty packet.
 QUIC DATAGRAM delivery is unreliable and unordered, matching the inner
 WireGuard datagram semantics. Per-connection receive and send queues are
 bounded to 512 KiB and 256 KiB respectively; congestion may drop datagrams.

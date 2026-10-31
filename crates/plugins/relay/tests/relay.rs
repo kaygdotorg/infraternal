@@ -83,7 +83,15 @@ async fn linked_hosts_exchange_unchanged_datagrams_and_others_cannot_inject() {
     let (c, mut cn) = client(&mut ca, address, host(3)).await;
     let id = linked(&a, &mut an, &b, &mut bn, (host(1), host(2))).await;
 
-    for size in [0, 1, 92, 148, 1000] {
+    a.connection().send_datagram(frame(id, &[])).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), b.connection().read_datagram())
+            .await
+            .is_err(),
+        "header-only datagram was relayed"
+    );
+
+    for size in [1, 92, 148, 1000] {
         let payload: Vec<u8> = (0..size).map(|i| u8::try_from(i % 251).unwrap()).collect();
         a.connection().send_datagram(frame(id, &payload)).unwrap();
         let got = tokio::time::timeout(WAIT, b.connection().read_datagram())
@@ -121,8 +129,8 @@ async fn linked_hosts_exchange_unchanged_datagrams_and_others_cannot_inject() {
     );
     let stats = relay.stats();
     assert_eq!((stats.hosts, stats.links), (3, 1));
-    assert_eq!(stats.forwarded, 11);
-    assert!(stats.dropped >= 2, "{stats:?}");
+    assert_eq!(stats.forwarded, 9);
+    assert!(stats.dropped >= 3, "{stats:?}");
     relay.close().await;
 }
 

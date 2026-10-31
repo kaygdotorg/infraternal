@@ -35,7 +35,10 @@ fuzz_target!(|data: &[u8]| {
         if let Some(notice) = wire::Notice::decode(kind, body) {
             let (encoded, len) = notice.encode();
             assert_eq!(wire::notice_len(encoded[0]), Some(len - 1));
-            assert_eq!(wire::Notice::decode(encoded[0], &encoded[1..len]), Some(notice));
+            assert_eq!(
+                wire::Notice::decode(encoded[0], &encoded[1..len]),
+                Some(notice)
+            );
         }
     }
 
