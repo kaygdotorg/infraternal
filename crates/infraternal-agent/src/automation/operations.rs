@@ -5,20 +5,32 @@ use infraternal_shim::frame::Frame;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::{
-    collections::BTreeMap,
     fs,
     io::{self, Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::Path,
 };
 
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Name {
-    pub(super) name: String,
-    pub(super) uid: u32,
+// Reuse the existing JSON object representation instead of instantiating a
+// second ordered-map implementation and serde visitors for private name rows.
+pub(super) type Names = serde_json::Map<String, Value>;
+fn decode_names(bytes: &[u8]) -> io::Result<Names> {
+    let Value::Object(names) = serde_json::from_slice(bytes)? else {
+        return Err(io::ErrorKind::InvalidData.into());
+    };
+    for (id, entry) in &names {
+        if uuid::Uuid::parse_str(id).is_err()
+            || entry.as_object().is_none_or(|row| row.len() != 2)
+            || !entry["name"].as_str().is_some_and(super::name)
+            || entry["uid"]
+                .as_u64()
+                .is_none_or(|uid| u32::try_from(uid).is_err())
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+    }
+    Ok(names)
 }
-pub(super) type Names = BTreeMap<String, Name>;
 pub(super) fn load(state: &Path) -> io::Result<Names> {
     match fs::OpenOptions::new()
         .read(true)
@@ -38,14 +50,7 @@ pub(super) fn load(state: &Path) -> io::Result<Names> {
             if bytes.len() > 1_048_576 {
                 return Err(io::ErrorKind::InvalidData.into());
             }
-            let names: Names = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-            if names
-                .iter()
-                .any(|(id, entry)| uuid::Uuid::parse_str(id).is_err() || !super::name(&entry.name))
-            {
-                return Err(io::ErrorKind::InvalidData.into());
-            }
-            Ok(names)
+            decode_names(&bytes)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Names::new()),
         Err(error) => Err(error),
@@ -77,7 +82,8 @@ fn id(session: &Session) -> String {
 fn label(session: &Session, names: &Names) -> String {
     names
         .get(&id(session))
-        .map_or_else(|| id(session), |entry| entry.name.clone())
+        .and_then(|entry| entry["name"].as_str())
+        .map_or_else(|| id(session), str::to_owned)
 }
 fn row(session: &Session, names: &Names) -> Value {
     json!({"id": id(session), "name": label(session, names), "machine": "local"})
@@ -289,13 +295,7 @@ async fn create(
         &command,
     )
     .await?;
-    names.insert(
-        id(&session),
-        Name {
-            name: name.to_owned(),
-            uid,
-        },
-    );
+    names.insert(id(&session), json!({"name": name, "uid": uid}));
     if let Err(error) = save(state, &names) {
         // A failed name publication cannot leave a successful unnamed create.
         if let Ok(mut cleanup) = sessions::connect_sequenced(session.path.clone(), session.id).await
@@ -353,6 +353,25 @@ async fn send_text(session: Session, input: &Value) -> io::Result<Reply> {
 mod tests {
     //! A bounded transport page must not turn into a cap on the available sessions.
     use super::*;
+    #[test]
+    fn private_names_keep_the_existing_shape_and_strict_validation() {
+        let id = uuid::Uuid::from_u128(1).to_string();
+        let good = json!({id.clone(): {"name":"build", "uid":1000}});
+        let parsed = decode_names(&serde_json::to_vec(&good).unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), good);
+        for entry in [
+            json!([]),
+            json!({"name":"build", "uid":-1}),
+            json!({"name":"build", "uid":4294967296_u64}),
+            json!({"name":"../escape", "uid":1000}),
+            json!({"name":"build", "uid":1000, "extra":true}),
+            json!({"name":"build"}),
+        ] {
+            assert!(
+                decode_names(&serde_json::to_vec(&json!({id.clone():entry})).unwrap()).is_err()
+            );
+        }
+    }
     #[tokio::test]
     async fn lists_500_sessions_across_bounded_pages_without_loss() {
         let mut after = None;
@@ -364,10 +383,7 @@ mod tests {
                     let id = uuid::Uuid::from_u128(number);
                     names.insert(
                         id.to_string(),
-                        Name {
-                            name: format!("{:0<64}", number),
-                            uid: 1000,
-                        },
+                        json!({"name": format!("{:0<64}", number), "uid": 1000}),
                     );
                     let (peer, _) = tokio::net::UnixStream::pair().unwrap();
                     Session {

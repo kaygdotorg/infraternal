@@ -6,7 +6,7 @@
 mod metadata;
 mod operations;
 use crate::sessions::{self, Session};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::{io, os::unix::fs::MetadataExt, path::Path, time::Duration};
 
@@ -17,7 +17,7 @@ pub fn actions() -> Vec<infraternal_plugin_api::ActionDefinition> {
 }
 
 /// Bounded result carried inside the existing public Call/Result framing.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct Reply {
     pub code: u8,
     pub message: String,
@@ -25,6 +25,32 @@ pub struct Reply {
     pub data: Value,
 }
 impl Reply {
+    /// Decode through the shared JSON parser, avoiding a second typed visitor.
+    /// # Errors
+    /// Refuses malformed results while permitting additive future fields.
+    pub fn decode(bytes: &[u8]) -> io::Result<Self> {
+        let mut value: Value = serde_json::from_slice(bytes)?;
+        let code = value["code"]
+            .as_u64()
+            .and_then(|n| u8::try_from(n).ok())
+            .ok_or(io::ErrorKind::InvalidData)?;
+        let Value::String(message) = value["message"].take() else {
+            return Err(io::ErrorKind::InvalidData.into());
+        };
+        let Value::String(next) = value["next"].take() else {
+            return Err(io::ErrorKind::InvalidData.into());
+        };
+        let data = value
+            .as_object_mut()
+            .and_then(|object| object.remove("data"))
+            .ok_or(io::ErrorKind::InvalidData)?;
+        Ok(Self {
+            code,
+            message,
+            next,
+            data,
+        })
+    }
     fn ok(message: &str, data: Value) -> Self {
         Self {
             code: 0,
@@ -144,7 +170,7 @@ fn same_account(session: &Session, uid: u32, names: &operations::Names) -> bool 
     }) && ((uid != 0 && session.peer.peer_cred().is_ok_and(|peer| peer.uid() == uid))
         || names
             .get(&uuid::Uuid::from_bytes(session.id).to_string())
-            .is_some_and(|entry| entry.uid == uid)
+            .is_some_and(|entry| entry["uid"].as_u64() == Some(u64::from(uid)))
         || std::fs::read_to_string(format!(
             "/proc/{}/task/{}/children",
             session.pid, session.pid
@@ -234,6 +260,23 @@ mod tests {
         }
         assert!(validate("list", &json!({})).is_ok());
         assert!(validate("new", &json!({"machine":"local", "name":"ok", "command":["/bin/echo", "", "literal; safe"]})).is_ok());
+    }
+    #[test]
+    fn reply_decoder_keeps_additive_fields_and_refuses_malformed_fields() {
+        let reply = Reply::ok("ok", json!({"bytes_sent": 7}));
+        let mut value = serde_json::to_value(&reply).unwrap();
+        value["future"] = json!(true);
+        let decoded = Reply::decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(decoded.code, 0);
+        assert_eq!(decoded.data, reply.data);
+        for malformed in [
+            json!([]),
+            json!({"code": 256, "message":"", "next":"", "data":{}}),
+            json!({"code": 0, "message":false, "next":"", "data":{}}),
+            json!({"code":0, "message":"", "next":""}),
+        ] {
+            assert!(Reply::decode(&serde_json::to_vec(&malformed).unwrap()).is_err());
+        }
     }
     #[test]
     fn caller_tree_is_kernel_derived_and_account_scoped() {

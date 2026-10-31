@@ -129,7 +129,7 @@ async fn execute(
 ) -> io::Result<Reply> {
     let action = format!("sessions.{verb}");
     let bytes = infraternal_agent::plugin_control::call(state, &action, bytes).await?;
-    let mut reply: Reply = serde_json::from_slice(&bytes)?;
+    let mut reply = Reply::decode(&bytes)?;
     if verb != "list" || reply.code != 0 {
         return Ok(reply);
     }
@@ -148,8 +148,7 @@ async fn execute(
         let result =
             infraternal_agent::plugin_control::call(state, &action, &serde_json::to_vec(&page)?)
                 .await;
-        let next = result
-            .and_then(|bytes| serde_json::from_slice::<Reply>(&bytes).map_err(io::Error::other));
+        let next = result.and_then(|bytes| Reply::decode(&bytes));
         match next {
             Ok(next) if next.code == 0 => {
                 rows.extend(
