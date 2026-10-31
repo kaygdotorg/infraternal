@@ -12,6 +12,53 @@ const IDS: [&str; 8] = [
     "release", "server", "agent", "mesh", "host", "relay", "backup", "ssh",
 ];
 
+#[test]
+fn manager_completion_follows_child_exit_even_if_stdout_closes_first() {
+    use std::{process::Command, time::Duration, time::Instant};
+
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "exec 1>&-; /bin/sleep 0.02; exit 7"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let result = super::wait_manager_child(&mut child, Instant::now() + Duration::from_secs(1));
+    if result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    assert_eq!(result.unwrap().code(), Some(7));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn manager_completion_handles_an_already_exited_child_and_a_deadline() {
+    use std::{process::Command, time::Duration, time::Instant};
+
+    let mut exited = Command::new("/bin/false").spawn().unwrap();
+    // Leave the exited child unreaped, exactly as when it exits between spawn
+    // and readiness registration. waitid(WNOWAIT) observes without consuming it.
+    nix::sys::wait::waitid(
+        nix::sys::wait::Id::Pid(nix::unistd::Pid::from_raw(
+            i32::try_from(exited.id()).unwrap(),
+        )),
+        nix::sys::wait::WaitPidFlag::WEXITED | nix::sys::wait::WaitPidFlag::WNOWAIT,
+    )
+    .unwrap();
+    let result = super::wait_manager_child(&mut exited, Instant::now() + Duration::from_secs(1));
+    assert_eq!(result.unwrap().code(), Some(1));
+
+    let mut stalled = Command::new("/bin/sleep").arg("5").spawn().unwrap();
+    let started = Instant::now();
+    let result = super::wait_manager_child(&mut stalled, started + Duration::from_millis(40));
+    let _ = stalled.kill();
+    stalled.wait().unwrap();
+    assert!(
+        result.is_err(),
+        "a live manager cannot complete after its deadline"
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
 struct Fixture {
     root: std::path::PathBuf,
 }

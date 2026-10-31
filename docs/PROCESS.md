@@ -145,8 +145,8 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,445,552 bytes |
-  | `aarch64-unknown-linux-musl` | 19,630,392 bytes |
+  | `x86_64-unknown-linux-musl` | 21,443,824 bytes |
+  | `aarch64-unknown-linux-musl` | 19,629,240 bytes |
 
   Crash-loop status reporting and final review fixes (#237, D299/D303) use the
   pinned `scripts/static-cargo` stripped static recipe on build host
@@ -154,29 +154,35 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Source | x86_64 bytes | aarch64 bytes |
   | --- | ---: | ---: |
-  | origin/dev (`ec7b10111`) | 21,431,472 | 19,605,896 |
-  | #237 source (`0b4540046`) | 21,445,552 | 19,630,392 |
-  | Delta versus dev | +14,080 | +24,496 |
+  | origin/dev (`105b1a28d`) | 21,431,472 | 19,605,896 |
+  | #237 before completion readiness (`3ee792774`) | 21,445,552 | 19,630,392 |
+  | #237 completion readiness (`b5d823923`) | 21,443,824 | 19,629,240 |
+  | Final delta versus dev | +12,352 | +23,344 |
 
-  The subsequent rebase onto dev `57491e918` adds only the nix shell, gate
-  tooling and an editor test fixture; shipping Rust, Cargo and `.cargo` inputs
-  are unchanged. The final gate checks the rebased source against these exact
-  caps, without allowance (D243). Both measured images are static, with no
-  `PT_INTERP`.
+  Fresh sequential J40 builds on compute01 reproduce both dev sizes; its x86
+  hash also matches the earlier `57491e918` baseline. The subsequent rebase
+  onto `105b1a28d` adds tracer frontend changes without changing Rust, Cargo,
+  scripts or `.cargo` inputs. Exit readiness reduces the prior branch images
+  by 1,728 / 1,152 bytes. Both exact caps ratchet down without allowance (D243).
+  Both measured images are static, with no `PT_INTERP`.
 
-  The aarch64 delta is 8,112 bytes above 16 KiB and below 64 KiB. This whole-branch
+  The aarch64 delta is 6,960 bytes above 16 KiB and below 64 KiB. This whole-branch
   growth retains monotonic restart/exit diagnostics, configured-role headlines
   and D303 exits. A mask cannot override observed running state or, alone,
   establish a down host role. Recovery names the owning manager's unmask command
   and shares the CLI's three-step budget with diagnostics. Queries use at most
   four fallible 128 KiB workers, two per scope, with bounded admission and
-  independent per-unit deadlines; resource refusal remains Unknown.
+  independent per-unit deadlines; resource refusal remains Unknown. Completion
+  waits on the owned child's exit descriptor within the same deadline, retaining
+  the bounded compatibility path when that descriptor is unavailable.
   Relative to dev, the earlier fix enables the existing nix dependency's `time`
   feature in the shipping graph for CLOCK_MONOTONIC; dev had it only in
-  development dependencies. The final fix round changes no dependency, feature,
-  version or release setting. These are whole-branch deltas, without claiming
-  per-helper attribution. Both target receipts, healthy-service timings labelled
-  "build host", and the final gate output are recorded on #237.
+  development dependencies. Completion readiness adds a Linux-only status-to-shim
+  dependency edge to reuse the audited exit descriptor; the shim already ships
+  in the binary. No library, version, shipping feature or release setting is
+  added. These are whole-branch deltas, without claiming per-helper attribution.
+  Both target receipts, paired perf-VM measurements and the final gate output
+  are recorded on #237.
 
   Replay geometry and stale-note repairs (#257, R257-01/R257-02) measure
   21,431,472 / 19,605,896 bytes (x86_64 / aarch64), using the pinned

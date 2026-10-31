@@ -1612,6 +1612,7 @@ dependencies = [
 name = "infraternal-status"
 version = "0.1.0"
 dependencies = [
+ "infraternal-shim",
  "nix",
  "uuid",
 ]

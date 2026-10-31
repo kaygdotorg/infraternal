@@ -866,28 +866,71 @@ fn manager_properties(
         "--no-pager", unit,
     ]).env("LC_ALL", "C").env("SYSTEMD_COLORS", "0")
         .stdin(Stdio::null()).stderr(Stdio::null()).stdout(Stdio::piped()).spawn().map_err(|_| "could not start the service manager query")?;
+    let status = wait_manager_child(&mut child, deadline);
+    if let Ok(status) = status {
+        let output = child
+            .wait_with_output()
+            .map_err(|_| "could not read the service manager response")?;
+        if status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            Err("service manager query was refused")
+        }
+    } else {
+        // Reap only the process this probe started. An unresponsive
+        // manager is unknown, never grounds to claim a running service.
+        let _ = child.kill();
+        let _ = child.wait();
+        Err("service manager query timed out")
+    }
+}
+
+/// Wait for this owned child's exit, keeping both observations on one deadline.
+/// The unreaped child pins its PID, so opening its lifetime descriptor cannot
+/// subscribe to a reused PID. Readiness wakes immediately without a sampling tick.
+fn wait_manager_child(
+    child: &mut std::process::Child,
+    deadline: std::time::Instant,
+) -> Result<std::process::ExitStatus, ()> {
+    #[cfg(target_os = "linux")]
+    if let Ok(descriptor) = infraternal_shim::process_exit_descriptor(child.id()) {
+        use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+        use std::os::fd::AsFd;
+
+        let mut fds = [PollFd::new(descriptor.as_fd(), PollFlags::POLLIN)];
+        loop {
+            let left = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .filter(|left| !left.is_zero())
+                .ok_or(())?;
+            // poll uses milliseconds; round up so sub-millisecond budget
+            // never becomes a busy loop or an early timeout.
+            let millis = left.as_nanos().div_ceil(1_000_000);
+            let timeout = PollTimeout::try_from(millis).map_err(|_| ())?;
+            match poll(&mut fds, timeout) {
+                Ok(0) => return Err(()),
+                Ok(_)
+                    if fds[0]
+                        .revents()
+                        .is_some_and(|flags| flags.contains(PollFlags::POLLIN)) =>
+                {
+                    return child.wait().map_err(|_| ());
+                }
+                Err(nix::errno::Errno::EINTR) => {}
+                _ => return Err(()),
+            }
+        }
+    }
+    // Non-Linux hosts, older kernels and denied/unavailable exit descriptors
+    // retain the existing bounded fallback. Readiness registration failure
+    // alone must not hide a manager response that was previously readable.
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let output = child
-                    .wait_with_output()
-                    .map_err(|_| "could not read the service manager response")?;
-                return if status.success() {
-                    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-                } else {
-                    Err("service manager query was refused")
-                };
-            }
+            Ok(Some(status)) => return Ok(status),
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
-            _ => {
-                // Reap only the process this probe started. An unresponsive
-                // manager is unknown, never grounds to claim a running service.
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("service manager query timed out");
-            }
+            _ => return Err(()),
         }
     }
 }

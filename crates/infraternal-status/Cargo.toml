@@ -8,6 +8,9 @@ license.workspace = true
 [dependencies]
 nix = { workspace = true, features = ["time"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+infraternal-shim.workspace = true
+
 [dev-dependencies]
 uuid.workspace = true
 
