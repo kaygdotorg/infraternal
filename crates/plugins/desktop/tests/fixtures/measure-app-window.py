@@ -39,6 +39,11 @@ import time
 
 VIDEO, ERROR, STATE, GEOMETRY, WINDOWS, INPUT_RESULT = 70, 69, 68, 66, 65, 67
 TEXT = "the quick brown fox jumps over the lazy dog 0123456789 "
+METRIC = re.compile(r"^METRIC (.*)$")
+
+
+def fields(line):
+    return dict(item.split("=", 1) for item in line.split() if "=" in item)
 
 
 def now():
@@ -60,11 +65,12 @@ def parse_header(header):
 class HelperLink:
     """Public helper socket (contracts/desktop-helper.md)."""
 
-    def __init__(self, path, helper_pid):
+    def __init__(self, path, helper_pid, metrics_log):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.connect(path)
         self.lock = threading.Lock()
         self.root = helper_pid
+        self.metrics_log = metrics_log
         self.private = False
 
     def send(self, kind, body):
@@ -158,8 +164,31 @@ class CompanionLink:
 SYSTEM = ("VTEncoderXPCService", "replayd", "WindowServer")
 
 
-def process_tree(root):
-    """CPU seconds and RSS KiB of root, its descendants and SYSTEM processes, from one ps snapshot."""
+def helper_companion_pids(path):
+    """Read LaunchServices companion PIDs reported by the helper, if still live."""
+    if not path:
+        return set()
+    pids = set()
+    with open(path, errors="replace") as metrics:
+        for line in metrics:
+            match = METRIC.match(line.strip())
+            if not match or not match.group(1).startswith("launch_services"):
+                continue
+            pid = fields(match.group(1)).get("pid")
+            if pid and pid.isdecimal() and int(pid) > 1:
+                pids.add(int(pid))
+    return pids
+
+
+def process_snapshot(link, metrics_log=None):
+    """Sample the helper, its detached LaunchServices companion and system work."""
+    companion_pids = {link.root} if link.private else helper_companion_pids(metrics_log)
+    roots = {link.root} | companion_pids
+    return {"at_ns": now(), "companion_pids": sorted(companion_pids), "tree": process_tree(roots)}
+
+
+def process_tree(roots):
+    """CPU seconds and RSS KiB of explicit roots, descendants and SYSTEM processes."""
     out = subprocess.run(["ps", "-axo", "pid=,ppid=,time=,rss=,comm="], capture_output=True, text=True, check=True).stdout
     rows = {}
     for line in out.splitlines():
@@ -167,7 +196,9 @@ def process_tree(root):
         rows[int(pid)] = (int(ppid), cpu_seconds(cpu), int(rss))
         if os.path.basename(command) in SYSTEM:
             rows[os.path.basename(command) + ":" + pid] = rows[int(pid)]
-    members, frontier = {root} | {key for key in rows if isinstance(key, str)}, [root]
+    roots = set(roots)
+    members = roots | {key for key in rows if isinstance(key, str)}
+    frontier = list(roots)
     while frontier:
         parent = frontier.pop()
         for pid, (ppid, _, _) in rows.items():
@@ -187,8 +218,14 @@ def cpu_seconds(text):
 
 
 def capture(args):
+    if args.socket and args.helper_pid is None:
+        raise SystemExit("--helper-pid is required with --socket so helper CPU and RSS are sampled")
+    if args.socket and not args.metrics_log:
+        raise SystemExit("--metrics-log is required with --socket so detached companion CPU and RSS are sampled")
+    if args.socket and not os.path.isfile(args.metrics_log):
+        raise SystemExit("--metrics-log must name the running helper's stderr file")
     os.makedirs(args.out, exist_ok=False)
-    link = CompanionLink(args.app, args.out) if args.app else HelperLink(args.socket, args.helper_pid)
+    link = CompanionLink(args.app, args.out) if args.app else HelperLink(args.socket, args.helper_pid, args.metrics_log)
     link.send(1, {})
     kind, body = link.read()
     assert kind == WINDOWS, kind
@@ -261,7 +298,7 @@ def capture(args):
         phases.append(("scroll", args.scroll, "scroll"))
     if args.after_idle:
         phases.append(("settled", args.after_idle, None))
-    snapshots = [(now(), process_tree(link.root))]
+    snapshots = [process_snapshot(link, args.metrics_log)]
     for name, seconds, action in phases:
         began = now()
         if action == "scroll":
@@ -298,13 +335,14 @@ def capture(args):
             events["typed"] = index
         else:
             time.sleep(seconds)
-        snapshots.append((now(), process_tree(link.root)))
+        snapshots.append(process_snapshot(link, args.metrics_log))
         events["phases"].append({"name": name, "begin_ns": began, "end_ns": now()})
     link.send(5, {})
     stopped.wait(10)
     stream.close()
     link.close()
-    events["cpu_snapshots"] = [{"at_ns": at, "tree": tree} for at, tree in snapshots]
+    events["cpu_snapshots"] = snapshots
+    events["companion_pids"] = sorted({pid for snapshot in snapshots for pid in snapshot["companion_pids"]})
     events["replies"] = replies
     with open(os.path.join(args.out, "events.json"), "w") as handle:
         json.dump(events, handle, indent=1)
@@ -314,13 +352,6 @@ def capture(args):
             handle.write("\t".join(str(v) for v in row) + "\n")
     first = receipts[0][0] - events["start_sent_ns"] if receipts else None
     print(json.dumps({"frames": len(receipts), "first_frame_ms": first and first / 1e6, "out": args.out}))
-
-
-METRIC = re.compile(r"^METRIC (.*)$")
-
-
-def fields(line):
-    return dict(item.split("=", 1) for item in line.split() if "=" in item)
 
 
 def percentile(values, q):
@@ -358,10 +389,12 @@ def summarize(args):
             lifecycle.append(match.group(1))
         if "pid" in values and match.group(1).startswith(("source_capture_config", "capture_window")):
             companion_pids.add(int(values["pid"]))
+    companion_pids.update(events.get("companion_pids", []))
     result = {"window": {k: events["window"].get(k) for k in ("app_name", "window_id", "owner_pid", "frame")},
               "output": [events["start"]["size"]["width"], events["start"]["size"]["height"]],
               "first_frame_ms": (receipts[0]["recv"] - events["start_sent_ns"]) / 1e6 if receipts else None,
               "launch_ms": events.get("launch_ms"),
+              "companion_pids": sorted(companion_pids),
               "start_reply_ms": (events["start_reply_ns"] - events["start_sent_ns"]) / 1e6,
               "typed": events.get("typed"), "scrolled": events.get("scrolled"), "phases": [], "callbacks": callbacks, "lifecycle": lifecycle}
     launches = [fields(entry) for entry in lifecycle if entry.startswith("launch_services")]
@@ -432,6 +465,7 @@ def main():
     run.add_argument("--app-name", help="first on-screen normal window of this app, instead of an ID")
     run.add_argument("--title", help="with --app-name: the window with exactly this title")
     run.add_argument("--helper-pid", type=int, help="helper PID for CPU sampling (with --socket)")
+    run.add_argument("--metrics-log", help="helper stderr path (required with --socket; supplies detached companion PIDs)")
     run.add_argument("--focus", action="store_true", help="click the target window center before warmup; use when that point is an editor")
     run.add_argument("--out", required=True)
     run.add_argument("--warmup", type=float, default=3)

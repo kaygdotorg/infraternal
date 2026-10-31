@@ -83,8 +83,12 @@ LaunchServices-to-PID startup time. `summarize RUN STDERR` joins frame receipts 
 the companion's METRIC lines by capture stamp: capture-to-encoded and
 capture-to-client percentiles exclude sharp refreshes of the retained picture
 (`surface_delivery fresh=false`), whose stamp age is not latency. CPU covers the
-companion plus `VTEncoderXPCService`, `replayd` and `WindowServer`, which also
-serve other clients. Decode `stream.h264` with any H.264 decoder for pixels.
+helper, its LaunchServices-detached companion, and `VTEncoderXPCService`,
+`replayd` and `WindowServer`, which also serve other clients. With `--socket`,
+pass `--helper-pid` and `--metrics-log` pointing to that helper's stderr file;
+the sampler follows its `launch_services pid=...` receipt to include the
+companion's CPU and RSS. The JSON records the sampled companion PIDs. Decode
+`stream.h264` with any H.264 decoder for pixels.
 
 `encoder-matrix.swift` lists every VideoToolbox encoder on the Mac and encodes a
 decoded PNG of a real captured window (static, typing-sized damage and 8 px

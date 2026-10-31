@@ -212,16 +212,20 @@ absolute and end in `.png`. It neither requests permissions nor injects input;
 it is not exposed as a server action. This keeps diagnostic stills under the
 installed identity instead of attributing them to a remote shell.
 
-A local supervisor may set `INFRATERNAL_DESKTOP_COMPANION` to the absolute
-executable path inside its installed signed companion bundle. It must be an
-owned regular executable without shared write permissions; symlinks are refused.
-Remote action bodies cannot set it. This preserves the signed bundle's installed
-identity instead of extracting another copy into a runtime directory. The Rust
-helper's diagnostic mode requires this explicit path and forwards the native
-JSON; normal operation otherwise retains its embedded-companion fallback.
-The bundle identifier remains `com.infraternal.desktop.helper`. Signing and
-permission approval remain installation prerequisites, never automated privacy
-or trust changes.
+A local supervisor sets `INFRATERNAL_DESKTOP_COMPANION` to the absolute
+executable path inside the installed signed bundle. It must be an owned regular
+executable without shared write permissions; symlinks are refused. Remote action
+bodies cannot set it. This path identifies the bundle and is never executed
+directly: the Rust helper starts the bundle through LaunchServices with
+`open -n -W -g`, passing a fresh mode-0600 Unix socket and PID-file path in its
+mode-0700 private runtime directory. The bundle writes its PID before connecting
+to that socket. The helper tracks the companion separately from the `open -W`
+waiter and verifies the private launch arguments before signaling it during
+bounded cleanup. Normal operation and `--check-permissions` both use this same
+signed LaunchServices path; there is no loose-executable or embedded-companion
+fallback. The bundle identifier remains `com.infraternal.desktop.helper`.
+Signing and permission approval remain installation prerequisites, never
+automated privacy or trust changes.
 
 Sources: [Apple responsibility model](https://developer.apple.com/documentation/security/applying-launch-environment-and-library-constraints),
 [spawn descriptor semantics](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/posix_spawn.2.html),
