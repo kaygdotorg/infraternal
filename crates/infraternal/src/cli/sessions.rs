@@ -6,6 +6,8 @@ use infraternal_plugin_api::ActionDefinition;
 use serde_json::{Value, json};
 use std::{io, path::PathBuf, process::ExitCode};
 
+// Keep this cold adapter out of the shared top-level command dispatch.
+#[inline(never)]
 pub fn run(action: &ActionDefinition, matches: &ArgMatches, json_output: bool) -> ExitCode {
     let verb = action.command.get(1).map_or("list", String::as_str);
     let mut input = json!({});
@@ -90,16 +92,15 @@ fn pretty(data: &Value) -> String {
     // Retained terminal output is data. Escape control bytes in human output so
     // merely reading it cannot send terminal control sequences to this caller.
     if let Some(text) = data["text"].as_str() {
-        return text
-            .chars()
-            .flat_map(|c| {
-                if c.is_control() && !matches!(c, '\n' | '\t') {
-                    c.escape_default().collect::<Vec<_>>()
-                } else {
-                    vec![c]
-                }
-            })
-            .collect();
+        let mut output = String::with_capacity(text.len());
+        for character in text.chars() {
+            if character.is_control() && !matches!(character, '\n' | '\t') {
+                output.extend(character.escape_default());
+            } else {
+                output.push(character);
+            }
+        }
+        return output;
     }
     if let Some(rows) = data["sessions"].as_array() {
         return rows
