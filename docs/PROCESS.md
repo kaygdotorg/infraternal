@@ -145,8 +145,17 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,444,656 bytes |
-  | `aarch64-unknown-linux-musl` | 19,605,896 bytes |
+  | `x86_64-unknown-linux-musl` | 21,445,296 bytes |
+  | `aarch64-unknown-linux-musl` | 19,604,184 bytes |
+
+  The #146 integration onto requested dev `42ab33035` measures 21,445,296 /
+  19,604,184 bytes (x86_64 / aarch64) with app windows off by default. The
+  x86_64 artifact grows 13,824 bytes from the 42ab33035 baseline of 21,431,472;
+  this is 2,560 bytes below D243's 16 KiB limit. Both exact ceilings follow
+  the stripped images with no spare allowance. The desktop backend is
+  optional, production ignores the `?appwin=1` preview flag, and the Settings
+  preference starts off and requires the server capability. Receipts and the
+  final gate are recorded on #146.
 
   Replay geometry and stale-note repairs (#257, R257-01/R257-02) measure
   21,431,472 / 19,605,896 bytes (x86_64 / aarch64), using the pinned

@@ -64,11 +64,11 @@ rust_check_static_binary() {
     fi
 
     # D243 ratchets each ceiling to the measured stripped artifact. J16's
-    # flag-off x86 delta is 13,184 bytes, within its <16 KiB exception; keep
-    # the new ceiling exact so this adds no further size allowance.
+    # flag-off x86 delta is 13,824 bytes, within its <16 KiB exception; keep
+    # both ceilings exact so this adds no further size allowance.
     case "$target" in
-        x86_64-unknown-linux-musl) max_size_bytes=21444656 ;;
-        aarch64-unknown-linux-musl) max_size_bytes=19605896 ;;
+        x86_64-unknown-linux-musl) max_size_bytes=21445296 ;;
+        aarch64-unknown-linux-musl) max_size_bytes=19604184 ;;
         *)
             printf 'no static binary size baseline configured for target: %s\n' "$target" >&2
             return 1
@@ -211,7 +211,9 @@ rust_static_build_check() {
     local target
     local targets=("x86_64-unknown-linux-musl" "aarch64-unknown-linux-musl")
     local target_dir="${CARGO_TARGET_DIR:-target}"
+    local host="$(uname -m)"
     local x86_binary="${target_dir}/x86_64-unknown-linux-musl/release/infraternal"
+    local native_binary
     local failed=0
 
     for tool in cargo file readelf stat prlimit python3 bun; do
@@ -230,7 +232,11 @@ rust_static_build_check() {
     for target in "${targets[@]}"; do
         scripts/static-cargo build --locked --release --package infraternal --target "$target" || return $?
         if [[ "$target" == x86_64-unknown-linux-musl ]]; then
-            CARGO_TARGET_DIR="$target_dir" python3 scripts/test-openssl-avx512-gcm.py || return $?
+            if [[ "$host" == x86_64 ]]; then
+                CARGO_TARGET_DIR="$target_dir" python3 scripts/test-openssl-avx512-gcm.py || return $?
+            else
+                printf 'x86_64 AES-GCM vector runtime check skipped on host %s\n' "$host"
+            fi
         fi
         # Keep every size failure, but still exercise both shipping providers.
         rust_check_static_binary "$target" || failed=1
@@ -240,8 +246,16 @@ rust_static_build_check() {
     CARGO_TARGET_DIR="$target_dir" python3 scripts/test-static-size.py || failed=1
     # Inspect both freshly built images; iterate never qualifies stale artifacts.
     CARGO_TARGET_DIR="$target_dir" bun test scripts/release/static-metadata-review.test.ts || failed=1
-    rust_check_cli_stub "$x86_binary" "server" || failed=1
-    rust_check_cli_group "$x86_binary" "agent" || failed=1
+    case "$host" in
+        x86_64) native_binary="$x86_binary" ;;
+        aarch64) native_binary="${target_dir}/aarch64-unknown-linux-musl/release/infraternal" ;;
+        *)
+            printf 'native CLI smoke checks have no binary for host architecture: %s\n' "$host" >&2
+            return 1
+            ;;
+    esac
+    rust_check_cli_stub "$native_binary" "server" || failed=1
+    rust_check_cli_group "$native_binary" "agent" || failed=1
     return "$failed"
 }
 
