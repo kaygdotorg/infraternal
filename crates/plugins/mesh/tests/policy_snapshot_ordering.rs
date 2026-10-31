@@ -33,6 +33,8 @@ fn install(fallback: bool) -> (Node, Config) {
         local_key: None,
         server: None,
         node: NodeId(1),
+        #[cfg(feature = "mesh-dns-spike")]
+        name: None,
         version: 10,
         addresses: Addresses {
             ipv4: "10.254.0.1".parse().unwrap(),
@@ -54,6 +56,8 @@ fn install(fallback: bool) -> (Node, Config) {
                 outbound: TrafficPolicy::None,
             },
         )]),
+        #[cfg(feature = "mesh-dns-spike")]
+        peer_names: std::collections::BTreeMap::new(),
     };
     for chunk in configuration::chunks(None, &config).unwrap() {
         node.chunk(chunk).unwrap();

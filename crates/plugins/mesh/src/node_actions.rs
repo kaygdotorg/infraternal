@@ -246,6 +246,9 @@ struct Empty {}
 struct IdentityProbe {
     #[serde(default)]
     compact_access: bool,
+    #[cfg(feature = "mesh-dns-spike")]
+    #[serde(default)]
+    dns_names: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -283,7 +286,11 @@ fn parse<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, PluginError>
 }
 /// Pure node action request. No kernel or filesystem operation occurs during parsing.
 pub enum Request {
-    Identity { compact_access: bool },
+    Identity {
+        compact_access: bool,
+        #[cfg(feature = "mesh-dns-spike")]
+        dns_names: bool,
+    },
     Up,
     Down,
     Status,
@@ -299,6 +306,8 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
             let probe: IdentityProbe = parse(input)?;
             Ok(Request::Identity {
                 compact_access: probe.compact_access,
+                #[cfg(feature = "mesh-dns-spike")]
+                dns_names: probe.dns_names,
             })
         }
         "mesh.up" | "mesh.down" | "mesh.status" => {
@@ -317,10 +326,17 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
 // Advertise extensions only after an explicit probe; ordinary callers receive the legacy shape.
 fn identity_response(
     identity: Option<crate::dataplane::Identity>,
-    requested: bool,
+    requested_compact_access: bool,
+    requested_dns_names: bool,
 ) -> Option<crate::dataplane::Identity> {
+    #[cfg(not(feature = "mesh-dns-spike"))]
+    let _ = requested_dns_names;
     identity.map(|mut identity| {
-        identity.compact_access &= requested;
+        identity.compact_access &= requested_compact_access;
+        #[cfg(feature = "mesh-dns-spike")]
+        {
+            identity.dns_names &= requested_dns_names;
+        }
         identity
     })
 }
@@ -378,15 +394,25 @@ impl AgentPlugin for MeshNodePlugin {
         let mut owner = self.owner.lock().map_err(|_| PluginError::Rejected)?;
         let node = owner.node()?;
         let result = match request {
-            Request::Identity { compact_access } => {
+            Request::Identity {
+                compact_access,
+                #[cfg(feature = "mesh-dns-spike")]
+                dns_names,
+            } => {
+                #[cfg(feature = "mesh-dns-spike")]
+                let requested_dns_names = dns_names;
+                #[cfg(not(feature = "mesh-dns-spike"))]
+                let requested_dns_names = false;
                 json!(identity_response(
                     node.ensure().map_err(|_| PluginError::Rejected)?,
-                    compact_access
+                    compact_access,
+                    requested_dns_names,
                 ))
             }
             Request::Up => {
                 json!(identity_response(
                     Some(node.up().map_err(|_| PluginError::Rejected)?),
+                    false,
                     false,
                 ))
             }
@@ -510,6 +536,8 @@ mod tests {
             server: Some(NodeId(2)),
             local_key: None,
             node: NodeId(1),
+            #[cfg(feature = "mesh-dns-spike")]
+            name: None,
             from_version: None,
             version: 1,
             index: 0,
@@ -536,6 +564,8 @@ mod tests {
             )]),
             merged: std::collections::BTreeMap::new(),
             removed: Vec::new(),
+            #[cfg(feature = "mesh-dns-spike")]
+            peer_names: std::collections::BTreeMap::new(),
         };
         plugin
             .call(
@@ -643,6 +673,8 @@ mod tests {
             local_key: None,
             server: None,
             node: NodeId(1),
+            #[cfg(feature = "mesh-dns-spike")]
+            name: None,
             from_version: None,
             version: 1,
             index: 0,
@@ -655,6 +687,8 @@ mod tests {
             upserted: std::collections::BTreeMap::new(),
             merged: std::collections::BTreeMap::new(),
             removed: Vec::new(),
+            #[cfg(feature = "mesh-dns-spike")]
+            peer_names: std::collections::BTreeMap::new(),
         };
         plugin
             .call(
@@ -708,13 +742,26 @@ mod identity_upgrade_tests {
             public_key: crate::policy::model::PublicKey([1; 32]),
             port: 44000,
             compact_access: true,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_names: true,
         };
-        let legacy = serde_json::json!(super::identity_response(Some(identity.clone()), false));
+        let legacy = serde_json::json!(super::identity_response(
+            Some(identity.clone()),
+            false,
+            false
+        ));
         assert_eq!(legacy.as_object().map(serde_json::Map::len), Some(2));
         assert_eq!(legacy["port"], 44000);
         assert!(legacy.get("compact_access").is_none());
-        let negotiated = serde_json::json!(super::identity_response(Some(identity), true));
+        let negotiated =
+            serde_json::json!(super::identity_response(Some(identity.clone()), true, true));
         assert_eq!(negotiated["compact_access"], true);
+        #[cfg(feature = "mesh-dns-spike")]
+        assert_eq!(negotiated["dns_names"], true);
+        let compact_only = serde_json::json!(super::identity_response(Some(identity), true, false));
+        assert_eq!(compact_only["compact_access"], true);
+        #[cfg(feature = "mesh-dns-spike")]
+        assert!(compact_only.get("dns_names").is_none());
     }
 }
 
@@ -742,6 +789,8 @@ mod peer_page_tests {
             local_key: None,
             server: Some(NodeId(1)),
             node: NodeId(1),
+            #[cfg(feature = "mesh-dns-spike")]
+            name: None,
             version: 4,
             addresses: address(1),
             default_policy: DefaultPolicy::Allow,
@@ -765,6 +814,8 @@ mod peer_page_tests {
                     )
                 })
                 .collect(),
+            #[cfg(feature = "mesh-dns-spike")]
+            peer_names: std::collections::BTreeMap::new(),
         }
     }
     fn page_through(

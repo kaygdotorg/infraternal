@@ -25,12 +25,20 @@ pub fn compile(
         .get(node)
         .ok_or(MeshError::UnknownNode)?;
     let view = coordinator.view(node).ok_or(MeshError::UnknownNode)?;
+    #[cfg(feature = "mesh-dns-spike")]
+    let name = checkpoint
+        .members
+        .iter()
+        .find(|member| member.node.id == node)
+        .map(|member| member.node.host.clone());
     let fallback = if default == DefaultPolicy::Allow {
         TrafficPolicy::All
     } else {
         TrafficPolicy::None
     };
     let mut peers = BTreeMap::new();
+    #[cfg(feature = "mesh-dns-spike")]
+    let mut peer_names = BTreeMap::new();
     for member in &checkpoint.members {
         let other = member.node.id;
         if other == node {
@@ -67,6 +75,8 @@ pub fn compile(
                 outbound,
             },
         );
+        #[cfg(feature = "mesh-dns-spike")]
+        peer_names.insert(other, member.node.host.clone());
     }
     Ok(Config {
         local_key: checkpoint
@@ -76,10 +86,14 @@ pub fn compile(
             .map(|member| member.keys.current),
         server: Some(checkpoint.server),
         node,
+        #[cfg(feature = "mesh-dns-spike")]
+        name,
         version: checkpoint.generation,
         addresses: local,
         default_policy: default,
         peers,
+        #[cfg(feature = "mesh-dns-spike")]
+        peer_names,
     })
 }
 /// List directed pairs that lose ANY new-connection reach. Port narrowing counts as a loss.
@@ -130,6 +144,8 @@ pub fn chunks(
             local_key: new.local_key,
             server: new.server,
             node: new.node,
+            #[cfg(feature = "mesh-dns-spike")]
+            name: new.name.clone(),
             from_version: old.map(|old| old.version),
             version: new.version,
             index: 0,
@@ -139,12 +155,20 @@ pub fn chunks(
             upserted: BTreeMap::new(),
             merged: BTreeMap::new(),
             removed: Vec::new(),
+            #[cfg(feature = "mesh-dns-spike")]
+            peer_names: BTreeMap::new(),
         },
         output: Vec::new(),
     };
     for (node, peer) in &new.peers {
         if old.and_then(|old| old.peers.get(node)) != Some(peer) {
             builder.peer(*node, peer)?;
+        }
+    }
+    #[cfg(feature = "mesh-dns-spike")]
+    for (node, name) in &new.peer_names {
+        if old.and_then(|old| old.peer_names.get(node)) != Some(name) {
+            builder.peer_name(*node, name)?;
         }
     }
     for node in old
@@ -183,6 +207,8 @@ impl Chunks {
         self.part.upserted.clear();
         self.part.merged.clear();
         self.part.removed.clear();
+        #[cfg(feature = "mesh-dns-spike")]
+        self.part.peer_names.clear();
         self.output.push(previous);
         Ok(())
     }
@@ -224,6 +250,27 @@ impl Chunks {
             }
         }
         Ok(())
+    }
+    #[cfg(feature = "mesh-dns-spike")]
+    fn peer_name(&mut self, node: NodeId, name: &str) -> Result<(), &'static str> {
+        let previous = self.part.clone();
+        self.part.peer_names.insert(node, name.to_owned());
+        if self.fits()? {
+            return Ok(());
+        }
+        self.part = previous;
+        if !self.part.upserted.is_empty()
+            || !self.part.merged.is_empty()
+            || !self.part.removed.is_empty()
+            || !self.part.peer_names.is_empty()
+        {
+            self.flush(self.part.clone())?;
+        }
+        self.part.peer_names.insert(node, name.to_owned());
+        if self.fits()? {
+            return Ok(());
+        }
+        Err("Mesh name exceeds frame resource bound.")
     }
     fn port(
         &mut self,

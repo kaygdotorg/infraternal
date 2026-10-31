@@ -15,6 +15,10 @@ pub struct Identity {
     /// New coordinators use ranges only after the enabled receiver advertises support.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub compact_access: bool,
+    /// Resolver support is negotiated separately from compact access snapshots [#266].
+    #[cfg(feature = "mesh-dns-spike")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dns_names: bool,
 }
 
 /// Explicit pair rules replace this fallback, so port grants also narrow an open mesh.
@@ -60,10 +64,18 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<NodeId>,
     pub node: NodeId,
+    /// The coordinator's canonical single-label name for this node; absent on legacy snapshots.
+    #[cfg(feature = "mesh-dns-spike")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub version: u64,
     pub addresses: Addresses,
     pub default_policy: DefaultPolicy,
     pub peers: BTreeMap<NodeId, PeerPolicy>,
+    /// Names for peers in the same policy snapshot, keyed by their stable node identity.
+    #[cfg(feature = "mesh-dns-spike")]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub peer_names: BTreeMap<NodeId, String>,
 }
 /// Transport selector seam: a mesh destination never replaces the enrolled TLS server name [215].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +95,10 @@ pub struct Chunk {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<NodeId>,
     pub node: NodeId,
+    /// Repeated on every chunk so a rename commits with the complete accepted revision.
+    #[cfg(feature = "mesh-dns-spike")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub from_version: Option<u64>,
     pub version: u64,
     pub index: u32,
@@ -94,6 +110,10 @@ pub struct Chunk {
     #[serde(default)]
     pub merged: BTreeMap<NodeId, PeerPolicy>,
     pub removed: Vec<NodeId>,
+    /// Name updates are staged with peer changes and published only on the final chunk.
+    #[cfg(feature = "mesh-dns-spike")]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub peer_names: BTreeMap<NodeId, String>,
     /// Negotiated, final access-only delta; snapshots retain ordinary peer chunks.
     #[serde(
         default,

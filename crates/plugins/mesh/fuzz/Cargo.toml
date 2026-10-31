@@ -12,14 +12,29 @@ cargo-fuzz = true
 [workspace]
 members = ["."]
 
+[features]
+default = ["mesh-dns-spike"]
+ee = []
+mesh-dns-spike = []
+
 [dependencies]
 libfuzzer-sys = "0.4"
-nix = { version = "0.30", features = ["socket", "time"] }
+nix = { version = "0.30", features = ["poll", "socket", "time"] }
+infraternal-mesh = { path = "../../../infraternal-mesh" }
+serde = "1.0"
+simple-dns = "=0.13.0"
 zeroize = "1.9"
 
 [[bin]]
 name = "netlink"
 path = "fuzz_targets/netlink.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dns"
+path = "fuzz_targets/dns.rs"
 test = false
 doc = false
 bench = false

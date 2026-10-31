@@ -23,6 +23,8 @@ fn fixture() -> (PathBuf, Node) {
         local_key: None,
         server: None,
         node: NodeId(1),
+        #[cfg(feature = "mesh-dns-spike")]
+        name: None,
         from_version: None,
         version: 1,
         index: 0,
@@ -35,6 +37,8 @@ fn fixture() -> (PathBuf, Node) {
         upserted: BTreeMap::new(),
         merged: BTreeMap::new(),
         removed: Vec::new(),
+        #[cfg(feature = "mesh-dns-spike")]
+        peer_names: std::collections::BTreeMap::new(),
     })
     .unwrap();
     (directory, node)

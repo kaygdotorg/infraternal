@@ -14,6 +14,8 @@ cutoff-measure = ["nix?/time"]
 agent = ["dep:nix", "dep:openssl", "dep:zeroize"]
 # Kernel timestamp precision is used by opt-in transport measurement fixtures only.
 test-support = ["agent"]
+# Temporary, default-off resolver prototype while the DNS library choice is measured [#266].
+mesh-dns-spike = ["agent", "server", "dep:simple-dns"]
 
 [dependencies]
 infraternal-plugin-api = { workspace = true, features = ["socket-host"] }
@@ -31,6 +33,7 @@ nix = { workspace = true, optional = true, features = ["net"] }
 openssl = { workspace = true, optional = true }
 zeroize = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
+simple-dns = { version = "=0.13.0", optional = true }
 
 [lints]
 workspace = true

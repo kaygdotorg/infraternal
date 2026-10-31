@@ -19,6 +19,8 @@ fn config() -> Config {
         local_key: Some(PublicKey([1; 32])),
         server: Some(NodeId(1)),
         node: NodeId(2),
+        #[cfg(feature = "mesh-dns-spike")]
+        name: None,
         version: 1,
         addresses: Addresses {
             ipv4: Ipv4Addr::from(0x0afe_0002),
@@ -44,6 +46,8 @@ fn config() -> Config {
                 )
             })
             .collect::<BTreeMap<_, _>>(),
+        #[cfg(feature = "mesh-dns-spike")]
+        peer_names: std::collections::BTreeMap::new(),
     }
 }
 
@@ -243,6 +247,23 @@ fn compact_identity_support_requires_an_explicit_strict_probe() {
     let parse = infraternal_plugin_mesh::node_actions::parse_action;
     assert!(parse("mesh.identity", br#"{"compact_access":true}"#).is_ok());
     assert!(parse("mesh.identity", b"{}").is_ok());
+    #[cfg(feature = "mesh-dns-spike")]
+    assert!(
+        parse(
+            "mesh.identity",
+            br#"{"compact_access":true,"dns_names":true}"#
+        )
+        .is_ok()
+    );
+    #[cfg(not(feature = "mesh-dns-spike"))]
+    assert!(
+        parse(
+            "mesh.identity",
+            br#"{"compact_access":true,"dns_names":true}"#
+        )
+        .is_err(),
+        "DNS support must be compiled in before the agent accepts its capability probe"
+    );
     for input in [
         br#"{"compact_access":true,"unknown":true}"#.as_slice(),
         br#"{"compact_access":true,"compact_access":false}"#.as_slice(),

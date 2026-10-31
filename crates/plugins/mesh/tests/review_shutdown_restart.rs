@@ -71,6 +71,8 @@ fn configure(node: &mut Node) {
             local_key: None,
             server: None,
             node: NodeId(1),
+            #[cfg(feature = "mesh-dns-spike")]
+            name: None,
             from_version: None,
             version: 1,
             index: u32::try_from(index).unwrap(),
@@ -80,6 +82,8 @@ fn configure(node: &mut Node) {
             upserted: peers.iter().cloned().collect::<BTreeMap<_, _>>(),
             merged: BTreeMap::new(),
             removed: Vec::new(),
+            #[cfg(feature = "mesh-dns-spike")]
+            peer_names: std::collections::BTreeMap::new(),
         };
         assert!(serde_json::to_vec(&chunk).unwrap().len() <= 8192);
         node.chunk(chunk).unwrap();

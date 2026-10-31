@@ -136,3 +136,35 @@ fn compiled_chunks_identify_the_server_and_old_snapshots_have_no_proposal() {
     let old: infraternal_plugin_mesh::dataplane::Config = serde_json::from_value(old).unwrap();
     assert_eq!(old.server, None);
 }
+
+#[test]
+#[cfg(feature = "mesh-dns-spike")]
+fn compiled_snapshot_carries_local_and_peer_names_even_when_access_is_denied() {
+    let coord = coordinator();
+    let config =
+        configuration::compile(&coord, NodeId(2), DefaultPolicy::Deny, &BTreeMap::new()).unwrap();
+
+    assert_eq!(config.name.as_deref(), Some("host-2"));
+    assert_eq!(config.peer_names[&NodeId(1)], "host-1");
+    assert_eq!(config.peer_names[&NodeId(3)], "host-3");
+    assert_eq!(config.peers[&NodeId(3)].inbound, TrafficPolicy::None);
+}
+
+#[test]
+#[cfg(feature = "mesh-dns-spike")]
+fn name_renames_are_carried_by_the_existing_versioned_configuration_chunks() {
+    let coord = coordinator();
+    let old =
+        configuration::compile(&coord, NodeId(2), DefaultPolicy::Allow, &BTreeMap::new()).unwrap();
+    let mut next = old.clone();
+    next.version += 1;
+    next.name = Some("renamed-local".to_owned());
+    next.peer_names.insert(NodeId(3), "renamed-peer".to_owned());
+
+    let chunks = configuration::chunks(Some(&old), &next).unwrap();
+
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].name.as_deref(), Some("renamed-local"));
+    assert_eq!(chunks[0].peer_names[&NodeId(3)], "renamed-peer");
+    assert!(chunks[0].last);
+}
