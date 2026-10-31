@@ -308,6 +308,26 @@ async fn udp_resolver_answers_on_the_mesh_address_inside_a_network_namespace() {
         .await
         .is_err()
     );
+
+    let mut oversized = query("build-01.internal", 1);
+    oversized.resize(4097, 0);
+    client
+        .send_to(
+            &oversized,
+            SocketAddr::from((snapshot.addresses.ipv4, DNS_PORT)),
+        )
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            client.recv_from(&mut response),
+        )
+        .await
+        .is_err(),
+        "a truncated oversized datagram must not be parsed as its valid prefix"
+    );
+
     assert!(
         Command::new("ip")
             .args(["address", "del", "10.254.0.2/32", "dev", "lo"])

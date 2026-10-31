@@ -239,7 +239,8 @@ impl Resolver {
         let worker = thread::Builder::new()
             .name("mesh-dns".to_owned())
             .spawn(move || {
-                let mut query = [0_u8; MAX_PACKET];
+                // The sentinel byte exposes recv_from truncation at the protocol size limit.
+                let mut query = [0_u8; MAX_PACKET + 1];
                 let mut descriptors = [
                     PollFd::new(worker_socket.as_fd(), PollFlags::POLLIN),
                     PollFd::new(shutdown_reader.as_fd(), PollFlags::POLLIN),
@@ -265,6 +266,9 @@ impl Resolver {
                         Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                         Err(_) => break,
                     };
+                    if length > MAX_PACKET {
+                        continue;
+                    }
                     let records = worker_records
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
