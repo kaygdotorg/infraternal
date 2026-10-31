@@ -10,9 +10,8 @@
    row) carries its lock glyph on the frame line, and the shackle rises above that line (#126, D195). The clip is
    `overflow: clip` on `.panes`, the viewport's parent, whose box reaches 12 px above the viewport (negative margin, the same
    amount as padding) while the viewport sits `inset: 12px` from the padding edge: the viewport's own rectangle, which the
-   camera measures, is unchanged. It is not a `clip-path` on the viewport (what this did before): a `clip-path` makes its
-   element a backdrop root, so a Frosted window's `backdrop-filter` saw only what is inside the viewport and never the
-   canvas behind it (#256). `overflow: clip` does not make a backdrop root, cannot be scrolled (the first rule above), and
+   camera measures, is unchanged. Keeping clipping on the parent leaves the viewport free of a backdrop root, so a
+   Frosted window's `backdrop-filter` can sample the canvas behind it (#256). `overflow: clip` does not make a backdrop root, cannot be scrolled (the first rule above), and
    needs no `overflow-clip-margin`. Nothing between a window and the canvas backdrop may take a clip-path, filter, mask,
    opacity or blend mode, or the blur goes blind again. */
 .terminal-screen[data-clusters][data-canvas="on"] .panes { overflow: clip; margin-top: -12px; padding-top: 12px; }
