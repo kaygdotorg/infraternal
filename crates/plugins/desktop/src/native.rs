@@ -89,6 +89,8 @@ impl TrackedCompanion {
     fn new(pid: u32, socket_path: &Path, pid_path: &Path) -> io::Result<Self> {
         let pid = i32::try_from(pid)
             .map_err(|_| io::Error::other("Desktop companion launch identity is invalid."))?;
+        let event_pid = usize::try_from(pid)
+            .map_err(|_| io::Error::other("Desktop companion launch identity is invalid."))?;
         let exit_queue = Kqueue::new()?;
         fcntl(&exit_queue, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
         let mut events = [process_exit_event(0)];
@@ -100,7 +102,7 @@ impl TrackedCompanion {
             exited: false,
         };
         match tracked.exit_queue.kevent(
-            &[process_exit_event(pid as usize)],
+            &[process_exit_event(event_pid)],
             &mut events,
             Some(zero_timeout()),
         ) {
@@ -155,9 +157,8 @@ impl TrackedCompanion {
                     self.exited = true;
                     return Ok(true);
                 }
-                Ok(_) => return Ok(false),
                 Err(Errno::EINTR) if Instant::now() < deadline => {}
-                Err(Errno::EINTR) => return Ok(false),
+                Ok(_) | Err(Errno::EINTR) => return Ok(false),
                 Err(Errno::ESRCH) => {
                     self.exited = true;
                     return Ok(true);
@@ -492,72 +493,101 @@ fn accept_blocking(listener: &UnixListener) -> io::Result<Option<UnixStream>> {
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
-fn update_companion_pid(
-    pid_path: &Path,
-    socket_path: &Path,
-    companion_pid: &mut Option<u32>,
-    companion: &mut Option<TrackedCompanion>,
-    pid_ready_ms: &mut Option<f64>,
+struct LaunchHandshake<'a> {
+    pid_path: &'a Path,
+    socket_path: &'a Path,
+    companion_pid: Option<u32>,
+    companion: Option<TrackedCompanion>,
+    pid_ready_ms: Option<f64>,
     started: Instant,
-) -> io::Result<()> {
-    if companion_pid.is_none() {
-        let pid = read_companion_pid(pid_path)?;
-        if pid.is_some() && pid_ready_ms.is_none() {
-            *pid_ready_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
-        }
-        *companion_pid = pid;
-    }
-    if companion.is_none()
-        && let Some(pid) = *companion_pid
-    {
-        *companion = Some(TrackedCompanion::new(pid, socket_path, pid_path)?);
-    }
-    Ok(())
+    measure: bool,
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
-fn accept_launch_connection(
-    listener: &UnixListener,
-    pid_path: &Path,
-    socket_path: &Path,
-    companion_pid: &mut Option<u32>,
-    companion: &mut Option<TrackedCompanion>,
-    pid_ready_ms: &mut Option<f64>,
-    started: Instant,
-    measure: bool,
-) -> io::Result<Option<(UnixStream, u32)>> {
-    update_companion_pid(
-        pid_path,
-        socket_path,
-        companion_pid,
-        companion,
-        pid_ready_ms,
-        started,
-    )?;
-    let Some(stream) = accept_blocking(listener)? else {
-        return Ok(None);
-    };
-    crate::socket::admit(&stream)?;
-    update_companion_pid(
-        pid_path,
-        socket_path,
-        companion_pid,
-        companion,
-        pid_ready_ms,
-        started,
-    )?;
-    let Some(pid) = *companion_pid else {
-        return Err(io::Error::other(
-            "Desktop companion did not publish its launch identity.",
-        ));
-    };
-    if measure {
-        eprintln!(
-            "METRIC launch_services pid={pid} launch_ms={:.3}",
-            (*pid_ready_ms).unwrap_or_else(|| started.elapsed().as_secs_f64() * 1000.0)
-        );
+impl LaunchHandshake<'_> {
+    fn update_companion_pid(&mut self) -> io::Result<()> {
+        if self.companion_pid.is_none() {
+            let pid = read_companion_pid(self.pid_path)?;
+            if pid.is_some() && self.pid_ready_ms.is_none() {
+                self.pid_ready_ms = Some(self.started.elapsed().as_secs_f64() * 1000.0);
+            }
+            self.companion_pid = pid;
+        }
+        if self.companion.is_none()
+            && let Some(pid) = self.companion_pid
+        {
+            self.companion = Some(TrackedCompanion::new(pid, self.socket_path, self.pid_path)?);
+        }
+        Ok(())
     }
-    Ok(Some((stream, pid)))
+
+    fn accept(&mut self, listener: &UnixListener) -> io::Result<Option<UnixStream>> {
+        self.update_companion_pid()?;
+        let Some(stream) = accept_blocking(listener)? else {
+            return Ok(None);
+        };
+        crate::socket::admit(&stream)?;
+        self.update_companion_pid()?;
+        let Some(pid) = self.companion_pid else {
+            return Err(io::Error::other(
+                "Desktop companion did not publish its launch identity.",
+            ));
+        };
+        let Some(tracked) = self.companion.as_ref() else {
+            return Err(io::Error::other(
+                "Desktop companion launch identity is unavailable.",
+            ));
+        };
+        if tracked.pid.as_raw().cast_unsigned() != pid {
+            return Err(io::Error::other(
+                "Desktop companion launch identity changed during startup.",
+            ));
+        }
+        if self.measure {
+            eprintln!(
+                "METRIC launch_services pid={pid} launch_ms={:.3}",
+                self.pid_ready_ms
+                    .unwrap_or_else(|| self.started.elapsed().as_secs_f64() * 1000.0)
+            );
+        }
+        Ok(Some(stream))
+    }
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn finish_launch_connection(
+    launcher: Child,
+    private_directory: PrivateDirectory,
+    stream: UnixStream,
+    tracked: TrackedCompanion,
+) -> io::Result<SpawnedCompanion> {
+    let input = match stream.try_clone() {
+        Ok(input) => Box::new(input) as Box<dyn CompanionInput>,
+        Err(error) => {
+            drop(stream);
+            retire_launch_services(launcher, Some(tracked));
+            return Err(error);
+        }
+    };
+    let reader_interrupt = match stream.try_clone() {
+        Ok(interrupt) => interrupt,
+        Err(error) => {
+            drop(input);
+            drop(stream);
+            retire_launch_services(launcher, Some(tracked));
+            return Err(error);
+        }
+    };
+    Ok(SpawnedCompanion {
+        launch: CompanionLaunch {
+            launcher,
+            companion: Some(tracked),
+        },
+        input,
+        output: Box::new(stream),
+        reader_interrupt: Some(reader_interrupt),
+        private_directory: Some(private_directory),
+    })
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
@@ -587,86 +617,48 @@ fn spawn_via_launch_services(
             })
             .spawn()?;
 
-    let mut companion_pid = None;
-    let mut companion = None;
-    let mut pid_ready_ms = None;
+    let mut handshake = LaunchHandshake {
+        pid_path: &pid_path,
+        socket_path: &socket_path,
+        companion_pid: None,
+        companion: None,
+        pid_ready_ms: None,
+        started,
+        measure,
+    };
     loop {
-        match accept_launch_connection(
-            &listener,
-            &pid_path,
-            &socket_path,
-            &mut companion_pid,
-            &mut companion,
-            &mut pid_ready_ms,
-            started,
-            measure,
-        ) {
-            Ok(Some((stream, pid))) => {
-                let input = match stream.try_clone() {
-                    Ok(input) => Box::new(input) as Box<dyn CompanionInput>,
-                    Err(error) => {
-                        drop(stream);
-                        retire_launch_services(launcher, companion);
-                        return Err(error);
-                    }
-                };
-                let reader_interrupt = match stream.try_clone() {
-                    Ok(interrupt) => interrupt,
-                    Err(error) => {
-                        drop(input);
-                        drop(stream);
-                        retire_launch_services(launcher, companion);
-                        return Err(error);
-                    }
-                };
-                let Some(tracked) = companion.take() else {
-                    drop(input);
+        match handshake.accept(&listener) {
+            Ok(Some(stream)) => {
+                let Some(tracked) = handshake.companion.take() else {
                     drop(stream);
                     retire_launch_services(launcher, None);
                     return Err(io::Error::other(
                         "Desktop companion launch identity is unavailable.",
                     ));
                 };
-                if tracked.pid.as_raw() as u32 != pid {
-                    drop(input);
-                    drop(stream);
-                    retire_launch_services(launcher, Some(tracked));
-                    return Err(io::Error::other(
-                        "Desktop companion launch identity changed during startup.",
-                    ));
-                }
-                return Ok(SpawnedCompanion {
-                    launch: CompanionLaunch {
-                        launcher,
-                        companion: Some(tracked),
-                    },
-                    input,
-                    output: Box::new(stream),
-                    reader_interrupt: Some(reader_interrupt),
-                    private_directory: Some(private_directory),
-                });
+                return finish_launch_connection(launcher, private_directory, stream, tracked);
             }
             Ok(None) => {}
             Err(error) => {
-                retire_launch_services(launcher, companion);
+                retire_launch_services(launcher, handshake.companion.take());
                 return Err(error);
             }
         }
         match launcher.try_wait() {
             Ok(Some(_)) => {
-                retire_launch_services(launcher, companion);
+                retire_launch_services(launcher, handshake.companion.take());
                 return Err(io::Error::other(
                     "LaunchServices exited before the desktop companion connected.",
                 ));
             }
             Ok(None) => {}
             Err(error) => {
-                retire_launch_services(launcher, companion);
+                retire_launch_services(launcher, handshake.companion.take());
                 return Err(error);
             }
         }
         if started.elapsed() >= std::time::Duration::from_secs(5) {
-            retire_launch_services(launcher, companion);
+            retire_launch_services(launcher, handshake.companion.take());
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "LaunchServices did not start the desktop companion in time.",
@@ -697,23 +689,17 @@ fn retire_launch_services(mut launcher: Child, mut companion: Option<TrackedComp
     if !companion_exited && let Some(process) = companion.as_mut() {
         // `open -W` is only a waiter; its exit is not evidence that this
         // separately launched process released the private socket.
-        match process.signal_if_current(nix::sys::signal::Signal::SIGTERM) {
-            Ok(true) => {
-                companion_exited = process
-                    .wait_for_exit(Duration::from_millis(500))
-                    .unwrap_or(false);
-            }
-            Ok(false) | Err(_) => {}
+        if let Ok(true) = process.signal_if_current(nix::sys::signal::Signal::SIGTERM) {
+            companion_exited = process
+                .wait_for_exit(Duration::from_millis(500))
+                .unwrap_or(false);
         }
-        if !companion_exited {
-            match process.signal_if_current(nix::sys::signal::Signal::SIGKILL) {
-                Ok(true) => {
-                    companion_exited = process
-                        .wait_for_exit(Duration::from_secs(1))
-                        .unwrap_or(false);
-                }
-                Ok(false) | Err(_) => {}
-            }
+        if !companion_exited
+            && let Ok(true) = process.signal_if_current(nix::sys::signal::Signal::SIGKILL)
+        {
+            companion_exited = process
+                .wait_for_exit(Duration::from_secs(1))
+                .unwrap_or(false);
         }
     }
 
@@ -1028,15 +1014,15 @@ impl Drop for Native {
         if let Some(input) = self.input.take() {
             input.close_write();
         }
-        if let Some(launch) = self.child.take() {
-            if !retire_owned(launch) {
-                self.interrupt_reader();
-            }
+        if let Some(launch) = self.child.take()
+            && !retire_owned(launch)
+        {
+            self.interrupt_reader();
         }
-        if let Some(retirement) = self.retirement.take() {
-            if !retirement.join().is_ok_and(|retired| retired) {
-                self.interrupt_reader();
-            }
+        if let Some(retirement) = self.retirement.take()
+            && !retirement.join().is_ok_and(|retired| retired)
+        {
+            self.interrupt_reader();
         }
         // The receiver is closed before joining, so a full response slot cannot
         // block the reader while it drains the child's final cleanup response.
@@ -1193,13 +1179,13 @@ mod launch_tests {
             .spawn()
             .unwrap();
         let stream = listener.accept().unwrap().0;
-        let pid = Pid::from_raw(companion.id() as i32);
+        let pid = Pid::from_raw(companion.id().cast_signed());
         let stop_deadline = Instant::now() + Duration::from_secs(2);
         loop {
             match waitpid(pid, Some(WaitPidFlag::WNOHANG | WaitPidFlag::WUNTRACED)).unwrap() {
                 WaitStatus::Stopped(_, _) => break,
                 WaitStatus::StillAlive if Instant::now() < stop_deadline => {
-                    thread::sleep(Duration::from_millis(5))
+                    thread::sleep(Duration::from_millis(5));
                 }
                 status => panic!("companion did not stop with its socket open: {status:?}"),
             }
