@@ -32,8 +32,17 @@ fn main() {
         return;
     };
     let path = PathBuf::from(out).join("infraternal-desktop-native");
+    // Pin the companion to the deployment target the crate links with, instead
+    // of the SDK default (the host OS), so Info.plist's minimum is honest.
+    let arch = if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") {
+        "x86_64"
+    } else {
+        "arm64"
+    };
     let status = Command::new("swiftc")
         .args([
+            "-target",
+            &format!("{arch}-apple-macos14.2"),
             "-O",
             "-whole-module-optimization",
             "native/ResponsibleLaunch.swift",
