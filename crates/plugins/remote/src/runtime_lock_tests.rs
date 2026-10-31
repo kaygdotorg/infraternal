@@ -6,7 +6,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 #[path = "../../../infraternal-shim/tests/unit/fixture_state.rs"]
 mod fixture_state;
 
-struct Fixture(PathBuf);
+struct Fixture(fixture_state::FixtureState);
 impl Fixture {
     fn new() -> Self {
         let root = fixture_state::fixture_state();

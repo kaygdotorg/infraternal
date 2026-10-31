@@ -8,41 +8,33 @@ use super::*;
 use crate::restart_binary::fixture::{RESTART_TEST_HANG_BOUND as HANG_BOUND, Signed};
 use std::os::{fd::AsRawFd, unix::process::CommandExt};
 
-struct Directory(PathBuf);
+struct Directory(PathBuf, Option<PathBuf>);
 impl Directory {
     fn new() -> Self {
         const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
         let socket_directory = format!("c{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
-            || {
-                PathBuf::from(std::env::var_os("HOME").unwrap())
-                    .join(".cache/codex-scratch/infraternal")
-            },
-            PathBuf::from,
-        );
-        let fallback = PathBuf::from(std::env::var_os("HOME").unwrap())
+        let default_root = PathBuf::from(std::env::var_os("HOME").unwrap())
             .join(".cache/codex-scratch/infraternal");
-        let socket_path = |root: &Path| {
-            root.join("restart-tests")
-                .join(&socket_directory)
-                .join("restart/control.sock")
-        };
-        let root = if socket_path(&root).as_os_str().as_encoded_bytes().len()
-            <= MAX_UNIX_SOCKET_PATH_BYTES
-        {
-            root
+        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT")
+            .map_or_else(|| default_root.clone(), PathBuf::from);
+        let path = root.join("restart-tests").join(&socket_directory);
+        let needs_short_root = path
+            .join("restart/control.sock")
+            .as_os_str()
+            .as_encoded_bytes()
+            .len()
+            > MAX_UNIX_SOCKET_PATH_BYTES;
+        // Executable fixtures must retain trusted HOME ancestry and share the
+        // running image's filesystem for hard-link checks. Only sockets use /tmp.
+        let directory = if needs_short_root {
+            Self(
+                default_root.join("restart-tests").join(socket_directory),
+                Some(nix::unistd::mkdtemp("/tmp/ir-XXXXXX").unwrap()),
+            )
         } else {
-            static LONG_ROOT_WARNING: std::sync::Once = std::sync::Once::new();
-            LONG_ROOT_WARNING.call_once(|| {
-                eprintln!(
-                    "restart test state root exceeds the Linux socket path limit; using {}",
-                    fallback.display()
-                );
-            });
-            fallback
+            Self(path, None)
         };
-        let path = root.join("restart-tests").join(socket_directory);
-        let socket = path.join("restart/control.sock");
+        let socket = directory.state().join("restart/control.sock");
         assert!(
             socket.as_os_str().as_encoded_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES,
             "restart fixture socket path exceeds Linux sun_path: {} bytes",
@@ -60,14 +52,21 @@ impl Directory {
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(&path)
+            .create(&directory.0)
             .unwrap();
-        Self(path)
+        directory
+    }
+
+    fn state(&self) -> &Path {
+        self.1.as_deref().unwrap_or(&self.0)
     }
 }
 impl Drop for Directory {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+        if let Some(root) = &self.1 {
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 }
 
@@ -179,11 +178,11 @@ fn bounded_output(
 #[tokio::test]
 async fn private_control_endpoint_cannot_be_stolen_or_created_by_a_client() {
     let directory = Directory::new();
-    assert!(request(&directory.0, None).await.is_err());
-    assert!(!directory.0.join("restart").exists());
-    let control = Control::start(&directory.0).unwrap();
+    assert!(request(directory.state(), None).await.is_err());
+    assert!(!directory.state().join("restart").exists());
+    let control = Control::start(directory.state()).unwrap();
     assert_eq!(
-        std::fs::metadata(directory.0.join("restart"))
+        std::fs::metadata(directory.state().join("restart"))
             .unwrap()
             .mode()
             & 0o777,
@@ -193,18 +192,18 @@ async fn private_control_endpoint_cannot_be_stolen_or_created_by_a_client() {
         std::fs::metadata(&control.path).unwrap().mode() & 0o777,
         0o600
     );
-    assert!(Control::start(&directory.0).is_err());
+    assert!(Control::start(directory.state()).is_err());
     assert!(control.path.exists());
     drop(control);
-    assert!(!directory.0.join("restart/control.sock").exists());
+    assert!(!directory.state().join("restart/control.sock").exists());
 }
 
 #[tokio::test]
 async fn restart_requests_use_the_servers_binary_and_reject_untrusted_paths() {
     let directory = Directory::new();
-    let mut control = Control::start(&directory.0).unwrap();
+    let mut control = Control::start(directory.state()).unwrap();
     let (received, requested) = tokio::time::timeout(HANG_BOUND, async {
-        tokio::join!(control.requested(None), request(&directory.0, None))
+        tokio::join!(control.requested(None), request(directory.state(), None))
     })
     .await
     .expect("owner restart request deadline");
@@ -232,14 +231,14 @@ async fn restart_requests_use_the_servers_binary_and_reject_untrusted_paths() {
 async fn runtime_directory_symlinks_and_public_permissions_are_refused() {
     let directory = Directory::new();
     let external = Directory::new();
-    std::os::unix::fs::symlink(&external.0, directory.0.join("restart")).unwrap();
-    assert!(Control::start(&directory.0).is_err());
-    std::fs::remove_file(directory.0.join("restart")).unwrap();
+    std::os::unix::fs::symlink(&external.0, directory.state().join("restart")).unwrap();
+    assert!(Control::start(directory.state()).is_err());
+    std::fs::remove_file(directory.state().join("restart")).unwrap();
     std::fs::DirBuilder::new()
         .mode(0o755)
-        .create(directory.0.join("restart"))
+        .create(directory.state().join("restart"))
         .unwrap();
-    assert!(Control::start(&directory.0).is_err());
+    assert!(Control::start(directory.state()).is_err());
 }
 
 #[test]
@@ -411,7 +410,7 @@ fn real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin() {
 #[tokio::test]
 async fn closed_reply_and_missing_reload_target_do_not_end_restart_control() {
     let directory = Directory::new();
-    let mut control = Control::start(&directory.0).unwrap();
+    let mut control = Control::start(directory.state()).unwrap();
     let path = control.path.clone();
     let receive = async {
         let result =
@@ -434,7 +433,7 @@ async fn closed_reply_and_missing_reload_target_do_not_end_restart_control() {
         .await
         .expect("closed reply fixture must finish");
     let (received, requested) = tokio::time::timeout(HANG_BOUND, async {
-        tokio::join!(control.requested(None), request(&directory.0, None))
+        tokio::join!(control.requested(None), request(directory.state(), None))
     })
     .await
     .expect("valid request after a closed reply must finish");
@@ -489,10 +488,10 @@ fn reload_reopens_install_path_when_the_running_inode_was_replaced() {
 #[tokio::test]
 async fn default_restart_opens_the_receiver_target_exactly_once() {
     let directory = Directory::new();
-    let mut control = Control::start(&directory.0).unwrap();
+    let mut control = Control::start(directory.state()).unwrap();
     crate::restart_binary::reset_test_opens();
     let (received, sent) = tokio::time::timeout(HANG_BOUND, async {
-        tokio::join!(control.requested(None), request(&directory.0, None))
+        tokio::join!(control.requested(None), request(directory.state(), None))
     })
     .await
     .expect("default restart request must finish");
@@ -572,7 +571,7 @@ fn early_hangup_is_queued_until_control_installs_its_handler() {
         let directory = Directory::new();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut control = Control::start(&directory.0).unwrap();
+            let mut control = Control::start(directory.state()).unwrap();
             assert!(
                 tokio::time::timeout(HANG_BOUND, control.requested(None))
                     .await
@@ -609,9 +608,9 @@ fn restart_request_logs_kernel_peer_target_and_cold_outcome() {
         let directory = Directory::new();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut control = Control::start(&directory.0).unwrap();
+            let mut control = Control::start(directory.state()).unwrap();
             let (received, sent) =
-                tokio::join!(control.requested(None), request(&directory.0, None));
+                tokio::join!(control.requested(None), request(directory.state(), None));
             assert!(received.is_ok());
             assert!(!sent.unwrap());
         });

@@ -113,22 +113,29 @@ mod tests {
     use super::*;
     use crate::test_common as common;
 
-    struct Fixture(std::path::PathBuf);
+    struct Fixture {
+        path: std::path::PathBuf,
+        _scratch: common::ScratchRoot,
+    }
     impl Fixture {
         fn new() -> Self {
-            let root = common::scratch().join(format!("payload-{}", uuid::Uuid::new_v4().simple()));
+            let scratch = common::scratch();
+            let root = scratch.join(format!("payload-{}", uuid::Uuid::new_v4().simple()));
             std::fs::create_dir(&root).unwrap();
-            Self(root)
+            Self {
+                path: root,
+                _scratch: scratch,
+            }
         }
         fn file(&self, name: &str, bytes: &[u8]) -> std::path::PathBuf {
-            let path = self.0.join(name);
+            let path = self.path.join(name);
             std::fs::write(&path, bytes).unwrap();
             path
         }
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            let _ = std::fs::remove_dir_all(&self.path);
         }
     }
 

@@ -49,42 +49,9 @@ impl Drop for CleanupMany {
     }
 }
 
-/// Runtime fixtures keep their generated session socket within Linux `sun_path`.
-fn fixture_root(directory: &str) -> PathBuf {
-    let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
-        || {
-            PathBuf::from(std::env::var_os("HOME").expect("test requires HOME"))
-                .join(".cache/codex-scratch/infraternal")
-        },
-        PathBuf::from,
-    );
-    let fallback = PathBuf::from(std::env::var_os("HOME").expect("test requires HOME"))
-        .join(".cache/codex-scratch/infraternal");
-    let session_socket = |root: &Path| {
-        root.join(directory)
-            .join("sessions")
-            .join(format!("{}.sock", "a".repeat(32)))
-    };
-    let root = if session_socket(&root).as_os_str().as_bytes().len() < 108 {
-        root
-    } else {
-        static LONG_ROOT_WARNING: std::sync::Once = std::sync::Once::new();
-        LONG_ROOT_WARNING.call_once(|| {
-            eprintln!(
-                "agent session test state root exceeds the Linux socket path limit; using {}",
-                fallback.display()
-            );
-        });
-        fallback
-    };
-    let socket = session_socket(&root);
-    assert!(
-        socket.as_os_str().as_bytes().len() < 108,
-        "fallback agent session socket path exceeds the Unix socket path limit"
-    );
-    fs::create_dir_all(&root).unwrap();
-    root.join(directory)
-}
+// Share the native fixture owner so fallback directories are also removed on panic.
+#[path = "../../infraternal-shim/tests/unit/fixture_state.rs"]
+mod fixture_state;
 
 async fn until(peer: &mut UnixStream, cursor: &mut u64, marker: &[u8]) {
     let mut reader = Reader::default();
@@ -122,7 +89,8 @@ async fn until(peer: &mut UnixStream, cursor: &mut u64, marker: &[u8]) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn detached_shim_is_discovered_and_replays_from_the_last_observed_offset() {
-    let directory = fixture_root(&format!("ar{}", std::process::id()));
+    let fixture = fixture_state::fixture_state();
+    let directory = fixture.clone();
     // Validate the actual rendezvous after applying the configured fixture root.
     let socket = directory
         .join("sessions")
@@ -227,8 +195,8 @@ async fn detached_shim_is_discovered_and_replays_from_the_last_observed_offset()
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::too_many_lines)]
 async fn restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill() {
-    let suffix = uuid::Uuid::new_v4().simple().to_string();
-    let base = fixture_root(&format!("e{}", &suffix[..8]));
+    let fixture = fixture_state::fixture_state();
+    let base = fixture.clone();
     let directory = state(Some(base)).unwrap();
     let mut cleanup = CleanupMany {
         state: directory.clone(),

@@ -8,9 +8,10 @@ mod common;
 
 #[test]
 fn shared_ownership_shell_preserves_recovery_and_refusal_invariants() {
+    let scratch = common::scratch();
     let output = Command::new("python3")
         .env("INFRATERNAL_TEST_RUNTIME_HELPER", common::runtime_helper())
-        .env("INFRATERNAL_TEST_STATE_ROOT", common::scratch())
+        .env("INFRATERNAL_TEST_STATE_ROOT", scratch.as_os_str())
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/previous_attempt_shell.py"

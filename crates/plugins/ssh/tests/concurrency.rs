@@ -509,7 +509,8 @@ async fn an_interrupted_disable_keeps_admission_closed_until_its_adapter_retires
 #[tokio::test]
 async fn component_off_retires_a_real_native_helper() {
     use infraternal_plugin_api::ComponentPlugin;
-    let path = common::scratch().join(format!("component-helper-{}", uuid::Uuid::new_v4()));
+    let scratch = common::scratch();
+    let path = scratch.join(format!("component-helper-{}", uuid::Uuid::new_v4()));
     let backend = Arc::new(HeldBackend {
         entered: Semaphore::new(0),
         release: Semaphore::new(0),

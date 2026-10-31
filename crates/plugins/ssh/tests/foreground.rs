@@ -11,7 +11,8 @@ use std::{os::unix::fs::PermissionsExt, time::Duration};
 
 #[tokio::test]
 async fn configured_backgrounding_is_overridden_for_owned_bootstrap_commands() {
-    let root = common::scratch().join(format!(
+    let scratch = common::scratch();
+    let root = scratch.join(format!(
         "fg-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     ));

@@ -24,6 +24,7 @@ use tokio::process::Command;
 /// retaining the real CLI code. SHA-256 also stays optimized in dev/test builds
 /// so test-only artifacts do not consume the fixed prompt deadline.
 struct AskpassImage {
+    _scratch: common::ScratchRoot,
     directory: PathBuf,
     path: PathBuf,
 }
@@ -41,7 +42,8 @@ fn askpass_image() -> Arc<AskpassImage> {
         return image;
     }
 
-    let directory = common::scratch().join(format!(
+    let scratch = common::scratch();
+    let directory = scratch.join(format!(
         "askpass-image-{}-{}",
         std::process::id(),
         uuid::Uuid::new_v4()
@@ -63,7 +65,11 @@ fn askpass_image() -> Arc<AskpassImage> {
         String::from_utf8_lossy(&stripped.stderr)
     );
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let image = Arc::new(AskpassImage { directory, path });
+    let image = Arc::new(AskpassImage {
+        directory,
+        path,
+        _scratch: scratch,
+    });
     *cached = Arc::downgrade(&image);
     image
 }
@@ -113,7 +119,8 @@ async fn real_cli_askpass_refuses_unregistered_parent_and_cleans_helper() {
 #[tokio::test]
 async fn real_cli_unlocks_an_encrypted_synthetic_key_on_private_pipes() {
     use tokio::io::AsyncWriteExt;
-    let root = common::scratch().join(format!("e-{}", std::process::id()));
+    let scratch = common::scratch();
+    let root = scratch.join(format!("e-{}", std::process::id()));
     let askpass_image = askpass_image();
     let passphrase = Secret::new(b"synthetic-key-unlock\n".to_vec());
     let mut generating = Command::new("openssl")
@@ -175,7 +182,8 @@ async fn real_cli_unlocks_an_encrypted_synthetic_key_on_private_pipes() {
 #[ignore = "run under the disposable controlling-terminal harness"]
 async fn encrypted_key_without_passphrase_never_prompts_on_a_controlling_terminal() {
     use tokio::io::AsyncWriteExt;
-    let root = common::scratch().join(format!("n-{}", std::process::id()));
+    let scratch = common::scratch();
+    let root = scratch.join(format!("n-{}", std::process::id()));
     let passphrase = Secret::new(b"synthetic-key-unlock\n".to_vec());
     let mut generating = Command::new("openssl")
         .args([

@@ -129,18 +129,24 @@ mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
 
-    struct Fixture(std::path::PathBuf);
+    struct Fixture {
+        path: std::path::PathBuf,
+        _scratch: crate::test_common::ScratchRoot,
+    }
     impl Fixture {
         fn new() -> Self {
-            let path = crate::test_common::scratch()
-                .join(format!("encoded-{}", uuid::Uuid::new_v4().simple()));
+            let scratch = crate::test_common::scratch();
+            let path = scratch.join(format!("encoded-{}", uuid::Uuid::new_v4().simple()));
             std::fs::write(&path, vec![b'x'; 128 * 1024]).unwrap();
-            Self(path)
+            Self {
+                path,
+                _scratch: scratch,
+            }
         }
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_file(&self.path);
         }
     }
 
@@ -165,33 +171,33 @@ mod tests {
     async fn gzip_roundtrip_and_repeated_adds_share_one_encoding() {
         let fixture = Fixture::new();
         let (first, second) = tokio::join!(
-            encoded(&fixture.0, Codec::Gzip),
-            encoded(&fixture.0, Codec::Gzip)
+            encoded(&fixture.path, Codec::Gzip),
+            encoded(&fixture.path, Codec::Gzip)
         );
         let first = first.unwrap().unwrap();
         let second = second.unwrap().unwrap();
-        let third = encoded(&fixture.0, Codec::Gzip).await.unwrap().unwrap();
+        let third = encoded(&fixture.path, Codec::Gzip).await.unwrap().unwrap();
         assert!(Arc::ptr_eq(&first, &second));
         assert!(Arc::ptr_eq(&first, &third));
-        assert_eq!(unpack(&first).await, std::fs::read(&fixture.0).unwrap());
+        assert_eq!(unpack(&first).await, std::fs::read(&fixture.path).unwrap());
     }
 
     #[tokio::test]
     async fn binary_replacement_never_reuses_the_previous_encoding() {
         let fixture = Fixture::new();
-        let first = encoded(&fixture.0, Codec::Gzip).await.unwrap().unwrap();
-        let next = fixture.0.with_extension("next");
+        let first = encoded(&fixture.path, Codec::Gzip).await.unwrap().unwrap();
+        let next = fixture.path.with_extension("next");
         std::fs::write(&next, vec![b'y'; 128 * 1024]).unwrap();
-        std::fs::rename(&next, &fixture.0).unwrap();
-        let second = encoded(&fixture.0, Codec::Gzip).await.unwrap().unwrap();
+        std::fs::rename(&next, &fixture.path).unwrap();
+        let second = encoded(&fixture.path, Codec::Gzip).await.unwrap().unwrap();
         assert!(!Arc::ptr_eq(&first, &second));
-        assert_eq!(unpack(&second).await, std::fs::read(&fixture.0).unwrap());
+        assert_eq!(unpack(&second).await, std::fs::read(&fixture.path).unwrap());
     }
 
     #[tokio::test]
     async fn small_payloads_retain_raw_streaming() {
         let fixture = Fixture::new();
-        std::fs::write(&fixture.0, b"small public payload").unwrap();
-        assert!(encoded(&fixture.0, Codec::Gzip).await.unwrap().is_none());
+        std::fs::write(&fixture.path, b"small public payload").unwrap();
+        assert!(encoded(&fixture.path, Codec::Gzip).await.unwrap().is_none());
     }
 }
