@@ -111,6 +111,8 @@ export async function startRealServer(options: {
   certificate?: (pem: string) => Promise<void>;
   /** Seeds controlled public host trust before any bootstrap operation. */
   prepareData?: (directory: string) => Promise<void>;
+  /** Real shell fixtures supply a private startup directory without touching the VM user's files. */
+  startupDirectory?: string;
 } = {}): Promise<RealServer> {
   // `lean`: the recording of every output frame made this single-threaded relay slower than the server's one-second
   // write limit allows under busy terminals, and the server then closed the socket.
@@ -172,7 +174,7 @@ export async function startRealServer(options: {
     unit = options.systemd ? `s199-${randomUUID()}` : undefined;
     return spawn(unit ? "systemd-run" : binary, unit ? ["--user", "--quiet", "--wait", "--pipe", "--collect", "--unit", unit, "-p", "KillMode=process", `--setenv=XDG_RUNTIME_DIR=${runtime}`, `--setenv=ZDOTDIR=${resolve(root, "crates/infraternal/tests/profile")}`, binary, ...args] : args, {
     cwd: root, detached: true,
-    env: { ...process.env, XDG_RUNTIME_DIR: runtime, ZDOTDIR: resolve(root, "crates/infraternal/tests/profile") },
+    env: { ...process.env, XDG_RUNTIME_DIR: runtime, ZDOTDIR: options.startupDirectory ?? resolve(root, "crates/infraternal/tests/profile") },
     stdio: ["ignore", process.env.REAL_SERVER_LOG === "1" ? "pipe" : "ignore", "pipe"],
     });
   };

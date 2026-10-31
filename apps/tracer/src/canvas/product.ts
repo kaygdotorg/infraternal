@@ -34,6 +34,7 @@ import { createLazyMeshApi } from "./mesh/lazy";
 import { connectionTransport } from "./mesh/transport";
 import { offerMeshView } from "./mesh/offer";
 import { createLiveSessions, type LiveSessions } from "./sessions/live";
+import { createStartupHints } from "./sessions/startup-hints";
 import { createLiveInventory } from "./sessions/live-inventory";
 import { teachOnce } from "../hints";
 import type { DetailsSourceLoader } from "./windows/details-source";
@@ -93,8 +94,10 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   let disposed = false, hostsStarted = false, hostsReady = false;
   let startHosts = (): void => {};
   let offHosts: (() => void) | undefined;
+  const startupHints = createStartupHints(connection, core.toast);
   const sessions = createLiveSessions({
     core, connection, pool, host: embedded,
+    onStartupSession: (session, hostId, name) => { void startupHints.inspect(session, hostId, name); },
     ...(options.predictiveEcho ? { predictiveEcho: true } : {}),
     ...(options.firstHooks ? { firstHooks: options.firstHooks } : {}),
     ...(options.onFirstClient ? { onFirstClient: options.onFirstClient } : {}),
@@ -181,7 +184,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   // fetch in createCanvas and does not wait for it.
   if (saved && docHasGroups(saved)) await loadGroups();
   const canvas = createCanvas(core, {
-    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => { warmSetup(); addHost.open(); }, authority },
+    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => { warmSetup(); addHost.open(); }, authority, startupHints },
     float: false,
     persisted: (id) => id !== "settings",
   });
@@ -273,6 +276,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       offSessionInventory();
       offAuthorityWelcome();
       authority.dispose();
+      startupHints.dispose();
       offMeshView();
       addHost.dispose();
       canvas.dispose();

@@ -21,9 +21,32 @@ use std::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
+// Broad TERM compatibility, true colour and the cooperative startup marker [D315].
+const TERMINAL_ENVIRONMENT: [(&str, &str); 3] = [
+    ("TERM", "xterm-256color"),
+    ("COLORTERM", "truecolor"),
+    ("INFRATERNAL_SESSION", "1"),
+];
+
 pub struct Pty {
     pub master: File,
     pub child: Child,
+}
+
+/// Replacing a startup file must not silently discard ACLs or other security metadata.
+pub(crate) fn file_has_attributes(file: &File) -> io::Result<bool> {
+    // SAFETY: a null buffer and zero size query only the required list length;
+    // the borrowed descriptor remains open and the kernel retains no pointer.
+    let length = unsafe { nix::libc::flistxattr(file.as_raw_fd(), std::ptr::null_mut(), 0) };
+    if length >= 0 {
+        return Ok(length != 0);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(nix::libc::ENOTSUP) {
+        Ok(false)
+    } else {
+        Err(error)
+    }
 }
 fn errno(error: nix::errno::Errno) -> io::Error {
     io::Error::from_raw_os_error(error as i32)
@@ -196,9 +219,7 @@ impl Pty {
             .env("USER", &user.name)
             .env("LOGNAME", &user.name)
             .env("SHELL", shell)
-            .env("TERM", "xterm-256color")
-            // Keep TERM broadly compatible while separately advertising 24-bit colour.
-            .env("COLORTERM", "truecolor")
+            .envs(TERMINAL_ENVIRONMENT)
             .env("PATH", "/usr/local/bin:/usr/bin:/bin")
             .stdin(Stdio::from(slave.try_clone()?))
             .stdout(Stdio::from(slave.try_clone()?))
@@ -782,6 +803,11 @@ mod child_environment_tests {
                 .iter()
                 .any(|(name, value)| name == b"COLORTERM" && value == b"truecolor")
         );
+        assert!(
+            actual
+                .iter()
+                .any(|(name, value)| name == b"INFRATERNAL_SESSION" && !value.is_empty())
+        );
         assert!(actual.iter().all(|(name, _)| {
             name == b"HOME"
                 || name == b"USER"
@@ -789,6 +815,7 @@ mod child_environment_tests {
                 || name == b"SHELL"
                 || name == b"TERM"
                 || name == b"COLORTERM"
+                || name == b"INFRATERNAL_SESSION"
                 || name == b"PATH"
                 || name == b"ZDOTDIR"
                 || name == b"LANG"
