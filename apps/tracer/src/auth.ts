@@ -83,13 +83,14 @@ export async function inspectDeviceApproval(code: string): Promise<DeviceApprova
   } catch (error: unknown) {
     throw deviceApprovalError(error);
   }
+  const scopes = review?.scopes;
   if (typeof review?.device !== "string"
     || review.device.length === 0
     || review.device.length > 128
     || /[\u0000-\u001f\u007f]/.test(review.device)
-    || !Array.isArray(review.scopes)
-    || review.scopes.length !== DEVICE_APPROVAL_SCOPES.length
-    || !DEVICE_APPROVAL_SCOPES.every((scope, index) => review.scopes?.[index] === scope)) {
+    || !Array.isArray(scopes)
+    || scopes.length !== DEVICE_APPROVAL_SCOPES.length
+    || !DEVICE_APPROVAL_SCOPES.every((scope, index) => scopes[index] === scope)) {
     throw new AuthError("The server's sign-in request could not be reviewed. Check that the server is up to date, then ask for a new link.");
   }
   return { device: review.device, scopes: [...DEVICE_APPROVAL_SCOPES] };
