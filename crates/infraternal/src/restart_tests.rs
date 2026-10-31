@@ -563,15 +563,15 @@ fn runtime_shutdown_never_waits_forever_on_a_blocking_waiter() {
 #[test]
 fn early_hangup_is_queued_until_control_installs_its_handler() {
     const NAME: &str = "restart::tests::early_hangup_is_queued_until_control_installs_its_handler";
-    if std::env::var_os("INFRATERNAL_EARLY_HUP_TEST").is_some() {
+    if let Some(state) = std::env::var_os("INFRATERNAL_EARLY_HUP_TEST") {
         queue_reload().unwrap();
         // Direct the signal to this thread: the real image does this before
         // creating any runtime threads, which then inherit the blocked mask.
         nix::sys::signal::raise(nix::sys::signal::Signal::SIGHUP).unwrap();
-        let directory = Directory::new();
+        let state = PathBuf::from(state);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut control = Control::start(directory.state()).unwrap();
+            let mut control = Control::start(&state).unwrap();
             assert!(
                 tokio::time::timeout(HANG_BOUND, control.requested(None))
                     .await
@@ -581,10 +581,12 @@ fn early_hangup_is_queued_until_control_installs_its_handler() {
         });
         return;
     }
+    // Keep cleanup in the parent: a bounded stop cannot run child destructors.
+    let directory = Directory::new();
     let child_image = stripped_test_image(&std::env::current_exe().unwrap());
     let child = std::process::Command::new(child_image)
         .args(["--exact", NAME, "--nocapture"])
-        .env("INFRATERNAL_EARLY_HUP_TEST", "1")
+        .env("INFRATERNAL_EARLY_HUP_TEST", directory.state())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -603,22 +605,23 @@ fn early_hangup_is_queued_until_control_installs_its_handler() {
 #[test]
 fn restart_request_logs_kernel_peer_target_and_cold_outcome() {
     const NAME: &str = "restart::tests::restart_request_logs_kernel_peer_target_and_cold_outcome";
-    if std::env::var_os("INFRATERNAL_RESTART_LOG_TEST").is_some() {
+    if let Some(state) = std::env::var_os("INFRATERNAL_RESTART_LOG_TEST") {
         infraternal_server::configure_logging(false);
-        let directory = Directory::new();
+        let state = PathBuf::from(state);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut control = Control::start(directory.state()).unwrap();
-            let (received, sent) =
-                tokio::join!(control.requested(None), request(directory.state(), None));
+            let mut control = Control::start(&state).unwrap();
+            let (received, sent) = tokio::join!(control.requested(None), request(&state, None));
             assert!(received.is_ok());
             assert!(!sent.unwrap());
         });
         return;
     }
+    // Own both roots through success, child failure, and timeout unwinding.
+    let directory = Directory::new();
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", NAME, "--nocapture"])
-        .env("INFRATERNAL_RESTART_LOG_TEST", "1")
+        .env("INFRATERNAL_RESTART_LOG_TEST", directory.state())
         .env("RUST_LOG", "infraternal=info")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
