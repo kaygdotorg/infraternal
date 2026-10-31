@@ -73,7 +73,11 @@ window picker (macOS 26.5, #146). `--socket` speaks
 to a running helper instead, for the production socket path. Phases are
 warmup, idle, typing (tagged text input through the companion), optional
 scroll (tagged wheel events over a long document) and settled; the target app
-must be frontmost for typing. `summarize RUN STDERR` joins frame receipts with
+must be frontmost for typing. The Rust helper launches this same bundle through
+LaunchServices with `open -n -W -g` and a fresh mode-0600 Unix socket in a
+mode-0700 temporary directory; it refuses loose executables. In measurement
+mode, companion metrics flow to the helper's stderr, including
+LaunchServices-to-PID startup time. `summarize RUN STDERR` joins frame receipts with
 the companion's METRIC lines by capture stamp: capture-to-encoded and
 capture-to-client percentiles exclude sharp refreshes of the retained picture
 (`surface_delivery fresh=false`), whose stamp age is not latency. CPU covers the

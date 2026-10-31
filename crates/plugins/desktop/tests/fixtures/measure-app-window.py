@@ -342,6 +342,8 @@ def summarize(args):
             deliveries.setdefault(int(values["capture_ns"]), []).append(values["fresh"] == "true")
         elif match.group(1).startswith("capture_callback"):
             callbacks.append(values)
+        elif match.group(1).startswith("launch_services"):
+            lifecycle.append(match.group(1))
         elif match.group(1).startswith(("capture_lifecycle", "capture_window", "source_capture_config", "capture_start_failed", "capture_stopped", "hardware=")):
             lifecycle.append(match.group(1))
         if "pid" in values and match.group(1).startswith(("source_capture_config", "capture_window")):
@@ -352,6 +354,9 @@ def summarize(args):
               "launch_ms": events.get("launch_ms"),
               "start_reply_ms": (events["start_reply_ns"] - events["start_sent_ns"]) / 1e6,
               "typed": events.get("typed"), "scrolled": events.get("scrolled"), "phases": [], "callbacks": callbacks, "lifecycle": lifecycle}
+    launches = [fields(entry) for entry in lifecycle if entry.startswith("launch_services")]
+    if launches and "launch_ms" in launches[-1]:
+        result["launch_ms"] = float(launches[-1]["launch_ms"])
     sent = events["start_sent_ns"]
     stamps = {}
     for entry in lifecycle:

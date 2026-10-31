@@ -1,4 +1,4 @@
-/// Role: establish the companion's own privacy attribution while retaining its PID and inherited pipes [D203,D208].
+/// Role: retain the signed bundle's privacy attribution and launch PID for its private channel [D203,D208,#146].
 import Darwin
 import Foundation
 
@@ -21,8 +21,8 @@ func establishResponsibility() throws {
     defer { posix_spawnattr_destroy(&attributes) }
     try check(disclaim(&attributes, 1))
     // SETEXEC replaces this process rather than leaving a supervising child.
-    // Rust keeps the same Child/PID, process group and stdin/stdout endpoints;
-    // EOF restoration, deadlines and forced retirement continue to work.
+    // LaunchServices retains the app bundle identity and PID while its private
+    // socket carries the bounded protocol and closes to request cleanup.
     try check(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETEXEC)))
     let executable = Bundle.main.executablePath ?? CommandLine.arguments[0]
     let arguments = ([executable] + Array(CommandLine.arguments.dropFirst()) + [marker]).map { strdup($0) }

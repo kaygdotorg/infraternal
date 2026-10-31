@@ -65,8 +65,4 @@ fn main() {
         status.is_ok_and(|s| s.success()),
         "The macOS desktop companion requires the macOS Swift toolchain."
     );
-    println!(
-        "cargo:rustc-env=INFRATERNAL_DESKTOP_NATIVE={}",
-        path.display()
-    );
 }

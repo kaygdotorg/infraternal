@@ -1,4 +1,4 @@
-/// Role: private AppKit-session companion; one bounded stdio request/response, cleanup on EOF [D203].
+/// Role: signed AppKit-session companion; one private socket request/response, cleanup on EOF [D203,#146].
 import AppKit
 import Foundation
 import Darwin
@@ -46,13 +46,60 @@ if let index = CommandLine.arguments.firstIndex(of: "--capture-still") {
 private let measureInputCommands = ProcessInfo.processInfo.environment["INFRATERNAL_DESKTOP_MEASURE"] != nil
 let surfaceMode = CommandLine.arguments.contains("--surface-capture")
 private let encoderMode = CommandLine.arguments.contains("--encoder")
+private var companionInput = FileHandle.standardInput
+private var companionOutput = FileHandle.standardOutput
 
 enum HelperFailure: Error { case invalid, permission, unavailable }
+
+private func connectCompanionChannel() throws {
+    let matches = CommandLine.arguments.indices.filter { CommandLine.arguments[$0] == "--socket" }
+    guard !matches.isEmpty else { return }
+    guard matches.count == 1, let index = matches.first,
+          CommandLine.arguments.count > index + 1 else { throw HelperFailure.invalid }
+    let path = CommandLine.arguments[index + 1]
+    let encoded = Array(path.utf8) + [0]
+    var address = sockaddr_un()
+    guard path.hasPrefix("/"), encoded.count <= MemoryLayout.size(ofValue: address.sun_path) else { throw HelperFailure.invalid }
+    address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+    address.sun_family = sa_family_t(AF_UNIX)
+    let copied = withUnsafeMutableBytes(of: &address.sun_path) { (destination: UnsafeMutableRawBufferPointer) -> Bool in
+        guard encoded.count <= destination.count else { return false }
+        destination.copyBytes(from: encoded)
+        return true
+    }
+    guard copied else { throw HelperFailure.invalid }
+    let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+    guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    let connected = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
+    }
+    guard connected == 0 else {
+        let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        _ = Darwin.close(descriptor)
+        throw error
+    }
+    let outputDescriptor = Darwin.dup(descriptor)
+    guard outputDescriptor >= 0 else {
+        let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        _ = Darwin.close(descriptor)
+        throw error
+    }
+    companionInput = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+    companionOutput = FileHandle(fileDescriptor: outputDescriptor, closeOnDealloc: true)
+}
+
+do { try connectCompanionChannel() }
+catch {
+    FileHandle.standardError.write(Data("Desktop companion channel unavailable.\n".utf8))
+    exit(1)
+}
 
 private func readExactly(_ count: Int) throws -> Data {
     var result = Data()
     while result.count < count {
-        let part = FileHandle.standardInput.readData(ofLength:count-result.count)
+        let part = companionInput.readData(ofLength:count-result.count)
         guard !part.isEmpty else { throw HelperFailure.unavailable }
         result.append(part)
     }
@@ -72,7 +119,7 @@ func sendPacket(_ kind: UInt8, _ body: Data) throws {
     var length = UInt32(body.count+2).bigEndian
     let header = withUnsafeBytes(of:&length) { Data($0) } + Data([1,kind])
     outputLock.lock(); defer { outputLock.unlock() }
-    FileHandle.standardOutput.write(header + body)
+    companionOutput.write(header + body)
 }
 
 private func json(_ value: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]) }

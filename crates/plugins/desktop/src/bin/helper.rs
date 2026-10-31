@@ -1,5 +1,8 @@
 //! Per-user desktop helper entrypoint; no daemon or server is created [D203,D201].
 #[cfg(target_os = "macos")]
+use std::io::Write as _;
+
+#[cfg(target_os = "macos")]
 fn main() -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
     const TIMEOUT: &str = "SCREENCAPTUREKIT_COMPLETION_TIMEOUT_SECS";
@@ -22,19 +25,12 @@ fn main() -> std::io::Result<()> {
     if std::env::args_os().any(|arg| arg == "--check-permissions") {
         let path = configured_companion()?.ok_or_else(|| {
             std::io::Error::other(
-                "Set INFRATERNAL_DESKTOP_COMPANION to the signed companion executable.",
+                "Set INFRATERNAL_DESKTOP_COMPANION to the executable inside the signed capture app bundle.",
             )
         })?;
-        // The native entrypoint establishes responsibility before its preflight;
-        // diagnostics and every production Native::spawn use that same path.
-        let status = std::process::Command::new(path)
-            .arg("--check-permissions")
-            .status()?;
-        return if status.success() {
-            Ok(())
-        } else {
-            Err(std::io::Error::other("Desktop permission check failed."))
-        };
+        let output = infraternal_plugin_desktop::native::check_permissions(&path)?;
+        std::io::stdout().write_all(&output)?;
+        return Ok(());
     }
     run()
 }
@@ -76,10 +72,11 @@ async fn run() -> std::io::Result<()> {
     let endpoint = Endpoint::bind(&runtime)?;
     let companion_runtime = companion_runtime.as_deref().unwrap_or(&runtime);
     infraternal_plugin_desktop::socket::validate_runtime(companion_runtime)?;
-    let native_path = match configured_companion()? {
-        Some(path) => path,
-        None => extract_companion(companion_runtime)?,
-    };
+    let native_path = configured_companion()?.ok_or_else(|| {
+        io::Error::other(
+            "Set INFRATERNAL_DESKTOP_COMPANION to the executable inside the signed capture app bundle.",
+        )
+    })?;
     endpoint.listener.set_nonblocking(true)?;
     let listener = tokio::net::UnixListener::from_std(endpoint.listener.try_clone()?)?;
     let stopping = Arc::new(AtomicBool::new(false));
@@ -112,7 +109,21 @@ async fn run() -> std::io::Result<()> {
             let mut companion = native.take().ok_or_else(|| io::Error::other("Desktop companion unavailable."))?; let stop = Arc::clone(&stopping);
             let mut task = tokio::task::spawn_blocking(move || { let result = helper::session(socket,&mut companion,&encoder_path,&stop); (companion,result) });
             tokio::select! {
-                result = &mut task => { if let Ok((companion,result)) = result { native = Some(companion); if let Err(error) = result && error.kind() != io::ErrorKind::UnexpectedEof { eprintln!("Desktop stream stopped: {error}"); } } },
+                result = &mut task => {
+                    if let Ok((companion, session_result)) = result {
+                        if let Err(error) = session_result && error.kind() != io::ErrorKind::UnexpectedEof {
+                            eprintln!("Desktop stream stopped: {error}");
+                        }
+                        if companion.is_stopped() {
+                            drop(companion);
+                            native = Some(restart_companion(native_path.clone()).await?);
+                        } else {
+                            native = Some(companion);
+                        }
+                    } else {
+                        native = Some(restart_companion(native_path.clone()).await?);
+                    }
+                },
                 _ = terminate.recv() => { stopping.store(true,Ordering::Release); let _ = shutdown.shutdown(std::net::Shutdown::Both); let _ = task.await; break },
                 _ = interrupt.recv() => { stopping.store(true,Ordering::Release); let _ = shutdown.shutdown(std::net::Shutdown::Both); let _ = task.await; break },
             }
@@ -120,9 +131,18 @@ async fn run() -> std::io::Result<()> {
         }
         Ok(())
     }.await;
-    // Keep the inert companion at a stable path so macOS permission approvals
-    // address the same executable on later starts. Disabling leaves no process.
+    // Capture instances are retired after each stream; LaunchServices keeps
+    // their TCC identity attached to the installed bundle across later starts.
     result
+}
+
+#[cfg(target_os = "macos")]
+async fn restart_companion(
+    path: std::path::PathBuf,
+) -> std::io::Result<infraternal_plugin_desktop::native::Native> {
+    tokio::task::spawn_blocking(move || infraternal_plugin_desktop::native::Native::spawn(&path))
+        .await
+        .map_err(|_| std::io::Error::other("Desktop companion restart failed."))?
 }
 /// A locally configured signed companion keeps its installed bundle identity.
 /// Remote action bodies cannot select this path; the supervising user owns it.
@@ -137,6 +157,7 @@ fn configured_companion() -> std::io::Result<Option<std::path::PathBuf>> {
 #[cfg(any(target_os = "macos", test))]
 fn validate_companion(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::MetadataExt;
+    infraternal_plugin_desktop::native::companion_app_bundle(path)?;
     let metadata = std::fs::symlink_metadata(path)?;
     if !path.is_absolute()
         || !metadata.is_file()
@@ -149,68 +170,6 @@ fn validate_companion(path: &std::path::Path) -> std::io::Result<()> {
         ));
     }
     Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn extract_companion(runtime: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
-    use std::{
-        fs,
-        io::{self, Read},
-        os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
-    };
-    let native_path = runtime.join("desktop-native");
-    // Extract only into the authenticated private directory, never overwrite a file or symlink.
-    let embedded = include_bytes!(env!("INFRATERNAL_DESKTOP_NATIVE"));
-    match fs::symlink_metadata(&native_path) {
-        Ok(_) => {
-            let file = fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(nix::libc::O_NOFOLLOW)
-                .open(&native_path)?;
-            let metadata = file.metadata()?;
-            if !metadata.is_file()
-                || metadata.uid() != nix::unistd::geteuid().as_raw()
-                || metadata.mode() & 0o777 != 0o500
-                || metadata.len() != u64::try_from(embedded.len()).unwrap_or(u64::MAX)
-            {
-                return Err(io::Error::other(
-                    "Desktop companion differs from this helper; remove the stopped helper's companion before updating.",
-                ));
-            }
-            let mut actual = Vec::new();
-            file.take(metadata.len().saturating_add(1))
-                .read_to_end(&mut actual)?;
-            if actual != embedded.as_slice() {
-                return Err(io::Error::other(
-                    "Desktop companion differs from this helper; remove the stopped helper's companion before updating.",
-                ));
-            }
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            // Publish a complete immutable file atomically: simultaneous owned
-            // source helpers must never observe a partially extracted binary.
-            let temporary = runtime.join(format!("desktop-native-{}.pending", std::process::id()));
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o500)
-                .open(&temporary)?;
-            std::io::Write::write_all(&mut file, embedded)?;
-            file.sync_all()?;
-            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o500))?;
-            let publication = fs::hard_link(&temporary, &native_path);
-            fs::remove_file(&temporary)?;
-            match publication {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    return extract_companion(runtime);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Err(error) => return Err(error),
-    }
-    Ok(native_path)
 }
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -262,10 +221,17 @@ mod companion_tests {
             .join(format!("companion-path-{}", std::process::id()));
         fs::create_dir(&root).unwrap();
         let _cleanup = Cleanup(root.clone());
-        let executable = root.join("companion");
+        let contents = root.join("InfraternalCaptureHelper.app").join("Contents");
+        let executable = contents.join("MacOS/InfraternalCaptureHelper");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(contents.join("Info.plist"), "bundle fixture").unwrap();
         fs::write(&executable, b"fixture executable").unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(validate_companion(&executable).is_ok());
+        let loose = root.join("companion");
+        fs::write(&loose, b"loose executable").unwrap();
+        fs::set_permissions(&loose, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(validate_companion(&loose).is_err());
         let link = root.join("link");
         symlink(&executable, &link).unwrap();
         assert!(validate_companion(&link).is_err());
