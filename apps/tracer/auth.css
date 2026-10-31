@@ -228,6 +228,15 @@
 .auth-signin:has(.auth-text-button) { padding-bottom: calc(var(--auth-pad) - var(--auth-tail)); }
 .auth-signin .auth-lede { margin-bottom: 28px; }
 .auth-login { width: 100%; height: 48px; border-radius: 12px; font-size: 15px; }
+.device-approval-facts { display: grid; gap: 12px; margin: 0 0 20px; }
+.device-approval-facts > div { display: grid; grid-template-columns: 72px minmax(0, 1fr); align-items: baseline; gap: 12px; }
+.device-approval-facts dt { color: var(--fg-2); font-size: 13px; }
+.device-approval-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-weight: var(--fw-label); }
+.device-approval-access { margin: 0 0 20px; }
+.device-approval-access h2 { margin: 0 0 8px; color: var(--fg-2); font: var(--fw-label) 13px/1.4 var(--font-face); }
+.device-approval-scopes { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.device-approval-scopes li { min-width: 0; overflow-wrap: anywhere; }
+.device-approval-note { margin: 0 0 24px; color: var(--fg-2); font-size: 13px; }
 .auth-loading { min-height: 1em; margin: 14px 0 0; text-align: center; }
 /* A line that exists only while it has something to say (the passkey wait counter, an error): the
    row is 0fr while empty, so the card hugs its content, and eases open when text arrives. */

@@ -32,6 +32,8 @@ mod restart_binary;
 #[cfg(all(feature = "remote", feature = "plugin-server"))]
 mod restart_image;
 mod shim_cli;
+#[cfg(feature = "remote")]
+mod sign_in;
 #[cfg(feature = "ssh")]
 mod ssh_askpass;
 #[cfg(feature = "ssh")]
@@ -201,6 +203,26 @@ fn dispatch_action(
         CliHandler::Unavailable => run_unavailable(action, json_output),
         CliHandler::Status => run_status(registry, json_output),
         CliHandler::Skill => run_skill(registry, matches, json_output),
+        CliHandler::SignIn => {
+            #[cfg(feature = "remote")]
+            {
+                match matches.get_one::<String>("server") {
+                    Some(server) => sign_in::run(server, json_output),
+                    None => report_failure_as(
+                        "sign-in",
+                        "A server address is required.",
+                        "provide an HTTPS server origin, for example https://infra.example.org"
+                            .to_owned(),
+                        json_output,
+                        Exit::Usage,
+                    ),
+                }
+            }
+            #[cfg(not(feature = "remote"))]
+            {
+                run_unavailable(action, json_output)
+            }
+        }
         CliHandler::ServerPlugin => {
             #[cfg(feature = "release")]
             {
