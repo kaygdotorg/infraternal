@@ -73,7 +73,9 @@ window picker (macOS 26.5, #146). `--socket` speaks
 to a running helper instead, for the production socket path. Phases are
 warmup, idle, typing (tagged text input through the companion), optional
 scroll (tagged wheel events over a long document) and settled; the target app
-must be frontmost for typing. The Rust helper launches this same bundle through
+must be frontmost for typing. Pass `--focus` when the idle phase must include an
+active text caret; it clicks the target window center before warmup, so use it
+only when that point is an editor. The Rust helper launches this same bundle through
 LaunchServices with `open -n -W -g` and a fresh mode-0600 Unix socket in a
 mode-0700 temporary directory; it refuses loose executables. In measurement
 mode, companion metrics flow to the helper's stderr, including

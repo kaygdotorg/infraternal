@@ -1,4 +1,4 @@
-/// Role: exercise actual framework rectangle representations and unchanged-frame sentinels [D254,D266].
+/// Role: exercise framework damage classification, geometry diagnostics and unchanged-frame sentinels [D254,D266,#146].
 import Foundation
 import CoreGraphics
 
@@ -14,6 +14,8 @@ import CoreGraphics
         expect(captureFrameHasDamage([empty], initial: true), "first picture is always delivered")
         let caret = CGRect(x: 120, y: 60, width: 2, height: 17).dictionaryRepresentation
         expect(captureFrameDamage([caret], initial: false) == .caret, "a narrow vertical cursor change is transient")
+        let caretDiagnostic = captureFrameDamageDiagnostics([caret])
+        expect(caretDiagnostic.contains("2.0") && caretDiagnostic.contains("17.0"), "opt-in metrics preserve dirty-rectangle dimensions")
         let shortLine = CGRect(x: 120, y: 60, width: 2, height: 7).dictionaryRepresentation
         expect(captureFrameDamage([shortLine], initial: false) == .content, "short narrow changes remain content")
         let wideCaret = CGRect(x: 120, y: 60, width: 4, height: 17).dictionaryRepresentation

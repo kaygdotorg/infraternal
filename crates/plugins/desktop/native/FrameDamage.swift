@@ -1,4 +1,4 @@
-/// Role: classify native frame damage without reading pixels or queuing unchanged pictures [D254,D266].
+/// Role: classify native frame damage and report geometry-only diagnostics in opt-in measurements [D254,D266,#146].
 import Foundation
 import CoreGraphics
 
@@ -50,4 +50,29 @@ func captureFrameDamage(_ metadata: Any?, initial: Bool) -> CaptureFrameDamage {
 
 func captureFrameHasDamage(_ metadata: Any?, initial: Bool) -> Bool {
     captureFrameDamage(metadata, initial: initial) != .unchanged
+}
+
+/// Compact geometry for opt-in capture measurements; rectangle contents do not
+/// include pixels, titles or other app data, and unknown values remain labeled.
+func captureFrameDamageDiagnostics(_ metadata: Any?) -> String {
+    guard let rectangles = metadata as? [Any] else { return "unknown" }
+    return rectangles.map { value in
+        let kind: String
+        let rectangle: CGRect?
+        if let dictionary = value as? [String: Any] {
+            kind = "dictionary"
+            rectangle = CGRect(dictionaryRepresentation: dictionary as CFDictionary)
+        } else if let boxed = value as? NSValue,
+                  String(cString: boxed.objCType) == damageRectangleEncoding {
+            kind = "nsvalue"
+            rectangle = boxed.rectValue
+        } else if let unboxed = value as? CGRect {
+            kind = "cgrect"
+            rectangle = unboxed
+        } else {
+            return "unknown-\(String(reflecting: type(of: value)))"
+        }
+        guard let rectangle else { return "invalid-\(kind)" }
+        return "\(kind):\(rectangle.minX),\(rectangle.minY),\(rectangle.width),\(rectangle.height)"
+    }.joined(separator: ";")
 }

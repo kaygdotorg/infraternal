@@ -289,10 +289,11 @@ fn launch_services_command(
     ]);
     if measure {
         command.arg("--env").arg("INFRATERNAL_DESKTOP_MEASURE=1");
-        command.args(["--stderr", "/dev/fd/2"]);
-    } else {
-        command.args(["--stderr", "/dev/null"]);
     }
+    let measured_stderr = std::env::var_os("INFRATERNAL_DESKTOP_MEASURE_STDERR").map(PathBuf::from);
+    command
+        .arg("--stderr")
+        .arg(launch_stderr_path(measure, measured_stderr.as_deref()));
     command
         .arg(bundle)
         .arg("--args")
@@ -307,6 +308,17 @@ fn launch_services_command(
         command.arg("--surface-capture");
     }
     command
+}
+
+/// Keep companion diagnostics quiet by default; an explicit absolute path
+/// makes `LaunchServices`' child stderr observable during a measured run.
+fn launch_stderr_path(measure: bool, configured: Option<&Path>) -> PathBuf {
+    if !measure {
+        return PathBuf::from("/dev/null");
+    }
+    configured
+        .filter(|path| path.is_absolute())
+        .map_or_else(|| PathBuf::from("/dev/fd/2"), Path::to_path_buf)
 }
 
 #[cfg(target_os = "macos")]
@@ -821,8 +833,11 @@ fn retire_owned(launch: CompanionLaunch) {
 mod launch_tests {
     #[cfg(target_os = "macos")]
     use super::accept_blocking;
-    use super::{companion_app_bundle, parse_companion_pid};
-    use std::{fs, path::PathBuf};
+    use super::{companion_app_bundle, launch_stderr_path, parse_companion_pid};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     struct Cleanup(PathBuf);
     impl Drop for Cleanup {
@@ -855,6 +870,23 @@ mod launch_tests {
         assert!(parse_companion_pid("not-a-pid\n", 41).is_err());
         assert!(parse_companion_pid("1\n", 41).is_err());
         assert!(parse_companion_pid("41\n", 41).is_err());
+    }
+
+    #[test]
+    fn measured_launch_services_can_write_companion_metrics_to_an_absolute_file() {
+        assert_eq!(
+            launch_stderr_path(true, Some(Path::new("/tmp/desktop-capture.stderr"))),
+            PathBuf::from("/tmp/desktop-capture.stderr")
+        );
+        assert_eq!(launch_stderr_path(true, None), PathBuf::from("/dev/fd/2"));
+        assert_eq!(
+            launch_stderr_path(true, Some(Path::new("relative.stderr"))),
+            PathBuf::from("/dev/fd/2")
+        );
+        assert_eq!(
+            launch_stderr_path(false, Some(Path::new("/tmp/ignored.stderr"))),
+            PathBuf::from("/dev/null")
+        );
     }
 
     #[cfg(target_os = "macos")]

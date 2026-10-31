@@ -145,7 +145,8 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         mailbox.unlock()
         if measure {
             let entries = (damage as? [Any])?.count ?? -1
-            FileHandle.standardError.write(Data("METRIC source_frame pid=\(getpid()) capture_ns=\(nanos(ticks)) callback_ns=\(callback) damaged=\(damageKind != .unchanged) damage_kind=\(damageKind.rawValue) damage_entries=\(entries)\n".utf8))
+            let geometry = captureFrameDamageDiagnostics(damage)
+            FileHandle.standardError.write(Data("METRIC source_frame pid=\(getpid()) capture_ns=\(nanos(ticks)) callback_ns=\(callback) damaged=\(damageKind != .unchanged) damage_kind=\(damageKind.rawValue) damage_entries=\(entries) damage_rects=\(geometry)\n".utf8))
         }
         if schedule { encodingQueue.async { [weak self] in self?.drain() } }
     }
@@ -167,7 +168,14 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 if pressure { _ = bitrate.feedback(at:ProcessInfo.processInfo.systemUptime, congested:true) }
                 let dequeued = measure ? nanos(mach_absolute_time()) : 0
                 if let frame, pixels.prepare(frame.0) {
-                    damageState.changed(at: ProcessInfo.processInfo.systemUptime, caret: frame.3 == .caret)
+                    if measure {
+                        let bounds = pixels.damageBounds.map { "\($0.x),\($0.y),\($0.width),\($0.height)" } ?? "none"
+                        FileHandle.standardError.write(Data("METRIC pixel_damage capture_ns=\(nanos(frame.1)) kind=\(pixels.damageKind) bounds=\(bounds) pixels=\(pixels.changedPixels) complete=\(pixels.damageBoundsComplete)\n".utf8))
+                    }
+                    // Framework dirty rectangles can cover an entire window even
+                    // when only its insertion caret changed. The retained BGRA
+                    // history is the authoritative area for scheduling sharp refresh.
+                    damageState.changed(at: ProcessInfo.processInfo.systemUptime, caret: pixels.damageKind == .caret)
                 }
                 if repair { damageState.repair() }
                 guard let current, let decision = damageState.next(at: ProcessInfo.processInfo.systemUptime) else { break }

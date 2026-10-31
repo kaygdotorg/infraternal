@@ -8,7 +8,9 @@ the bounded local helper protocol (contracts/desktop-helper.md) to a running
 `infraternal-desktop-helper`. Either way it starts one window stream at the
 window's own size x backing scale (so nothing is resized), keeps
 it idle, then types into it through the helper's own tagged input injection, and
-stops. It saves the Annex-B stream and one receipt per received video frame.
+stops. `--focus` clicks the window center before warmup, for measurements where
+the idle caret must already be visible. It saves the Annex-B stream and one
+receipt per received video frame.
 
 `summarize` joins those receipts with the companion's opt-in METRIC lines
 (helper stderr with INFRATERNAL_DESKTOP_MEASURE=1) by capture timestamp and
@@ -212,7 +214,8 @@ def capture(args):
         # helper derives it from its own control child instead.
         start["capture_rect"] = frame
     launch = getattr(link, "launch_ms", None)
-    events = {"launch_ms": launch, "window": window, "display": display, "start": start, "phases": []}
+    events = {"launch_ms": launch, "window": window, "display": display, "start": start,
+              "focused_before_measurement": args.focus, "phases": []}
     receipts = []
     replies = []
     stream = open(os.path.join(args.out, "stream.h264"), "wb")
@@ -245,6 +248,13 @@ def capture(args):
         raise SystemExit("Start refused: %s" % body.decode("utf-8", "replace"))
     thread = threading.Thread(target=reader, daemon=True)
     thread.start()
+    if args.focus:
+        # A frontmost application alone does not guarantee that its insertion caret is active.
+        click = {"type": "mouse", "x": width / 2, "y": height / 2, "button": 0, "modifiers": 0}
+        link.send(4, {**click, "state": 1})
+        link.send(4, {**click, "state": 2})
+        time.sleep(0.1)
+        link.send(10, {"active": False})
     # Warmup absorbs process start, first IDR and encoder warm-up so idle is steady state.
     phases = [("warmup", args.warmup, None), ("idle", args.idle, None), ("typing", args.motion, "type")]
     if args.scroll:
@@ -422,6 +432,7 @@ def main():
     run.add_argument("--app-name", help="first on-screen normal window of this app, instead of an ID")
     run.add_argument("--title", help="with --app-name: the window with exactly this title")
     run.add_argument("--helper-pid", type=int, help="helper PID for CPU sampling (with --socket)")
+    run.add_argument("--focus", action="store_true", help="click the target window center before warmup; use when that point is an editor")
     run.add_argument("--out", required=True)
     run.add_argument("--warmup", type=float, default=3)
     run.add_argument("--idle", type=float, default=10)
