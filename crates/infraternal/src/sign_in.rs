@@ -312,14 +312,12 @@ use std::{
     time::Duration,
 };
 
-use http_body_util::BodyExt;
-use hyper::{StatusCode, header};
-use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode, SslVersion};
+use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::time::Instant;
 use url::Url;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::cli::output::{CommandResult, CommandState, Exit, emit, print_progress};
 
@@ -379,30 +377,6 @@ struct DeviceApproval {
     lifetime: Duration,
 }
 
-struct HttpResponse {
-    status: StatusCode,
-    retry_after: Option<Duration>,
-    body: Zeroizing<Vec<u8>>,
-}
-
-/// Keeps request bytes zeroizable after Hyper has consumed its reference to the payload.
-struct SecretBytes(bytes::Bytes);
-
-impl SecretBytes {
-    fn clone_for_request(&self) -> bytes::Bytes {
-        self.0.clone()
-    }
-}
-
-impl Drop for SecretBytes {
-    fn drop(&mut self) {
-        let bytes = std::mem::replace(&mut self.0, bytes::Bytes::new());
-        if let Ok(mut bytes) = bytes.try_into_mut() {
-            bytes.as_mut().zeroize();
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 enum NetworkFailure {
     Dns,
@@ -412,6 +386,21 @@ enum NetworkFailure {
     Request,
     ResponseBody,
     Timeout { request_started: bool },
+}
+
+impl From<crate::remote::ClientFailure> for NetworkFailure {
+    fn from(failure: crate::remote::ClientFailure) -> Self {
+        match failure {
+            crate::remote::ClientFailure::Dns(..) => Self::Dns,
+            crate::remote::ClientFailure::Connect(..)
+            | crate::remote::ClientFailure::SocketOption(..) => Self::Connect,
+            crate::remote::ClientFailure::TlsConfiguration
+            | crate::remote::ClientFailure::TlsHandshake => Self::Tls,
+            crate::remote::ClientFailure::HttpHandshake => Self::Response,
+            crate::remote::ClientFailure::Request => Self::Request,
+            crate::remote::ClientFailure::ResponseBody => Self::ResponseBody,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -438,14 +427,6 @@ enum Redemption {
     Pending,
     RetryAfter(Duration),
     Credential(Zeroizing<String>),
-}
-
-struct AbortConnection(tokio::task::JoinHandle<()>);
-
-impl Drop for AbortConnection {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
 }
 
 /// Starts one CLI device approval and saves the redeemed key only after private storage is ready.
@@ -863,135 +844,24 @@ async fn post_json_with_timeout(
     server: &Url,
     path: &'static str,
     body: &[u8],
-) -> Result<HttpResponse, NetworkFailure> {
+) -> Result<crate::remote::ClientResponse, NetworkFailure> {
     let mut request_started = false;
     match tokio::time::timeout(
         REQUEST_TIMEOUT,
-        post_json(server, path, body, &mut request_started),
+        crate::remote::post_json(
+            server,
+            path,
+            bytes::Bytes::copy_from_slice(body),
+            None,
+            MAX_RESPONSE_BYTES,
+            &mut request_started,
+        ),
     )
     .await
     {
-        Ok(response) => response,
+        Ok(response) => response.map_err(NetworkFailure::from),
         Err(_) => Err(NetworkFailure::Timeout { request_started }),
     }
-}
-
-async fn connect_tls(
-    server: &Url,
-) -> Result<tokio_openssl::SslStream<tokio::net::TcpStream>, NetworkFailure> {
-    let name = server.host_str().ok_or(NetworkFailure::Response)?;
-    let port = server
-        .port_or_known_default()
-        .ok_or(NetworkFailure::Response)?;
-    let addresses = tokio::net::lookup_host((name, port))
-        .await
-        .map_err(|_| NetworkFailure::Dns)?
-        .collect::<Vec<_>>();
-    if addresses.is_empty() {
-        return Err(NetworkFailure::Dns);
-    }
-    let mut socket = None;
-    for address in addresses {
-        if let Ok(connected) = tokio::net::TcpStream::connect(address).await {
-            socket = Some(connected);
-            break;
-        }
-    }
-    let socket = socket.ok_or(NetworkFailure::Connect)?;
-    let mut tls =
-        SslConnector::builder(SslMethod::tls_client()).map_err(|_| NetworkFailure::Tls)?;
-    tls.set_min_proto_version(Some(SslVersion::TLS1_3))
-        .map_err(|_| NetworkFailure::Tls)?;
-    tls.set_verify(SslVerifyMode::PEER);
-    tls.set_default_verify_paths()
-        .map_err(|_| NetworkFailure::Tls)?;
-    for bundle in [
-        "/etc/ssl/certs/ca-certificates.crt",
-        "/etc/pki/tls/certs/ca-bundle.crt",
-        "/etc/ssl/ca-bundle.pem",
-    ] {
-        if Path::new(bundle).is_file() {
-            tls.set_ca_file(bundle).map_err(|_| NetworkFailure::Tls)?;
-            break;
-        }
-    }
-    let ssl = tls
-        .build()
-        .configure()
-        .map_err(|_| NetworkFailure::Tls)?
-        .into_ssl(name)
-        .map_err(|_| NetworkFailure::Tls)?;
-    let mut stream = tokio_openssl::SslStream::new(ssl, socket).map_err(|_| NetworkFailure::Tls)?;
-    std::pin::Pin::new(&mut stream)
-        .connect()
-        .await
-        .map_err(|_| NetworkFailure::Tls)?;
-    Ok(stream)
-}
-
-async fn post_json(
-    server: &Url,
-    path: &str,
-    body: &[u8],
-    request_started: &mut bool,
-) -> Result<HttpResponse, NetworkFailure> {
-    let stream = connect_tls(server).await?;
-    let (mut sender, connection) =
-        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
-            .await
-            .map_err(|_| NetworkFailure::Response)?;
-    let connection = AbortConnection(tokio::spawn(async move {
-        let _ = connection.await;
-    }));
-    let request_body = SecretBytes(bytes::Bytes::copy_from_slice(body));
-    let request = hyper::Request::builder()
-        .method("POST")
-        .uri(path)
-        .header(
-            header::HOST,
-            server[url::Position::BeforeHost..url::Position::AfterPort].to_owned(),
-        )
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(http_body_util::Full::new(request_body.clone_for_request()))
-        .map_err(|_| NetworkFailure::Response)?;
-    // Hyper may write the one-time poll capability as soon as this send future is polled.
-    *request_started = true;
-    let response = sender
-        .send_request(request)
-        .await
-        .map_err(|_| NetworkFailure::Request);
-    drop(request_body);
-    let response = response?;
-    let status = response.status();
-    let retry_after = response
-        .headers()
-        .get(header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_secs);
-    let body = if status == StatusCode::OK {
-        let bytes = http_body_util::Limited::new(response.into_body(), MAX_RESPONSE_BYTES)
-            .collect()
-            .await
-            .map_err(|_| NetworkFailure::ResponseBody)?
-            .to_bytes();
-        let body = Zeroizing::new(bytes.to_vec());
-        if let Ok(mut bytes) = bytes.try_into_mut() {
-            bytes.as_mut().zeroize();
-        }
-        body
-    } else {
-        // Error bodies are not part of this protocol; status and Retry-After
-        // determine the outcome, and dropping them avoids false redemption uncertainty.
-        drop(response.into_body());
-        Zeroizing::new(Vec::new())
-    };
-    drop(connection);
-    Ok(HttpResponse {
-        status,
-        retry_after,
-        body,
-    })
 }
 
 fn map_network_failure(failure: NetworkFailure) -> Failure {
