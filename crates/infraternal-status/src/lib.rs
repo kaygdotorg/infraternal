@@ -21,7 +21,7 @@
 //! database establishes the server role even when its unit is masked/missing.
 //! A host role needs an installed infraternal-agent unit; an absent unconfigured
 //! role is not a failed component. Disabled below means disabled and inactive;
-//! disabling autostart alone never overrides an observed running process.
+//! disabling autostart or masking alone never overrides an observed running process.
 //!
 //! Standalone server or infraternal agent:
 //!
@@ -262,11 +262,7 @@ pub fn probe(
     let units: Vec<_> = discover(roots)
         .into_iter()
         .map(|unit| {
-            let state = if unit.masked {
-                Activity::Inactive
-            } else {
-                activity(unit.scope, &unit.name)
-            };
+            let state = activity(unit.scope, &unit.name);
             (unit, state)
         })
         .collect();
@@ -308,14 +304,8 @@ pub fn probe_local(roots: &Roots, ids: &[String]) -> NodeStatus {
     let mut units: Vec<_> = discover(roots)
         .into_iter()
         .map(|mut unit| {
-            let state = if unit.masked {
-                Activity::Inactive
-            } else {
-                Activity::Unknown
-            };
-            if !unit.masked {
-                unit.query_error = Some("service query worker unavailable");
-            }
+            unit.query_error = Some("service query worker unavailable");
+            let state = Activity::Unknown;
             (unit, state)
         })
         .collect();
@@ -333,9 +323,6 @@ pub fn probe_local(roots: &Roots, ids: &[String]) -> NodeStatus {
                     .stack_size(128 * 1024)
                     .spawn_scoped(scope, move || {
                         for (unit, state) in chunk {
-                            if unit.masked {
-                                continue;
-                            }
                             if std::time::Instant::now() >= admission {
                                 unit.query_error = Some("service query capacity exhausted");
                                 continue;

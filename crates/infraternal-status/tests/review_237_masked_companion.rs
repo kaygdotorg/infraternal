@@ -33,7 +33,13 @@ fn masked_server_beside_a_running_host_has_a_partial_setup_headline() {
             net_class: root.join("net"),
         },
         &["server".to_owned(), "agent".to_owned()],
-        &|_, _| Activity::Active,
+        &|_, name| {
+            if name == "infraternal-server.service" {
+                Activity::Inactive
+            } else {
+                Activity::Active
+            }
+        },
     );
     fs::remove_dir_all(root).unwrap();
     assert_eq!(status.components[0].state, "Stopped");

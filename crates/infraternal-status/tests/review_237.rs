@@ -35,8 +35,9 @@ fn isolated(name: &str, manager: &str, check: impl FnOnce(PathBuf)) {
     fs::remove_dir_all(root).unwrap();
     assert!(
         output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stdout)
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -141,7 +142,7 @@ printf '%s\n' ActiveState=failed SubState=failed NRestarts=45 MainPID=0 ExecMain
 fn masked_server_with_retained_data_is_not_described_as_running() {
     isolated(
         "masked_server_with_retained_data_is_not_described_as_running",
-        "exit 1",
+        "printf '%s\\n' LoadState=masked ActiveState=inactive SubState=dead MainPID=0",
         |root| {
             let units = root.join("system");
             let data = root.join("data");
@@ -162,7 +163,7 @@ fn masked_server_with_retained_data_is_not_described_as_running() {
             assert_eq!(status.overall(), Activity::Inactive);
             assert!(
                 !status.headline().1.contains("is running"),
-                "a masked server cannot be running: {}",
+                "the manager reports this masked server stopped: {}",
                 status.headline().1
             );
         },

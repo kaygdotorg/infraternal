@@ -34,7 +34,10 @@ def main():
             )
             manager = case / "bin/systemctl"
             manager.write_text(
-                "#!/bin/sh\nprintf '%s\\n' ActiveState=active SubState=running "
+                "#!/bin/sh\nfor unit; do :; done\n"
+                "case \"$unit\" in *server*) printf '%s\\n' "
+                "LoadState=masked ActiveState=inactive SubState=dead MainPID=0; exit 0;; esac\n"
+                "printf '%s\\n' ActiveState=active SubState=running "
                 "MainPID=42 NRestarts=0 ExecMainStartTimestampMonotonic=1\n"
             )
             manager.chmod(0o755)
