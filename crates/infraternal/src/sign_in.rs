@@ -93,6 +93,41 @@ mod tests {
         assert_eq!(fs::read(target).unwrap(), b"unchanged");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn credential_read_refuses_a_private_directory_replaced_after_locking() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temporary = TemporaryDirectory::new();
+        let directory = temporary.0.join("infraternal");
+        fs::create_dir(&directory).unwrap();
+        let locked_directory = super::lock_private_directory(&directory).unwrap();
+
+        let replacement = temporary.0.join("replacement");
+        fs::create_dir(&replacement).unwrap();
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o700)).unwrap();
+        let replacement_contents = br#"{"version":1,"credentials":[]}"#;
+        let replacement_file = replacement.join("credentials.json");
+        fs::write(&replacement_file, replacement_contents).unwrap();
+        let original = temporary.0.join("original");
+        fs::rename(&directory, original).unwrap();
+        symlink(&replacement, &directory).unwrap();
+
+        assert!(
+            super::read_credential_file(&locked_directory).is_err(),
+            "credential reads must stay bound to the directory inode that was locked"
+        );
+        assert!(
+            super::replace_file_atomically(&locked_directory, b"redirected").is_err(),
+            "credential replacement must stay bound to the directory inode that was locked"
+        );
+        assert_eq!(
+            fs::read(&replacement_file).unwrap().as_slice(),
+            replacement_contents,
+            "credential writes must not be redirected into a replacement directory"
+        );
+    }
+
     #[test]
     fn credential_store_keeps_credentials_for_other_servers() {
         let temporary = TemporaryDirectory::new();
@@ -581,16 +616,16 @@ fn credential_directory() -> io::Result<PathBuf> {
 }
 
 fn prepare_store(directory: &Path) -> io::Result<()> {
-    let _lock = lock_private_directory(directory)?;
-    let _ = read_credential_file(directory)?;
+    let locked_directory = lock_private_directory(directory)?;
+    let _ = read_credential_file(&locked_directory)?;
     Ok(())
 }
 
 fn store_credential(directory: &Path, credential: StoredCredential) -> io::Result<PathBuf> {
     // Keep the lock across read, replacement and directory sync so concurrent
     // sign-ins cannot overwrite one another's credentials.
-    let _lock = lock_private_directory(directory)?;
-    let mut file = read_credential_file(directory)?;
+    let locked_directory = lock_private_directory(directory)?;
+    let mut file = read_credential_file(&locked_directory)?;
     file.credentials.push(credential);
     let encoded = Zeroizing::new(serde_json::to_vec(&file).map_err(|_| {
         io::Error::new(
@@ -599,11 +634,48 @@ fn store_credential(directory: &Path, credential: StoredCredential) -> io::Resul
         )
     })?);
     let path = directory.join(CREDENTIAL_FILE_NAME);
-    replace_file_atomically(&path, &encoded)?;
+    replace_file_atomically(&locked_directory, &encoded)?;
     Ok(path)
 }
 
-fn lock_private_directory(directory: &Path) -> io::Result<nix::fcntl::Flock<File>> {
+/// Holds the locked directory inode so every credential operation can stay relative to it.
+struct LockedCredentialDirectory {
+    path: PathBuf,
+    lock: nix::fcntl::Flock<File>,
+}
+
+impl LockedCredentialDirectory {
+    /// Refuses a replaced pathname while data operations remain anchored to the held descriptor.
+    fn verify_path_identity(&self) -> io::Result<()> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY);
+        let current = options.open(&self.path)?;
+        let current = current.metadata()?;
+        let locked = self.lock.metadata()?;
+        if !private_directory_metadata(&current)
+            || !private_directory_metadata(&locked)
+            || current.dev() != locked.dev()
+            || current.ino() != locked.ino()
+        {
+            return Err(permission_denied());
+        }
+        Ok(())
+    }
+}
+
+fn private_directory_metadata(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    metadata.is_dir()
+        && owned_by_current_user(metadata)
+        && metadata.permissions().mode() & 0o777 == 0o700
+}
+
+fn lock_private_directory(directory: &Path) -> io::Result<LockedCredentialDirectory> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     fs::create_dir_all(directory)?;
@@ -619,10 +691,14 @@ fn lock_private_directory(directory: &Path) -> io::Result<nix::fcntl::Flock<File
     if metadata.permissions().mode() & 0o777 != 0o700 {
         file.set_permissions(fs::Permissions::from_mode(0o700))?;
     }
-    Ok(
-        nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
-            .map_err(|(_, error)| error)?,
-    )
+    let lock = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
+        .map_err(|(_, error)| error)?;
+    let locked_directory = LockedCredentialDirectory {
+        path: directory.to_owned(),
+        lock,
+    };
+    locked_directory.verify_path_identity()?;
+    Ok(locked_directory)
 }
 
 fn owned_by_current_user(metadata: &fs::Metadata) -> bool {
@@ -638,28 +714,39 @@ fn owned_by_current_user(metadata: &fs::Metadata) -> bool {
     }
 }
 
-fn read_credential_file(directory: &Path) -> io::Result<CredentialFile> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+fn read_credential_file(directory: &LockedCredentialDirectory) -> io::Result<CredentialFile> {
+    use std::os::unix::fs::PermissionsExt;
 
-    let path = directory.join(CREDENTIAL_FILE_NAME);
-    let mut options = OpenOptions::new();
-    options.read(true).custom_flags(nix::libc::O_NOFOLLOW);
-    let file = match options.open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+    directory.verify_path_identity()?;
+    let fd = match nix::fcntl::openat(
+        &*directory.lock,
+        CREDENTIAL_FILE_NAME,
+        nix::fcntl::OFlag::O_RDONLY
+            | nix::fcntl::OFlag::O_NOFOLLOW
+            | nix::fcntl::OFlag::O_NONBLOCK
+            | nix::fcntl::OFlag::O_CLOEXEC,
+        nix::sys::stat::Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(nix::errno::Errno::ENOENT) => {
+            directory.verify_path_identity()?;
             return Ok(CredentialFile {
                 version: 1,
                 credentials: Vec::new(),
             });
         }
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     };
+    let file = File::from(fd);
     let metadata = file.metadata()?;
     if !metadata.is_file() || !owned_by_current_user(&metadata) {
         return Err(permission_denied());
     }
     if metadata.permissions().mode() & 0o777 != 0o600 {
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    if file.metadata()?.permissions().mode() & 0o777 != 0o600 {
+        return Err(permission_denied());
     }
     if metadata.len() > MAX_CREDENTIAL_FILE_BYTES as u64 {
         return Err(io::Error::new(
@@ -686,36 +773,70 @@ fn read_credential_file(directory: &Path) -> io::Result<CredentialFile> {
             "credential file version is unsupported",
         ));
     }
+    directory.verify_path_identity()?;
     Ok(file)
 }
 
-fn replace_file_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
+fn replace_file_atomically(
+    directory: &LockedCredentialDirectory,
+    bytes: &[u8],
+) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
 
-    let directory = path.parent().ok_or_else(permission_denied)?;
+    directory.verify_path_identity()?;
     for _ in 0..32 {
         let sequence = TEMPORARY_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let temporary = directory.join(format!(
+        let temporary = format!(
             ".credentials-{}-{sequence}.tmp",
             std::process::id()
-        ));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true).mode(0o600);
-        let mut file = match options.open(&temporary) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
+        );
+        let fd = match nix::fcntl::openat(
+            &*directory.lock,
+            temporary.as_str(),
+            nix::fcntl::OFlag::O_WRONLY
+                | nix::fcntl::OFlag::O_CREAT
+                | nix::fcntl::OFlag::O_EXCL
+                | nix::fcntl::OFlag::O_NOFOLLOW
+                | nix::fcntl::OFlag::O_CLOEXEC,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        ) {
+            Ok(fd) => fd,
+            Err(nix::errno::Errno::EEXIST) => continue,
+            Err(error) => return Err(error.into()),
         };
+        let mut file = File::from(fd);
         let result = (|| {
+            let metadata = file.metadata()?;
+            if !metadata.is_file() || !owned_by_current_user(&metadata) {
+                return Err(permission_denied());
+            }
+            if metadata.permissions().mode() & 0o777 != 0o600 {
+                file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            }
+            if file.metadata()?.permissions().mode() & 0o777 != 0o600 {
+                return Err(permission_denied());
+            }
             file.write_all(bytes)?;
             file.sync_all()?;
             drop(file);
-            fs::rename(&temporary, path)?;
-            File::open(directory)?.sync_all()?;
+            directory.verify_path_identity()?;
+            nix::fcntl::renameat(
+                &*directory.lock,
+                temporary.as_str(),
+                &*directory.lock,
+                CREDENTIAL_FILE_NAME,
+            )
+            .map_err(io::Error::from)?;
+            directory.lock.sync_all()?;
+            directory.verify_path_identity()?;
             Ok(())
         })();
         if result.is_err() {
-            let _ = fs::remove_file(&temporary);
+            let _ = nix::unistd::unlinkat(
+                &*directory.lock,
+                temporary.as_str(),
+                nix::unistd::UnlinkatFlags::NoRemoveDir,
+            );
         }
         return result;
     }
