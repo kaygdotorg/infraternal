@@ -2,11 +2,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use infraternal_status::{Activity, Roots, probe};
-use std::{fs, os::unix::fs::symlink, path::PathBuf};
+use std::{fs, os::unix::fs::symlink};
 
 #[test]
 fn masked_server_recovery_keeps_next_steps_within_the_cli_limit() {
-    let root = PathBuf::from(std::env::temp_dir()).join(format!(
+    let root = std::env::temp_dir().join(format!(
         "r237-next-{}-{}",
         std::process::id(),
         uuid::Uuid::new_v4()

@@ -1034,6 +1034,9 @@ impl NodeStatus {
         if let Some(repair) = self.server_recovery_step() {
             next.insert(0, repair);
         }
+        // Repair actions share the CLI's three-step budget with diagnostics,
+        // including actions prepended above (D299).
+        next.truncate(3);
         (overall, message, next)
     }
 
