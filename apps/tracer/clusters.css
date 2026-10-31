@@ -6,10 +6,17 @@
    may scroll the nearest scroll container to bring a focused terminal into view, which moved the whole canvas sideways
    by up to a column and kept off-screen terminals alive (#126). `clip` clips like `hidden` and cannot be scrolled. */
 .terminal-screen[data-clusters] { overflow: clip; }
-/* The viewport clips the world to its box, with 12 px more at the top: a window flush with the top edge (a lone window,
-   the first row) carries its lock glyph on the frame line, and the shackle rises above that line. A clip-path rather
-   than overflow, because overflow clips at the box exactly and overflow-clip-margin is not in every browser. */
-.cl-viewport { position: absolute; inset: 0; overflow: visible; clip-path: inset(-12px 0 0 0); touch-action: none; -webkit-user-select: none; user-select: none; }
+/* The canvas is clipped to its box, with 12 px more at the top: a window flush with the top edge (a lone window, the first
+   row) carries its lock glyph on the frame line, and the shackle rises above that line (#126, D195). The clip is
+   `overflow: clip` on `.panes`, the viewport's parent, whose box reaches 12 px above the viewport (negative margin, the same
+   amount as padding) while the viewport sits `inset: 12px` from the padding edge: the viewport's own rectangle, which the
+   camera measures, is unchanged. It is not a `clip-path` on the viewport (what this did before): a `clip-path` makes its
+   element a backdrop root, so a Frosted window's `backdrop-filter` saw only what is inside the viewport and never the
+   canvas behind it (#256). `overflow: clip` does not make a backdrop root, cannot be scrolled (the first rule above), and
+   needs no `overflow-clip-margin`. Nothing between a window and the canvas backdrop may take a clip-path, filter, mask,
+   opacity or blend mode, or the blur goes blind again. */
+.terminal-screen[data-clusters][data-canvas="on"] .panes { overflow: clip; margin-top: -12px; padding-top: 12px; }
+.cl-viewport { position: absolute; inset: 12px 0 0 0; overflow: visible; touch-action: none; -webkit-user-select: none; user-select: none; }
 .cl-viewport[data-panning] { cursor: grabbing; }
 /* While the camera moves each window is a layer of its own: it is rastered once at its size and the compositor only scales it,
    where one shared layer was rastered again as the zoom changed (the windows' shadows, headers and borders: on a GPU the raster
