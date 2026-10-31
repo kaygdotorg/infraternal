@@ -145,32 +145,38 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,444,656 bytes |
-  | `aarch64-unknown-linux-musl` | 19,629,880 bytes |
+  | `x86_64-unknown-linux-musl` | 21,445,552 bytes |
+  | `aarch64-unknown-linux-musl` | 19,630,392 bytes |
 
   Crash-loop status reporting and final review fixes (#237, D299/D303) use the
   pinned `scripts/static-cargo` stripped static recipe on build host
-  6by32-compute02, one target at a time in one build slot:
+  infraternal-dev-01-compute01, one target at a time in one build slot:
 
   | Source | x86_64 bytes | aarch64 bytes |
   | --- | ---: | ---: |
-  | origin/dev (`2fb412d01`) | 21,431,472 | 19,605,896 |
-  | #237 source (`cb2e6d1bd`) | 21,444,656 | 19,629,880 |
-  | Delta versus dev | +13,184 | +23,984 |
+  | origin/dev (`ec7b10111`) | 21,431,472 | 19,605,896 |
+  | #237 source (`0b4540046`) | 21,445,552 | 19,630,392 |
+  | Delta versus dev | +14,080 | +24,496 |
 
-  Exact caps follow these measured images without allowance (D243). The
-  whole-branch growth retains monotonic restart/exit diagnostics, configured-role
-  headlines and D303 exits, including masked/missing services beside a healthy
-  companion. Queries use at most four fallible 128 KiB workers, with two reserved
-  per manager scope, bounded admission and independent per-unit deadlines;
-  resource refusal remains Unknown with a plain reason.
-  Written reasons for growth above 16 KiB, actual healthy-service timings labelled
-  "build host", both target receipts and the final gate output are on #237.
+  The subsequent rebase onto dev `57491e918` adds only the nix shell, gate
+  tooling and an editor test fixture; shipping Rust, Cargo and `.cargo` inputs
+  are unchanged. The final gate checks the rebased source against these exact
+  caps, without allowance (D243). Both measured images are static, with no
+  `PT_INTERP`.
+
+  The aarch64 delta is 8,112 bytes above 16 KiB and below 64 KiB. This whole-branch
+  growth retains monotonic restart/exit diagnostics, configured-role headlines
+  and D303 exits. A mask cannot override observed running state or, alone,
+  establish a down host role. Recovery names the owning manager's unmask command
+  and shares the CLI's three-step budget with diagnostics. Queries use at most
+  four fallible 128 KiB workers, two per scope, with bounded admission and
+  independent per-unit deadlines; resource refusal remains Unknown.
   Relative to dev, the earlier fix enables the existing nix dependency's `time`
-  feature in the normal shipping graph for CLOCK_MONOTONIC; dev had it only in
-  development dependencies. This final fix adds no dependency or feature, and no
-  dependency versions or release settings changed. These deltas cover the whole
-  branch, without claiming per-helper size attribution.
+  feature in the shipping graph for CLOCK_MONOTONIC; dev had it only in
+  development dependencies. The final fix round changes no dependency, feature,
+  version or release setting. These are whole-branch deltas, without claiming
+  per-helper attribution. Both target receipts, healthy-service timings labelled
+  "build host", and the final gate output are recorded on #237.
 
   Replay geometry and stale-note repairs (#257, R257-01/R257-02) measure
   21,431,472 / 19,605,896 bytes (x86_64 / aarch64), using the pinned
