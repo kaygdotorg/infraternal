@@ -40,6 +40,13 @@ export function writeSize<K extends keyof WindowSizes>(kind: K, value: WindowSiz
 }
 
 /**
+ * The widest a desktop column is drawn: the "Full width" size, 99% of the canvas area. A hand resize already stops here,
+ * but the saved width is a weight times the default width, so a later change (a wider "Window Sizes" option, a narrower
+ * window) made a saved column wider than the screen, and the canvas viewport clips what overhangs it.
+ */
+export const maxColumnWidth = (width: number): number => Math.max(480, Math.round(width * 0.99));
+
+/**
  * The default column (window) width for a canvas area `width` px wide: the canvas viewport's client width, which is the
  * space between the screen margins on a phone set to "Comfortable" and the screen between the safe areas otherwise (see
  * `edgeToEdge`). Pure, so it can be tested alone.
@@ -51,7 +58,7 @@ export function columnWidth(width: number, narrow: boolean, sizes: WindowSizes):
     // phone width). In a strip, edge to edge narrows it by `peekWidth`, so it is never wider than full width.
     return Math.round(width);
   }
-  if (sizes.desktop === "full") return Math.max(480, Math.round(width * 0.99));
+  if (sizes.desktop === "full") return maxColumnWidth(width);
   if (sizes.desktop === "wide") return Math.max(480, Math.min(960, Math.round((width - 24) / 2)));
   return Math.max(400, Math.min(640, Math.round((width - 24) / 3)));
 }
