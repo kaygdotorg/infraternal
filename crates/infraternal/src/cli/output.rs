@@ -221,7 +221,7 @@ pub enum Exit {
     Unreachable,
     /// Some of the work was done and some was not.
     #[allow(dead_code)]
-    // Device sign-in uses this when approval succeeded but local persistence failed.
+    // The remote operation may have succeeded, but the client cannot confirm or finish it.
     Partial,
     /// Stopped by the person (Ctrl-C); `--json` runs print the `interrupted` envelope, then re-raise SIGINT.
     Interrupted,

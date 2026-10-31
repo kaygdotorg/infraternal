@@ -231,6 +231,19 @@ mod tests {
     }
 
     #[test]
+    fn redemption_timeout_exit_depends_on_whether_request_started() {
+        for (request_started, expected_code) in [(false, 5), (true, 6)] {
+            assert_eq!(
+                super::exit_for_failure(super::map_redemption_network_failure(
+                    super::NetworkFailure::Timeout { request_started }
+                ))
+                .code(),
+                expected_code
+            );
+        }
+    }
+
+    #[test]
     fn ambiguous_redemption_transport_and_server_failures_are_partial() {
         for failure in [
             super::NetworkFailure::Dns,
@@ -245,7 +258,6 @@ mod tests {
         for failure in [
             super::NetworkFailure::Request,
             super::NetworkFailure::ResponseBody,
-            super::NetworkFailure::Timeout,
         ] {
             assert_eq!(
                 super::exit_for_failure(super::map_redemption_network_failure(failure)).code(),
@@ -399,7 +411,7 @@ enum NetworkFailure {
     Response,
     Request,
     ResponseBody,
-    Timeout,
+    Timeout { request_started: bool },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -442,20 +454,18 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
         Ok(server) => server,
         Err(failure) => return fail(json_output, failure),
     };
-    let directory = match credential_directory() {
-        Ok(directory) => directory,
-        Err(_) => return fail(json_output, Failure::InsecureStorage),
+    let Ok(directory) = credential_directory() else {
+        return fail(json_output, Failure::InsecureStorage);
     };
     if let Err(error) = prepare_store(&directory) {
         return fail(json_output, storage_failure(error.kind(), false));
     }
     let device = local_device_name();
-    let runtime = match tokio::runtime::Builder::new_current_thread()
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-    {
-        Ok(runtime) => runtime,
-        Err(_) => return fail(json_output, Failure::Runtime),
+    else {
+        return fail(json_output, Failure::Runtime);
     };
     let origin = server.origin().ascii_serialization();
     match crate::block_on(
@@ -613,7 +623,7 @@ fn store_credential(directory: &Path, credential: StoredCredential) -> io::Resul
 }
 
 fn lock_private_directory(directory: &Path) -> io::Result<nix::fcntl::Flock<File>> {
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     fs::create_dir_all(directory)?;
     let mut options = OpenOptions::new();
@@ -625,7 +635,6 @@ fn lock_private_directory(directory: &Path) -> io::Result<nix::fcntl::Flock<File
     if !metadata.is_dir() || !owned_by_current_user(&metadata) {
         return Err(permission_denied());
     }
-    use std::os::unix::fs::PermissionsExt;
     if metadata.permissions().mode() & 0o777 != 0o700 {
         file.set_permissions(fs::Permissions::from_mode(0o700))?;
     }
@@ -649,7 +658,7 @@ fn owned_by_current_user(metadata: &fs::Metadata) -> bool {
 }
 
 fn read_credential_file(directory: &Path) -> io::Result<CredentialFile> {
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     let path = directory.join(CREDENTIAL_FILE_NAME);
     let mut options = OpenOptions::new();
@@ -668,7 +677,6 @@ fn read_credential_file(directory: &Path) -> io::Result<CredentialFile> {
     if !metadata.is_file() || !owned_by_current_user(&metadata) {
         return Err(permission_denied());
     }
-    use std::os::unix::fs::PermissionsExt;
     if metadata.permissions().mode() & 0o777 != 0o600 {
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
@@ -678,7 +686,9 @@ fn read_credential_file(directory: &Path) -> io::Result<CredentialFile> {
             "credential file is too large",
         ));
     }
-    let mut encoded = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
+    let initial_capacity = usize::try_from(metadata.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "credential file is too large"))?;
+    let mut encoded = Zeroizing::new(Vec::with_capacity(initial_capacity));
     file.take((MAX_CREDENTIAL_FILE_BYTES + 1) as u64)
         .read_to_end(&mut encoded)?;
     if encoded.len() > MAX_CREDENTIAL_FILE_BYTES {
@@ -840,9 +850,11 @@ fn parse_redemption_response(body: &[u8]) -> Result<Zeroizing<String>, Failure> 
 
 fn map_redemption_network_failure(failure: NetworkFailure) -> Failure {
     match failure {
-        NetworkFailure::Request | NetworkFailure::ResponseBody | NetworkFailure::Timeout => {
-            Failure::RedemptionUncertain
-        }
+        NetworkFailure::Request
+        | NetworkFailure::ResponseBody
+        | NetworkFailure::Timeout {
+            request_started: true,
+        } => Failure::RedemptionUncertain,
         failure => map_network_failure(failure),
     }
 }
@@ -852,12 +864,21 @@ async fn post_json_with_timeout(
     path: &'static str,
     body: &[u8],
 ) -> Result<HttpResponse, NetworkFailure> {
-    tokio::time::timeout(REQUEST_TIMEOUT, post_json(server, path, body))
-        .await
-        .map_err(|_| NetworkFailure::Timeout)?
+    let mut request_started = false;
+    match tokio::time::timeout(
+        REQUEST_TIMEOUT,
+        post_json(server, path, body, &mut request_started),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => Err(NetworkFailure::Timeout { request_started }),
+    }
 }
 
-async fn post_json(server: &Url, path: &str, body: &[u8]) -> Result<HttpResponse, NetworkFailure> {
+async fn connect_tls(
+    server: &Url,
+) -> Result<tokio_openssl::SslStream<tokio::net::TcpStream>, NetworkFailure> {
     let name = server.host_str().ok_or(NetworkFailure::Response)?;
     let port = server
         .port_or_known_default()
@@ -905,6 +926,16 @@ async fn post_json(server: &Url, path: &str, body: &[u8]) -> Result<HttpResponse
         .connect()
         .await
         .map_err(|_| NetworkFailure::Tls)?;
+    Ok(stream)
+}
+
+async fn post_json(
+    server: &Url,
+    path: &str,
+    body: &[u8],
+    request_started: &mut bool,
+) -> Result<HttpResponse, NetworkFailure> {
+    let stream = connect_tls(server).await?;
     let (mut sender, connection) =
         hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
             .await
@@ -923,6 +954,8 @@ async fn post_json(server: &Url, path: &str, body: &[u8]) -> Result<HttpResponse
         .header(header::CONTENT_TYPE, "application/json")
         .body(http_body_util::Full::new(request_body.clone_for_request()))
         .map_err(|_| NetworkFailure::Response)?;
+    // Hyper may write the one-time poll capability as soon as this send future is polled.
+    *request_started = true;
     let response = sender
         .send_request(request)
         .await
@@ -964,10 +997,11 @@ async fn post_json(server: &Url, path: &str, body: &[u8]) -> Result<HttpResponse
 fn map_network_failure(failure: NetworkFailure) -> Failure {
     match failure {
         NetworkFailure::Dns => Failure::Dns,
-        NetworkFailure::Connect => Failure::Connect,
         NetworkFailure::Tls => Failure::Tls,
         NetworkFailure::Response | NetworkFailure::ResponseBody => Failure::BadResponse,
-        NetworkFailure::Request | NetworkFailure::Timeout => Failure::Connect,
+        NetworkFailure::Connect | NetworkFailure::Request | NetworkFailure::Timeout { .. } => {
+            Failure::Connect
+        }
     }
 }
 
