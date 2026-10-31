@@ -79,3 +79,9 @@ capture-to-client percentiles exclude sharp refreshes of the retained picture
 (`surface_delivery fresh=false`), whose stamp age is not latency. CPU covers the
 companion plus `VTEncoderXPCService`, `replayd` and `WindowServer`, which also
 serve other clients. Decode `stream.h264` with any H.264 decoder for pixels.
+
+`encoder-matrix.swift` lists every VideoToolbox encoder on the Mac and encodes a
+decoded PNG of a real captured window (static, typing-sized damage and 8 px
+scroll per frame, 60 Hz, one frame in flight) per codec/profile with the
+companion's production session settings. It needs no permission and captures
+nothing. It measures for the owner's encoder decision and chooses nothing.
