@@ -80,11 +80,39 @@ test("device approval link reviews the exact laptop and scopes before approval",
     }
   }
 
+  await page.getByText("I checked that this code matches the code in my terminal").click();
   await page.getByRole("button", { name: "Approve with passkey" }).click();
   await expect(page.getByRole("alert")).toContainText("passkey prompt was cancelled");
   expect(loginStarts).toBe(1);
   expect(approvals).toBe(0);
   expect(await page.evaluate(() => Reflect.get(window, "__deviceApprovalPasskeyPrompted"))).toBe(true);
+});
+
+test("approval page shows the code so a person can match it with the CLI", async ({ page }) => {
+  const code = "AbCdEfGhIjKlMnOp";
+  await page.route("**/auth/status", route => route.fulfill({ json: { setup_required: false } }));
+  await page.route("**/auth/session", route => route.fulfill({ json: {
+    user_id: "11111111-1111-4111-8111-111111111111",
+    username: "fixture_owner",
+    display_name: "Fixture owner",
+    device: "Browser",
+    fresh: Math.floor(Date.now() / 1000),
+  } }));
+  await page.route("**/auth/device-inspect", route => route.fulfill({ json: {
+    device: "kayg-laptop",
+    scopes: ["hosts:read", "terminal:connect", "actions:dry-run"],
+  } }));
+
+  await page.goto(`/?device_code=${code}`);
+  await expect(page.getByRole("heading", { name: "Approve device sign-in" })).toBeVisible();
+  // The terminal prints the same one-time code; comparing it prevents approving a different request's link.
+  await expect(page.getByText(code, { exact: true })).toBeVisible();
+  const codeMatch = page.getByRole("checkbox", { name: "I checked that this code matches the code in my terminal" });
+  await expect(codeMatch).toBeVisible();
+  const approve = page.getByRole("button", { name: "Approve with passkey" });
+  await expect(approve).toBeDisabled();
+  await page.getByText("I checked that this code matches the code in my terminal").click();
+  await expect(approve).toBeEnabled();
 });
 
 test("a fresh virtual passkey tap approves the reviewed device request", async ({ page }) => {
@@ -150,6 +178,7 @@ test("a fresh virtual passkey tap approves the reviewed device request", async (
 
   await page.goto("/?device_code=AbCdEfGhIjKlMnOp");
   await expect(page.getByRole("heading", { name: "Approve device sign-in" })).toBeVisible();
+  await page.getByText("I checked that this code matches the code in my terminal").click();
   await page.getByRole("button", { name: "Approve with passkey" }).click();
   await expect(page.getByRole("heading", { name: "Device approved" })).toBeVisible();
   expect(approvals).toBe(1);

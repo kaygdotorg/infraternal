@@ -232,6 +232,7 @@
 .device-approval-facts > div { display: grid; grid-template-columns: 72px minmax(0, 1fr); align-items: baseline; gap: 12px; }
 .device-approval-facts dt { color: var(--fg-2); font-size: 13px; }
 .device-approval-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-weight: var(--fw-label); }
+.device-approval-code { display: flex; align-items: center; }
 .device-approval-access { margin: 0 0 20px; }
 .device-approval-access h2 { margin: 0 0 8px; color: var(--fg-2); font: var(--fw-label) 13px/1.4 var(--font-face); }
 .device-approval-scopes { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }

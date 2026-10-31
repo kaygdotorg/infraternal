@@ -2,6 +2,7 @@
 import { approveDeviceApproval, inspectDeviceApproval, isDeviceUserCode, loginWithPasskey } from "./auth";
 import { deviceName, safeAuthMessage } from "./onboarding";
 import { loading, type Loading } from "../../../packages/ui/src/countup";
+import { springCheckbox } from "../../../packages/ui/src/tick";
 import { BRAND_MARK, KEY_MARK } from "./auth-marks";
 
 /** Loads the device facts only after a signed-in browser session exists. */
@@ -62,6 +63,10 @@ function renderReview(
       <div class="auth-mark">${BRAND_MARK}<span>infraternal</span></div>
       <h1 id="device-approval-title">Approve device sign-in</h1>
       <p class="auth-lede">Review this computer and the access it is requesting.</p>
+      <label class="auth-label" for="device-approval-code">Code</label>
+      <output class="auth-input auth-mono device-approval-code" id="device-approval-code"></output>
+      <p class="auth-hint">Match this code with the code in your terminal before you approve.</p>
+      <label class="auth-check"><input id="device-approval-code-match" type="checkbox" /><span>I checked that this code matches the code in my terminal</span></label>
       <dl class="device-approval-facts">
         <div><dt>Device</dt><dd id="device-approval-device"></dd></div>
       </dl>
@@ -76,6 +81,7 @@ function renderReview(
     </section>
   </section>`;
 
+  host.querySelector<HTMLOutputElement>("#device-approval-code")!.textContent = code;
   host.querySelector<HTMLElement>("#device-approval-device")!.textContent = review.device;
   const scopes = host.querySelector<HTMLUListElement>(".device-approval-scopes")!;
   for (const scope of review.scopes) {
@@ -85,13 +91,20 @@ function renderReview(
   }
 
   const button = host.querySelector<HTMLButtonElement>("#device-approval-approve")!;
+  const codeMatch = host.querySelector<HTMLInputElement>("#device-approval-code-match")!;
   const error = host.querySelector<HTMLElement>("#device-approval-error")!;
   const status = host.querySelector<HTMLElement>("#device-approval-status")!;
   let approving = false;
+  springCheckbox(codeMatch);
+  button.disabled = true;
+  codeMatch.addEventListener("change", () => {
+    button.disabled = approving || !codeMatch.checked;
+  });
   button.addEventListener("click", () => {
-    if (approving) return;
+    if (approving || !codeMatch.checked) return;
     approving = true;
     button.disabled = true;
+    codeMatch.disabled = true;
     error.textContent = "";
     status.textContent = "Waiting for your passkey…";
     const waiting: Loading = loading(button.querySelector<HTMLElement>(".busy-count")!, 400);
@@ -103,7 +116,8 @@ function renderReview(
         mountDeviceApprovalSuccess(host);
       } catch (failure: unknown) {
         approving = false;
-        button.disabled = false;
+        codeMatch.disabled = false;
+        button.disabled = !codeMatch.checked;
         status.textContent = "";
         error.textContent = safeAuthMessage(failure);
       } finally {
