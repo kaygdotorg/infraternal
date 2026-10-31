@@ -2683,7 +2683,7 @@ async fn startup_call(
     if input.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
         return Err(invalid());
     }
-    let request: Request = serde_json::from_slice(input).map_err(|_| invalid())?;
+    let request = Request::parse(input).map_err(|_| invalid())?;
     let key =
         |host: Option<uuid::Uuid>| host.map_or_else(|| "local".to_owned(), |id| id.to_string());
     let (session, op, proposal, confirmed) = match request {

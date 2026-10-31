@@ -2,15 +2,12 @@
 use serde::Deserialize;
 use sqlx::{Row, SqlitePool};
 
-#[derive(Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Request {
     Get {
         host_id: Option<uuid::Uuid>,
     },
     Set {
         host_id: Option<uuid::Uuid>,
-        #[serde(default)]
         global: bool,
         enabled: Option<bool>,
     },
@@ -27,6 +24,76 @@ pub(crate) enum Request {
         proposal: serde_json::Value,
         confirmed: bool,
     },
+}
+
+/// A flat wire shape avoids serde's tagged-enum content buffering. Validate
+/// operation-specific keys separately, retaining duplicate-field rejection in
+/// the typed pass. This cold, bounded action does not run on terminal traffic.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireRequest {
+    op: String,
+    host_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    global: bool,
+    enabled: Option<bool>,
+    session: Option<uuid::Uuid>,
+    #[serde(default)]
+    proposal: serde_json::Value,
+    confirmed: Option<bool>,
+}
+
+impl Request {
+    pub(crate) fn parse(input: &[u8]) -> serde_json::Result<Self> {
+        use serde::de::Error as _;
+        let wire: WireRequest = serde_json::from_slice(input)?;
+        let value: serde_json::Value = serde_json::from_slice(input)?;
+        let invalid = || serde_json::Error::custom("invalid startup request");
+        let object = value.as_object().ok_or_else(invalid)?;
+        let allowed: &[&str] = match wire.op.as_str() {
+            "get" => &["op", "host_id"],
+            "set" => &["op", "host_id", "global", "enabled"],
+            "inspect" => &["op", "session"],
+            "apply" | "undo" => &["op", "session", "proposal", "confirmed"],
+            _ => return Err(invalid()),
+        };
+        if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+            return Err(invalid());
+        }
+        Ok(match wire.op.as_str() {
+            "get" => Self::Get {
+                host_id: wire.host_id,
+            },
+            "set" => Self::Set {
+                host_id: wire.host_id,
+                global: wire.global,
+                enabled: wire.enabled,
+            },
+            "inspect" => Self::Inspect {
+                session: wire.session.ok_or_else(invalid)?,
+            },
+            op => {
+                if !object.contains_key("proposal") {
+                    return Err(invalid());
+                }
+                let session = wire.session.ok_or_else(invalid)?;
+                let confirmed = wire.confirmed.ok_or_else(invalid)?;
+                if op == "apply" {
+                    Self::Apply {
+                        session,
+                        proposal: wire.proposal,
+                        confirmed,
+                    }
+                } else {
+                    Self::Undo {
+                        session,
+                        proposal: wire.proposal,
+                        confirmed,
+                    }
+                }
+            }
+        })
+    }
 }
 
 pub(crate) async fn preferences(
@@ -69,6 +136,36 @@ pub(crate) async fn claim(pool: &SqlitePool, user: &str, host: &str) -> Result<b
 mod tests {
     //! Scoped switches and atomic first-use claims must survive independent concurrent callers.
     use super::*;
+
+    #[test]
+    fn request_decoder_keeps_operation_fields_strict() {
+        for input in [
+            r#"{"op":"get"}"#,
+            r#"{"op":"get","host_id":null}"#,
+            r#"{"op":"set","global":true,"enabled":false}"#,
+            r#"{"op":"set","enabled":null}"#,
+            r#"{"op":"inspect","session":"00000000-0000-0000-0000-000000000001"}"#,
+            r#"{"op":"apply","session":"00000000-0000-0000-0000-000000000001","proposal":null,"confirmed":true}"#,
+        ] {
+            assert!(Request::parse(input.as_bytes()).is_ok(), "{input}");
+        }
+        for input in [
+            r#"{"op":"get","session":null}"#,
+            r#"{"op":"get","uid":0}"#,
+            r#"{"op":"get","host_id":false}"#,
+            r#"{"op":"get","op":"get"}"#,
+            r#"{"op":"set","global":null}"#,
+            r#"{"op":"set","enabled":1}"#,
+            r#"{"op":"inspect","session":null}"#,
+            r#"{"op":"inspect","session":"invalid"}"#,
+            r#"{"op":"apply","session":"00000000-0000-0000-0000-000000000001","proposal":{},"confirmed":null}"#,
+            r#"{"op":"undo","session":"00000000-0000-0000-0000-000000000001","confirmed":true}"#,
+            r#"{"op":"unknown"}"#,
+            r#"[]"#,
+        ] {
+            assert!(Request::parse(input.as_bytes()).is_err(), "{input}");
+        }
+    }
 
     async fn pool() -> SqlitePool {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
