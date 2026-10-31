@@ -70,23 +70,44 @@ struct LocalInputPause {
 
 enum EncodeDecision: Equatable {
     case motion(keyframe: Bool)
+    case caret
     case refresh
-    var keyframe: Bool { switch self { case .motion(let force): return force; case .refresh: return true } }
+    var keyframe: Bool {
+        switch self {
+        case .motion(let force): return force
+        case .caret: return false
+        case .refresh: return true
+        }
+    }
 }
 
 struct DamageEncodingState {
     private var hasFrame = false
     private var damaged = false
+    private var damagedCaret = false
     private var keyframe = true
     private var settle: Double?
     private var retryRefresh = false
-    mutating func changed(at now: Double) {
-        hasFrame = true; damaged = true; settle = now + 0.25
+    mutating func changed(at now: Double, caret: Bool = false) {
+        hasFrame = true
+        damaged = true
+        damagedCaret = caret
+        // A blink is a real delta, but it does not postpone the one sharp
+        // refresh owed after content motion or cancel a dropped refresh retry.
+        if !caret {
+            settle = now + 0.25
+            retryRefresh = false
+        }
     }
     mutating func repair() { keyframe = true }
     mutating func next(at now: Double) -> EncodeDecision? {
         guard hasFrame else { return nil }
-        if damaged { damaged = false; retryRefresh = false; return .motion(keyframe: keyframe) }
+        if damaged {
+            damaged = false
+            let caret = damagedCaret && !keyframe
+            damagedCaret = false
+            return caret ? .caret : .motion(keyframe: keyframe)
+        }
         if retryRefresh { retryRefresh = false; return .refresh }
         if keyframe { return .motion(keyframe: true) }
         if let settle, now >= settle { self.settle = nil; return .refresh }

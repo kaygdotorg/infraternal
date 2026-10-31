@@ -12,7 +12,20 @@ import CoreGraphics
         expect(!captureFrameHasDamage([NSValue(rect: .zero)], initial: false), "empty boxed rectangle is unchanged")
         expect(!captureFrameHasDamage([], initial: false), "empty list is unchanged")
         expect(captureFrameHasDamage([empty], initial: true), "first picture is always delivered")
+        let caret = CGRect(x: 120, y: 60, width: 2, height: 17).dictionaryRepresentation
+        expect(captureFrameDamage([caret], initial: false) == .caret, "a narrow vertical cursor change is transient")
+        let shortLine = CGRect(x: 120, y: 60, width: 2, height: 7).dictionaryRepresentation
+        expect(captureFrameDamage([shortLine], initial: false) == .content, "short narrow changes remain content")
+        let wideCaret = CGRect(x: 120, y: 60, width: 4, height: 17).dictionaryRepresentation
+        expect(captureFrameDamage([wideCaret], initial: false) == .content, "wide changes remain content")
+        let glyph = CGRect(x: 120, y: 60, width: 7, height: 13).dictionaryRepresentation
+        expect(captureFrameDamage([glyph], initial: false) == .content, "a typed glyph remains real content motion")
+        expect(captureFrameDamage([caret, glyph], initial: false) == .content, "caret plus glyph stays real content motion")
+        expect(captureFrameDamage([caret, caret], initial: false) == .content, "multiple narrow changes remain conservative")
+        let scroll = CGRect(x: 0, y: 0, width: 640, height: 200).dictionaryRepresentation
+        expect(captureFrameDamage([scroll], initial: false) == .content, "scroll damage remains real content motion")
         expect(captureFrameHasDamage(nil, initial: false), "absent metadata is conservative")
+        expect(captureFrameDamage(nil, initial: false) == .content, "unknown changes remain real content motion")
         expect(captureFrameHasDamage(["unknown"], initial: false), "unknown entry is conservative")
         expect(captureFrameHasDamage([["X": 1]], initial: false), "incomplete dictionary is conservative")
         for n in 1...32 {
@@ -22,6 +35,6 @@ import CoreGraphics
             expect(captureFrameHasDamage([empty, changed], initial: false), "changed corpus \(n)")
             expect(captureFrameHasDamage([zero, "unknown"], initial: false), "unknown corpus \(n)")
         }
-        print("PASS native damage metadata: empty sentinels, first picture, changed and unknown corpus")
+        print("PASS native damage metadata: empty sentinels, caret, content motion and unknown corpus")
     }
 }

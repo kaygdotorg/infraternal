@@ -15,8 +15,8 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var diagnosticCallbacks = 0
     // Preserve the callback stamp with its exact buffer through newest-frame
     // replacement; retained refreshes must never acquire a newer callback stamp.
-    private var latest: (CVPixelBuffer, UInt64, UInt64)?
-    private var retained: (CVPixelBuffer, UInt64, UInt64)?
+    private var latest: (CVPixelBuffer, UInt64, UInt64, CaptureFrameDamage)?
+    private var retained: (CVPixelBuffer, UInt64, UInt64, CaptureFrameDamage)?
     private var active = false
     private var stopped = false
     private var repairing = false
@@ -133,16 +133,19 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     func receiveFrame(_ pixel: CVPixelBuffer, ticks: UInt64, damage: Any?, callback: UInt64 = 0) {
         mailbox.lock()
         guard !stopped else { mailbox.unlock(); return }
-        // Missing/unknown damage remains conservative. A nonempty list of empty
-        // rectangles must not replace the retained picture or reset its refresh.
-        let damaged = captureFrameHasDamage(damage, initial: retained == nil)
-        if damaged { latest = (pixel, ticks, callback) }
-        let schedule = damaged && !active
+        // Missing/unknown damage remains conservative. Empty sentinels do not
+        // replace the retained picture, while content dominates a coalesced blink.
+        let damageKind = captureFrameDamage(damage, initial: retained == nil)
+        if damageKind != .unchanged {
+            let mergedKind: CaptureFrameDamage = damageKind == .content || latest?.3 == .content ? .content : .caret
+            latest = (pixel, ticks, callback, mergedKind)
+        }
+        let schedule = damageKind != .unchanged && !active
         if schedule { active = true }
         mailbox.unlock()
         if measure {
             let entries = (damage as? [Any])?.count ?? -1
-            FileHandle.standardError.write(Data("METRIC source_frame pid=\(getpid()) capture_ns=\(nanos(ticks)) callback_ns=\(callback) damaged=\(damaged) damage_entries=\(entries)\n".utf8))
+            FileHandle.standardError.write(Data("METRIC source_frame pid=\(getpid()) capture_ns=\(nanos(ticks)) callback_ns=\(callback) damaged=\(damageKind != .unchanged) damage_kind=\(damageKind.rawValue) damage_entries=\(entries)\n".utf8))
         }
         if schedule { encodingQueue.async { [weak self] in self?.drain() } }
     }
@@ -163,7 +166,9 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 if retired { break }
                 if pressure { _ = bitrate.feedback(at:ProcessInfo.processInfo.systemUptime, congested:true) }
                 let dequeued = measure ? nanos(mach_absolute_time()) : 0
-                if let frame, pixels.prepare(frame.0) { damageState.changed(at: ProcessInfo.processInfo.systemUptime) }
+                if let frame, pixels.prepare(frame.0) {
+                    damageState.changed(at: ProcessInfo.processInfo.systemUptime, caret: frame.3 == .caret)
+                }
                 if repair { damageState.repair() }
                 guard let current, let decision = damageState.next(at: ProcessInfo.processInfo.systemUptime) else { break }
                 if frame == nil { _ = pixels.prepare(current.0) }
