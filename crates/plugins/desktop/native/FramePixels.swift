@@ -30,6 +30,8 @@ final class FramePixels {
     // Helper-managed sizing alternates the same caret between seven and eight changed columns.
     private static let maximumCaretAnchorWidthDelta = 1
     private static let maximumCaretAnchorVariants = 8
+    // Newly observed fade rectangles stay content until they recur across a blink cycle.
+    private static let maximumCaretFadeVariants = 8
     // Measured 7/8-pixel anchors produce a 10-pixel intermediate fade at the same insertion point.
     private static let maximumFadePositionDelta = 3
     private static let maximumFadeWidthDelta = 2
@@ -41,21 +43,42 @@ final class FramePixels {
 
     /// Bounded anchor variants and their last-seen time establish a recurring caret cadence.
     private struct CaretCandidate {
+        struct FadeVariant {
+            let bounds: PixelDamageBounds
+            var at: Double
+        }
+
         var bounds: PixelDamageBounds
         var at: Double
         var anchorVariants: [PixelDamageBounds]
+        var fadeVariants: [FadeVariant]
 
         init(bounds: PixelDamageBounds, at: Double) {
             self.bounds = bounds
             self.at = at
             anchorVariants = [bounds]
             anchorVariants.reserveCapacity(FramePixels.maximumCaretAnchorVariants)
+            fadeVariants = []
+            fadeVariants.reserveCapacity(FramePixels.maximumCaretFadeVariants)
         }
 
         mutating func remember(_ bounds: PixelDamageBounds) {
             guard anchorVariants.count < FramePixels.maximumCaretAnchorVariants,
                   !anchorVariants.contains(bounds) else { return }
             anchorVariants.append(bounds)
+        }
+
+        mutating func observeFade(_ bounds: PixelDamageBounds, at now: Double) -> PixelDamageKind {
+            guard let index = fadeVariants.firstIndex(where: { $0.bounds == bounds }) else {
+                guard fadeVariants.count < FramePixels.maximumCaretFadeVariants else { return .content }
+                fadeVariants.append(FadeVariant(bounds: bounds, at: now))
+                return .content
+            }
+            let previous = fadeVariants[index]
+            fadeVariants[index].at = now
+            guard at > previous.at,
+                  FramePixels.blinkInterval(now - previous.at) else { return .content }
+            return .caret
         }
     }
 
@@ -196,7 +219,10 @@ final class FramePixels {
                 caretRecognition = .empty
                 return .content
             }
-            return caretRecognition.active ? .caret : .content
+            var candidate = previous
+            let kind = candidate.observeFade(bounds, at: now)
+            caretRecognition.candidate = candidate
+            return caretRecognition.active ? kind : .content
         }
         if isCaretAnchor(bounds), isCaretAnchor(previous.bounds), isSameCaretAnchor(bounds, previous.bounds) {
             if caretRecognition.active {
@@ -232,7 +258,10 @@ final class FramePixels {
                 caretRecognition = .empty
                 return .content
             }
-            return caretRecognition.active ? .caret : .content
+            var candidate = previous
+            let kind = candidate.observeFade(bounds, at: now)
+            caretRecognition.candidate = candidate
+            return caretRecognition.active ? kind : .content
         }
         if isCaretAnchor(bounds) {
             caretRecognition = CaretRecognition(candidate: current, active: false)
@@ -272,5 +301,9 @@ final class FramePixels {
 
     private func isBlinkInterval(_ interval: Double) -> Bool {
         interval >= Self.minimumBlinkInterval && interval <= Self.maximumBlinkInterval
+    }
+
+    private static func blinkInterval(_ interval: Double) -> Bool {
+        interval.isFinite && interval >= minimumBlinkInterval && interval <= maximumBlinkInterval
     }
 }
