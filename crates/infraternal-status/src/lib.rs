@@ -20,7 +20,9 @@
 //! Headline/exit contract for configured roles (D299/D303). A retained server
 //! database establishes the server role even when its unit is masked/missing.
 //! A host role needs an installed infraternal-agent unit; an absent unconfigured
-//! role is not a failed component. Disabled below means disabled and inactive;
+//! role is not a failed component. An inactive masked host unit alone does not
+//! establish a host role; a running masked unit still does. Masked below means
+//! masked and inactive. Disabled below means disabled and inactive;
 //! disabling autostart or masking alone never overrides an observed running process.
 //!
 //! Standalone server or infraternal agent:
@@ -37,14 +39,15 @@
 //!
 //! | | active | looping | failed | masked | missing | disabled | unknown |
 //! | --- | --- | --- | --- | --- | --- | --- | --- |
-//! | active | R/0 | P/5 | P/5 | P/5 | P/5 | P/5 | U/0 |
-//! | looping | P/5 | L/5 | Q/5 | Q/5 | Q/5 | Q/5 | X/5 |
-//! | failed | P/5 | Q/5 | F/5 | P/5 | P/5 | P/5 | X/5 |
-//! | masked | P/5 | Q/5 | P/5 | D/5 | D/5 | D/5 | X/5 |
-//! | missing | P/5 | Q/5 | P/5 | D/5 | D/5 | D/5 | X/5 |
-//! | disabled | P/5 | Q/5 | P/5 | D/5 | D/5 | D/5 | X/5 |
-//! | unknown | U/0 | X/5 | X/5 | X/5 | X/5 | X/5 | U/0 |
+//! | active | R/0 | P/5 | P/5 | S/0 | P/5 | P/5 | U/0 |
+//! | looping | P/5 | L/5 | Q/5 | S/5 | Q/5 | Q/5 | X/5 |
+//! | failed | P/5 | Q/5 | F/5 | S/5 | P/5 | P/5 | X/5 |
+//! | masked | P/5 | Q/5 | P/5 | S/5 | D/5 | D/5 | X/5 |
+//! | missing | P/5 | Q/5 | P/5 | S/5 | D/5 | D/5 | X/5 |
+//! | disabled | P/5 | Q/5 | P/5 | S/5 | D/5 | D/5 | X/5 |
+//! | unknown | U/0 | X/5 | X/5 | S/0 | X/5 | X/5 | U/0 |
 //!
+//! S: only the server role is configured; use its standalone headline/exit.
 //! R/L/F/D: both running/restarting repeatedly/failed/not running on this
 //! machine. P: "Part of this machine's setup is not running." Q: "Part of
 //! this machine's setup is restarting repeatedly." U: "The status of part of
@@ -270,7 +273,14 @@ pub fn probe(
 }
 
 /// Assemble component facts after every unit has kept its own observation.
-fn assemble(roots: &Roots, ids: &[String], units: Vec<(Unit, Activity)>) -> NodeStatus {
+fn assemble(roots: &Roots, ids: &[String], mut units: Vec<(Unit, Activity)>) -> NodeStatus {
+    // A bare host-service mask carries no installed ExecStart or retained data.
+    // Only an observed live service establishes that role despite the mask.
+    units.retain(|(unit, state)| {
+        !unit.masked
+            || unit.kind == Kind::Server
+            || matches!(state, Activity::Active | Activity::Restarting { .. })
+    });
     let has = |kind| units.iter().any(|(unit, _)| unit.kind == kind);
     let server_data = has(Kind::Server)
         || roots

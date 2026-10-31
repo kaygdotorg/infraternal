@@ -7,7 +7,7 @@
 //! "should run" (D303). Both cases are driven through `probe_local` with a stub
 //! `systemctl` that prints what the manager prints for them.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use infraternal_status::{Activity, Roots, probe_local};
+use infraternal_status::{Activity, Role, Roots, probe_local};
 use std::{
     fs,
     os::unix::fs::{PermissionsExt, symlink},
@@ -15,7 +15,9 @@ use std::{
     process::Command,
 };
 
+const RUNNING: &str = "LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=4242\nNRestarts=0\nExecMainStartTimestampMonotonic=1\n";
 const MASKED_RUNNING: &str = "LoadState=masked\nUnitFileState=masked\nActiveState=active\nSubState=running\nMainPID=4343\nNRestarts=0\nExecMainStartTimestampMonotonic=1\n";
+const MASKED_DEAD: &str = "LoadState=masked\nUnitFileState=masked\nActiveState=inactive\nSubState=dead\nMainPID=0\nNRestarts=0\nExecMainStartTimestampMonotonic=0\n";
 
 /// Re-run one test in a child process whose `PATH` holds only the stub manager.
 fn isolated(name: &str, check: impl FnOnce(&Path)) {
@@ -115,6 +117,64 @@ fn a_masked_service_its_manager_reports_running_is_not_stopped() {
             assert!(
                 wrong.is_empty(),
                 "the manager reports these masked services running: {wrong:?}"
+            );
+        },
+    );
+}
+
+#[test]
+fn a_mask_alone_does_not_make_a_down_infraternal_agent() {
+    isolated(
+        "a_mask_alone_does_not_make_a_down_infraternal_agent",
+        |root| {
+            let mut wrong = Vec::new();
+            for user in [false, true] {
+                // A healthy server; the separate agent unit was masked by an
+                // administrator (the server already embeds its own agent).
+                let roots = reset(root);
+                fs::write(
+                    unit_dir(root, !user).join("infraternal-server.service"),
+                    "[Service]\nExecStart=/usr/bin/infraternal server\n",
+                )
+                .unwrap();
+                symlink(
+                    "/dev/null",
+                    unit_dir(root, user).join("infraternal-agent.service"),
+                )
+                .unwrap();
+                fs::write(root.join("server.properties"), RUNNING).unwrap();
+                fs::write(root.join("agent.properties"), MASKED_DEAD).unwrap();
+                let node = probe_local(&roots, &["server".to_owned(), "agent".to_owned()]);
+                let headline = node.headline().1;
+                if headline != "The server is running on this machine."
+                    || node.confirmed_down_count() != 0
+                {
+                    wrong.push(format!(
+                        "server beside masked agent user={user}: {headline} / down={}",
+                        node.confirmed_down_count()
+                    ));
+                }
+                // Nothing but the mask: this machine runs no infraternal role.
+                let roots = reset(root);
+                symlink(
+                    "/dev/null",
+                    unit_dir(root, user).join("infraternal-agent.service"),
+                )
+                .unwrap();
+                fs::write(root.join("agent.properties"), MASKED_DEAD).unwrap();
+                let node = probe_local(&roots, &["agent".to_owned()]);
+                if node.role != Role::None || node.confirmed_down_count() != 0 {
+                    wrong.push(format!(
+                        "mask only user={user}: {:?} {} / down={}",
+                        node.role,
+                        node.headline().1,
+                        node.confirmed_down_count()
+                    ));
+                }
+            }
+            assert!(
+                wrong.is_empty(),
+                "a masked agent unit is not something that should run: {wrong:?}"
             );
         },
     );

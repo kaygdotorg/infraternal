@@ -604,17 +604,30 @@ fn configured_role_state_table_controls_headline_and_exit() {
                 }
             });
             let label = matrix[server_index][agent_index];
-            let expected = match label {
-                'R' => "The server and the infraternal agent are running on this machine.",
-                'L' => {
-                    "The server and the infraternal agent are restarting repeatedly on this machine."
+            let expected = if agent_index == 3 {
+                assert_eq!(node.role, Role::Server);
+                match server_index {
+                    0 => "The server is running on this machine.",
+                    1 => "The server is restarting repeatedly on this machine.",
+                    2 => "The server has failed on this machine.",
+                    6 => "The status of part of this machine's setup is unknown.",
+                    _ => "The server is not running on this machine.",
                 }
-                'F' => "The server and the infraternal agent have failed on this machine.",
-                'D' => "The server and the infraternal agent are not running on this machine.",
-                'Q' => "Part of this machine's setup is restarting repeatedly.",
-                'U' => "The status of part of this machine's setup is unknown.",
-                'X' => "Part of this machine's setup is not running; another status is unknown.",
-                _ => "Part of this machine's setup is not running.",
+            } else {
+                match label {
+                    'R' => "The server and the infraternal agent are running on this machine.",
+                    'L' => {
+                        "The server and the infraternal agent are restarting repeatedly on this machine."
+                    }
+                    'F' => "The server and the infraternal agent have failed on this machine.",
+                    'D' => "The server and the infraternal agent are not running on this machine.",
+                    'Q' => "Part of this machine's setup is restarting repeatedly.",
+                    'U' => "The status of part of this machine's setup is unknown.",
+                    'X' => {
+                        "Part of this machine's setup is not running; another status is unknown."
+                    }
+                    _ => "Part of this machine's setup is not running.",
+                }
             };
             assert_eq!(
                 node.headline().1,
@@ -626,7 +639,12 @@ fn configured_role_state_table_controls_headline_and_exit() {
             } else {
                 5
             };
-            assert_eq!(exit, if matches!(label, 'R' | 'U') { 0 } else { 5 });
+            let healthy = if agent_index == 3 {
+                matches!(server_index, 0 | 6)
+            } else {
+                matches!(label, 'R' | 'U')
+            };
+            assert_eq!(exit, if healthy { 0 } else { 5 });
             if exit == 5 {
                 assert_ne!(node.headline().0, Active);
             }
