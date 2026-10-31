@@ -42,7 +42,7 @@ for (const [name, width, height] of [["desktop", 1440, 900], ["phone", 393, 852]
         await page.locator(".auth-check").click();
         await page.getByRole("button", { name: "Open infraternal" }).click();
         await page.locator(".cl-viewport").waitFor();
-        const add = page.getByRole("button", { name: "Add guard", exact: true });
+        const add = page.locator(".ui-toast").getByRole("button", { name: "Add guard", exact: true });
         await expect(add).toBeVisible({ timeout: 20_000 });
         expect(await readFile(file, "utf8")).toBe(original);
         await expect(page.getByRole("button", { name: "Copy guard", exact: true })).toBeVisible();
@@ -52,6 +52,7 @@ for (const [name, width, height] of [["desktop", 1440, 900], ["phone", 393, 852]
         expect(await readFile(file, "utf8")).toBe(original);
         await page.screenshot({ path: join(captures, `${name}-${theme}-confirm.png`) });
         await page.locator(".ui-confirm-no").click();
+        await expect(page.locator(".ui-confirm-tip")).toHaveCount(0);
         await expect(add).toBeVisible();
         expect(await readFile(file, "utf8")).toBe(original);
         await add.click();

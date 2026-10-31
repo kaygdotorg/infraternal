@@ -109,6 +109,7 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
   parent.append(host);
 
   let hideTimer = 0;
+  let closeTimer = 0;
   let selectAction: ToastAction["onSelect"] | undefined;
   let selectSecondaryAction: ToastAction["onSelect"] | undefined;
   let closeHandler: (() => void) | undefined;
@@ -119,7 +120,9 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
     selectAction = undefined;
     selectSecondaryAction = undefined;
     host.dataset.open = "false";
-    window.setTimeout(() => {
+    window.clearTimeout(closeTimer);
+    closeTimer = window.setTimeout(() => {
+      closeTimer = 0;
       if (host.dataset.open === "false") host.hidden = true;
     }, 190);
     finish();
@@ -141,6 +144,9 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
   return {
     show(value) {
       window.clearTimeout(hideTimer);
+      // A previous message's closing timer must not hide this one while its
+      // opening frame waits for a busy renderer.
+      window.clearTimeout(closeTimer);
       finish();
       closeHandler = value.onClose;
       close.hidden = !value.dismissible;
@@ -184,6 +190,7 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
     dismiss,
     dispose() {
       window.clearTimeout(hideTimer);
+      window.clearTimeout(closeTimer);
       action.removeEventListener("click", primaryClick);
       secondaryAction.removeEventListener("click", secondaryClick);
       close.removeEventListener("click", dismiss);
