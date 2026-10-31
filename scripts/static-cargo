@@ -1,8 +1,172 @@
 #!/usr/bin/env bash
-# Keep static build callers on the common Cargo compiler driver (D243, #201, #229).
+# Keep static release callers on one cache-visible compiler path recipe [D243, #246].
 set -euo pipefail
-root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$root"
-# .cargo/rustc.sh owns remapping for direct Cargo and packaging alike. Passing
-# flags through untouched avoids a second mapping that changes artifact bytes.
-exec cargo "$@"
+source "$root/.cargo/rust-remap-flags.sh"
+cargo_root="${CARGO_HOME:-$HOME/.cargo}"
+target_root="${CARGO_TARGET_DIR:-$root/target}"
+rustup_root="${RUSTUP_HOME:-$HOME/.rustup}"
+[[ "$cargo_root" = /* ]] || cargo_root="$root/$cargo_root"
+[[ "$target_root" = /* ]] || target_root="$root/$target_root"
+[[ "$rustup_root" = /* ]] || rustup_root="$root/$rustup_root"
+remap_flags=()
+# Preserve the compiler's historical broad-to-specific order. Rustc applies
+# the last matching remap; registry roots must follow CARGO_HOME so Cargo source
+# locations canonicalize to `/cargo/<crate>/...` in both artifacts and cache keys.
+remap_flags+=(
+    "--remap-path-prefix=$root=/infraternal"
+    "--remap-path-prefix=$cargo_root=/cargo"
+    "--remap-path-prefix=$target_root=/build"
+)
+# Glob order follows the caller's locale, and locale collation ignores
+# punctuation, so two hosts could order registry roots differently and produce
+# different cache keys. Bytewise order keeps the flag list identical everywhere.
+registries=()
+while IFS= read -r -d '' registry; do registries+=("$registry"); done < <(
+    for registry in "$cargo_root"/registry/src/*; do
+        [[ ! -d "$registry" ]] || printf '%s\0' "$registry"
+    done | LC_ALL=C sort -z
+)
+for registry in "${registries[@]}"; do
+    remap_flags+=("--remap-path-prefix=$registry=/cargo")
+done
+remap_flags+=("--remap-path-prefix=$rustup_root=/rustup")
+
+requested_targets=()
+previous_arg=""
+for argument in "$@"; do
+    if [[ "$previous_arg" == "--target" ]]; then
+        case "$argument" in
+            x86_64-unknown-linux-musl|aarch64-unknown-linux-musl) requested_targets+=("$argument") ;;
+        esac
+        previous_arg=""
+        continue
+    fi
+    case "$argument" in
+        --target) previous_arg="--target" ;;
+        --target=*)
+            target="${argument#--target=}"
+            case "$target" in
+                x86_64-unknown-linux-musl|aarch64-unknown-linux-musl) requested_targets+=("$target") ;;
+            esac
+            ;;
+    esac
+done
+
+if ((${#requested_targets[@]} == 0)); then
+    case "${CARGO_BUILD_TARGET:-}" in
+        x86_64-unknown-linux-musl|aarch64-unknown-linux-musl) requested_targets+=("$CARGO_BUILD_TARGET") ;;
+    esac
+fi
+
+native_environment=()
+if ((${#requested_targets[@]} > 0)); then
+    native_remap_flags=()
+    infraternal_append_path_remap_flags native_remap_flags "-ffile-prefix-map=" \
+        "$root" "$cargo_root" "$target_root" ""
+    # cc-rs wraps C compilers with RUSTC_WRAPPER. Put native mappings in each
+    # target's flags before that wrapper hashes the invocation, including roots with spaces.
+    # Re-quote existing C flags after tokenizing them with their previous parser.
+    mapfile -d '' native_environment < <(python3 - "${requested_targets[@]}" -- "${native_remap_flags[@]}" <<'PY'
+import os
+import re
+import shlex
+import sys
+
+enabled = os.environ.get("CC_SHELL_ESCAPED_FLAGS", "").lower() in {"1", "true", "yes", "on"}
+def split_flags(value):
+    return shlex.split(value) if enabled else re.findall(r"[^\t\n\v\f\r ]+", value)
+
+changed = {}
+for name, value in os.environ.items():
+    if name in {"CFLAGS", "CXXFLAGS", "HOST_CFLAGS", "TARGET_CFLAGS", "HOST_CXXFLAGS", "TARGET_CXXFLAGS"} \
+            or name.startswith(("CFLAGS_", "CXXFLAGS_")):
+        changed[name] = shlex.join(split_flags(value))
+
+separator = sys.argv.index("--")
+targets = sys.argv[1:separator]
+remap_flags = sys.argv[separator + 1:]
+for target in targets:
+    suffix = target.replace("-", "_").replace(".", "_")
+    for name in (f"CFLAGS_{suffix}", f"CXXFLAGS_{suffix}"):
+        flags = split_flags(os.environ.get(name, ""))
+        changed[name] = shlex.join([*flags, *remap_flags])
+changed["CC_SHELL_ESCAPED_FLAGS"] = "1"
+for name, value in changed.items():
+    sys.stdout.buffer.write(f"{name}={value}".encode() + b"\0")
+PY
+    )
+    if ((${#native_environment[@]} == 0)); then
+        printf 'could not prepare cache-visible native path remaps\n' >&2
+        exit 1
+    fi
+fi
+
+# Cargo's environment overrides hide target config flags. Move them into the
+# requested static target settings so sccache keys every path-dependent result.
+inherited_rustflags=()
+if ((${#requested_targets[@]} > 0)); then
+    if [[ -v CARGO_ENCODED_RUSTFLAGS ]]; then
+        if [[ -n "$CARGO_ENCODED_RUSTFLAGS" ]]; then
+            IFS=$'\x1f' read -r -a inherited_rustflags <<< "$CARGO_ENCODED_RUSTFLAGS"
+        fi
+    elif [[ -v RUSTFLAGS ]]; then
+        encoded_flags="$(python3 -c 'import base64, os, shlex; print("\n".join(base64.b64encode(flag.encode()).decode() for flag in shlex.split(os.environ["RUSTFLAGS"])))')"
+        if [[ -n "$encoded_flags" ]]; then
+            while IFS= read -r encoded_flag; do
+                inherited_rustflags+=("$(printf '%s' "$encoded_flag" | base64 --decode)")
+            done <<< "$encoded_flags"
+        fi
+    fi
+    unset CARGO_ENCODED_RUSTFLAGS RUSTFLAGS
+fi
+
+toml_array() {
+    local separator="" flag value
+    printf '['
+    for flag in "$@"; do
+        value="${flag//\\/\\\\}"
+        value="${value//\"/\\\"}"
+        printf '%s"%s"' "$separator" "$value"
+        separator=,
+    done
+    printf ']'
+}
+
+cargo_config=()
+for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+    # The workspace config already enables crt-static. Cargo merges target
+    # rustflags arrays, so only add cache-visible remaps here.
+    target_flags=("${remap_flags[@]}")
+    requested=false
+    for requested_target in "${requested_targets[@]}"; do
+        if [[ "$target" == "$requested_target" ]]; then
+            requested=true
+            break
+        fi
+    done
+    if [[ "$requested" == true ]]; then
+        inherited_target_flags=()
+        for ((index = 0; index < ${#inherited_rustflags[@]}; index++)); do
+            if [[ "${inherited_rustflags[index]}" == "-C" \
+                && "${inherited_rustflags[index + 1]:-}" == "target-feature=+crt-static" ]]; then
+                index=$((index + 1))
+                continue
+            fi
+            if [[ "${inherited_rustflags[index]}" == "-Ctarget-feature=+crt-static" ]]; then
+                continue
+            fi
+            inherited_target_flags+=("${inherited_rustflags[index]}")
+        done
+        target_flags=("${inherited_target_flags[@]}" "${target_flags[@]}")
+    fi
+    cargo_config+=(--config "target.$target.rustflags=$(toml_array "${target_flags[@]}")")
+done
+
+if ((${#native_environment[@]} > 0)); then
+    export INFRATER_CARGO_TARGET_REMAPPINGS=1
+    exec env "${native_environment[@]}" cargo "${cargo_config[@]}" "$@"
+fi
+unset INFRATER_CARGO_TARGET_REMAPPINGS
+exec cargo "${cargo_config[@]}" "$@"

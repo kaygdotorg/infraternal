@@ -68,7 +68,7 @@ async function request(server: RealServer, context: BrowserContext, action: stri
 
 /** Every test owns its server and browser partitions, including failed-assertion cleanup. */
 async function pair(browser: Browser): Promise<{ server: RealServer; desktop: BrowserContext; phone: BrowserContext; page: Page; mobile: Page; dispose(): Promise<void> }> {
-  const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4673) });
+  const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4673), recordCloses: true, lean: false });
   const desktop = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
   const phone = await browser.newContext({ ...devices["iPhone 15"], ignoreHTTPSErrors: true });
   try {
@@ -205,10 +205,19 @@ test("a transitive span group reduces identically before and after a fresh snaps
       { id: "b", weight: 1, windows: [{ id: "middle", target, span: 2, rows: 1, row: 1 }] },
       { id: "c", weight: 1, windows: [{ id: "right", target, span: 1, rows: 1, row: 0 }] },
     ] } }] };
-    expect((await request(server, desktop, "canvas.layout.initialize", { op_id: randomUUID(), document: incoming })).ok).toBe(true);
+    // Explicit window creation permits repeated references; bootstrap imports now deduplicate targets.
+    const chain = incoming.views[0]!;
+    expect((await request(server, desktop, "canvas.layout.apply", { op_id: randomUUID(), base_revision: initial.revision, intent: { type: "view.add", view: { ...chain, layout: { type: "tiled", columns: [] } } } })).ok).toBe(true);
+    if (chain.layout.type !== "tiled") throw Error("chain must be tiled");
+    for (const column of chain.layout.columns) for (const window of column.windows) {
+      expect((await request(server, desktop, "canvas.layout.apply", { op_id: randomUUID(), base_revision: initial.revision, intent: { type: "open", view_id: chain.id, column_id: column.id, window: { id: window.id, target: window.target } } })).ok).toBe(true);
+    }
+    for (const column of chain.layout.columns) for (const window of column.windows) {
+      expect((await request(server, desktop, "canvas.layout.apply", { op_id: randomUUID(), base_revision: initial.revision, intent: { type: "resize", window_id: window.id, span: window.span, rows: window.rows, row: window.row } })).ok).toBe(true);
+    }
     await settled(page); await settled(mobile);
     const before = (await request(server, desktop, "", {}, true)).value;
-    const view = (before.document as CanvasDocument).views.find((v) => v.name === "Recovered: Span chain")!;
+    const view = (before.document as CanvasDocument).views.find((v) => v.id === "chain")!;
     if (view.layout.type !== "tiled") throw Error("chain must be tiled");
     const anchor = view.layout.columns[2]!.windows[0]!;
     expect((await request(server, desktop, "canvas.layout.apply", { op_id: randomUUID(), base_revision: before.revision, intent: { type: "split", view_id: view.id, anchor_id: anchor.id, axis: "down", column_id: view.layout.columns[2]!.id, window: { id: "new-chain", target } } })).ok).toBe(true);
@@ -248,6 +257,114 @@ test("nullable resize fields cannot diverge the live projection from a snapshot"
   } finally { await fixture.dispose(); }
 });
 
+test("layout event latency reaches two protocol subscribers at scale", async ({ browser }) => {
+  test.skip(process.env.LAYOUT_EVENT_PERF !== "1", "measure only on the locked perf VM");
+  const fixture = await pair(browser);
+  const { server, desktop, phone, page, mobile } = fixture;
+  const clients: Array<{ apply(intent: unknown): Promise<number>; wait(revision: number): Promise<void>; close(): void }> = [];
+  const bounded = async <T>(operation: Promise<T>): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([operation, new Promise<T>((_resolve, reject) => { timer = setTimeout(() => reject(Error("layout measurement response absent")), 15_000); })]);
+    } finally { clearTimeout(timer); }
+  };
+  try {
+    const initial = (await cache(page)).canonical;
+    const view = initial.views.find((view) => view.id === "console")!;
+    if (view.layout.type !== "tiled") throw Error("expected tiled fixture");
+    const column = view.layout.columns[0]!, original = column.windows[0]!;
+    // Keep authentication and the real PTY, but remove renderer work from the
+    // protocol fanout measurement. Both independent sockets stay subscribed.
+    await page.close(); await mobile.close();
+    for (const context of [desktop, phone]) {
+      const cookie = (await context.cookies()).map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
+      const socket = new WebSocket(server.backend.replace("http:", "ws:") + "/v1/ws", { headers: { Origin: server.origin, Cookie: cookie } });
+      const decoder = new WebSocketFrameDecoder();
+      // A failed private route is bounded by the awaited operation's deadline,
+      // so teardown still runs instead of leaving a detached fixture behind.
+      socket.on("error", () => {});
+      let callId = 0, revision = -1, ready: () => void = () => {};
+      const loaded = new Promise<void>((resolve) => { ready = resolve; });
+      const calls = new Map<number, (revision: number) => void>();
+      const waiting = new Set<{ revision: number; resolve(): void }>();
+      const send = (frame: Parameters<typeof encodeMuxedFrame>[1]): void => { socket.send(encodeMuxedFrame(0, frame)); };
+      socket.on("message", (bytes) => decoder.feed(new Uint8Array(Buffer.from(bytes as Buffer)), (_stream, frame) => {
+        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: 0n, clientInfo: "layout-event-measurement" });
+        else if (frame.type === "Ping") send({ ...frame, type: "Pong" });
+        else if (frame.type === "Welcome") send({ type: "Subscribe", subId: 1, filterJson: Buffer.from('{"topic":"canvas.layout"}') });
+        else if (frame.type === "Event") {
+          const event = JSON.parse(new TextDecoder().decode(frame.eventJson)) as { revision?: number };
+          if (Number.isSafeInteger(event.revision)) {
+            revision = Math.max(revision, event.revision!); ready();
+            for (const waiter of waiting) if (revision >= waiter.revision) { waiting.delete(waiter); waiter.resolve(); }
+          }
+        } else if (frame.type === "Result") {
+          if (!frame.ok) { socket.close(); return; }
+          calls.get(frame.callId)?.((JSON.parse(new TextDecoder().decode(frame.json)) as { revision: number }).revision);
+          calls.delete(frame.callId);
+        }
+      }));
+      clients.push({
+        apply: (intent) => bounded(new Promise<number>((resolve) => {
+          const id = ++callId; calls.set(id, resolve);
+          send({ type: "Call", callId: id, actionId: "canvas.layout.apply", inputJson: Buffer.from(JSON.stringify({ op_id: randomUUID(), base_revision: 0, intent })) });
+        })),
+        wait: (target) => revision >= target ? Promise.resolve() : bounded(new Promise<void>((resolve) => waiting.add({ revision: target, resolve }))),
+        close: () => socket.terminate(),
+      });
+      await bounded(loaded);
+    }
+    let memberships = 1;
+    const results: Array<{ windows: number; samples: number; p50Ms: number; p99Ms: number }> = [];
+    for (const count of [1, 10, 60]) {
+      for (; memberships < count; memberships++) await clients[0]!.apply({ type: "open", view_id: "console", column_id: column.id, window: { id: `event-${memberships}`, target: original.target } });
+      const samples: number[] = [];
+      await Promise.all(clients.map(async (client, device) => {
+        for (let n = 0; n < 100; n++) {
+          const started = performance.now();
+          const revision = await client.apply({ type: "resize", window_id: original.id, height: (n % 10 + 1) * (device + 1) });
+          await Promise.all(clients.map((subscriber) => subscriber.wait(revision)));
+          samples.push(performance.now() - started);
+        }
+      }));
+      samples.sort((a, b) => a - b);
+      const result = { windows: count, samples: samples.length, p50Ms: samples[99]!, p99Ms: samples[197]! };
+      results.push(result); console.log(`LAYOUT_EVENTS ${JSON.stringify(result)}`);
+    }
+    await writeFile(tracerEvidencePath("layout-events.json"), JSON.stringify(results, null, 2));
+  } finally { for (const client of clients) client.close(); await fixture.dispose(); }
+});
+
+test("a withdrawn layout subscription catches up on the same healthy socket", async ({ browser }) => {
+  const fixture = await pair(browser);
+  const { server, desktop, page, mobile } = fixture;
+  const withdrawn: unknown[] = [];
+  try {
+    const cdp = await mobile.context().newCDPSession(mobile);
+    await cdp.send("Network.enable");
+    const decoder = new WebSocketFrameDecoder();
+    cdp.on("Network.webSocketFrameReceived", ({ response }) => {
+      if (response.opcode !== 2) return;
+      decoder.feed(new Uint8Array(Buffer.from(response.payloadData, "base64")), (_stream, frame) => {
+        if (frame.type === "Event") {
+          const event = JSON.parse(new TextDecoder().decode(frame.eventJson)) as Record<string, unknown>;
+          if (event.type === "error") withdrawn.push(event.type);
+        }
+      });
+    });
+    const connections = server.bridges.length;
+    expect((await request(server, desktop, "plugins.set_enabled", { plugin: "canvas", enabled: false })).ok).toBe(true);
+    await expect.poll(() => withdrawn.length).toBeGreaterThan(0);
+    expect((await request(server, desktop, "plugins.set_enabled", { plugin: "canvas", enabled: true })).ok).toBe(true);
+    const result = await request(server, desktop, "canvas.layout.apply", { op_id: randomUUID(), base_revision: (await cache(page)).canonical.revision, intent: { type: "view.update", view_id: "console", name: "Recovered Console" } });
+    expect(result.ok).toBe(true);
+    await expect.poll(async () => (await cache(mobile)).canonical.revision, { timeout: 15_000 }).toBe(result.value.revision);
+    await expect.poll(async () => (await cache(page)).canonical.revision).toBe(result.value.revision);
+    expect((await cache(mobile)).canonical).toEqual((await cache(page)).canonical);
+    expect(server.bridges.length).toBe(connections);
+  } finally { await fixture.dispose(); }
+});
+
 test("sixty memberships, stale edits and checkpoint compaction preserve the same account canvas", async ({ browser }, info) => {
   const fixture = await pair(browser);
   const { server, desktop, phone, page, mobile } = fixture;
@@ -264,7 +381,7 @@ test("sixty memberships, stale edits and checkpoint compaction preserve the same
       decoder.feed(new Uint8Array(Buffer.from(response.payloadData, "base64")), (_stream, frame) => {
         if (frame.type !== "Event") return;
         const event = JSON.parse(new TextDecoder().decode(frame.eventJson)) as Record<string, unknown>;
-        if (String(event.type).startsWith("canvas.layout.")) received[name]!.push({ type: event.type, revision: event.revision });
+        if (String(event.type).startsWith("canvas.layout.") || event.type === "error") received[name]!.push({ type: event.type, revision: event.revision });
       });
     });
   }
@@ -299,6 +416,10 @@ test("sixty memberships, stale edits and checkpoint compaction preserve the same
     await expect.poll(async () => (await cache(mobile)).canonical.revision).toBe(head.revision);
     expect((await cache(page)).canonical).toEqual(head.document);
     expect((await cache(mobile)).canonical).toEqual(head.document);
+    expect(errors).toEqual([]);
+    // Layout convergence alone can pass while repeated protocol closes churn
+    // every terminal socket. Keep that failure visible in the scale gate.
+    expect(server.bridges.flatMap((bridge) => bridge.terminalCloses ?? []).filter((close) => close.reason.includes("invalid protocol frame"))).toEqual([]);
     const ws = (head.document as CanvasDocument).views.flatMap((v) => v.layout.type === "tiled" ? v.layout.columns.flatMap((c) => c.windows) : []);
     expect(ws).toHaveLength(60); expect(new Set(ws.map((w) => w.id)).size).toBe(60);
     expect(ws.some((w) => w.id === "scale-3")).toBe(false);
@@ -314,7 +435,7 @@ with sqlite3.connect(sys.argv[1]) as db:
     await page.screenshot({ path: tracerEvidencePath("review-sixty-desktop.png") });
     await mobile.screenshot({ path: tracerEvidencePath("review-sixty-phone.png") });
   } finally {
-    try { await writeFile(tracerEvidencePath(`review-r2-scale-final-${info.repeatEachIndex}.json`), JSON.stringify({ errors, received, connections: server.bridges.map((b) => ({ closed: b.closed, closedBy: b.closedBy, closedReason: b.closedReason, serverClose: b.serverClose })), desktop: await cache(page), phone: await cache(mobile), calls: server.bridges.map((b) => b.control) }, null, 2)); }
+    try { await writeFile(tracerEvidencePath(`review-r2-scale-final-${info.repeatEachIndex}.json`), JSON.stringify({ errors, received, closeCounts: { invalidProtocol: server.bridges.flatMap((b) => b.terminalCloses ?? []).filter((c) => c.reason.includes("invalid protocol frame")).length, shimDisconnected: server.bridges.flatMap((b) => b.terminalCloses ?? []).filter((c) => c.reason === "terminal shim disconnected").length }, closes: server.bridges.flatMap((b) => b.terminalCloses ?? []), connections: server.bridges.map((b) => ({ closed: b.closed, closedBy: b.closedBy, closedReason: b.closedReason, serverClose: b.serverClose })), desktop: await cache(page), phone: await cache(mobile), calls: server.bridges.map((b) => b.control) }, null, 2)); }
     finally { await fixture.dispose(); }
   }
 });

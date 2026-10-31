@@ -123,9 +123,15 @@ pub(crate) struct AttachmentHandle(Arc<AttachmentHandleInner>);
 struct AttachmentHandleInner {
     id: u64,
     stream_id: u32,
-    input: mpsc::Sender<Bytes>,
+    input: mpsc::Sender<ForwardInput>,
     input_acked: watch::Receiver<u64>,
     commands: mpsc::Sender<Command>,
+}
+
+/// A fence completes only after all earlier frames reached the host command FIFO.
+enum ForwardInput {
+    Frame(Bytes),
+    Fence(oneshot::Sender<()>),
 }
 
 impl AttachmentHandle {
@@ -154,9 +160,55 @@ impl AttachmentHandle {
         }
         self.0
             .input
-            .send(frame)
+            .send(ForwardInput::Frame(frame))
             .await
             .map_err(|_| AgentError::Unavailable)
+    }
+    /// Replies are best effort, separately bounded, and retain their query deadline
+    /// through the host command queue. They never park a keyboard-credit waiter.
+    pub(crate) fn reply(&self, query_seq: u64, bytes: Bytes, expires: std::time::Instant) -> bool {
+        !bytes.is_empty()
+            && bytes.len() <= 1024
+            && self
+                .0
+                .commands
+                .try_send(Command::Reply {
+                    attachment_id: self.0.id,
+                    query_seq,
+                    bytes,
+                    expires,
+                })
+                .is_ok()
+    }
+
+    /// Preserve browser wire order across the asynchronous input forwarder.
+    /// The direct reply API still bypasses keyboard credit; this fence only
+    /// waits for earlier admitted frames to be published, within reply expiry.
+    pub(crate) async fn reply_after_queued_input(
+        &self,
+        query_seq: u64,
+        bytes: Bytes,
+        expires: std::time::Instant,
+    ) -> bool {
+        if std::time::Instant::now() >= expires {
+            return false;
+        }
+        let (completed, fence) = oneshot::channel();
+        let published = async {
+            self.0
+                .input
+                .send(ForwardInput::Fence(completed))
+                .await
+                .map_err(|_| ())?;
+            fence.await.map_err(|_| ())
+        };
+        if !matches!(
+            tokio::time::timeout_at(expires.into(), published).await,
+            Ok(Ok(()))
+        ) {
+            return false;
+        }
+        self.reply(query_seq, bytes, expires)
     }
     /// Rebind only after the browser consumer admits the transition under its authority gate.
     pub async fn reconnect(&self) -> Result<(), AgentError> {
@@ -572,6 +624,12 @@ enum Command {
         attachment_id: u64,
         frame: Bytes,
     },
+    Reply {
+        attachment_id: u64,
+        query_seq: u64,
+        bytes: Bytes,
+        expires: std::time::Instant,
+    },
     Detach {
         attachment_id: u64,
     },
@@ -896,10 +954,17 @@ struct OpenResult {
 
 async fn forward_inputs(
     attachment_id: u64,
-    mut input: mpsc::Receiver<Bytes>,
+    mut input: mpsc::Receiver<ForwardInput>,
     commands: mpsc::Sender<Command>,
 ) {
-    while let Some(frame) = input.recv().await {
+    while let Some(request) = input.recv().await {
+        let frame = match request {
+            ForwardInput::Frame(frame) => frame,
+            ForwardInput::Fence(completed) => {
+                let _ = completed.send(());
+                continue;
+            }
+        };
         if commands
             .send(Command::Input {
                 attachment_id,
@@ -1911,6 +1976,40 @@ async fn process_command(
             }
             reattach(connection, attachment).await
         }
+        Command::Reply {
+            attachment_id,
+            query_seq,
+            bytes,
+            expires,
+        } => {
+            let Some(attachment) = attachments.get(&attachment_id) else {
+                crate::terminal_queries::record_drop();
+                return true;
+            };
+            if std::time::Instant::now() >= expires || attachment.replaying {
+                crate::terminal_queries::record_drop();
+                return true;
+            }
+            // A timed-out partial frame retires the link rather than leaving an
+            // ambiguous stream prefix. Accepted replies are never replayed.
+            let delivered = tokio::time::timeout_at(
+                expires.into(),
+                write_frame(
+                    connection,
+                    attachment.stream_id,
+                    &Frame::InputReply {
+                        query_seq,
+                        bytes: &bytes,
+                    },
+                ),
+            )
+            .await
+            .unwrap_or(false);
+            if !delivered {
+                crate::terminal_queries::record_drop();
+            }
+            delivered
+        }
         Command::Input {
             attachment_id,
             frame,
@@ -2126,7 +2225,13 @@ enum TerminalNotice {
         session_id: String,
         #[serde(deserialize_with = "deserialize_replay_cursor")]
         out_seq: u64,
+        #[serde(default)]
+        cols: Option<u16>,
+        #[serde(default)]
+        rows: Option<u16>,
     },
+    #[serde(rename = "terminal.query_replies_unavailable")]
+    QueryRepliesUnavailable { session_id: String },
     #[serde(rename = "terminal.exited")]
     Exited {
         session_id: String,
@@ -2156,10 +2261,13 @@ impl TerminalNotice {
             Self::ReplayComplete {
                 session_id,
                 out_seq,
+                cols,
+                rows,
             } => {
-                let _ = out_seq;
+                let _ = (out_seq, cols, rows);
                 session_id
             }
+            Self::QueryRepliesUnavailable { session_id } => session_id,
             Self::Exited {
                 session_id,
                 status,
@@ -3016,3 +3124,7 @@ pub(crate) static TEST_CLOSE_LINES: std::sync::Mutex<Vec<u32>> = std::sync::Mute
 pub(crate) fn test_control_queue_state(peer: std::net::SocketAddr) -> Option<(bool, usize)> {
     writes::test_control_queue_state(peer)
 }
+
+#[cfg(test)]
+#[path = "embedded_reply_order_tests.rs"]
+mod reply_order_tests;

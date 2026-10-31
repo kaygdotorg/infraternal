@@ -153,7 +153,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
           inventory.attach(hostId, host.sessionId);
           // The shell is attachable now; install, join and start go on behind it and show in this window's machine pill.
           const rec = canvas.cx.win.openSession(hostId, host.sessionId);
-          if (rec) void attachSetup(rec, { host: host.name, hostId, status, onComplete: () => { setupPendingHostIds.delete(hostId); } });
+          if (rec) void attachSetup(rec, { host: host.name, hostId, status, remove: () => { const label = removal.label(); return label ? { label, run: (anchor) => removal.remove(hostId, host.name, anchor) } : undefined; }, onComplete: () => { setupPendingHostIds.delete(hostId); } });
         } else canvas.cx.win.open(hostId);
         applyIdentities([{ id: hostId, name: host.name, ...(host.user ? { user: host.user } : {}), os: host.os }]);
       }
@@ -222,6 +222,8 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     const view = canvas.cx.views.get("mesh");
     if (view) { if (savedMesh.layout.type === "graph") view.view.graphPins = savedMesh.layout.pinned; view.view.x = savedMesh.cell.x * CELL; view.view.y = savedMesh.cell.y * CELL; view.sx.set(view.view.x, true); view.sy.set(view.view.y, true); }
   }
+  // A touch screen draws wider columns than the layout saved (D309): views they now overlap move clear, for display only.
+  if (canvas.cx.state.metrics.minW > 0) canvas.cx.view.settle(canvas.cx.state.currentView);
   // Capture initial structure once; subsequent server paints reset the comparison baseline.
   if (saved?.views.some((view) => view.id === "console")) canvas.cx.store.reset(); else canvas.cx.store.changed();
   let paintRevision = 0, paintAfterDrop = false;

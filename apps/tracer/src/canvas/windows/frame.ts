@@ -20,6 +20,7 @@ import { isInteractive, isTerminal, makeBody } from "../views/body";
 import { beginMove } from "./move";
 import { coarse } from "../dom";
 import { scrollerOf } from "../layout/columns";
+import { drawnWidthOf, setColumnWidth } from "../layout/column-els";
 import { RecentList } from "../recency";
 
 export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
@@ -173,7 +174,7 @@ function resizeHost(cx: Ctx, rec: WinRec): WindowResizeHost {
     begin(): ResizeStart {
       const colEl = rec.card.root.parentElement as HTMLElement;
       // A column in a group has no box of its own (D212): its width is the one it was given.
-      const width = (Number(colEl.dataset.w) || colEl.offsetWidth) * cam.z;
+      const width = (drawnWidthOf(colEl) || colEl.offsetWidth) * cam.z;
       origin = { x: rec.owner.x, w: Math.round(width / cam.z) };
       const top = (parseFloat(rec.card.root.style.marginTop) || 0) * cam.z;
       const widest = Math.max(480, Math.round(cx.viewport.clientWidth * 0.99));
@@ -182,9 +183,8 @@ function resizeHost(cx: Ctx, rec: WinRec): WindowResizeHost {
     apply(f: ResizeFrame): void {
       const colEl = rec.card.root.parentElement as HTMLElement;
       const w = Math.round(f.width / cam.z);
-      colEl.dataset.w = String(w);
+      setColumnWidth(colEl, w, cx.state.metrics);
       colEl.dataset.user = "1";
-      colEl.style.setProperty("--w", `${w}px`);
       const root = rec.card.root;
       const h = Math.round(f.height / cam.z);
       root.style.height = `${h}px`;

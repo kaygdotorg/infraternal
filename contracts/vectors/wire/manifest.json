@@ -98,6 +98,13 @@
       "name": "event",
       "file": "event.bin",
       "frame": { "type": "Event", "subId": 2, "eventJson": "{\"state\":\"ready\"}" }
-    }
+    },
+    {
+      "name": "reply-marked-input",
+      "file": "input-reply.bin",
+      "frame": { "type": "Input", "inSeq": "0", "replyTo": "18446744073709551614", "bytesHex": "1b5b313b3152" }
+    },
+    {"name": "replay-complete-legacy", "file": "replay-complete-legacy.bin", "frame": {"type": "Event", "subId": 0, "eventJson": "{\"type\":\"terminal.replay_complete\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"out_seq\":\"18446744073709551615\"}"}},
+    {"name": "replay-complete-size", "file": "replay-complete-size.bin", "frame": {"type": "Event", "subId": 0, "eventJson": "{\"type\":\"terminal.replay_complete\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"out_seq\":\"18446744073709551615\",\"cols\":120,\"rows\":40}"}}
   ]
 }

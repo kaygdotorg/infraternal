@@ -13,7 +13,7 @@ import { expect, test, type Page } from "playwright/test";
 
 const CAPTURES = tracerEvidencePath("inbox-generic");
 mkdirSync(CAPTURES, { recursive: true });
-const TITLE = "Host connections are locked";
+const TITLE = "The server restarted";
 const LINE = "Unlock host connections";
 
 async function signIn(page: Page, query: string, theme = "ink"): Promise<void> {
@@ -67,7 +67,7 @@ for (const [name, viewport, scale] of [["desktop", { width: 1440, height: 900 },
     // Expanding grows the card upward inside the sidebar; Enter and Escape work from the row.
     await row.click();
     await expect(row).toHaveAttribute("aria-expanded", "true");
-    await expect(card(page).locator(".ui-inbox-body")).toContainText("Confirm with your passkey");
+    await expect(card(page).locator(".ui-inbox-body")).toContainText("needs your passkey once");
     await page.waitForTimeout(400);
     const open = await card(page).boundingBox();
     expect(open && sidebar && open.y >= sidebar.y && open.y + open.height <= sidebar.y + sidebar.height).toBeTruthy();

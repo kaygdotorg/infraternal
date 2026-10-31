@@ -58,8 +58,15 @@ def run(binary):
         os.kill(int(children[0]), signal.SIGKILL)
         return path, pid, time.monotonic()
 
+    def process_active(pid):
+        try:
+            return Path(f'/proc/{pid}/exe').exists()
+        except PermissionError:
+            # A live daemon can deny executable inspection while dumpability is disabled.
+            return True
+
     def retired(path, pid, started):
-        while path.exists() or Path(f'/proc/{pid}/exe').exists():
+        while path.exists() or process_active(pid):
             assert time.monotonic() - started < 1, 'dead shim exceeded one-second retirement bound'
             time.sleep(.005)
         counts(0, 0)
@@ -85,7 +92,7 @@ def run(binary):
         client.open()
         counts(1, 1)
         client.attach()
-        client.until(b'shim-test')
+        client.wait_for_shell()
         counts(1, 0)
         client.send(1, 0x0f, struct.pack('<H', 0) + varint(4) + b'done')
         counts(1, 1)

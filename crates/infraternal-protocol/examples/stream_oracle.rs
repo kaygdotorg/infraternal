@@ -83,6 +83,9 @@ fn fields(frame: &Frame<'_>) -> Value {
             json!({"type":"Desktop","message":message})
         }
 
+        Frame::InputReply { query_seq, bytes } => {
+            json!({ "type": "Input", "inSeq": "0", "replyTo": query_seq.to_string(), "bytes": bytes })
+        }
         Frame::Hello {
             version,
             caps,

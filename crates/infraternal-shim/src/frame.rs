@@ -21,6 +21,8 @@ pub const SESSION_OWNER: u64 = 8;
 /// independently of peer selection mode; ordinary writer selection and
 /// replacement remain unchanged.
 pub const SHARED_WRITER: u64 = 16;
+/// Capability bit 5 permits bounded renderer replies without typing cursors or geometry changes [307].
+pub const QUERY_REPLIES: u64 = 32;
 
 /// Frozen v1 messages. Byte vectors are owned only after length validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +40,8 @@ pub enum Frame {
     },
     Attach(u64),
     Input(Vec<u8>),
+    /// Additive 0x1E; server-arbitrated reply bytes, at most 1024 bytes.
+    QueryReply(Vec<u8>),
     Output(u64, Vec<u8>),
     Resize {
         cols: u16,
@@ -157,9 +161,51 @@ impl Frame {
     /// Encode into reusable storage, rejecting oversized payloads before growth.
     /// # Errors
     /// Rejects frames beyond the frozen limit without changing the buffer.
-    #[allow(clippy::too_many_lines)]
     pub fn encode_into(&self, wire: &mut Vec<u8>) -> io::Result<()> {
+        self.encode_mode::<false>(wire)
+    }
+    /// Encode retained output directly from a possibly wrapped ring. The
+    /// complete frame size is validated before touching any preceding batch.
+    /// # Errors
+    /// Rejects payloads beyond the frozen frame bound without changing `wire`.
+    #[cfg(feature = "process-per-user")]
+    pub(crate) fn output_slices_into<const APPEND: bool>(
+        seq: u64,
+        first: &[u8],
+        second: &[u8],
+        wire: &mut Vec<u8>,
+    ) -> io::Result<()> {
+        let size = first
+            .len()
+            .checked_add(second.len())
+            .and_then(|bytes| bytes.checked_add(9))
+            .filter(|size| *size <= MAX_FRAME)
+            .ok_or_else(invalid)?;
+        let length = u32::try_from(size).map_err(|_| invalid())?;
+        if !APPEND {
+            wire.clear();
+        }
+        wire.reserve(size + 4);
+        wire.extend_from_slice(&length.to_le_bytes());
+        wire.push(0x11);
+        wire.extend_from_slice(&seq.to_le_bytes());
+        wire.extend_from_slice(first);
+        wire.extend_from_slice(second);
+        Ok(())
+    }
+    #[allow(clippy::too_many_lines)]
+    fn encode_mode<const APPEND: bool>(&self, wire: &mut Vec<u8>) -> io::Result<()> {
+        #[cfg(feature = "process-per-user")]
+        if let Self::Output(seq, bytes) = self {
+            return Self::output_slices_into::<APPEND>(*seq, bytes, &[], wire);
+        }
         let size = match self {
+            Self::QueryReply(bytes) => {
+                if bytes.is_empty() || bytes.len() > 1024 {
+                    return Err(invalid());
+                }
+                1 + bytes.len()
+            }
             Self::Input(bytes) => 1 + bytes.len(),
             Self::Output(_, bytes) | Self::Snapshot(_, bytes) | Self::SequencedInput(_, bytes) => {
                 9 + bytes.len()
@@ -176,8 +222,11 @@ impl Frame {
         if size > MAX_FRAME {
             return Err(invalid());
         }
-        wire.clear();
-        wire.resize(4, 0);
+        if !APPEND {
+            wire.clear();
+        }
+        let start = wire.len();
+        wire.resize(start + 4, 0);
         let body = wire;
         macro_rules! put {
             ($value:expr) => {
@@ -210,6 +259,10 @@ impl Frame {
             Self::Attach(caps) => {
                 body.push(2);
                 put!(caps);
+            }
+            Self::QueryReply(bytes) => {
+                body.push(0x1e);
+                body.extend_from_slice(bytes);
             }
             Self::Input(bytes) => {
                 body.push(0x10);
@@ -286,8 +339,8 @@ impl Frame {
                 body.extend_from_slice(message.as_bytes());
             }
         }
-        let size = u32::try_from(body.len() - 4).map_err(|_| invalid())?;
-        body[..4].copy_from_slice(&size.to_le_bytes());
+        let size = u32::try_from(body.len() - start - 4).map_err(|_| invalid())?;
+        body[start..start + 4].copy_from_slice(&size.to_le_bytes());
         Ok(())
     }
     /// Decode a complete type plus payload (without the length prefix).
@@ -313,6 +366,7 @@ impl Frame {
             },
             2 => Self::Attach(p.u64()?),
             0x10 => Self::Input(p.bytes()),
+            0x1e if !p.0.is_empty() && p.0.len() <= 1024 => Self::QueryReply(p.bytes()),
             0x11 => Self::Output(p.u64()?, p.bytes()),
             0x12 => Self::Resize {
                 cols: p.u16()?,
@@ -358,6 +412,19 @@ pub struct Decoder {
     bytes: Vec<u8>,
 }
 impl Decoder {
+    #[cfg(feature = "process-per-user")]
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.bytes.capacity()
+    }
+    #[cfg(feature = "process-per-user")]
+    pub(crate) fn growth_bound(&self, incoming: usize) -> usize {
+        let needed = self.bytes.len().saturating_add(incoming);
+        if needed <= self.bytes.capacity() {
+            0
+        } else {
+            self.bytes.capacity().saturating_mul(2).max(needed).max(8) - self.bytes.capacity()
+        }
+    }
     /// Consume bytes and return complete frames, preserving an incomplete suffix.
     /// # Errors
     /// Rejects invalid frames and storage beyond one maximum-sized frame.

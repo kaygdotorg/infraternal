@@ -30,11 +30,17 @@ def main():
     parser.add_argument('--test-binary', type=Path, required=True)
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--timeout-retry', action='store_true')
+    parser.add_argument('--retry', action='store_true', help='inject an immediate published setup failure, then measure Retry (#230)')
+    parser.add_argument('--route-wait-max-ms', type=int, help='optional route-wait assertion, separate from Retry duration')
     parser.add_argument('--mode', choices=['rootless', 'root'], default='rootless')
     parser.add_argument('--session-binary', type=Path, help='early session image; selects the published (instant) path')
     parser.add_argument('--stale-helper', type=Path, help='older binary swapped into the executable cache once the agent runs')
     parser.add_argument('--label', required=True)
     args = parser.parse_args()
+    if args.retry and args.timeout_retry:
+        parser.error('--retry cannot be combined with --timeout-retry')
+    if args.retry and args.session_binary is None:
+        parser.error('--retry requires --session-binary')
     assert os.geteuid() == 0
     assert os.uname().nodename == 'infraternal-perf-test', 'fixture runs only on the named VM'
     assert args.label.isalnum()
@@ -58,6 +64,7 @@ def main():
     public_created = False
     blocked = False
     fd = None
+    lock_trace_path = None
     try:
         # Account deletion can precede logind's retirement of the old uid.
         # Keep execution uids distinct across adjacent fixture runs.
@@ -139,9 +146,29 @@ PidFile {root}/sshd.pid
             run('nft', '-f', '-', input=rule.encode())
             blocked = True
             environment['BREAKIT2_TIMEOUT_RETRY'] = '1'
+            if args.session_binary:
+                environment['ADDHOST_RETRY_PHASE_TIMING'] = '1'
+                environment['ADDHOST_RETRY_LOCK_TIMING'] = '1'
+                environment['BREAKIT2_RETRY_MAX_MS'] = '2000'
         if args.session_binary:
             environment['ADDHOST_INSTANT'] = '1'
             environment['INFRATERNAL_REMOTE_TEST_SESSION_BINARY'] = str(args.session_binary.resolve())
+        if args.retry:
+            environment['BREAKIT2_RETRY'] = '1'
+            environment['BREAKIT2_RETRY_MAX_MS'] = '2000'
+            environment['ADDHOST_RETRY_PHASE_TIMING'] = '1'
+            environment['ADDHOST_RETRY_LOCK_TIMING'] = '1'
+        # A silent first attempt retains its link-scaled startup allowance.
+        # Retry's LAN budget remains separate from that deliberately blocked wait.
+        if args.route_wait_max_ms is not None:
+            assert args.route_wait_max_ms > 0
+            environment['BREAKIT2_ROUTE_WAIT_MAX_MS'] = str(args.route_wait_max_ms)
+        if args.session_binary and (args.retry or args.timeout_retry):
+            lock_trace_path = root / 'retry-lock-trace' if root_mode else Path(f'/run/user/{uid}/retry-lock-trace')
+            lock_trace_path.touch(mode=0o600, exist_ok=False)
+            if not root_mode:
+                os.chown(lock_trace_path, uid, uid)
+            environment['ADDHOST_RETRY_LOCK_TRACE_PATH'] = str(lock_trace_path)
         base = Path('/var/lib/infraternal') if root_mode else home / '.local/share/infraternal'
         root_installed = root_mode
         if args.stale_helper:
@@ -167,7 +194,7 @@ PidFile {root}/sshd.pid
                 print(f'STALE helper swapped bytes={len(stale)}', flush=True)
             swapper = threading.Thread(target=swap, daemon=True)
             swapper.start()
-        print(f'ENVIRONMENT machine={os.uname().nodename} cpus={os.cpu_count()} load={Path("/proc/loadavg").read_text().strip()} label={args.label} uid={uid} mode={args.mode} instant={bool(args.session_binary)} stale_helper={bool(args.stale_helper)}', flush=True)
+        print(f'ENVIRONMENT machine={os.uname().nodename} cpus={os.cpu_count()} load={Path("/proc/loadavg").read_text().strip()} label={args.label} uid={uid} mode={args.mode} instant={bool(args.session_binary)} retry={args.retry} timeout_retry={args.timeout_retry} stale_helper={bool(args.stale_helper)}', flush=True)
         time.sleep(.2)
         result = subprocess.run([str(args.test_binary.resolve()), 'breakit2_live_ssh_install_join_and_terminal', '--ignored', '--nocapture'], input=private, env=environment)
         print('RECEIPTS', [p.name for p in base.parent.glob('infraternal.bootstrap-rollback-*')], flush=True)
@@ -195,6 +222,8 @@ PidFile {root}/sshd.pid
             print(f'CLEANUP sshd_pid={sshd.pid} exited={sshd.returncode}', flush=True)
         if fd is not None:
             os.close(fd)
+        if lock_trace_path is not None:
+            lock_trace_path.unlink(missing_ok=True)
         if created:
             run('runuser', '-u', account, '--', 'env', f'XDG_RUNTIME_DIR=/run/user/{uid}', 'systemctl', '--user', 'disable', '--now', 'infraternal-agent.service', stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
             run('loginctl', 'disable-linger', account)
@@ -215,6 +244,9 @@ PidFile {root}/sshd.pid
                 raise AssertionError('disposable account survived cleanup')
             assert not home.exists()
         print('CLEANUP nft_table_absent=true disposable_account_removed=true', flush=True)
+        if root.exists():
+            shutil.rmtree(root)
+            print('CLEANUP fixture_directory_removed=true', flush=True)
 
 
 if __name__ == '__main__':

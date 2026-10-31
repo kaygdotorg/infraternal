@@ -115,7 +115,9 @@ Reviews and fixes run at the same time as the next lane's build.
   limit.
 - `python3 scripts/latency_proxy.py self-test --samples 31` measures the
   configured loopback RTT and prints `METRIC name=network_rtt_selftest ...`.
-  `scripts/verify fast` runs the short three-sample version. The full
+  `scripts/verify fast` runs a three-sample zero-delay byte-forwarding check
+  without a timing bound; the configured RTT measurement stays in the latency
+  profile. The full
   `scripts/verify latency` profile runs the relay self-test, a real agent/PTy
   echo and flood gate, `verify-auth-browser`, and the production tracer browser
   suite. Playwright uses `TRACER_TEST_PORT` (default 4621); concurrent runs
@@ -143,16 +145,238 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,348,496 bytes |
-  | `aarch64-unknown-linux-musl` | 19,544,816 bytes |
+  | `x86_64-unknown-linux-musl` | 21,444,656 bytes |
+  | `aarch64-unknown-linux-musl` | 19,605,896 bytes |
 
-  The #146 integration adds 4,192 / 9,216 bytes over release 6's measured
-  21,344,304 / 19,535,600 bytes. The x86_64 comparison rebuilds merge base
-  `8f8c84e37` with the same locked static release recipe (D243, D264).
-  From release 5, #244 adds 3,776 /
+  Replay geometry and stale-note repairs (#257, R257-01/R257-02) measure
+  21,431,472 / 19,605,896 bytes (x86_64 / aarch64), using the pinned
+  `scripts/static-cargo` recipe on 8by64-compute02, one target at a time.
+  Against dev `8f88bf086` at 21,420,592 / 19,592,504 bytes, the deltas are
+  +10,880 / +13,392 bytes, both below 16 KiB. The exact caps above follow
+  these images without allowance (D243); no dependencies, features or release
+  settings changed. Build receipts and replay/browser regressions are on #257.
+
+  The release 9.5 integration (#24, #240, #252) merges reviewed account-scoped
+  revocation `820890478` into dev `07c5da77b`, retaining the installed-service
+  setup-token changes. Fresh pinned stripped static builds on 6by32-compute02,
+  one target after the other through the shared build slot, measure:
+
+  | Source | x86_64 bytes | aarch64 bytes |
+  | --- | ---: | ---: |
+  | Dev (`07c5da77b`) | 21,400,400 | 19,575,064 |
+  | #240 alone (`820890478`) | 21,401,776 | 19,583,480 |
+  | Merged | 21,420,592 | 19,592,504 |
+  | Delta versus dev | +20,192 | +17,440 |
+
+  Both exact caps above use the merged measurements without allowance (D243).
+  Growth retains the reviewed account isolation, cancellation-safe commit and
+  publication, unavailable-authority teardown, and installed-service setup
+  resolution. Link-time effects make the parent deltas non-additive. No manual
+  production-code resolution, dependency, feature or release-profile change is
+  included; only the independent auth test additions and measurement records
+  required conflict resolution. Build receipts, repeated regressions and final
+  gate output are recorded on #24 and #240.
+
+  The setup-token review repairs (#252, R252-01–R252-05) measure
+  21,400,400 / 19,575,064 bytes (x86_64 / aarch64), using the pinned stripped
+  static recipe on 8by64-compute02, one target at a time. Against the
+  reviewed setup-token head, the repair deltas are +832 / +512 bytes.
+  A fresh x86_64 build of merge base `4a6202a52` measures 21,386,512 bytes,
+  making the complete branch delta +13,888 bytes. The exact caps above follow
+  these measurements without allowance (D243). No dependencies, features or
+  release settings changed; receipts and final gate output are on #252.
+
+  The installed-service setup command and data resolver (#252), merged onto
+  dev `4a6202a52`, measure 21,399,568 / 19,574,552 bytes (x86_64 / aarch64)
+  with the pinned stripped static recipe on 8by64-compute02: +13,056 / +10,944
+  bytes against dev's 21,386,512 / 19,563,608 bytes. Both deltas are below
+  16 KiB; both exact caps above use these measurements with no allowance
+  (D243). Dev's reviewed #255 Tokio and owned-descriptor code is unchanged;
+  build receipts and setup-command tests are recorded on #252.
+
+  Account-source loss fix R2-1 (#240) shares the existing unavailable teardown
+  across recovery and revocation exits. The same pinned recipe on
+  6by32-compute02 measures 21,401,776 / 19,583,480 bytes: +64 / 0 bytes
+  versus round 2, with no dependency or feature changes. The caps track those
+  exact images.
+
+  Account-scoped revocation round 2 (#240) retains final commit and publication
+  through caller cancellation and closes bootstrap/setup sockets with 1013 on
+  notification-source loss. The pinned stripped static recipe on shared build
+  VM 6by32-compute02 measures 21,401,712 / 19,583,480 bytes (x86_64 / aarch64).
+  Versus task baseline `9896d3a85` at 21,389,424 / 19,562,296 bytes, total growth
+  is +12,288 / +21,184 bytes; x86_64 baseline was reproduced byte for byte.
+  ARM exceeds 16 KiB by 4,800 bytes: this retains the required cancellation
+  ownership and typed unavailable close across bootstrap/setup waits. Reusing
+  the existing completion owner removes the success-path task and result
+  channel, saving 1,760 / 1,824 bytes versus the first corrected implementation.
+  No dependency, feature, profile, protocol or schema changes were added by
+  these fixes. The required dev merge includes #255, so these are whole-branch
+  deltas, not isolated helper costs. Target-specific measurements and the ARM
+  justification are recorded on #240 under the task's justified-growth allowance
+  (D243); both caps use exact measured images with no slack.
+
+  The RUSTSEC-2026-0386 repair (#255) pins Tokio 1.53.3 and keeps reactor
+  descriptors owned until deregistration inside the audited shim boundary.
+  The unchanged pinned static recipe on 8by64-compute02 measures
+  21,386,512 / 19,563,608 bytes (x86_64 / aarch64), -2,912 / +1,440 bytes
+  versus merged base `f069bb2a9`. Both exact caps above ratchet to these
+  measured images with no allowance (D243); receipts are on #255. Other
+  dependency versions and the release profile stay unchanged.
+
+  Release jobs (not `scripts/verify fast`, which every job runs) also run
+  `scripts/test-static-reproducibility.py`. It builds both targets again from a detached checkout with separate
+  Cargo registry, Rustup and target roots. It forces compilation through the
+  shared sccache server, compares the shipping bytes and checks that the cache
+  wrapper receives Rust and native C path-remap flags before compilation. Rust
+  flags keep registry source mappings after the enclosing `CARGO_HOME` mapping;
+  rustc applies the later match, which keeps sources under `/cargo/<crate>`.
+  This catches release output that depends on a job's build locations.
+
+  Release jobs also run the full browser suite twice in a row on the exact
+  candidate head, with the pinned static binary and its production web
+  build (owner, 2026-10-30, #207: "fine by me"). They run after `scripts/verify
+  fast` and before the reproducibility check, with at most 2 workers, retries
+  0, distinct ports, short private roots and evidence outside the checkout.
+  Both runs must have zero failures and zero missing reports, and every skip
+  must name its reason (an issue or decision). Any fix to the candidate
+  resets the pair. A retry that passes once can no longer let a broken user
+  flow into production.
+
+  The release-9 merge back into dev (#24) retains the optional per-user host
+  and updates only the existing `rustls-webpki` dependency to 0.103.16 for
+  RUSTSEC-2026-0382. Fresh builds of dev `fe047e2d3` and the merged source use
+  the same pinned static recipe on infraternal-dev:
+
+  | Source | x86_64 bytes | aarch64 bytes |
+  | --- | ---: | ---: |
+  | Dev before | 21,385,264 | 19,570,256 |
+  | Release 9 merged, with the TLS patch | 21,387,248 | 19,559,400 |
+  | Delta | +1,984 | −10,856 |
+
+  Both exact caps above use the measured merge bytes, with no allowance
+  (D243). The existing TLS engine and features stay selected; no protocol or
+  build-profile change is included. Receipts and compatibility gates are on #24.
+
+  The RUSTSEC-2026-0382 lockfile update to rustls-webpki 0.103.16 measures
+  21,387,248 / 19,559,400 bytes with the same pinned static recipe: +1,024 /
+  +1,408 bytes versus release 9. Both exact caps ratchet to these measured
+  values; the receipts are on #24.
+
+  The release 9.4 merge back into dev (#24, #240, #254) brings in the
+  busy-store authority close handling and the Mesh drag and overlap fixes.
+  Fresh builds of the merged source with the same pinned static recipe, on
+  the build VM 8by64-compute02, measure:
+
+  | Source | x86_64 bytes | aarch64 bytes |
+  | --- | ---: | ---: |
+  | Dev before (`81962ab09`) | 21,389,232 | 19,561,656 |
+  | Release 9.4 caps as recorded (`db4add238`) | 21,389,424 | 19,562,296 |
+  | Merged | 21,389,424 | 19,562,168 |
+  | Delta versus dev | +192 | +512 |
+
+  The x86_64 image matches release 9.4 byte for byte; the aarch64 image is
+  128 bytes below it. Both exact caps are set to the merged measurements,
+  with no allowance (D243). The growth over dev is release 9.4's reviewed
+  close-path code, within the 16 KiB band. Receipts are on #24.
+
+  Busy-store wake classification and fractional session deadlines (#240)
+  measure 21,389,040 / 19,561,912 bytes with the pinned static recipe:
+  -256 bytes against the reproduced release-9.3 x86_64 baseline, and +256
+  bytes against its recorded aarch64 ceiling. Both ceilings track these
+  exact artifacts with no allowance (D243). The proof path retains the
+  busy/refused distinction and shares the fractional deadline conversion;
+  dependencies, features, query limits and retry budgets are unchanged.
+
+  Release 9.4's close-path change (5280c44d4, #240) then measured 21,389,424 /
+  19,562,296 bytes, +384 bytes per target; it raised both caps to those
+  artifacts within D243's 16 KiB band.
+
+  Release 9.3's socket authority read cap (#240) measured 21,389,296 /
+  19,561,656 bytes with the same pinned static recipe: +2,048 / +2,256 bytes
+  versus release 9.2. Both exact caps were set to those measurements with no
+  allowance (D243); the release artifacts and receipts are on #24. The
+  rustls-webpki 0.103.16 lockfile update measured 21,387,248 / 19,559,400
+  bytes for release 9.2, +1,024 / +1,408 versus release 9.
+
+  The release 9.3 merge back into dev (#24, #240) keeps dev's optional
+  per-user host and brings in the authority read cap unchanged; dev had not
+  touched the auth or websocket sources since the merge base. The merged
+  source measures 21,389,232 / 19,561,656 bytes with the same pinned static
+  recipe: -64 / +0 bytes versus release 9.3. The x86_64 cap ratchets down to
+  that measurement and the aarch64 cap stays (D243).
+
+  The reply-reservation production fix (#24, D307) measures 21,387,120 /
+  19,558,856 bytes with the same pinned static recipe: -64 / -256 bytes
+  against release 8. Replies expire while older typing waits or the queue
+  is full; expected expiry and opaque writer refusals avoid error allocation.
+  Both exact caps ratchet down to these measurements (D243). No protocol,
+  dependency or build-profile change is added.
+
+  Release 9 merges the reviewed reply reservation and shared-layout recovery
+  histories, then picks the quiet session-list warm-up and its standalone test
+  fix (#24, #243, #249). Same pinned stripped static measurements:
+
+  | Stage | x86_64 bytes | aarch64 bytes |
+  | --- | ---: | ---: |
+  | Release 8 | 21,387,184 | 19,559,112 |
+  | Reply reservation | 21,387,120 | 19,558,856 |
+  | Layout recovery | 21,386,224 | 19,557,992 |
+  | Quiet warm-up and final | 21,386,224 | 19,557,992 |
+
+  Final deltas versus release 8 are -960 / -1,120 bytes;
+  both exact caps retain no growth allowance (D243). Link-time effects make
+  the individual reductions non-additive. The TypeScript-only picks
+  leave both native images byte-identical. Migration 0030 is the only added
+  migration; production's 0001–0029 SQL remains unchanged. Qualification and
+  artifact receipts are recorded on #24, #243 and #249. No dev or delta-review
+  branch is included, and this release qualification does not deploy.
+
+  Release 8 integrates D307, synchronized output and input ordering (#206),
+  the stale-screen note (#248), and the display-only phone column minimum
+  (#243, D309). The stripped static measurements are:
+
+  | Stage | x86_64 bytes | aarch64 bytes |
+  | --- | ---: | ---: |
+  | Release 7 | 21,385,264 | 19,570,256 |
+  | D307 | 21,387,824 | 19,559,624 |
+  | Synchronized output, colour and input ordering | 21,387,184 | 19,559,112 |
+  | Stale-screen note | 21,387,184 | 19,559,112 |
+  | Phone minimum and final | 21,387,184 | 19,559,112 |
+
+  Final deltas are +1,920 / −11,144 bytes versus release 7. The release-6
+  D307 delta is not additive on this combination. The release-8 brief permits
+  at most +20,000 x86_64 bytes: the result is 18,080 bytes below that stop
+  line. Both exact caps retain no growth allowance (D243). The note and phone
+  changes leave both native files byte-identical. No migration is added;
+  production's 0001–0029 SQL files remain unchanged. Measurements and release
+  qualification receipts are recorded on #24, #206, #243 and #248.
+
+  The initial shared layout recovery fix (#243) ratcheted the ceilings to
+  21,386,992 / 19,558,632 bytes: −192 / −480 versus release 8. It adds migration
+  0030 to backfill transactional receipt counts. Build-time SQL formatting
+  compaction preserves every original migration checksum; historical layout
+  repair happens through normal snapshot revisions. Static receipts and the
+  production-shaped two-device checks are recorded on #243.
+
+  The release-9 recovery review fixes (#243) preserve bounded fallback and queued
+  membership IDs, then share ID assignment and recovery recognition to offset
+  their code. Same-recipe rebuilds against `bd5ee1dd7` measure 21,386,224 /
+  19,558,248 bytes: −768 / −384. Both exact ceilings ratchet downward to these
+  measurements. No dependency, profile or migration SQL changes are included;
+  both architecture receipts and the review regressions are recorded on #243.
+
+  Release 7 measured 21,385,264 / 19,570,256 bytes after the reviewed Retry and Mesh merges,
+  #246 source-path normalization, and the #236 migration collision correction:
+  +40,960 / +34,656 bytes over release 6. Retry measured 21,352,208 /
+  19,542,304 bytes; Mesh measured 21,385,264 / 19,570,256. Build normalization
+  preserved those sizes. Reserving existing names in unshipped migration 0029
+  adds +0 / +0 bytes. The exact caps retain no growth allowance (D243).
+  Release jobs run the cross-root reproducibility check after `scripts/verify fast`.
+  Release 6 measured 21,344,304 / 19,535,600 bytes. From release 5, #244 adds 3,776 /
   3,320 bytes and #243 adds 114,656 / 104,592 bytes, totaling 118,432 /
   107,912 bytes. D308 accepts the shared-layout increase after its first
-  trim; x86_64 remains 24,928 bytes below this task's +140 KiB stop line.
+  trim; release 6 x86_64 remained 24,928 bytes below its +140 KiB stop line.
   Release 5 added the Mesh view (#236) at +81,760 / +56,992 over release 4;
   D306 accepted that increase. Each cap stays at its exact measured size
   until a later measured reduction ratchets it down. Release 4's one-off D243 exception was accepted

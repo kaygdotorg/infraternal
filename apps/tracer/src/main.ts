@@ -1,5 +1,5 @@
 /** Starts auth and the terminal, keeping the terminal bundle off the unauthenticated path. */
-import { AuthError, checkStatus, checkSession, recoveryAuth } from "./auth";
+import { AuthError, checkStatus, checkSession, recoveryAuth, type AuthStatus } from "./auth";
 import { registerSignOut } from "./sign-out";
 import { cacheDrawingIdentity } from "./offline-cache";
 import type { DrawingIdentity } from "./offline-drawing";
@@ -58,6 +58,9 @@ declare global {
         wasmMemoryBytes: number;
         themeColorsMs: number;
         themeRenderMs: number;
+        synchronizedOutputHoldsPaint: boolean;
+        synchronizedTimeoutReleasedAt: number;
+        lastPaintedOutputAt: number;
         terminalColors?: { background: { r: number; g: number; b: number }; foreground: { r: number; g: number; b: number } };
       } | undefined;
       benchmarkFullRedraw: (iterations: number) => number[] | undefined;
@@ -81,6 +84,14 @@ declare global {
       terminalLinks: () => readonly { target: string; openable: boolean }[];
       rendererMetrics: () => TerminalClient["rendererMetrics"] | undefined;
       currentView: () => string;
+    };
+    /** Controlled shared-layout hooks for mock-browser break-it specs. */
+    __tracerLayoutReviewDouble?: {
+      revisions: () => { server: number; client: number };
+      currentView: () => string;
+      viewIds: () => string[];
+      removeConsole: () => number;
+      skipRevision: () => number;
     };
   }
 }
@@ -141,12 +152,12 @@ async function start(): Promise<void> {
     new Promise<void>((resolve) => window.setTimeout(resolve, 800)),
   ]).catch(() => undefined);
   try {
-    const [setupRequired] = await Promise.all([
+    const [status] = await Promise.all([
       checkStatus(),
       fontsReady,
     ]);
     installTooltips();
-    await showAuthState(setupRequired);
+    await showAuthState(status);
   } catch (error: unknown) {
     await fontsReady;
     installTooltips();
@@ -166,13 +177,13 @@ async function refreshAuth(): Promise<void> {
   }
 }
 
-async function showAuthState(setupRequired: boolean): Promise<void> {
-  const session = setupRequired ? undefined : await checkSession();
+async function showAuthState(status: AuthStatus): Promise<void> {
+  const session = status.setupRequired ? undefined : await checkSession();
   if (session) {
     activeUserId = session.user_id;
     await showTerminal(session);
   } else {
-    renderAuth(setupRequired);
+    renderAuth(status.setupRequired, "", status.setupTokenCommand);
   }
 }
 
@@ -241,7 +252,11 @@ function renderUnavailable(message: string): void {
   scheduleBackdrop();
 }
 
-function renderAuth(setupRequired: boolean, message = ""): void {
+function renderAuth(
+  setupRequired: boolean,
+  message = "",
+  setupTokenCommand = "infraternal server setup-token",
+): void {
   authLight();
   document.documentElement.removeAttribute("data-ui-font");
   mountOnboarding(app, setupRequired, message, (userId, firstSetup, welcomeName, instant) => {
@@ -250,7 +265,7 @@ function renderAuth(setupRequired: boolean, message = ""): void {
     activeUserId = userId;
     if (firstSetup) showWelcome(welcomeName ?? "", instant);
     else void showTerminal(undefined, instant);
-  });
+  }, setupTokenCommand);
   scheduleBackdrop();
 }
 
@@ -361,6 +376,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   const clustersMode = __CLUSTERS_PREVIEW__ && mockMode && proto === "clusters";
   const probeMode = query.get("probe") === "1";
   const predictiveEcho = query.get("predict") === "1";
+  const reviewLayout = productTestMode && query.get("reviewLayout") === "1";
   // The canvas is the product screen. The test double's plain page and the latency probe keep the single
   // terminal screen: the terminal specs and the probe drive that one terminal.
   const useCanvas = (!mockMode || productTestMode) && !probeMode;
@@ -422,11 +438,16 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     screen.setRecoveryPending(identity?.recovery_pending?.ready_at);
     try {
       const { mountProductCanvas } = await import("./canvas/product");
+      const layoutReview = reviewLayout
+        ? await import("./canvas/model/layout-review-double").then(({ createLayoutReviewDouble }) => createLayoutReviewDouble(
+          activeUserId ?? "account", hostName, query.get("reviewSession") ?? "review-session", query.get("reviewWide") === "1",
+        ))
+        : undefined;
       productCanvas = await mountProductCanvas(screen, {
         host: { name: hostName },
         accountId: activeUserId ?? "account",
         predictiveEcho,
-        ...(__CLUSTERS_PREVIEW__ && productTestMode ? { previewStore: new (await import("./canvas/model/store")).LocalCanvasStore(activeUserId ?? "account") } : {}),
+        ...(__CLUSTERS_PREVIEW__ && productTestMode ? { previewStore: layoutReview?.store ?? new (await import("./canvas/model/store")).LocalCanvasStore(activeUserId ?? "account") } : {}),
         ...(productTestMode ? { onFirstClient: (client: TerminalClient) => {
           window.__tracerProductTestDouble = {
             isConnected: () => client.isConnected,
@@ -440,6 +461,13 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
         } } : {}),
         onRecoveryPending: (readyAt) => { recoveryNoticeGeneration++; screen.setRecoveryPending(readyAt); },
       });
+      if (layoutReview) window.__tracerLayoutReviewDouble = {
+        revisions: layoutReview.revision,
+        currentView: () => (productCanvas as unknown as { canvas?: { cx?: { state?: { currentView?: string }; views?: Map<string, unknown> } } } | undefined)?.canvas?.cx?.state?.currentView ?? "",
+        viewIds: () => [...((productCanvas as unknown as { canvas?: { cx?: { views?: Map<string, unknown> } } } | undefined)?.canvas?.cx?.views?.keys() ?? [])],
+        removeConsole: layoutReview.removeConsole,
+        skipRevision: layoutReview.skipRevision,
+      };
     } catch (error: unknown) {
       console.error("canvas failed to start", error);
       screen.dispose();

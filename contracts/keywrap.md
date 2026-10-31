@@ -88,7 +88,7 @@ Argon2 work at two simultaneous calls; exhausted capacity fails closed.
 | setup-check | `{token}` | `204` if current and no owner exists; `401` for wrong/expired tokens; `404` after owner creation |
 | setup-start | legacy `{token,name}` or `{token,username,display_name?}` | `{ceremony,user_id,options,recovery_words}` |
 | registration-finish | `{ceremony,proof,passkey_wrap,recovery_wrap}` | secure session cookie |
-| status | `{}` | `{setup_required: bool}` only |
+| status | `{}` | `{setup_required: bool, setup_token_command: string}` only |
 | login-start | `{}` (legacy `{user_id}` supported) | `{ceremony,options}` |
 | login-finish | `{ceremony,proof,device}` | restricted secure session cookie and `pending_transaction` |
 | session | `{}` | `{user_id,username,display_name,device,fresh}` and refreshed cookie |
@@ -142,7 +142,11 @@ missing or blank display names default to the username. New requests use
 Legacy `{token,name}` remains accepted by treating `name` as both labels, subject
 to the username rule. WebAuthn registration uses the username for `user.name`
 and the display name for `user.displayName`. The authenticated session returns
-both labels; public status remains exactly `{setup_required}`.
+both labels; public status returns only `setup_required` and the non-secret
+`setup_token_command` [16][202], never account labels or a capability. The command
+comes from the registered action: `infraternal server setup-token`, prefixed with
+`sudo` when the server runs as an installed system service (#252). Display and
+copy use the same string; no data path or token is included.
 
 Migration 0006 preserves existing display labels. A unique legacy label that
 already matches the username rule is retained in lowercase; an invalid or
@@ -345,6 +349,25 @@ Start (not resume), cancel (when a row existed), and complete audit rows commit 
 the same SQLite transaction as their state changes. Rows contain only account ID,
 event and Unix time. Invalid requests, reissues and repeat cancellation cannot
 invent completion or duplicate start evidence. Notification is after commit.
+
+## Account-scoped authority notifications (#240, D28)
+
+Session revocation and recovery-state notifications must use independent watch
+generations per account. Logout carries the account returned by its committed
+session deletion and, when known, the private session hash; recovery completion
+invalidates its old sessions. These internal hints never enter browser events or logs.
+
+Subscribe before the entry authority read, including after socket admission.
+Every unseen generation means recheck that account. Coalesced intermediate events
+cannot be discarded based on the latest session hash: an earlier logout may have
+revoked this socket. A lost source fails closed as unavailable authority. Remove
+an account's channel when its last subscription ends, including concurrent drops.
+
+Logout, recovery start/cancel/rotation and recovery completion all know their
+affected account; none requires a server-wide authority event. Test-only all-account
+notifications may model database changes whose account scope is unknown. Server
+shutdown and component disable retain their separate lifecycle signals. Ordinary
+account changes must never wake another account's sockets or pending operations.
 
 ## Browser-only recovery derivation v2 (#45, D151 owner task)
 

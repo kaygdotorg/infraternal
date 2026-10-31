@@ -162,13 +162,18 @@ fn render_unit(
     } else {
         "multi-user.target"
     };
+    let scope = if user {
+        ""
+    } else {
+        "Environment=INFRATERNAL_SERVER_SERVICE_SCOPE=system\n"
+    };
     let reload = if cfg!(feature = "remote") {
         "ExecReload=/bin/kill -HUP $MAINPID\n"
     } else {
         ""
     };
     Ok(format!(
-        "[Unit]\nDescription=infraternal server ({name})\nAfter=network.target\n\n[Service]\nType=simple\nExecStart={command}\n{reload}Restart=on-failure\nRestartSec=2\nKillMode=process\n\n[Install]\nWantedBy={target}\n"
+        "[Unit]\nDescription=infraternal server ({name})\nAfter=network.target\n\n[Service]\nType=simple\n{scope}ExecStart={command}\n{reload}Restart=on-failure\nRestartSec=2\nKillMode=process\n\n[Install]\nWantedBy={target}\n"
     ))
 }
 
@@ -263,5 +268,31 @@ mod tests {
         assert!(output.contains("KillMode=process"));
         assert!(output.contains("systemctl --user enable --now tracer-server.service"));
         assert!(output.contains("--tls-key"));
+        assert!(!output.contains("INFRATERNAL_SERVER_SERVICE_SCOPE"));
+    }
+
+    #[test]
+    fn system_units_mark_the_scope_used_by_first_run_status() {
+        let args = ServerArgs {
+            remote: super::super::remote_server::Options::default(),
+            listen: SocketAddr::from(([127, 0, 0, 1], 47361)),
+            data: PathBuf::from("./state"),
+            public_origin: Some("https://localhost:47361".to_owned()),
+            web_root: None,
+            tls_cert: None,
+            tls_key: None,
+            behind_proxy: false,
+            trusted_proxies: Vec::new(),
+        };
+        let options = InstallArgs {
+            system: true,
+            user: false,
+            dry_run: true,
+            force: false,
+            name: "infraternal-server".to_owned(),
+        };
+
+        let output = install(&args, &options).expect("dry-run output");
+        assert!(output.contains("Environment=INFRATERNAL_SERVER_SERVICE_SCOPE=system"));
     }
 }

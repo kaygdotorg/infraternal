@@ -122,6 +122,24 @@ pub(crate) async fn serve(
     }
 }
 
+/// Exercises the failed-control path without treating the test harness as a server executable.
+#[cfg(all(test, feature = "remote"))]
+async fn serve_behind_control<F>(
+    data_dir: PathBuf,
+    serving: F,
+) -> Result<Outcome, infraternal_server::ServerError>
+where
+    F: std::future::Future<Output = Result<(), infraternal_server::ServerError>> + Send,
+{
+    match crate::restart::Control::start(&data_dir) {
+        Ok(_) => panic!("test fixture requires an unavailable restart control endpoint"),
+        Err(error) => {
+            tracing::warn!(error_kind = ?error.kind(), "server restart control unavailable; continuing without its socket");
+            serving.await.map(|()| Outcome::Stopped)
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "remote_server_tests.rs"]
 mod tests;

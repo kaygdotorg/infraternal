@@ -176,7 +176,7 @@ test("a failed stage turns its arc to the failure state; the pill explains it an
   const tip = page.getByRole("dialog", { name: "Setup of o2" });
   await expect(tip).toBeVisible();
   await expect(tip).toContainText("o2 couldn't join this server");
-  await expect(tip).toContainText("Your terminal keeps working.");
+  await expect(tip).toContainText("Your other sessions keep working.");
   await expect(tip).toContainText("Try again in a moment.");
   await expect(tip.getByRole("button", { name: "Try again" })).toBeVisible();
   await expect(tip.getByRole("button", { name: "Dismiss" })).toBeVisible();

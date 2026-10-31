@@ -64,6 +64,8 @@ const RESUME_NEXT: u64 = 1;
 const LINK_DOUBT_NOTICES: u64 = 1 << 1;
 /// Browser Hello bit 2 enables bounded control-stream visibility notices (#244).
 const VIEWER_VISIBILITY: u64 = 1 << 2;
+/// Reply-marked Input is independent of shipped viewer visibility.
+const TERMINAL_QUERY_REPLIES: u64 = 1 << 3;
 const RESUME_WINDOW_SECONDS: u32 = 120;
 // Reject upgrades immediately when the process is at this fixed socket limit.
 const MAX_CONNECTIONS: usize = 256;
@@ -139,6 +141,23 @@ impl Drop for RenewalHold {
     }
 }
 
+/// Keep a server-wide read place until its SELECT future completes.
+struct AuthorityReadHold(Arc<AuthorityLimits>);
+
+impl AuthorityReadHold {
+    /// Move a borrowed permit into an owned query lifetime.
+    fn take(limits: Arc<AuthorityLimits>, place: tokio::sync::SemaphorePermit<'_>) -> Self {
+        place.forget();
+        Self(limits)
+    }
+}
+
+impl Drop for AuthorityReadHold {
+    fn drop(&mut self) {
+        self.0.reads.add_permits(1);
+    }
+}
+
 /// State shared by the authenticated browser socket route.
 #[derive(Clone)]
 pub(crate) struct WebSocketState {
@@ -160,6 +179,7 @@ pub(crate) struct WebSocketState {
     users: Arc<std::sync::Mutex<HashMap<String, std::sync::Weak<Semaphore>>>>,
     session_changes: watch::Sender<u64>,
     close_logs: StreamCloseLog,
+    queries: Arc<std::sync::Mutex<crate::terminal_queries::Registry>>,
 }
 
 impl WebSocketState {
@@ -202,6 +222,11 @@ impl WebSocketState {
         .await?;
         let (session_changes, _) = watch::channel(0_u64);
         let close_logs = StreamCloseLog::new();
+        #[cfg(feature = "remote")]
+        let queries = hosts.6.clone();
+        #[cfg(not(feature = "remote"))]
+        let queries: Arc<std::sync::Mutex<crate::terminal_queries::Registry>> = Arc::default();
+        let inventory_queries = queries.clone();
         let mut inventory = agent.session_inventory();
         let inventory_pool = pool.clone();
         let inventory_changes = session_changes.clone();
@@ -218,6 +243,15 @@ impl WebSocketState {
                             .await
                             .is_ok()
                         {
+                            {
+                                let mut queries = inventory_queries
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                if let SessionInventoryState::Available(ids) = &*inventory.borrow()
+                                {
+                                    queries.reconcile(None, ids);
+                                }
+                            }
                             inventory_changes
                                 .send_modify(|version| *version = version.wrapping_add(1));
                         } else {
@@ -252,6 +286,7 @@ impl WebSocketState {
             users: Arc::default(),
             session_changes,
             close_logs,
+            queries,
         })
     }
 
@@ -355,6 +390,13 @@ impl WebSocketState {
     pub(crate) fn with_authority_read_timeout(mut self, timeout: Duration) -> Self {
         self.authority_read_timeout = timeout;
         self
+    }
+
+    /// Observe retained reads while socket tests control time around real storage.
+    #[cfg(all(test, feature = "remote"))]
+    pub(crate) fn authority_read_monitor(&self) -> impl Fn() -> usize + 'static {
+        let authority = Arc::clone(&self.authority);
+        move || AUTHORITY_READS - authority.reads.available_permits()
     }
 
     /// Reserve per-user capacity before Hello. Weak entries disappear when the last socket drops.
@@ -471,12 +513,12 @@ async fn run_socket(
     #[cfg(not(test))]
     let handshake_timeout = HANDSHAKE_TIMEOUT;
     let handshake_deadline = tokio::time::Instant::now() + handshake_timeout;
-    let mut recovery_events = state.auth.recovery_events();
+    let mut recovery_events = state.auth.recovery_events(&user_id);
     let mut recovery_subscribed = false;
     let mut recovery_snapshot = RecoverySnapshot::Unread;
     let mut session_changes = state.session_changes.subscribe();
     let mut terminal_sessions_subscribed = None;
-    let mut revocations = state.auth.revocation_events();
+    let mut revocations = state.auth.revocation_events(&user_id);
     let (mut sink, mut source) = socket.split();
     let mut receive = BytesMut::with_capacity(4096);
     let mut encode = Vec::with_capacity(4096);
@@ -493,7 +535,9 @@ async fn run_socket(
                     CONTROL_STREAM,
                     &Frame::Hello {
                         version: 1,
-                        caps: state.plugins.wire_capabilities() | VIEWER_VISIBILITY,
+                        caps: state.plugins.wire_capabilities()
+                            | VIEWER_VISIBILITY
+                            | TERMINAL_QUERY_REPLIES,
                         client_info: "infraternal-server/0.1",
                     },
                     &mut encode,
@@ -631,8 +675,11 @@ async fn run_socket(
     let mut loop_result = Ok(());
     let mut teardown_reason = crate::stream_close::SERVER_PROCESSING_FAILED;
     let mut close_already_logged = false;
-    // Set when teardown already read the session's authority, so the 1011 Close below reuses that
-    // answer instead of reading a second time (#227).
+    // AUTHORITY_UNAVAILABLE is provisional after frame errors; only a typed
+    // unavailable result, closed revocation source, or transport end is final.
+    let mut authority_unavailable_known = false;
+    // Set when teardown already read the session's authority, so the final Close
+    // decision reuses that answer instead of reading a second time (#227).
     let mut session_live_at_teardown = None;
     #[cfg(any(test, feature = "native-streams"))]
     let socket_authority = plugins.authority();
@@ -642,19 +689,23 @@ async fn run_socket(
             tokio::select! {
                 Some(reply) = plugins.recv() => {
                     let Some(wire) = plugins.accept(reply, &mut encode) else {continue;};
-                        #[cfg(any(test, feature = "native-streams"))]
-                        {
+                    #[cfg(any(test, feature = "native-streams"))]
+                    {
                         let authority = plugins.take_delivery_authority();
                         let sending = async {
                             let write = send_message(&mut sink, Message::Binary(wire));
                             let send = while_authorized(&state, &user_id, &session_token, true, write);
-                            match authority { Some(authority) => authority.authorized(Box::pin(send)).await, None => send.await }
+                            match authority {
+                                Some(authority) => authority.authorized(Box::pin(send)).await,
+                                None => send.await,
+                            }
                         };
                         if sending.await.is_err() { break; }
-                        }
-                        #[cfg(not(any(test, feature = "native-streams")))]
-                        if while_authorized(&state, &user_id, &session_token, true, send_message(&mut sink, Message::Binary(wire))).await.is_err() { break; }
-
+                    }
+                    #[cfg(not(any(test, feature = "native-streams")))]
+                    if while_authorized(&state, &user_id, &session_token, true,
+                        send_message(&mut sink, Message::Binary(wire))
+                    ).await.is_err() { break; }
                 }
                 changed = recovery_events.changed(), if recovery_subscribed => {
                     if changed.is_err() { break; }
@@ -670,25 +721,41 @@ async fn run_socket(
                         ).await.is_err() { break; }
                 }
                 changed = revocations.changed() => {
-                    if changed.is_err() {
-                        teardown_reason = RESUME_REFUSED;
-                        loop_result = Err(());
-                        break;
+                    if changed.is_err() { break; }
+                    match authority_deadline(&state, &user_id, &session_token, false).await {
+                        Ok(deadline) => expiry = deadline,
+                        Err(miss) => {
+                            // Unproven authority after the bounded retry is server
+                            // unavailability; only a known deletion/expiry is refusal.
+                            teardown_reason = match miss {
+                                AuthorityMiss::Refused => RESUME_REFUSED,
+                                AuthorityMiss::Unavailable => {
+                                    authority_unavailable_known = true;
+                                    AUTHORITY_UNAVAILABLE
+                                }
+                            };
+                            loop_result = Err(());
+                            break;
+                        }
                     }
-                    let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else {
-                        teardown_reason = RESUME_REFUSED;
-                        loop_result = Err(());
-                        break;
-                    };
-                    expiry = deadline;
                 }
                 () = tokio::time::sleep_until(expiry) => {
-                    let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else {
-                        teardown_reason = RESUME_REFUSED;
-                        loop_result = Err(());
-                        break;
-                    };
-                    expiry = deadline;
+                    match authority_deadline(&state, &user_id, &session_token, false).await {
+                        Ok(deadline) => expiry = deadline,
+                        Err(miss) => {
+                            // Unproven authority after the bounded retry is server
+                            // unavailability; only a known deletion/expiry is refusal.
+                            teardown_reason = match miss {
+                                AuthorityMiss::Refused => RESUME_REFUSED,
+                                AuthorityMiss::Unavailable => {
+                                    authority_unavailable_known = true;
+                                    AUTHORITY_UNAVAILABLE
+                                }
+                            };
+                            loop_result = Err(());
+                            break;
+                        }
+                    }
                 }
                 input = transport.recv() => {
                     let Ok(Some(input)) = input else {
@@ -715,7 +782,8 @@ async fn run_socket(
                                     crate::websocket_transport::EndReason::SizeLimit => 1009,
                                     crate::websocket_transport::EndReason::IdleTimeout => 1001,
                                     crate::websocket_transport::EndReason::AuthorizationRefused => 1008,
-                                    crate::websocket_transport::EndReason::FlowControlRefused => 1013,
+                                    crate::websocket_transport::EndReason::FlowControlRefused
+                                    | crate::websocket_transport::EndReason::AuthorityUnavailable => 1013,
                                     _ => 1002,
                                 };
                                 let _ = tokio::time::timeout(
@@ -786,20 +854,16 @@ async fn run_socket(
                             }).await;
                             break;
                         }
-                            if let Ok(decoded) = decode_muxed_frame(&wire)
-                                && attachments.contains_key(&decoded.stream_id)
-                                && !matches!(decoded.frame, Frame::Input { .. } | Frame::Resize { .. } | Frame::Credit { .. } | Frame::Close { .. }) {
-                                loop_result = Err(());
-                                break;
-                            }
-                            if let Ok(decoded) = decode_muxed_frame(&wire)
-                                && !attachments.contains_key(&decoded.stream_id)
-                                && !plugins.owns_stream(decoded.stream_id)
-                                && (plugins.opens_native_stream(&decoded.frame) || matches!(decoded.frame, Frame::AttachTerm { .. }))
-                                && attachments.len() + plugins.active_streams() >= MAX_ATTACHMENTS {
-                                if while_authorized(&state, &user_id, &session_token, true, send_frame(&mut sink, decoded.stream_id, &Frame::Close { code: 1013, reason: "stream limit" }, &mut encode)).await.is_err() { break; }
-                                continue;
-                            }
+                        if let Ok(decoded) = decode_muxed_frame(&wire)
+                            && !attachments.contains_key(&decoded.stream_id)
+                            && !plugins.owns_stream(decoded.stream_id)
+                            && (plugins.opens_native_stream(&decoded.frame) || matches!(decoded.frame, Frame::AttachTerm { .. }))
+                            && attachments.len() + plugins.active_streams() >= MAX_ATTACHMENTS {
+                            if while_authorized(&state, &user_id, &session_token, true,
+                                send_frame(&mut sink, decoded.stream_id, &Frame::Close { code: 1013, reason: "stream limit" }, &mut encode)
+                            ).await.is_err() { break; }
+                            continue;
+                        }
                         match plugins.dispatch(&wire, &mut encode) {
                             Dispatch::Queued => continue,
                             Dispatch::Refused(wire) => {
@@ -887,12 +951,30 @@ async fn run_socket(
     }
     #[cfg(not(any(test, feature = "native-streams")))]
     application.await;
+    // A closed account cursor stays closed even if its registry entry is replaced.
+    // Share the known-unavailable teardown for recovery, revocation and guarded
+    // work exits: source loss must report 1013 without another authority read,
+    // preserving the same unavailable outcome as bootstrap/setup sockets (#240 R2-1).
+    if revocations.has_changed().is_err()
+        || (recovery_subscribed && recovery_events.has_changed().is_err())
+    {
+        teardown_reason = AUTHORITY_UNAVAILABLE;
+        authority_unavailable_known = true;
+        loop_result = Err(());
+    }
     pending_plugin_calls.shutdown().await;
     drop(plugins);
     if !close_already_logged && !attachments.is_empty() {
         let end = transport.end_reason();
+        if end == crate::websocket_transport::EndReason::AuthorityUnavailable {
+            authority_unavailable_known = true;
+        }
         let reason = if end != crate::websocket_transport::EndReason::Open {
             end.close_reason()
+        } else if authority_unavailable_known {
+            // The authority outcome is already known unavailable. Preserve its
+            // classification and release attached streams without another read.
+            AUTHORITY_UNAVAILABLE
         } else if teardown_reason == PROTOCOL_ERROR
             || teardown_reason == AUTHORITY_UNAVAILABLE
             || teardown_reason == crate::stream_close::SERVER_PROCESSING_FAILED
@@ -903,6 +985,7 @@ async fn run_socket(
             let (reason, live) =
                 failure_reason(&state, &user_id, &session_token, teardown_reason).await;
             session_live_at_teardown = Some(live);
+            authority_unavailable_known = reason == AUTHORITY_UNAVAILABLE;
             reason
         } else {
             teardown_reason
@@ -911,32 +994,45 @@ async fn run_socket(
         record_socket_close(&state, &attachments, CloseWho::Server, reason, None, None);
     }
     drop(attachments);
-    // Only a still-authorized browser hears why its socket ended. The liveness
-    // is the one non-renewing, single-attempt read already made for the close
-    // log when the exit was a failure; otherwise make that read now. No wait
-    // and no renewal: a busy store must not hold the transport open here, and
-    // a socket that is closing is not activity (#240).
-    if loop_result.is_err()
-        && match session_live_at_teardown {
-            Some(live) => live,
-            None => teardown_read(&state, &user_id, &session_token)
-                .await
-                .is_ok(),
-        }
-    {
-        let _ = tokio::time::timeout(
-            CLOSE_TIMEOUT,
-            send_frame(
-                &mut sink,
-                CONTROL_STREAM,
-                &Frame::Close {
-                    code: 1011,
-                    reason: teardown_reason.client_text,
+    // A known server_busy outcome reports only server status, so it does not
+    // need another liveness read. Other close details require confirmed
+    // liveness, reusing the close-log read or making one non-renewing attempt.
+    if loop_result.is_err() {
+        let close_allowed = if authority_unavailable_known {
+            true
+        } else {
+            match session_live_at_teardown {
+                Some(live) => live,
+                None => match teardown_read(&state, &user_id, &session_token).await {
+                    Ok(_) => true,
+                    Err(AuthorityMiss::Refused) => false,
+                    Err(AuthorityMiss::Unavailable) => {
+                        authority_unavailable_known = true;
+                        teardown_reason = AUTHORITY_UNAVAILABLE;
+                        true
+                    }
                 },
-                &mut encode,
-            ),
-        )
-        .await;
+            }
+        };
+        if close_allowed {
+            let _ = tokio::time::timeout(
+                CLOSE_TIMEOUT,
+                send_frame(
+                    &mut sink,
+                    CONTROL_STREAM,
+                    &Frame::Close {
+                        code: if authority_unavailable_known {
+                            1013
+                        } else {
+                            1011
+                        },
+                        reason: teardown_reason.client_text,
+                    },
+                    &mut encode,
+                ),
+            )
+            .await;
+        }
     }
     let _ =
         tokio::time::timeout(CLOSE_TIMEOUT, send_message(&mut sink, Message::Close(None))).await;
@@ -1003,8 +1099,10 @@ async fn while_authorized_operation(
     operation: infraternal_plugin_api::Operation<'_, Result<(), ()>>,
     #[cfg(any(test, feature = "native-streams"))] completed: Option<&mut bool>,
 ) -> Result<(), ()> {
-    let mut revocations = state.auth.revocation_events();
-    let mut expiry = authority_deadline(state, user, token, renew).await?;
+    let mut revocations = state.auth.revocation_events(user);
+    let mut expiry = authority_deadline(state, user, token, renew)
+        .await
+        .map_err(|_| ())?;
     let mut check = tokio::time::interval_at(
         tokio::time::Instant::now() + BUSY_AUTHORITY_INTERVAL,
         BUSY_AUTHORITY_INTERVAL,
@@ -1236,6 +1334,17 @@ where
                 attachment.needs_snapshot = true;
                 return Ok(());
             }
+            state
+                .queries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .observe(
+                    attachment.session_id,
+                    attachment.host_id,
+                    out_seq,
+                    &bytes,
+                    std::time::Instant::now(),
+                );
             attachment.credit -= length;
             attachment.last_out_seq = end;
             send_frame(
@@ -1284,6 +1393,11 @@ where
             )
             .await?;
             if ended {
+                state
+                    .queries
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .retire(attachment.session_id);
                 state.sessions_changed();
             }
             send_frame(
@@ -1387,6 +1501,13 @@ where
             // The host's infraternal agent found no shim for the session: a final
             // answer, distinct from every transient close (wire §4, #158).
             let gone = code == CLOSE_SESSION_GONE;
+            if gone {
+                state
+                    .queries
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .retire(attachment.session_id);
+            }
             let reason = if gone { SESSION_GONE_REASON } else { reason };
             let close_reason = classify_terminal_close(reason);
             let mut close = attachment.close_record(stream_id, who, close_reason);
@@ -1397,9 +1518,10 @@ where
                 .await
                 .is_ok();
             attachments.remove(&stream_id);
-            if gone {
-                ended.insert(stream_id)?;
-            }
+            // Every host close races frames already queued by the browser,
+            // including the initial Credit/Resize. Absorb them until Close or
+            // reattach, just as for a final close, without losing sibling streams.
+            ended.insert(stream_id)?;
             sent
         }
     };
@@ -2164,6 +2286,27 @@ where
             state.close_logs.record(&close);
             Ok(())
         }
+        Frame::InputReply { query_seq, bytes } if stream_id != 0 && stream_id % 2 == 1 => {
+            let attachment = attachments.get(&stream_id).ok_or(())?;
+            let expires = state
+                .queries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .claim(
+                    attachment.session_id,
+                    query_seq,
+                    bytes,
+                    std::time::Instant::now(),
+                );
+            if let Some(expires) = expires
+                && !attachment
+                    .input
+                    .reply(query_seq, Bytes::copy_from_slice(bytes), expires)
+            {
+                crate::terminal_queries::record_drop();
+            }
+            Ok(())
+        }
         Frame::Input { in_seq, bytes } if stream_id != 0 && stream_id % 2 == 1 => {
             let attachment = attachments.get_mut(&stream_id).ok_or(())?;
             let end = in_seq
@@ -2252,6 +2395,13 @@ async fn close_terminal_stream<K>(
 where
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
+    if close.code == CLOSE_SESSION_GONE {
+        state
+            .queries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retire(close.record.session_id);
+    }
     let stream_id = close.record.browser_stream_id;
     let reason = close.record.reason.client_text;
     attachments.remove(&stream_id);
@@ -2310,18 +2460,8 @@ pub(super) async fn probe_deadline(
     state: &WebSocketState,
     user: &str,
     token: &str,
-) -> Result<tokio::time::Instant, ()> {
-    let started = tokio::time::Instant::now();
-    let wall = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| ())?;
-    let expiry = read_expiry(state, user, token, false, AUTHORITY_WAIT)
-        .await
-        .map_err(|_| ())?;
-    let wall_deadline = Duration::from_secs(u64::try_from(expiry).map_err(|_| ())?);
-    started
-        .checked_add(wall_deadline.checked_sub(wall).ok_or(())?)
-        .ok_or(())
+) -> Result<tokio::time::Instant, AuthorityMiss> {
+    authority_deadline(state, user, token, false).await
 }
 
 async fn socket_deadline(
@@ -2329,7 +2469,9 @@ async fn socket_deadline(
     user_id: &str,
     token: &str,
 ) -> Result<tokio::time::Instant, ()> {
-    authority_deadline(state, user_id, token, false).await
+    authority_deadline(state, user_id, token, false)
+        .await
+        .map_err(|_| ())
 }
 
 async fn authority_deadline(
@@ -2337,14 +2479,23 @@ async fn authority_deadline(
     user_id: &str,
     token: &str,
     renew: bool,
-) -> Result<tokio::time::Instant, ()> {
-    let expiry = read_expiry(state, user_id, token, renew, AUTHORITY_WAIT)
-        .await
-        .map_err(|_| ())?;
-    // The wait may have taken up to AUTHORITY_WAIT: measure the deadline from the
-    // wall clock after the read, so a slow store can never extend a session.
-    let remaining = u64::try_from(expiry - unix_seconds()?).map_err(|_| ())?;
-    Ok(tokio::time::Instant::now() + Duration::from_secs(remaining))
+) -> Result<tokio::time::Instant, AuthorityMiss> {
+    let expiry = read_expiry(state, user_id, token, renew, AUTHORITY_WAIT).await?;
+    // Pair the clocks after the read and retain fractional wall seconds. Neither
+    // SQL delay nor truncation may extend authority beyond the stored expiry.
+    let started = tokio::time::Instant::now();
+    let wall = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| AuthorityMiss::Unavailable)?;
+    let wall_deadline =
+        Duration::from_secs(u64::try_from(expiry).map_err(|_| AuthorityMiss::Refused)?);
+    started
+        .checked_add(
+            wall_deadline
+                .checked_sub(wall)
+                .ok_or(AuthorityMiss::Refused)?,
+        )
+        .ok_or(AuthorityMiss::Unavailable)
 }
 
 /// Read the session's expiry, and start its renewal when `renew` is set and it
@@ -2360,11 +2511,14 @@ async fn authority_deadline(
 /// the retry loop is compiled once (D243).
 ///
 /// Only the read is retried. It is a SELECT, which a WAL database serves while
-/// another connection holds the write lock, so a dropped attempt gives its
-/// connection back as soon as its statement returns. The renewal is a write
-/// that may wait seconds for that lock; it never runs here (`renew_soon`).
-/// Each attempt holds one of the `AUTHORITY_READS` places, so however many
-/// sockets retry at once they hold at most that many connections.
+/// another connection holds the write lock. The renewal is a write that may
+/// wait seconds for that lock; it never runs here (`renew_soon`). Each attempt
+/// obtains one of the `AUTHORITY_READS` places within its deadline. Fast SELECTs
+/// run inline. If one misses its deadline, `DetachOnDrop` moves its pinned
+/// future into a task with its place until the SELECT future completes. Pool
+/// return and health checks may finish afterward, so the place bounds active
+/// queries rather than an instantaneous pool-idle count. A retry cannot start
+/// another SELECT while its previous query future remains in flight.
 ///
 /// Expiry is monotonic: once a session's end has passed it is never found live
 /// again. Every attempt reads the wall clock when it starts, so a retry after a
@@ -2386,28 +2540,30 @@ async fn read_expiry(
     let give_up = tokio::time::Instant::now() + wait;
     let mut pause = AUTHORITY_RETRY_PAUSE;
     let expiry = loop {
+        let attempt_deadline = tokio::time::Instant::now() + read_timeout;
         let read = async {
             let reads = &state.authority.reads;
             let place = match reads.try_acquire() {
                 Ok(place) => place,
                 Err(_) => reads.acquire().await.ok()?,
             };
-            let result = match unix_seconds() {
-                Ok(now) => state
-                    .auth
-                    .live_expiry(token, user_id, now)
-                    .await
-                    .map_err(|error| match error {
-                        crate::auth::Error::Denied => AuthorityMiss::Refused,
-                        _ => AuthorityMiss::Unavailable,
-                    }),
-                Err(()) => Err(AuthorityMiss::Unavailable),
+            let Ok(now) = unix_seconds() else {
+                drop(place);
+                return Some(Err(AuthorityMiss::Unavailable));
             };
-            drop(place);
-            Some(result)
+            let hold = AuthorityReadHold::take(Arc::clone(&state.authority), place);
+            let query = crate::completion::DetachOnDrop::new(Box::pin(
+                state.auth.live_expiry(token, user_id, now, hold),
+            ));
+            Some(query.await.map_err(|error| match error {
+                crate::auth::Error::Denied => AuthorityMiss::Refused,
+                _ => AuthorityMiss::Unavailable,
+            }))
         };
-        match tokio::time::timeout(read_timeout, read).await {
-            Ok(Some(result)) => break result?,
+        match tokio::time::timeout_at(attempt_deadline, read).await {
+            // A future that does not yield can finish after the timer. Keep the
+            // explicit post-result check so such a completion still retries.
+            Ok(Some(result)) if tokio::time::Instant::now() <= attempt_deadline => break result?,
             _ if tokio::time::Instant::now() + pause < give_up => {
                 tokio::time::sleep(pause).await;
                 pause = (pause * 2).min(AUTHORITY_RETRY_PAUSE_MAX);
@@ -2429,8 +2585,8 @@ async fn read_expiry(
 /// reports as gone or expired is `Refused`; a read that missed its bound, or
 /// could not reach storage, is `Unavailable`: the server was busy, which is
 /// neither a refusal nor a bad frame (#227, #240).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AuthorityMiss {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AuthorityMiss {
     Refused,
     Unavailable,
 }
@@ -2739,7 +2895,10 @@ impl EndedStreams {
                 self.0.remove(&stream_id);
                 Ok(true)
             }
-            Frame::Input { .. } | Frame::Credit { .. } | Frame::Resize { .. } => Ok(true),
+            Frame::Input { .. }
+            | Frame::InputReply { .. }
+            | Frame::Credit { .. }
+            | Frame::Resize { .. } => Ok(true),
             Frame::AttachTerm { .. } => {
                 self.0.remove(&stream_id);
                 Ok(false)

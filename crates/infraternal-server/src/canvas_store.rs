@@ -1,4 +1,6 @@
 //! Supplies the canvas plugin with the host's existing SQLite and terminal-ownership context [183,198,243].
+mod recovery;
+
 use infraternal_plugin_canvas::{
     model::{self, CHECKPOINT, Document, MAX_DOCUMENT, MAX_INPUT, MAX_RECEIPTS, text},
     reducer::reduce,
@@ -33,6 +35,13 @@ pub struct Store {
     changes: watch::Sender<()>,
     writes: Arc<Mutex<()>>,
 }
+/// Internal read repair uses the same bounded transaction machinery as caller intents.
+#[derive(Clone, Copy)]
+enum Mode {
+    Apply,
+    Initialize,
+    Repair,
+}
 impl Store {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
@@ -50,38 +59,56 @@ impl Store {
     /// # Errors
     /// Refuses unavailable storage or invalid persisted state.
     pub async fn events(&self, account: &str, after: Option<i64>) -> Result<Vec<Value>, Error> {
-        // One statement gives head and tail the same SQLite read snapshot without
-        // retaining a read transaction or repeating the document for every log row.
-        let rows=sqlx::query("SELECT 0 AS kind,revision,document,initialized,NULL AS event FROM canvas_heads WHERE account=? UNION ALL SELECT 1,revision,NULL,NULL,event FROM canvas_operations WHERE account=? AND revision>? ORDER BY kind,revision").bind(account).bind(account).bind(after.unwrap_or(i64::MAX)).fetch_all(&self.pool).await?;
-        let Some(head) = rows.first() else {
-            return Ok(vec![snapshot(&Document::default(), false)]);
-        };
-        if head.get::<i64, _>("kind") != 0 {
-            return Err(Error);
-        }
-        let revision: i64 = head.get("revision");
-        if let Some(after) = after
-            && after <= revision
-            && i64::try_from(rows.len() - 1).ok() == Some(revision - after)
-        {
-            let mut events = Vec::with_capacity(rows.len() - 1);
-            for row in &rows[1..] {
-                events.push(serde_json::from_slice(
-                    row.get::<&str, _>("event").as_bytes(),
-                )?);
+        let mut cursor = after;
+        loop {
+            // One statement gives head and tail the same SQLite read snapshot without
+            // retaining a read transaction or repeating the document for every log row.
+            let rows=sqlx::query("SELECT 0 AS kind,revision,document,initialized,NULL AS event FROM canvas_heads WHERE account=? UNION ALL SELECT 1,revision,NULL,NULL,event FROM canvas_operations WHERE account=? AND revision>? ORDER BY kind,revision").bind(account).bind(account).bind(cursor.unwrap_or(i64::MAX)).fetch_all(&self.pool).await?;
+            let Some(head) = rows.first() else {
+                return Ok(vec![snapshot(&Document::default(), false)]);
+            };
+            if head.get::<i64, _>("kind") != 0 {
+                return Err(Error);
             }
-            return Ok(events);
+            let revision: i64 = head.get("revision");
+            let tail = cursor.is_some_and(|after| {
+                after <= revision && i64::try_from(rows.len() - 1).ok() == Some(revision - after)
+            });
+            let raw: &str = head.get("document");
+            // Every persisted document is written by serde_json, which leaves this
+            // literal prefix unescaped. A missing marker rules out historical recovery
+            // views; incidental matches only take the fully validated slow path.
+            let document = if !tail || raw.contains("Recovered: ") {
+                let document = Document(serde_json::from_slice(raw.as_bytes())?);
+                if !document.valid() {
+                    return Err(Error);
+                }
+                Some(document)
+            } else {
+                None
+            };
+            // A bounded repair can leave recovery views intact. Only reload
+            // if maintenance (or a competing writer) advanced the head.
+            if document.as_ref().is_some_and(recovery::needed)
+                && self.transact(Mode::Repair, account, &[]).await? != revision
+            {
+                cursor = None;
+                continue;
+            }
+            if tail {
+                let mut events = Vec::with_capacity(rows.len() - 1);
+                for row in &rows[1..] {
+                    events.push(serde_json::from_slice(
+                        row.get::<&str, _>("event").as_bytes(),
+                    )?);
+                }
+                return Ok(events);
+            }
+            return Ok(vec![snapshot(
+                &document.ok_or(Error)?,
+                head.get::<bool, _>("initialized"),
+            )]);
         }
-        let document = Document(serde_json::from_slice(
-            head.get::<&str, _>("document").as_bytes(),
-        )?);
-        if !document.valid() {
-            return Err(Error);
-        }
-        Ok(vec![snapshot(
-            &document,
-            head.get::<bool, _>("initialized"),
-        )])
     }
     /// Apply exactly one bounded semantic intent, allowing stale but never future revisions.
     /// # Errors
@@ -89,7 +116,7 @@ impl Store {
     pub async fn apply(&self, account: &str, input: &[u8]) -> Result<i64, Error> {
         self.call(false, account, input).await
     }
-    /// Compare-and-set bootstrap, preserving a differing loser as recoverable views.
+    /// Initialize once, then merge only targets absent from the account canvas.
     /// # Errors
     /// Refuses invalid references, bounds, ownership or inconsistent retry input.
     pub async fn initialize(&self, account: &str, input: &[u8]) -> Result<i64, Error> {
@@ -98,78 +125,129 @@ impl Store {
     /// One transaction path keeps the existing storage futures shared by both actions.
     /// # Errors
     /// Returns the same opaque refusal as the two declared action wrappers.
-    #[allow(clippy::too_many_lines)]
     pub async fn call(&self, initialize: bool, account: &str, input: &[u8]) -> Result<i64, Error> {
-        let request = decode(
-            input,
+        self.transact(
             if initialize {
-                MAX_DOCUMENT + 2048
+                Mode::Initialize
             } else {
-                MAX_INPUT
+                Mode::Apply
             },
-        )?;
-        let fields = if initialize {
-            &["op_id", "document"][..]
-        } else {
-            &["op_id", "base_revision", "intent"][..]
-        };
-        if !model::shape(&request, fields) {
-            return Err(Error);
-        }
-        let op_id = model::string(&request, "op_id").ok_or(Error)?;
-        let action = if initialize { "initialize" } else { "apply" };
-        // Permanent retry receipts retain the existing SHA-256 digest, never a
-        // second copy of a bootstrap document. Canonical JSON ignores key order.
-        let request_hash = crate::auth::hash(&serde_json::to_string(&model::object(vec![
-            ("action", Value::from(action)),
-            ("input", request.clone()),
-        ]))?);
-        let _writer = self.writes.lock().await;
-        let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool).await?;
-        let mut document = head(&mut tx, account).await?;
-        if let Some(revision) =
-            receipt(&mut tx, account, op_id, &request_hash, document.revision()).await?
-        {
-            return Ok(revision);
-        }
-        let mut noop = false;
-        if initialize {
-            let mut incoming = Document(request.get("document").cloned().ok_or(Error)?);
-            if !incoming.valid() || serde_json::to_string(&incoming.0)?.len() > MAX_DOCUMENT {
+            account,
+            input,
+        )
+        .await
+    }
+    // Keep one storage state machine for edits and read repair. The caller holds
+    // only this operation handle rather than another copy of the write futures.
+    #[allow(clippy::too_many_lines)]
+    #[inline(never)]
+    fn transact<'a>(
+        &'a self,
+        mode: Mode,
+        account: &'a str,
+        input: &'a [u8],
+    ) -> infraternal_plugin_api::Operation<'a, Result<i64, Error>> {
+        Box::pin(async move {
+            let initialize = matches!(mode, Mode::Initialize);
+            let maintenance = matches!(mode, Mode::Repair);
+            let request = if maintenance {
+                Value::Null
+            } else {
+                decode(
+                    input,
+                    if initialize {
+                        MAX_DOCUMENT + 2048
+                    } else {
+                        MAX_INPUT
+                    },
+                )?
+            };
+            let fields = if initialize {
+                &["op_id", "document"][..]
+            } else {
+                &["op_id", "base_revision", "intent"][..]
+            };
+            if !maintenance && !model::shape(&request, fields) {
                 return Err(Error);
             }
-            incoming.normalize();
-            ownership(&mut tx, account, OwnershipWindows::Document(&incoming)).await?;
-            let initialized: bool =
-                sqlx::query("SELECT initialized FROM canvas_heads WHERE account=?")
-                    .bind(account)
-                    .fetch_one(&mut *tx)
-                    .await?
-                    .get(0);
-            incoming.0["revision"] = json!(document.revision());
-            if !initialized {
-                document = incoming;
-            } else if incoming != document {
-                recover(&mut document, incoming)?;
-            }
-        } else {
-            let base = request
-                .get("base_revision")
-                .and_then(Value::as_i64)
-                .ok_or(Error)?;
-            if base < 0 || base > document.revision() {
-                return Err(Error);
-            }
-            let intent = request.get("intent").ok_or(Error)?;
-            // Each intent can inspect only its own ID and a split anchor. Probe
-            // the account index instead of loading its lifetime close history.
-            let id = intent
-                .get("window")
-                .and_then(|w| model::string(w, "id"))
-                .or_else(|| model::string(intent, "window_id"))
-                .unwrap_or("");
-            let anchor = model::string(intent, "anchor_id").unwrap_or("");
-            let closed: Vec<String> = sqlx::query(
+            let op_id = if maintenance {
+                ""
+            } else {
+                model::string(&request, "op_id").ok_or(Error)?
+            };
+            // Permanent retry receipts retain the existing SHA-256 digest, never a
+            // second copy of a bootstrap document. Canonical JSON ignores key order.
+            let request_hash = if maintenance {
+                String::new()
+            } else {
+                // The original envelope sorts action before input. Only the fixed
+                // header is literal; serde_json still encodes every input value.
+                let mut envelope = serde_json::to_string(&request)?;
+                envelope.insert_str(
+                    0,
+                    if initialize {
+                        r#"{"action":"initialize","input":"#
+                    } else {
+                        r#"{"action":"apply","input":"#
+                    },
+                );
+                envelope.push('}');
+                crate::auth::hash(&envelope)
+            };
+            let _writer = self.writes.lock().await;
+            let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool).await?;
+            let mut document = head_document(&mut tx, account).await?;
+            let repaired = recovery::repair(&mut document)?;
+            let retry = if maintenance {
+                None
+            } else {
+                receipt(&mut tx, account, op_id, &request_hash, document.revision()).await?
+            };
+            let mut noop = false;
+            let mut import_noop = false;
+            let accepted = !maintenance && retry.is_none();
+            if accepted {
+                if initialize {
+                    let mut incoming = Document(request.get("document").cloned().ok_or(Error)?);
+                    if !incoming.valid() || serde_json::to_string(&incoming.0)?.len() > MAX_DOCUMENT
+                    {
+                        return Err(Error);
+                    }
+                    incoming.normalize();
+                    ownership(&mut tx, account, OwnershipWindows::Document(&incoming)).await?;
+                    let initialized: bool =
+                        sqlx::query("SELECT initialized FROM canvas_heads WHERE account=?")
+                            .bind(account)
+                            .fetch_one(&mut *tx)
+                            .await?
+                            .get(0);
+                    incoming.0["revision"] = json!(document.revision());
+                    if initialized {
+                        let before = document.clone();
+                        let views = incoming.0["views"].as_array_mut().ok_or(Error)?;
+                        recovery::merge(&mut document, std::mem::take(views), true)?;
+                        import_noop = document == before;
+                    } else {
+                        document = incoming;
+                    }
+                } else {
+                    let base = request
+                        .get("base_revision")
+                        .and_then(Value::as_i64)
+                        .ok_or(Error)?;
+                    if base < 0 || base > document.revision() {
+                        return Err(Error);
+                    }
+                    let intent = request.get("intent").ok_or(Error)?;
+                    // Each intent can inspect only its own ID and a split anchor. Probe
+                    // the account index instead of loading its lifetime close history.
+                    let id = intent
+                        .get("window")
+                        .and_then(|w| model::string(w, "id"))
+                        .or_else(|| model::string(intent, "window_id"))
+                        .unwrap_or("");
+                    let anchor = model::string(intent, "anchor_id").unwrap_or("");
+                    let closed: Vec<String> = sqlx::query(
                 "SELECT window_id FROM canvas_closed WHERE account=? AND window_id IN (?,?)",
             )
             .bind(account)
@@ -180,126 +258,88 @@ impl Store {
             .into_iter()
             .map(|row| row.get(0))
             .collect();
-            let before = document.clone();
-            reduce(&mut document, intent, &closed)?;
-            document.normalize();
-            noop = document == before;
-            // Admit new references only: retirement must not freeze unrelated edits.
-            if matches!(model::string(intent, "type"), Some("open" | "split")) {
-                ownership(
-                    &mut tx,
-                    account,
-                    OwnershipWindows::One(intent.get("window").ok_or(Error)?),
-                )
-                .await?;
-            }
-            if model::string(intent, "type") == Some("target") {
-                // Retargeting introduces a reference just as opening does; close must never bypass admission.
-                let window = json!({"target": intent.get("target").ok_or(Error)?});
-                ownership(&mut tx, account, OwnershipWindows::One(&window)).await?;
-            }
-            if model::string(intent, "type") == Some("close") {
-                let id = model::string(intent, "window_id").ok_or(Error)?;
-                // At most one tombstone is added per accepted revision; the
-                // permanent receipt quota also bounds this table.
-                sqlx::query("INSERT OR IGNORE INTO canvas_closed(account,window_id) VALUES(?,?)")
-                    .bind(account)
-                    .bind(id)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-        }
-        document.normalize();
-        document.0["revision"] = json!(document.revision() + 1);
-        if !document.valid() {
-            return Err(Error);
-        }
-        let event = if initialize {
-            snapshot(&document, true)
-        } else {
-            model::object(vec![
-                ("type", Value::from("canvas.layout.operation")),
-                ("revision", Value::from(document.revision())),
-                ("op_id", Value::from(op_id)),
-                ("intent", request["intent"].clone()),
-                ("noop", Value::from(noop)),
-            ])
-        };
-        save(
-            &mut tx,
-            account,
-            &document,
-            op_id,
-            &request_hash,
-            &event,
-            initialize,
-        )
-        .await?;
-        commit(tx, self.changes.clone()).await?;
-        Ok(document.revision())
-    }
-}
-fn recover(document: &mut Document, mut incoming: Document) -> Result<(), Error> {
-    let mut ids = Vec::<(String, String)>::new();
-    for mut view in incoming
-        .0
-        .get_mut("views")
-        .and_then(Value::as_array_mut)
-        .ok_or(Error)?
-        .drain(..)
-    {
-        view["id"] = json!(uuid::Uuid::new_v4().to_string());
-        // The v1 browser bound counts UTF-16 units, including the recovery prefix.
-        let mut units = 0;
-        let name = model::string(&view, "name")
-            .ok_or(Error)?
-            .chars()
-            .take_while(|c| {
-                units += c.len_utf16();
-                units <= 189
-            })
-            .collect::<String>();
-        view["name"] = Value::String(format!("Recovered: {name}"));
-        if let Some(columns) = view
-            .get_mut("layout")
-            .and_then(|l| l.get_mut("columns"))
-            .and_then(Value::as_array_mut)
-        {
-            for column in columns {
-                column["id"] = json!(uuid::Uuid::new_v4().to_string());
-                for window in column
-                    .get_mut("windows")
-                    .and_then(Value::as_array_mut)
-                    .ok_or(Error)?
-                {
-                    let old = model::string(window, "id").ok_or(Error)?.to_owned();
-                    let id = if let Some((_, id)) = ids.iter().find(|(seen, _)| *seen == old) {
-                        id.clone()
-                    } else {
-                        let id = uuid::Uuid::new_v4().to_string();
-                        ids.push((old, id.clone()));
-                        id
-                    };
-                    window["id"] = Value::String(id);
+                    let before = document.clone();
+                    reduce(&mut document, intent, &closed)?;
+                    document.normalize();
+                    noop = document == before;
+                    // Admit new references only: retirement must not freeze unrelated edits.
+                    if matches!(model::string(intent, "type"), Some("open" | "split")) {
+                        ownership(
+                            &mut tx,
+                            account,
+                            OwnershipWindows::One(intent.get("window").ok_or(Error)?),
+                        )
+                        .await?;
+                    }
+                    if model::string(intent, "type") == Some("target") {
+                        // Retargeting introduces a reference just as opening does; close must never bypass admission.
+                        let window = json!({"target": intent.get("target").ok_or(Error)?});
+                        ownership(&mut tx, account, OwnershipWindows::One(&window)).await?;
+                    }
+                    if model::string(intent, "type") == Some("close") {
+                        let id = model::string(intent, "window_id").ok_or(Error)?;
+                        // At most one tombstone is added per accepted revision; the
+                        // permanent receipt quota also bounds this table.
+                        sqlx::query(
+                            "INSERT OR IGNORE INTO canvas_closed(account,window_id) VALUES(?,?)",
+                        )
+                        .bind(account)
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
                 }
             }
-        }
-        document
-            .0
-            .get_mut("views")
-            .and_then(Value::as_array_mut)
-            .ok_or(Error)?
-            .push(view);
+            if accepted && !import_noop {
+                document.normalize();
+                document.0["revision"] = json!(document.revision() + 1);
+                if !document.valid() {
+                    return Err(Error);
+                }
+            }
+            let changed = repaired || (accepted && !import_noop);
+            if changed {
+                // A repairing edit keeps both normal revision steps but publishes the
+                // final snapshot: no operation tail may replay against the replaced IDs.
+                let checkpoint = initialize || repaired;
+                let event = if checkpoint {
+                    snapshot(&document, true)
+                } else {
+                    model::object(vec![
+                        ("type", Value::from("canvas.layout.operation")),
+                        ("revision", Value::from(document.revision())),
+                        ("op_id", Value::from(op_id)),
+                        ("intent", request["intent"].clone()),
+                        ("noop", Value::from(noop)),
+                    ])
+                };
+                save(&mut tx, account, &document, &event, checkpoint).await?;
+            }
+            // Imports with no new targets still retain a durable retry receipt. Keep
+            // both paths in one commit, notifying only when the layout actually changed.
+            if accepted {
+                save_receipt(&mut tx, account, op_id, &request_hash, document.revision()).await?;
+            }
+            if changed || accepted {
+                commit(tx, self.changes.clone(), changed).await?;
+            }
+            Ok(retry.unwrap_or(document.revision()))
+        })
     }
-    Ok(())
 }
-async fn commit(tx: Transaction<'static, Sqlite>, changes: watch::Sender<()>) -> Result<(), Error> {
+async fn commit(
+    tx: Transaction<'static, Sqlite>,
+    changes: watch::Sender<()>,
+    notify: bool,
+) -> Result<(), Error> {
     // COMMIT can become durable before its caller receives the acknowledgement.
     // Keep its invalidation in the same finite task so socket cancellation cannot
     // strand connected devices on an older revision. No timer or worker is retained.
     tokio::spawn(async move {
         tx.commit().await?;
-        changes.send_replace(());
+        if notify {
+            changes.send_replace(());
+        }
         Ok::<(), Error>(())
     })
     .await
@@ -333,7 +373,7 @@ fn snapshot(document: &Document, initialized: bool) -> Value {
         ("document", document.0.clone()),
     ])
 }
-async fn head(tx: &mut Transaction<'_, Sqlite>, account: &str) -> Result<Document, Error> {
+async fn head_document(tx: &mut Transaction<'_, Sqlite>, account: &str) -> Result<Document, Error> {
     let empty = serde_json::to_string(&Document::default().0)?;
     sqlx::query(
         "INSERT OR IGNORE INTO canvas_heads(account,revision,document,initialized) VALUES(?,0,?,0)",
@@ -356,21 +396,19 @@ async fn receipt(
     request_hash: &str,
     revision: i64,
 ) -> Result<Option<i64>, Error> {
-    if let Some(row) =
-        sqlx::query("SELECT request,revision FROM canvas_receipts WHERE account=? AND op_id=?")
-            .bind(account)
-            .bind(id)
-            .fetch_optional(&mut **tx)
-            .await?
-    {
-        if row.get::<String, _>("request") != request_hash {
+    // A matching retry is the first row; otherwise the union yields the account's
+    // transactional receipt counter. LIMIT preserves retry admission at the quota and shares one
+    // row-query future across both paths. No-op imports count without a revision.
+    let row = sqlx::query("SELECT request,revision FROM canvas_receipts WHERE account=? AND op_id=? UNION ALL SELECT NULL,receipt_count FROM canvas_heads WHERE account=? LIMIT 1")
+        .bind(account).bind(id).bind(account).fetch_one(&mut **tx).await?;
+    let value: i64 = row.get("revision");
+    if let Some(request) = row.get::<Option<&str>, _>("request") {
+        if request != request_hash {
             return Err(Error);
         }
-        return Ok(Some(row.get("revision")));
+        return Ok(Some(value));
     }
-    // One unique accepted call increments the head and inserts one receipt in
-    // the same transaction. Check retries first so the quota never expires them.
-    if revision >= MAX_RECEIPTS {
+    if value >= MAX_RECEIPTS || revision >= 9_007_199_254_740_991 {
         return Err(Error);
     }
     Ok(None)
@@ -424,13 +462,26 @@ async fn ownership_window<'a>(
     }
     Ok(())
 }
-#[allow(clippy::too_many_arguments)]
+async fn save_receipt(
+    tx: &mut Transaction<'_, Sqlite>,
+    account: &str,
+    id: &str,
+    request_hash: &str,
+    revision: i64,
+) -> Result<(), Error> {
+    sqlx::query("INSERT INTO canvas_receipts(account,op_id,request,revision) VALUES(?,?,?,?)")
+        .bind(account)
+        .bind(id)
+        .bind(request_hash)
+        .bind(revision)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
 async fn save(
     tx: &mut Transaction<'_, Sqlite>,
     account: &str,
     document: &Document,
-    id: &str,
-    request_hash: &str,
     event: &Value,
     force_snapshot: bool,
 ) -> Result<(), Error> {
@@ -442,13 +493,6 @@ async fn save(
         .bind(document.revision())
         .bind(&json)
         .bind(account)
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query("INSERT INTO canvas_receipts(account,op_id,request,revision) VALUES(?,?,?,?)")
-        .bind(account)
-        .bind(id)
-        .bind(request_hash)
-        .bind(document.revision())
         .execute(&mut **tx)
         .await?;
     if force_snapshot || document.revision() % CHECKPOINT == 0 {
@@ -506,7 +550,50 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0030_canvas_receipt_count.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
         Store::new(pool)
+    }
+    #[tokio::test]
+    async fn permanent_receipts_keep_the_original_json_digest_recipe() {
+        let store = fixture().await;
+        let request = json!({"op_id":"initial","document":Document::default()});
+        let input = serde_json::to_vec(&request).unwrap();
+        store.initialize("a", &input).await.unwrap();
+        for (initialize, legacy) in [
+            (
+                true,
+                json!({"op_id":"legacy-λ-\"","document":Document::default()}),
+            ),
+            (
+                false,
+                json!({"op_id":"legacy-apply","base_revision":1,"intent":{"type":"close","window_id":"gone"}}),
+            ),
+        ] {
+            let action = if initialize { "initialize" } else { "apply" };
+            let digest = crate::auth::hash(
+                &serde_json::to_string(&model::object(vec![
+                    ("action", Value::from(action)),
+                    ("input", legacy.clone()),
+                ]))
+                .unwrap(),
+            );
+            sqlx::query("INSERT INTO canvas_receipts VALUES('a',?,?,1)")
+                .bind(legacy["op_id"].as_str().unwrap())
+                .bind(digest)
+                .execute(&store.pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .call(initialize, "a", &serde_json::to_vec(&legacy).unwrap())
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
     }
     #[tokio::test]
     async fn cancelled_commit_still_invalidates_a_durable_change() {
@@ -517,11 +604,13 @@ mod tests {
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&store.pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO canvas_heads VALUES('a',0,'{}',0)")
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        let mut pending = Box::pin(commit(tx, store.changes.clone()));
+        sqlx::query(
+            "INSERT INTO canvas_heads(account,revision,document,initialized) VALUES('a',0,'{}',0)",
+        )
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        let mut pending = Box::pin(commit(tx, store.changes.clone(), true));
         let ready =
             std::future::poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_ready())).await;
         assert!(!ready, "commit needs the database worker acknowledgement");

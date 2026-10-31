@@ -17,7 +17,9 @@ fn replay_prefix_stops_at_the_shim_hello_head() {
 async fn replay_complete_preserves_the_full_output_cursor_as_decimal() {
     let id = [0x5a; 16];
     let (tx, mut messages) = mpsc::channel(1);
-    replay_complete(&tx, 17, id, u64::MAX).await.unwrap();
+    replay_complete(&tx, 17, id, u64::MAX, (80, 24))
+        .await
+        .unwrap();
     let Some(Message::Event(stream, json)) = messages.recv().await else {
         panic!("replay completion was not emitted as an Event");
     };
@@ -26,6 +28,8 @@ async fn replay_complete_preserves_the_full_output_cursor_as_decimal() {
     assert_eq!(event["type"], "terminal.replay_complete");
     assert_eq!(event["session_id"], uuid::Uuid::from_bytes(id).to_string());
     assert_eq!(event["out_seq"], u64::MAX.to_string());
+    assert_eq!(event["cols"], 80);
+    assert_eq!(event["rows"], 24);
 }
 
 #[test]
@@ -521,4 +525,90 @@ async fn the_unhealthy_handoff_case_survives_concurrent_spawns() {
         unexpected, 0,
         "a shut-down peer accepted {unexpected} of {rounds} writes"
     );
+}
+
+#[tokio::test]
+async fn replay_geometry_is_frozen_before_queued_resize_and_delayed_output() {
+    use infraternal_shim::frame::MULTI_WRITER;
+    let id = *uuid::Uuid::new_v4().as_bytes();
+    let root = crate::test_state_root().join(&uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let state = sessions::state(Some(root)).unwrap();
+    let path = sessions::rendezvous(&state, id);
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let shim = tokio::spawn(async move {
+        let (mut peer, _) = listener.accept().await.unwrap();
+        sessions::send(
+            &mut peer,
+            &Shim::Hello {
+                version: 1,
+                caps: SEQUENCED_INPUT | MULTI_WRITER,
+                session: id,
+                pid: std::process::id(),
+                cols: 80,
+                rows: 24,
+                created: 0,
+                head: 3,
+                start: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let mut reader = Reader::default();
+        assert!(matches!(
+            reader.read(&mut peer).await.unwrap(),
+            Shim::Attach(_)
+        ));
+        assert_eq!(reader.read(&mut peer).await.unwrap(), Shim::SelectWriter(2));
+        assert_eq!(
+            reader.read(&mut peer).await.unwrap(),
+            Shim::InputStateRequest
+        );
+        sessions::send(&mut peer, &Shim::InputState(0, 0))
+            .await
+            .unwrap();
+        assert_eq!(reader.read(&mut peer).await.unwrap(), Shim::ReadFrom(0));
+        // Hold replay until the attaching viewer's Resize has been processed.
+        assert_eq!(
+            reader.read(&mut peer).await.unwrap(),
+            Shim::Resize {
+                cols: 120,
+                rows: 40,
+                px_w: 0,
+                px_h: 0
+            }
+        );
+        sessions::send(&mut peer, &Shim::Output(0, b"abc".to_vec()))
+            .await
+            .unwrap();
+        std::future::pending::<()>().await;
+    });
+    let (mut commands, receiver) = session_commands::channel();
+    let (tx, mut messages) = mpsc::channel(8);
+    let relay = tokio::spawn(terminal(path, id, 2, 0, 0, receiver, tx));
+    assert!(matches!(
+        messages.recv().await,
+        Some(Message::Shim(2, Shim::InputAck(0)))
+    ));
+    commands.try_send(Command::Resize(120, 40, 0, 0)).unwrap();
+    commands.try_send(Command::Credit(3)).unwrap();
+    let check = async {
+        assert!(
+            matches!(messages.recv().await, Some(Message::Shim(2, Shim::Output(0, bytes))) if bytes == b"abc")
+        );
+        let Some(Message::Event(2, bytes)) = messages.recv().await else {
+            panic!("missing replay fence");
+        };
+        let event: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(event["out_seq"], "3");
+        assert_eq!(
+            (event["cols"].as_u64(), event["rows"].as_u64()),
+            (Some(80), Some(24))
+        );
+    };
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), check).await;
+    relay.abort();
+    shim.abort();
+    let _ = tokio::join!(relay, shim);
+    std::fs::remove_dir_all(state).unwrap();
+    result.unwrap();
 }

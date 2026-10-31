@@ -4,9 +4,12 @@
 //! Restarting invalidates pending ceremonies, never credentials. SQLite transactions serialize
 //! owner creation, recovery replacement, passkey limits and capability redemption.
 
+mod account_events;
+pub(crate) use account_events::AccountSubscription;
 mod binding;
 #[path = "../bootstrap_authorization.rs"]
 mod bootstrap_authorization;
+mod committed;
 pub(crate) mod cookies;
 mod crypto;
 mod devices;
@@ -30,6 +33,8 @@ use wraps::put_wrap;
 mod migration_compat;
 #[cfg(test)]
 mod migration_compat_tests;
+#[cfg(test)]
+mod migration_data_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -148,13 +153,16 @@ pub struct Auth {
     pool: SqlitePool,
     webauthn: Arc<Webauthn>,
     origin: String,
+    system_service: bool,
     pending: Arc<Mutex<Pending>>,
     ingress: Arc<Mutex<http::Ingress>>,
-    recovery_changes: Arc<tokio::sync::watch::Sender<()>>,
-    revocations: Arc<tokio::sync::watch::Sender<()>>,
+    recovery_changes: Arc<account_events::AccountEvents>,
+    revocations: Arc<account_events::AccountEvents>,
     setup_consumed: Arc<watch::Sender<()>>,
     #[cfg(test)]
     recovery_pause: Arc<Mutex<Option<Arc<RecoveryPause>>>>,
+    #[cfg(test)]
+    authority_reads: Arc<std::sync::Mutex<HashMap<String, usize>>>,
     // i64::MIN leaves HTTP on wall time; tests opt into a shared, advanceable clock.
     #[cfg(test)]
     test_http_time: Arc<AtomicI64>,
@@ -168,6 +176,28 @@ impl Auth {
     #[must_use]
     pub fn origin(&self) -> &str {
         &self.origin
+    }
+
+    /// Mark the server's public setup instructions for its installed service scope.
+    pub(crate) fn with_system_service(mut self, system_service: bool) -> Self {
+        self.system_service = system_service;
+        self
+    }
+
+    /// Command shown beside the first-run token, derived from the action definition.
+    fn setup_token_command(&self) -> String {
+        #[cfg(feature = "cli-plugin")]
+        {
+            crate::cli::setup_token_command(self.system_service)
+        }
+        #[cfg(not(feature = "cli-plugin"))]
+        {
+            if self.system_service {
+                "sudo infraternal server setup-token".to_owned()
+            } else {
+                "infraternal server setup-token".to_owned()
+            }
+        }
     }
 
     /// Subscribe to the successful owner-enrollment event used to retire its CLI socket.
@@ -199,16 +229,29 @@ impl Auth {
             pool,
             webauthn: Arc::new(webauthn),
             origin: url.origin().ascii_serialization(),
+            system_service: false,
             pending: Arc::default(),
             ingress: Arc::default(),
-            recovery_changes: Arc::new(tokio::sync::watch::channel(()).0),
-            revocations: Arc::new(tokio::sync::watch::channel(()).0),
+            recovery_changes: Arc::default(),
+            revocations: Arc::default(),
             setup_consumed: Arc::new(setup_consumed),
             #[cfg(test)]
             recovery_pause: Arc::default(),
             #[cfg(test)]
+            authority_reads: Arc::default(),
+            #[cfg(test)]
             test_http_time: Arc::new(AtomicI64::new(i64::MIN)),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authority_reads(&self, user: &str) -> usize {
+        self.authority_reads
+            .lock()
+            .unwrap()
+            .get(user)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Set the HTTP time shared by cloned test routers.

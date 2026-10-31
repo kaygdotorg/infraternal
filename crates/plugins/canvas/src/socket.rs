@@ -34,7 +34,7 @@ const INITIALIZE: ActionDef = ActionDef {
     instructions: &[
         "Keep the original local v1 document until this call succeeds.",
         "Send the document once with a unique op_id; retry the identical input if needed.",
-        "Subscribe to canvas.layout; a differing local layout appears in recovered views.",
+        "Subscribe to canvas.layout; missing targets merge into the shared layout.",
     ],
     input: SchemaRef("canvas.layout.initialize"),
     output: SchemaRef("canvas.layout.revision"),

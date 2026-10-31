@@ -55,9 +55,16 @@ unknown command (D299). It appears again when it works.
 
 Only `infraternal server init` creates a persistent server service. It prints
 the installation plan with `--dry-run`. Applying setup asks for confirmation
-on a terminal; non-interactive use must pass `--yes`. The legacy
+on a terminal; non-interactive use must pass `--yes`. The top-level help also
+lists `server init` as the first server-setup command. The legacy
 `infraternal server install` path remains hidden from help and only prints
 migration guidance; it does not create or change a service.
+
+`--data` always selects the server data directory when supplied. Without it,
+server commands that read or create server data use the `--data` path recorded
+by an installed system service, including its effective drop-ins. If no system
+service records a path, they use `./data`. A setup-token command that cannot
+read its selected directory prints one line with the matching `sudo` command.
 
 ## Generated skills
 

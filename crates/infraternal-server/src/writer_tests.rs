@@ -4,6 +4,9 @@ use super::*;
 #[path = "websocket_authority_tests.rs"]
 mod authority_watchdog;
 
+#[path = "websocket_busy_edge_tests.rs"]
+pub(super) mod busy_edges;
+
 async fn database() -> (SqlitePool, String, [u8; 16]) {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)

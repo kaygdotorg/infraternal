@@ -409,3 +409,121 @@ async fn review_pending_input_limit_retires_only_its_attachment() {
     );
     assert_eq!(routes.get(&4), Some(&2));
 }
+
+#[tokio::test]
+async fn review_reply_bypasses_queued_typing_without_losing_its_cursor_or_bytes() {
+    let (commands, mut received) = mpsc::channel(8);
+    let (input, input_rx) = mpsc::channel(8);
+    let (_credit, input_acked) = watch::channel(0);
+    let handle = AttachmentHandle(Arc::new(AttachmentHandleInner {
+        id: 1,
+        stream_id: 2,
+        input,
+        input_acked,
+        commands: commands.clone(),
+    }));
+    let forwarding = tokio::spawn(forward_inputs(1, input_rx, commands));
+    let (output, _events) = mpsc::channel(8);
+    let queue = crate::websocket_input::InputQueue::new(handle.clone(), 1, output);
+    let Command::Input { frame, .. } = input_command(0, b"A") else {
+        unreachable!();
+    };
+    // The unsequenced reply lane intentionally bypasses typing credit [307].
+    // Both admissions can occur before the ordinary forwarding tasks run;
+    // taking the reply must leave the typing frame and its cursor intact.
+    queue.enqueue(frame).unwrap();
+    assert!(handle.reply(
+        42,
+        Bytes::from_static(b"renderer reply"),
+        std::time::Instant::now() + Duration::from_secs(10)
+    ));
+    let first = received.recv().await.unwrap();
+    assert!(
+        matches!(first, Command::Reply { query_seq: 42, .. }),
+        "the independent reply lane must not wait for typing forwarding"
+    );
+    let Command::Input { frame, .. } = received.recv().await.unwrap() else {
+        panic!("queued typing must remain available after the reply");
+    };
+    forwarding.abort();
+    assert!(matches!(
+        decode_muxed_frame(&frame).unwrap().frame,
+        Frame::Input {
+            in_seq: 0,
+            bytes: b"A"
+        }
+    ));
+}
+
+#[tokio::test]
+async fn reply_queue_deadline_and_live_reply_do_not_change_typing_offsets() {
+    let (mut connection, mut peer) = connection();
+    let (tx, _output) = mpsc::channel(8);
+    let mut attachments = HashMap::from([(1, attachment(tx))]);
+    let mut routes = HashMap::from([(2, 1)]);
+    let mut pending = HashMap::new();
+    assert!(
+        process_command(
+            Command::Reply {
+                attachment_id: 1,
+                query_seq: 42,
+                bytes: Bytes::from_static(b"\x1b[1;1R"),
+                expires: std::time::Instant::now(),
+            },
+            &mut connection,
+            &mut attachments,
+            &mut routes,
+            &mut pending
+        )
+        .await
+    );
+    let mut scratch = [0; 128];
+    assert!(
+        peer.try_read(&mut scratch)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    assert!(
+        process_command(
+            Command::Reply {
+                attachment_id: 1,
+                query_seq: 43,
+                bytes: Bytes::from_static(b"\x1b[1;1R"),
+                expires: std::time::Instant::now() + Duration::from_secs(10),
+            },
+            &mut connection,
+            &mut attachments,
+            &mut routes,
+            &mut pending
+        )
+        .await
+    );
+    let reply = receive(&mut peer).await;
+    assert!(matches!(
+        decode_muxed_frame(&reply).unwrap().frame,
+        Frame::InputReply {
+            query_seq: 43,
+            bytes: b"\x1b[1;1R"
+        }
+    ));
+    assert_eq!(attachments[&1].last_input_end, 0);
+    assert_eq!(attachments[&1].last_in_seq, 0);
+    assert!(attachments[&1].unacknowledged.is_empty());
+    assert!(
+        process_command(
+            input_command(0, b"typed"),
+            &mut connection,
+            &mut attachments,
+            &mut routes,
+            &mut pending
+        )
+        .await
+    );
+    let input = receive(&mut peer).await;
+    assert!(matches!(
+        decode_muxed_frame(&input).unwrap().frame,
+        Frame::Input {
+            in_seq: 0,
+            bytes: b"typed"
+        }
+    ));
+}

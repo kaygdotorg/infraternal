@@ -5,7 +5,7 @@ use crate::{
 };
 
 /// Browser leg-A capability, independent of native leg-B core capabilities.
-pub const CAPABILITY: u64 = 1 << 3;
+pub const CAPABILITY: u64 = 1 << 4;
 /// Leg B reserves bits 0–7 for transport control; desktop uses the first native lane bit.
 pub const NATIVE_CAPABILITY: u64 = 1 << 8;
 /// Access units leave room for the largest desktop header inside the frozen frame limit.

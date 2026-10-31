@@ -20,12 +20,14 @@
 //! No network is touched and no file is written. Every path is injected through
 //! [`Roots`] so tests build whole nodes in a temporary directory.
 //!
-//! This is its own crate so that it is built size-optimized like the other
-//! management code (D243); it runs once per `status` call, never on a data path.
+//! This is its own crate so that it is built size-optimized with the other
+//! management code (D243). The status probe and installed-data lookup run only
+//! for their respective CLI commands, never on a data path.
 
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -83,6 +85,8 @@ pub struct Unit {
     pub name: String,
     /// Server or agent.
     pub kind: Kind,
+    /// `--data` argument, when given.
+    pub data: Option<PathBuf>,
     /// `--state` argument, when given.
     pub state: Option<PathBuf>,
 }
@@ -117,9 +121,23 @@ impl Roots {
         } else {
             std::env::var_os("XDG_RUNTIME_DIR").map(|dir| PathBuf::from(dir).join("infraternal"))
         };
+        // Debug builds expose a fixture root to CLI integration tests; release
+        // builds always read the installer-owned system unit directory.
+        let system_units = {
+            #[cfg(debug_assertions)]
+            if let Some(directory) = std::env::var_os("INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR") {
+                vec![PathBuf::from(directory)]
+            } else {
+                vec![PathBuf::from("/etc/systemd/system")]
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                vec![PathBuf::from("/etc/systemd/system")]
+            }
+        };
         Self {
             // Installers write units to /etc; packaged units elsewhere are not ours.
-            system_units: vec![PathBuf::from("/etc/systemd/system")],
+            system_units,
             user_units: config.map(|config| config.join("systemd/user")),
             run_dir,
             // A server's database lives here when no unit names it.
@@ -247,7 +265,7 @@ fn discover(roots: &Roots) -> Vec<Unit> {
             if found.iter().any(|u| u.scope == scope && u.name == name) {
                 continue;
             }
-            if let Some(unit) = read_unit(scope, dir, &name) {
+            if let Some(unit) = read_unit(scope, dir, &name, false) {
                 found.push(unit);
             }
         }
@@ -255,8 +273,44 @@ fn discover(roots: &Roots) -> Vec<Unit> {
     found
 }
 
+/// Return the data directory configured by an installed system server unit.
+///
+/// Unlike status discovery, this lookup considers custom unit names because
+/// `server init --name` lets the installer choose one. It reads only system
+/// service files and their drop-ins, where the installer records the absolute
+/// `--data` path. User units do not override a system install.
+#[must_use]
+pub fn server_data_directory(roots: &Roots) -> Option<PathBuf> {
+    let mut seen = HashSet::new();
+    for directory in &roots.system_units {
+        let Ok(entries) = fs::read_dir(directory) else {
+            continue;
+        };
+        let mut names: Vec<String> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".service"))
+            .collect();
+        names.sort_unstable();
+        for name in names {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let Some(unit) = read_unit(Scope::System, directory, &name, true) else {
+                continue;
+            };
+            if let (Kind::Server, Some(data)) =
+                (unit.kind, unit.data.filter(|path| path.is_absolute()))
+            {
+                return Some(data);
+            }
+        }
+    }
+    None
+}
+
 /// Classify a unit by its effective `ExecStart`.
-fn read_unit(scope: Scope, dir: &Path, name: &str) -> Option<Unit> {
+fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) -> Option<Unit> {
     let mut exec: Option<String> = None;
     let mut apply = |text: &str| {
         for line in text.lines() {
@@ -285,36 +339,96 @@ fn read_unit(scope: Scope, dir: &Path, name: &str) -> Option<Unit> {
             apply(&text);
         }
     }
-    let exec = exec?;
-    // The first word is the program; the next non-option word is the subcommand.
-    let kind = match exec
-        .split_whitespace()
-        .skip(1)
-        .map(|word| word.trim_matches('"'))
-        .find(|word| !word.starts_with('-'))
-    {
-        Some("server") => Kind::Server,
-        Some("agent") => Kind::Agent,
-        _ => return None,
-    };
+    let words = exec.as_deref().and_then(exec_words)?;
+    let program = Path::new(words.first()?);
+    if require_infraternal && !is_infraternal_program(program) {
+        return None;
+    }
+    // Exact subcommand words preserve support for global flags before the
+    // command; quoted data paths remain one word and cannot match by substring.
+    let kind = words.iter().skip(1).find_map(|word| match word.as_str() {
+        "server" => Some(Kind::Server),
+        "agent" => Some(Kind::Agent),
+        _ => None,
+    })?;
     Some(Unit {
         scope,
         name: name.to_owned(),
         kind,
-        state: option(&exec, "--state"),
+        data: option(&words, "--data"),
+        state: option(&words, "--state"),
     })
 }
 
-/// Value of `--flag value` or `--flag=value`. Unit files may quote words; paths
-/// containing spaces are not supported by the installer, so quotes are trimmed.
-fn option(line: &str, flag: &str) -> Option<PathBuf> {
-    let mut words = line.split_whitespace();
-    while let Some(word) = words.next() {
+/// The installer records the resolved executable, which may have a versioned name.
+/// Accept that identity as well as the ordinary command name; an arbitrary
+/// program with a `server` argument must not select this CLI's data directory.
+fn is_infraternal_program(program: &Path) -> bool {
+    program
+        .file_name()
+        .is_some_and(|name| name == "infraternal")
+        || (program.is_absolute()
+            && std::env::current_exe().is_ok_and(|current| {
+                program == current
+                    || fs::canonicalize(program).is_ok_and(|resolved| resolved == current)
+            }))
+}
+
+/// Split the installer-generated systemd command into its arguments.
+///
+/// systemd quotes paths with spaces and backslash-escapes embedded quotes and
+/// backslashes. Unclosed quotes or a trailing escape are rejected so callers
+/// fall back to the ordinary data directory instead of guessing.
+fn exec_words(line: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut started = false;
+    for character in line.chars() {
+        if escaped {
+            word.push(character);
+            escaped = false;
+            started = true;
+        } else if character == '\\' {
+            escaped = true;
+            started = true;
+        } else if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            } else {
+                word.push(character);
+            }
+        } else if matches!(character, '"' | '\'') {
+            quote = Some(character);
+            started = true;
+        } else if character.is_whitespace() {
+            if started {
+                words.push(std::mem::take(&mut word));
+                started = false;
+            }
+        } else {
+            word.push(character);
+            started = true;
+        }
+    }
+    if escaped || quote.is_some() {
+        return None;
+    }
+    if started {
+        words.push(word);
+    }
+    Some(words)
+}
+
+/// Value of `--flag value` or `--flag=value` in parsed unit arguments.
+fn option(words: &[String], flag: &str) -> Option<PathBuf> {
+    for (index, word) in words.iter().enumerate() {
         if word == flag {
-            return words.next().map(|v| PathBuf::from(v.trim_matches('"')));
+            return words.get(index + 1).map(PathBuf::from);
         }
         if let Some(v) = word.strip_prefix(flag).and_then(|r| r.strip_prefix('=')) {
-            return Some(PathBuf::from(v.trim_matches('"')));
+            return Some(PathBuf::from(v));
         }
     }
     None

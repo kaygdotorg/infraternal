@@ -10,7 +10,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRATCH = Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target'))
 SCRATCH.mkdir(parents=True, exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='wrapper test-', dir=SCRATCH) as directory:
-    tool = Path(directory) / 'auth-tools/zig/zig'
+    target_root = Path(directory) / 'target with spaces'
+    cargo_home = Path(directory) / 'cargo home'
+    registry_root = cargo_home / 'registry/src/index with spaces'
+    registry_root.mkdir(parents=True)
+    tool = target_root / 'auth-tools/zig/zig'
     tool.parent.mkdir(parents=True)
     tool.write_text('#!/usr/bin/env python3\nimport sys\nprint("\\n".join(sys.argv[1:]))\n')
     tool.chmod(0o755)
@@ -18,7 +22,7 @@ with tempfile.TemporaryDirectory(prefix='wrapper test-', dir=SCRATCH) as directo
         ('x86_64-unknown-linux-musl', 'x86_64-linux-musl'),
         ('aarch64-unknown-linux-musl', 'aarch64-linux-musl'),
     ):
-        environment = dict(os.environ, CARGO_TARGET_DIR=directory, TARGET=target)
+        environment = dict(os.environ, CARGO_HOME=str(cargo_home), CARGO_TARGET_DIR=str(target_root), TARGET=target)
         retained = ['-DOPENSSL_NO_SECURE_MEMORY=1', '-DOTHER=1', '-O3', 'input with spaces.c']
         result = subprocess.run(
             [str(ROOT / '.cargo/musl-cc.sh'), f'--target={target}',
@@ -26,14 +30,27 @@ with tempfile.TemporaryDirectory(prefix='wrapper test-', dir=SCRATCH) as directo
             env=environment, check=True, capture_output=True, text=True,
         )
         assert result.stdout.splitlines() == ['cc', '-target', zig_target,
+            f'-ffile-prefix-map={registry_root}=/cargo',
+            f'-ffile-prefix-map={target_root}=/build',
+            f'-ffile-prefix-map={cargo_home}=/cargo',
+            f'-ffile-prefix-map={ROOT}=/infraternal', *retained], target
+        supplied_maps = [
+            f'-ffile-prefix-map={registry_root}=/cargo',
+            f'-ffile-prefix-map={target_root}=/build',
+            f'-ffile-prefix-map={cargo_home}=/cargo',
             f'-ffile-prefix-map={ROOT}=/infraternal',
-            f'-ffile-prefix-map={directory}=/build', *retained], target
+        ]
+        cached = subprocess.run(
+            [str(ROOT / '.cargo/musl-cc.sh'), f'--target={target}', *supplied_maps, *retained],
+            env=environment, check=True, capture_output=True, text=True,
+        )
+        assert cached.stdout.splitlines() == ['cc', '-target', zig_target, *supplied_maps, *retained], target
         build_directories = [
-            f'-DENGINESDIR="{directory}/native/install/lib/engines-3"',
-            f'-DMODULESDIR="{directory}/native/install/lib/ossl-modules"',
+            f'-DENGINESDIR="{target_root}/native/install/lib/engines-3"',
+            f'-DMODULESDIR="{target_root}/native/install/lib/ossl-modules"',
         ]
         explicit = '-DMODULESDIR="/chosen/trusted modules"'
-        mismatched = f'-DMODULESDIR="{directory}/native/install/lib/engines-3"'
+        mismatched = f'-DMODULESDIR="{target_root}/native/install/lib/engines-3"'
         result = subprocess.run(
             [str(ROOT / '.cargo/musl-cc.sh'), *build_directories, explicit, mismatched],
             env=environment, check=True, capture_output=True, text=True,
@@ -61,7 +78,8 @@ with tempfile.TemporaryDirectory(prefix='wrapper test-', dir=SCRATCH) as directo
     )
     environment = dict(
         os.environ,
-        CARGO_TARGET_DIR=directory,
+        CARGO_HOME=str(cargo_home),
+        CARGO_TARGET_DIR=str(target_root),
         TARGET='x86_64-unknown-linux-musl',
     )
     arguments = [
@@ -81,8 +99,10 @@ with tempfile.TemporaryDirectory(prefix='wrapper test-', dir=SCRATCH) as directo
         )
         assert result.stdout.splitlines() == [
             'cc', '-target', 'x86_64-linux-musl',
-            f'-ffile-prefix-map={ROOT}=/infraternal',
-            f'-ffile-prefix-map={directory}=/build', '-O3', 'cipher_aes_gcm_hw.c',
+            f'-ffile-prefix-map={registry_root}=/cargo',
+            f'-ffile-prefix-map={target_root}=/build',
+            f'-ffile-prefix-map={cargo_home}=/cargo',
+            f'-ffile-prefix-map={ROOT}=/infraternal', '-O3', 'cipher_aes_gcm_hw.c',
         ]
     patched = include.read_text()
     assert '#include "cipher_aes_gcm_hw_vaes_avx512.inc"' not in patched

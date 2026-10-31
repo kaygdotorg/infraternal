@@ -2,6 +2,114 @@
 use super::*;
 
 #[test]
+fn merge_review_replies_cannot_consume_space_reserved_for_deferred_typing() {
+    const REPLY: &[u8] = b"\x1b[1;1R";
+    struct Child(Pty);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.child.kill();
+            let _ = self.0.child.wait();
+        }
+    }
+    let mut pty = Child(Pty::spawn(Uid::effective().as_raw(), 80, 24).unwrap());
+    let make_peer = |writer| {
+        let (socket, remote) = UnixStream::pair().unwrap();
+        let peer = Peer {
+            stream: socket,
+            decoder: Decoder::default(),
+            trailing: Vec::new(),
+            deferred: None,
+            attached: true,
+            caps: SEQUENCED_INPUT | MULTI_WRITER | SHARED_WRITER | QUERY_REPLIES,
+            input_reply: None,
+            writer: Some(writer),
+            shared_writer: false,
+            ack_queued: 0,
+            size: (80, 24, 0, 0),
+            cursor: None,
+            pending: Vec::new(),
+            written: 0,
+            exited_sent: false,
+            request: None,
+        };
+        (peer, remote)
+    };
+    let (mut peer, _remote) = make_peer(9);
+    let (mut waiting_peer, _waiting_remote) = make_peer(7);
+    let mut cursors = Inputs::with_geometry(peer.size);
+    cursors.select(7, peer.size).unwrap();
+    cursors.select(9, peer.size).unwrap();
+    let mut input = VecDeque::new();
+    for seq in 0..512 {
+        cursors.accept(9, seq, b"t", &mut input).unwrap();
+        assert!(cursors.reply(false, REPLY, &mut input));
+    }
+    // Start at the shared-host segment cap with a reply tail. Coalescing
+    // replies can then fill the byte budget without adding another segment.
+    // Two seven-byte position reports make the remaining space divisible
+    // by six, so every queued reply is also valid terminal reply syntax.
+    assert!(cursors.reply(false, b"\x1b[10;1R", &mut input));
+    assert!(cursors.reply(false, b"\x1b[10;1R", &mut input));
+    while input.len() < MAX_FRAME {
+        assert!(cursors.reply(false, REPLY, &mut input));
+    }
+    let mut terminal = Terminal::new(80, 24).unwrap();
+    let ring = Ring::new(8192);
+    let mut config = Config::new([0; 16], Uid::effective().as_raw());
+    // A full queue drops best-effort replies without closing the peer or
+    // changing typing ownership. The decoder already validates reply size.
+    assert!(
+        handle(
+            Frame::QueryReply(REPLY.to_vec()),
+            &mut peer,
+            &mut pty.0,
+            &mut terminal,
+            &ring,
+            &mut config,
+            &mut input,
+            &mut cursors,
+            false,
+            false,
+        )
+        .is_ok(),
+        "a full queue must drop a reply without closing its peer"
+    );
+    assert_eq!(input.len(), MAX_FRAME);
+    assert_eq!(cursors.get(Some(9)).unwrap().accepted, 512);
+    assert_eq!(cursors.get(Some(9)).unwrap().written, 0);
+    // An older shared writer waits for eight bytes of room. Each bounded PTY
+    // write frees six bytes; a fresh reply must leave that reservation alone.
+    // Repeating this schedule otherwise keeps the oldest typing frame parked.
+    assert!(waiting_peer.input_waits(0, 8, 0, 0, false).unwrap());
+    waiting_peer.deferred = Some(0);
+    for _ in 0..16 {
+        input.drain(..REPLY.len());
+        cursors.advance(REPLY.len()).unwrap();
+        // A best-effort reply may be refused, dropped or deferred. None of
+        // those choices permits it to consume another frame's reservation.
+        let _ = handle(
+            Frame::QueryReply(REPLY.to_vec()),
+            &mut peer,
+            &mut pty.0,
+            &mut terminal,
+            &ring,
+            &mut config,
+            &mut input,
+            &mut cursors,
+            false,
+            waiting_peer.deferred.is_some(),
+        );
+    }
+    let available = MAX_FRAME - input.len();
+    assert!(
+        !waiting_peer.input_waits(0, 8, 0, available, false).unwrap(),
+        "oldest 8-byte typing frame is still parked after 16 partial writes: \
+         queued={} available={available}; fresh replies consumed its reservation",
+        input.len()
+    );
+}
+
+#[test]
 fn trim_duplicates_gaps_overflow_and_capacity_are_transactional() {
     let mut cursors = InputCursors::default();
     let mut queue = VecDeque::new();

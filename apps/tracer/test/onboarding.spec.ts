@@ -1,5 +1,5 @@
 /** Production-browser onboarding evidence at the approved phone and desktop viewports. */
-import { expect, test, type Page, type TestInfo } from "playwright/test";
+import { expect, test, type Page, type Route, type TestInfo } from "playwright/test";
 
 const viewports = [
   { id: "iphone-15", width: 393, height: 852 },
@@ -9,10 +9,14 @@ const viewports = [
 test("invalid setup token stays on step 1 with focused guidance", async ({ page }, testInfo) => {
   test.setTimeout(60_000);
   const context = page.context();
-  await context.request.post("/__mock/reset");
+  // Capture the fresh fixture token before screenshots leave the request connection idle.
+  const resetResponse = await context.request.post("/__mock/reset", { maxRetries: 1 });
+  const setupBody = await resetResponse.json() as { setup_token: string };
   await page.emulateMedia({ colorScheme: "dark", reducedMotion: "no-preference" });
-  await page.goto("/?mock=1");
+  await page.goto("/install?mock=1");
   await expect(page.getByRole("heading", { name: "Make this server yours" })).toBeVisible();
+  await expect(page.locator("[data-setup-token-command]")).toHaveText("infraternal server setup-token");
+  await expect(page.locator(".auth-hint")).toContainText("Run the command on the server. The token expires after 24 hours.");
 
   // Hold the validation response long enough to check the 400 ms count-up threshold.
   await page.route("**/auth/setup-check", async (route) => {
@@ -28,7 +32,7 @@ test("invalid setup token stays on step 1 with focused guidance", async ({ page 
   await expect(page.locator("#setup-next .busy-count")).toBeVisible();
   await expect(page.locator("#setup-next .busy-count")).toContainText(/\d+\.\d+s/);
   await expect(page.locator("#setup-token-error")).toContainText(
-    "That token doesn't match. Run infraternal server setup-token on the server.",
+    "That token doesn't match. Run the command shown above on the server.",
   );
   await expect(page.locator("#setup-token")).toBeFocused();
   await expect(page.locator("#setup-username")).toHaveCount(0);
@@ -43,18 +47,43 @@ test("invalid setup token stays on step 1 with focused guidance", async ({ page 
     screenshots.push(path);
   }
 
-  const setupResponse = await context.request.get("/__mock/setup-token");
-  const setupBody = await setupResponse.json() as { setup_token: string };
   await page.locator("#setup-token").fill(setupBody.setup_token);
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByRole("heading", { name: "Who are you?" })).toBeVisible();
   console.log(`SETUP_TOKEN_ERROR_SCREENSHOTS ${screenshots.join(" ")}`);
 });
 
-test("setup, recovery acknowledgement, welcome and returning sign-in match the browser contract", async ({ page }, testInfo) => {
-  test.setTimeout(60_000);
+test("system-service setup shows and copies its sudo command", async ({ page }, testInfo) => {
   const context = page.context();
-  await context.request.post("/__mock/reset");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.route("**/auth/status", (route) => route.fulfill({
+    status: 200,
+    json: {
+      setup_required: true,
+      setup_token_command: "sudo infraternal server setup-token",
+    },
+  }));
+
+  await page.goto("/install?mock=1");
+  const command = "sudo infraternal server setup-token";
+  await expect(page.locator("[data-setup-token-command]")).toHaveText(command);
+  await page.setViewportSize({ width: 393, height: 852 });
+  const screenshot = testInfo.outputPath("system-service-setup-token-command.png");
+  await page.screenshot({ path: screenshot, fullPage: true, animations: "disabled" });
+  await testInfo.attach("system-service-setup-token-command", {
+    path: screenshot,
+    contentType: "image/png",
+  });
+  await page.getByRole("button", { name: "Copy setup token command" }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(command);
+});
+
+test("setup, recovery acknowledgement, welcome and returning sign-in match the browser contract", async ({ page }, testInfo) => {
+  test.setTimeout(90_000);
+  const context = page.context();
+  // Capture the fresh fixture token before screenshots leave the request connection idle.
+  const resetResponse = await context.request.post("/__mock/reset", { maxRetries: 1 });
+  const setupBody = await resetResponse.json() as { setup_token: string };
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   const cdp = await context.newCDPSession(page);
   await cdp.send("WebAuthn.enable");
@@ -82,13 +111,14 @@ test("setup, recovery acknowledgement, welcome and returning sign-in match the b
   const tokenCenters = await captureState(page, testInfo, "step-1-token", screenshots, "#setup-card");
   await installShiftObserver(page);
 
-  const setupResponse = await context.request.get("/__mock/setup-token");
-  const setupBody = await setupResponse.json() as { setup_token: string };
   await page.locator("#setup-token").fill(setupBody.setup_token);
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.locator("#setup-username")).toBeVisible();
   await expectNoLayoutShifts(page);
   const identityCenters = await captureState(page, testInfo, "step-2-identity", screenshots, "#setup-card");
+  // The username rule is on screen before any wrong key, and the display-name input stops at the validated limit.
+  await expect(page.locator("#username-hint")).toHaveText("Use 2–32 lowercase letters, digits, _ or -.");
+  await expect(page.locator("#setup-display-name")).toHaveAttribute("maxlength", "64");
   await page.locator("#setup-username").fill("Ada");
   await expect(page.locator("#setup-username")).toHaveValue("ada");
   await expect(page.locator("#setup-display-name")).toHaveValue("ada");
@@ -203,7 +233,10 @@ test("setup, recovery acknowledgement, welcome and returning sign-in match the b
   await page.keyboard.press("Enter");
   const signInTransitions = await page.evaluate(() => (window as Window & { __signinTransitions?: string[] }).__signinTransitions ?? []);
   expect(signInTransitions).toEqual([]);
-  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
+  await expect.poll(
+    () => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true),
+    { timeout: 30_000 },
+  ).toBe(true);
   console.log(`ONBOARDING_SCREENSHOTS ${screenshots.join(" ")}`);
 });
 
@@ -273,3 +306,42 @@ async function installShiftObserver(page: Page): Promise<void> {
     }).observe({ type: "layout-shift", buffered: false });
   });
 }
+
+test("a setup chunk that fails to load shows a retry card, never a blank screen (#247)", async ({ page }, testInfo) => {
+  test.setTimeout(60_000);
+  await page.context().request.post("/__mock/reset", { maxRetries: 1 });
+  // Fail only the setup chunk: the one whose text holds the first step's lede.
+  const blocked = async (route: Route) => {
+    const response = await route.fetch();
+    if ((await response.text()).includes("Paste the one-time setup token")) await route.abort(); else await route.fulfill({ response });
+  };
+  await page.route(/\/chunk-[0-9a-z]{8}\.js$/, blocked);
+  for (const viewport of viewports) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto("/?mock=1");
+    await expect(page.locator("#auth-error")).toHaveText("Could not load setup. Check your connection; it will retry.");
+    await page.screenshot({ path: testInfo.outputPath(`setup-load-failed-${viewport.id}.png`) });
+    console.log("SETUP_LOAD_FAILED_SCREENSHOT", testInfo.outputPath(`setup-load-failed-${viewport.id}.png`));
+  }
+  await page.unroute(/\/chunk-[0-9a-z]{8}\.js$/, blocked);
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.locator("#setup-token")).toBeVisible();
+});
+
+test("system-service setup stays within the phone viewport", async ({ page }) => {
+  const viewport = { width: 375, height: 667 };
+  await page.setViewportSize(viewport);
+  await page.route("**/auth/status", (route) => route.fulfill({
+    status: 200,
+    json: {
+      setup_required: true,
+      setup_token_command: "sudo infraternal server setup-token",
+    },
+  }));
+  await page.goto("/install?mock=1");
+  await expect(page.locator("[data-setup-token-command]")).toHaveText("sudo infraternal server setup-token");
+  await page.evaluate(() => document.fonts.ready);
+  const bounds = await page.locator("#setup-card").boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
+});

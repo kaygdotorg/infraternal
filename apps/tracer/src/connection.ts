@@ -74,6 +74,8 @@ const RESUME_NEXT = 1n;
 const LINK_DOUBT_NOTICES = 2n;
 /** Hello bit 2: control Event 0 reports page visibility (#244). */
 const VIEWER_VISIBILITY = 4n;
+/** Hello caps bit 3 advertises reply-marked terminal Input support [D307]. */
+const TERMINAL_QUERY_REPLIES = 8n;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RECOVERY_SUBSCRIPTION = 45;
@@ -87,6 +89,8 @@ interface Subscription {
   /** The subscription is (re)established: the owner refetches its snapshot, since events may have been missed. */
   onOpen?: (() => void) | undefined;
 }
+/** Refresh keeps the subscription ID, so retries replace its bounded server slot. */
+export type SubscriptionHandle = (() => void) & { resync(): void };
 const encoder = new TextEncoder();
 
 /** What a stream gives the connection. All callbacks run on the socket's event task. */
@@ -116,7 +120,7 @@ export interface ConnectionConfig {
   /** Connection state: true once a stream attached, false when the socket closes. */
   onConnectionChange?: (connected: boolean) => void;
   /**
-   * Asked at every socket open: true advertises the desktop video capability (bit 3, contracts/wire.md §9) in the
+   * Asked at every socket open: true advertises the desktop video capability (bit 4, contracts/wire.md §9) in the
    * client's Hello, so the server may open app-window and screen streams on this socket. It is read at connect time,
    * so a person who turns the feature on needs the next connection for it to take effect; the flag is off by default.
    */
@@ -124,7 +128,7 @@ export interface ConnectionConfig {
 }
 
 /** Capability bit the server advertises (and a client echoes) for desktop video streams. */
-export const DESKTOP_VIDEO_CAP = 8n;
+export const DESKTOP_VIDEO_CAP = 16n;
 
 interface ResumeCredentials { connectionId: Uint8Array; resumeToken: Uint8Array; deadline: number; windowMs: number }
 
@@ -193,6 +197,8 @@ export class MuxConnection {
   private attachedCount = 0;
   /** Streams that attached on this server-side connection: the server keeps a writer row for each, up to its cap. */
   private readonly writersUsed = new Set<number>();
+  /** Streams that sent AttachTerm on the current WebSocket; resume retains writers but replaces attachments. */
+  private readonly attachedOnSocket = new Set<number>();
 
   private readonly onVisibility = (): void => this.pageVisibilityChanged();
 
@@ -249,7 +255,8 @@ export class MuxConnection {
   closeStream(id: number): void {
     if (!this.streams.delete(id)) return;
     this.unacknowledgedInput.delete(id);
-    this.send(id, { type: "Close", code: 1000, reason: "window closed" });
+    // A retained writer can belong to the resumed connection's old socket; Close requires a new AttachTerm first.
+    if (this.attachedOnSocket.delete(id)) this.send(id, { type: "Close", code: 1000, reason: "window closed" });
   }
 
   /** Sends one frame on a stream. Frames are dropped while the socket is not open (the stream resends on attach). */
@@ -260,7 +267,7 @@ export class MuxConnection {
       const length = encodeMuxedFrameInto(streamId, frame, this.sendScratch);
       // Even an attachment closed before replay completes retains a server writer row.
       if (frame.type === "AttachTerm") this.writersUsed.add(streamId);
-      if (frame.type === "Input" && this.streams.has(streamId)) {
+      if (frame.type === "Input" && frame.replyTo === undefined && this.streams.has(streamId)) {
         const end = frame.inSeq + BigInt(frame.bytes.byteLength);
         const previous = this.unacknowledgedInput.get(streamId) ?? 0n;
         // Replayed earlier bytes cannot lower the outstanding input watermark.
@@ -270,6 +277,8 @@ export class MuxConnection {
       }
       onEncoded?.(performance.now());
       socket.send(this.sendScratch.subarray(0, length));
+      // Server writer identity survives resume, but the attached route is recreated on each WebSocket.
+      if (frame.type === "AttachTerm") this.attachedOnSocket.add(streamId);
       onSent?.(performance.now());
     } catch {
       this.fail("could not encode an infraternal wire frame");
@@ -290,13 +299,15 @@ export class MuxConnection {
    * welcome (a new socket has none), and `onOpen` runs each time so the owner can resync: events sent while the
    * socket was down are not replayed. Returns the unsubscribe function.
    */
-  subscribe(filter: { topic: string }, onEvent: (event: Record<string, unknown>) => void, onOpen?: () => void): () => void {
+  subscribe(filter: { topic: string }, onEvent: (event: Record<string, unknown>) => void, onOpen?: () => void): SubscriptionHandle {
     const subId = this.nextSubscription++;
     this.subscriptions.set(subId, { filter, onEvent, onOpen });
     if (this.isWelcomed) this.openSubscription(subId);
     // Account state must load before any terminal window exists (D248).
     if (!this.socket && !this.closed) this.connect();
-    return () => { this.subscriptions.delete(subId); };
+    return Object.assign(() => { this.subscriptions.delete(subId); }, {
+      resync: () => { if (this.isWelcomed) this.openSubscription(subId); },
+    });
   }
 
   /**
@@ -478,6 +489,7 @@ export class MuxConnection {
     socket.binaryType = "arraybuffer";
     this.socket = socket;
     this.decoder = new WebSocketFrameDecoder();
+    this.attachedOnSocket.clear();
     this.serverVisibility = false;
     this.welcomed = false;
 
@@ -579,6 +591,7 @@ export class MuxConnection {
     this.socket = undefined;
     this.decoder = undefined;
     this.welcomed = false;
+    this.attachedOnSocket.clear();
     this.attachedCount = 0;
     this.config.onConnectionChange?.(false);
     this.resetPings();
@@ -713,14 +726,18 @@ export class MuxConnection {
     handler.onFrame(frame, message, receivedAt);
   }
 
+  /** Whether this server accepts reply-marked Input [307]. */
+  terminalQueryReplies = false;
+
   private control(frame: WireFrame): void {
     switch (frame.type) {
       case "Hello":
         if (frame.version !== VERSION) { this.fail("server uses an unsupported wire version"); return; }
         this.serverVisibility = (frame.caps & VIEWER_VISIBILITY) !== 0n;
-        // What the server can do is its own statement; features show themselves only when it says so.
+        // Server capabilities govern feature visibility independently of the client's request.
         this.serverCapsValue = frame.caps;
         for (const l of [...this.capListeners]) l(frame.caps);
+        this.terminalQueryReplies = (frame.caps & TERMINAL_QUERY_REPLIES) !== 0n;
         return;
       case "Welcome":
         this.stopRetryHintListeners();

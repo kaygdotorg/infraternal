@@ -5,16 +5,70 @@ import { ActionRefused } from "../../connection";
 import { reduce, type Intent } from "./operations";
 import type { CanvasDocument } from "./document";
 import { canvasKey, clearAccountStorage } from "../../account-storage";
+const moduleMathRandom = Math.random;
 const document = (): CanvasDocument => ({ format: "infraternal.canvas", version: 1, revision: 0, views: [{ id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [] } }] });
 class Transport implements LayoutTransport {
+  resyncs = 0;
   event: (e: Record<string, unknown>) => void = () => {};
   open: () => void = () => {};
   calls: Array<{ action: string; input: Record<string, unknown>; resolve: (r: Record<string, unknown>) => void; reject: (error?: Error) => void }> = [];
   call(action: string, input: Record<string, unknown>): Promise<Record<string, unknown>> { return new Promise((resolve, reject) => this.calls.push({ action, input: structuredClone(input), resolve, reject: (error?: Error) => reject(error ?? Error("disconnected")) })); }
-  subscribe(_filter: { topic: string }, event: (e: Record<string, unknown>) => void, open?: () => void): () => void { this.event = event; this.open = open ?? (() => {}); this.open(); return () => { this.event = () => {}; }; }
+  subscribe(_filter: { topic: string }, event: (e: Record<string, unknown>) => void, open?: () => void) { this.event = event; this.open = open ?? (() => {}); this.open(); return Object.assign(() => { this.event = () => {}; }, { resync: () => { this.resyncs++; this.open(); } }); }
   snapshot(doc = document(), initialized = true): void { this.event({ type: "canvas.layout.snapshot", document: doc, revision: doc.revision, initialized }); }
 }
 const tick = async (): Promise<void> => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
+/** Models the production pin bound and stale-base acceptance while broadcasting accepted operations to every device. */
+class PinLimitTransport implements LayoutTransport {
+  readonly isWelcomed = true;
+  readonly listeners = new Set<(event: Record<string, unknown>) => void>();
+  readonly document: CanvasDocument = {
+    format: "infraternal.canvas", version: 1, revision: 1,
+    views: [{ id: "mesh", kind: "mesh", name: "Mesh", cell: { x: 0, y: 0 }, layout: { type: "graph", pinned: {} } }],
+  };
+  accepted = 0;
+  refused = 0;
+  processed = 0;
+  #tail: Promise<void> = Promise.resolve();
+
+  subscribe(_filter: { topic: string }, event: (e: Record<string, unknown>) => void, open?: () => void) {
+    this.listeners.add(event); open?.();
+    event({ type: "canvas.layout.snapshot", document: structuredClone(this.document), revision: this.document.revision, initialized: true });
+    return Object.assign(() => { this.listeners.delete(event); }, { resync: () => event({ type: "canvas.layout.snapshot", document: structuredClone(this.document), revision: this.document.revision, initialized: true }) });
+  }
+
+  call(action: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return new Promise((resolve, reject) => {
+      this.#tail = this.#tail.then(() => {
+        this.processed++;
+        const intent = input.intent as Intent | undefined;
+        if (action !== "canvas.layout.apply" || !intent || typeof input.base_revision !== "number" || input.base_revision > this.document.revision) {
+          this.refused++; reject(new ActionRefused(undefined, "invalid input")); return;
+        }
+        const next = structuredClone(this.document);
+        reduce(next, intent);
+        const view = next.views.find((candidate) => candidate.id === "mesh")!;
+        const invalidPins = view.layout.type !== "graph"
+          || Object.keys(view.layout.pinned).length > 256
+          || Object.values(view.layout.pinned).some(({ x, y }) =>
+            !Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 100_000 || Math.abs(y) > 100_000);
+        if (invalidPins) {
+          this.refused++; reject(new ActionRefused(undefined, "invalid input")); return;
+        }
+        next.revision++;
+        Object.assign(this.document, next);
+        this.accepted++;
+        const event = { type: "canvas.layout.operation", revision: this.document.revision, op_id: input.op_id, intent, noop: false };
+        for (const listener of this.listeners) listener(event);
+        resolve({ revision: this.document.revision });
+      });
+    });
+  }
+
+  async drain(expected: number): Promise<void> {
+    for (let turn = 0; turn < 2000 && this.processed < expected; turn++) { await this.#tail; await tick(); }
+    if (this.processed !== expected) throw new Error(`processed ${this.processed} of ${expected} layout intents`);
+  }
+}
 beforeEach(() => {
   const values = new Map<string, string>();
   const area = { getItem: (k: string) => values.get(k) ?? null, setItem: (k: string, v: string) => values.set(k, v), removeItem: (k: string) => values.delete(k), key: (i: number) => [...values.keys()][i] ?? null, get length() { return values.size; } };
@@ -22,6 +76,108 @@ beforeEach(() => {
   Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: area });
 });
 const opened: Intent = { type: "open", view_id: "console", column_id: "c", window: { id: "w", target: { type: "settings", section: "appearance" } } };
+test("a negative drop on a 1,025-node mesh writes one pin, and the peer ends with every pin (#24)", async () => {
+  const transport = new PinLimitTransport();
+  const first = new ServerCanvasStore(transport, "mesh-owner"), second = new ServerCanvasStore(transport, "mesh-peer");
+  try {
+    const initial = await first.load(); await second.load();
+    const graphOf = (doc: CanvasDocument) => {
+      const view = doc.views.find((candidate) => candidate.id === "mesh")!;
+      if (view.layout.type !== "graph") throw new Error("graph view missing");
+      return view.layout;
+    };
+    // 200 cards moved earlier; a 1,000-host mesh with 25 tags has 1,025 nodes, almost all unmoved.
+    const before = structuredClone(initial!);
+    for (let n = 0; n < 200; n++) graphOf(before).pinned[`node-${n}`] = { x: n * 16, y: n * 16 };
+    await first.save(before); first.flush();
+    await transport.drain(200); // one intent per earlier pin
+    const baseline = transport.processed;
+    // The drop: the card is now left of and above the auto layout. Pins may be negative; no other pin is rewritten.
+    const dropped = structuredClone(before);
+    graphOf(dropped).pinned["node-1000"] = { x: -1280, y: -480 };
+    const saved = first.save(dropped);
+    first.flush();
+    const raw = localStorage.getItem(canvasKey("mesh-owner"));
+    const cached = JSON.parse(raw ?? "{}") as { pending?: unknown[] };
+    expect(cached.pending).toHaveLength(1);
+    await saved;
+    await transport.drain(baseline + 1);
+    expect(transport.refused).toBe(0);
+    const peer = await second.load();
+    // The count and moved point alone miss a peer that changed or lost any earlier coordinates.
+    expect(graphOf(peer!).pinned).toEqual(graphOf(dropped).pinned);
+  } finally { first.dispose(); second.dispose(); }
+});
+test("repeated pin moves reach both coordinate limits; the next move is refused and rolled back", async () => {
+  const transport = new PinLimitTransport(), notices: boolean[] = [];
+  const first = new ServerCanvasStore(transport, "mesh-bound-owner", (definitive) => notices.push(definitive === true));
+  const second = new ServerCanvasStore(transport, "mesh-bound-peer");
+  const graphOf = (doc: CanvasDocument) => {
+    const view = doc.views.find((candidate) => candidate.id === "mesh")!;
+    if (view.layout.type !== "graph") throw new Error("graph view missing");
+    return view.layout;
+  };
+  try {
+    await first.load(); await second.load();
+    let expected = 0;
+    for (let step = 1; step <= 10; step++) {
+      const next = structuredClone(first.current());
+      graphOf(next).pinned["node-0"] = { x: -step * 10_000, y: step * 10_000 };
+      const saved = first.save(next); first.flush(); await saved;
+      await transport.drain(++expected);
+      expect(graphOf(second.current()).pinned["node-0"]).toEqual({ x: -step * 10_000, y: step * 10_000 });
+    }
+
+    const outside = structuredClone(first.current());
+    graphOf(outside).pinned["node-0"] = { x: -100_001, y: 100_001 };
+    const saved = first.save(outside); first.flush(); await saved;
+    await transport.drain(++expected);
+
+    expect(transport.accepted).toBe(10);
+    expect(transport.refused).toBe(1);
+    expect(notices).toEqual([true]);
+    expect(graphOf(first.current()).pinned["node-0"]).toEqual({ x: -100_000, y: 100_000 });
+    expect(graphOf(second.current()).pinned["node-0"]).toEqual({ x: -100_000, y: 100_000 });
+  } finally { first.dispose(); second.dispose(); }
+});
+test("a layout gap or withdrawn worker requests one fresh snapshot with bounded backoff", async () => {
+  const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  const originalRandom = Math.random;
+  const timers = new Map<number, { run: () => void; delay: number }>(); let id = 0;
+  globalThis.setTimeout = ((run: () => void, delay: number) => { timers.set(++id, { run, delay }); return id; }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: number) => { timers.delete(timer); }) as unknown as typeof clearTimeout;
+  Math.random = () => 0;
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "a");
+  const retry = (delay: number): void => {
+    const timer = [...timers].find(([, timer]) => timer.delay === delay); expect(timer).toBeDefined();
+    timers.delete(timer![0]); timer![1].run();
+  };
+  try {
+    transport.snapshot();
+    for (let n = 0; n < 100; n++) transport.event({ type: "canvas.layout.operation", revision: n + 5, intent: opened });
+    expect(store.current().revision).toBe(0); expect(transport.resyncs).toBe(0);
+    retry(250); expect(transport.resyncs).toBe(1);
+    transport.event({ type: "error", error: "forbidden" });
+    retry(500); expect(transport.resyncs).toBe(2);
+    for (const delay of [1000, 2000, 4000, 5000, 5000]) {
+      transport.event({ type: "error", error: "canvas unavailable" }); retry(delay);
+    }
+    const head = document(); reduce(head, opened); head.revision = 104;
+    transport.snapshot(head); expect(store.current()).toEqual(head);
+    const next = store.current(); next.views[0]!.name = "After receipt";
+    await store.save(next);
+    const call = transport.calls[0]!; call.resolve({ revision: 105 }); await tick();
+    expect([...timers.values()].some((timer) => timer.delay === 250)).toBe(true);
+    transport.event({ type: "canvas.layout.operation", revision: 105, op_id: call.input.op_id, intent: call.input.intent });
+    expect([...timers.values()].some((timer) => timer.delay === 250)).toBe(false);
+    transport.event({ type: "error", error: "canvas unavailable" }); retry(250);
+    expect(transport.resyncs).toBe(8);
+    store.dispose(); expect(timers.size).toBe(0);
+  } finally { store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
+});
+test("layout recovery restores Math.random after its virtual timer test", () => {
+  expect(Math.random).toBe(moduleMathRandom);
+});
 test("event before Result and duplicate events do not apply an optimistic edit twice", async () => {
   const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
   const next = document(); reduce(next, opened); await store.save(next);
@@ -89,6 +245,64 @@ test("closing an unsent shell removes its unresolved birth without blocking surv
   expect(intent.type).toBe("open"); expect(intent.window.id).toBe("child");
   store.flush(); expect(JSON.stringify(JSON.parse(localStorage.getItem(canvasKey("a"))!).pending)).not.toContain('"id":"pending"'); store.dispose();
 });
+
+test("sixty withdrawn layout subscriptions spread their coalesced retry timers", () => {
+  const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  const originalRandom = Math.random;
+  const timers = new Map<number, { run: () => void; at: number; delay: number }>();
+  let id = 0, now = 0, randomStep = 0;
+  globalThis.setTimeout = ((run: () => void, delay: number) => {
+    timers.set(++id, { run, at: now + delay, delay }); return id;
+  }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: number) => { timers.delete(timer); }) as unknown as typeof clearTimeout;
+  // A low-discrepancy sequence keeps the virtual retry schedule reproducible across 60 stores.
+  Math.random = () => ((randomStep++ * 0.6180339887498949) % 1);
+  const stores: ServerCanvasStore[] = [], transports: Transport[] = [], firstDelays: number[] = [];
+  // Virtual time counts scheduled requests without making a host-latency claim.
+  const advance = (until: number): void => {
+    while (true) {
+      const next = [...timers].sort((a, b) => a[1].at - b[1].at)[0];
+      if (!next || next[1].at > until) break;
+      now = next[1].at; timers.delete(next[0]); next[1].run();
+    }
+    now = until;
+  };
+  try {
+    for (let n = 0; n < 60; n++) {
+      const transport = new Transport();
+      const subscribe = transport.subscribe.bind(transport);
+      transport.subscribe = (...args) => {
+        const off = subscribe(...args);
+        return Object.assign(off, { resync: () => {
+          transport.resyncs++; transport.open(); transport.event({ type: "error", error: "unavailable" });
+        } });
+      };
+      const store = new ServerCanvasStore(transport, `subscriber-${n}`);
+      stores.push(store); transports.push(transport); transport.snapshot();
+      const before = id;
+      for (let burst = 0; burst < 100; burst++) transport.event({ type: "error", error: "unavailable" });
+      const scheduled = [...timers].filter(([timerId]) => timerId > before);
+      expect(scheduled).toHaveLength(1);
+      firstDelays.push(scheduled[0]![1].delay);
+    }
+    advance(60_000);
+    const firstMinute = transports.reduce((sum, transport) => sum + transport.resyncs, 0);
+    advance(65_000);
+    const followingFiveSeconds = transports.reduce((sum, transport) => sum + transport.resyncs, 0) - firstMinute;
+    console.log(`LAYOUT_RETRY_SCHEDULE subscribers=60 first_minute=${firstMinute} following_5s=${followingFiveSeconds} first_delay_slots=${new Set(firstDelays).size}`);
+    expect(new Set(firstDelays).size).toBe(60);
+    expect(Math.min(...firstDelays)).toBeGreaterThanOrEqual(250);
+    expect(Math.max(...firstDelays)).toBeLessThan(375);
+    expect(firstMinute).toBeLessThan(900);
+    expect(followingFiveSeconds).toBeLessThan(60);
+    for (const transport of transports) transport.snapshot();
+    for (const store of stores) store.flush();
+    expect(timers.size).toBe(0);
+  } finally { for (const store of stores) store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
+});
+test("multi-subscriber retry scheduling restores Math.random", () => {
+  expect(Math.random).toBe(moduleMathRandom);
+});
 test("an acknowledgement after its ordered event does not repaint the same layout", async () => {
   const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
   let paints = 0; store.subscribe(() => { paints++; });
@@ -96,6 +310,27 @@ test("an acknowledgement after its ordered event does not repaint the same layou
   const call = transport.calls[0]!;
   transport.event({ type: "canvas.layout.operation", revision: 1, op_id: call.input.op_id, intent: opened });
   expect(paints).toBe(2); call.resolve({ revision: 1 }); await tick(); expect(paints).toBe(2); store.dispose();
+});
+
+test("review: a missing layout revision is recovered before the cached document is used again", () => {
+  const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  const originalRandom = Math.random;
+  const timers = new Map<number, { run: () => void; delay: number }>(); let id = 0;
+  globalThis.setTimeout = ((run: () => void, delay: number) => { timers.set(++id, { run, delay }); return id; }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: number) => { timers.delete(timer); }) as unknown as typeof clearTimeout;
+  Math.random = () => 0;
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "a");
+  try {
+    const baseline = document(); baseline.revision = 1; transport.snapshot(baseline); store.flush();
+    transport.event({ type: "canvas.layout.operation", revision: 3, op_id: "peer-after-gap", noop: false,
+      intent: { type: "view.update", view_id: "console", cell: { x: 7, y: 9 } } });
+    expect(store.current().revision).toBe(1);
+    const timer = [...timers].find(([, timer]) => timer.delay === 250); expect(timer).toBeDefined();
+    timers.delete(timer![0]); timer![1].run(); expect(transport.resyncs).toBe(1);
+    const authoritative = document(); authoritative.revision = 3; authoritative.views[0]!.cell = { x: 7, y: 9 };
+    transport.snapshot(authoritative);
+    expect(store.current().revision).toBe(3); expect(store.current().views[0]!.cell).toEqual({ x: 7, y: 9 });
+  } finally { store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
 });
 
 test("a bootstrap receipt before its canonical snapshot keeps the legacy layout drawable", async () => {
@@ -225,4 +460,70 @@ test("review r2: refusal drains independent edits waiting behind four in-flight 
     const final = store.current(); transport.open(); transport.snapshot(final); await tick();
     expect(transport.calls).toHaveLength(7);
   } finally { store.dispose(); }
+});
+
+// Virtual scheduling covers the combined gap, withdrawal and reconnect state machine without host timing claims.
+test("recovery coalesces gaps and errors, ignores operations until a snapshot, and survives reconnect", () => {
+  const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  const originalRandom = Math.random;
+  const timers = new Map<number, { run: () => void; delay: number }>(); let id = 0;
+  globalThis.setTimeout = ((run: () => void, delay: number) => { timers.set(++id, { run, delay }); return id; }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: number) => { timers.delete(timer); }) as unknown as typeof clearTimeout;
+  Math.random = () => 0;
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "interplay");
+  const retries = () => [...timers].filter(([, timer]) => timer.delay >= 250);
+  const fire = (delay: number): void => {
+    const pending = retries(); expect(pending).toHaveLength(1); expect(pending[0]![1].delay).toBe(delay);
+    timers.delete(pending[0]![0]); pending[0]![1].run();
+  };
+  try {
+    const baseline = document(); baseline.revision = 1; transport.snapshot(baseline); store.flush();
+    transport.event({ type: "canvas.layout.operation", revision: 3, op_id: "gap", intent: opened });
+    // An old generation's missing operation arriving late must not release the snapshot wait.
+    transport.event({ type: "canvas.layout.operation", revision: 2, op_id: "late", intent: opened });
+    expect(store.current().revision).toBe(1);
+    for (let n = 0; n < 100; n++) transport.event({ type: "error", error: "subscription no longer current" });
+    fire(250); expect(transport.resyncs).toBe(1);
+    // Errors returned by the replacement cannot strand the wait or start extra timers.
+    for (let n = 0; n < 100; n++) transport.event({ type: "error", error: "canvas unavailable" });
+    fire(500); expect(transport.resyncs).toBe(2);
+    const invalid = document(); invalid.revision = 3;
+    transport.event({ type: "canvas.layout.snapshot", revision: 4, document: invalid, initialized: true });
+    expect(store.current().revision).toBe(1); expect(retries()).toHaveLength(1);
+    // Reconnect already sends Subscribe. Its snapshot cancels the old recovery watchdog.
+    transport.open();
+    const authoritative = document(); authoritative.revision = 3; authoritative.views[0]!.cell = { x: 7, y: 9 };
+    transport.snapshot(authoritative); store.flush();
+    expect(store.current()).toEqual(authoritative); expect(retries()).toHaveLength(0);
+    expect(transport.resyncs).toBe(2);
+    transport.event({ type: "canvas.layout.operation", revision: 4, op_id: "after", intent: { type: "view.update", view_id: "console", name: "Live again" } });
+    expect(store.current().revision).toBe(4); expect(store.current().views[0]!.name).toBe("Live again"); store.flush();
+    transport.event({ type: "error", error: "withdrawn again" }); fire(250);
+    expect(transport.resyncs).toBe(3);
+    transport.snapshot(store.current()); store.flush(); expect(retries()).toHaveLength(0);
+    store.dispose(); expect(timers.size).toBe(0);
+  } finally { store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
+});
+
+// The normal 300 ms fixture RTT must not race the first snapshot watchdog into another Subscribe.
+test("a normal reconnect snapshot arrives before any replacement is requested", () => {
+  const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  const originalRandom = Math.random;
+  const timers = new Map<number, { run: () => void; at: number }>(); let id = 0, now = 0;
+  globalThis.setTimeout = ((run: () => void, delay: number) => { timers.set(++id, { run, at: now + delay }); return id; }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: number) => { timers.delete(timer); }) as unknown as typeof clearTimeout;
+  Math.random = () => 0;
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "normal-reconnect");
+  try {
+    transport.snapshot(); store.flush(); transport.open();
+    const head = document(); head.revision = 1;
+    setTimeout(() => transport.snapshot(head), 300);
+    while (true) {
+      const next = [...timers].sort((a, b) => a[1].at - b[1].at)[0];
+      if (!next || next[1].at > 300) break;
+      now = next[1].at; timers.delete(next[0]); next[1].run();
+    }
+    expect(transport.resyncs).toBe(0); expect(store.current().revision).toBe(1);
+    store.flush(); expect(timers.size).toBe(0);
+  } finally { store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
 });

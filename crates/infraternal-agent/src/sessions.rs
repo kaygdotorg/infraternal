@@ -7,6 +7,7 @@
 use infraternal_shim::frame::{
     APPROXIMATE_SNAPSHOT, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT, SHARED_WRITER,
 };
+use infraternal_shim::readiness::Registration;
 use nix::{
     sys::inotify::{AddWatchFlags, InitFlags, Inotify},
     unistd::Uid,
@@ -14,10 +15,7 @@ use nix::{
 use std::{
     fs::{self, DirBuilder},
     io,
-    os::{
-        fd::{AsFd, AsRawFd, RawFd},
-        unix::fs::{DirBuilderExt, MetadataExt},
-    },
+    os::unix::fs::{DirBuilderExt, MetadataExt},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -34,13 +32,6 @@ use tokio::{
 // to 32 MiB while allowing any number of live sessions (D214).
 const DISCOVERY_HANDSHAKES: usize = 32 * 1024 * 1024 / MAX_FRAME;
 const HANDSHAKE: Duration = Duration::from_secs(2);
-
-struct Watch(Inotify);
-impl AsRawFd for Watch {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0.as_fd().as_raw_fd()
-    }
-}
 
 /// Init manager detected once at startup, never periodically probed.
 #[derive(Clone, Copy, Debug)]
@@ -85,6 +76,8 @@ pub struct Session {
     pub path: PathBuf,
     pub peer: UnixStream,
     pub head: u64,
+    /// Authoritative screen geometry at the Hello capture, before this peer resizes.
+    pub size: (u16, u16),
     pub pid: u32,
     /// Selected capabilities, never inferred from the binary version.
     pub caps: u64,
@@ -222,7 +215,11 @@ pub async fn connect_writer(path: PathBuf, id: [u8; 16], writer: u32) -> io::Res
     let mut session = connect_with(
         path,
         id,
-        SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT | SHARED_WRITER,
+        SEQUENCED_INPUT
+            | MULTI_WRITER
+            | APPROXIMATE_SNAPSHOT
+            | SHARED_WRITER
+            | infraternal_shim::frame::QUERY_REPLIES,
     )
     .await?;
     if session.caps & MULTI_WRITER == 0 || writer == 0 {
@@ -266,7 +263,11 @@ pub async fn connect_shared_writer(
     let mut session = connect_with(
         path,
         id,
-        SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT | SHARED_WRITER,
+        SEQUENCED_INPUT
+            | MULTI_WRITER
+            | APPROXIMATE_SNAPSHOT
+            | SHARED_WRITER
+            | infraternal_shim::frame::QUERY_REPLIES,
     )
     .await?;
     let required = SEQUENCED_INPUT | MULTI_WRITER | SHARED_WRITER;
@@ -278,6 +279,17 @@ pub async fn connect_shared_writer(
 }
 
 async fn connect_with(path: PathBuf, id: [u8; 16], requested: u64) -> io::Result<Session> {
+    handshake(path, id, Some(requested)).await
+}
+
+/// Read fresh replay metadata without attaching, selecting a writer or changing geometry.
+#[cfg(feature = "remote")]
+pub(crate) async fn replay_size(path: PathBuf, id: [u8; 16]) -> io::Result<(u16, u16)> {
+    let hello = handshake(path, id, None).await?;
+    Ok(hello.size)
+}
+
+async fn handshake(path: PathBuf, id: [u8; 16], requested: Option<u64>) -> io::Result<Session> {
     timeout(HANDSHAKE, async {
         let mut peer = UnixStream::connect(&path).await?;
         let uid = peer.peer_cred()?.uid();
@@ -292,22 +304,32 @@ async fn connect_with(path: PathBuf, id: [u8; 16], requested: u64) -> io::Result
             start,
             pid,
             caps,
+            cols,
+            rows,
             ..
         } = hello
         else {
             return Err(invalid("invalid shim Hello"));
         };
-        if session != id || start > head {
+        if session != id
+            || start > head
+            || cols == 0
+            || rows == 0
+            || usize::from(cols) * usize::from(rows) > 200_000
+        {
             return Err(invalid("shim identity or ring range mismatch"));
         }
         let supports_owner = caps & infraternal_shim::frame::SESSION_OWNER != 0;
-        let caps = caps & requested;
-        send(&mut peer, &Frame::Attach(caps)).await?;
+        let caps = caps & requested.unwrap_or(0);
+        if requested.is_some() {
+            send(&mut peer, &Frame::Attach(caps)).await?;
+        }
         Ok(Session {
             id,
             path,
             peer,
             head,
+            size: (cols, rows),
             pid,
             caps,
             supports_owner,
@@ -439,7 +461,7 @@ pub fn process_birth_ticks(record: &[u8]) -> Option<u64> {
 }
 
 /// Directory retirement events keep the registry fresh without idle timers.
-pub(crate) struct SessionEvents(tokio::io::unix::AsyncFd<Watch>);
+pub(crate) struct SessionEvents(Registration<Inotify>);
 impl SessionEvents {
     pub(crate) fn new(state: &Path) -> io::Result<Self> {
         let watch = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC)
@@ -447,14 +469,12 @@ impl SessionEvents {
         watch
             .add_watch(state.join("sessions").as_path(), AddWatchFlags::IN_DELETE)
             .map_err(io::Error::from)?;
-        Ok(Self(tokio::io::unix::AsyncFd::new(Watch(watch))?))
+        Ok(Self(Registration::new(watch)?))
     }
     pub(crate) async fn changed(&self) -> io::Result<()> {
         loop {
             let mut ready = self.0.readable().await?;
-            if let Ok(result) =
-                ready.try_io(|fd| fd.get_ref().0.read_events().map_err(io::Error::from))
-            {
+            if let Ok(result) = ready.try_io(|fd| fd.read_events().map_err(io::Error::from)) {
                 result?;
                 return Ok(());
             }
@@ -474,7 +494,7 @@ fn isolated(program: &Path) -> Command {
 
 // bind emits IN_CREATE before listen, so a refused early connection must
 // also wake on chmod. The shim chmods to 0600 only after listen succeeds.
-fn socket_readiness(state: &Path) -> io::Result<tokio::io::unix::AsyncFd<Watch>> {
+fn socket_readiness(state: &Path) -> io::Result<Registration<Inotify>> {
     let watch =
         Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC).map_err(io::Error::from)?;
     watch
@@ -483,7 +503,7 @@ fn socket_readiness(state: &Path) -> io::Result<tokio::io::unix::AsyncFd<Watch>>
             AddWatchFlags::IN_CREATE | AddWatchFlags::IN_ATTRIB,
         )
         .map_err(io::Error::from)?;
-    tokio::io::unix::AsyncFd::new(Watch(watch))
+    Registration::new(watch)
 }
 
 /// Launch the same binary in an independent scope, or the shim's double fork.
@@ -587,9 +607,7 @@ pub async fn launch_with_readiness(
                 Err(error) => return Err(error),
             }
             let mut readiness = watch.readable().await?;
-            if let Ok(result) =
-                readiness.try_io(|fd| fd.get_ref().0.read_events().map_err(io::Error::from))
-            {
+            if let Ok(result) = readiness.try_io(|fd| fd.read_events().map_err(io::Error::from)) {
                 result?;
             }
         }

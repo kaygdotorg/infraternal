@@ -293,6 +293,23 @@ mod tests {
         assert!(!doc.valid());
         assert!(!text(&"x".repeat(201)));
     }
+
+    #[test]
+    fn graph_pin_coordinates_include_both_limits_but_refuse_the_next_integer() {
+        let mut doc = Document::default();
+        doc.0["views"] = json!([{
+            "id":"mesh","kind":"mesh","name":"Mesh","cell":{"x":0,"y":0},
+            "layout":{"type":"graph","pinned":{"node":{"x":-100_000,"y":100_000}}}
+        }]);
+        assert!(doc.valid());
+
+        doc.0["views"][0]["layout"]["pinned"]["node"]["x"] = json!(-100_001);
+        assert!(!doc.valid());
+        doc.0["views"][0]["layout"]["pinned"]["node"]["x"] = json!(-100_000);
+        doc.0["views"][0]["layout"]["pinned"]["node"]["y"] = json!(100_001);
+        assert!(!doc.valid());
+    }
+
     #[test]
     fn host_id_requires_canonical_lowercase_hyphenated_text() {
         let mut value = json!({"type":"session","id":"session","host":"host"});

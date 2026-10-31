@@ -2,8 +2,8 @@
 #![forbid(unsafe_code)]
 use crate::{
     frame::{
-        APPROXIMATE_SNAPSHOT, Decoder, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT,
-        SESSION_OWNER, SHARED_WRITER,
+        APPROXIMATE_SNAPSHOT, Decoder, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, QUERY_REPLIES,
+        SEQUENCED_INPUT, SESSION_OWNER, SHARED_WRITER,
     },
     pty::Pty,
     ring::{DEFAULT_CAPACITY, Ring},
@@ -20,6 +20,8 @@ use nix::{
     unistd::Uid,
 };
 use std::fmt::Write as _;
+#[cfg(feature = "host-diagnostics")]
+use std::os::fd::AsRawFd;
 use std::{
     collections::VecDeque,
     fs::{self, DirBuilder},
@@ -35,6 +37,34 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+/// Statically dispatched state boundary shared with the optional hosting experiment.
+trait SessionTerminal {
+    fn snapshot(&self) -> io::Result<Vec<u8>>;
+    fn approximate_snapshot(&self) -> Vec<u8>;
+    fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()>;
+    fn resize_with_ring(&mut self, cols: u16, rows: u16, ring: Option<&Ring>) -> io::Result<()>;
+    fn requires_approximation(&self) -> bool;
+}
+impl SessionTerminal for Terminal {
+    fn snapshot(&self) -> io::Result<Vec<u8>> {
+        self.snapshot()
+    }
+    fn approximate_snapshot(&self) -> Vec<u8> {
+        self.approximate_snapshot()
+    }
+    fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
+        self.resize(cols, rows)
+    }
+    fn resize_with_ring(&mut self, cols: u16, rows: u16, ring: Option<&Ring>) -> io::Result<()> {
+        self.resize_with_ring(cols, rows, ring)
+    }
+    fn requires_approximation(&self) -> bool {
+        self.requires_approximation()
+    }
+}
+#[cfg(feature = "process-per-user")]
+#[path = "user_host.rs"]
+pub(crate) mod user_host;
 const CHUNK: usize = 16 * 1024;
 const MAX_PEERS: usize = 32;
 #[path = "inputs.rs"]
@@ -104,6 +134,10 @@ struct Peer {
     request: Option<Request>,
 }
 impl Peer {
+    #[cfg(feature = "process-per-user")]
+    fn buffer_bytes(&self) -> usize {
+        self.decoder.allocated_bytes() + self.pending.capacity() + self.trailing.capacity()
+    }
     /// Capacity cannot hide a malformed range. Shared requests reserve space
     /// before acceptance; neither geometry nor durable ownership changes here.
     fn input_waits(
@@ -142,7 +176,8 @@ impl Peer {
                 | MULTI_WRITER
                 | APPROXIMATE_SNAPSHOT
                 | SESSION_OWNER
-                | SHARED_WRITER);
+                | SHARED_WRITER
+                | QUERY_REPLIES);
         if self.caps & SESSION_OWNER != 0 {
             if self.caps != SESSION_OWNER {
                 return Err(invalid_input());
@@ -165,7 +200,7 @@ impl Peer {
         self.written = 0;
         Ok(())
     }
-    fn snapshot(&mut self, terminal: &Terminal, head: u64) -> io::Result<()> {
+    fn snapshot(&mut self, terminal: &impl SessionTerminal, head: u64) -> io::Result<()> {
         match terminal.snapshot() {
             Ok(bytes) => {
                 self.queue(&Frame::Snapshot(head, bytes))?;
@@ -198,7 +233,7 @@ impl Peer {
     fn resize(
         &mut self,
         pty: &mut Pty,
-        terminal: &mut Terminal,
+        terminal: &mut impl SessionTerminal,
         ring: &Ring,
         config: &mut Config,
     ) -> io::Result<bool> {
@@ -206,11 +241,25 @@ impl Peer {
         pty.resize(cols, rows, px_w, px_h)?;
         // Origin bytes alone cannot certify history at a changed geometry;
         // the terminal independently verifies provenance before reconstructing.
+        trace_host!(
+            ResizeStart,
+            config.session,
+            pty.master.as_raw_fd(),
+            ring.head(),
+            0
+        );
         let resized = if ring.start() == 0 {
             terminal.resize_with_ring(cols, rows, Some(ring))
         } else {
             terminal.resize(cols, rows)
         };
+        trace_host!(
+            ResizeDone,
+            config.session,
+            pty.master.as_raw_fd(),
+            ring.head(),
+            0
+        );
         if resized.is_err() {
             pty.resize(config.cols, config.rows, 0, 0)?;
             // Do not retry the refused geometry on the next accepted key.
@@ -226,6 +275,7 @@ impl Peer {
         config.rows = rows;
         Ok(true)
     }
+    #[cfg(not(feature = "process-per-user"))]
     fn flush(&mut self) -> io::Result<()> {
         while self.written < self.pending.len() {
             match self.stream.write(&self.pending[self.written..]) {
@@ -238,6 +288,57 @@ impl Peer {
         }
         self.pending.clear();
         self.written = 0;
+        Ok(())
+    }
+    #[cfg(feature = "process-per-user")]
+    fn flush(&mut self) -> io::Result<()> {
+        let mut bytes = usize::MAX;
+        let mut attempts = usize::MAX;
+        self.flush_bounded(&mut bytes, &mut attempts)
+    }
+    /// Shared hosts spend one byte/syscall budget across state and output
+    /// frames. A partial write retains the original frame and cursor; only a
+    /// completed frame may release its storage or admit a following frame.
+    #[cfg(feature = "process-per-user")]
+    fn flush_bounded(&mut self, bytes: &mut usize, attempts: &mut usize) -> io::Result<()> {
+        while self.written < self.pending.len() && *bytes > 0 && *attempts > 0 {
+            let end = self.pending.len().min(self.written.saturating_add(*bytes));
+            *attempts -= 1;
+            trace_host!(
+                SocketWriteStart,
+                [0; 16],
+                self.stream.as_raw_fd(),
+                self.cursor.unwrap_or(0),
+                end - self.written
+            );
+            match self.stream.write(&self.pending[self.written..end]) {
+                Ok(0) => return Err(io::ErrorKind::BrokenPipe.into()),
+                Ok(n) => {
+                    self.written += n;
+                    *bytes -= n;
+                    trace_host!(
+                        SocketWriteDone,
+                        [0; 16],
+                        self.stream.as_raw_fd(),
+                        u64::try_from(self.written).map_err(io::Error::other)?,
+                        n,
+                        self.pending.len()
+                    );
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if self.written == self.pending.len() {
+            self.pending.clear();
+            if self.pending.capacity() > CHUNK * 4 {
+                // Completion may be the last event before an indefinite idle
+                // wait. Release large repaint storage at that boundary.
+                self.pending = Vec::new();
+            }
+            self.written = 0;
+        }
         Ok(())
     }
 }
@@ -600,7 +701,8 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
                                 | MULTI_WRITER
                                 | APPROXIMATE_SNAPSHOT
                                 | SESSION_OWNER
-                                | SHARED_WRITER,
+                                | SHARED_WRITER
+                                | QUERY_REPLIES,
                             session: config.session,
                             pid: std::process::id(),
                             cols: config.cols,
@@ -746,7 +848,7 @@ fn consume_peer(
     bytes: &[u8],
     p: &mut Peer,
     pty: &mut Pty,
-    terminal: &mut Terminal,
+    terminal: &mut impl SessionTerminal,
     ring: &Ring,
     config: &mut Config,
     input: &mut VecDeque<u8>,
@@ -801,7 +903,7 @@ fn handle<'a>(
     frame: impl Into<FrameRef<'a>>,
     p: &mut Peer,
     pty: &mut Pty,
-    terminal: &mut Terminal,
+    terminal: &mut impl SessionTerminal,
     ring: &Ring,
     config: &mut Config,
     input: &mut VecDeque<u8>,
@@ -839,16 +941,29 @@ fn handle<'a>(
         }
         let writer = p.writer.ok_or_else(invalid)?;
         let accepted = cursors.get(p.writer)?.accepted;
+        #[cfg(not(feature = "process-per-user"))]
+        let available = MAX_FRAME - input.len();
+        #[cfg(feature = "process-per-user")]
+        let available = cursors.available(writer, input.len());
         if p.input_waits(
             offset.unwrap_or(accepted),
             bytes.len(),
             accepted,
-            MAX_FRAME - input.len(),
+            available,
             reserved,
         )? {
             return Err(io::ErrorKind::WouldBlock.into());
         }
         cursors.accept(writer, offset.unwrap_or(accepted), bytes, input)?;
+        trace_host!(
+            InputQueued,
+            config.session,
+            p.stream.as_raw_fd(),
+            accepted,
+            usize::try_from(cursors.get(p.writer)?.accepted - accepted)
+                .map_err(io::Error::other)?,
+            writer as usize
+        );
         if cursors.get(p.writer)?.accepted > accepted {
             // Only newly accepted input changes the active size [74]. Replayed
             // duplicate bytes cannot steal the last typist's terminal geometry.
@@ -868,6 +983,13 @@ fn handle<'a>(
         // immediately so batching output never adds a keystroke round trip.
         let (first, _) = input.as_slices();
         if !first.is_empty() {
+            trace_host!(
+                PtyWriteStart,
+                config.session,
+                pty.master.as_raw_fd(),
+                0,
+                first.len()
+            );
             match pty.master.write(first) {
                 Ok(n) => {
                     input.drain(..n);
@@ -884,6 +1006,11 @@ fn handle<'a>(
         return Err(invalid());
     };
     match frame {
+        Frame::QueryReply(bytes) if p.caps & QUERY_REPLIES != 0 && !exited => {
+            // Replies expire on reserved or full capacity without disconnecting
+            // the peer; admission refusal leaves typing cursors intact [307].
+            let _ = cursors.reply(reserved, &bytes, input);
+        }
         Frame::SelectWriter(id) if p.caps & MULTI_WRITER != 0 && p.writer.is_none() && id != 0 => {
             cursors.select(id, p.size)?;
             p.writer = Some(id);
@@ -984,9 +1111,9 @@ impl InputCursors {
 #[path = "../tests/unit/sequenced_input.rs"]
 mod sequenced_checks;
 
-/// Static error copy keeps malformed writer data out of diagnostics.
+/// An opaque error kind keeps invalid writer data out of diagnostics without allocation.
 fn invalid_input() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, "invalid shim writer input")
+    io::ErrorKind::InvalidData.into()
 }
 
 fn invalid_request() -> io::Error {

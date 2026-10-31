@@ -24,7 +24,7 @@ interface Vector {
 describe("wire protocol golden vectors", () => {
   test("encodes and decodes each frame exactly as the shared manifest describes", async () => {
     const vectors = await readVectors();
-    expect(vectors.length).toBe(17);
+    expect(vectors.length).toBe(20);
     for (const vector of vectors) {
       const bytes = new Uint8Array(await Bun.file(new URL(vector.file, manifestUrl)).arrayBuffer());
       expect(encodeFrame(vector.frame)).toEqual(bytes);
@@ -157,6 +157,7 @@ function readFrame(value: Record<string, unknown>): WireFrame {
       return {
         type: "Input",
         inSeq: BigInt(stringField(value, "inSeq")),
+        ...(value.replyTo === undefined ? {} : { replyTo: BigInt(stringField(value, "replyTo")) }),
         bytes: hexField(value, "bytesHex"),
       };
     case "Output":
@@ -280,4 +281,27 @@ test("split mux header preserves trailing Close", () => {
     { type: "Close", code: 0, reason: "" },
   ]);
   expect(decoder.bufferedLength).toBe(0);
+});
+
+test("reply-marked Input uses an additive bounded layout without changing legacy input", () => {
+  const bytes = new TextEncoder().encode("\u001b[1;1R");
+  const marked: WireFrame = { type: "Input", inSeq: 0n, replyTo: 42n, bytes };
+  expect(decodeFrame(encodeFrame(marked)).frame).toEqual(marked);
+  const legacy: WireFrame = { type: "Input", inSeq: 9n, bytes };
+  expect(decodeFrame(encodeFrame(legacy)).frame).toEqual(legacy);
+  expect(() => encodeFrame({ ...marked, bytes: new Uint8Array(1025) })).toThrow();
+  expect(() => encodeFrame({ ...marked, bytes: new Uint8Array() })).toThrow();
+  for (let length = 0; length < encodeFrame(marked).length; length++) {
+    expect(() => decodeFrame(encodeFrame(marked).subarray(0, length))).toThrow();
+  }
+});
+
+test("empty marked input reports the stable invalid-body decoder failure", () => {
+  try {
+    decodeFrame(Uint8Array.of(9, 0x17, 0, 0, 0, 0, 0, 0, 0, 0));
+    throw new Error("empty reply unexpectedly decoded");
+  } catch (error) {
+    expect(error).toBeInstanceOf(WireDecodeError);
+    expect((error as WireDecodeError).code).toBe("invalid-body");
+  }
 });

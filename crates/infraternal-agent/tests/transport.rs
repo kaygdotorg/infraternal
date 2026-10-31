@@ -1,4 +1,4 @@
-//! Real socketpair framing checks for inherited leg-B descriptors [9][12][41].
+//! Real socketpair framing and inherited descriptor ownership checks [9][12][40][41].
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use infraternal_agent::transport::{Receive, Socket, Transmit};
 use infraternal_protocol::{Frame, encode_muxed_frame_into};
@@ -107,4 +107,33 @@ async fn oversized_header_and_truncated_frame_are_rejected() {
         Receive::default().next(&socket).await.unwrap_err().kind(),
         std::io::ErrorKind::UnexpectedEof
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn replacing_the_callers_descriptor_cannot_redirect_registered_io() {
+    use std::os::fd::OwnedFd;
+    use std::time::Duration;
+
+    let (original, mut original_peer) = UnixStream::pair().unwrap();
+    let mut caller: OwnedFd = original.into();
+    let socket = Socket::inherited(caller.as_raw_fd()).unwrap();
+    let (replacement, mut replacement_peer) = UnixStream::pair().unwrap();
+    // dup2 safely replaces a caller-owned descriptor without racing another
+    // test's allocation. A registration must retain the original description.
+    nix::unistd::dup2(&replacement, &mut caller).unwrap();
+    replacement_peer.write_all(b"replacement").unwrap();
+    original_peer.write_all(b"original").unwrap();
+    let mut bytes = [0; 32];
+    let count = tokio::time::timeout(Duration::from_secs(2), socket.read(&mut bytes))
+        .await
+        .expect("original socket readiness must remain reachable")
+        .unwrap();
+    assert_eq!(&bytes[..count], b"original");
+    drop(caller);
+    original_peer.write_all(b"still open").unwrap();
+    let count = tokio::time::timeout(Duration::from_secs(2), socket.read(&mut bytes))
+        .await
+        .expect("closing the caller must not close the registration")
+        .unwrap();
+    assert_eq!(&bytes[..count], b"still open");
 }

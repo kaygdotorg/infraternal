@@ -73,6 +73,7 @@
 }
 
 .auth-card {
+  min-width: 0;
   width: min(440px, 100%);
   --auth-pad: 36px;
   padding: var(--auth-pad) 32px var(--auth-pad);

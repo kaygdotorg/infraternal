@@ -30,26 +30,10 @@ impl MinimalHost {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         // Only these ownership fixtures need the short alias: the rest of the
         // workspace keeps the canonical cache root for rename and execution tests.
-        let scratch = std::env::var_os("INFRATERNAL_SSH_TEST_STATE_ROOT")
-            .or_else(|| std::env::var_os("INFRATERNAL_TEST_STATE_ROOT"))
-            .map_or_else(
-                || {
-                    // Absolute kernel socket names must fit sun_path, including
-                    // the newline-home case. Use the private runtime directory
-                    // for these short-lived fixtures; build artifacts stay cached.
-                    std::env::var_os("XDG_RUNTIME_DIR").map_or_else(
-                        || {
-                            PathBuf::from(std::env::var_os("HOME").unwrap())
-                                .join(".cache/codex-scratch/ar3")
-                        },
-                        PathBuf::from,
-                    )
-                },
-                PathBuf::from,
-            );
+        let scratch = common::recovery_scratch();
         fs::create_dir_all(&scratch).unwrap();
         let root = scratch.join(format!(
-            "r{}-{}",
+            "{:x}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -130,6 +114,12 @@ impl MinimalHost {
             .unwrap();
         child.wait_with_output().unwrap()
     }
+}
+
+fn bind_short_session_socket(directory: &std::path::Path, name: &str) -> UnixListener {
+    let directory_fd = fs::File::open(directory).unwrap();
+    // Keep the AF_UNIX address short while placing the stale socket in its real fixture directory.
+    UnixListener::bind(format!("/proc/self/fd/{}/{name}", directory_fd.as_raw_fd())).unwrap()
 }
 
 impl Drop for MinimalHost {
@@ -456,8 +446,8 @@ fn review_live_session_socket_in_plain_home_blocks_cleanup() {
 }
 
 /// Review R10 (#230): a newline in the home path splits the session endpoint's
-/// kernel table row; the live endpoint must still block cleanup. The runtime
-/// fixture root keeps the absolute name within `sun_path`.
+/// kernel table row; the live endpoint must still block cleanup. The shared
+/// fixture root falls back when needed so this absolute name fits `sun_path`.
 #[test]
 fn review_live_session_socket_in_newline_home_blocks_cleanup() {
     live_session_socket_blocks_cleanup(Some("\nn"));
@@ -478,15 +468,14 @@ fn live_session_socket_blocks_cleanup(home_suffix: Option<&str>) {
     } else {
         "sessions/33333333333333333333333333333333.sock"
     });
+    let relative_session = PathBuf::from(host.root.file_name().unwrap())
+        .join(".local/share/infraternal/sessions")
+        .join(session.file_name().unwrap());
     let program = "import ctypes,os,socket,sys; os.umask(0o177); s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(); os.chdir('/'); assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; print('ready',flush=True); sys.stdin.read()";
-    // Keep the unusual home name in the kernel's diagnostic path, but omit
-    // the long HOME-cache prefix from sockaddr_un. Changing only the child's
-    // working directory is safe while sibling fixtures run concurrently.
-    let parent = host.root.parent().unwrap();
     let mut holder = Command::new("python3")
         .args(["-u", "-c", program])
-        .arg(session.strip_prefix(parent).unwrap())
-        .current_dir(parent)
+        .arg(relative_session)
+        .current_dir(host.root.parent().unwrap())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -558,16 +547,10 @@ fn review_cached_helper_without_session_mode_asks_for_a_refresh() {
     .unwrap();
     fs::set_permissions(&payload, fs::Permissions::from_mode(0o700)).unwrap();
     // A shim that died and left its endpoint behind.
-    // A directory descriptor keeps the bind name short without changing the
-    // process-wide working directory or shortening the canonical session ID.
-    let directory = fs::File::open(host.base()).unwrap();
-    drop(
-        UnixListener::bind(
-            PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()))
-                .join("sessions/55555555555555555555555555555555.sock"),
-        )
-        .unwrap(),
-    );
+    drop(bind_short_session_socket(
+        &host.base().join("sessions"),
+        "55555555555555555555555555555555.sock",
+    ));
     let (inspect, _) = recovery_scripts();
     let output = Command::new("/bin/sh")
         .args(["-c", &inspect.replace("$HOME", host.root.to_str().unwrap())])

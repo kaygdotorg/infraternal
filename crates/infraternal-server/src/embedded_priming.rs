@@ -666,6 +666,7 @@ fn normalize_notice(
         TerminalNotice::Unavailable { seq, .. } => (1, seq),
         TerminalNotice::Exited { final_seq, .. } => (2, final_seq),
         TerminalNotice::ReplayComplete { out_seq, .. } => (3, out_seq),
+        TerminalNotice::QueryRepliesUnavailable { .. } => (4, 0),
     };
     if seen
         .get(&stream)

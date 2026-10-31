@@ -163,9 +163,13 @@
 /* One type scale per platform (docs/design/TASTE.md): desktop 13 px body, touch 16 px. */
 .ui-toast { min-height: 44px; gap: 10px; padding: 6px 8px 6px 12px; border-radius: 14px; }
 /* A long message with actions stacks them under it (toast.ts sets data-stacked) instead of squeezing the text beside them. */
-.ui-toast[data-stacked="true"] { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; column-gap: 10px; row-gap: 2px; }
-.ui-toast[data-stacked="true"] .ui-toast-message { padding-top: 5px; }
-.ui-toast[data-stacked="true"] .ui-toast-actions { grid-column: 1 / -1; justify-self: end; }
+/* Explicit cells: mark | message | close on the first row, the actions on the second. Auto-placement left the glyph, text and
+   close in separate rows with an empty column between them at phone width. */
+.ui-toast[data-stacked="true"] { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; column-gap: 10px; row-gap: 0; }
+.ui-toast[data-stacked="true"] .ui-toast-marker, .ui-toast[data-stacked="true"] .ui-toast-glyph { grid-column: 1; grid-row: 1; margin-top: 4px; }
+.ui-toast[data-stacked="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 5px; padding-bottom: 5px; }
+.ui-toast[data-stacked="true"] .ui-toast-close { grid-column: 3; grid-row: 1; }
+.ui-toast[data-stacked="true"] .ui-toast-actions { grid-column: 2 / -1; grid-row: 2; justify-self: end; }
 .ui-toast-message { min-width: 0; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.4; }
 .ui-toast-marker { display: grid; width: 22px; height: 22px; flex: none; place-items: center; }
 .ui-toast-marker .tick { width: 20px; height: 20px; }

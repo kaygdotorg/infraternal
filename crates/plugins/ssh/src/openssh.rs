@@ -399,9 +399,18 @@ impl SshSession for Session {
             .map(|policy| policy.lookup)
     }
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+        self.run_with_timeout(script, input, self.timeout)
+    }
+
+    fn run_with_timeout<'a>(
+        &'a self,
+        script: &'a str,
+        input: Input<'a>,
+        timeout: Duration,
+    ) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
             let mut command = self.channel_command(script)?;
-            let result = execute(&mut command, input, self.timeout).await?;
+            let result = execute(&mut command, input, timeout).await?;
             if result.success {
                 return Ok(CommandOutput {
                     stdout: result.stdout,

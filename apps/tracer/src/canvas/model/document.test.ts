@@ -131,6 +131,38 @@ test("a plain view is saved without spans or bands, exactly as before D212", () 
   expect(json).not.toContain("\"row\"");
 });
 
+test("D309: the saved weights do not depend on how a touch screen draws the columns", () => {
+  // A desktop saved a weight-floor column and a full one. The phone loads them, draws them (the floor widens the drawn
+  // column only) and saves nothing different: the weights that come out are the weights that went in.
+  const phone = metricsFor(393, 852, true);
+  expect(phone.minW).toBeGreaterThan(0);
+  const saved = toDocument([{ ...console_, cols: [{ ...console_.cols[0]!, w: m.colW }, { ...console_.cols[1]!, w: Math.round(0.1 * m.colW) }] }], m, 1);
+  const layout = saved.views[0]!.layout;
+  if (layout.type !== "tiled") throw new Error("tiled");
+  const weights = layout.columns.map((c) => c.weight);
+  expect(weights).toEqual([1, 0.1]);
+  const resolve = (t: { type: string; host?: string; id?: string }) => (t.type === "session" ? { host: t.host ?? "", sessionId: t.id ?? "" } : undefined);
+  const roundTrip = (metrics: typeof phone): number[] => {
+    const cols = columnsFromDocument(layout, metrics, resolve as never);
+    const again = toDocument([{ ...console_, cols }], metrics, 2).views[0]!.layout;
+    if (again.type !== "tiled") throw new Error("tiled");
+    return again.columns.map((c) => c.weight);
+  };
+  const cols = columnsFromDocument(layout, phone, resolve as never);
+  expect(cols[1]!.w).toBeLessThan(phone.minW); // the model keeps the saved width, not the drawn one
+  // Whatever pixel rounding the screen's own width brings, the floor adds nothing: the same weights with and without it.
+  expect(roundTrip(phone)).toEqual(roundTrip({ ...phone, minW: 0 }));
+  expect(roundTrip(phone)[0]).toBe(1);
+});
+
+test("D309: a view this device pushed clear for display is saved where the layout has it", () => {
+  const pushed: ViewModel = { ...console_, x: 6 * CELL, y: 3 * CELL, home: { x: 2 * CELL, y: CELL } };
+  expect(toDocument([pushed], m, 1).views[0]!.cell).toEqual({ x: 2, y: 1 });
+  // Without a push the drawn position is the saved one, as before.
+  const { home: _home, ...drawnHere } = pushed;
+  expect(toDocument([drawnHere], m, 1).views[0]!.cell).toEqual({ x: 6, y: 3 });
+});
+
 test("an offscreen graph keeps its shared pins before any nodes are rendered", () => {
   const graph: ViewModel & { graphPins: Record<string, { x: number; y: number }> } = { id: "mesh", name: "Mesh", layout: "graph", cols: [], nodes: [], x: 0, y: 0, graphPins: { host: { x: 40, y: 80 } } };
   expect(toDocument([graph], m, 2).views[0]?.layout).toEqual({ type: "graph", pinned: graph.graphPins });

@@ -10,9 +10,7 @@ use std::time::Duration;
 struct State(PathBuf);
 impl State {
     fn new() -> Self {
-        let path = PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(".cache/codex-scratch/remote-agents")
-            .join(format!("daemon-{}", uuid::Uuid::new_v4()));
+        let path = crate::test_state_root().join(format!("daemon-{}", uuid::Uuid::new_v4()));
         Self(path)
     }
 }

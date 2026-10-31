@@ -38,6 +38,7 @@ pub(crate) struct RemoteHosts(
     Arc<std::sync::Mutex<Option<Arc<ListenerFactory>>>>,
     bool,
     pub(crate) crate::remote_inventory::InventoryChanges,
+    pub(crate) Arc<std::sync::Mutex<crate::terminal_queries::Registry>>,
 );
 
 /// Identity and admission limits are shared; this factory never retains its host map.
@@ -138,6 +139,7 @@ impl RemoteHosts {
             Arc::default(),
             false,
             crate::remote_inventory::InventoryChanges::default(),
+            Arc::default(),
         )
     }
     /// Classify the accepted destination, including a pre-existing wildcard listener.
@@ -415,6 +417,7 @@ impl RemoteHosts {
         {
             self.attach(&runtime, id, host).await?;
         }
+        self.5.publish();
         Ok(())
     }
 
@@ -472,6 +475,7 @@ impl RemoteHosts {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = authority.clone();
         }
         host.authority = authority;
+        self.5.publish();
         // A parked underlay is a path replacement, not a new discovery source.
         // The existing remote registry retains the authoritative observed IP.
         if let Some(runtime) = runtime {

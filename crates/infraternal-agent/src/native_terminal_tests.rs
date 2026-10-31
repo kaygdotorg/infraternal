@@ -131,8 +131,7 @@ async fn attached(
 async fn real_pty_resumes_native_writer_after_25_connection_replacements() {
     let binary = std::env::var_os("INFRATERNAL_TEST_BINARY").expect("explicit built CLI path");
     let id = uuid::Uuid::new_v4();
-    let base =
-        PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/remote-agents");
+    let base = crate::test_state_root();
     let path = base.join(format!("n{}", &id.simple().to_string()[..8]));
     let path = sessions::state(Some(path)).unwrap();
     let mut state = State { path, pid: None };

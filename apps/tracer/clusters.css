@@ -264,12 +264,18 @@
 /* ---- mockup scaffolding: a small tag in the top-right corner (scenes live in the palette) ---- */
 .cl-mockup { position: absolute; z-index: 6; top: calc(10px + env(safe-area-inset-top) + var(--pill-h, 38px) + 4px); right: var(--gutter); height: 22px; padding: 0 9px; color: var(--fg-3); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; cursor: pointer; }
 /* On a desktop it sits in the top row, left of the canvas controls, so it never covers a window. */
-@media (hover: hover) and (pointer: fine) { .cl-mockup { top: calc(10px + env(safe-area-inset-top) + (var(--pill-h, 38px) - 22px) / 2); right: calc(var(--gutter) + 3 * (var(--pill-h, 38px) + 10px)); } }
+@media (hover: hover) and (pointer: fine) and (min-width: 960px) { .cl-mockup { top: calc(10px + env(safe-area-inset-top) + (var(--pill-h, 38px) - 22px) / 2); right: calc(var(--gutter) + 3 * (var(--pill-h, 38px) + 10px)); } }
 
 /* The snap toggle takes the slot of the disabled "+" in the top bar's right group. */
 .cl-snap, .cl-viewsbtn { color: var(--fg-2); }
 .cl-viewsbtn svg, .cl-snap svg { stroke-width: 1.6; }
 /* On touch the toolbar has these (canvas row), and its row replaces the frame lock. */
+/* Where the canvas buttons sit beside "+", the top bar keeps room for all three (--side, style.css) so the pill, centred on
+   the screen, ends before them. Below 600 px the pill would be left under ~300 px, so the buttons give way instead (the
+   bottom toolbar has both actions) and the pill keeps the room; no text is cut. */
+.terminal-screen[data-canvas="on"] .top { --side: calc(3 * var(--pill-h) + 12px); }
+@media (max-width: 600px) { .cl-snap, .cl-viewsbtn { display: none; } .terminal-screen[data-canvas="on"] .top { --side: var(--pill-h); } }
+@media (pointer: coarse) { .terminal-screen[data-canvas="on"] .top { --side: var(--pill-h); } }
 @media (pointer: coarse) { .cl-snap, .cl-viewsbtn { display: none; } .terminal-screen[data-clusters] .ui-window-lock { display: none; } }
 .cl-snap[aria-pressed="true"] { color: var(--accent); }
 .cl-snap svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); }

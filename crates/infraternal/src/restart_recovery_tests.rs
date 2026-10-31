@@ -156,8 +156,15 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
         let outcome = replace(runtime, replacement, true);
         panic!("verified replacement or recovery returned: {outcome:?}");
     }
-    let root = PathBuf::from(std::env::var_os("HOME").unwrap())
-        .join(".cache/codex-scratch/release-pipeline-r4");
+    // Use the gate's private root for nested fixtures; retain the HOME fallback
+    // for standalone test runs that do not provide one.
+    let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
+        || {
+            PathBuf::from(std::env::var_os("HOME").unwrap())
+                .join(".cache/codex-scratch/release-pipeline-r4")
+        },
+        PathBuf::from,
+    );
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)

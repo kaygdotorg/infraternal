@@ -23,6 +23,7 @@ import type { Ctx, ViewRec, WinRec } from "../context";
 import { loadDroplet } from "../layout/droplet-handle";
 import { COLUMN_GAP } from "../layout/geometry";
 import { columnEls, freshColumnId, topItem } from "../layout/columns";
+import { setColumnWidth } from "../layout/column-els";
 import type { Col } from "../layout/grid";
 import { groupsLoaded, loadGroups, type Groups } from "../layout/groups-handle";
 import type { ViewId, WindowModel } from "../model/types";
@@ -211,7 +212,7 @@ export function createWindows(cx: Ctx): WindowsModule {
           const partner = colEl.dataset.half ? columnEls(c.colsEl).find((x) => x.dataset.half === colEl.dataset.half && x !== colEl) ?? null : null;
           if (partner) {
             const w = (Number(partner.dataset.w) || state.metrics.colW) + COLUMN_GAP + (Number(colEl.dataset.w) || state.metrics.colW);
-            partner.dataset.w = String(w); partner.style.setProperty("--w", `${w}px`); delete partner.dataset.half;
+            setColumnWidth(partner, w, state.metrics); delete partner.dataset.half;
           }
           colEl.remove();
         }
@@ -378,8 +379,7 @@ export function createWindows(cx: Ctx): WindowsModule {
         const w = Number(colEl.dataset.w) || state.metrics.colW;
         const minimum = Math.ceil(state.metrics.colW * MIN_COLUMN_WEIGHT);
         const first = Math.max(minimum, Math.round((w - COLUMN_GAP) / 2));
-        colEl.dataset.w = String(first);
-        colEl.style.setProperty("--w", `${first}px`);
+        setColumnWidth(colEl, first, state.metrics);
         const next = cx.view.newCol({ id: freshColumnId(cx, c), w: Math.max(minimum, w - COLUMN_GAP - first), wins: [nm] });
         // The two halves name each other: closing one of them gives its width back to the other (see `close`).
         const pair = `p${++state.serial}`;

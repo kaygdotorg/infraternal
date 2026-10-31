@@ -1,9 +1,50 @@
 //! Frame regression and measurement harness, separated from production code [40].
 use super::*;
+
+#[cfg(feature = "process-per-user")]
+#[test]
+fn borrowed_output_keeps_frozen_bytes_and_refuses_before_batch_mutation() {
+    let frozen = [12, 0, 0, 0, 0x11, 42, 0, 0, 0, 0, 0, 0, 0, b'a', b'b', b'c'];
+    let mut wire = Vec::new();
+    Frame::output_slices_into::<false>(42, b"a", b"bc", &mut wire).unwrap();
+    assert_eq!(wire, frozen);
+    Frame::output_slices_into::<true>(42, b"ab", b"c", &mut wire).unwrap();
+    assert_eq!(wire, [frozen, frozen].concat());
+    let before = wire.clone();
+    let oversized = vec![0; MAX_FRAME];
+    assert!(Frame::output_slices_into::<true>(0, &oversized, &[], &mut wire).is_err());
+    assert_eq!(wire, before);
+    assert!(Frame::output_slices_into::<false>(0, &[], &oversized, &mut wire).is_err());
+    assert_eq!(wire, before);
+}
 #[cfg(test)]
 mod tests {
     //! Exercises frame invariants against real data and frozen expectations.
     use super::*;
+    #[cfg(feature = "process-per-user")]
+    #[test]
+    fn batch_append_preserves_prefix_and_refuses_invalid_frames() {
+        let state = Frame::InputState(17, 19);
+        let output = Frame::Output(42, b"reply".to_vec());
+        let mut wire = state.encode().unwrap();
+        Frame::output_slices_into::<true>(42, b"reply", &[], &mut wire).unwrap();
+        let mut expected = state.encode().unwrap();
+        expected.extend(output.encode().unwrap());
+        assert_eq!(wire, expected);
+        let before = wire.clone();
+        assert!(
+            Frame::Input(vec![0; MAX_FRAME])
+                .encode_into(&mut wire)
+                .is_err()
+        );
+        assert_eq!(wire, before);
+        assert!(
+            Frame::SnapshotWithFlags(0, 2, vec![])
+                .encode_into(&mut wire)
+                .is_err()
+        );
+        assert_eq!(wire, before);
+    }
     #[test]
     fn golden_and_fragmented() {
         let fixtures = [
@@ -350,4 +391,23 @@ fn shared_writer_selector_is_fixed_length_and_fragment_safe() {
         assert!(Frame::decode(body).is_err());
         assert!(FrameRef::decode(body).is_err());
     }
+}
+
+#[test]
+fn query_reply_extension_is_bounded_and_fragment_safe() {
+    let frame = Frame::QueryReply(b"\x1b[1;1R".to_vec());
+    let wire = frame.encode().unwrap();
+    assert_eq!(wire, [7, 0, 0, 0, 0x1e, 27, b'[', b'1', b';', b'1', b'R']);
+    assert_eq!(FrameRef::decode(&wire[4..]).unwrap().into_owned(), frame);
+    for split in 0..=wire.len() {
+        let mut decoder = Decoder::default();
+        let mut frames = decoder.feed(&wire[..split]).unwrap();
+        frames.extend(decoder.feed(&wire[split..]).unwrap());
+        assert_eq!(frames, vec![frame.clone()]);
+    }
+    assert!(Frame::QueryReply(Vec::new()).encode().is_err());
+    assert!(Frame::QueryReply(vec![0; 1025]).encode().is_err());
+    assert!(Frame::decode(&[0x1e]).is_err());
+    assert!(FrameRef::decode(&[vec![0x1e], vec![0; 1025]].concat()).is_err());
+    assert!(Frame::QueryReply(vec![0; 1024]).encode().is_ok());
 }

@@ -3,14 +3,13 @@
 use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
 
+#[path = "../../../infraternal-shim/tests/unit/fixture_state.rs"]
+mod fixture_state;
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
-        let root = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/rl230/{}-{}",
-            std::process::id(),
-            uuid_free()
-        ));
+        let root = fixture_state::fixture_state();
         fs::create_dir_all(root.join("base/sessions")).unwrap();
         for path in [&root, &root.join("base"), &root.join("base/sessions")] {
             fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
@@ -20,12 +19,6 @@ impl Fixture {
     fn state(&self) -> PathBuf {
         self.0.join("base/sessions")
     }
-}
-fn uuid_free() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -209,17 +202,40 @@ fn kernel_holds(path: &Path) -> Option<bool> {
     kernel_bound(&[(path.to_path_buf(), fs::metadata(path).unwrap())])
 }
 
-/// Waits briefly for the kernel socket dump to forget a just-closed endpoint.
-fn sessions_after_close(runtime: &File) -> Result<(), u8> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+const AFTER_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Waits up to two seconds for the kernel socket dump to forget a closed endpoint.
+fn after_close<T: PartialEq>(live: &T, mut inspect: impl FnMut() -> T) -> T {
+    // A procfs snapshot can itself take longer than the old 100 ms budget when
+    // several verification jobs run at once, leaving no poll to observe release.
+    let deadline = std::time::Instant::now() + AFTER_CLOSE_TIMEOUT;
     loop {
-        match sessions(runtime) {
-            Err(73) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            result => return result,
+        let result = inspect();
+        if result != *live || std::time::Instant::now() >= deadline {
+            return result;
         }
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
+}
+
+fn sessions_after_close(runtime: &File) -> Result<(), u8> {
+    after_close(&Err(73), || sessions(runtime))
+}
+
+#[test]
+fn after_close_waits_for_a_slow_socket_snapshot() {
+    let mut inspections = 0;
+    let result = after_close(&Some(true), || {
+        inspections += 1;
+        if inspections == 1 {
+            std::thread::sleep(std::time::Duration::from_millis(125));
+            Some(true)
+        } else {
+            Some(false)
+        }
+    });
+    assert_eq!(result, Some(false));
+    assert_eq!(inspections, 2);
 }
 
 /// Kernel ownership remains observable when a runtime makes descriptors private.
@@ -232,9 +248,15 @@ fn legacy_inspection_finds_a_real_bound_socket() {
     assert_eq!(kernel_holds(&path), Some(true));
     let other = fixture.state().join("other.sock");
     drop(std::os::unix::net::UnixListener::bind(&other).unwrap());
-    assert_eq!(kernel_holds(&other), Some(false));
+    assert_eq!(
+        after_close(&Some(true), || kernel_holds(&other)),
+        Some(false)
+    );
     drop(listener);
-    assert_eq!(kernel_holds(&path), Some(false));
+    assert_eq!(
+        after_close(&Some(true), || kernel_holds(&path)),
+        Some(false)
+    );
 }
 
 /// Names are never read: newline homes and absolute aliases keep the same identity.
@@ -255,7 +277,10 @@ fn legacy_inspection_is_independent_of_the_bound_name() {
         let listener = std::os::unix::net::UnixListener::bind(&bound).unwrap();
         assert_eq!(kernel_holds(&probed), Some(true));
         drop(listener);
-        assert_eq!(kernel_holds(&probed), Some(false));
+        assert_eq!(
+            after_close(&Some(true), || kernel_holds(&probed)),
+            Some(false)
+        );
         fs::remove_file(probed).unwrap();
     }
 }

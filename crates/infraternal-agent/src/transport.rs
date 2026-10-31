@@ -1,10 +1,8 @@
 //! Event-driven inherited leg-B socket IO with reusable bounded wire buffers [9][41].
 //!
-//! The caller keeps the inherited fd open for the entire run. This module never
-//! takes ownership or closes the original descriptor: macOS owns a safe duplicate
-//! for `SO_NOSIGPIPE`, while Linux keeps its borrowed-fd fast path. This module uses nix's safe socket syscalls and `AsyncFd` readiness
-//! registration avoid an unsafe fd conversion. Every operation is nonblocking,
-//! regardless of the flags chosen by the spawning server.
+//! Readiness owns a CLOEXEC duplicate of the inherited socket. Closing or
+//! replacing the caller's descriptor cannot redirect this registration. Every
+//! operation is nonblocking regardless of the spawning server's fd flags.
 
 use crate::channel::Channel;
 #[cfg(any(test, feature = "native-streams"))]
@@ -13,29 +11,16 @@ use infraternal_protocol::{
     DecodeError, DecodedMuxedFrame, Frame, MAX_FRAME_LEN, decode_frame, decode_muxed_frame,
     encode_frame_into, encode_muxed_frame_into,
 };
+use infraternal_shim::readiness::{Registration, duplicate_inherited};
 use nix::sys::socket::{MsgFlags, recv, send};
 use std::{
     io,
-    os::fd::{AsRawFd, RawFd},
+    os::fd::{AsRawFd, OwnedFd, RawFd},
 };
-use tokio::io::unix::AsyncFd;
 
-struct Descriptor {
-    fd: RawFd,
-    // Darwin's fdescfs safely duplicates the inherited descriptor so its
-    // socket option can be set through AsFd without unsafe fd conversion.
-    #[cfg(target_os = "macos")]
-    _lease: std::fs::File,
-}
-impl AsRawFd for Descriptor {
-    fn as_raw_fd(&self) -> RawFd {
-        self.fd
-    }
-}
-
-/// An inherited socket; the original descriptor and its blocking flags survive.
+/// An independently owned socket descriptor; the inherited fd flags stay unchanged.
 pub struct Socket {
-    descriptor: AsyncFd<Descriptor>,
+    descriptor: Registration<OwnedFd>,
 }
 impl Socket {
     /// Register readiness once on the runtime's reactor.
@@ -48,24 +33,8 @@ impl Socket {
                 "leg B requires an inherited fd >= 3",
             ));
         }
-        #[cfg(target_os = "macos")]
-        let lease = {
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(format!("/dev/fd/{fd}"))?;
-            socket2::SockRef::from(&file).set_nosigpipe(true)?;
-            file
-        };
         Ok(Self {
-            descriptor: AsyncFd::new(Descriptor {
-                #[cfg(not(target_os = "macos"))]
-                fd,
-                #[cfg(target_os = "macos")]
-                fd: lease.as_raw_fd(),
-                #[cfg(target_os = "macos")]
-                _lease: lease,
-            })?,
+            descriptor: Registration::new(duplicate_inherited(fd)?)?,
         })
     }
 
@@ -76,7 +45,7 @@ impl Socket {
         loop {
             let mut ready = self.descriptor.readable().await?;
             match ready.try_io(|fd| {
-                recv(fd.get_ref().fd, bytes, MsgFlags::MSG_DONTWAIT).map_err(io::Error::from)
+                recv(fd.as_raw_fd(), bytes, MsgFlags::MSG_DONTWAIT).map_err(io::Error::from)
             }) {
                 Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {}
                 Ok(result) => return result,
@@ -94,7 +63,12 @@ impl Socket {
         while sent < bytes.len() {
             let mut ready = self.descriptor.writable().await?;
             match ready.try_io(|fd| {
-                send(fd.get_ref().fd, &bytes[sent..], send_flags()).map_err(io::Error::from)
+                send(
+                    fd.as_raw_fd(),
+                    &bytes[sent..],
+                    MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL,
+                )
+                .map_err(io::Error::from)
             }) {
                 Ok(Ok(0)) => return Err(io::ErrorKind::WriteZero.into()),
                 Ok(Ok(n)) => sent += n,
@@ -104,19 +78,6 @@ impl Socket {
             }
         }
         Ok(())
-    }
-}
-
-// macOS suppresses SIGPIPE through SO_NOSIGPIPE on its owned duplicate;
-// Linux keeps its existing per-write flag and borrowed-fd fast path.
-fn send_flags() -> MsgFlags {
-    #[cfg(target_os = "macos")]
-    {
-        MsgFlags::MSG_DONTWAIT
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL
     }
 }
 
@@ -381,7 +342,7 @@ mod remote_deadline_tests {
             self.socket.write(bytes).await
         }
     }
-    // Retain the owned descriptor separately: Socket borrows it just like fd3.
+    // Retain the caller descriptor separately to exercise the inherited-fd entry point.
     fn pair() -> (
         std::os::unix::net::UnixStream,
         tokio::net::UnixStream,
@@ -467,7 +428,7 @@ mod remote_deadline_tests {
         let (_owned, mut peer, channel) = pair();
         let wire = ping(7);
         peer.write_all(&wire[..1]).await.unwrap();
-        drop(channel.socket.descriptor.readable().await.unwrap());
+        let _ = channel.socket.descriptor.readable().await.unwrap();
         let mut receive = Receive::default();
         {
             let mut pending = std::pin::pin!(receive.next(&channel));
@@ -489,7 +450,7 @@ mod remote_deadline_tests {
         // suffix before resuming proves an expired frame cannot use that order.
         peer.write_all(&wire[1..]).await.unwrap();
         // Prime reactor readiness so the inner read completes on its first poll.
-        drop(channel.socket.descriptor.readable().await.unwrap());
+        let _ = channel.socket.descriptor.readable().await.unwrap();
         let result = receive.next(&channel).await;
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
         assert!(channel.retired.load(Ordering::Relaxed));

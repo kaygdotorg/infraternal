@@ -3,10 +3,7 @@
 
 use std::process::Command;
 
-#[allow(
-    dead_code,
-    reason = "This oracle needs only the shared runtime helper path."
-)]
+#[allow(dead_code)]
 mod common;
 
 #[test]

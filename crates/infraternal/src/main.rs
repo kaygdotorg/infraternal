@@ -10,6 +10,8 @@ mod embedded_cli;
 mod host_remove;
 #[cfg(feature = "release")]
 mod release_cli;
+#[cfg(feature = "process-per-user")]
+mod user_host_cli;
 
 #[cfg(any(
     feature = "remote",
@@ -772,9 +774,10 @@ fn server_args(matches: &ArgMatches) -> Result<ServerArgs, String> {
             remote_ca_dir,
         },
         listen,
-        data: matches
-            .get_one::<String>("data")
-            .map_or_else(|| PathBuf::from("./data"), PathBuf::from),
+        data: server_data_directory(
+            matches.get_one::<String>("data").map(String::as_str),
+            infraternal_status::Roots::detect,
+        ),
         public_origin: matches.get_one::<String>("public_origin").cloned(),
         web_root: matches.get_one::<String>("web_root").map(PathBuf::from),
         tls_cert: matches.get_one::<String>("tls_cert").map(PathBuf::from),
@@ -943,9 +946,10 @@ struct SetupTokenOutput<'a> {
 
 #[cfg(feature = "plugin-server")]
 fn run_setup_token(matches: &ArgMatches, json_output: bool) -> ExitCode {
-    let data_dir = matches
-        .get_one::<String>("data")
-        .map_or_else(|| PathBuf::from("./data"), PathBuf::from);
+    let data_dir = server_data_directory(
+        matches.get_one::<String>("data").map(String::as_str),
+        infraternal_status::Roots::detect,
+    );
     let Ok(runtime) = tokio::runtime::Runtime::new() else {
         return report_failure(
             "server setup-token",
@@ -976,13 +980,70 @@ fn run_setup_token(matches: &ArgMatches, json_output: bool) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(error) => report_failure(
+        Err(SetupTokenReadError::PermissionDenied) => {
+            setup_token_permission_failure(matches, json_output)
+        }
+        Err(SetupTokenReadError::Unavailable(error)) => report_failure(
             "server setup-token",
             "The setup capability is not available.",
             error.to_owned(),
             json_output,
         ),
     }
+}
+
+/// Resolve the server's explicit, installed-service, and fallback data locations in that order.
+#[cfg(feature = "plugin-server")]
+fn server_data_directory(
+    explicit: Option<&str>,
+    roots: impl FnOnce() -> infraternal_status::Roots,
+) -> PathBuf {
+    if let Some(explicit) = explicit {
+        return PathBuf::from(explicit);
+    }
+
+    infraternal_status::server_data_directory(&roots()).unwrap_or_else(|| PathBuf::from("./data"))
+}
+
+/// Keep the non-JSON permission diagnostic to one actionable line.
+#[cfg(feature = "plugin-server")]
+fn setup_token_permission_failure(matches: &ArgMatches, json_output: bool) -> ExitCode {
+    let explicit = matches.get_one::<String>("data");
+    let command = setup_token_sudo_command(explicit.map(String::as_str));
+    if json_output {
+        return report_failure(
+            "server setup-token",
+            "The server data directory is not readable.",
+            format!("run: {command}"),
+            true,
+        );
+    }
+    eprintln!("The server data directory is not readable. Run: {command}");
+    ExitCode::from(Exit::Failed.code())
+}
+
+/// Format the actual action command, preserving an explicit path as a shell-safe argument.
+#[cfg(feature = "plugin-server")]
+fn setup_token_sudo_command(explicit_data: Option<&str>) -> String {
+    let mut command = infraternal_server::cli::setup_token_command(true);
+    if let Some(data) = explicit_data {
+        command.push_str(" --data ");
+        command.push_str(&shell_quote(data));
+    }
+    command
+}
+
+/// Quote a path as one POSIX shell argument when the permission diagnostic is copied.
+#[cfg(feature = "plugin-server")]
+fn shell_quote(argument: &str) -> String {
+    if !argument.is_empty()
+        && argument
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_./-".contains(&byte))
+    {
+        return argument.to_owned();
+    }
+    format!("'{}'", argument.replace('\'', "'\\''"))
 }
 
 /// Share cold command startup through the existing reactor regardless of result type [243].
@@ -1148,6 +1209,15 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    #[cfg(feature = "process-per-user")]
+    if matches.get_one::<i64>("host_sessions").is_some() {
+        return user_host_cli::run(matches);
+    }
+    #[cfg(feature = "process-per-user")]
+    if matches.get_one::<String>("host_accounting").is_some() {
+        eprintln!("--host-accounting requires --host-sessions");
+        return ExitCode::from(2);
+    }
     match options.run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -1272,12 +1342,81 @@ mod failure_data_tests {
     }
 }
 
+#[cfg(all(test, feature = "plugin-server"))]
+mod server_data_resolution_tests {
+    //! Checks the CLI's explicit, installed-service and ordinary fallback precedence.
+
+    use super::server_data_directory;
+    use infraternal_status::Roots;
+    use std::{fs, path::PathBuf};
+
+    fn roots(system_units: Vec<PathBuf>) -> Roots {
+        Roots {
+            system_units,
+            user_units: None,
+            run_dir: None,
+            data_dirs: Vec::new(),
+            net_class: PathBuf::new(),
+        }
+    }
+
+    #[test]
+    fn explicit_data_directory_wins_over_the_installed_service() {
+        assert_eq!(
+            server_data_directory(Some("/srv/explicit"), || {
+                panic!("explicit data path must not scan installed services")
+            }),
+            PathBuf::from("/srv/explicit")
+        );
+    }
+
+    #[test]
+    fn installed_service_data_directory_is_selected_when_no_override_is_given() {
+        let root = std::env::temp_dir().join(format!("setup-data-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("system unit fixture");
+        fs::write(
+            root.join("infraternal-server.service"),
+            "[Service]\nExecStart=/usr/bin/infraternal server --data /srv/installed\n",
+        )
+        .expect("write system unit fixture");
+
+        assert_eq!(
+            server_data_directory(None, || roots(vec![root.clone()])),
+            PathBuf::from("/srv/installed")
+        );
+        fs::remove_dir_all(root).expect("remove system unit fixture");
+    }
+
+    #[test]
+    fn missing_install_uses_the_existing_default_directory() {
+        assert_eq!(
+            server_data_directory(None, || roots(Vec::new())),
+            PathBuf::from("./data")
+        );
+    }
+}
+
 fn print_result<T: Serialize>(result: &CommandResult<T>, json_output: bool, to_stderr: bool) {
     cli::output::print(result, json_output, to_stderr && !json_output);
 }
 
+/// Preserve access refusal separately from sanitized, non-secret protocol failures.
+#[cfg(feature = "plugin-server")]
+#[derive(Debug)]
+enum SetupTokenReadError {
+    PermissionDenied,
+    Unavailable(&'static str),
+}
+
+#[cfg(feature = "plugin-server")]
+impl From<&'static str> for SetupTokenReadError {
+    fn from(message: &'static str) -> Self {
+        Self::Unavailable(message)
+    }
+}
+
 #[cfg(all(unix, feature = "plugin-server"))]
-async fn read_setup_token(data_dir: &Path) -> Result<String, &'static str> {
+async fn read_setup_token(data_dir: &Path) -> Result<String, SetupTokenReadError> {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::UnixStream,
@@ -1285,7 +1424,13 @@ async fn read_setup_token(data_dir: &Path) -> Result<String, &'static str> {
 
     let mut socket = UnixStream::connect(data_dir.join("setup-token.sock"))
         .await
-        .map_err(|_| "no active first-run token socket")?;
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::PermissionDenied {
+                SetupTokenReadError::PermissionDenied
+            } else {
+                SetupTokenReadError::Unavailable("no active first-run token socket")
+            }
+        })?;
     socket
         .write_all(b"GET\n")
         .await
@@ -1304,14 +1449,14 @@ async fn read_setup_token(data_dir: &Path) -> Result<String, &'static str> {
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
     {
-        return Err("no active first-run token");
+        return Err("no active first-run token".into());
     }
-    String::from_utf8(response[..43].to_vec()).map_err(|_| "invalid local token response")
+    String::from_utf8(response[..43].to_vec()).map_err(|_| "invalid local token response".into())
 }
 
 #[cfg(all(not(unix), feature = "plugin-server"))]
-async fn read_setup_token(_data_dir: &Path) -> Result<String, &'static str> {
-    Err("local token retrieval requires a Unix socket")
+async fn read_setup_token(_data_dir: &Path) -> Result<String, SetupTokenReadError> {
+    Err("local token retrieval requires a Unix socket".into())
 }
 
 #[cfg(feature = "plugin-server")]
@@ -1353,19 +1498,43 @@ mod setup_token_tests {
     //! Verifies the explicit CLI handoff uses the private local request protocol.
 
     use super::read_setup_token;
+    use std::{
+        os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+        path::{Path, PathBuf},
+    };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::UnixListener,
     };
 
+    struct PrivateDirectory(PathBuf);
+
+    impl PrivateDirectory {
+        /// Keep Unix socket fixture paths short even when `TMPDIR` is nested deeply.
+        fn new() -> Self {
+            let path = Path::new("/tmp").join(format!("itok-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).expect("create token test directory");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .expect("set token test directory permissions");
+            Self(path)
+        }
+    }
+
+    impl Drop for PrivateDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[tokio::test]
     async fn setup_token_command_reads_only_the_expected_socket_response() {
-        let data_dir =
-            std::env::temp_dir().join(format!("infraternal-token-cli-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&data_dir);
-        std::fs::create_dir_all(&data_dir).expect("create token test directory");
-        let listener =
-            UnixListener::bind(data_dir.join("setup-token.sock")).expect("bind token test socket");
+        let data_dir = PrivateDirectory::new();
+        let socket = data_dir.0.join("setup-token.sock");
+        assert!(
+            socket.as_os_str().as_bytes().len() < 108,
+            "token test socket path exceeds the Unix socket path limit"
+        );
+        let listener = UnixListener::bind(socket).expect("bind token test socket");
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept token request");
             let mut request = [0; 4];
@@ -1380,11 +1549,12 @@ mod setup_token_tests {
                 .expect("write token response");
         });
         assert_eq!(
-            read_setup_token(&data_dir).await.expect("read setup token"),
+            read_setup_token(&data_dir.0)
+                .await
+                .expect("read setup token"),
             "A".repeat(43)
         );
         server.await.expect("token test socket server");
-        std::fs::remove_dir_all(data_dir).expect("remove token test directory");
     }
 }
 
@@ -1589,9 +1759,10 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
         }
         #[cfg(feature = "plugin-server")]
         if action.cli_handler == CliHandler::ServerRestart {
-            let data = matches
-                .get_one::<String>("data")
-                .map_or_else(|| PathBuf::from("./data"), PathBuf::from);
+            let data = server_data_directory(
+                matches.get_one::<String>("data").map(String::as_str),
+                infraternal_status::Roots::detect,
+            );
             let options = restart::Options {
                 binary: matches.get_one::<String>("binary").map(PathBuf::from),
             };

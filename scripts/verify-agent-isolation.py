@@ -19,7 +19,7 @@ def run(binary):
         client.open()
         stalled = client.id
         client.attach()
-        client.until(b'shim-test')
+        client.wait_for_shell()
         cursor = client.out
         client.send(1, 0x0f, struct.pack('<H', 0) + varint(4) + b'done')
         # Open a sibling before holding the first session's handshake.

@@ -15,6 +15,7 @@ with tempfile.TemporaryDirectory(prefix="remap-test-", dir=SCRATCH) as directory
     for name in ("short", "a-deliberately-longer-checkout-location"):
         checkout = Path(directory) / name
         (checkout / ".cargo").mkdir(parents=True)
+        shutil.copy2(ROOT / ".cargo/rust-remap-flags.sh", checkout / ".cargo/rust-remap-flags.sh")
         shutil.copy2(ROOT / ".cargo/rustc.sh", checkout / ".cargo/rustc.sh")
         shutil.copy2(ROOT / "rust-toolchain.toml", checkout / "rust-toolchain.toml")
         source = checkout / "source.rs"

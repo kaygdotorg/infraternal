@@ -44,9 +44,9 @@ use tower::ServiceExt;
 
 pub(crate) static SERIAL: Mutex<()> = Mutex::const_new(());
 
-/// Model a committed revocation notification with a fixed signal and no authority data.
-pub(crate) fn publish_revocation(auth: &Auth) {
-    auth.revocations.send_replace(());
+/// Model a committed account revocation without disclosing authority data.
+pub(crate) fn publish_revocation(auth: &Auth, user: &str) {
+    auth.revocations.publish(user, None);
 }
 
 #[path = "socket_clock.rs"]
@@ -499,7 +499,10 @@ async fn setup_restart_rotation_expiry_and_parallel_redemption() {
 async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
-    let events = f.auth.revocation_events();
+    let events = f.auth.revocation_events(&f.user);
+    let other_revocations = f.auth.revocation_events("other-account");
+    let mut recovery_events = f.auth.recovery_events(&f.user);
+    let other_recovery = f.auth.recovery_events("other-account");
     assert!(
         f.auth
             .recovery_start(
@@ -551,14 +554,18 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
         .await
         .unwrap();
     let start = f.auth.legacy_ready(&token, NOW + 2 * DAY).await.unwrap();
+    recovery_events.borrow_and_update();
     let session = finish_replacement(&f, &start, &second, NOW + 2 * DAY).await;
+    assert!(recovery_events.has_changed().unwrap());
+    assert!(!other_revocations.has_changed().unwrap());
+    assert!(!other_recovery.has_changed().unwrap());
     assert!(
         events.has_changed().unwrap(),
         "recovery failed to wake live sockets"
     );
     assert!(
         f.auth
-            .live_expiry(&f.session, &f.user, NOW + 2 * DAY)
+            .live_expiry(&f.session, &f.user, NOW + 2 * DAY, ())
             .await
             .is_err()
     );
@@ -2212,15 +2219,29 @@ async fn authenticated_prf_metadata_preserves_legacy_envelopes() {
     );
 }
 
-/// Public status reveals exactly one flag; HTTP resident login establishes the resolved session.
+/// Public status reveals the first-run state and scope-correct local command.
 #[tokio::test]
 async fn public_status_and_discoverable_http_login() {
     let _guard = SERIAL.lock().await;
     let (auth, _) = empty().await;
-    let app = router(auth);
+    let app = router(auth.clone());
     let (status, headers, body) = http_post_json(&app, "status", json!({})).await;
     assert_eq!(status, axum::http::StatusCode::OK);
-    assert_eq!(body, json!({"setup_required":true}));
+    assert_eq!(
+        body,
+        json!({
+            "setup_required":true,
+            "setup_token_command":"infraternal server setup-token",
+        })
+    );
+    let system_app = router(auth.with_system_service(true));
+    assert_eq!(
+        http_post_json(&system_app, "status", json!({})).await.2,
+        json!({
+            "setup_required":true,
+            "setup_token_command":"sudo infraternal server setup-token",
+        })
+    );
     assert_eq!(headers[axum::http::header::CACHE_CONTROL], "no-store");
     assert_eq!(
         http_post_json(&app, "status", json!({"extra":true}))
@@ -2232,7 +2253,10 @@ async fn public_status_and_discoverable_http_login() {
     let app = router(f.auth.clone());
     assert_eq!(
         http_post_json(&app, "status", json!({})).await.2,
-        json!({"setup_required":false})
+        json!({
+            "setup_required":false,
+            "setup_token_command":"infraternal server setup-token",
+        })
     );
     let (status, start_headers, start) = http_post_json(&app, "login-start", json!({})).await;
     assert_eq!(status, axum::http::StatusCode::OK);
@@ -3380,3 +3404,50 @@ mod remote_removal_tests;
 mod terminal_refusal_tests;
 #[path = "tls_tests.rs"]
 mod tls_tests;
+/// Keep the canonical public-status result documentation aligned with the HTTP boundary.
+#[tokio::test]
+async fn public_status_result_fields_are_listed_in_the_auth_contract() {
+    let _guard = SERIAL.lock().await;
+    let (auth, _) = empty().await;
+    let app = router(auth);
+    let (status, _, body) = http_post_json(&app, "status", json!({})).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let contract = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/keywrap.md"
+    ));
+    let result_row = contract
+        .lines()
+        .find(|line| line.starts_with("| status |"))
+        .expect("canonical public status result");
+    for field in body.as_object().expect("public status object").keys() {
+        assert!(
+            result_row.contains(field.as_str()),
+            "public status field {field} is absent from the canonical result contract"
+        );
+    }
+}
+
+/// One logout must not make unrelated accounts contend for socket authority reads.
+#[tokio::test]
+async fn account_logout_does_not_notify_another_account() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let mut own = f.auth.revocation_events(&f.user);
+    let other = f.auth.revocation_events("other-account");
+    f.auth.logout(&f.session).await.unwrap();
+    assert!(own.has_changed().unwrap());
+    assert!(matches!(own.borrow_and_update().as_deref(), Some(hint) if hint == hash(&f.session)));
+    f.auth.logout(&f.session).await.unwrap();
+    assert!(
+        !own.has_changed().unwrap(),
+        "a repeated logout emitted a change"
+    );
+    assert!(
+        !other.has_changed().unwrap(),
+        "unrelated account was notified"
+    );
+}
+
+#[path = "logout_commit_tests.rs"]
+mod logout_commit;

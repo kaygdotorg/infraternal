@@ -5,7 +5,10 @@
 use std::{
     fs,
     io::{Read, Write},
-    os::unix::{fs::PermissionsExt, net::UnixListener},
+    os::unix::{
+        fs::PermissionsExt,
+        net::{UnixListener, UnixStream},
+    },
     process::Command,
     thread,
 };
@@ -45,5 +48,238 @@ fn setup_output_keeps_legacy_and_versioned_readers() {
     assert!(
         value["token"].as_str() == Some(sample.as_str()),
         "legacy reader"
+    );
+}
+
+#[test]
+fn setup_token_finds_the_data_dir_from_a_system_service_without_flags() {
+    let root = std::env::temp_dir().join(format!("it-setup-unit-{}", std::process::id()));
+    let data = root.join("server-state");
+    let units = root.join("systemd");
+    fs::create_dir_all(&data).expect("private fixture directory");
+    fs::create_dir_all(&units).expect("system unit fixture directory");
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).expect("private permissions");
+    let socket_path = data.join("setup-token.sock");
+    let listener = UnixListener::bind(&socket_path).expect("fixture socket");
+    let binary = env!("CARGO_BIN_EXE_infraternal");
+    fs::write(
+        units.join("custom-server.service"),
+        format!(
+            "[Service]\nExecStart=\"{binary}\" \"server\" \"--data\" \"{}\"\n",
+            data.display()
+        ),
+    )
+    .expect("write system service fixture");
+    let reply = "B".repeat(43);
+    let worker_reply = reply.clone();
+    let worker = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("local request");
+        let mut request = [0; 4];
+        if socket.read_exact(&mut request).is_ok() {
+            assert_eq!(&request, b"GET\n");
+            socket
+                .write_all(worker_reply.as_bytes())
+                .expect("fixture reply");
+            socket.write_all(b"\n").expect("reply delimiter");
+        }
+    });
+    let output = Command::new(binary)
+        .args(["server", "setup-token"])
+        .current_dir(&root)
+        .env_clear()
+        .env("INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR", &units)
+        .output()
+        .expect("real setup-token CLI");
+    if !output.status.success() {
+        // Wake the local fixture so a red test still leaves no blocked worker.
+        let _ = UnixStream::connect(&socket_path);
+    }
+    worker.join().expect("fixture worker");
+    fs::remove_dir_all(&root).expect("fixture cleanup");
+    assert!(
+        output.status.success(),
+        "setup-token must use the installed system service data directory"
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains(&reply));
+}
+
+#[test]
+fn unreadable_system_service_data_prints_one_sudo_command_line() {
+    let root = std::env::temp_dir().join(format!("it-setup-denied-{}", std::process::id()));
+    let data = root.join("server-state");
+    let units = root.join("systemd");
+    fs::create_dir_all(&data).expect("private fixture directory");
+    fs::create_dir_all(&units).expect("system unit fixture directory");
+    fs::write(
+        units.join("custom-server.service"),
+        format!(
+            "[Service]\nExecStart=\"{}\" \"server\" \"--data\" \"{}\"\n",
+            env!("CARGO_BIN_EXE_infraternal"),
+            data.display()
+        ),
+    )
+    .expect("write system service fixture");
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o000))
+        .expect("make service data unreadable");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_infraternal"))
+        .args(["server", "setup-token"])
+        .current_dir(&root)
+        .env_clear()
+        .env("INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR", &units)
+        .output();
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o700))
+        .expect("restore fixture permissions");
+    fs::remove_dir_all(&root).expect("remove setup fixture");
+    let output = output.expect("real setup-token CLI");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert_eq!(output.stdout.as_slice(), b"");
+    assert_eq!(stderr.lines().count(), 1, "stderr must contain one line");
+    assert_eq!(
+        stderr.trim(),
+        "The server data directory is not readable. Run: sudo infraternal server setup-token"
+    );
+}
+#[test]
+fn setup_token_reads_a_traversable_directory_without_listing_access() {
+    let root = std::path::PathBuf::from(std::env::var_os("HOME").expect("fixture home"))
+        .join(".cache/codex-scratch/review-setup-token-data/fixtures")
+        .join(format!("execute-{}", std::process::id()));
+    let data = root.join("data");
+    fs::create_dir_all(&data).expect("create socket fixture");
+    let socket_path = data.join("setup-token.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind fixture socket");
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
+        .expect("set private socket permissions");
+    let worker = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("local connection");
+        let mut request = [0; 4];
+        if socket.read_exact(&mut request).is_ok() {
+            assert_eq!(&request, b"GET\n");
+            socket
+                .write_all("C".repeat(43).as_bytes())
+                .expect("synthetic response");
+            socket.write_all(b"\n").expect("response delimiter");
+        }
+    });
+    // Connecting to a known socket requires directory traversal, not listing.
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o300))
+        .expect("set traversal permissions");
+    let output = Command::new(env!("CARGO_BIN_EXE_infraternal"))
+        .args(["server", "setup-token", "--data"])
+        .arg(&data)
+        .output()
+        .expect("run setup-token");
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o700))
+        .expect("restore directory permissions");
+    if !output.status.success() {
+        let _ = UnixStream::connect(&socket_path);
+    }
+    worker.join().expect("finish socket fixture");
+    fs::remove_dir_all(&root).expect("remove fixture");
+    assert!(
+        output.status.success(),
+        "a reachable private socket must remain usable without directory listing access"
+    );
+}
+#[test]
+fn setup_token_permission_hint_covers_a_private_socket_in_a_readable_directory() {
+    let root = std::path::PathBuf::from(std::env::var_os("HOME").expect("fixture home"))
+        .join(".cache/codex-scratch/review-setup-token-data/fixtures")
+        .join(format!("socket-{}", std::process::id()));
+    fs::create_dir_all(&root).expect("create readable fixture directory");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755))
+        .expect("set readable directory permissions");
+    let socket_path = root.join("setup-token.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind fixture socket");
+    // A different service owner can list the directory while the private socket refuses access.
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o000))
+        .expect("refuse socket access");
+    let output = Command::new(env!("CARGO_BIN_EXE_infraternal"))
+        .args(["server", "setup-token", "--data"])
+        .arg(&root)
+        .output()
+        .expect("run setup-token");
+    drop(listener);
+    fs::remove_dir_all(&root).expect("remove fixture");
+    assert!(!output.status.success());
+    assert_eq!(output.stdout.as_slice(), b"");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("sudo infraternal server setup-token"),
+        "a refused socket connection must identify the elevated command even when its directory is readable"
+    );
+}
+#[test]
+fn setup_token_discovers_a_service_installed_through_a_versioned_binary_symlink() {
+    let root = std::path::PathBuf::from(std::env::var_os("HOME").expect("fixture home"))
+        .join(".cache/codex-scratch/review-setup-token-data/fixtures")
+        .join(format!("r-{}", std::process::id()));
+    let data = root.join("d");
+    let units = root.join("u");
+    fs::create_dir_all(&data).expect("create data fixture");
+    fs::create_dir_all(&units).expect("create unit fixture");
+    let versioned = root.join("infraternal-versioned");
+    fs::hard_link(env!("CARGO_BIN_EXE_infraternal"), &versioned)
+        .or_else(|_| fs::copy(env!("CARGO_BIN_EXE_infraternal"), &versioned).map(|_| ()))
+        .expect("create versioned executable fixture");
+    let alias = root.join("infraternal");
+    std::os::unix::fs::symlink(&versioned, &alias).expect("link executable fixture");
+    let plan = Command::new(&alias)
+        .args([
+            "--json",
+            "server",
+            "init",
+            "--system",
+            "--dry-run",
+            "--data",
+        ])
+        .arg(&data)
+        .current_dir(&root)
+        .env_clear()
+        .env("INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR", &units)
+        .output()
+        .expect("generate service plan");
+    assert!(
+        plan.status.success(),
+        "the installer must accept the executable symlink"
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).expect("service plan JSON");
+    let text = plan["data"]["plan"].as_str().expect("service plan");
+    let unit = &text[text.find("[Unit]").expect("unit header")
+        ..text.find("\nWould run:").expect("unit boundary")];
+    fs::write(units.join("infraternal-server.service"), unit).expect("write generated unit");
+    let socket_path = data.join("setup-token.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind fixture socket");
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
+        .expect("set private socket permissions");
+    let worker = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("local connection");
+        let mut request = [0; 4];
+        if socket.read_exact(&mut request).is_ok() {
+            assert_eq!(&request, b"GET\n");
+            socket
+                .write_all("D".repeat(43).as_bytes())
+                .expect("synthetic response");
+            socket.write_all(b"\n").expect("response delimiter");
+        }
+    });
+    let output = Command::new(&alias)
+        .args(["server", "setup-token"])
+        .current_dir(&root)
+        .env_clear()
+        .env("INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR", &units)
+        .output()
+        .expect("run setup-token");
+    if !output.status.success() {
+        let _ = UnixStream::connect(&socket_path);
+    }
+    worker.join().expect("finish socket fixture");
+    fs::remove_dir_all(&root).expect("remove fixture");
+    assert!(
+        output.status.success(),
+        "the installer-generated service must be discoverable through a versioned executable symlink"
     );
 }

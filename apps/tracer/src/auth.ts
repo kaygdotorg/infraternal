@@ -55,11 +55,21 @@ export class AuthError extends Error {
   }
 }
 
-/** Reads only the public first-run flag before choosing an access screen. */
-export async function checkStatus(): Promise<boolean> {
-  const status = await post<{ setup_required: unknown }>("status", {});
+/** Public first-run state and its matching local setup-token command. */
+export interface AuthStatus {
+  setupRequired: boolean;
+  setupTokenCommand: string;
+}
+
+/** Reads the public first-run state before choosing an access screen. */
+export async function checkStatus(): Promise<AuthStatus> {
+  const status = await post<{ setup_required: unknown; setup_token_command?: unknown }>("status", {});
   if (typeof status.setup_required !== "boolean") throw new AuthError("The server's answer could not be used. Try again.");
-  return status.setup_required;
+  const setupTokenCommand = status.setup_token_command ?? "infraternal server setup-token";
+  if (setupTokenCommand !== "infraternal server setup-token" && setupTokenCommand !== "sudo infraternal server setup-token") {
+    throw new AuthError("The server's setup command could not be used. Try again.");
+  }
+  return { setupRequired: status.setup_required, setupTokenCommand };
 }
 
 /** Validates first-run authority without starting or consuming owner enrollment. */
@@ -223,7 +233,7 @@ async function post<Result = unknown>(action: string, body: unknown, headers: Re
   if (!response.ok) {
     const message = response.status >= 500 ? "The server could not complete the request. Try again."
       : response.status === 429 ? "Too many attempts. Wait a minute and try again."
-      : action === "setup-check" && response.status === 401 ? "That token doesn't match. Run `infraternal server setup-token` on the server."
+      : action === "setup-check" && response.status === 401 ? "That token doesn't match. Run the command shown on the setup screen."
       : action === "setup-start" && response.status === 401 ? "The setup token is invalid or expired. Get the current token from the server."
       : action === "setup-start" && response.status === 409 ? "That username is already in use. Choose another username."
       : action === "login-finish" ? "This passkey could not sign in. Try your registered passkey."

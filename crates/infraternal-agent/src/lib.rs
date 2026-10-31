@@ -37,6 +37,22 @@ pub mod transport;
 #[cfg(any(test, feature = "native-streams"))]
 pub mod wire;
 
+/// Resolve the per-job root used by tests that bind local socket fixtures.
+/// The configured root keeps socket names short while `HOME` stays absolute
+/// for tests that validate account paths. Standalone runs retain their cache fallback.
+#[cfg(test)]
+pub(crate) fn test_state_root() -> std::path::PathBuf {
+    let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
+        || {
+            std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME for test scratch"))
+                .join(".cache/codex-scratch/remote-agents")
+        },
+        std::path::PathBuf::from,
+    );
+    std::fs::create_dir_all(&root).expect("prepare isolated test state root");
+    root
+}
+
 /// Run the standalone inherited-fd daemon after synchronous CLI dispatch [9][13].
 /// Its shim children exec the synchronous hidden CLI arm before they fork; the
 /// host daemon's current-thread reactor never runs inside those shim processes.

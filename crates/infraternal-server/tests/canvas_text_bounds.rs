@@ -1,4 +1,4 @@
-//! Matches v1 browser string bounds and keeps recovered names within the same UTF-16 limit [180].
+//! Matches v1 browser string bounds and keeps imported names within the same UTF-16 limit [180].
 #![cfg(feature = "canvas")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use infraternal_plugin_canvas::model::text;
@@ -10,7 +10,7 @@ fn text_uses_the_browser_utf16_bound() {
     assert!(!text(&"😀".repeat(101)));
 }
 #[tokio::test]
-async fn recovered_name_respects_the_browser_utf16_bound() {
+async fn imported_name_respects_the_browser_utf16_bound() {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -18,6 +18,10 @@ async fn recovered_name_respects_the_browser_utf16_bound() {
         .unwrap();
     sqlx::raw_sql("CREATE TABLE users(id TEXT PRIMARY KEY); INSERT INTO users VALUES('a'); CREATE TABLE terminal_sessions(id BLOB PRIMARY KEY,user_id TEXT);").execute(&pool).await.unwrap();
     sqlx::raw_sql(include_str!("../migrations/0028_canvas_layout.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0030_canvas_receipt_count.sql"))
         .execute(&pool)
         .await
         .unwrap();
@@ -30,7 +34,7 @@ async fn recovered_name_respects_the_browser_utf16_bound() {
         )
         .await
         .unwrap();
-    doc["views"] = json!([{"id":"console","kind":"console","name":"😀".repeat(100),"cell":{"x":0,"y":0},"layout":{"type":"tiled","columns":[]}}]);
+    doc["views"] = json!([{"id":"console","kind":"console","name":"😀".repeat(100),"cell":{"x":0,"y":0},"layout":{"type":"tiled","columns":[{"id":"c","weight":1,"windows":[{"id":"w","target":{"type":"settings","section":"appearance"}}]}]}}]);
     store
         .initialize(
             "a",

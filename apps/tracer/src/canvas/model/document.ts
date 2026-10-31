@@ -55,7 +55,7 @@ export function toDocument(views: readonly ViewModel[], metrics: Metrics, revisi
   return {
     format: FORMAT, version: VERSION, revision,
     views: views.map((v): DocView => ({
-      id: v.id, kind: v.id, name: v.name, cell: { x: Math.round(v.x / CELL), y: Math.round(v.y / CELL) },
+      id: v.id, kind: v.id, name: v.name, cell: { x: Math.round((v.home ?? v).x / CELL), y: Math.round((v.home ?? v).y / CELL) },
       layout: v.layout === "graph"
         ? { type: "graph", pinned: v.graphPins ? structuredClone(v.graphPins) : Object.fromEntries(v.nodes.filter((n) => n.pinned).map((n) => [n.id, { x: Math.round(n.x), y: Math.round(n.y) }])) }
         : {

@@ -268,7 +268,7 @@ test("an unsupported host cannot be retried; an install failure can", async ({ p
   await expect(page.getByText("restore access", { exact: false })).toHaveCount(0);
   await expect(page.getByText("Automatic cleanup may still need to finish.", { exact: false })).toHaveCount(0);
   await page.locator(".ah-details summary").click();
-  await expect(page.locator(".ah-details pre")).toContainText("Failed step: Start the host service");
+  await expect(page.locator(".ah-details pre")).toContainText("Failed step: Start infraternal on the host");
   await page.screenshot({ path: tracerEvidencePath("addhost-169", "failure-details.png") });
   await inWizard(page, "Retry").click();
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
@@ -447,9 +447,9 @@ for (const binary of ["arm64", "x86_64"] as const) for (const viewport of [{ wid
     await page.setViewportSize(viewport);
     await openWizard(page);
     await addTyped(page, "broken.lab");
-    await expect(wizard(page)).toContainText(`Get the ${binary} binary: the binary does not match the signed checksum.`, { timeout: 15_000 });
+    await expect(wizard(page)).toContainText(`Download infraternal (${binary}): the binary does not match the signed checksum.`, { timeout: 15_000 });
     await wizard(page).locator(".ah-details summary").click();
-    await expect(wizard(page).locator(".ah-details pre")).toContainText(`Failed step: Get the ${binary} binary`);
+    await expect(wizard(page).locator(".ah-details pre")).toContainText(`Failed step: Download infraternal (${binary})`);
     const screenshot = info.outputPath(`release-verification-${viewport.width}.png`);
     await page.screenshot({ path: screenshot });
     await info.attach("release verification refusal", { path: screenshot, contentType: "image/png" });

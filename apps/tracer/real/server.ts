@@ -56,6 +56,8 @@ export interface Bridge {
   acked: Map<number, bigint>;
   /** Completed real PTY replays, including automatic rebinding on the same browser socket. */
   replays: number;
+  /** Counts marked renderer answers without retaining terminal input. */
+  replyAttempts?: number;
   /** Close frames the client sent (stream detaches). */
   detached: number[];
   /** Control-stream actions and subscriptions: what the browser asked (`up`) and what the server answered (`down`). */
@@ -116,12 +118,16 @@ const text = new TextDecoder();
  */
 export async function startRealServer(options: {
   latencyMs?: number;
+  /** Delay the real protocol upgrade so cached renderers can register before socket open (#257). */
+  upgradeDelayMs?: number;
   /** Record public control timestamps only for an explicitly enabled VM measurement. */
   timedControls?: boolean;
   /** Explicit native-window measurement only; bootstrap messages never enter it. */
   onDesktopStage?: (receipt: DesktopStage) => void;
   /** Explicit reconnect diagnosis only; these are same-host handling intervals. */
   onProbeStage?: (receipt: ProbeStage) => void;
+  /** Retain every stream Close for functional ordering assertions without timing traces. */
+  recordCloses?: boolean;
   /** The bridge does not decode or keep the server's output (benchmarks with busy terminals). */
   lean?: boolean;
   address?: string;
@@ -218,14 +224,21 @@ export async function startRealServer(options: {
   const activeBrowsers = new Set<WebSocket>();
   const front = new WebSocketServer({ noServer: true });
   let browserOfflineUntil = 0;
-  tls.on("upgrade", (request, socket, head) => {
+  tls.on("upgrade", async (request, socket, head) => {
     if (Date.now() < browserOfflineUntil) { socket.destroy(); return; }
+    // Frame delay starts after open. This separate fixture control models the handshake ordering;
+    // every subsequent byte still travels through the real server and PTY unchanged.
+    if (request.url === "/v1/ws" && options.upgradeDelayMs) {
+      await new Promise((resolve) => setTimeout(resolve, options.upgradeDelayMs));
+      if (socket.destroyed) return;
+    }
     front.handleUpgrade(request, socket, head, (browser) => {
       activeBrowsers.add(browser);
       const upstream = new WebSocket(backend.replace("http:", "ws:") + (request.url ?? "/v1/ws"), { headers: { Origin: origin, Cookie: request.headers.cookie ?? "" } });
-      const bridge: Bridge = { id: bridges.length, closed: false, attached: new Map(), output: new Map(), acked: new Map(), replays: 0, detached: [], control: [], cookie: request.headers.cookie ?? "" };
+      const bridge: Bridge = { id: bridges.length, closed: false, attached: new Map(), output: new Map(), acked: new Map(), replays: 0, replyAttempts: 0, detached: [], control: [], cookie: request.headers.cookie ?? "" };
       // Harness stage markers contain only fixed labels and timestamps, never terminal text.
       bridge.markers = [];
+      if (options.recordCloses) bridge.terminalCloses = [];
       if (process.env.REAL_OUTPUT_TIMES === "1") {
         bridge.outputTimes = [];
         bridge.outputRanges = [];
@@ -265,6 +278,7 @@ export async function startRealServer(options: {
             console.error(`FRAME ${Date.now() % 100000} b${bridge.id} up s${stream} ${f.type}${detail}`);
           }
           if (f.type === "Hello" && stream === 0) bridge.helloResume = (f.caps & 1n) !== 0n;
+          if (f.type === "Input" && f.replyTo !== undefined) bridge.replyAttempts = (bridge.replyAttempts ?? 0) + 1;
           if (f.type === "AttachTerm") {
             bridge.attached.set(stream, [...(bridge.attached.get(stream) ?? []), Buffer.from(f.sessionId).toString("hex")]);
             bridge.attachTimes?.push({ stream, at: Date.now() });

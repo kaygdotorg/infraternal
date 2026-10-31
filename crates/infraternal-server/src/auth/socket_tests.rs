@@ -924,3 +924,16 @@ mod review_mobile_visibility;
 #[cfg(all(feature = "canvas", feature = "mesh"))]
 #[path = "socket_tests/canvas.rs"]
 mod canvas;
+
+#[path = "socket_tests/review_authority_cap.rs"]
+mod review_authority_cap;
+
+#[cfg(feature = "remote")]
+#[path = "socket_tests/review_busy_wake.rs"]
+mod review_busy_wake;
+
+#[path = "socket_tests/per_account_revocation.rs"]
+mod per_account_revocation;
+
+#[path = "socket_tests/review_account_scope.rs"]
+mod review_account_scope;

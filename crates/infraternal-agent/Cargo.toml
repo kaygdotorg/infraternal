@@ -6,10 +6,10 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-# Generic plugin media lanes are absent from terminal-only production builds (#146).
+# Generic plugin media lanes stay absent from terminal-only builds (#146).
 native-streams = ["infraternal-plugin-api/native-streams", "remote", "infraternal-plugin-remote/native-streams"]
-remote = ["infraternal-plugin-api/native-wire", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "dep:openssl", "dep:tokio-openssl", "dep:quinn"]
 desktop = ["native-streams", "dep:infraternal-plugin-desktop"]
+remote = ["infraternal-plugin-api/native-wire", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "dep:openssl", "dep:tokio-openssl", "dep:quinn"]
 default = ["plugin-host-facts"]
 plugin-host-facts = ["dep:infraternal-plugin-host-facts"]
 
@@ -18,13 +18,14 @@ mesh = ["dep:infraternal-plugin-mesh"]
 
 [dependencies]
 infraternal-plugin-desktop = { path = "../plugins/desktop", version = "0.1.0", default-features = false, features = ["source"], optional = true }
-infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
 infraternal-plugin-host-facts = { path = "../plugins/host-facts", version = "0.1.0", default-features = false, features = ["agent"], optional = true }
 
 infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", optional = true, default-features = false }
 bytes.workspace = true
 infraternal-protocol.workspace = true
-nix.workspace = true
+infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
+infraternal-shim = { workspace = true, features = ["async-fd"] }
+nix = { workspace = true, features = ["inotify", "event"] }
 tokio = { workspace = true, features = ["net", "io-util", "process", "time"] }
 uuid.workspace = true
 serde.workspace = true
@@ -34,27 +35,22 @@ openssl = { workspace = true, optional = true }
 tokio-openssl = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-# Reuse Tokio's existing OS socket adapter for safe SO_NOSIGPIPE configuration.
-socket2 = { version = "0.6", features = ["all"] }
-
 [target.'cfg(target_os = "linux")'.dependencies]
 infraternal-plugin-mesh = { path = "../plugins/mesh", version = "0.1.0", optional = true, default-features = false, features = ["agent"] }
-infraternal-shim.workspace = true
-nix = { workspace = true, features = ["inotify", "event"] }
 
-[lints]
-workspace = true
-
+# The latency fixture needs the opt-in native desktop source [D203, D204].
 [[example]]
 name = "desktop-latency-source"
 required-features = ["desktop"]
 
+[lints]
+workspace = true
+
 [dev-dependencies]
-# Safe monotonic timestamps align opt-in test diagnostics with external profiles.
-nix = { workspace = true, features = ["time"] }
 # Frozen extension vectors remain covered without adding them to shipping terminals.
 infraternal-protocol = { workspace = true, features = ["desktop"] }
+# Safe monotonic timestamps align opt-in test diagnostics with external profiles.
+nix = { workspace = true, features = ["time"] }
 # Paused test time controls frame-expiry ordering without changing runtime timers.
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", default-features = false, features = ["test-support"] }

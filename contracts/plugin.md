@@ -118,6 +118,16 @@ event bus on the server fans events out to:
 
 The UI never polls. Live counts in the sidebar tree come from events.
 
+A plugin subscription is identified by its `sub_id` on one authenticated
+socket. Repeating `Subscribe` with that ID replaces the previous generation
+in its existing bounded slot; normal topic and authorization checks still
+apply, and replies from the replaced generation are discarded. An error event
+can withdraw a subscription without closing the socket. A stateful viewer
+recovers by repeating the same ID to request its topic's initial snapshot,
+coalescing retries with positive, capped backoff rather than allocating new
+IDs. Canvas-specific revision and pending-intent rules are in wire §Account
+canvas layout (#250).
+
 The Mesh coordinator is the `mesh` plugin server feature. Its live view uses the same
 control-stream `Subscribe`/`Event` frames. Subscribe with
 `{"topic":"mesh","tag"?:string}` to receive an initial filtered snapshot,

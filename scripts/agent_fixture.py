@@ -41,18 +41,33 @@ def replay_complete_cursor(event, session_id):
 def fixture_state(label):
     """Return a short per-process private state path for real Unix-socket fixtures."""
     root = Path(os.environ.get(
-        'INFRATERNAL_TEST_STATE_ROOT',
-        Path.home() / '.cache/codex-scratch/infraternal',
+        'INFRATERNAL_AGENT_TEST_STATE_ROOT',
+        os.environ.get(
+            'INFRATERNAL_TEST_STATE_ROOT',
+            Path.home() / '.cache/codex-scratch/infraternal',
+        ),
     ))
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    state = root / f'{label}{os.getpid()}'
-    socket_path = state / 'sessions' / ('a' * 32 + '.sock')
+    fallback = Path.home() / '.cache/codex-scratch/infraternal'
+
+    def paths_for(candidate):
+        state = candidate / f'{label}{os.getpid()}'
+        socket_path = state / 'sessions' / ('a' * 32 + '.sock')
+        paths = (socket_path, socket_path.with_suffix('.upstream'))
+        return state, paths
+
     # Linux sockaddr_un.sun_path includes the trailing NUL in its 108-byte bound.
     # AckBarrier also connects through a sibling .upstream socket with a longer suffix.
-    paths = (socket_path, socket_path.with_suffix('.upstream'))
+    state, paths = paths_for(root)
     longest = max(len(os.fsencode(path)) for path in paths)
     if longest >= 108:
-        raise ValueError(f'test state path is too long for an AF_UNIX socket: {longest} bytes')
+        root = fallback
+        state, paths = paths_for(root)
+        longest = max(len(os.fsencode(path)) for path in paths)
+    if longest >= 108:
+        raise ValueError(
+            f'test state path is too long for an AF_UNIX socket after fallback: {longest} bytes'
+        )
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
     return state
 
 
@@ -165,7 +180,7 @@ def weight_fixture_shim(state, session_id, weight, caller_pid=None, diagnose=Fal
 class Binary:
     def __init__(self, binary, state):
         self.state = state
-        self.binary = binary
+        self.binary = Path(binary).resolve()
         self.out = 0
         self.entered = 0
         self.acked = 0
@@ -182,6 +197,12 @@ class Binary:
         self.start()
 
     def start(self):
+        # Validate the caller's exact build artifact before opening a relay;
+        # otherwise exec failure is hidden behind a socket timeout.
+        if not self.binary.is_file():
+            raise FileNotFoundError(f'fixture binary not found: {self.binary}')
+        if not os.access(self.binary, os.X_OK):
+            raise PermissionError(f'fixture binary is not executable: {self.binary}')
         self.sock, test_peer = socket.socketpair()
         agent_peer, child_peer = socket.socketpair()
         self.sock.settimeout(20)
@@ -297,11 +318,33 @@ class Binary:
         assert (stream, kind) == (0, 0x31) and body[4] == 1, body
         self.id = uuid.UUID(json.loads(body[5:])['session_id'])
         self.benchmark_scope()
+        self.prepare_shell()
         self.out = self.entered = self.acked = 0
         self.credit_pending = 0
         self.credit_available = 0
         self.data.clear()
         return self.id
+
+    def prepare_shell(self):
+        """Set a portable prompt through the legacy writer, before test writers attach."""
+        # ZDOTDIR isolates zsh only. Configure the real login shell over its
+        # PTY so Bash hosts also emit the fixture prompt. Legacy writer zero
+        # keeps every daemon test writer's input cursor at its original zero.
+        path = self.state / 'sessions' / f'{self.id.hex}.sock'
+        with socket.socket(socket.AF_UNIX) as peer:
+            peer.settimeout(20)
+            peer.connect(str(path))
+            hello = exact(peer, struct.unpack('<I', exact(peer, 4))[0])
+            assert hello[0] == 1 and hello[11:27] == self.id.bytes
+            command = b"PS1='shim-'test'% '; printf 'FIXTURE_%s\\n' READY\n"
+            for body in (b'\x02' + struct.pack('<Q', 0), b'\x10' + command,
+                         b'\x13' + struct.pack('<Q', 0)):
+                peer.sendall(struct.pack('<I', len(body)) + body)
+            output = bytearray()
+            while b'FIXTURE_READY\r\n' not in output:
+                frame = exact(peer, struct.unpack('<I', exact(peer, 4))[0])
+                assert frame[0] == 0x11
+                output.extend(frame[9:])
 
     def benchmark_scope(self):
         """Keep the fixture-owned shim at this caller's scheduling weight."""
@@ -442,6 +485,12 @@ class Binary:
         while marker not in self.data[max(0, len(self.data) - 32768):]:
             assert time.monotonic() < deadline
             self.process(credit)
+
+    def wait_for_shell(self):
+        """Confirm the attached login shell executes input without assuming its prompt."""
+        self.input(b"printf 'shell-ready-%s\\n' check\n")
+        self.until(b"shell-ready-check")
+        self.wait_ack()
 
     def wait_ack(self):
         while self.acked < self.entered:
