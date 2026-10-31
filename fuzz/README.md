@@ -72,6 +72,24 @@ The target checks parser robustness and validation boundaries, not database
 authorization or transaction behavior. The JSON shapes and action IDs are
 specified in contracts/mesh-api.md.
 
+## Relay frames
+
+This target includes the production relay wire codec directly, so it exercises
+the same fixed-size request and notice decoders, host-ID parser and DATAGRAM
+header parser without enabling the relay runtime or pulling it into the
+shipping feature set. It checks round trips for every accepted frame and
+returns normally for arbitrary bytes up to 4 KiB.
+
+```sh
+python3 fuzz/seed.py --relay-only
+CARGO_PROFILE_RELEASE_LTO=false cargo +nightly fuzz run relay_wire_decode -- \
+  -max_total_time=60 -max_len=4096 -rss_limit_mb=512
+```
+
+The synthetic corpus includes each control kind, a zero link ID, truncated and
+overlong frames, a DATAGRAM header, and a valid enrollment URI. It contains no
+credentials or captured network data.
+
 ## Auth capability cookies
 
 `auth_cookie` includes the production capability reader source. It feeds up to

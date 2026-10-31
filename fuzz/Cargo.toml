@@ -1,4 +1,4 @@
-# Build the shim, wire, auth, bootstrap, mesh and signed-release parser fuzz harnesses [12,40].
+# Build the shim, wire, auth, bootstrap, mesh, relay and signed-release parser fuzz harnesses [12,40].
 [package]
 name = "infraternal-fuzz"
 version.workspace = true
@@ -115,6 +115,13 @@ bench = false
 [[bin]]
 name = "remote_ca_copy_decode"
 path = "fuzz_targets/remote_ca_copy_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relay_wire_decode"
+path = "fuzz_targets/relay_wire_decode.rs"
 test = false
 doc = false
 bench = false
