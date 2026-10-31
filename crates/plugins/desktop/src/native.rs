@@ -18,6 +18,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "macos")]
+use nix::{
+    errno::Errno,
+    fcntl::{FcntlArg, FdFlag, fcntl},
+    sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue},
+};
 #[cfg(all(target_os = "macos", not(test)))]
 use std::os::unix::fs::MetadataExt;
 #[cfg(target_os = "macos")]
@@ -65,14 +71,161 @@ impl CompanionInput for UnixStream {
 
 struct CompanionLaunch {
     launcher: Child,
-    // Only `LaunchServices`-owned bundles publish a separate process identity.
-    companion_pid: Option<u32>,
+    #[cfg(target_os = "macos")]
+    companion: Option<TrackedCompanion>,
+}
+
+#[cfg(target_os = "macos")]
+struct TrackedCompanion {
+    pid: nix::unistd::Pid,
+    socket_path: PathBuf,
+    pid_path: PathBuf,
+    exit_queue: Kqueue,
+    exited: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl TrackedCompanion {
+    fn new(pid: u32, socket_path: &Path, pid_path: &Path) -> io::Result<Self> {
+        let pid = i32::try_from(pid)
+            .map_err(|_| io::Error::other("Desktop companion launch identity is invalid."))?;
+        let exit_queue = Kqueue::new()?;
+        fcntl(&exit_queue, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+        let mut events = [process_exit_event(0)];
+        let mut tracked = Self {
+            pid: nix::unistd::Pid::from_raw(pid),
+            socket_path: socket_path.to_owned(),
+            pid_path: pid_path.to_owned(),
+            exit_queue,
+            exited: false,
+        };
+        match tracked.exit_queue.kevent(
+            &[process_exit_event(pid as usize)],
+            &mut events,
+            Some(zero_timeout()),
+        ) {
+            Ok(count) => tracked.exited = count != 0,
+            Err(Errno::ESRCH) => {
+                return Err(io::Error::other("Desktop companion exited during launch."));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(tracked)
+    }
+
+    /// The private per-launch socket and PID-file arguments identify this exact
+    /// same-bundle process if its numeric PID is later reused.
+    fn matches_current_launch(&self) -> io::Result<bool> {
+        if self.exited {
+            return Ok(false);
+        }
+        let pid = self.pid.as_raw().to_string();
+        let output = Command::new("/bin/ps")
+            .args(["-p", pid.as_str(), "-o", "uid=,command=", "-ww"])
+            .output()?;
+        if !output.status.success() {
+            return Ok(false);
+        }
+        let line = String::from_utf8_lossy(&output.stdout);
+        let mut columns = line.trim().splitn(2, char::is_whitespace);
+        let Some(uid) = columns.next().and_then(|value| value.parse::<u32>().ok()) else {
+            return Ok(false);
+        };
+        let Some(command) = columns.next() else {
+            return Ok(false);
+        };
+        Ok(uid == nix::unistd::geteuid().as_raw()
+            && has_process_argument(command, "--socket", &self.socket_path)
+            && has_process_argument(command, "--launch-pid-file", &self.pid_path))
+    }
+
+    fn wait_for_exit(&mut self, timeout: Duration) -> io::Result<bool> {
+        if self.exited {
+            return Ok(true);
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let mut events = [process_exit_event(0)];
+            match self
+                .exit_queue
+                .kevent(&[], &mut events, Some(duration_timespec(remaining)))
+            {
+                Ok(count) if count != 0 => {
+                    self.exited = true;
+                    return Ok(true);
+                }
+                Ok(_) => return Ok(false),
+                Err(Errno::EINTR) if Instant::now() < deadline => {}
+                Err(Errno::EINTR) => return Ok(false),
+                Err(Errno::ESRCH) => {
+                    self.exited = true;
+                    return Ok(true);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    fn signal_if_current(&self, signal: nix::sys::signal::Signal) -> io::Result<bool> {
+        if !self.matches_current_launch()? {
+            return Ok(false);
+        }
+        match nix::sys::signal::kill(self.pid, signal) {
+            Ok(()) => Ok(true),
+            Err(Errno::ESRCH) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn has_process_argument(command: &str, name: &str, value: &Path) -> bool {
+    let Some(value) = value.to_str() else {
+        return false;
+    };
+    let mut arguments = command.split_whitespace();
+    while let Some(argument) = arguments.next() {
+        if argument == name && arguments.next() == Some(value) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn process_exit_event(pid: usize) -> KEvent {
+    KEvent::new(
+        pid,
+        EventFilter::EVFILT_PROC,
+        EvFlags::EV_ADD | EvFlags::EV_ONESHOT,
+        FilterFlag::NOTE_EXIT,
+        0,
+        0,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn zero_timeout() -> nix::libc::timespec {
+    nix::libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn duration_timespec(duration: Duration) -> nix::libc::timespec {
+    nix::libc::timespec {
+        tv_sec: duration.as_secs().try_into().unwrap_or(i64::MAX),
+        tv_nsec: duration.subsec_nanos().into(),
+    }
 }
 
 struct SpawnedCompanion {
     launch: CompanionLaunch,
     input: Box<dyn CompanionInput>,
     output: Box<dyn Read + Send>,
+    reader_interrupt: Option<UnixStream>,
     private_directory: Option<PrivateDirectory>,
 }
 
@@ -133,10 +286,12 @@ fn spawn_direct(executable: &Path, encoder: bool, surface: bool) -> io::Result<S
     Ok(SpawnedCompanion {
         launch: CompanionLaunch {
             launcher,
-            companion_pid: None,
+            #[cfg(target_os = "macos")]
+            companion: None,
         },
         input: Box::new(input),
         output: Box::new(output),
+        reader_interrupt: None,
         private_directory: None,
     })
 }
@@ -339,7 +494,9 @@ fn accept_blocking(listener: &UnixListener) -> io::Result<Option<UnixStream>> {
 #[cfg(all(target_os = "macos", not(test)))]
 fn update_companion_pid(
     pid_path: &Path,
+    socket_path: &Path,
     companion_pid: &mut Option<u32>,
+    companion: &mut Option<TrackedCompanion>,
     pid_ready_ms: &mut Option<f64>,
     started: Instant,
 ) -> io::Result<()> {
@@ -350,6 +507,11 @@ fn update_companion_pid(
         }
         *companion_pid = pid;
     }
+    if companion.is_none()
+        && let Some(pid) = *companion_pid
+    {
+        *companion = Some(TrackedCompanion::new(pid, socket_path, pid_path)?);
+    }
     Ok(())
 }
 
@@ -357,17 +519,33 @@ fn update_companion_pid(
 fn accept_launch_connection(
     listener: &UnixListener,
     pid_path: &Path,
+    socket_path: &Path,
     companion_pid: &mut Option<u32>,
+    companion: &mut Option<TrackedCompanion>,
     pid_ready_ms: &mut Option<f64>,
     started: Instant,
     measure: bool,
 ) -> io::Result<Option<(UnixStream, u32)>> {
-    update_companion_pid(pid_path, companion_pid, pid_ready_ms, started)?;
+    update_companion_pid(
+        pid_path,
+        socket_path,
+        companion_pid,
+        companion,
+        pid_ready_ms,
+        started,
+    )?;
     let Some(stream) = accept_blocking(listener)? else {
         return Ok(None);
     };
     crate::socket::admit(&stream)?;
-    update_companion_pid(pid_path, companion_pid, pid_ready_ms, started)?;
+    update_companion_pid(
+        pid_path,
+        socket_path,
+        companion_pid,
+        companion,
+        pid_ready_ms,
+        started,
+    )?;
     let Some(pid) = *companion_pid else {
         return Err(io::Error::other(
             "Desktop companion did not publish its launch identity.",
@@ -410,12 +588,15 @@ fn spawn_via_launch_services(
             .spawn()?;
 
     let mut companion_pid = None;
+    let mut companion = None;
     let mut pid_ready_ms = None;
     loop {
         match accept_launch_connection(
             &listener,
             &pid_path,
+            &socket_path,
             &mut companion_pid,
+            &mut companion,
             &mut pid_ready_ms,
             started,
             measure,
@@ -425,40 +606,67 @@ fn spawn_via_launch_services(
                     Ok(input) => Box::new(input) as Box<dyn CompanionInput>,
                     Err(error) => {
                         drop(stream);
-                        retire_launch_services(launcher, Some(pid));
+                        retire_launch_services(launcher, companion);
                         return Err(error);
                     }
                 };
+                let reader_interrupt = match stream.try_clone() {
+                    Ok(interrupt) => interrupt,
+                    Err(error) => {
+                        drop(input);
+                        drop(stream);
+                        retire_launch_services(launcher, companion);
+                        return Err(error);
+                    }
+                };
+                let Some(tracked) = companion.take() else {
+                    drop(input);
+                    drop(stream);
+                    retire_launch_services(launcher, None);
+                    return Err(io::Error::other(
+                        "Desktop companion launch identity is unavailable.",
+                    ));
+                };
+                if tracked.pid.as_raw() as u32 != pid {
+                    drop(input);
+                    drop(stream);
+                    retire_launch_services(launcher, Some(tracked));
+                    return Err(io::Error::other(
+                        "Desktop companion launch identity changed during startup.",
+                    ));
+                }
                 return Ok(SpawnedCompanion {
                     launch: CompanionLaunch {
                         launcher,
-                        companion_pid: Some(pid),
+                        companion: Some(tracked),
                     },
                     input,
                     output: Box::new(stream),
+                    reader_interrupt: Some(reader_interrupt),
                     private_directory: Some(private_directory),
                 });
             }
             Ok(None) => {}
             Err(error) => {
-                retire_launch_services(launcher, companion_pid);
+                retire_launch_services(launcher, companion);
                 return Err(error);
             }
         }
         match launcher.try_wait() {
             Ok(Some(_)) => {
+                retire_launch_services(launcher, companion);
                 return Err(io::Error::other(
                     "LaunchServices exited before the desktop companion connected.",
                 ));
             }
             Ok(None) => {}
             Err(error) => {
-                retire_launch_services(launcher, companion_pid);
+                retire_launch_services(launcher, companion);
                 return Err(error);
             }
         }
         if started.elapsed() >= std::time::Duration::from_secs(5) {
-            retire_launch_services(launcher, companion_pid);
+            retire_launch_services(launcher, companion);
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "LaunchServices did not start the desktop companion in time.",
@@ -468,37 +676,63 @@ fn spawn_via_launch_services(
     }
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
-fn retire_launch_services(mut launcher: Child, companion_pid: Option<u32>) {
-    let mut deadline = Instant::now() + std::time::Duration::from_secs(3);
-    while matches!(launcher.try_wait(), Ok(None)) && Instant::now() < deadline {
-        thread::sleep(std::time::Duration::from_millis(10));
+#[cfg(target_os = "macos")]
+fn retire_launch_services(mut launcher: Child, mut companion: Option<TrackedCompanion>) -> bool {
+    let mut launcher_exited = matches!(launcher.try_wait(), Ok(Some(_)));
+    let mut companion_exited = companion
+        .as_mut()
+        .is_none_or(|process| process.wait_for_exit(Duration::ZERO).unwrap_or(false));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !launcher_exited && !companion_exited && Instant::now() < deadline {
+        if let Some(process) = companion.as_mut() {
+            companion_exited = process
+                .wait_for_exit(Duration::from_millis(10))
+                .unwrap_or(false);
+        } else {
+            thread::sleep(Duration::from_millis(10));
+        }
+        launcher_exited = matches!(launcher.try_wait(), Ok(Some(_)));
     }
-    if !matches!(launcher.try_wait(), Ok(Some(_))) {
-        if let Some(pid) = companion_pid.and_then(|pid| i32::try_from(pid).ok()) {
-            let process = nix::unistd::Pid::from_raw(pid);
-            let _ = nix::sys::signal::kill(process, nix::sys::signal::Signal::SIGTERM);
-            deadline = Instant::now() + std::time::Duration::from_millis(500);
-            while matches!(launcher.try_wait(), Ok(None)) && Instant::now() < deadline {
-                thread::sleep(std::time::Duration::from_millis(10));
+
+    if !companion_exited && let Some(process) = companion.as_mut() {
+        // `open -W` is only a waiter; its exit is not evidence that this
+        // separately launched process released the private socket.
+        match process.signal_if_current(nix::sys::signal::Signal::SIGTERM) {
+            Ok(true) => {
+                companion_exited = process
+                    .wait_for_exit(Duration::from_millis(500))
+                    .unwrap_or(false);
             }
-            if matches!(launcher.try_wait(), Ok(None)) {
-                let _ = nix::sys::signal::kill(process, nix::sys::signal::Signal::SIGKILL);
+            Ok(false) | Err(_) => {}
+        }
+        if !companion_exited {
+            match process.signal_if_current(nix::sys::signal::Signal::SIGKILL) {
+                Ok(true) => {
+                    companion_exited = process
+                        .wait_for_exit(Duration::from_secs(1))
+                        .unwrap_or(false);
+                }
+                Ok(false) | Err(_) => {}
             }
         }
+    }
+
+    if matches!(launcher.try_wait(), Ok(None)) {
         let _ = launcher.kill();
     }
-    let _ = launcher.wait();
+    let launcher_reaped = launcher.wait().is_ok();
+    companion_exited && launcher_reaped
 }
 
 pub struct Native {
     child: Option<CompanionLaunch>,
     _private_directory: Option<PrivateDirectory>,
     input: Option<Box<dyn CompanionInput>>,
+    reader_interrupt: Option<UnixStream>,
     replies: Option<Receiver<Reply>>,
     reader: Option<JoinHandle<()>>,
     cancellation: Option<Arc<AtomicBool>>,
-    retirement: Option<JoinHandle<()>>,
+    retirement: Option<JoinHandle<bool>>,
     encoder: bool,
     surface: bool,
     video: Option<Vec<u8>>,
@@ -530,6 +764,7 @@ impl Native {
             launch,
             input,
             mut output,
+            reader_interrupt,
             private_directory,
         } = spawned;
         let (sender, replies) = mpsc::sync_channel(1);
@@ -549,6 +784,7 @@ impl Native {
             child: Some(launch),
             _private_directory: private_directory,
             input: Some(input),
+            reader_interrupt,
             replies: Some(replies),
             reader: Some(reader),
             cancellation: None,
@@ -635,16 +871,8 @@ impl Native {
         if let Some(input) = self.input.take() {
             input.close_write();
         }
-        if self
-            .child
-            .as_ref()
-            .is_some_and(|launch| launch.companion_pid.is_some())
-        {
-            if let Some(launch) = self.child.take() {
-                self.retirement = Some(thread::spawn(move || retire_owned(launch)));
-            }
-        } else if let Some(launch) = self.child.as_mut() {
-            let _ = launch.launcher.kill();
+        if let Some(launch) = self.child.take() {
+            self.retirement = Some(thread::spawn(move || retire_owned(launch)));
         }
     }
     fn retire_control(&mut self) {
@@ -657,6 +885,11 @@ impl Native {
             // Cleanup runs outside the operation deadline and remains owned:
             // Drop joins it before the helper can report complete shutdown.
             self.retirement = Some(thread::spawn(move || retire_owned(launch)));
+        }
+    }
+    fn interrupt_reader(&mut self) {
+        if let Some(stream) = self.reader_interrupt.take() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     }
     fn response(&mut self, deadline: Instant, graceful: bool) -> Reply {
@@ -793,10 +1026,14 @@ impl Drop for Native {
             input.close_write();
         }
         if let Some(launch) = self.child.take() {
-            retire_owned(launch);
+            if !retire_owned(launch) {
+                self.interrupt_reader();
+            }
         }
         if let Some(retirement) = self.retirement.take() {
-            let _ = retirement.join();
+            if !retirement.join().is_ok_and(|retired| retired) {
+                self.interrupt_reader();
+            }
         }
         // The receiver is closed before joining, so a full response slot cannot
         // block the reader while it drains the child's final cleanup response.
@@ -806,37 +1043,46 @@ impl Drop for Native {
     }
 }
 
-fn retire_child(mut child: Child) {
+fn retire_child(mut child: Child) -> bool {
     let deadline = Instant::now() + Duration::from_secs(3);
     while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
     }
     let _ = child.kill();
-    let _ = child.wait();
+    child.wait().is_ok()
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
-fn retire_owned(launch: CompanionLaunch) {
-    if let Some(companion_pid) = launch.companion_pid {
-        retire_launch_services(launch.launcher, Some(companion_pid));
+#[cfg(target_os = "macos")]
+fn retire_owned(launch: CompanionLaunch) -> bool {
+    if let Some(companion) = launch.companion {
+        retire_launch_services(launch.launcher, Some(companion))
     } else {
-        retire_child(launch.launcher);
+        retire_child(launch.launcher)
     }
 }
 
-#[cfg(not(all(target_os = "macos", not(test))))]
-fn retire_owned(launch: CompanionLaunch) {
-    retire_child(launch.launcher);
+#[cfg(not(target_os = "macos"))]
+fn retire_owned(launch: CompanionLaunch) -> bool {
+    retire_child(launch.launcher)
 }
 
 #[cfg(test)]
 mod launch_tests {
     #[cfg(target_os = "macos")]
-    use super::accept_blocking;
+    use super::{CompanionLaunch, Native, TrackedCompanion, accept_blocking};
     use super::{companion_app_bundle, launch_stderr_path, parse_companion_pid};
     use std::{
         fs,
         path::{Path, PathBuf},
+    };
+    #[cfg(target_os = "macos")]
+    use std::{
+        io::Read,
+        os::unix::net::UnixListener,
+        process::{Command, Stdio},
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
     };
 
     struct Cleanup(PathBuf);
@@ -912,6 +1158,105 @@ mod launch_tests {
             flags & nix::libc::O_NONBLOCK,
             0,
             "the protocol reader requires blocking reads"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dropping_stream_retires_stopped_companion_after_waiter_exit() {
+        use nix::{
+            sys::wait::{WaitPidFlag, WaitStatus, waitpid},
+            unistd::Pid,
+        };
+
+        let root =
+            std::env::temp_dir().join(format!("desktop-retire-companion-{}", std::process::id()));
+        let _cleanup = Cleanup(root.clone());
+        fs::create_dir_all(&root).unwrap();
+        let socket_path = root.join("s");
+        let pid_path = root.join("p");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let script = "import os,signal,socket,sys,time; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(sys.argv[sys.argv.index('--socket')+1]); open(sys.argv[sys.argv.index('--launch-pid-file')+1],'w').write(str(os.getpid())+'\\n'); os.kill(os.getpid(),signal.SIGSTOP); time.sleep(60)";
+        let mut companion = Command::new("python3")
+            .arg("-c")
+            .arg(script)
+            .arg("--socket")
+            .arg(&socket_path)
+            .arg("--launch-pid-file")
+            .arg(&pid_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stream = listener.accept().unwrap().0;
+        let pid = Pid::from_raw(companion.id() as i32);
+        let stop_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG | WaitPidFlag::WUNTRACED)).unwrap() {
+                WaitStatus::Stopped(_, _) => break,
+                WaitStatus::StillAlive if Instant::now() < stop_deadline => {
+                    thread::sleep(Duration::from_millis(5))
+                }
+                status => panic!("companion did not stop with its socket open: {status:?}"),
+            }
+        }
+
+        // A dead `open -W` waiter does not prove the separately launched app
+        // exited. Keep a blocked reader to exercise the complete Drop path.
+        let mut launcher = Command::new("/usr/bin/true").spawn().unwrap();
+        launcher.wait().unwrap();
+        let tracked = TrackedCompanion::new(companion.id(), &socket_path, &pid_path).unwrap();
+        assert!(tracked.matches_current_launch().unwrap());
+        let another_launch = TrackedCompanion::new(
+            companion.id(),
+            &root.join("other-socket"),
+            &root.join("other-pid"),
+        )
+        .unwrap();
+        assert!(!another_launch.matches_current_launch().unwrap());
+        let input = stream.try_clone().unwrap();
+        let reader_interrupt = input.try_clone().unwrap();
+        let reader = thread::spawn(move || {
+            let mut output = stream;
+            let mut byte = [0; 1];
+            while output.read(&mut byte).is_ok_and(|count| count > 0) {}
+        });
+        let native = Native {
+            child: Some(CompanionLaunch {
+                launcher,
+                companion: Some(tracked),
+            }),
+            _private_directory: None,
+            input: Some(Box::new(input)),
+            reader_interrupt: Some(reader_interrupt),
+            replies: None,
+            reader: Some(reader),
+            cancellation: None,
+            retirement: None,
+            encoder: false,
+            surface: false,
+            video: None,
+            video_gap: false,
+        };
+        let (done_tx, done_rx) = mpsc::channel();
+        let dropper = thread::spawn(move || {
+            drop(native);
+            let _ = done_tx.send(());
+        });
+        let completed = done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        let companion_retired = companion.try_wait().unwrap().is_some();
+        if !companion_retired {
+            // Keep a failing regression run self-cleaning even when Drop hangs.
+            let _ = companion.kill();
+        }
+        dropper.join().unwrap();
+        if !companion_retired {
+            let _ = companion.wait();
+        }
+        assert!(
+            completed && companion_retired,
+            "Native::drop must retire a stopped companion after its LaunchServices waiter exits"
         );
     }
 }
