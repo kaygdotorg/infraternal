@@ -371,6 +371,8 @@ pub enum CliHandler {
     Unavailable,
     /// Dispatch a declared node action over its local same-uid socket.
     NodeComponent,
+    /// Run saved-session automation with caller-session authority.
+    Sessions,
     /// Inspect the local node and registered components.
     Status,
     /// List or render generated command skills.

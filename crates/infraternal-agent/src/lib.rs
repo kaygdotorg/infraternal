@@ -20,6 +20,8 @@ pub use infraternal_plugin_remote::remote_quic;
 pub use infraternal_plugin_remote::remote_renewal;
 #[cfg(feature = "remote")]
 pub use infraternal_plugin_remote::remote_tls;
+#[cfg(target_os = "linux")]
+pub mod automation;
 pub mod sessions;
 pub mod transport;
 

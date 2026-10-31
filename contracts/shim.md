@@ -331,3 +331,13 @@ viewer's typing cursor, select the active writer or change terminal geometry.
 The trusted server arbitrates identity, syntax and expiry before forwarding;
 the shim validates capability and size before queue admission. Replies are
 best effort and never replayed after link replacement.
+
+### Explicit saved-shell close (D314, #251)
+
+Capability bit 6 (`CLOSE_SESSION`, value 64) permits zero-payload `CloseSession`
+(opcode `0x1F`). It is legal only after selecting that capability in Attach.
+It requests SIGHUP of the shim-owned shell process group, including when a
+foreground job has a different group. Existing Signal semantics stay unchanged.
+An already reaped child is a no-op; the shim never signals a recycled PID.
+The request has no acknowledgement: delivery is not proof of process exit.
+Old shims must receive no such frame; callers report an upgrade/recreate fix.
