@@ -128,7 +128,8 @@ infraternal sessions close local:build
 ```
 
 The machine's exact hostname also works. A target accepts its saved name or
-stable UUID after the colon. Names contain 1–64 ASCII letters, digits, dots,
+stable UUID after the colon. Lists retain stable UUID order across pages.
+Names contain 1–64 ASCII letters, digits, dots,
 dashes or underscores, excluding `.` and `..`. Names survive daemon restarts
 in private state; names of live sessions must be unique on that account.
 `send` adds no newline and reports only bytes acknowledged written to the PTY.

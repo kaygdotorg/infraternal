@@ -30,6 +30,7 @@ def inside(binary, state):
     cli(binary, state, 'new', 'local', '--name', 'build', code=2)
     rows = cli(binary, state)['data']['sessions']
     assert any(row['name'] == 'build' for row in rows), rows
+    assert [row['id'] for row in rows] == sorted(row['id'] for row in rows), rows
     missing = cli(binary, state, 'send', 'local:biuld', 'x', code=4)
     assert 'Did you mean "build"?' in missing['message'], missing
     sent = cli(binary, state, 'send', 'local:build', "printf 'OUTPUT_%s\\n' READY\n")

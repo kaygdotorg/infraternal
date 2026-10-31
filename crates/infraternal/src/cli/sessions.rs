@@ -170,7 +170,8 @@ async fn execute(
             }
         }
     }
-    rows.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    // Keep the daemon's stable ID/page order; a second name sort would repeat
+    // sorting machinery and disrupt the ordering of partial and complete lists.
     reply.data = json!({"sessions": rows});
     Ok(reply)
 }
