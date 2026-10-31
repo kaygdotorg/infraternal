@@ -18,10 +18,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(all(target_os = "macos", not(test)))]
+use std::os::unix::fs::MetadataExt;
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
-#[cfg(all(target_os = "macos", not(test)))]
-use std::os::unix::{fs::MetadataExt, net::UnixListener};
+#[cfg(target_os = "macos")]
+use std::os::unix::net::UnixListener;
 #[cfg(any(not(target_os = "macos"), test))]
 use std::process::ChildStdin;
 
@@ -307,6 +309,21 @@ fn launch_services_command(
     command
 }
 
+#[cfg(target_os = "macos")]
+#[cfg_attr(test, allow(dead_code))]
+fn accept_blocking(listener: &UnixListener) -> io::Result<Option<UnixStream>> {
+    match listener.accept() {
+        Ok((stream, _)) => {
+            // Darwin inherits O_NONBLOCK from this listener; protocol reads run
+            // on a blocking reader thread and would otherwise fail with EAGAIN.
+            stream.set_nonblocking(false)?;
+            Ok(Some(stream))
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(all(target_os = "macos", not(test)))]
 fn update_companion_pid(
     pid_path: &Path,
@@ -334,26 +351,23 @@ fn accept_launch_connection(
     measure: bool,
 ) -> io::Result<Option<(UnixStream, u32)>> {
     update_companion_pid(pid_path, companion_pid, pid_ready_ms, started)?;
-    match listener.accept() {
-        Ok((stream, _)) => {
-            crate::socket::admit(&stream)?;
-            update_companion_pid(pid_path, companion_pid, pid_ready_ms, started)?;
-            let Some(pid) = *companion_pid else {
-                return Err(io::Error::other(
-                    "Desktop companion did not publish its launch identity.",
-                ));
-            };
-            if measure {
-                eprintln!(
-                    "METRIC launch_services pid={pid} launch_ms={:.3}",
-                    (*pid_ready_ms).unwrap_or_else(|| started.elapsed().as_secs_f64() * 1000.0)
-                );
-            }
-            Ok(Some((stream, pid)))
-        }
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
-        Err(error) => Err(error),
+    let Some(stream) = accept_blocking(listener)? else {
+        return Ok(None);
+    };
+    crate::socket::admit(&stream)?;
+    update_companion_pid(pid_path, companion_pid, pid_ready_ms, started)?;
+    let Some(pid) = *companion_pid else {
+        return Err(io::Error::other(
+            "Desktop companion did not publish its launch identity.",
+        ));
+    };
+    if measure {
+        eprintln!(
+            "METRIC launch_services pid={pid} launch_ms={:.3}",
+            (*pid_ready_ms).unwrap_or_else(|| started.elapsed().as_secs_f64() * 1000.0)
+        );
     }
+    Ok(Some((stream, pid)))
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
@@ -805,6 +819,8 @@ fn retire_owned(launch: CompanionLaunch) {
 
 #[cfg(test)]
 mod launch_tests {
+    #[cfg(target_os = "macos")]
+    use super::accept_blocking;
     use super::{companion_app_bundle, parse_companion_pid};
     use std::{fs, path::PathBuf};
 
@@ -839,5 +855,31 @@ mod launch_tests {
         assert!(parse_companion_pid("not-a-pid\n", 41).is_err());
         assert!(parse_companion_pid("1\n", 41).is_err());
         assert!(parse_companion_pid("41\n", 41).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn launch_services_accept_resets_nonblocking_listener_mode() {
+        use std::os::{
+            fd::AsFd,
+            unix::net::{UnixListener, UnixStream},
+        };
+
+        let root = std::env::temp_dir().join(format!("desktop-accept-mode-{}", std::process::id()));
+        let _cleanup = Cleanup(root.clone());
+        fs::create_dir(&root).unwrap();
+        let socket_path = root.join("companion.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+
+        let _client = UnixStream::connect(&socket_path).unwrap();
+        let stream = accept_blocking(&listener).unwrap().unwrap();
+        let flags = nix::fcntl::fcntl(stream.as_fd(), nix::fcntl::FcntlArg::F_GETFL).unwrap();
+
+        assert_eq!(
+            flags & nix::libc::O_NONBLOCK,
+            0,
+            "the protocol reader requires blocking reads"
+        );
     }
 }
