@@ -71,24 +71,64 @@ export function beginInlineRename(options: InlineRenameOptions): InlineRename {
 }
 
 /**
+ * The least room the field's text gets (layout px): about eight characters. A shorter name is given this much, so a
+ * two-letter host is not renamed in a field the size of a caret.
+ */
+const MIN_TEXT_PX = 72;
+/** How far the field's box reaches past the name's box on each side (it is also the field's own padding there). */
+const FIELD_PAD_PX = 4;
+
+/**
  * Puts the field exactly over a name that sits inside something that must not hold a field itself (a button, a
  * pill): the field is a child of `container`, which becomes the positioned parent, and the name is hidden under it
  * (it keeps its space, so nothing around it moves). `scale` is the zoom the container is drawn at. Returns what
  * `close` calls: it takes the field off and shows the name again.
+ *
+ * Invariant: the field never reaches beyond the name's own box by more than `FIELD_PAD_PX`. What is drawn beside a name
+ * (a machine's mark, a status dot, a note, the window's actions) starts at least a gap after it, so the field cannot sit
+ * under any of it, whatever the width of the name (a status dot over the last letter was the bug that made this a rule,
+ * #259). The one case where the surroundings move: a name whose box is narrower than its own text in the field (a name
+ * too short to type in, or a phone, where the field's text is 16 px and the name's is smaller). Its hidden box is
+ * widened to the field's text width (at least `MIN_TEXT_PX`), so the pill grows by that much and its neighbours
+ * follow; they never get covered. A long name is already ellipsized by its surface and stays in its box; the field
+ * scrolls its text there as any field does.
  */
 export function placeOverName(name: HTMLElement, container: HTMLElement, input: HTMLInputElement, scale = 1): () => void {
-  const at = name.getBoundingClientRect(), box = container.getBoundingClientRect();
   const positioned = getComputedStyle(container).position !== "static";
   if (!positioned) container.style.position = "relative";
+  const widened = name.style.minWidth;
+  // The field's own type decides how wide its text is, so it is measured in the field's font, in the container (which
+  // may be drawn at a zoom: the rect is divided by it).
+  input.style.cssText = "position:absolute;visibility:hidden";
+  container.append(input);
+  const type = getComputedStyle(input);
+  const probe = document.createElement("span");
+  probe.style.cssText = `position:absolute;visibility:hidden;white-space:pre;font-family:${type.fontFamily};font-size:${type.fontSize};font-weight:${type.fontWeight};letter-spacing:${type.letterSpacing}`;
+  probe.textContent = input.value;
+  container.append(probe);
+  const textPx = probe.getBoundingClientRect().width / scale;
+  probe.remove();
+  const room = Math.max(MIN_TEXT_PX, Math.ceil(textPx));
+  if (name.getBoundingClientRect().width / scale < room) name.style.minWidth = `${room}px`;
+  // Measured after the widening: the layout above has moved by now.
+  const at = name.getBoundingClientRect(), box = container.getBoundingClientRect();
   // The text starts where the name's text started: the field's own padding is taken back from its left edge.
-  const left = (at.left - box.left) / scale - 6;
-  input.style.cssText = `position:absolute;z-index:2;left:${left}px;top:${(at.top - box.top + at.height / 2) / scale}px;transform:translateY(-50%);width:${Math.max(at.width / scale + 12, 120)}px;max-width:calc(100% - ${Math.max(left, 0)}px)`;
+  const left = (at.left - box.left) / scale - FIELD_PAD_PX;
+  // Only the part of the name's box that is visible counts: a surface that clips its name (an ellipsis in a pill that
+  // cannot grow) hides the rest of a widened box, and the field must stop where the clip does.
+  let right = at.right;
+  for (let el = name.parentElement; el && el !== container; el = el.parentElement) {
+    if (getComputedStyle(el).overflowX !== "visible") right = Math.min(right, el.getBoundingClientRect().right);
+  }
+  // One pixel more than the name, so the caret at the end of a name that fills the box does not scroll the text.
+  const width = (right - at.left) / scale + 2 * FIELD_PAD_PX + 1;
+  input.style.cssText = `position:absolute;z-index:2;left:${left}px;top:${(at.top - box.top + at.height / 2) / scale}px;transform:translateY(-50%);width:${width}px;padding:0 ${FIELD_PAD_PX}px;max-width:calc(100% - ${Math.max(left, 0)}px)`;
   const hidden = name.style.visibility;
   name.style.visibility = "hidden";
-  container.append(input);
   return () => {
     input.remove();
     name.style.visibility = hidden;
+    name.style.minWidth = widened;
     if (!positioned) container.style.position = "";
   };
 }
