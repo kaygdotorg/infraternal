@@ -366,7 +366,16 @@ pub fn gone(error: &io::Error) -> bool {
 /// Discover every socket identity with bounded parallel handshakes.
 /// # Errors
 /// Returns directory errors or a live shim handshake failure.
-pub async fn discover(state: &Path) -> io::Result<Vec<Session>> {
+#[inline(never)]
+pub fn discover(
+    state: &Path,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<Vec<Session>>> + Send + '_>> {
+    // Discovery runs at recovery and automation boundaries, never per keystroke.
+    // Share one state machine across consumers rather than inlining its socket
+    // scans and bounded concurrent handshakes into each caller's poll/drop paths.
+    Box::pin(discover_inner(state))
+}
+async fn discover_inner(state: &Path) -> io::Result<Vec<Session>> {
     let mut tasks = JoinSet::new();
     let mut sessions = Vec::new();
     for entry in fs::read_dir(state.join("sessions"))? {
