@@ -1,6 +1,6 @@
 /**
  * A scripted sideways pan of the canvas, measured with a Chromium trace (#256). Shared by the report spec
- * (`frosted-scroll-report.spec.ts`, the numbers on the issue) and the assertion spec (`frosted-scroll.spec.ts`).
+ * (`frosted-scroll-report.spec.ts`, the numbers on the issue) and the stripe spec (`frosted-real.spec.ts`).
  *
  * What it does: opens the clusters mockup with the owner's look (Tokyo Night, mesh, Frosted cards), puts exactly
  * `count` windows in the Console view, frees the canvas (no snapping) and pans it sideways for `ms` with one wheel
@@ -22,8 +22,6 @@ export interface ScrollOptions {
   windows: 1 | 4;
   /** How many windows the Console view holds (1, 4 or 12). */
   count: number;
-  /** `live` keeps the blur running while the canvas moves (`?glass=live`). */
-  glass?: "live";
   /** Card level (the floating chrome). The owner's setting is 4, Frosted. */
   card?: 1 | 2 | 3 | 4;
   /** Device pixel ratio of the page. */
@@ -35,8 +33,6 @@ export interface ScrollOptions {
 }
 
 export interface Sample {
-  /** The world carried `data-moving` when this was taken. */
-  moving: boolean;
   /** `backdrop-filter` of every window that was on screen. */
   windows: string[];
   /** `backdrop-filter` of the floating chrome that was on screen (pills, panels). */
@@ -92,7 +88,7 @@ export interface OpenCanvas { context: BrowserContext; page: Page; cdp: CDPSessi
 export async function openCanvas(browser: Browser, options: ScrollOptions): Promise<OpenCanvas> {
   const context = await browser.newContext({ baseURL: base(), viewport: { width: 1440, height: 900 }, deviceScaleFactor: options.dpr ?? 1 });
   const page = await context.newPage();
-  const query = `mock=1&proto=clusters&scene=1&theme=tokyo&bg=mesh&card=${options.card ?? 4}&windows=${options.windows}${options.glass ? `&glass=${options.glass}` : ""}`;
+  const query = `mock=1&proto=clusters&scene=1&theme=tokyo&bg=mesh&card=${options.card ?? 4}&windows=${options.windows}`;
   await page.goto(`/?${query}`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   if (options.css) await page.addStyleTag({ content: options.css });
@@ -129,7 +125,6 @@ export async function pan(open: OpenCanvas, ms = 3000): Promise<ScrollResult> {
         sampled = true;
         const visible = (e: Element): boolean => e.getBoundingClientRect().width > 0 && getComputedStyle(e).visibility !== "hidden";
         w.__pan.mid = {
-          moving: document.querySelector(".cl-world")!.hasAttribute("data-moving"),
           windows: [...document.querySelectorAll(".ui-window[data-onscreen]")].map(blur),
           cards: [...document.querySelectorAll(".ui-pill, .ui-overlay-surface, .ui-panel")].filter(visible).map(blur),
         };

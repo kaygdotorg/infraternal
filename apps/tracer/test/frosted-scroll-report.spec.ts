@@ -1,7 +1,7 @@
 /**
  * The numbers behind #256: a scripted 3 s sideways pan with 1, 4 and 12 windows, frosting off (Solid windows, the
- * baseline), Frosted with the live blur (`?glass=live`, what shipped before the fix) and Frosted with the default
- * path. It reports; it asserts only that it ran. It is skipped unless `FROSTED_REPORT=1`, because one run takes
+ * baseline) and Frosted (the blur runs at rest and while the canvas pans, TASTE "Frosted means really frosted").
+ * It reports; it asserts only that it ran. It is skipped unless `FROSTED_REPORT=1`, because one run takes
  * minutes. Each configuration is run `FROSTED_REPS` times (default 3) and the run with the median p95 is reported.
  *
  *   FROSTED_REPORT=1 TRACER_TEST_PORT=4256 bun x playwright test --workers=1 test/frosted-scroll-report.spec.ts
@@ -18,8 +18,7 @@ const reps = Number(process.env.FROSTED_REPS ?? 3);
 const dpr = Number(process.env.FROSTED_DPR ?? 1) as 1 | 2;
 const CONFIGS = [
   { label: "frosting off (Solid)", windows: 1 as const },
-  { label: "Frosted, live blur", windows: 4 as const, glass: "live" as const },
-  { label: "Frosted, default", windows: 4 as const },
+  { label: "Frosted", windows: 4 as const },
 ];
 
 const median = (runs: ScrollResult[]): ScrollResult => [...runs].sort((a, b) => a.p95 - b.p95)[Math.floor(runs.length / 2)]!;
