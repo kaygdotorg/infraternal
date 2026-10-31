@@ -1031,19 +1031,36 @@ impl NodeStatus {
                 }
             })
             .collect();
-        if matches!(self.role, Role::Server | Role::Both)
-            && !self
-                .units
-                .iter()
-                .any(|(unit, _)| unit.kind == Kind::Server && !unit.masked)
-        {
-            next.insert(
-                0,
-                "Restore the server service for the existing data, then run infraternal status."
-                    .to_owned(),
-            );
+        if let Some(repair) = self.server_recovery_step() {
+            next.insert(0, repair);
         }
         (overall, message, next)
+    }
+
+    /// Recover retained server configuration only when runtime evidence needs it.
+    fn server_recovery_step(&self) -> Option<String> {
+        if let Some((unit, _)) = self.units.iter().find(|(unit, state)| {
+            unit.kind == Kind::Server
+                && unit.masked
+                && matches!(state, Activity::Inactive | Activity::Failed)
+        }) {
+            // A mask is recoverable without recreating the service. Preserve
+            // the owning scope; never advise a running service to be repaired.
+            let manager = match unit.scope {
+                Scope::System => "systemctl",
+                Scope::User => "systemctl --user",
+            };
+            Some(format!("{manager} unmask {}", unit.name))
+        } else if matches!(self.role, Role::Server | Role::Both)
+            && !self.units.iter().any(|(unit, _)| unit.kind == Kind::Server)
+        {
+            Some(
+                "Restore the server service for the existing data, then run infraternal status."
+                    .to_owned(),
+            )
+        } else {
+            None
+        }
     }
 
     /// Overall activity follows configured roles: a healthy companion cannot

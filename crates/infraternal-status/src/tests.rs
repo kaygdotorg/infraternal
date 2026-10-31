@@ -501,21 +501,38 @@ fn restart_age_uses_only_comparable_monotonic_microseconds() {
 #[test]
 fn retained_data_has_an_honest_headline_and_repair_step() {
     for masked in [false, true] {
-        let fixture = Fixture::new();
-        fixture.write("var-lib/infraternal.sqlite", "");
-        if masked {
-            std::os::unix::fs::symlink(
-                "/dev/null",
-                fixture.root.join("etc/infraternal-server.service"),
-            )
-            .unwrap();
+        for user in [false, true] {
+            let fixture = Fixture::new();
+            fixture.write("var-lib/infraternal.sqlite", "");
+            if masked {
+                std::os::unix::fs::symlink(
+                    "/dev/null",
+                    fixture.root.join(if user {
+                        "user/infraternal-server.service"
+                    } else {
+                        "etc/infraternal-server.service"
+                    }),
+                )
+                .unwrap();
+            }
+            let status = fixture.status(&[]);
+            let (activity, headline, next) = status.headline();
+            assert_eq!(activity, Activity::Inactive);
+            assert_eq!(headline, "The server is not running on this machine.");
+            assert_eq!(state(&status, "server").0, "Stopped");
+            if masked {
+                assert_eq!(
+                    next[0],
+                    if user {
+                        "systemctl --user unmask infraternal-server.service"
+                    } else {
+                        "systemctl unmask infraternal-server.service"
+                    }
+                );
+            } else {
+                assert!(next[0].contains("Restore the server service"));
+            }
         }
-        let status = fixture.status(&[]);
-        let (activity, headline, next) = status.headline();
-        assert_eq!(activity, Activity::Inactive);
-        assert_eq!(headline, "The server is not running on this machine.");
-        assert_eq!(state(&status, "server").0, "Stopped");
-        assert!(next[0].contains("Restore the server service"));
     }
 }
 

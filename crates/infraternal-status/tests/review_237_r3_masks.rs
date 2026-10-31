@@ -101,6 +101,10 @@ fn a_masked_service_its_manager_reports_running_is_not_stopped() {
                     .unwrap();
                     fs::write(root.join(format!("{role}.properties")), MASKED_RUNNING).unwrap();
                     let node = probe_local(&roots, &[role.to_owned()]);
+                    assert!(
+                        node.headline().2.is_empty(),
+                        "a running masked service needs no repair"
+                    );
                     if node.overall() != Activity::Active
                         || node.confirmed_down_count() != 0
                         || node.components[0].state != "Running"
