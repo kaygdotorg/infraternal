@@ -871,7 +871,10 @@ impl Native {
         if let Some(input) = self.input.take() {
             input.close_write();
         }
-        if let Some(launch) = self.child.take() {
+        if let Some(mut launch) = self.child.take() {
+            // A cancelled exchange cannot use a late reply. Stop the waiter now;
+            // LaunchServices cleanup still verifies and signals its detached app.
+            let _ = launch.launcher.kill();
             self.retirement = Some(thread::spawn(move || retire_owned(launch)));
         }
     }
