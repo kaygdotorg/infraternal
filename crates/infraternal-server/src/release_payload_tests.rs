@@ -13,6 +13,37 @@ use std::{
     thread,
 };
 
+/// Use the nonlocal supported binary so download paths remain covered on both host architectures.
+fn remote_arch() -> Architecture {
+    match std::env::consts::ARCH {
+        "x86_64" => Architecture::Aarch64,
+        "aarch64" => Architecture::X86_64,
+        architecture => panic!("unsupported release-test host architecture: {architecture}"),
+    }
+}
+
+fn host_arch() -> Architecture {
+    match std::env::consts::ARCH {
+        "x86_64" => Architecture::X86_64,
+        "aarch64" => Architecture::Aarch64,
+        architecture => panic!("unsupported release-test host architecture: {architecture}"),
+    }
+}
+
+fn architecture_label(arch: Architecture) -> &'static str {
+    match arch {
+        Architecture::X86_64 => "x86_64",
+        Architecture::Aarch64 => "aarch64",
+    }
+}
+
+fn binary_name(arch: Architecture) -> &'static str {
+    match arch {
+        Architecture::X86_64 => "infraternal-x86_64-musl",
+        Architecture::Aarch64 => "infraternal-aarch64-musl",
+    }
+}
+
 pub(crate) struct Bucket {
     pub(crate) origin: String,
     pub(crate) files: Arc<StdMutex<HashMap<String, Vec<u8>>>>,
@@ -128,15 +159,17 @@ impl Release {
             fields[0], fields[1]
         );
         let payload = vec![0x42; size];
-        let name = "infraternal-aarch64-musl";
+        // Both signed binaries let the same test exercise a remote download on x86_64 and aarch64.
+        let full_payloads = [
+            ("infraternal-aarch64-musl", payload.clone()),
+            ("infraternal-x86_64-musl", payload),
+        ];
         let version_name = version;
         let version = format!("{version}\n").into_bytes();
-        let mut sums = format!(
-            "{:x}  {name}\n{:x}  VERSION\n",
-            Sha256::digest(&payload),
-            Sha256::digest(&version)
-        )
-        .into_bytes();
+        let mut sums = format!("{:x}  VERSION\n", Sha256::digest(&version)).into_bytes();
+        for (name, bytes) in &full_payloads {
+            sums.extend_from_slice(format!("{:x}  {name}\n", Sha256::digest(bytes)).as_bytes());
+        }
         let session_files = if sessions {
             vec![
                 ("infraternal-x86_64-session-musl", b"x86 session".to_vec()),
@@ -168,16 +201,16 @@ impl Release {
         );
         std::fs::remove_file(key).unwrap();
         let signature = std::fs::read(sums_file.with_extension("sig")).unwrap();
-        let files = [
-            (name, payload),
-            ("VERSION", version),
-            ("SHA256SUMS", sums),
-            ("SHA256SUMS.sig", signature),
-        ]
-        .into_iter()
-        .chain(session_files)
-        .map(|(name, bytes)| (format!("/releases/{version_name}/{name}"), bytes))
-        .collect();
+        let files = full_payloads
+            .into_iter()
+            .chain([
+                ("VERSION", version),
+                ("SHA256SUMS", sums),
+                ("SHA256SUMS.sig", signature),
+            ])
+            .chain(session_files)
+            .map(|(name, bytes)| (format!("/releases/{version_name}/{name}"), bytes))
+            .collect();
         Self { root, files, trust }
     }
     fn resolver(&self, origin: String, cache: &str, development: bool) -> ReleasePayload {
@@ -209,55 +242,64 @@ async fn signed_download_cache_hit_offline_and_tampered_cache() {
     let release = Release::new(1024);
     let bucket = Bucket::new(release.files.clone());
     let resolver = release.resolver(bucket.origin.clone(), "valid", false);
-    let path = resolver.resolve(Architecture::Aarch64).await.unwrap();
+    let arch = remote_arch();
+    let path = resolver.resolve(arch).await.unwrap();
     assert_eq!(bucket.requests.load(Ordering::Relaxed), 4);
     assert_eq!(std::fs::read(&path).unwrap(), vec![0x42; 1024]);
-    assert_eq!(resolver.resolve(Architecture::Aarch64).await.unwrap(), path);
+    assert_eq!(resolver.resolve(arch).await.unwrap(), path);
     assert_eq!(bucket.requests.load(Ordering::Relaxed), 4);
     drop(bucket);
-    assert_eq!(resolver.resolve(Architecture::Aarch64).await.unwrap(), path);
+    assert_eq!(resolver.resolve(arch).await.unwrap(), path);
     std::fs::write(&path, b"tampered").unwrap();
-    assert!(resolver.resolve(Architecture::Aarch64).await.is_err());
+    assert!(resolver.resolve(arch).await.is_err());
 }
 
 #[tokio::test]
 async fn missing_wrong_version_tampered_network_and_development_only_fallback() {
     let release = Release::new(1024);
+    let arch = remote_arch();
     let bucket = Bucket::new(release.files.clone());
     bucket.files.lock().unwrap().insert(
-        "/releases/0.1.0/infraternal-aarch64-musl".into(),
+        format!("/releases/0.1.0/{}", binary_name(arch)),
         b"tampered".to_vec(),
     );
     let resolver = release.resolver(bucket.origin.clone(), "tampered", false);
-    let error = resolver.resolve(Architecture::Aarch64).await.err().unwrap();
+    let error = resolver.resolve(arch).await.err().unwrap();
     assert_eq!(
         error.message,
         "the binary does not match the signed checksum."
     );
-    assert!(format!("{error}").starts_with("Get the arm64 binary:"));
-    assert!(!resolver.cache.join("0.1.0/aarch64").exists());
+    let step = match arch {
+        Architecture::Aarch64 => "Get the arm64 binary:",
+        Architecture::X86_64 => "Get the x86_64 binary:",
+    };
+    assert!(format!("{error}").starts_with(step));
+    assert!(
+        !resolver
+            .cache
+            .join(format!("0.1.0/{}", architecture_label(arch)))
+            .exists()
+    );
     let mut wrong = release.resolver(bucket.origin.clone(), "version", false);
     wrong.version = "0.1.1".into();
-    assert!(wrong.resolve(Architecture::Aarch64).await.is_err());
+    assert!(wrong.resolve(arch).await.is_err());
     let empty = Bucket::new(HashMap::new());
     let normal = release.resolver(empty.origin.clone(), "missing", false);
-    assert!(normal.resolve(Architecture::Aarch64).await.is_err());
+    assert!(normal.resolve(arch).await.is_err());
     let dev = release.resolver(empty.origin.clone(), "development", true);
     assert_eq!(
-        dev.resolve(Architecture::Aarch64).await.unwrap(),
-        dev.local.aarch64
+        dev.resolve(arch).await.unwrap(),
+        dev.local.get(arch).to_path_buf()
     );
     drop(empty);
     assert!(
-        dev.resolve(Architecture::Aarch64).await.is_err(),
+        dev.resolve(arch).await.is_err(),
         "offline is not an absent release"
     );
-    if std::env::consts::ARCH == "x86_64" {
-        assert_eq!(
-            normal.resolve(Architecture::X86_64).await.unwrap(),
-            normal.executable
-        );
-    }
+    assert_eq!(
+        normal.resolve(host_arch()).await.unwrap(),
+        normal.executable
+    );
 }
 
 #[tokio::test]
@@ -267,12 +309,13 @@ async fn cross_architecture_cold_and_warm_cache_measurements() {
     let bucket = Bucket::new(release.files.clone());
     let resolver = release.resolver(bucket.origin.clone(), "bench", false);
     let start = std::time::Instant::now();
-    resolver.resolve(Architecture::Aarch64).await.unwrap();
+    let arch = remote_arch();
+    resolver.resolve(arch).await.unwrap();
     let cold = start.elapsed().as_secs_f64() * 1000.0;
     let mut samples = Vec::new();
     for _ in 0..50 {
         let start = std::time::Instant::now();
-        resolver.resolve(Architecture::Aarch64).await.unwrap();
+        resolver.resolve(arch).await.unwrap();
         samples.push(start.elapsed().as_secs_f64() * 1000.0);
     }
     let burst_start = std::time::Instant::now();
@@ -281,7 +324,7 @@ async fn cross_architecture_cold_and_warm_cache_measurements() {
     for _ in 0..8 {
         let resolver = resolver.clone();
         tasks.push(tokio::spawn(async move {
-            resolver.resolve(Architecture::Aarch64).await.unwrap()
+            resolver.resolve(arch).await.unwrap()
         }));
     }
     for task in tasks {
@@ -308,15 +351,21 @@ async fn a_valid_older_release_replayed_under_the_requested_version_is_refused()
     let bucket = Bucket::new(replay);
     let mut resolver = release.resolver(bucket.origin.clone(), "replay", false);
     resolver.version = "0.1.1".into();
+    let arch = remote_arch();
     let error = resolver
-        .resolve(Architecture::Aarch64)
+        .resolve(arch)
         .await
         .expect_err("a signed older release must not become this server version");
     assert_eq!(
         error.message,
         "the signed release belongs to another server version."
     );
-    assert!(!resolver.cache.join("0.1.1/aarch64").exists());
+    assert!(
+        !resolver
+            .cache
+            .join(format!("0.1.1/{}", architecture_label(arch)))
+            .exists()
+    );
 }
 
 #[tokio::test]
@@ -324,16 +373,19 @@ async fn eight_concurrent_add_hosts_share_one_verified_download() {
     let release = Release::new(1024);
     let bucket = Bucket::new(release.files.clone());
     let resolver = Arc::new(release.resolver(bucket.origin.clone(), "concurrent", false));
+    let arch = remote_arch();
     let mut tasks = Vec::new();
     for _ in 0..8 {
         let resolver = resolver.clone();
         tasks.push(tokio::spawn(async move {
-            resolver.resolve(Architecture::Aarch64).await.unwrap()
+            resolver.resolve(arch).await.unwrap()
         }));
     }
-    let expected = resolver
-        .cache
-        .join("0.1.0/aarch64/infraternal-aarch64-musl");
+    let expected = resolver.cache.join(format!(
+        "0.1.0/{}/{}",
+        architecture_label(arch),
+        binary_name(arch)
+    ));
     for task in tasks {
         assert_eq!(task.await.unwrap(), expected);
     }
@@ -343,16 +395,22 @@ async fn eight_concurrent_add_hosts_share_one_verified_download() {
 #[tokio::test]
 async fn a_missing_payload_never_enables_development_fallback() {
     let release = Release::new(1024);
+    let arch = remote_arch();
     let mut files = release.files.clone();
-    files.remove("/releases/0.1.0/infraternal-aarch64-musl");
+    files.remove(&format!("/releases/0.1.0/{}", binary_name(arch)));
     let bucket = Bucket::new(files);
     let resolver = release.resolver(bucket.origin.clone(), "missing-payload", true);
     let error = resolver
-        .resolve(Architecture::Aarch64)
+        .resolve(arch)
         .await
         .expect_err("signed manifest without a payload must stop");
     assert_eq!(error.message, "this version has no matching release file.");
-    assert!(!resolver.cache.join("0.1.0/aarch64").exists());
+    assert!(
+        !resolver
+            .cache
+            .join(format!("0.1.0/{}", architecture_label(arch)))
+            .exists()
+    );
 }
 
 #[tokio::test]
@@ -361,14 +419,15 @@ async fn cache_symlinks_and_shared_files_are_refused() {
     let release = Release::new(1024);
     let bucket = Bucket::new(release.files.clone());
     let resolver = release.resolver(bucket.origin.clone(), "unsafe", false);
-    let path = resolver.resolve(Architecture::Aarch64).await.unwrap();
+    let arch = remote_arch();
+    let path = resolver.resolve(arch).await.unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(resolver.resolve(Architecture::Aarch64).await.is_err());
+    assert!(resolver.resolve(arch).await.is_err());
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let retained = path.with_extension("retained");
     std::fs::rename(&path, &retained).unwrap();
     symlink(&retained, &path).unwrap();
-    assert!(resolver.resolve(Architecture::Aarch64).await.is_err());
+    assert!(resolver.resolve(arch).await.is_err());
     assert_eq!(bucket.requests.load(Ordering::Relaxed), 4);
 }
 // This subprocess helper lets the parent stop a real download without running
@@ -394,7 +453,7 @@ fn partial_download_restart_child() {
     };
     tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(resolver.resolve(Architecture::Aarch64))
+        .block_on(resolver.resolve(remote_arch()))
         .unwrap();
 }
 
@@ -404,6 +463,8 @@ async fn restarted_resolution_reclaims_partial_downloads_after_process_stop() {
     let release = Release::new(2 * 1024 * 1024);
     let bucket = Bucket::new(release.files.clone());
     let restarted = release.resolver(bucket.origin.clone(), "restart", false);
+    let arch = remote_arch();
+    let payload_name = binary_name(arch);
     let version = restarted.cache.join("0.1.0");
     // Repeat the abrupt stop: retention must be bounded across restarts, not
     // merely within one download. Each child writes one MiB before stopping.
@@ -433,7 +494,7 @@ async fn restarted_resolution_reclaims_partial_downloads_after_process_stop() {
                     )
                     .await
                     .unwrap();
-                if path.ends_with("infraternal-aarch64-musl") {
+                if path.ends_with(payload_name) {
                     socket.write_all(&body[..1024 * 1024]).await.unwrap();
                     // The body deliberately remains incomplete until the child
                     // stops; successful verification/publication cannot happen.
@@ -444,7 +505,7 @@ async fn restarted_resolution_reclaims_partial_downloads_after_process_stop() {
                 }
             }
         });
-        let before = partial_payload_bytes(&version);
+        let before = partial_payload_bytes(&version, arch);
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -459,7 +520,7 @@ async fn restarted_resolution_reclaims_partial_downloads_after_process_stop() {
             .spawn()
             .unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        while partial_payload_bytes(&version) < before + 1024 * 1024 {
+        while partial_payload_bytes(&version, arch) < before + 1024 * 1024 {
             assert!(
                 child.try_wait().unwrap().is_none(),
                 "download child stopped early"
@@ -475,11 +536,11 @@ async fn restarted_resolution_reclaims_partial_downloads_after_process_stop() {
         child.wait().unwrap();
         server.await.unwrap();
     }
-    let retained_before = partial_payload_bytes(&version);
+    let retained_before = partial_payload_bytes(&version, arch);
     assert_eq!(retained_before, 2 * 1024 * 1024);
-    let ready = restarted.resolve(Architecture::Aarch64).await.unwrap();
+    let ready = restarted.resolve(arch).await.unwrap();
     assert_eq!(std::fs::metadata(ready).unwrap().len(), 2 * 1024 * 1024);
-    let retained_after = partial_payload_bytes(&version);
+    let retained_after = partial_payload_bytes(&version, arch);
     println!(
         "RELEASE_CACHE_RESTART abrupt_stops=2 retained_before_bytes={retained_before} retained_after_bytes={retained_after}"
     );
@@ -491,13 +552,13 @@ async fn restarted_resolution_reclaims_partial_downloads_after_process_stop() {
 
 // Count only payload files in resolver-owned temporary directories. The
 // verified published cache and signed metadata are deliberately excluded.
-fn partial_payload_bytes(version: &Path) -> u64 {
+fn partial_payload_bytes(version: &Path, arch: Architecture) -> u64 {
     std::fs::read_dir(version)
         .into_iter()
         .flatten()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_name().to_string_lossy().starts_with("download-"))
-        .filter_map(|entry| std::fs::metadata(entry.path().join("infraternal-aarch64-musl")).ok())
+        .filter_map(|entry| std::fs::metadata(entry.path().join(binary_name(arch))).ok())
         .map(|metadata| metadata.len())
         .sum()
 }
@@ -560,18 +621,16 @@ async fn edge_add_host_keeps_exact_server_version_and_verified_cache() {
     let mut resolver = release.resolver(bucket.origin.clone(), "edge", false);
     resolver.version = version.into();
     assert_eq!(
-        resolver.resolve(Architecture::X86_64).await.unwrap(),
+        resolver.resolve(host_arch()).await.unwrap(),
         resolver.executable
     );
     assert_eq!(bucket.requests.load(Ordering::Relaxed), 0);
-    let payload = resolver.resolve(Architecture::Aarch64).await.unwrap();
+    let arch = remote_arch();
+    let payload = resolver.resolve(arch).await.unwrap();
     assert!(payload.to_string_lossy().contains(version));
     assert_eq!(std::fs::read(&payload).unwrap(), vec![0x42; 1024]);
     assert_eq!(bucket.requests.load(Ordering::Relaxed), 4);
-    assert_eq!(
-        resolver.resolve(Architecture::Aarch64).await.unwrap(),
-        payload
-    );
+    assert_eq!(resolver.resolve(arch).await.unwrap(), payload);
     assert_eq!(bucket.requests.load(Ordering::Relaxed), 4);
 }
 

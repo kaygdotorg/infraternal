@@ -18,6 +18,7 @@ async fn decoded_image_and_hash_advance_before_the_transfer_tail_is_released() {
     // Keep the installed decoder, staging tee and digest implementation.
     let hashed = f.root.join("hash-received-byte");
     let released = f.root.join("transfer-tail-released");
+    let input_progress = f.root.join("compressed-input-progress");
     executable(
         &f.root.join("tools/sha256sum"),
         &format!(
@@ -48,14 +49,30 @@ sys.exit(child.wait())
         &f.root.join("tools/head"),
         &format!(
             r#"#!/usr/bin/python3
-"""Hold the compressed tail until both decode and hash have consumed the prefix."""
+"""Hold a bounded compressed tail until both decode and hash advance."""
 import os, sys, time
 from pathlib import Path
 remaining = int(sys.argv[sys.argv.index('-c') + 1])
+total = remaining
+tail = min(16384, max(1, total // 8))
+prefix = total - tail
 sent = 0
 observed = False
+payload = Path({payload:?})
+hashed = Path({hashed:?})
+released = Path({released:?})
+input_progress = Path({input_progress:?})
 while remaining:
-    chunk = os.read(0, min(65536, remaining))
+    if not observed and sent == prefix:
+        # The Rust timeout bounds this wait; keep the reserved tail unread.
+        while not (hashed.exists() and payload.exists() and payload.stat().st_size > 0):
+            time.sleep(0.01)
+        observed = True
+        released.write_text("%d:%d" % (remaining, payload.stat().st_size))
+    limit = min(65536, remaining)
+    if not observed:
+        limit = min(limit, prefix - sent)
+    chunk = os.read(0, limit)
     if not chunk:
         sys.exit(3)
     remaining -= len(chunk)
@@ -63,22 +80,18 @@ while remaining:
     view = memoryview(chunk)
     while view:
         view = view[os.write(1, view):]
-    # Hold past one full decoder input block (128 KiB plus a frame header):
-    # stopping exactly at 128 KiB deadlocks the decoder whenever the payload
-    # starts page-aligned in the pipe, whatever the setup script's length.
-    if not observed and sent >= 196608 and remaining:
-        observed = True
-        deadline = time.monotonic() + 10
-        payload = Path({payload:?})
-        while not (Path({hashed:?}).exists() and payload.exists() and payload.stat().st_size > 0):
-            if time.monotonic() >= deadline:
-                sys.exit(88)
-            time.sleep(0.01)
-        Path({released:?}).touch()
+    input_progress.write_text("%d/%d" % (sent, total))
+    # The decoder's block boundary varies with the encoded image. Check the
+    # real consumers after each bounded write, while the encoded tail remains.
+    if not observed and hashed.exists() and payload.exists() and payload.stat().st_size > 0:
+        if remaining > tail:
+            observed = True
+            released.write_text("%d:%d" % (remaining, payload.stat().st_size))
 "#,
             payload = f.base().join(".bootstrap-lock/payload").to_str().unwrap(),
             hashed = hashed.to_str().unwrap(),
             released = released.to_str().unwrap(),
+            input_progress = input_progress.to_str().unwrap(),
         ),
     );
     let id = uuid::Uuid::new_v4();
@@ -115,16 +128,44 @@ while remaining:
         transaction.stage_session_on(&f.binary, Some(checked)),
     )
     .await
-    .unwrap_or_else(|_| panic!("streaming fixture exceeded its bounded wait"));
+    .unwrap_or_else(|_| {
+        panic!(
+            "streaming fixture exceeded its bounded wait: hashed={} released={:?} input_progress={:?} staged_bytes={:?} expected_bytes={}",
+            hashed.exists(),
+            std::fs::read_to_string(&released),
+            std::fs::read_to_string(&input_progress),
+            std::fs::metadata(f.base().join(".bootstrap-lock/payload")).map(|m| m.len()),
+            binary.len()
+        )
+    });
     assert!(
         result.is_ok(),
-        "streaming transfer stalled or refused; hashed={} staged_bytes={:?}",
+        "streaming transfer failed: error={:?} hashed={} released={:?} input_progress={:?} staged_bytes={:?} expected_bytes={}",
+        result.as_ref().err(),
         hashed.exists(),
-        std::fs::metadata(f.base().join(".bootstrap-lock/payload")).map(|m| m.len())
+        std::fs::read_to_string(&released),
+        std::fs::read_to_string(&input_progress),
+        std::fs::metadata(f.base().join(".bootstrap-lock/payload")).map(|m| m.len()),
+        binary.len()
     );
     let (actual, bridge) = result.unwrap();
     assert_eq!(actual, id);
-    assert!(released.exists(), "the reader never held a nonempty tail");
+    let released_state = std::fs::read_to_string(&released).unwrap_or_else(|_| {
+        panic!(
+            "the compressed tail completed before stage/hash progress: input_progress={:?} staged_bytes={:?}",
+            std::fs::read_to_string(&input_progress),
+            std::fs::metadata(f.base().join(".bootstrap-lock/payload")).map(|m| m.len())
+        )
+    });
+    let (remaining, staged) = released_state.split_once(':').unwrap();
+    assert!(
+        remaining.parse::<u64>().unwrap() > 0,
+        "the reader consumed the compressed tail before observing progress"
+    );
+    assert!(
+        staged.parse::<u64>().unwrap() > 0,
+        "the reader released the tail before staging a decoded prefix"
+    );
     assert_eq!(
         std::fs::read(f.base().join(".bootstrap-lock/payload")).unwrap(),
         binary

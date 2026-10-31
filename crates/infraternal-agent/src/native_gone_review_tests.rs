@@ -2,6 +2,29 @@
 
 use super::*;
 
+struct SocketFixture {
+    path: std::path::PathBuf,
+}
+
+impl Drop for SocketFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn socket_fixture_base(id: uuid::Uuid) -> SocketFixture {
+    use std::os::unix::fs::DirBuilderExt as _;
+
+    // Job-specific state roots can exceed AF_UNIX's 108-byte path limit after the rendezvous suffix.
+    // A private UUID directory in /tmp keeps this socket fixture short and isolates parallel test runs.
+    let path = std::path::PathBuf::from("/tmp").join(format!("if-{}", id.simple()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&path)
+        .unwrap();
+    SocketFixture { path }
+}
+
 /// A native peer that accepts `AttachTerm` but never consumes the final reply.
 struct BlockedNative {
     attach: std::sync::Mutex<Option<Vec<u8>>>,
@@ -32,11 +55,11 @@ impl crate::channel::Channel for BlockedNative {
 #[tokio::test]
 async fn vanished_native_session_bounds_final_reply_drain_for_a_stuck_peer() {
     let id = uuid::Uuid::new_v4();
-    let base = crate::test_state_root().join("fds");
-    std::fs::create_dir_all(&base).unwrap();
+    let base = socket_fixture_base(id);
     let state = State {
         path: sessions::state(Some(
-            base.join(format!("b{}", &id.simple().to_string()[..8])),
+            base.path
+                .join(format!("b{}", &id.simple().to_string()[..8])),
         ))
         .unwrap(),
         pid: None,
@@ -68,10 +91,10 @@ async fn vanished_native_session_bounds_final_reply_drain_for_a_stuck_peer() {
 #[tokio::test]
 async fn vanished_native_session_delivers_final_close_before_stream_retirement() {
     let id = uuid::Uuid::new_v4();
-    let base = crate::test_state_root().join("fds");
-    std::fs::create_dir_all(&base).unwrap();
+    let base = socket_fixture_base(id);
     let path = sessions::state(Some(
-        base.join(format!("n{}", &id.simple().to_string()[..8])),
+        base.path
+            .join(format!("n{}", &id.simple().to_string()[..8])),
     ))
     .unwrap();
     let state = State { path, pid: None };
@@ -122,11 +145,11 @@ async fn vanished_native_session_delivers_final_close_before_stream_retirement()
 #[tokio::test]
 async fn retired_native_session_delivers_saved_status_then_final_close_before_retirement() {
     let id = uuid::Uuid::new_v4();
-    let base = crate::test_state_root().join("fds");
-    std::fs::create_dir_all(&base).unwrap();
+    let base = socket_fixture_base(id);
     let state = State {
         path: sessions::state(Some(
-            base.join(format!("r{}", &id.simple().to_string()[..8])),
+            base.path
+                .join(format!("r{}", &id.simple().to_string()[..8])),
         ))
         .unwrap(),
         pid: None,
@@ -209,11 +232,11 @@ impl crate::channel::Channel for QueuedNative {
 #[tokio::test]
 async fn retiring_native_handshake_preserves_final_answer_with_inflight_commands() {
     let id = uuid::Uuid::new_v4();
-    let base = crate::test_state_root().join("fds");
-    std::fs::create_dir_all(&base).unwrap();
+    let base = socket_fixture_base(id);
     let state = State {
         path: sessions::state(Some(
-            base.join(format!("q{}", &id.simple().to_string()[..8])),
+            base.path
+                .join(format!("q{}", &id.simple().to_string()[..8])),
         ))
         .unwrap(),
         pid: None,
@@ -269,11 +292,11 @@ async fn retiring_native_handshake_preserves_final_answer_with_inflight_commands
 #[tokio::test]
 async fn retired_native_status_bounds_final_reply_drain_for_a_stuck_peer() {
     let id = uuid::Uuid::new_v4();
-    let base = crate::test_state_root().join("fds");
-    std::fs::create_dir_all(&base).unwrap();
+    let base = socket_fixture_base(id);
     let state = State {
         path: sessions::state(Some(
-            base.join(format!("t{}", &id.simple().to_string()[..8])),
+            base.path
+                .join(format!("t{}", &id.simple().to_string()[..8])),
         ))
         .unwrap(),
         pid: None,
