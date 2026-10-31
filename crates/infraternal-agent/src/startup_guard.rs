@@ -60,13 +60,25 @@ pub async fn execute(
     let mut stdin = child.stdin.take().ok_or_else(refused)?;
     stdin.write_all(&bytes).await?;
     drop(stdin);
-    let output = tokio::time::timeout(std::time::Duration::from_secs(4), child.wait_with_output())
-        .await
-        .map_err(|_| refused())??;
-    if !output.status.success() || output.stdout.len() > 8192 {
-        return Err(refused());
-    }
-    Ok(output.stdout)
+    helper_output(child).await
+}
+
+async fn helper_output(mut child: tokio::process::Child) -> io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt as _;
+    let stdout = child.stdout.take().ok_or_else(refused)?;
+    // Drain before waiting so a full pipe cannot stall a valid response. The
+    // helper has no useful stderr; one bounded reader replaces collection of
+    // both streams. Dropping the timed-out future still kills the child.
+    tokio::time::timeout(std::time::Duration::from_secs(4), async move {
+        let mut bytes = Vec::new();
+        stdout.take(8193).read_to_end(&mut bytes).await?;
+        if bytes.len() > 8192 || !child.wait().await?.success() {
+            return Err(refused());
+        }
+        Ok(bytes)
+    })
+    .await
+    .map_err(|_| refused())?
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -308,6 +320,28 @@ mod tests {
     impl Drop for Home {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn helper_output_keeps_response_and_exit_status_bounds() {
+        for (script, accepted) in [
+            ("printf %8192s x", true),
+            ("printf %8193s x", false),
+            ("printf ok; exit 1", false),
+        ] {
+            let child = tokio::process::Command::new("sh")
+                .args(["-c", script])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let output = helper_output(child).await;
+            assert_eq!(output.is_ok(), accepted, "{script}");
+            if accepted {
+                assert_eq!(output.unwrap().len(), 8192);
+            }
         }
     }
 
