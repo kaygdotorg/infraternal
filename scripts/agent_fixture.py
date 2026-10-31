@@ -10,6 +10,7 @@ import signal
 import socket
 import struct
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -38,6 +39,9 @@ def replay_complete_cursor(event, session_id):
     return value
 
 
+_private_state_roots = {}
+
+
 def fixture_state(label):
     """Return a short per-process private state path for real Unix-socket fixtures."""
     root = Path(os.environ.get(
@@ -47,7 +51,6 @@ def fixture_state(label):
             Path.home() / '.cache/codex-scratch/infraternal',
         ),
     ))
-    fallback = Path.home() / '.cache/codex-scratch/infraternal'
 
     def paths_for(candidate):
         state = candidate / f'{label}{os.getpid()}'
@@ -59,15 +62,23 @@ def fixture_state(label):
     # AckBarrier also connects through a sibling .upstream socket with a longer suffix.
     state, paths = paths_for(root)
     longest = max(len(os.fsencode(path)) for path in paths)
+    private = None
     if longest >= 108:
-        root = fallback
+        # Neither HOME nor tempfile's TMPDIR-dependent default is a bounded
+        # fallback. Keep an owner until cleanup (or interpreter shutdown).
+        private = tempfile.TemporaryDirectory(prefix='if-', dir='/tmp')
+        root = Path(private.name)
         state, paths = paths_for(root)
         longest = max(len(os.fsencode(path)) for path in paths)
     if longest >= 108:
+        if private is not None:
+            private.cleanup()
         raise ValueError(
             f'test state path is too long for an AF_UNIX socket after fallback: {longest} bytes'
         )
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if private is not None:
+        _private_state_roots[state] = private
     return state
 
 
@@ -651,3 +662,6 @@ def cleanup(state):
         except (OSError, EOFError):
             pass
     shutil.rmtree(state, ignore_errors=True)
+    private = _private_state_roots.pop(state, None)
+    if private is not None:
+        private.cleanup()

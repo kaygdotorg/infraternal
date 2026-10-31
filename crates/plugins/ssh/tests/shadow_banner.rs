@@ -17,7 +17,8 @@ use std::{os::unix::fs::PermissionsExt, time::Duration};
 
 #[tokio::test]
 async fn a_long_pre_authentication_banner_does_not_refuse_the_host() {
-    let root = common::scratch().join(format!(
+    let scratch = common::scratch();
+    let root = scratch.join(format!(
         "bn-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     ));

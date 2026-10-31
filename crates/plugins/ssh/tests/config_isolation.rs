@@ -11,7 +11,8 @@ use std::{os::unix::fs::PermissionsExt, time::Duration};
 
 #[tokio::test]
 async fn configured_identity_paths_are_not_inherited_by_the_command_child() {
-    let root = common::scratch().join(format!(
+    let scratch = common::scratch();
+    let root = scratch.join(format!(
         "cfg-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     ));
@@ -76,7 +77,8 @@ printf '%s\n' 'isolated-public-policy'
 #[test]
 fn synthetic_master_socket_is_private_at_creation() {
     use std::os::unix::fs::MetadataExt;
-    let root = common::scratch().join(format!(
+    let scratch = common::scratch();
+    let root = scratch.join(format!(
         "socket-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     ));

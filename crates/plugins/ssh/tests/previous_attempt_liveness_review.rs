@@ -33,7 +33,8 @@ fn check(home: &Path) -> Output {
 
 #[test]
 fn home_alias_keeps_open_setup_descriptor_live() {
-    let root = common::scratch().join(format!("liveness-{}", uuid::Uuid::new_v4().simple()));
+    let scratch = common::scratch();
+    let root = scratch.join(format!("liveness-{}", uuid::Uuid::new_v4().simple()));
     let fixture = Fixture(root.clone());
     let home = root.join("real-home");
     let parent = home.join(".local/share");

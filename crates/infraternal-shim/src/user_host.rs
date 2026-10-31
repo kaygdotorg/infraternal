@@ -1553,7 +1553,13 @@ mod tests {
         std::fs::remove_dir_all(&state).unwrap();
     }
 
-    pub(super) fn ack_fixture(tag: u8) -> (Session, std::os::unix::net::UnixStream, PathBuf) {
+    pub(super) fn ack_fixture(
+        tag: u8,
+    ) -> (
+        Session,
+        std::os::unix::net::UnixStream,
+        crate::fixture_state::FixtureState,
+    ) {
         let state = crate::fixture_state::fixture_state();
         let mut config = Config::new([tag; 16], Uid::effective().as_raw());
         config.state = Some(state.clone());

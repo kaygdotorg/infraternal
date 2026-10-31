@@ -97,7 +97,8 @@ impl SshSession for Receipts {
 
 #[tokio::test]
 async fn refused_publication_reports_failure_to_the_waiting_wizard() {
-    let path = common::scratch().join(format!("public-{}", uuid::Uuid::new_v4().simple()));
+    let scratch = common::scratch();
+    let path = scratch.join(format!("public-{}", uuid::Uuid::new_v4().simple()));
     std::fs::write(&path, b"synthetic public payload").unwrap();
     let runner = Bootstrap::new(
         Arc::new(Receipts),
@@ -519,7 +520,8 @@ async fn setup_attempt_end(
 
 #[tokio::test]
 async fn retry_reopens_ssh_after_transport_loss_and_keeps_the_published_shell() {
-    let path = common::scratch().join(format!("reconnect-{}", uuid::Uuid::new_v4().simple()));
+    let scratch = common::scratch();
+    let path = scratch.join(format!("reconnect-{}", uuid::Uuid::new_v4().simple()));
     std::fs::write(&path, b"synthetic verified full payload").unwrap();
     let disconnected = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let underlying = Arc::new(RecoverableTransport {
@@ -614,7 +616,8 @@ async fn retry_reopens_ssh_after_transport_loss_and_keeps_the_published_shell() 
 #[tokio::test]
 async fn signed_session_is_typable_before_full_resolution_and_late_failure_retries_the_same_shell()
 {
-    let path = common::scratch().join(format!("deferred-{}", uuid::Uuid::new_v4().simple()));
+    let scratch = common::scratch();
+    let path = scratch.join(format!("deferred-{}", uuid::Uuid::new_v4().simple()));
     std::fs::write(&path, b"synthetic verified session payload").unwrap();
     let source = Arc::new(DeferredPayload {
         session: path.clone(),
@@ -728,7 +731,8 @@ impl infraternal_plugin_ssh::install::PayloadSource for WarmPayload {
 
 #[tokio::test]
 async fn encoding_warmup_resolves_admitted_source_images_instead_of_configured_paths() {
-    let path = common::scratch().join(format!("warm-{}", uuid::Uuid::new_v4().simple()));
+    let scratch = common::scratch();
+    let path = scratch.join(format!("warm-{}", uuid::Uuid::new_v4().simple()));
     std::fs::write(&path, b"synthetic verified payload for encoding warmup").unwrap();
     let source = Arc::new(WarmPayload {
         path: path.clone(),
