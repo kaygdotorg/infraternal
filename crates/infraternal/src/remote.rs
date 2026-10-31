@@ -351,12 +351,13 @@ pub(crate) async fn post_json(
             }
         }
     }
-    let socket = connect_enrollment(name, port).await.map_err(|error| {
-        match Failure::of(&error) {
-            Some(Failure::Dns(message)) => ClientFailure::Dns(message, error.kind()),
-            _ => ClientFailure::Connect(error.kind()),
-        }
-    })?;
+    let socket =
+        connect_enrollment(name, port)
+            .await
+            .map_err(|error| match Failure::of(&error) {
+                Some(Failure::Dns(message)) => ClientFailure::Dns(message, error.kind()),
+                _ => ClientFailure::Connect(error.kind()),
+            })?;
     socket
         .set_nodelay(true)
         .map_err(|error| ClientFailure::SocketOption(error.kind()))?;
@@ -366,8 +367,8 @@ pub(crate) async fn post_json(
         .map_err(|_| ClientFailure::TlsConfiguration)?
         .into_ssl(name)
         .map_err(|_| ClientFailure::TlsConfiguration)?;
-    let mut stream = tokio_openssl::SslStream::new(ssl, socket)
-        .map_err(|_| ClientFailure::TlsConfiguration)?;
+    let mut stream =
+        tokio_openssl::SslStream::new(ssl, socket).map_err(|_| ClientFailure::TlsConfiguration)?;
     std::pin::Pin::new(&mut stream)
         .connect()
         .await
@@ -461,8 +462,8 @@ async fn redeem(url: &str, root: Option<&X509>, request: &JoinRequest) -> io::Re
         8192,
         &mut request_started,
     )
-        .await
-        .map_err(client_failure_to_io)?;
+    .await
+    .map_err(client_failure_to_io)?;
     if response.status != StatusCode::OK {
         return Err(refused());
     }
