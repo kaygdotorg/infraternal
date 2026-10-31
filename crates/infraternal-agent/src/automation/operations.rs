@@ -362,7 +362,7 @@ mod tests {
         for entry in [
             json!([]),
             json!({"name":"build", "uid":-1}),
-            json!({"name":"build", "uid":4294967296_u64}),
+            json!({"name":"build", "uid":4_294_967_296_u64}),
             json!({"name":"../escape", "uid":1000}),
             json!({"name":"build", "uid":1000, "extra":true}),
             json!({"name":"build"}),
