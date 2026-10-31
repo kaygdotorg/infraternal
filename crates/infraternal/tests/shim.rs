@@ -327,8 +327,20 @@ fn real_shell_reconnect_resize_and_delivered_exit() {
     until(&mut peer, &mut seq, b"RESUME_OK\r\n");
     session.finish(peer, seq);
 }
+fn vim_path() -> PathBuf {
+    // Resolve in the test runner: login shells deliberately scrub the inherited toolchain PATH.
+    let vim = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|directory| directory.join("vim"))
+        .find(|path| {
+            fs::metadata(path)
+                .is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o111 != 0)
+        })
+        .expect("Vim must be available in the verification toolchain");
+    fs::canonicalize(vim).unwrap()
+}
 #[test]
 fn ring_wrap_snapshot_repaints_real_vim() {
+    let vim = vim_path().to_str().unwrap().replace('\'', "'\\''");
     let mut session = Session::new(1024, false);
     let mut peer = session.attach(0);
     let mut original_seq = 0;
@@ -342,7 +354,7 @@ fn ring_wrap_snapshot_repaints_real_vim() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../infraternal-shim/tests/fixtures/capture.py");
     let command = format!(
-        "printf '\\033c'; seq 1 4000; vim -u NONE -i NONE -n '{}'; printf 'vim-exited-%s\\n' check\n",
+        "printf '\\033c'; seq 1 4000; '{vim}' -u NONE -i NONE -n '{}'; printf 'vim-exited-%s\\n' check\n",
         fixture.display()
     );
     send(&mut peer, Frame::Input(command.into_bytes()));

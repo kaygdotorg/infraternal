@@ -265,8 +265,16 @@ rust_verify_fast() {
     # the workspace run builds neither. Its shim lib tests are the gate.
     rust_run_gate "shim process-per-user" cargo test --locked --package infraternal-shim --features process-per-user --lib
     rust_run_gate "cargo-deny" cargo deny check
+    rust_run_gate "gate architecture" python3 scripts/test-verify-architecture.py
     if [[ "$mode" == final ]]; then
-        rust_run_gate "static builds" rust_static_build_check
+        # The x86 build VM checks both shipping targets. This gate also executes
+        # x86 crypto/CLI probes, so cross-compilation alone cannot qualify it on ARM.
+        if [[ "$(uname -m)" == x86_64 ]]; then
+            rust_run_gate "static builds" rust_static_build_check
+        else
+            printf '\nstatic builds: skipped (requires the x86_64 build VM; host %s)\n' "$(uname -m)"
+            RUST_GATE_ROWS+=("static builds|SKIP (x86)")
+        fi
     fi
     rust_print_summary
 
