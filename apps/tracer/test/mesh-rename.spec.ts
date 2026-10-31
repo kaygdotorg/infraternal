@@ -196,6 +196,32 @@ test.describe("touch", () => {
     await expect(card(page, "renamed-by-tap")).toBeVisible();
   });
 
+  test("phone 393x852: the open field never sits under the status dot, for short, usual and long names", async ({ page }) => {
+    await open(page, PHONE);
+    const dblTap = async (host: string): Promise<void> => {
+      await bringIntoView(page, host);
+      const box = (await hostName(page, host).boundingBox())!;
+      const x = box.x + box.width / 2, y = box.y + box.height / 2;
+      await page.touchscreen.tap(x, y);
+      await page.touchscreen.tap(x, y);
+    };
+    await checkAndRename(page, "build-01", LONG, dblTap, "393x852");
+    await checkAndRename(page, LONG, "db", dblTap, "393x852");
+    await dblTap("db");
+    await expectFieldClearOnCard(page, "db", "393x852 card \"db\" (after a long name)");
+    await shoot(page, "field-clear-393x852-short-name");
+    await page.keyboard.press("Escape");
+    await page.locator("#sidebar-toggle").tap();
+    await expect(page.locator("#sidebar")).toBeVisible();
+    const label = page.locator('#tree .bm-leaf[data-id="n-nix-cache"] .bm-label');
+    await label.scrollIntoViewIfNeeded();
+    const box = (await label.boundingBox())!;
+    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(field(page)).toBeVisible();
+    await expectFieldClearInTree(page, "n-nix-cache", "393x852 tree");
+  });
+
   test("in the Views tree the first tap flies and the sidebar waits for the second", async ({ page }) => {
     await open(page, PHONE);
     await page.locator("#sidebar-toggle").tap();
@@ -223,6 +249,84 @@ test.describe("touch", () => {
     await expect(page.locator("#sidebar")).toBeHidden({ timeout: 3000 });
     await expect(field(page)).toHaveCount(0);
   });
+});
+
+/**
+ * The open field never sits under what is drawn beside the name (#259, found in the phone captures: the green status dot sat
+ * on the last letter of the name). A rect is the drawn box in CSS px; two boxes collide when they share any area.
+ */
+type Box = { x: number; y: number; w: number; h: number };
+const collide = (a: Box, b: Box): boolean => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+const boxOf = (locator: ReturnType<Page["locator"]>): Promise<Box> =>
+  locator.evaluate((el) => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; });
+/** What the card's pill draws around the name: the machine's mark, the status dot, the session name and the header actions. */
+const CARD_NEIGHBOURS = [".ui-window-mark", ".ui-window-dot", ".ui-window-session", ".ui-window-actions .ui-window-action"];
+
+/** The field is open on this host's card: it stays inside the pill and clear of each neighbour that is drawn; its text is whole. */
+async function expectFieldClearOnCard(page: Page, host: string, what: string): Promise<void> {
+  const input = field(page);
+  await expect(input, what).toBeVisible();
+  const f = await boxOf(input);
+  const pill = await boxOf(card(page, host).locator(".ui-window-pill"));
+  expect(f.x, `${what}: field starts inside the pill`).toBeGreaterThanOrEqual(pill.x - 0.5);
+  expect(f.x + f.w, `${what}: field ends inside the pill`).toBeLessThanOrEqual(pill.x + pill.w + 0.5);
+  const dot = await boxOf(card(page, host).locator(".ui-window-dot"));
+  expect(dot.w, `${what}: the status dot is drawn (the check is meaningful)`).toBeGreaterThan(1);
+  for (const selector of CARD_NEIGHBOURS) {
+    for (const el of await card(page, host).locator(selector).all()) {
+      const b = await boxOf(el);
+      if (b.w < 1 || b.h < 1) continue; // not drawn (hidden by the width, or no status)
+      expect(collide(f, b), `${what}: the field (${JSON.stringify(f)}) covers ${selector} (${JSON.stringify(b)})`).toBe(false);
+    }
+  }
+}
+/** Short names open whole: the field never makes a name scroll before anything was typed. */
+const expectTextWhole = (page: Page, what: string) =>
+  expect.poll(() => field(page).evaluate((el: HTMLInputElement) => el.scrollWidth - el.clientWidth), { message: `${what}: the open field scrolls its own text` }).toBeLessThanOrEqual(1);
+
+/** Opens the field (by double click or double tap on the name), checks it, and renames the host to `to` so the next case has a new shape of name. */
+async function checkAndRename(page: Page, host: string, to: string, open: (host: string) => Promise<void>, size: string): Promise<void> {
+  await open(host);
+  await expectFieldClearOnCard(page, host, `${size} card "${host}"`);
+  // A long name is ellipsized on its card, and the field scrolls it as any field does; every name that fits opens whole.
+  if (host !== LONG) await expectTextWhole(page, `${size} card "${host}"`);
+  await shoot(page, `field-clear-${size}-${host === LONG ? "long" : host.length < 4 ? "short" : "usual"}-name`);
+  await page.keyboard.type(to);
+  await page.keyboard.press("Enter");
+  await expect(card(page, to)).toBeVisible();
+  await page.waitForTimeout(400);
+}
+const LONG = "build-farm-eu-west-central-runner-17";
+
+/** The tree's field stays inside its row and clear of the row's own mark or note, when it has one. */
+async function expectFieldClearInTree(page: Page, id: string, what: string): Promise<void> {
+  const leaf = page.locator(`#tree .bm-leaf[data-id="${id}"]`);
+  const f = await boxOf(field(page));
+  const row = await boxOf(leaf);
+  expect(f.x + f.w, `${what}: field ends inside its row`).toBeLessThanOrEqual(row.x + row.w + 0.5);
+  for (const el of await leaf.locator(".ui-mark, .bm-meta").all()) {
+    const b = await boxOf(el);
+    if (b.w < 1 || b.h < 1) continue;
+    expect(collide(f, b), `${what}: the field covers a mark or note of its row`).toBe(false);
+  }
+}
+
+test("desktop: the open field never sits under the status dot, for short, usual and long names", async ({ page }) => {
+  await open(page, DESKTOP);
+  const dbl = async (host: string): Promise<void> => { await hostName(page, host).dblclick(); };
+  await checkAndRename(page, "build-01", LONG, dbl, "1440x900");
+  await checkAndRename(page, LONG, "db", dbl, "1440x900");
+  await dbl("db");
+  await expectFieldClearOnCard(page, "db", "1440x900 card \"db\" (after a long name)");
+  await shoot(page, "field-clear-1440x900-short-name");
+  await page.keyboard.press("Escape");
+  // The Views tree: the field in a leaf row.
+  await page.locator("#sidebar-toggle").click();
+  await expect(page.locator("#sidebar")).toBeVisible();
+  await page.locator('#tree .bm-leaf[data-id="n-nix-cache"] .bm-label').dblclick();
+  await expect(field(page)).toBeVisible();
+  await expectFieldClearInTree(page, "n-nix-cache", "1440x900 tree");
+  await page.keyboard.press("Escape");
 });
 
 test("paper theme: the field reads on light", async ({ page }) => {
