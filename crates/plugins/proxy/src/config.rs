@@ -158,7 +158,7 @@ pub fn render_static_config(config: &StaticConfig) -> io::Result<String> {
     .map_err(io::Error::other)?;
     writeln!(
         rendered,
-        "\n[ping]\nentryPoint = \"health\"\nmanualRouting = true"
+        "\n[ping]\nentryPoint = \"health\"\nmanualRouting = false"
     )
     .map_err(io::Error::other)?;
     writeln!(
@@ -257,7 +257,7 @@ pub fn render_dynamic_config(services: &[PublishedService]) -> io::Result<Vec<u8
             https_middlewares.push(access_middleware);
         }
         routers.insert(
-            format!("{}-http", service.id),
+            format!("http.{}", service.id),
             json!({
                 "rule": rule,
                 "entryPoints": ["http"],
@@ -269,7 +269,7 @@ pub fn render_dynamic_config(services: &[PublishedService]) -> io::Result<Vec<u8
             CertificateName::Wildcard(name) | CertificateName::Exact(name) => name,
         };
         routers.insert(
-            format!("{}-https", service.id),
+            service.id.clone(),
             json!({
                 "rule": rule,
                 "entryPoints": ["https"],

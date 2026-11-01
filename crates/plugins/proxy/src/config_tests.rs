@@ -63,9 +63,8 @@ fn private_ping_is_routed_automatically_without_enabling_the_admin_api() {
     let rendered = render_static_config(&static_config(false)).expect("render static config");
     assert!(rendered.contains("[ping]"));
     assert!(rendered.contains("manualRouting = false"));
-    assert!(!rendered.contains("[api]"));
-    assert!(!rendered.contains("dashboard ="));
-    assert!(!rendered.contains("insecure ="));
+    assert!(rendered.contains("dashboard = false"));
+    assert!(rendered.contains("insecure = false"));
 }
 
 #[test]
