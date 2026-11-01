@@ -163,9 +163,9 @@ impl Store {
                 )?
             };
             let fields = if initialize {
-                &["op_id", "document"][..]
+                &["op_id", "document", "session_incarnation"][..]
             } else {
-                &["op_id", "base_revision", "intent"][..]
+                &["op_id", "base_revision", "intent", "session_incarnation"][..]
             };
             if !maintenance && !model::shape(&request, fields) {
                 return Err(Error);

@@ -7,14 +7,17 @@
      would shift every window under the canvas's own transform. Panning is the transform only. */
   position: absolute; inset: 0; overflow: hidden; overflow: clip;
   /* Windows cast shadows past the viewport edge; give them room without clipping. */
-  margin: 0 calc(var(--gutter) * -1) -16px; padding: 0 var(--gutter) 16px;
+  margin: 0 calc(var(--gutter) * -1) -1rem; padding: 0 var(--gutter) 1rem;
   touch-action: none;
   /* A window's lock shackle rises a few pixels over its top frame line. */
-  overflow-clip-margin: 10px;
+  overflow-clip-margin: 0.625rem;
 }
 .canvas-viewport[data-grab="ready"] { cursor: grab; }
 .canvas-viewport[data-grab="dragging"] { cursor: grabbing; }
 .canvas-viewport[data-grab] .ui-window { pointer-events: none; }
+/* The canvas's geometry stays in px (the gap, the columns' padding and negative margin below): the layout code lays windows out
+   with the same numbers (COLUMN_GAP, geometry.ts), so a rem here would drift from it by a pixel or two per column at any size
+   but the standard one. The windows themselves grow with the UI size (window-sizes.ts); the chrome inside them scales in rem. */
 .canvas-layer { display: flex; gap: 12px; height: 100%; transform-origin: 0 0; will-change: transform; }
 .canvas-layer > .ui-window { flex: none; width: var(--window-w, 100%); height: var(--window-h, 100%); }
 
@@ -24,15 +27,15 @@
 /* Static previews use the terminal's face and metrics, so a preview and the live terminal
    read the same: 14 px on desktop (13 px on touch) with the renderer's font-box line. */
 .canvas-preview {
-  --preview-font: 14px;
-  position: absolute; inset: 0; margin: 0; padding: 14px 16px; overflow: auto;
+  --preview-font: 0.875rem;
+  position: absolute; inset: 0; margin: 0; padding: 0.875rem 1rem; overflow: auto;
   color: var(--fg); font: var(--fw-body, 450) var(--preview-font)/1.2857 var(--font-mono, "Maple Mono NF"), ui-monospace, monospace;
   letter-spacing: 0; white-space: pre; tab-size: 8;
   overscroll-behavior: contain; scrollbar-width: none; touch-action: pan-x pan-y;
   -webkit-user-select: text; user-select: text;
 }
 .canvas-preview::-webkit-scrollbar { display: none; }
-@media (pointer: coarse) { .canvas-preview { --preview-font: 13px; } }
+@media (pointer: coarse) { .canvas-preview { --preview-font: 0.8125rem; } }
 .canvas-prompt { color: var(--accent); }
 /* SGR 3 (italic) and 1 (bold) in a static preview; the font's own italic is used when it has one, the browser slants the upright face when it has none. */
 .canvas-preview i { font-style: italic; }
@@ -52,24 +55,26 @@
 /* ---- details popover ------------------------------------------------------------- */
 .canvas-popover {
   position: absolute; z-index: 6; display: flex; flex-direction: column; min-height: 0; overflow: hidden;
-  border-radius: 14px; color: var(--fg);
+  border-radius: 0.875rem; color: var(--fg);
 }
-.canvas-popover-head { display: flex; align-items: center; gap: 12px; padding: 14px 16px 12px; }
-.canvas-popover-logo { display: grid; flex: none; place-items: center; width: 24px; height: 24px; color: var(--fg); }
-.canvas-popover-names { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.canvas-popover-head { display: flex; align-items: center; gap: 0.75rem; padding: 0.875rem 1rem 0.75rem; }
+.canvas-popover-logo { display: grid; flex: none; place-items: center; width: 1.5rem; height: 1.5rem; color: var(--fg); }
+.canvas-popover-names { display: flex; flex-direction: column; gap: 0.1875rem; min-width: 0; }
 .canvas-popover-title { font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
 .canvas-popover-sub { color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
-.canvas-popover-tabs { display: flex; padding: 0 16px 10px; }
+.canvas-popover-tabs { display: flex; padding: 0 1rem 0.625rem; }
 .canvas-popover-scroll {
-  min-height: 0; overflow: auto; padding: 2px 16px 10px; overscroll-behavior: contain;
+  min-height: 0; overflow: auto; padding: 2px 1rem 0.625rem; overscroll-behavior: contain;
   border-top: 1px solid var(--line);
-  -webkit-mask-image: linear-gradient(transparent, #000 10px, #000 calc(100% - 10px), transparent);
-  mask-image: linear-gradient(transparent, #000 10px, #000 calc(100% - 10px), transparent);
+  -webkit-mask-image: linear-gradient(transparent, #000 0.625rem, #000 calc(100% - 0.625rem), transparent);
+  mask-image: linear-gradient(transparent, #000 0.625rem, #000 calc(100% - 0.625rem), transparent);
 }
+/* The destructive action under the facts: the settings row's own 8 px padding plus this 8 px puts its label on the keys' 16 px edge. */
+.canvas-popover-action { flex: none; padding: 0.375rem 0.5rem 0.5rem; border-top: 1px solid var(--line); }
 @media (pointer: coarse) {
-  .canvas-popover { border-radius: 18px; }
-  .canvas-popover-head { padding: 16px 16px 12px; }
-  .canvas-popover-logo { width: 28px; height: 28px; }
+  .canvas-popover { border-radius: 1.125rem; }
+  .canvas-popover-head { padding: 1rem 1rem 0.75rem; }
+  .canvas-popover-logo { width: 1.75rem; height: 1.75rem; }
 }
 
 /* While a flow owns the window the capsule is only its title: no separator, no session, no
@@ -78,9 +83,9 @@
 
 /* The mock badge sits in the bottom corner, clear of window headers, and never on top of
    an open popover. */
-.terminal-screen[data-canvas="on"] .test-double-badge { top: auto; bottom: 24px; right: calc(var(--gutter) + 10px); }
+.terminal-screen[data-canvas="on"] .test-double-badge { top: auto; bottom: 1.5rem; right: calc(var(--gutter) + 0.625rem); }
 @media (pointer: coarse) {
-  .terminal-screen[data-canvas="on"] .test-double-badge { bottom: calc(84px + env(safe-area-inset-bottom)); }
+  .terminal-screen[data-canvas="on"] .test-double-badge { bottom: calc(5.25rem + env(safe-area-inset-bottom)); }
 }
 
 
@@ -90,7 +95,7 @@
   .terminal-screen[data-canvas="on"] .tabs { display: flex; }
   .terminal-screen[data-canvas="on"] .tabs .tab:not(.tab-add) { display: none; }
 }
-@media (pointer: coarse) { .terminal-screen[data-canvas="on"] .tab-add { width: 44px; } }
+@media (pointer: coarse) { .terminal-screen[data-canvas="on"] .tab-add { width: 2.75rem; } }
 
 /* On a phone the capsule shares its row with the toggle spacer and "+": the round-trip readout
    gives way so the host name is never cut with an ellipsis. */

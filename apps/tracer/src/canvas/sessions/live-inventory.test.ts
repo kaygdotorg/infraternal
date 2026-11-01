@@ -1,8 +1,28 @@
 /** Reproduces stale remembered rows and pins host reconciliation behavior. */
 import { expect, test } from "bun:test";
 import { createLiveInventory } from "./live-inventory";
+import type { CanvasDocument } from "../model/schema";
 
-test("a host snapshot replaces cached session rows and keeps only live shims", () => {
+test("a shared manual name pins an existing record and survives later attach hints", () => {
+  const inventory = createLiveInventory({ accountId: "rename-peer", host: "server" });
+  inventory.reconcile("server", ["shared-session"]);
+  const document: CanvasDocument = { format: "infraternal.canvas", version: 1, revision: 1, views: [{ id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [{ id: "c", weight: 1, windows: [{ id: "w", target: { type: "session", host: "server", id: "shared-session", name: "manual name", pinned: true } }] }] } }] };
+  inventory.setLayout(document);
+  expect(inventory.get("server", "shared-session")?.pinned).toBe(true);
+  inventory.attach("server", "shared-session", { name: "shell" });
+  expect(inventory.get("server", "shared-session")?.name).toBe("manual name");
+  inventory.dispose();
+});
+
+test("choosing the current automatic name still pins it", () => {
+  const inventory = createLiveInventory({ accountId: "rename-current", host: "server" });
+  inventory.reconcile("server", ["session"]);
+  inventory.rename("server", "session", "shell");
+  expect(inventory.get("server", "session")?.pinned).toBe(true);
+  inventory.dispose();
+});
+
+test("a host snapshot replaces in-memory session rows without rewriting legacy storage", () => {
   const prior = Object.getOwnPropertyDescriptor(globalThis, "window");
   const staleIds = Array.from({ length: 40 }, (_, index) => `stale-${index}`);
   const liveIds = Array.from({ length: 16 }, (_, index) => `live-${index}`);
@@ -12,12 +32,13 @@ test("a host snapshot replaces cached session rows and keeps only live shims", (
     const inventory = createLiveInventory({ accountId: "ended", host: "server" });
     expect(inventory.status()).toBe("loading");
     expect(inventory.list("server")).toEqual([]);
+    inventory.reconcile("server", staleIds);
     expect(inventory.reconcile("server", liveIds).map((row) => row.id).sort()).toEqual(staleIds.sort());
     expect(inventory.status()).toBe("ready");
     expect(inventory.list("server").map((row) => row.id).sort()).toEqual([...liveIds].sort());
     expect(inventory.list("server").every((row) => row.state === "detached")).toBe(true);
     expect(inventory.get("server", staleIds[0]!)?.gone).toBe(true);
-    expect(JSON.parse(saved).map((row: { id: string }) => row.id).sort()).toEqual([...liveIds].sort());
+    expect(JSON.parse(saved).map((row: { id: string }) => row.id).sort()).toEqual([...staleIds].sort());
     inventory.gone("server", liveIds[0]!);
     expect(inventory.list("server").map((row) => row.id)).not.toContain(liveIds[0]);
     expect(JSON.parse(saved).map((row: { id: string }) => row.id)).not.toContain(liveIds[0]);
@@ -39,6 +60,7 @@ test("an unavailable agent hides remembered rows without ending them, then resto
   try {
     const inventory = createLiveInventory({ accountId: "restart", host: "server" });
     inventory.reconcile("server", [liveId]);
+    inventory.rename("server", liveId, "kept name");
     inventory.unavailable("server");
     expect(inventory.status()).toBe("loading");
     expect(inventory.list("server")).toEqual([]);
@@ -56,7 +78,7 @@ test("an unavailable agent hides remembered rows without ending them, then resto
   }
 });
 
-test("inventory remembers a remote session and refuses a cross-host attach", () => {
+test("inventory keeps a remote session per tab and refuses a cross-host attach", () => {
   const prior = Object.getOwnPropertyDescriptor(globalThis, "window");
   let saved = JSON.stringify([
     { host: "server", id: "legacy", name: "old", pinned: false, frecency: 1 },
@@ -73,8 +95,9 @@ test("inventory remembers a remote session and refuses a cross-host attach", () 
     expect(inventory.get("server", "remote")).toBeUndefined();
     inventory.detach("worker", "remote");
     const restored = createLiveInventory({ accountId: "fixture", host: "server" });
-    expect(restored.list("worker").map((row) => row.id)).toEqual(["remote"]);
-    expect(restored.get("worker", "remote")?.state).toBe("detached");
+    expect(restored.list("worker")).toEqual([]);
+    expect(restored.get("worker", "remote")).toBeUndefined();
+    expect(inventory.get("worker", "remote")?.state).toBe("detached");
     inventory.dispose(); restored.dispose();
   } finally {
     if (prior) Object.defineProperty(globalThis, "window", prior);

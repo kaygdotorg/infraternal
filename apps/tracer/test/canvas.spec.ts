@@ -4,6 +4,7 @@
  * live terminal's cursor staying on its text inside a window card.
  */
 import { chromium, expect, test, type BrowserContext, type Page } from "playwright/test";
+import { uiFactor } from "./ui-factor";
 
 type CanvasOffset = { x: number; y: number; minX: number; moving: boolean; transform: string };
 
@@ -98,7 +99,7 @@ test("details popover: keys left, values right, each cell copies with a tick", a
   expect(key!.x).toBeLessThan(rowBox.x + 8);
   expect(Math.abs(value!.x + value!.width - (rowBox.x + rowBox.width))).toBeLessThan(8);
   await row.locator(".ui-kv-value").click();
-  await expect(row.locator(".ui-kv-value")).toHaveAttribute("data-done", "");
+  await expect(row.locator(".ui-kv-value")).toHaveAttribute("data-copied", "");
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("6.8.0-58-generic");
   await row.locator(".ui-kv-key").click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("Kernel");
@@ -382,15 +383,15 @@ test("sidebar footer: the person and settings pills line up, press, and open Set
   await expect(page.locator(".ui-settings")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.locator(".ui-settings")).toHaveCount(0);
-  // Settings, About: the gear opens it; a value copies with the shared tick and "Copied".
+  // Settings, About: the gear opens it; a value copies and confirms in place (clipboard icon and "Copied").
   await foot.locator(".ui-sidebar-settings").click();
   const about = page.locator(".ui-settings");
   await expect(about.locator(".ui-settings-nav-row[aria-current='true']")).toHaveText("About");
   const commit = about.locator(".ui-kv-row", { hasText: "Commit" }).locator(".ui-kv-value");
   await commit.click();
-  await expect(commit).toHaveAttribute("data-done", "");
+  await expect(commit).toHaveAttribute("data-copied", "");
   expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(/^[0-9a-f]{40}$|^dev$/);
-  await expect(page.locator(".tip")).toContainText("Copied");
+  await expect(commit.locator(".ui-copied")).toHaveText("Copied");
   const version = about.locator(".ui-kv-row", { hasText: "Version" }).locator(".ui-kv-value");
   await version.click();
   expect((await page.evaluate(() => navigator.clipboard.readText())).length).toBeGreaterThanOrEqual(3);
@@ -440,10 +441,14 @@ test("lock: the icon appears near a window's top edge, locks with a click, stays
     const button = document.querySelector(".ui-window-lock")!.getBoundingClientRect();
     return { shackleBottom: shackle.bottom - w.top, shackleTop: shackle.top - w.top, bodyTop: body.top - w.top, hit: [button.width, button.height], bg: getComputedStyle(document.querySelector(".ui-window-lock")!).backgroundColor, border: getComputedStyle(document.querySelector(".ui-window-lock")!).borderTopWidth };
   });
+  // The glyph and its hit area are drawn in rem, the frame is a 1 px hairline: the glyph's offsets from the frame grow with the UI size's
+  // factor, and the button's own offset grows with it too, so the shackle's distance grows with its square (measured: 1.17 px at a
+  // factor of 1, 1.43 at 1.1, 2.01 at 1.32). The glyph's design is the same at every size (#283).
+  const factor = await uiFactor(page);
   expect(frame.shackleTop).toBeLessThan(-3);
-  expect(Math.abs(frame.bodyTop)).toBeLessThan(1.2);
-  expect(Math.abs(frame.shackleBottom)).toBeLessThan(1.2);
-  expect(frame.hit).toEqual([44, 44]);
+  expect(Math.abs(frame.bodyTop)).toBeLessThan(1.2 * factor);
+  expect(Math.abs(frame.shackleBottom)).toBeLessThan(1.2 * factor * factor);
+  for (const side of frame.hit as number[]) expect(Math.abs(side - 44 * factor), "the lock's hit area is 44 px at the standard factor").toBeLessThan(0.1);
   expect(frame.bg).toBe("rgba(0, 0, 0, 0)");
   expect(frame.border).toBe("0px");
   await expect(lock).toHaveAttribute("data-tip", "Lock input");
@@ -819,19 +824,21 @@ test("copy works from a plain-http, non-localhost origin: no async clipboard, th
     await page.locator(".ui-window").first().locator(".ui-window-pill").click();
     const value = page.locator(".canvas-popover .ui-kv-value").first();
     await value.click();
-    await expect(value).toHaveAttribute("data-done", "");
+    await expect(value).toHaveAttribute("data-copied", "");
     expect(await page.evaluate(() => (window as unknown as { __copied: string[] }).__copied)).toEqual(["6.8.0-58-generic"]);
-    // The tick morphs in (opacity rises) and the shared "Copied" tooltip shows.
-    await expect(value.locator(".ui-inline-tick .is-done")).toHaveCSS("opacity", "1");
-    await expect(page.locator(".tip")).toContainText("Copied");
+    // The text fades out and the clipboard icon with "Copied" takes its place; there is no tooltip.
+    await expect(value.locator(".ui-copied")).toHaveCSS("opacity", "1");
+    await expect(value.locator(".ui-kv-text")).toHaveCSS("opacity", "0");
+    await expect(value.locator(".ui-copied svg")).toHaveCount(1);
+    expect((await page.locator(".tip").allInnerTexts()).join(" ")).not.toContain("Copied");
     // The cursor over a copyable value is the pointer, never the green plus of `copy`.
     expect(await value.evaluate((node) => getComputedStyle(node).cursor)).toBe("pointer");
     // If both paths fail, the same slot says so.
     await page.evaluate(() => { document.execCommand = () => false; });
     const key = page.locator(".canvas-popover .ui-kv-key").first();
     await key.click();
-    await expect(page.locator(".tip")).toContainText("Couldn't copy");
-    await expect(key).not.toHaveAttribute("data-done", "");
+    await expect(key.locator(".ui-copied")).toHaveText("Couldn't copy");
+    await expect(key.locator(".ui-copied svg")).toHaveCount(0);
   } finally {
     await browser.close();
   }
@@ -883,7 +890,7 @@ test("palette (desktop): centred, as tall as its results, never closer than a qu
   // The selected row keeps its inset highlight.
   await page.locator("#palette-input").fill("theme");
   const inset = await page.locator(".result[aria-selected='true']").first().evaluate((node) => getComputedStyle(node, "::before").top);
-  expect(inset).toBe("3px");
+  expect(parseFloat(inset)).toBeCloseTo(3 * (await uiFactor(page)), 1);
   await page.keyboard.press("Escape");
 });
 

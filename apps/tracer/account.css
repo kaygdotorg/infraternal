@@ -1,0 +1,112 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* The person's card (D283): behind the person's pill in the sidebar footer. The card is the shared sidebar card (the Inbox uses
+   it too), its body the shared key/value list. This file only places them, plus the amber mark on the pill, the heading of the card
+   and the "Logs in as" pane. It is loaded when the card is first wanted (canvas/account/index.ts), never with the first screen. */
+
+/* ---- the pill's amber mark (Q6) ------------------------------------------------------------------------------------------- */
+/* One mark, on the avatar's lower right corner: it costs the pill no width, and it stays when the name has given way. */
+.ui-sidebar-user[data-attention] { position: relative; }
+.ui-sidebar-user .ui-sidebar-avatar[data-picture] { background-size: cover; background-position: center; }
+.ac-badge {
+  position: absolute; left: calc(var(--pill-h) - 1rem); bottom: 2px; display: grid; place-items: center; width: 0.875rem; height: 0.875rem; border-radius: 50%;
+  background: var(--warn); color: #2a1a00; font: 700 0.625rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-shadow: none;
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--bg) 80%, transparent); animation: ac-badge-in 180ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+@keyframes ac-badge-in { from { opacity: 0; transform: scale(0.6); } }
+@media (prefers-reduced-motion: reduce) { .ac-badge { animation-name: ac-badge-fade; } @keyframes ac-badge-fade { from { opacity: 0; } } }
+/* While the card is open the pill is lit the way the version pill is: the card grew out of it. */
+.ui-sidebar-user[aria-expanded="true"] { background: color-mix(in oklab, var(--fg) 8%, var(--overlay)); }
+
+/* ---- the card ------------------------------------------------------------------------------------------------------------- */
+/* The body is the one part that scrolls, so a short sidebar shows the heading and as much as fits. */
+.ac { flex: 0 0 auto; grid-template-rows: auto minmax(0, 1fr) auto; max-height: calc(100% - 8.75rem); }
+.ac .ui-sidebar-card-header { align-items: flex-start; padding-top: 0; }
+.ac .ui-kv-group { text-transform: none; letter-spacing: 0; }
+
+/* The heading is the person: picture, name, username. No "Account" title above it. */
+.ac-who { display: flex; flex: 1; align-items: flex-start; gap: 0.625rem; min-width: 0; color: var(--fg); }
+.ac-avatar { --pill-h: 2.75rem; position: relative; padding: 0; border: 0; cursor: pointer; background-size: cover; background-position: center; transition: transform 140ms var(--ease-out, ease-out); }
+.ac-avatar:disabled { cursor: default; opacity: 1; }
+.ac-avatar:not(:disabled):active { transform: scale(var(--ui-press-scale)); }
+@media (pointer: coarse) { .ac-avatar:not(:disabled)::after { content: ""; position: absolute; inset: -0.3125rem; } }
+.ac-names { display: grid; flex: 1; min-width: 0; gap: 2px; }
+.ac-nameline { display: flex; align-items: flex-start; gap: 2px; min-width: 0; }
+.ac-name { min-width: 0; padding-top: 1px; overflow-wrap: anywhere; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-label); line-height: 1.4; }
+.ac-username { min-width: 0; overflow-wrap: anywhere; color: var(--ui-text-secondary); font-size: var(--text-secondary); font-weight: 400; line-height: 1.4; }
+.ac-nameline .ui-rename-input { height: 1.5rem; margin: 0 -0.375rem; font: inherit; font-size: var(--text-body); font-weight: var(--fw-label); }
+/* The rename affordance is always there (touch has no hover), quiet until it is wanted. */
+.ac-pencil { position: relative; display: grid; flex: none; place-items: center; width: 1.5rem; height: 1.5rem; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--fg-3); cursor: pointer; transition: transform 140ms var(--ease-out, ease-out), background-color 140ms ease, color 140ms ease; }
+.ac-pencil svg { width: 0.875rem; height: 0.875rem; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.ac-pencil:active { transform: scale(var(--ui-press-scale)); }
+@media (hover: hover) and (pointer: fine) { .ac-pencil:hover { background: color-mix(in oklab, var(--fg) 8%, transparent); color: var(--fg); } }
+@media (pointer: coarse) { .ac-pencil::after { content: ""; position: absolute; inset: -0.625rem; } }
+
+.ac-body { min-height: 0; padding: 0.25rem 0.375rem 0.25rem; overflow: auto; overscroll-behavior: contain; }
+/* A row edited in place: the field takes the value's place. */
+.ac .ui-kv-row > .ui-rename-input { height: 1.5rem; font: inherit; }
+/* A value that is a concern is the strong text, not the quiet one: it is what the person should read. The amber mark before it is
+   the same amber as the pill's. Nothing else on the card turns amber. */
+.ac .ui-kv-row:has(.ui-mark[data-mark="warn"]) .ui-kv-value { color: var(--fg); font-weight: var(--fw-label); }
+/* Rows are as tall as a touch target on a phone: their text sits in the middle of the row, not at its top. */
+.ac .ui-kv-row { align-content: center; }
+/* A row that opens the pane turns its chevron down while the pane is open. */
+.ac .ui-kv-chevron { transition: transform 180ms var(--ease-out, ease-out); }
+.ac .ui-kv:has(+ .ac-pane[data-open]) .ui-kv-chevron { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .ac .ui-kv-chevron, .ac-avatar, .ac-pencil { transition: none; } }
+
+.ac-signout {
+  display: flex; align-items: center; gap: 0.5rem; width: 100%; min-height: var(--ui-row-h); margin: 0; padding: 0 0.375rem; border: 0; border-radius: 0.5rem; background: none;
+  color: var(--fg-2); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; -webkit-tap-highlight-color: transparent;
+  transition: background-color 120ms ease, color 120ms ease, transform 140ms var(--ease-out, ease-out);
+}
+.ac-signout svg { width: 1rem; height: 1rem; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.ac-signout:active { transform: scale(var(--ui-press-scale-soft)); }
+@media (hover: hover) and (pointer: fine) { .ac-signout:hover { background: color-mix(in oklab, var(--fg) 6%, transparent); color: var(--fg); } }
+
+/* ---- the "Logs in as" pane ------------------------------------------------------------------------------------------------- */
+/* Opens under its row: the height runs from 0 to its content (grid rows), so nothing below jumps. */
+.ac-pane { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 240ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
+.ac-pane[data-open] { grid-template-rows: 1fr; }
+.ac-pane[hidden] { display: none; }
+.ac-pane[inert] { visibility: hidden; transition: grid-template-rows 240ms var(--ease-out, ease), visibility 0s linear 240ms; }
+.ac-pane-clip { min-height: 0; overflow: hidden; }
+/* An opaque ground (the overlay's own solid colour) under the pane: the tag cards below are mixed into it, so every text on the
+   pane has one known background and its contrast can be measured. */
+.ac-pane-body { --ac-quiet: color-mix(in oklab, var(--fg) 88%, var(--overlay-solid, var(--bg))); display: grid; gap: 0.875rem; margin: 0.375rem 0 0.25rem; padding: 0.75rem; border-radius: 0.75rem; background: color-mix(in oklab, var(--fg) 5%, var(--overlay-solid, var(--bg))); }
+@media (prefers-reduced-motion: reduce) { .ac-pane { transition: none; } }
+
+/* One block for each account: its name and how many machines, then a card for each tag. Accounts are told apart by a hairline and
+   the space around it, not by more boxes. The quiet text (counts, "+N more", the link) is --ac-quiet, 88% of the text colour: --fg-2
+   measured 3.4:1 on a tag's card in the dark theme (spec: account-card, 4.5:1 on the real background). */
+.ac-account { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.5rem; }
+.ac-account + .ac-account { padding-top: 0.875rem; border-top: 1px solid var(--line); }
+.ac-account-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; min-width: 0; }
+/* An account's name identifies it: it wraps (at any point, a name has no spaces) rather than being cut; its count never moves. */
+.ac-account-name { min-width: 0; overflow-wrap: anywhere; color: var(--fg); font: var(--ui-type-label); font-weight: var(--fw-title, 600); letter-spacing: var(--ui-tracking); }
+.ac-account-count { flex: none; color: var(--ac-quiet); font: var(--ui-type-label); font-size: var(--text-secondary); letter-spacing: var(--ui-tracking); font-variant-numeric: tabular-nums; }
+
+/* A tag's card: the tag's colour (--tag, set from the same palette token as its chip) mixed into the pane's ground, with a
+   hairline in the colour. A flat fill and a 1 px line, no glass (TASTE). The tag's chip is its title and its count sits opposite. */
+.ac-tag {
+  --tag: var(--fg-3);
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.5rem; min-width: 0; padding: 0.5rem; border-radius: 0.625rem;
+  background: color-mix(in oklab, var(--tag) 14%, color-mix(in oklab, var(--fg) 5%, var(--overlay-solid, var(--bg))));
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--tag) 38%, transparent);
+}
+.ac-tag[data-untagged] { box-shadow: inset 0 0 0 1px var(--line); background: color-mix(in oklab, var(--fg) 4%, color-mix(in oklab, var(--fg) 5%, var(--overlay-solid, var(--bg)))); }
+.ac-tag-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; min-width: 0; font: var(--ui-type-label); font-size: var(--text-secondary); letter-spacing: var(--ui-tracking); }
+.ac-tag-head .ui-entity { min-width: 0; max-width: calc(100% - 3ch); }
+.ac-tag-none { color: var(--ac-quiet); font-weight: var(--fw-label); }
+.ac-tag-count { flex: none; color: var(--ac-quiet); font-variant-numeric: tabular-nums; }
+.ac-tag-hosts { display: flex; flex-wrap: wrap; gap: 0.25rem; min-width: 0; }
+.ac-tag-hosts .ui-entity { font-size: var(--text-secondary); }
+.ac-more { align-self: center; color: var(--ac-quiet); font: var(--ui-type-label); font-size: var(--text-secondary); letter-spacing: var(--ui-tracking); font-variant-numeric: tabular-nums; }
+
+.ac-rules {
+  position: relative; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; width: 100%; min-height: 1.5rem; padding: 0; border: 0; background: none; color: var(--ac-quiet);
+  font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: transform 140ms var(--ease-out, ease-out), color 120ms ease;
+}
+.ac-rules svg { width: 0.875rem; height: 0.875rem; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ac-rules:active { transform: scale(var(--ui-press-scale-soft)); }
+@media (hover: hover) and (pointer: fine) { .ac-rules:hover { color: var(--fg); } }
+@media (pointer: coarse) { .ac-rules { min-height: 2.75rem; } }

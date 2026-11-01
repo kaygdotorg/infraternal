@@ -36,6 +36,7 @@ import { coarse, el, reduced } from "../dom";
 import { byFrecency, type SessionRecord, type SessionState } from "../sessions/inventory";
 import { isTerminal } from "../views/body";
 import { ICON, SESSION_ICON } from "../views/icons";
+import { paintLink } from "./link";
 
 /** What the on-demand half does; `session-hooks.ts` calls it once it has loaded. */
 export interface SessionUiPart {
@@ -119,8 +120,8 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     const exited = s?.state === "exited";
     // The new shell has a session now (or the person moved on): a refusal no longer applies.
     if (rec.model.sessionId) refusals.delete(rec);
-    rec.card.setStatus(exited || refusals.has(rec) ? "offline" : rec.binding?.connected === false ? "connecting" : "live");
     const refusal = refusals.get(rec);
+    paintLink(rec, exited, refusals.has(rec) ? (refusal ?? "") : undefined);
     let strip = body.querySelector<HTMLElement>(".cl-sx-strip");
     const view: StripView | undefined = exited && s ? stripOf(rec, s) : refusal && !s ? refusedStrip(rec, refusal) : undefined;
     if (view) {

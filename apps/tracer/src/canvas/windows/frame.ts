@@ -21,6 +21,7 @@ import { coarse } from "../dom";
 import { scrollerOf } from "../layout/columns";
 import { drawnWidthOf, setColumnWidth } from "../layout/column-els";
 import { maxColumnWidth } from "../window-sizes";
+import { currentUiScale } from "../../../../../packages/ui/src/ui-scale";
 import { RecentList } from "../recency";
 
 export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
@@ -32,8 +33,12 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   // session manager are in the canvas row while a terminal is focused, and in ⌘K.
   const header = !coarse.matches;
   if (m.kind === "terminal" && !m.noAccess && !readOnly && header) {
-    actions.push({ id: "split-right", label: "Split right", icon: ICON.splitRight, onSelect: () => { void cx.win.split(rec, "right"); } });
-    actions.push({ id: "split-down", label: "Split down", icon: ICON.splitDown, onSelect: () => { void cx.win.split(rec, "down"); } });
+    // Option (macOS) or Alt (Windows, Linux) held near the buttons turns them into "new window right / below" (#280, D212):
+    // the other pair of the four actions, reached from the same place.
+    actions.push({ id: "split-right", label: "Split right", icon: ICON.splitRight, onSelect: () => { void cx.win.split(rec, "right"); },
+      alt: { label: "New window right", morph: "right", onSelect: () => { void cx.win.newWindow(rec, "right"); } } });
+    actions.push({ id: "split-down", label: "Split down", icon: ICON.splitDown, onSelect: () => { void cx.win.split(rec, "down"); },
+      alt: { label: "New window below", morph: "down", onSelect: () => { void cx.win.newWindow(rec, "below"); } } });
   }
   // The session manager sits beside the splits when the canvas has an inventory (D127); a team layout's windows are read-only.
   if (m.kind === "terminal" && !m.noAccess && cx.adapters.inventory && header) {
@@ -164,7 +169,7 @@ function resizeHost(cx: Ctx, rec: WinRec): WindowResizeHost {
       origin = { x: rec.owner.x, w: Math.round(width / cam.z) };
       const top = (parseFloat(rec.card.root.style.marginTop) || 0) * cam.z;
       const widest = maxColumnWidth(cx.viewport.clientWidth);
-      return { width, height: rec.card.root.offsetHeight * cam.z, top, minWidth: 300 * cam.z, minHeight: 160 * cam.z, maxWidth: widest * cam.z, areaHeight: (scrollerOf(colEl).clientHeight - 28) * cam.z };
+      return { width, height: rec.card.root.offsetHeight * cam.z, top, minWidth: 300 * currentUiScale() * cam.z, minHeight: 160 * currentUiScale() * cam.z, maxWidth: widest * cam.z, areaHeight: (scrollerOf(colEl).clientHeight - 28) * cam.z };
     },
     apply(f: ResizeFrame): void {
       const colEl = rec.card.root.parentElement as HTMLElement;

@@ -5,6 +5,8 @@ const EXIT_RETENTION_MS: u64 = 600_000;
 
 /// One option record supplies the full CLI and the private session payload.
 #[derive(Debug)]
+// This record mirrors independent private CLI switches, rather than runtime state.
+#[allow(clippy::struct_excessive_bools)]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 pub struct Options {
     #[cfg_attr(feature = "cli", arg(long))]
@@ -27,6 +29,12 @@ pub struct Options {
     /// Private fixed-command readiness probe; never reads login startup.
     #[cfg_attr(feature = "cli", arg(long))]
     pub readiness: bool,
+    /// Read literal program arguments from the private bounded startup pipe.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub command_stdin: bool,
+    /// Keep automation output until the existing bounded exit deadline.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub retain_output: bool,
 }
 
 impl Options {
@@ -44,9 +52,19 @@ impl Options {
             ring_capacity,
             exit_retention_ms,
             readiness,
+            command_stdin,
+            retain_output,
         } = self;
 
         let id = session_id(&session)?;
+        let command = if command_stdin {
+            read_command()?
+        } else {
+            Vec::new()
+        };
+        if readiness && command_stdin {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
         if detach && !crate::detach()? {
             return Ok(());
         }
@@ -59,6 +77,8 @@ impl Options {
                 state,
                 ring_capacity,
                 readiness,
+                command,
+                retain_output,
             },
             std::time::Duration::from_millis(exit_retention_ms),
         )
@@ -95,6 +115,22 @@ impl Options {
         {
             return None;
         }
+        let retain_output = trailing
+            .first()
+            .is_some_and(|flag| flag == "--retain-output");
+        let trailing = if retain_output {
+            &trailing[1..]
+        } else {
+            trailing
+        };
+        let command_stdin = trailing
+            .first()
+            .is_some_and(|flag| flag == "--command-stdin");
+        let trailing = if command_stdin {
+            &trailing[1..]
+        } else {
+            trailing
+        };
         let (readiness, detach) = match trailing {
             [] => (false, false),
             [flag] if flag == "--readiness" => (true, false),
@@ -112,6 +148,8 @@ impl Options {
             state: Some(state.into()),
             detach,
             readiness,
+            command_stdin,
+            retain_output,
             ring_capacity: RING_CAPACITY,
             exit_retention_ms: EXIT_RETENTION_MS,
         })
@@ -144,4 +182,20 @@ fn session_id(session: &str) -> std::io::Result<[u8; 16]> {
             u8::from_str_radix(&session[i * 2..i * 2 + 2], 16).map_err(std::io::Error::other)?;
     }
     Ok(id)
+}
+
+/// NUL separators preserve empty arguments and literal metacharacters without a shell.
+/// Bound before allocation; consume before detach closes the inherited pipe.
+fn read_command() -> std::io::Result<Vec<std::ffi::OsString>> {
+    use std::{io::Read, os::unix::ffi::OsStringExt};
+    let mut bytes = Vec::new();
+    std::io::stdin().take(8193).read_to_end(&mut bytes)?;
+    if bytes.len() > 8192 || bytes.last() != Some(&0) || bytes.first() == Some(&0) {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    bytes.pop();
+    Ok(bytes
+        .split(|b| *b == 0)
+        .map(|part| std::ffi::OsString::from_vec(part.to_vec()))
+        .collect())
 }

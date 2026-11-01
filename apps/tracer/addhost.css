@@ -17,17 +17,17 @@
    42 px, padding 0 20 · text button 13.5 500 fg-2 · card padding 36 32 28, radius 22.
    Rhythm: title +10, lede +24, label +8, footer +26. */
 .terminal-screen {
-  --ah-icon: 16px;
-  --ah-check: 18px;
-  --ah-row-pad: 8px;
-  --ah-control: 42px;
-  --ah-field-h: 48px;
+  --ah-icon: 1rem;
+  --ah-check: 1.125rem;
+  --ah-row-pad: 0.5rem;
+  --ah-control: 2.625rem;
+  --ah-field-h: 3rem;
   --ah-field: rgb(from var(--fg) r g b / 0.05);
   --ah-field-focus: rgb(from var(--fg) r g b / 0.09);
   --ah-ring: color-mix(in oklab, var(--fg) 55%, transparent);
 }
 @media (pointer: coarse) {
-  .terminal-screen { --ah-icon: 18px; --ah-check: 22px; --ah-row-pad: 10px; --ah-control: 44px; }
+  .terminal-screen { --ah-icon: 1.125rem; --ah-check: 1.375rem; --ah-row-pad: 0.625rem; --ah-control: 2.75rem; }
 }
 .ah-icon, .ah-status-icon, .ah-field-icon, .ah-root-icon, .ah-os-mark.is-line {
   width: var(--ah-icon);
@@ -51,7 +51,7 @@
   grid-template-rows: minmax(0, 1fr);
   /* One inset on every side, equal to the window card's own header padding (8 px), so the flow
      card at its maximum height sits inside the window with the same gap all round. */
-  padding: 8px;
+  padding: 0.5rem;
   overflow: hidden;
 }
 .ah-scrim { position: absolute; inset: 0; background: rgb(from var(--bg) r g b / 0.5); }
@@ -60,14 +60,14 @@
 .ah-float {
   position: relative;
   display: flex;
-  width: min(540px, 100%);
+  width: min(33.75rem, 100%);
   max-height: 100%;
   flex-direction: column;
   margin: auto;
-  border-radius: 22px;
+  border-radius: 1.375rem;
   --ui-overlay-shadow: var(--elevation);
   color: var(--fg);
-  font: var(--fw-body) 14px/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  font: var(--fw-body) 0.875rem/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   letter-spacing: -0.01em;
   --ui-tick-border-color: color-mix(in oklab, var(--fg) 34%, transparent);
   --ui-tick-border-width: 1.5px;
@@ -75,10 +75,10 @@
      than the theme's --fg-2 does; the window computes the lift, the card uses it. */
   --fg-2: var(--ah-fg2);
 }
-.ah-scroll { touch-action: pan-y; min-height: 0; flex: 1 1 auto; overflow: auto; overscroll-behavior: contain; padding: 36px 32px 36px; }
+.ah-scroll { touch-action: pan-y; min-height: 0; flex: 1 1 auto; overflow: auto; overscroll-behavior: contain; padding: 2.25rem 2rem 2.25rem; }
 /* With actions below, the list ends 20 px above them; with none (a running batch) it ends with the
    same 36 px it starts with, so the last row never touches the card edge. */
-.ah-float:has(.ah-foot:not([hidden])) .ah-scroll { padding-bottom: 20px; }
+.ah-float:has(.ah-foot:not([hidden])) .ah-scroll { padding-bottom: 1.25rem; }
 .ah-pages { display: grid; }
 /* The footer's own top padding already separates a short page from its actions. */
 .ah-float:not(.is-overflowing):has(.ah-foot:not([hidden])) .ah-scroll { padding-bottom: 0; }
@@ -86,70 +86,70 @@
 .ah-close {
   position: absolute;
   z-index: 2;
-  top: 14px;
-  right: 14px;
+  top: 0.875rem;
+  right: 0.875rem;
   display: grid;
-  width: 28px;
-  height: 28px;
+  width: 1.75rem;
+  height: 1.75rem;
   place-items: center;
   padding: 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: 0.5rem;
   background: transparent;
   color: var(--fg-3);
   cursor: pointer;
   transition: background-color 120ms ease, color 120ms ease, transform 120ms var(--ease-out);
 }
-.ah-close svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
-.ah-close::before { content: ""; position: absolute; inset: -8px; }
+.ah-close svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+.ah-close::before { content: ""; position: absolute; inset: -0.5rem; }
 @media (hover: hover) and (pointer: fine) { .ah-close:hover { background: var(--hover); color: var(--fg); } }
 .ah-close:active { transform: scale(var(--ui-press-scale-small)); }
 @media (max-width: 600px) {
-  .ah-float { width: 100%; border-radius: 20px; }
-  .ah-scroll { padding: 28px 22px 28px; }
-  .ah-float:has(.ah-foot:not([hidden])) .ah-scroll { padding-bottom: 16px; }
+  .ah-float { width: 100%; border-radius: 1.25rem; }
+  .ah-scroll { padding: 1.75rem 1.375rem 1.75rem; }
+  .ah-float:has(.ah-foot:not([hidden])) .ah-scroll { padding-bottom: 1rem; }
 }
-@media (pointer: coarse) { .ah-close { top: 8px; right: 8px; width: 44px; height: 44px; } .ah-close::before { inset: 0; } }
+@media (pointer: coarse) { .ah-close { top: 0.5rem; right: 0.5rem; width: 2.75rem; height: 2.75rem; } .ah-close::before { inset: 0; } }
 
 /* ── Type (sign-in roles) ─────────────────────────────────────────────── */
 .ah-hero {
   display: grid;
-  width: 36px;
-  height: 36px;
+  width: 2.25rem;
+  height: 2.25rem;
   place-items: center;
-  margin-bottom: 20px;
-  border-radius: 10px;
+  margin-bottom: 1.25rem;
+  border-radius: 0.625rem;
   background: rgb(from var(--fg) r g b / 0.06);
   color: var(--fg-2);
 }
-.ah-hero .ah-icon { width: 18px; height: 18px; }
+.ah-hero .ah-icon { width: 1.125rem; height: 1.125rem; }
 .ah-hero[data-tone="danger"] { background: rgb(from var(--danger) r g b / 0.13); color: var(--danger); }
-.ah-title { margin: 0 40px 10px 0; font-size: 21px; font-weight: var(--fw-title); line-height: 1.25; letter-spacing: -0.03em; text-wrap: balance; }
-.ah-lede { margin: 0 0 24px; color: var(--fg-2); text-wrap: pretty; }
-.ah-text { margin: -12px 0 18px; color: var(--fg-2); text-wrap: pretty; }
-.ah-quote { margin: 0 0 6px; font-weight: var(--fw-label); }
-.ah-note { display: flex; align-items: center; gap: 8px; margin: 14px 0 0; color: var(--fg-2); font-size: 13px; }
+.ah-title { margin: 0 2.5rem 0.625rem 0; font-size: 1.3125rem; font-weight: var(--fw-title); line-height: 1.25; letter-spacing: -0.03em; text-wrap: balance; }
+.ah-lede { margin: 0 0 1.5rem; color: var(--fg-2); text-wrap: pretty; }
+.ah-text { margin: -0.75rem 0 1.125rem; color: var(--fg-2); text-wrap: pretty; }
+.ah-quote { margin: 0 0 0.375rem; font-weight: var(--fw-label); }
+.ah-note { display: flex; align-items: center; gap: 0.5rem; margin: 0.875rem 0 0; color: var(--fg-2); font-size: 0.8125rem; }
 .ah-note .ah-icon { color: color-mix(in oklab, var(--danger) 70%, var(--fg-2)); }
-@media (max-width: 480px) { .ah-title { font-size: 23px; } }
+@media (max-width: 480px) { .ah-title { font-size: 1.4375rem; } }
 
 /* ── Field: the shared chip field, at the sign-in field's metrics ─────── */
-.ah-field { position: relative; --ui-chip-field-inset: calc(14px + var(--ah-icon) + 10px); }
+.ah-field { position: relative; --ui-chip-field-inset: calc(0.875rem + var(--ah-icon) + 0.625rem); }
 /* The hint keeps its line when hidden (opacity, not display), so the list below never jumps as it appears. */
-.ah-hint { min-height: 20px; margin: 6px 4px 0; color: var(--fg-2); font-size: 13px; line-height: 20px; opacity: 0; transition: opacity 180ms ease; }
+.ah-hint { min-height: 1.25rem; margin: 0.375rem 0.25rem 0; color: var(--fg-2); font-size: 0.8125rem; line-height: 1.25rem; opacity: 0; transition: opacity 180ms ease; }
 .ah-hint[data-show="true"] { opacity: 1; }
-.ah-field-icon { position: absolute; z-index: 1; top: 16px; left: 14px; color: var(--fg-3); pointer-events: none; }
+.ah-field-icon { position: absolute; z-index: 1; top: 1rem; left: 0.875rem; color: var(--fg-3); pointer-events: none; }
 .ah-secret {
   display: block;
   width: 100%;
-  min-height: 96px;
-  margin: 12px 0 0;
-  padding: 12px 14px;
+  min-height: 6rem;
+  margin: 0.75rem 0 0;
+  padding: 0.75rem 0.875rem;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 0.75rem;
   outline: none;
   background: var(--ah-field);
   color: var(--fg);
-  font: var(--fw-body) 14px/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  font: var(--fw-body) 0.875rem/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   resize: vertical;
 }
 .ah-secret::placeholder { color: var(--fg-3); opacity: 1; }
@@ -160,14 +160,14 @@
 .ah-reveal-in { min-height: 0; overflow: hidden; }
 
 /* ── List: plain rows, selection only in the checkbox ─────────────────────── */
-.ah-list { display: grid; margin: 14px -10px 0; container-type: inline-size; }
+.ah-list { display: grid; margin: 0.875rem -0.625rem 0; container-type: inline-size; }
 .ah-row {
   display: grid;
   grid-template-columns: var(--ah-check) var(--ah-icon) minmax(0, 1fr) auto;
   align-items: center;
-  column-gap: 12px;
-  padding: var(--ah-row-pad) 10px;
-  border-radius: 10px;
+  column-gap: 0.75rem;
+  padding: var(--ah-row-pad) 0.625rem;
+  border-radius: 0.625rem;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
@@ -175,101 +175,101 @@
 .ah-row.is-added { cursor: default; }
 .ah-row.is-added :is(.ah-name, .ah-meta, .ah-os-mark) { color: var(--fg-3); }
 .ah-check { display: grid; width: var(--ah-check); height: var(--ah-check); place-items: center; }
-.ah-check .tick, .ah-consent .tick { width: var(--ah-check); height: var(--ah-check); border-radius: 5px; color: var(--bg); }
+.ah-check .tick, .ah-consent .tick { width: var(--ah-check); height: var(--ah-check); border-radius: 0.3125rem; color: var(--bg); }
 .ah-row.is-added .tick { opacity: 0.4; }
 .ah-os-mark { width: var(--ah-icon); height: var(--ah-icon); flex: none; fill: currentColor; color: var(--fg-2); }
 .ah-main { display: grid; min-width: 0; }
 .ah-name { color: var(--fg); font-weight: var(--fw-label); overflow-wrap: anywhere; }
 .ah-candidate .ah-name { font-weight: var(--fw-body); }
 .ah-manual-target { font-weight: var(--fw-label); }
-.ah-meta { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 0 10px; color: var(--fg-2); font-size: 13px; line-height: 1.55; }
+.ah-meta { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 0 0.625rem; color: var(--fg-2); font-size: 0.8125rem; line-height: 1.55; }
 /* Never an ellipsis (TASTE): the line wraps between items (OS, architecture, source icons). */
 .ah-meta > span { white-space: nowrap; }
 .ah-candidate .ah-meta > span { white-space: normal; }
-.ah-srcs { display: inline-flex; flex: none; gap: 6px; }
+.ah-srcs { display: inline-flex; flex: none; gap: 0.375rem; }
 .ah-src { display: inline-grid; color: var(--fg-3); }
-.ah-src .ui-source-icon { width: 13px; height: 13px; stroke-width: 1.5; }
-.ah-status { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-2); font-size: 13px; white-space: nowrap; }
-.ah-status-icon { width: 14px; height: 14px; color: var(--fg-3); }
+.ah-src .ui-source-icon { width: 0.8125rem; height: 0.8125rem; stroke-width: 1.5; }
+.ah-status { display: inline-flex; align-items: center; gap: 0.375rem; color: var(--fg-2); font-size: 0.8125rem; white-space: nowrap; }
+.ah-status-icon { width: 0.875rem; height: 0.875rem; color: var(--fg-3); }
 .ah-status[data-tone="ok"] .ah-status-icon { color: var(--ok); }
 .ah-status[data-tone="warn"] .ah-status-icon { color: color-mix(in oklab, var(--danger) 55%, var(--ok)); }
 .ah-status[data-tone="off"] .ah-status-icon { color: var(--danger); }
 .ah-status[data-tone="none"] { color: var(--fg-3); }
-@container (max-width: 420px) {
+@container (max-width: 26.25rem) {
   .ah-status > span { display: none; }
 }
-.ah-none { margin: 12px 10px 0; color: var(--fg-2); }
+.ah-none { margin: 0.75rem 0.625rem 0; color: var(--fg-2); }
 
 /* ── Choices ──────────────────────────────────────────────────────────────── */
-.ah-options { display: grid; gap: 4px; margin: 0 -10px; }
-.ah-option { position: relative; display: grid; grid-template-columns: var(--ah-check) minmax(0, 1fr); align-items: start; column-gap: 12px; padding: 10px; border-radius: 12px; cursor: pointer; transition: background-color 200ms ease; }
+.ah-options { display: grid; gap: 0.25rem; margin: 0 -0.625rem; }
+.ah-option { position: relative; display: grid; grid-template-columns: var(--ah-check) minmax(0, 1fr); align-items: start; column-gap: 0.75rem; padding: 0.625rem; border-radius: 0.75rem; cursor: pointer; transition: background-color 200ms ease; }
 .ah-option:has(input:checked) { background: rgb(from var(--fg) r g b / 0.05); }
 @media (hover: hover) and (pointer: fine) { .ah-option:hover { background: color-mix(in oklab, var(--fg) 4%, transparent); } }
 .ah-option input { position: absolute; opacity: 0; pointer-events: none; }
 .ah-radio { width: var(--ah-check); height: var(--ah-check); margin-top: 2px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--ui-tick-border-color); transition: box-shadow 260ms cubic-bezier(0.34, 1.4, 0.64, 1); }
-.ah-option input:checked + .ah-radio { box-shadow: inset 0 0 0 5px var(--fg); }
+.ah-option input:checked + .ah-radio { box-shadow: inset 0 0 0 0.3125rem var(--fg); }
 .ah-option-text { display: grid; gap: 2px; font-weight: var(--fw-label); }
-.ah-option-hint { color: var(--fg-2); font-size: 13px; font-weight: var(--fw-body); }
-.ah-consent { display: flex; align-items: center; gap: 10px; min-height: 44px; margin-top: 12px; color: var(--fg-2); cursor: pointer; }
+.ah-option-hint { color: var(--fg-2); font-size: 0.8125rem; font-weight: var(--fw-body); }
+.ah-consent { display: flex; align-items: center; gap: 0.625rem; min-height: 2.75rem; margin-top: 0.75rem; color: var(--fg-2); cursor: pointer; }
 
 /* ── Progress: one compact row per host ─────────────────────────────── */
-.ah-jobs { display: grid; gap: 2px; margin: 0 -10px; padding: 0; list-style: none; }
+.ah-jobs { display: grid; gap: 2px; margin: 0 -0.625rem; padding: 0; list-style: none; }
 .ah-job {
   position: relative;
   display: grid;
   grid-template-columns: var(--ah-icon) minmax(0, 1fr) auto auto;
   align-items: center;
-  column-gap: 12px;
-  padding: 8px 10px 10px;
+  column-gap: 0.75rem;
+  padding: 0.5rem 0.625rem 0.625rem;
 }
 .ah-job .ah-meta { transition: color 160ms ease; }
 .ah-job[data-state="failed"] .ah-meta { color: color-mix(in oklab, var(--danger) 75%, var(--fg-2)); }
 .ah-job[data-state="pending"] :is(.ah-name, .ah-os-mark) { color: var(--fg-3); }
-.ah-bar { position: absolute; right: 10px; bottom: 3px; left: calc(10px + var(--ah-icon) + 12px); height: 2px; overflow: hidden; border-radius: 1px; background: var(--line); }
+.ah-bar { position: absolute; right: 0.625rem; bottom: 0.1875rem; left: calc(0.625rem + var(--ah-icon) + 0.75rem); height: 2px; overflow: hidden; border-radius: 1px; background: var(--line); }
 .ah-bar > span { display: block; height: 100%; background: var(--fg-2); transform: scaleX(0); transform-origin: left; transition: transform 420ms cubic-bezier(0.23, 1, 0.32, 1), background-color 200ms ease; }
 .ah-job[data-state="done"] .ah-bar > span { background: var(--ok); }
 .ah-job[data-state="failed"] .ah-bar > span { background: var(--danger); }
-.ah-mark { --ui-step-status-size: var(--ah-icon); --ui-spinner-size: 14px; }
-.ah-icon-button { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--fg-2); cursor: pointer; transition: background-color 120ms ease, color 120ms ease, transform 120ms var(--ease-out); }
-.ah-icon-button .ah-icon { width: 16px; height: 16px; }
+.ah-mark { --ui-step-status-size: var(--ah-icon); --ui-spinner-size: 0.875rem; }
+.ah-icon-button { display: grid; width: 1.75rem; height: 1.75rem; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--fg-2); cursor: pointer; transition: background-color 120ms ease, color 120ms ease, transform 120ms var(--ease-out); }
+.ah-icon-button .ah-icon { width: 1rem; height: 1rem; }
 .ah-icon-button[hidden] { display: none; }
 @media (hover: hover) and (pointer: fine) { .ah-icon-button:hover { background: var(--hover); color: var(--fg); } }
 .ah-icon-button:active { transform: scale(var(--ui-press-scale-small)); }
-@media (pointer: coarse) { .ah-icon-button { width: 44px; height: 44px; } }
+@media (pointer: coarse) { .ah-icon-button { width: 2.75rem; height: 2.75rem; } }
 
 /* ── Details ──────────────────────────────────────────────────────────────── */
-.ah-details { margin-top: 4px; }
-.ah-details summary { display: inline-flex; align-items: center; gap: 4px; padding: 4px 0; color: var(--fg-2); cursor: pointer; list-style: none; }
+.ah-details { margin-top: 0.25rem; }
+.ah-details summary { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.25rem 0; color: var(--fg-2); cursor: pointer; list-style: none; }
 .ah-details summary::-webkit-details-marker { display: none; }
-.ah-details summary .ah-icon { width: 14px; height: 14px; transition: transform 180ms var(--ease-out); }
+.ah-details summary .ah-icon { width: 0.875rem; height: 0.875rem; transition: transform 180ms var(--ease-out); }
 .ah-details[open] summary .ah-icon { transform: rotate(90deg); }
-.ah-details pre { margin: 8px 0 0; padding: 12px 14px; border-radius: 10px; background: var(--ah-field); color: var(--fg-2); font: var(--fw-body) 13px/1.6 var(--font-mono, "Geist Mono", monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ah-details pre { margin: 0.5rem 0 0; padding: 0.75rem 0.875rem; border-radius: 0.625rem; background: var(--ah-field); color: var(--fg-2); font: var(--fw-body) 0.8125rem/1.6 var(--font-mono, "Geist Mono", monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ── Actions (the sign-in card's pill and text buttons) ───────────────────── */
 /* Actions sit in the card's own footer, pinned below its scrolling body. */
-.ah-foot { display: flex; flex: none; align-items: center; gap: 12px; padding: 26px 32px 28px; }
+.ah-foot { display: flex; flex: none; align-items: center; gap: 0.75rem; padding: 1.625rem 2rem 1.75rem; }
 .ah-foot[hidden] { display: none; }
-.ah-float.is-overflowing .ah-foot { padding-top: 18px; box-shadow: 0 -1px 0 var(--line); }
-@media (max-width: 600px) { .ah-foot { padding: 22px 22px 22px; } }
-.ah-count { color: var(--fg-2); font-size: 13px; }
+.ah-float.is-overflowing .ah-foot { padding-top: 1.125rem; box-shadow: 0 -1px 0 var(--line); }
+@media (max-width: 600px) { .ah-foot { padding: 1.375rem 1.375rem 1.375rem; } }
+.ah-count { color: var(--fg-2); font-size: 0.8125rem; }
 /* Button states, material and motion belong to packages/ui; these are instance values. */
 .ah-primary {
-  --ui-button-min-width: 140px;
+  --ui-button-min-width: 8.75rem;
   --ui-button-height: var(--ah-control);
-  --ui-button-padding: 0 20px;
+  --ui-button-padding: 0 1.25rem;
   --ui-button-radius: 999px;
-  --ui-button-font: var(--fw-title) 13.5px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-button-font: var(--fw-title) 0.84375rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   --ui-button-letter-spacing: -0.01em;
   --ui-button-transition: transform 140ms var(--ease-out), background-color 160ms ease;
   margin-left: auto;
 }
-.ah-primary .ah-icon { width: 18px; height: 18px; }
+.ah-primary .ah-icon { width: 1.125rem; height: 1.125rem; }
 .ah-secondary {
   --ui-button-height: var(--ah-control);
-  --ui-button-padding: 0 8px;
-  --ui-button-font: var(--fw-label) 13.5px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-button-padding: 0 0.5rem;
+  --ui-button-font: var(--fw-label) 0.84375rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   --ui-button-transition: color 120ms ease, transform 140ms var(--ease-out);
-  margin-left: -8px;
+  margin-left: -0.5rem;
 }
 @media (max-width: 480px) {
   .ah-foot:has(.ah-secondary) { flex-direction: column-reverse; align-items: stretch; }
@@ -288,13 +288,13 @@
 .ah-sidebar-add {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 0.5625rem;
   width: 100%;
-  min-height: 44px;
-  margin-top: 4px;
-  padding: 0 8px;
+  min-height: 2.75rem;
+  margin-top: 0.25rem;
+  padding: 0 0.5rem;
   border: 0;
-  border-radius: var(--r-sm, 8px);
+  border-radius: var(--r-sm, 0.5rem);
   background: none;
   color: var(--fg-2);
   font: inherit;
@@ -302,14 +302,14 @@
   cursor: pointer;
   transition: transform 140ms var(--ease-out);
 }
-.ah-sidebar-add .ah-icon { width: 16px; height: 16px; }
+.ah-sidebar-add .ah-icon { width: 1rem; height: 1rem; }
 @media (hover: hover) and (pointer: fine) { .ah-sidebar-add:hover { background: var(--hover); color: var(--fg); } }
 .ah-sidebar-add:active { transform: scale(var(--ui-press-scale-soft)); }
 /* The root offer is a second window pill: the shared pill supplies size, hairline and type. */
-.ah-root-pill { gap: 6px; padding: 0 10px 0 8px; color: var(--fg-2); }
+.ah-root-pill { gap: 0.375rem; padding: 0 0.625rem 0 0.5rem; color: var(--fg-2); }
 @media (max-width: 480px) { .ah-root-pill { width: var(--ui-control-h); justify-content: center; padding: 0; } .ah-root-pill > span { display: none; } }
-.ah-root-pill .ah-root-icon { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.ah-root-pill .ui-spinner { --ui-spinner-size: 12px; }
+.ah-root-pill .ah-root-icon { width: 0.875rem; height: 0.875rem; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ah-root-pill .ui-spinner { --ui-spinner-size: 0.75rem; }
 .ah-root-pill:disabled { cursor: default; }
 
 @media (prefers-reduced-motion: reduce) {
@@ -323,67 +323,67 @@
    New class names (`ah-run`, `ah-seg`, `ah-stages`, `ah-keyblock`, …) so the mock-only window prototype
    above keeps its own rules. */
 .ah-overlay { position: absolute; z-index: 10; inset: 0; }
-.ah-overlay .ah-stage { padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
-@media (max-width: 600px) { .ah-overlay .ah-stage { padding: max(8px, env(safe-area-inset-top)) 8px max(8px, env(safe-area-inset-bottom)); } }
-.ah-code { padding: 1px 5px; border-radius: 5px; background: rgb(from var(--fg) r g b / 0.06); color: var(--fg); font-weight: var(--fw-label); overflow-wrap: anywhere; }
-.ah-note { display: flex; align-items: center; gap: 10px; margin: 14px 10px 0; color: var(--fg-2); }
+.ah-overlay .ah-stage { padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left)); }
+@media (max-width: 600px) { .ah-overlay .ah-stage { padding: max(0.5rem, env(safe-area-inset-top)) 0.5rem max(0.5rem, env(safe-area-inset-bottom)); } }
+.ah-code { padding: 1px 0.3125rem; border-radius: 0.3125rem; background: rgb(from var(--fg) r g b / 0.06); color: var(--fg); font-weight: var(--fw-label); overflow-wrap: anywhere; }
+.ah-note { display: flex; align-items: center; gap: 0.625rem; margin: 0.875rem 0.625rem 0; color: var(--fg-2); }
 .ah-note .ah-icon { flex: none; }
 .ah-load-error .ah-icon { color: var(--danger); }
-.ah-loading .ui-spinner { --ui-spinner-size: 14px; flex: none; }
-.ah-link { padding: 0; border: 0; background: none; color: var(--fg); font: var(--fw-label) 13.5px/1.4 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: color-mix(in oklab, var(--fg) 35%, transparent); cursor: pointer; }
-@media (pointer: coarse) { .ah-link { min-height: 44px; } }
-.ah-alt { margin-top: 18px; }
-.ah-error { margin: 14px 0 0; color: var(--danger); text-wrap: pretty; animation: ah-error-in 220ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
-@keyframes ah-error-in { from { opacity: 0; transform: translateY(4px); } }
+.ah-loading .ui-spinner { --ui-spinner-size: 0.875rem; flex: none; }
+.ah-link { padding: 0; border: 0; background: none; color: var(--fg); font: var(--fw-label) 0.84375rem/1.4 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-decoration: underline; text-underline-offset: 0.1875rem; text-decoration-color: color-mix(in oklab, var(--fg) 35%, transparent); cursor: pointer; }
+@media (pointer: coarse) { .ah-link { min-height: 2.75rem; } }
+.ah-alt { margin-top: 1.125rem; }
+.ah-error { margin: 0.875rem 0 0; color: var(--danger); text-wrap: pretty; animation: ah-error-in 220ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
+@keyframes ah-error-in { from { opacity: 0; transform: translateY(0.25rem); } }
 @media (prefers-reduced-motion: reduce) { .ah-error { animation: none; } }
-.ah-keyblock { margin: 0 0 14px; }
+.ah-keyblock { margin: 0 0 0.875rem; }
 .ah-keyblock .ui-kv { margin: 0; }
-.ah-input { display: block; width: 100%; height: var(--ah-field-h); margin: 12px 0 0; padding: 0 14px; border: 1px solid var(--line); border-radius: 12px; outline: none; background: var(--ah-field); color: var(--fg); font: var(--fw-body) 14px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); }
+.ah-input { display: block; width: 100%; height: var(--ah-field-h); margin: 0.75rem 0 0; padding: 0 0.875rem; border: 1px solid var(--line); border-radius: 0.75rem; outline: none; background: var(--ah-field); color: var(--fg); font: var(--fw-body) 0.875rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); }
 .ah-input::placeholder { color: var(--fg-3); opacity: 1; }
 .ah-input:focus { border-color: rgb(from var(--fg) r g b / 0.28); background: var(--ah-field-focus); }
 /* Rows and highlights bleed 6-10 px past the text column. The step viewport clips, so it carries that room itself
    (padding out, margin back in: the text column does not move). Revealed blocks sit back on the text column. */
-.ah-reveal .ah-keyblock { margin-top: 12px; }
-.ah-reveal .ah-text { margin: 0 0 4px; }
+.ah-reveal .ah-keyblock { margin-top: 0.75rem; }
+.ah-reveal .ah-text { margin: 0 0 0.25rem; }
 :root[data-focus-ring="on"] .ah :is(.ah-input, .ah-link, .ah-run-toggle):focus-visible { outline: 2px solid var(--ah-ring); outline-offset: 2px; }
 
 /* One block per host: the head is always visible; the steps open under it. */
-.ah-run { position: relative; border-radius: 12px; }
-.ah-run-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; column-gap: 12px; padding: 4px 10px 4px; border-radius: 10px; }
-.ah-run-toggle { display: grid; min-width: 0; grid-template-columns: var(--ah-icon) minmax(0, 1fr); align-items: center; column-gap: 12px; margin: 0; padding: 4px 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.ah-run { position: relative; border-radius: 0.75rem; }
+.ah-run-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; column-gap: 0.75rem; padding: 0.25rem 0.625rem 0.25rem; border-radius: 0.625rem; }
+.ah-run-toggle { display: grid; min-width: 0; grid-template-columns: var(--ah-icon) minmax(0, 1fr); align-items: center; column-gap: 0.75rem; margin: 0; padding: 0.25rem 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 @media (hover: hover) and (pointer: fine) { .ah-run-head:hover { background: var(--hover); } }
 .ah-run[data-state="failed"] .ah-job-step { color: color-mix(in oklab, var(--danger) 75%, var(--fg-2)); }
 .ah-run[data-state="pending"] :is(.ah-name, .ah-os-mark) { color: var(--fg-3); }
 .ah-run[data-state="failed"] .ah-mark { display: none; }
-.ah-seg { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 3px; margin: 2px 10px 8px calc(10px + var(--ah-icon) + 12px); }
+.ah-seg { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.1875rem; margin: 2px 0.625rem 0.5rem calc(0.625rem + var(--ah-icon) + 0.75rem); }
 .ah-seg > span { display: block; height: 2px; border-radius: 1px; background: var(--line); transition: background-color 260ms ease; }
 .ah-seg > span[data-state="running"] { background: var(--fg-2); }
 .ah-seg > span[data-state="done"] { background: var(--ok); }
 .ah-seg > span[data-state="failed"] { background: var(--danger); }
-.ah-stages { display: grid; margin: 0 10px 0 calc(10px + var(--ah-icon) + 12px); grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 340ms var(--ease-drawer, cubic-bezier(0.32, 0.72, 0, 1)), opacity 200ms ease, margin-bottom 340ms var(--ease-drawer, cubic-bezier(0.32, 0.72, 0, 1)); }
-.ah-run[data-open="true"] .ah-stages { grid-template-rows: 1fr; opacity: 1; margin-bottom: 8px; }
+.ah-stages { display: grid; margin: 0 0.625rem 0 calc(0.625rem + var(--ah-icon) + 0.75rem); grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 340ms var(--ease-drawer, cubic-bezier(0.32, 0.72, 0, 1)), opacity 200ms ease, margin-bottom 340ms var(--ease-drawer, cubic-bezier(0.32, 0.72, 0, 1)); }
+.ah-run[data-open="true"] .ah-stages { grid-template-rows: 1fr; opacity: 1; margin-bottom: 0.5rem; }
 .ah-stages-in { min-height: 0; margin: 0; padding: 0; overflow: hidden; list-style: none; transition: visibility 0s linear 340ms; }
 .ah-run[data-open="true"] .ah-stages-in { transition-delay: 0s; }
 .ah-run:not([data-open="true"]) .ah-stages-in { visibility: hidden; }
-.ah-stage-row { display: grid; grid-template-columns: var(--ah-icon) minmax(0, 1fr); column-gap: 12px; align-items: start; padding: 4px 0; }
-.ah-stage-mark { --ui-step-status-size: var(--ah-icon); --ui-spinner-size: 14px; margin-top: 2px; }
+.ah-stage-row { display: grid; grid-template-columns: var(--ah-icon) minmax(0, 1fr); column-gap: 0.75rem; align-items: start; padding: 0.25rem 0; }
+.ah-stage-mark { --ui-step-status-size: var(--ah-icon); --ui-spinner-size: 0.875rem; margin-top: 2px; }
 .ah-stage-text { display: grid; min-width: 0; }
 .ah-stage-name { color: var(--fg); font-weight: var(--fw-body); }
 .ah-stage-row[data-state="pending"] .ah-stage-name { color: var(--fg-3); }
-.ah-stage-detail { color: var(--fg-2); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+.ah-stage-detail { color: var(--fg-2); font-size: 0.8125rem; line-height: 1.55; overflow-wrap: anywhere; }
 .ah-stage-detail:empty { display: none; }
 .ah-stage-row[data-state="failed"] .ah-stage-detail { color: color-mix(in oklab, var(--danger) 75%, var(--fg-2)); }
 /* A hint under a key/value block sits one gap below it; the base hint style pulls up into a lede. */
 .ah-keyblock + .ah-text, .ah-install .ah-text { margin-top: 0; }
-.ah-install .ui-kv { margin-bottom: 14px; }
+.ah-install .ui-kv { margin-bottom: 0.875rem; }
 .ah-empty .ah-icon { color: var(--fg-3); }
 
 /* ── The wizard inside a flow window: the window body is the surface ──────────────────────────────── */
 .cl-flow { position: relative; display: block; overflow: hidden; }
-.ah-surface .ah-pages { margin-inline: -12px; padding-inline: 12px; }
-.ah-surface .ah-options .ah-reveal { margin-inline: 10px; }
+.ah-surface .ah-pages { margin-inline: -0.75rem; padding-inline: 0.75rem; }
+.ah-surface .ah-options .ah-reveal { margin-inline: 0.625rem; }
 /* On a phone the action that fixes a host sits on its own line under the name, so a long label never squeezes the name. */
 @media (max-width: 600px) {
   .ah-run-head { grid-template-columns: minmax(0, 1fr) auto auto; }
-  .ah-run-head .ah-job-fix { grid-column: 1 / -1; grid-row: 2; justify-self: start; margin-left: calc(var(--ah-icon) + 12px); }
+  .ah-run-head .ah-job-fix { grid-column: 1 / -1; grid-row: 2; justify-self: start; margin-left: calc(var(--ah-icon) + 0.75rem); }
 }

@@ -140,6 +140,10 @@ fn cli_plugin() -> PluginDefinition {
     plugin.actions.push(ssh_askpass_action());
     #[cfg(all(feature = "ssh", feature = "remote"))]
     plugin.actions.push(ssh_session_action());
+    #[cfg(all(feature = "plugin-agent", target_os = "linux"))]
+    plugin
+        .actions
+        .extend(infraternal_agent::automation::actions());
     plugin
 }
 
@@ -370,6 +374,8 @@ fn session_shim_action() -> ActionDefinition {
                     "detach".to_owned(),
                     JsonSchema::boolean("Detach from the parent process."),
                 ),
+                ("retain_output".to_owned(), JsonSchema::boolean("Keep automation output until the bounded exit deadline.")),
+                ("command_stdin".to_owned(), JsonSchema::boolean("Read literal program arguments from a private pipe.")),
                 ("readiness".to_owned(), JsonSchema::boolean("Private fixed-command readiness probe; never reads login startup.")),
                 ("exit_retention_ms".to_owned(), JsonSchema::integer("Exited session retention in milliseconds, clamped to the production ceiling.")),
                 (

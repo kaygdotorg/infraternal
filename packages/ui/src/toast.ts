@@ -8,6 +8,14 @@ export interface ToastAction {
   onSelect(event?: MouseEvent): void;
 }
 
+/** A compact icon button beside the message (TASTE: icons with warm tooltips). `label` is both its tooltip and its accessible name. */
+export interface ToastIconAction extends ToastAction {
+  /** Inner SVG markup on the 24 px grid (the shared icons). */
+  icon: string;
+  /** Keep the notice up after the action runs: for help that opens elsewhere while the question still waits. */
+  keepOpen?: boolean;
+}
+
 export interface ToastMessage {
   message: string;
   /** The message with entity chips in it (`entityText`); it replaces `message` on screen, which stays the plain text. */
@@ -15,6 +23,8 @@ export interface ToastMessage {
   action?: ToastAction;
   /** A second action beside the primary action, for a clear alternative such as Discard. */
   secondaryAction?: ToastAction;
+  /** Icon buttons after the message, in order (a question answered by ✓ or ✗, with ? for help). Shown on one line, never stacked. */
+  iconActions?: readonly ToastIconAction[];
   /** Accessible name for action choices that have a keyboard focus handoff. */
   actionGroupLabel?: string;
   /** ARIA shortcut value that focuses the action group, such as `Control+Shift+Space`. */
@@ -47,6 +57,8 @@ export interface ToastController {
 export interface ToastOptions {
   /** Window notices anchor to the inline start of a positioned, unscrolled parent. */
   placement?: "viewport" | "parent";
+  /** Persistent status can sit above transient notifications without sharing their replacement slot. */
+  aboveNotifications?: boolean;
 }
 
 /** Messages longer than this stack their actions beneath the text; shorter ones keep the actions beside it. */
@@ -104,23 +116,46 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
   close.dataset.tip = "Dismiss";
   close.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>`;
 
+  // Icon actions are rebuilt per message: a handful of buttons, only while the question is on screen.
+  const icons = document.createElement("div");
+  icons.className = "ui-toast-icons";
+  icons.setAttribute("role", "group");
+  icons.hidden = true;
+
   actions.append(action, secondaryAction);
-  host.append(marker, glyph, label, actions, close);
+  host.append(marker, glyph, label, actions, icons, close);
   parent.append(host);
+  // Wrapped text and touch targets change a notification's height. Reserve its
+  // measured space using the same CSS anchor, including the mobile key tray.
+  const neighbors = options.aboveNotifications ? [...parent.children].filter((el): el is HTMLElement => el !== host && el instanceof HTMLElement && el.classList.contains("ui-toast")) : [];
+  const spacing = neighbors.length ? new ResizeObserver(() => {
+    const height = Math.max(0, ...neighbors.map((el) => el.hidden ? 0 : el.offsetHeight));
+    // The measured height is in pixels; the gap beside it is a length of the interface (rem), so it grows with the UI size.
+    host.style.setProperty("--ui-toast-stack-offset", height ? `calc(${height}px + 0.75rem)` : "0px");
+  }) : undefined;
+  for (const neighbor of neighbors) spacing?.observe(neighbor);
 
   let hideTimer = 0;
+  let generation = 0;
+  let closeTimer = 0;
   let selectAction: ToastAction["onSelect"] | undefined;
   let selectSecondaryAction: ToastAction["onSelect"] | undefined;
   let closeHandler: (() => void) | undefined;
+  let iconRuns: readonly ToastIconAction[] = [];
   const finish = (): void => { const run = closeHandler; closeHandler = undefined; run?.(); };
   const dismiss = (): void => {
+    const epoch = ++generation;
     window.clearTimeout(hideTimer);
     hideTimer = 0;
     selectAction = undefined;
     selectSecondaryAction = undefined;
+    // A second click on a leaving notice must not run an answer twice.
+    iconRuns = [];
     host.dataset.open = "false";
-    window.setTimeout(() => {
-      if (host.dataset.open === "false") host.hidden = true;
+    window.clearTimeout(closeTimer);
+    closeTimer = window.setTimeout(() => {
+      closeTimer = 0;
+      if (epoch === generation && host.dataset.open === "false") host.hidden = true;
     }, 190);
     finish();
   };
@@ -134,13 +169,38 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
   };
   const primaryClick = (event: MouseEvent): void => onAction(selectAction, event);
   const secondaryClick = (event: MouseEvent): void => onAction(selectSecondaryAction, event);
+  const iconClick = (event: MouseEvent): void => {
+    const entry = iconRuns[Number((event.currentTarget as HTMLElement).dataset.index)];
+    if (!entry) return;
+    if (entry.keepOpen) entry.onSelect(event); else onAction(entry.onSelect, event);
+  };
+  const setIconActions = (list: readonly ToastIconAction[] = []): void => {
+    iconRuns = list;
+    icons.replaceChildren(...list.map((entry, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ui-toast-icon ui-button";
+      button.dataset.index = String(index);
+      button.setAttribute("aria-label", entry.label);
+      button.dataset.tip = entry.label;
+      button.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">${entry.icon}</svg>`;
+      button.addEventListener("click", iconClick);
+      return button;
+    }));
+    icons.hidden = list.length === 0;
+    if (list.length) icons.setAttribute("aria-label", "Notification choices"); else icons.removeAttribute("aria-label");
+  };
   action.addEventListener("click", primaryClick);
   secondaryAction.addEventListener("click", secondaryClick);
   close.addEventListener("click", dismiss);
 
   return {
     show(value) {
+      const epoch = ++generation;
       window.clearTimeout(hideTimer);
+      // A previous message's closing timer must not hide this one while its
+      // opening frame waits for a busy renderer.
+      window.clearTimeout(closeTimer);
       finish();
       closeHandler = value.onClose;
       close.hidden = !value.dismissible;
@@ -156,6 +216,8 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
       action.hidden = !value.action;
       secondaryAction.textContent = value.secondaryAction?.label ?? "";
       secondaryAction.hidden = !value.secondaryAction;
+      setIconActions(value.iconActions);
+      host.dataset.choices = String(Boolean(value.iconActions?.length));
       actions.hidden = !value.action && !value.secondaryAction;
       if (actions.hidden) {
         actions.removeAttribute("aria-label");
@@ -169,13 +231,14 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
       host.dataset.stacked = String(Boolean(value.action || value.secondaryAction) && value.message.length > STACK_AFTER);
       host.hidden = false;
       host.dataset.open = "false";
-      requestAnimationFrame(() => { if (!host.hidden) host.dataset.open = "true"; });
+      // A fast receipt can dismiss this message before its first animation frame.
+      requestAnimationFrame(() => { if (epoch === generation && !host.hidden) host.dataset.open = "true"; });
       const duration = value.duration ?? 4200;
       if (duration > 0) hideTimer = window.setTimeout(dismiss, duration);
     },
     focusAction(index = 0) {
       if (!Number.isInteger(index) || index < 0) return false;
-      const available = [action, secondaryAction].filter((button) => !button.hidden);
+      const available = [action, secondaryAction, ...icons.querySelectorAll<HTMLElement>("button")].filter((button) => !button.hidden);
       const target = available[index];
       if (!target || host.hidden) return false;
       target.focus({ preventScroll: true });
@@ -183,10 +246,13 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
     },
     dismiss,
     dispose() {
+      generation++;
       window.clearTimeout(hideTimer);
+      window.clearTimeout(closeTimer);
       action.removeEventListener("click", primaryClick);
       secondaryAction.removeEventListener("click", secondaryClick);
       close.removeEventListener("click", dismiss);
+      spacing?.disconnect();
       host.remove();
     },
   };

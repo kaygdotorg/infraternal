@@ -15,6 +15,7 @@ export interface AuthStart {
 }
 
 interface AuthSession {
+  session_incarnation?: string;
   user_id: string;
   username: string;
   display_name: string;

@@ -35,6 +35,8 @@ export function installShortcuts(cx: Ctx): () => void {
     { id: "split-down", label: "Split down", keys: "", combo: platformCombo({ code: "KeyD", key: "d", mod: true, shift: true }, { code: "KeyE", key: "e", mod: true, shift: true }) },
     { id: "new-window-right", label: "New window right", keys: "", combo: platformCombo({ code: "Enter", key: "Enter", mod: true, shift: false }, { code: "Enter", key: "Enter", mod: true, shift: true }) },
     { id: "new-window-below", label: "New window below", keys: "", combo: platformCombo({ code: "Enter", key: "Enter", mod: true, shift: true }, { code: "Enter", key: "Enter", mod: true, shift: true, alt: true }) },
+    // Not a binding: the other pair of the four, reached from the split buttons' own place (#280). Listed so `?` shows it.
+    { id: "split-buttons-alt", label: "Split buttons: new window instead", keys: { mac: "⌥ click", other: "Alt+click" } },
     // Close the active window (D178: its session keeps running, detached). ⌥⌘W on a Mac (⌘W is the browser's), Ctrl+Shift+X elsewhere.
     { id: "close-window", label: "Close window", keys: "", combo: platformCombo({ code: "KeyW", mod: true, alt: true }, { code: "KeyX", key: "x", mod: true, shift: true }) },
     { id: "next-window", label: "Next window", keys: "", combo: platformCombo({ code: "BracketRight", key: "]", mod: true, shift: false }, { code: "BracketRight", key: "]", mod: true, shift: true }) },

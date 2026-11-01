@@ -51,10 +51,18 @@ await Promise.all([
   cp("mesh.css", `${dist}/mesh.css`),
   cp("sessions.css", `${dist}/sessions.css`),
   cp("addhost.css", `${dist}/addhost.css`),
+  cp("version.css", `${dist}/version.css`),
+  // The person's card (D283) loads its own styles when it is first wanted, so they are not part of the first screen (D188).
+  cp("account.css", `${dist}/account.css`),
+  // The mockups' dev-only data toggle: in the preview build only.
+  ...(clustersPreview ? [cp("data-toggle.css", `${dist}/data-toggle.css`)] : []),
   cp("../../packages/ui/styles.css", `${dist}/ui.css`),
   cp("fonts", `${dist}/fonts`, { recursive: true, filter: (source) => !source.endsWith(".sh") && !source.endsWith(".py") }),
   cp("node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", `${dist}/fonts/Geist-Variable.woff2`),
 ]);
+// The mockup's "?" opens a stand-in for the public docs page (D44, D223), rendered from docs/multiplexer.md into this dist. Preview
+// builds only: it is never part of a release. It must exist before the encodings below are written.
+if (clustersPreview) await import("./test/render-docs-preview");
 // The budget gate reads this: which chunks the first screen needs and which load later (D188).
 const meta = (build as unknown as { metafile: { outputs: Record<string, MetaOutput> } }).metafile;
 await Bun.write(`${dist}/chunks.json`, JSON.stringify(classifyChunks(meta.outputs), null, 1));

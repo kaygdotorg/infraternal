@@ -141,12 +141,27 @@ Reviews and fixes run at the same time as the next lane's build.
 ## 7. Rust build speed and static binary size
 
 - `scripts/verify fast` checks the stripped, static release binaries against
-  exact measured ceilings, with no growth allowance (D243):
+  recorded baselines and reports the signed byte delta for each target
+  (D243 amended by the owner, 2026-11-01). Growth and shrinkage pass without
+  approval bands; build failures, missing artifacts, dynamic linkage,
+  `PT_INTERP` and wrong ELF targets still fail. Avoid gratuitous bloat and
+  record each slice’s measured sizes and deltas on its issue.
 
-  | Target | Measured ceiling |
+  | Target | Recorded baseline |
   | --- | ---: |
   | `x86_64-unknown-linux-musl` | 21,443,824 bytes |
   | `aarch64-unknown-linux-musl` | 19,629,240 bytes |
+
+  On merge, the orchestrator updates `baseline_bytes` in each target arm of
+  `scripts/verify.d/rust.sh` and this table to the merged stripped artifact’s
+  measured byte count (`stat -c %s target/<target>/release/infraternal`). Record
+  the merge SHA, both sizes and deltas on the issue. Keep the pre-merge
+  baselines while qualifying a slice so its reported deltas stay meaningful;
+  the gate never updates them automatically.
+
+  The measurements below are historical receipts. Their references to caps,
+  ratchets, allowances and approval bands describe the policy at the time;
+  the owner removed those requirements on 2026-11-01.
 
   Crash-loop status reporting and final review fixes (#237, D299/D303) use the
   pinned `scripts/static-cargo` stripped static recipe on build host
@@ -447,11 +462,8 @@ Reviews and fixes run at the same time as the next lane's build.
   optimization; terminal, mesh and cryptographic data paths retain speed
   optimization (D243, D264, D272).
   The obsolete #57 ceilings were below every shipping build and obscured growth.
-  Larger images fail. Smaller images also fail until that target's ceiling is
-  ratcheted down to its new measured size; a cut cannot leave slack for later
-  regrowth. Update both targets and this table with evidence on the issue.
-  An intentional increase needs a justified, target-specific measured owner
-  exception under D243. The gate never updates a ceiling automatically.
+  Under the amended D243 policy, these retained measurements are baselines,
+  not ceilings. Both larger and smaller images pass the size measurement.
   Attribution, retained feature costs and runtime tradeoffs are recorded
   on #198 and [#201](https://git.kayg.org/kayg/infraternal/issues/201).
 - The job launcher provides `sccache` through `RUSTC_WRAPPER`; keep the cache

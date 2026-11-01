@@ -71,6 +71,7 @@ mod tests {
                     13, 0, 0, 0, 0x20, 247, 255, 255, 255, 1, 0, 0, 0, 0, 0, 0, 0,
                 ],
             ),
+            (Frame::CloseSession, vec![1, 0, 0, 0, 0x1f]),
             (Frame::ExitAck, vec![1, 0, 0, 0, 0x21]),
         ];
         for (frame, wire) in fixtures {
@@ -90,6 +91,7 @@ mod tests {
             &[1, 0, 16, 0][..],
             &[1, 0, 0, 0, 3][..],
             &[2, 0, 0, 0, 0x21, 0][..],
+            &[2, 0, 0, 0, 0x1f, 0][..],
             &[4, 0, 0, 0, 0x7f, 0, 0, 255][..],
         ] {
             assert!(Decoder::default().feed(bytes).is_err());

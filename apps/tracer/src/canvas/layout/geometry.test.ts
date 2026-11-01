@@ -149,3 +149,47 @@ test("a desktop column is never drawn wider than the screen; a phone strip has n
   expect(metricsFor(393, 852, true).maxW).toBe(0);
   expect(drawnWidth(900, metricsFor(393, 852, true))).toBe(900);
 });
+
+// ---- windows grow with the UI size (#283) ---------------------------------------------------------------------------------
+
+test("a desktop default window is as many times wider as the UI is bigger", () => {
+  const at = (scale: number): number => metricsFor(1440, 900, false, DEFAULT_SIZES, scale).colW;
+  expect(at(1)).toBe(472); // a third of the canvas, less the gaps
+  expect(at(1.1)).toBe(519); // the new default size
+  expect(at(1.65)).toBe(779); // 150 % on top of the 1.1 base
+  expect(at(0.55)).toBe(260); // 50 %
+  expect(metricsFor(1440, 900, false, DEFAULT_SIZES, 1.1).scale).toBe(1.1);
+});
+
+test("the Wide option scales too, and every size stops at 99% of the canvas", () => {
+  const wide = { ...DEFAULT_SIZES, desktop: "wide" as const };
+  expect(metricsFor(1440, 900, false, wide, 1).colW).toBe(708);
+  expect(metricsFor(1440, 900, false, wide, 1.1).colW).toBe(779);
+  // The ceiling holds at every scale: a hypothetical 2x on a narrow desktop is held at the drawn-width ceiling (D191, #267).
+  for (const scale of [0.55, 1, 1.1, 1.65, 2, 3]) {
+    for (const width of [800, 1000, 1440, 1690, 1920]) {
+      const m = metricsFor(width, 900, false, wide, scale);
+      expect(m.colW).toBeLessThanOrEqual(m.maxW);
+      expect(m.maxW).toBe(Math.max(480, Math.round(width * 0.99)));
+    }
+  }
+  expect(metricsFor(800, 600, false, wide, 2).colW).toBe(792);
+});
+
+test("Full width stays 99% of the canvas at any scale, and a phone's window is the screen's width", () => {
+  const full = { ...DEFAULT_SIZES, desktop: "full" as const };
+  expect(metricsFor(1440, 900, false, full, 1.65).colW).toBe(1426);
+  expect(metricsFor(393, 852, true, DEFAULT_SIZES, 1.5).colW).toBe(metricsFor(393, 852, true).colW);
+  expect(metricsFor(393, 852, true, DEFAULT_SIZES, 1.5).peekW).toBe(metricsFor(393, 852, true).peekW);
+});
+
+test("the touch floor is about the terminal's cells, not the UI: it does not scale", () => {
+  const m = metricsFor(393, 852, true, DEFAULT_SIZES, 1.5);
+  expect(m.minW).toBe(metricsFor(393, 852, true).minW);
+});
+
+test("Mesh nodes grow with the UI size too", () => {
+  const m = metricsFor(1440, 900, false, DEFAULT_SIZES, 1.5);
+  expect([m.nodeW, m.nodeH]).toEqual([312, 156]);
+  expect([metricsFor(1440, 900, false).nodeW, metricsFor(1440, 900, false).nodeH]).toEqual([208, 104]);
+});

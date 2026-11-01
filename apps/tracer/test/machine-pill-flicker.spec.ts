@@ -14,7 +14,7 @@ test("machine pill state stays tied to the session connection during terminal re
 
   await page.evaluate(() => {
     const root = document.querySelector<HTMLElement>(".ui-window");
-    const dot = root?.querySelector<HTMLElement>(".ui-window-dot");
+    const dot = root?.querySelector<HTMLElement>(".ui-window-conn");
     if (!root || !dot) throw new Error("machine pill is missing");
     const trace = {
       mutations: [] as Array<{ at: number; attribute: string; old: string | null; next: string | null }>,
@@ -77,7 +77,7 @@ test("machine pill stays steady through repeated immediate server closes", async
   const traceDuration = 2_500;
   await page.evaluate((durationMs) => {
     const root = document.querySelector<HTMLElement>(".ui-window");
-    const dot = root?.querySelector<HTMLElement>(".ui-window-dot");
+    const dot = root?.querySelector<HTMLElement>(".ui-window-conn");
     if (!root || !dot) throw new Error("machine pill is missing");
     const trace = {
       startedAt: performance.now(),

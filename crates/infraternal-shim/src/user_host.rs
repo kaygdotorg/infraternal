@@ -4,7 +4,7 @@
 //! person's login. A UID shared by people is never sufficient to select a host.
 use super::{
     CHUNK, Config, InputReply, Inputs, MAX_PEERS, Peer, Request, SessionTerminal, SocketPath,
-    consume_peer, socket,
+    consume_peer, shim_peer_uid_allowed, socket,
 };
 use crate::{
     frame::{
@@ -677,7 +677,7 @@ impl Session {
             && let Ok((stream, _)) = self.listener.accept()
         {
             let credential = getsockopt(&stream, PeerCredentials).map_err(io::Error::from)?;
-            if (credential.uid() == 0 || credential.uid() == Uid::effective().as_raw())
+            if shim_peer_uid_allowed(credential.uid(), Uid::effective().as_raw())
                 && self.peers.len() < MAX_PEERS
             {
                 stream.set_nonblocking(true)?;

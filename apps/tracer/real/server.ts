@@ -7,6 +7,7 @@
  * - The web root is a copy of `TRACER_DIST` (default `dist`), frozen so a rebuild cannot change it mid-run.
  * - State lives in a private temporary directory; the certificate stays in memory; nothing secret is logged.
  */
+import { recordAttachment } from "./attachment-bookkeeping";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { randomUUID } from "node:crypto";
@@ -20,6 +21,44 @@ import { WebSocket, WebSocketServer } from "ws";
 import { WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 
 const root = resolve(import.meta.dirname, "../../..");
+
+/** A server leader can exit before its embedded children release resources needed by the replacement. */
+function processGroupExists(group: number): boolean {
+  try { process.kill(-group, 0); return true; }
+  catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+/** Detached session shims use their own groups, so this waits only for server-owned fixture processes. */
+async function waitForProcessGroupExit(group: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (processGroupExists(group)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return true;
+}
+
+function signalProcessGroup(group: number, signal: NodeJS.Signals): void {
+  try { process.kill(-group, signal); }
+  catch (error) {
+    if (!(typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH")) throw error;
+  }
+}
+
+function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const onExit = (): void => { clearTimeout(timer); resolve(true); };
+    const timer = setTimeout(() => {
+      child.off("exit", onExit);
+      resolve(false);
+    }, timeoutMs);
+    child.once("exit", onExit);
+  });
+}
 
 /** What the bridge saw on one browser socket. */
 export interface Bridge {
@@ -35,7 +74,7 @@ export interface Bridge {
   closedAt?: number;
   /** The reason of the last `Close` frame the server sent on this socket (stream 0 or a terminal stream). */
   serverClose?: string;
-  /** AttachTerm frames by client stream id: the session each stream attached to (hex). */
+  /** Explicit or server-restored attachments by client stream id (session hex). */
   attached: Map<number, string[]>;
   /** Terminal output text by client stream id. */
   output: Map<number, string>;
@@ -75,7 +114,7 @@ export interface RealServer {
   pid: number;
   /** Epoch milliseconds from the monotonic clock, for perf-VM-only recovery measurements. */
   recoveredAt?: number;
-  /** Restarts only the server PID, retaining its detached session shims. */
+  /** Restarts the server-owned process group while retaining session shims in their own groups. */
   restart(whileStopped?: () => Promise<void>): Promise<void>;
   /** Retain existing real TLS sockets when their upstream closes; replacements remain ordinary routes. */
   retainBrowserRoutes(): void;
@@ -98,7 +137,7 @@ export async function startRealServer(options: {
   timedControls?: boolean;
   /** Retain every stream Close for functional ordering assertions without timing traces. */
   recordCloses?: boolean;
-  /** The bridge does not decode or keep the server's output (benchmarks with busy terminals). */
+  /** Decode attachment metadata but retain no terminal output (busy-terminal measurements). */
   lean?: boolean;
   address?: string;
   port?: number;
@@ -111,6 +150,8 @@ export async function startRealServer(options: {
   certificate?: (pem: string) => Promise<void>;
   /** Seeds controlled public host trust before any bootstrap operation. */
   prepareData?: (directory: string) => Promise<void>;
+  /** Real shell fixtures supply a private startup directory without touching the VM user's files. */
+  startupDirectory?: string;
 } = {}): Promise<RealServer> {
   // `lean`: the recording of every output frame made this single-threaded relay slower than the server's one-second
   // write limit allows under busy terminals, and the server then closed the socket.
@@ -172,20 +213,35 @@ export async function startRealServer(options: {
     unit = options.systemd ? `s199-${randomUUID()}` : undefined;
     return spawn(unit ? "systemd-run" : binary, unit ? ["--user", "--quiet", "--wait", "--pipe", "--collect", "--unit", unit, "-p", "KillMode=process", `--setenv=XDG_RUNTIME_DIR=${runtime}`, `--setenv=ZDOTDIR=${resolve(root, "crates/infraternal/tests/profile")}`, binary, ...args] : args, {
     cwd: root, detached: true,
-    env: { ...process.env, XDG_RUNTIME_DIR: runtime, ZDOTDIR: resolve(root, "crates/infraternal/tests/profile") },
+    env: { ...process.env, XDG_RUNTIME_DIR: runtime, ZDOTDIR: options.startupDirectory ?? resolve(root, "crates/infraternal/tests/profile") },
     stdio: ["ignore", process.env.REAL_SERVER_LOG === "1" ? "pipe" : "ignore", "pipe"],
     });
   };
   let child = launch();
   const stop = async (): Promise<void> => {
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    const stopped = once(child, "exit");
+    const stoppedChild = child;
+    const group = stoppedChild.pid;
+    if (!group) return;
     if (unit) {
-      const control = spawn("systemctl", ["--user", "stop", unit], { stdio: "ignore" });
-      const [code] = await once(control, "exit");
-      if (code !== 0) throw new Error("private fixture service stop failed");
-    } else child.kill("SIGTERM");
-    await stopped;
+      if (stoppedChild.exitCode === null && stoppedChild.signalCode === null) {
+        const control = spawn("systemctl", ["--user", "stop", unit], { stdio: "ignore" });
+        const [code] = await once(control, "exit");
+        if (code !== 0) throw new Error("private fixture service stop failed");
+      }
+    } else if (processGroupExists(group)) {
+      // Stop the full server-owned group. Killing only its leader lets the embedded child
+      // keep its listener open while restart() starts a replacement on the same port.
+      signalProcessGroup(group, "SIGTERM");
+    }
+    if (!await waitForProcessGroupExit(group, 5_000)) {
+      signalProcessGroup(group, "SIGKILL");
+      if (!await waitForProcessGroupExit(group, 1_000)) {
+        throw new Error("real-server fixture process group did not exit within 6 seconds");
+      }
+    }
+    if (!await waitForChildExit(stoppedChild, 1_000)) {
+      throw new Error("real-server fixture launcher did not exit after its process group stopped");
+    }
   };
   if (process.env.REAL_SERVER_LOG === "1") { child.stderr?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); child.stdout?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); } else child.stderr?.resume();
 
@@ -243,7 +299,7 @@ export async function startRealServer(options: {
           if (f.type === "Hello" && stream === 0) bridge.helloResume = (f.caps & 1n) !== 0n;
           if (f.type === "Input" && f.replyTo !== undefined) bridge.replyAttempts = (bridge.replyAttempts ?? 0) + 1;
           if (f.type === "AttachTerm") {
-            bridge.attached.set(stream, [...(bridge.attached.get(stream) ?? []), Buffer.from(f.sessionId).toString("hex")]);
+            recordAttachment(bridge.attached, stream, f);
             bridge.attachTimes?.push({ stream, at: Date.now() });
             bridge.attachCursors?.push({ stream, lastOutSeq: f.lastOutSeq.toString(), lastInSeq: f.lastInSeq.toString(), at: Date.now() });
           }
@@ -257,7 +313,9 @@ export async function startRealServer(options: {
       upstream.on("message", (data, binary) => {
         pendingUpstreamMessages++;
         const bytes = Buffer.from(data as Buffer);
-        if (!lean && protocol && binary) outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
+        if (protocol && binary) outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
+          recordAttachment(bridge.attached, stream, f);
+          if (lean) return;
           if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Output" && f.type !== "Ack") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} down s${stream} ${f.type}`);
           if (f.type === "Output") {
             const chunkText = text.decode(f.bytes, { stream: true });
@@ -433,8 +491,7 @@ export async function startRealServer(options: {
     async dispose() {
       front.close();
       tls.close();
-      if (unit) await stop();
-      else try { process.kill(-child.pid!, "SIGTERM"); } catch { /* already gone */ }
+      await stop();
       // Reuse authenticated fixture teardown so detached shims cannot outlive
       // the runtime directory that identifies them. Never scan unrelated PIDs.
       // Root measurements run in a private mount namespace whose /run and passwd

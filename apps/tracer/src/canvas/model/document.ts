@@ -6,7 +6,7 @@
  *   person pinned (the rest are laid out automatically). Views sit on a coarse grid, stored in cells.
  * - Windows reference their target by a stable id plus a readable name (the same ids back deep links, #86).
  * - Network access rules are never stored here; the Mesh owns them.
- * - Shared revisions come from server-applied semantic operations. Browser storage holds only a drawing cache.
+ * - Shared revisions come from server-applied semantic operations. Each tab keeps its drawing and unconfirmed edits in memory (D312).
  *
  * `toDocument` and `fromDocument` convert between this and the runtime model (`types.ts`). `parseDocument` is the
  * only way untrusted JSON (storage, an import, the server) becomes a document: it checks shape and bounds and
@@ -20,7 +20,7 @@ export * from "./schema";
 
 /** Turns a runtime window into its stable reference. Windows that cannot be referenced (node cards) are left out. */
 function targetOf(w: WindowModel, pending: boolean): DocTarget | undefined {
-  if (w.kind === "terminal") return w.sessionId || pending ? { type: "session", id: w.sessionId ?? w.id, host: w.host, ...(w.hostId ? { hostId: w.hostId, ...(w.user ? { user: w.user } : {}), ...(w.address ? { address: w.address } : {}) } : {}), ...(w.session ? { name: w.session } : {}) } : undefined;
+  if (w.kind === "terminal") return w.sessionId || pending ? { type: "session", id: w.sessionId ?? w.id, host: w.host, ...(w.hostId ? { hostId: w.hostId, ...(w.user ? { user: w.user } : {}), ...(w.address ? { address: w.address } : {}) } : {}), ...(w.session ? { name: w.session } : {}), ...(w.sessionPinned ? { pinned: true } : {}) } : undefined;
   if (w.kind === "settings") return { type: "settings", section: w.id.slice(2) };
   if (w.kind === "containers" || w.kind === "logs") return { type: w.kind, host: w.host };
   return undefined;

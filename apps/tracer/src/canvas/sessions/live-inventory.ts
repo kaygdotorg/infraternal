@@ -16,10 +16,9 @@
  * stale row. Ended records stay available to their existing window but disappear from every session list.
  */
 import { documentWindows, type CanvasDocument } from "../model/schema";
-import { inventoryKey, createStoredJsonCache, readStoredJson } from "../../account-storage";
+import { createAccountNotifications } from "../../account-storage";
 import type { DeviceInfo, InventoryCapabilities, InventoryStatus, SessionInventory, SessionRecord } from "./inventory";
 
-interface Stored { host?: string; id: string; name: string; pinned: boolean; frecency: number }
 
 export interface LiveInventory extends SessionInventory {
   /** The server answered that the host no longer has this session (#158): it becomes exited and `gone`. */
@@ -35,7 +34,6 @@ export interface LiveInventory extends SessionInventory {
 }
 
 export function createLiveInventory(options: { accountId: string; host: string }): LiveInventory {
-  const key = inventoryKey(options.accountId);
   const records = new Map<string, SessionRecord>();
   const owners = new Map<string, string>();
   // Only windows opened on this device need status after its sidecar is superseded.
@@ -45,14 +43,10 @@ export function createLiveInventory(options: { accountId: string; host: string }
   const verifiedHosts = new Set<string>();
   let top = 0;
   let shared: Set<string> | undefined;
-  const storage = () => window.localStorage;
-  const cache = createStoredJsonCache(key, () => [...records.values()].filter((s) => !s.gone).map((s): Stored => ({ host: owners.get(s.id) ?? options.host, id: s.id, name: s.name, pinned: s.pinned, frecency: s.frecency })), storage);
-  const save = cache.flush, emit = cache.notify;
+  const cache = createAccountNotifications();
+  const save = (): void => {};
+  const emit = cache.notify;
   const blank = (id: string, name: string): SessionRecord => ({ id, name, pinned: false, state: "detached", lastOutput: "", age: "", viewers: 0, size: "", frecency: 0, screen: [] });
-  try {
-    const rows = (readStoredJson(key, storage) ?? []) as Stored[];
-    for (const r of rows) if (typeof r.id === "string" && typeof r.name === "string") { owners.set(r.id, typeof r.host === "string" && r.host.length <= 200 ? r.host : options.host); records.set(r.id, { ...blank(r.id, r.name), pinned: Boolean(r.pinned), frecency: Number(r.frecency) || 0 }); top = Math.max(top, Number(r.frecency) || 0); }
-  } catch { /* unreadable: start empty */ }
 
   const can: InventoryCapabilities = { rename: true, end: false, runAgain: false, dismiss: false };
   const only = (host: string, id: string): boolean => owners.get(id) === host;
@@ -69,6 +63,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
       for (const target of targets) {
         const record = records.get(target.id);
         if (record && target.name && target.name !== record.name) { record.name = target.name; changed = true; }
+        if (record && target.name && record.pinned !== (target.pinned === true)) { record.pinned = target.pinned === true; changed = true; }
       }
       if (changed) emit();
     },
@@ -87,6 +82,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
       if (s?.gone) return;
       if (!s) { s = blank(id, hint?.name ?? "shell"); records.set(id, s); awaitingCensus.add(id); }
       else if (hint?.name && !s.pinned) s.name = hint.name;
+      if (hint?.pinned) s.pinned = true;
       if (s.state === "open") { if (hint?.name && s.name !== hint.name && !s.pinned) emit(); return; }
       s.state = shared && !shared.has(id) ? "detached" : "open";
       s.frecency = ++top;
@@ -103,7 +99,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
     rename(host, id, name) {
       const s = only(host, id) ? records.get(id) : undefined;
       const next = name.trim();
-      if (!s || !next || next === s.name) return;
+      if (!s || !next || next === s.name && s.pinned) return;
       s.name = next;
       s.pinned = true;
       save();

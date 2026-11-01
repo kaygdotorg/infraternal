@@ -40,6 +40,8 @@ pub enum Frame<'a> {
         resume_token: &'a [u8; 32],
         /// Resume window in seconds.
         resume_window_seconds: u32,
+        /// Public authenticated-session incarnation, negotiated with Hello bit 4.
+        session_incarnation: Option<&'a str>,
     },
     /// Client request to resume an existing connection.
     Resume {
@@ -708,11 +710,21 @@ fn decode_connection_body(frame_type: u8, body: &[u8]) -> Result<Frame<'_>, Deco
             let connection_id = body_array::<16>(frame_type, body, 0)?;
             let resume_token = body_array::<32>(frame_type, body, 16)?;
             let resume_window_seconds = body_u32(frame_type, body, 48)?;
-            ensure_end(frame_type, body, 52)?;
+            let session_incarnation = if body.len() == 52 {
+                None
+            } else {
+                let (value, end) = body_string(frame_type, body, 52)?;
+                ensure_end(frame_type, body, end)?;
+                if !valid_incarnation(value) {
+                    return Err(invalid_body(frame_type, "invalid session incarnation"));
+                }
+                Some(value)
+            };
             Ok(Frame::Welcome {
                 connection_id,
                 resume_token,
                 resume_window_seconds,
+                session_incarnation,
             })
         }
         0x02 => {
@@ -935,12 +947,31 @@ fn ensure_end(frame_type: u8, body: &[u8], expected_len: usize) -> Result<(), De
     }
 }
 
+fn valid_incarnation(value: &str) -> bool {
+    value.len() == 43
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 fn body_len(frame: &Frame<'_>) -> Result<usize, EncodeError> {
     match frame {
         Frame::Hello { client_info, .. } => string_field_len(client_info)?
             .checked_add(10)
             .ok_or(EncodeError::LengthOverflow),
-        Frame::Welcome { .. } => Ok(52),
+        Frame::Welcome {
+            session_incarnation,
+            ..
+        } => {
+            if session_incarnation.is_some_and(|value| !valid_incarnation(value)) {
+                return Err(EncodeError::LengthOverflow);
+            }
+            Ok(if session_incarnation.is_some() {
+                96
+            } else {
+                52
+            })
+        }
         Frame::Resume { .. } => Ok(48),
         Frame::Ping { .. } | Frame::Pong { .. } => Ok(16),
         Frame::Close { reason, .. } => reason
@@ -1067,10 +1098,14 @@ fn append_connection_body(frame: &Frame<'_>, output: &mut Vec<u8>) -> Result<(),
             connection_id,
             resume_token,
             resume_window_seconds,
+            session_incarnation,
         } => {
             output.extend_from_slice(*connection_id);
             output.extend_from_slice(*resume_token);
             output.extend_from_slice(&resume_window_seconds.to_le_bytes());
+            if let Some(value) = session_incarnation {
+                write_string(value, output)?;
+            }
         }
         Frame::Resume {
             connection_id,

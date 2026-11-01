@@ -480,6 +480,7 @@ impl Local {
             let meta = std::fs::symlink_metadata(&path)?;
             (meta.dev(), meta.ino())
         };
+        let state = path.parent().ok_or(io::ErrorKind::InvalidInput)?.to_owned();
         let task = tokio::spawn(async move {
             // Sequential connections bound resources and preserve operator action order.
             while let Ok((mut socket, _)) = listener.accept().await {
@@ -487,7 +488,7 @@ impl Local {
                     // Request framing and reply writes have deadlines in serve.
                     // An accepted transaction owns its completion: kernel RCU
                     // cleanup at scale may outlive a transport framing deadline.
-                    let _ = serve(&mut socket, &registry).await;
+                    let _ = serve(&mut socket, &registry, &state).await;
                 }
             }
         });
@@ -535,7 +536,7 @@ async fn read_one(socket: &mut UnixStream) -> io::Result<Vec<u8>> {
         wire.extend_from_slice(&buffer[..read]);
     }
 }
-async fn serve(socket: &mut UnixStream, registry: &Registry) -> io::Result<()> {
+async fn serve(socket: &mut UnixStream, registry: &Registry, state: &Path) -> io::Result<()> {
     // A wholly idle listener has no timer. Once accepted, bound a stalled local request.
     let wire = tokio::time::timeout(std::time::Duration::from_secs(5), read_one(socket))
         .await
@@ -552,6 +553,32 @@ async fn serve(socket: &mut UnixStream, registry: &Registry) -> io::Result<()> {
     if action_id.is_empty() || action_id.len() > 128 || input_json.len() > MAX_ACTION_BYTES {
         return Err(io::ErrorKind::InvalidData.into());
     }
+    #[cfg(target_os = "linux")]
+    if let Some(verb) = action_id.strip_prefix("sessions.") {
+        let peer = socket.peer_cred()?;
+        let pid = peer
+            .pid()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .ok_or(io::ErrorKind::PermissionDenied)?;
+        let reply = crate::automation::execute(state, peer.uid(), pid, verb, input_json).await;
+        let reply = serde_json::to_vec(&reply)?;
+        let mut wire = Vec::new();
+        encode_muxed_frame_into(
+            0,
+            &Frame::Result {
+                call_id,
+                ok: true,
+                json: &reply,
+            },
+            &mut wire,
+        )
+        .map_err(|_| io::ErrorKind::InvalidData)?;
+        return tokio::time::timeout(std::time::Duration::from_secs(5), socket.write_all(&wire))
+            .await
+            .map_err(|_| io::ErrorKind::TimedOut)?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = state;
     let (ok, reply) = match registry
         .call_public(action_id.to_owned(), input_json.to_vec())
         .await

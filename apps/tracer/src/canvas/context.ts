@@ -135,6 +135,7 @@ export interface Adapters {
   addHost?: () => void;
   /** The lock on host connections (D168, D217): its state, the palette row and Settings → Hosts; absent when the server has none. */
   authority?: import("./addhost/authority-unlock").AuthorityControl;
+  startupHints?: import("./sessions/startup-hints").StartupHints;
 }
 
 export interface Ctx {

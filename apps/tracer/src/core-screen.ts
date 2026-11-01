@@ -1,4 +1,5 @@
 /** Mounts the authenticated terminal shell, theme controls, host tree, and mobile key tray. */
+import { bindInputToolbar } from "../../../packages/ui/src/input-toolbar";
 import { branchedMenu, type BranchSection, type BranchedMenu } from "../../../packages/ui/src/branched";
 import { applyTheme, DEFAULT_CARD, DEFAULT_WINDOW, LEVEL_NAMES, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
 import { refreshTip } from "../../../packages/ui/src/tooltip";
@@ -785,6 +786,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const scrimClick = (): void => setPalette(false, "pointer");
 
   const keydown = (event: KeyboardEvent): void => {
+    // Inert descendants cannot block global shortcuts while logout is in flight.
+    if (stage.inert) { event.preventDefault(); event.stopImmediatePropagation(); return; }
     if (event.key === "F6") {
       if (event.shiftKey || keytray.contains(event.target as Node)) {
         if (client) client.focus();
@@ -800,6 +803,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (settings?.isOpen || shortcuts.isOpen) return; // the open overlay takes this Escape itself
       // A control that holds something open (the inbox's expanded line) collapses it first (`data-owns-escape`).
       if (event.target instanceof Element && event.target.closest("[data-owns-escape]")) return;
+      // A card that takes Escape from anywhere on the page (`data-owns-escape="page"`: the version panel, which a click leaves focus outside of in Safari) closes itself first.
+      if (document.querySelector("[data-owns-escape='page']")) return;
       // An open menu or confirmation (the profile pill's menu, a sign-out question) closes first and keeps the sidebar it hangs from.
       if (palette.hidden && document.querySelector(".ui-anchored-popover, .ui-confirm-tip[data-open='true']")) return;
       // The palette owns this Escape: it stops here, so a canvas flow (the add-host wizard listens in the document's
@@ -935,7 +940,6 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     terminalFocusTarget = isTerminalFocus(active) ? active : null;
   };
   const keybarPointerDown = (event: PointerEvent): void => {
-    event.preventDefault();
     rememberTerminalFocus();
     if (!(event.target instanceof Element)) return;
     const modifierButton = event.target.closest<HTMLButtonElement>("button[data-mod]");
@@ -1024,8 +1028,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
   // The tray never takes or moves focus: some browsers move it on the compatibility mouse events that follow a touch,
   // so those are cancelled too (the terminal keeps its input focus and the keyboard stays up; nothing else gains one).
-  keybar.addEventListener("mousedown", (event) => event.preventDefault());
-  keybar.addEventListener("pointerdown", keybarPointerDown);
+  const offInputToolbar = bindInputToolbar(keybar, keybarPointerDown);
   keybar.addEventListener("pointercancel", keybarPointerCancel);
   keybar.addEventListener("click", keybarClick);
   keytray.addEventListener("keydown", keybarKeydown);
@@ -1617,7 +1620,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       dockedLayout.removeEventListener("change", dockedLayoutChange);
       window.visualViewport?.removeEventListener("resize", viewportChange);
       window.visualViewport?.removeEventListener("scroll", viewportChange);
-      keybar.removeEventListener("pointerdown", keybarPointerDown);
+      offInputToolbar();
       keybar.removeEventListener("pointercancel", keybarPointerCancel);
       keybar.removeEventListener("click", keybarClick);
       keytray.removeEventListener("keydown", keybarKeydown);

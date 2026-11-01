@@ -1,7 +1,7 @@
 /**
  * The product canvas: the canvas on real sessions. After sign-in the screen shows the Console view, whose windows
  * are terminal sessions on the embedded host or admitted remote hosts, several at once over the one
- * WebSocket. The server owns the shared layout; the browser caches it for first draw (D245, D248).
+ * WebSocket. The server owns the shared layout; each tab holds only its live drawing and unconfirmed edits (D312).
  *
  * Only real things are offered: the Console view, and the Settings view with the sections that exist today
  * (appearance, toolbar, shortcuts, about). Containers, sharing and add-host appear when their adapters do.
@@ -11,8 +11,11 @@
  * sees it at once, loading, so its pinned nodes are kept in the document while the snapshot is on its way.
  * This module is a lazy chunk, loaded after sign-in and never on the sign-in path.
  */
+import { mountToast } from "../../../../packages/ui/src/toast";
+import { ICON_INFO } from "../../../../packages/ui/src/icons";
 import { onDemand } from "../on-demand";
 import { ensureHostMarks, hostPlatformFromOs, type HostPlatform } from "../../../../packages/ui/src/host-icons";
+import { setLinkRoundTrip } from "../../../../packages/ui/src/window-card";
 import { ConnectionPool, MuxConnection } from "../connection";
 import { isCanonicalUuid } from "../identifiers";
 import type { CoreScreen } from "../core-screen";
@@ -27,15 +30,17 @@ import { createCanvas, type CanvasController } from "./create";
 import { CELL, boxOf } from "./layout/geometry";
 import { columnsFromDocument, viewFromDocument, docHasGroups, type DocTarget } from "./model/document";
 import { loadGroups } from "./layout/groups-handle";
-import { ServerCanvasStore } from "./model/server-store";
+import { ServerCanvasStore, type RevokedWork } from "./model/server-store";
 import { reconcile } from "./model/reconcile";
 import type { ViewModel, WindowModel } from "./model/types";
 import { createLazyMeshApi } from "./mesh/lazy";
 import { connectionTransport } from "./mesh/transport";
 import { offerMeshView } from "./mesh/offer";
 import { createLiveSessions, type LiveSessions } from "./sessions/live";
+import { createStartupHints } from "./sessions/startup-hints";
 import { createLiveInventory } from "./sessions/live-inventory";
 import { teachOnce } from "../hints";
+import { buildVersion } from "../build-version";
 import type { DetailsSourceLoader } from "./windows/details-source";
 import { BUILTIN_SECTIONS, buildSettingsView } from "./views/settings";
 
@@ -48,11 +53,18 @@ export interface ProductCanvasOptions {
   host: { name: string; user?: string };
   /** Layouts are kept per account. */
   accountId: string;
+  sessionIncarnation?: string;
   predictiveEcho?: boolean;
   /** Terminal hooks for the first window (the latency probe). */
   firstHooks?: TerminalHooks;
   onFirstClient?: (client: TerminalClient) => void;
+  isCurrent?: () => boolean;
+  onSessionCheck?: () => void;
+  /** Ends the old account screen when its authenticated lifetime changes; `work` says what happened to queued layout edits. */
+  onSessionRevoked?: (work: RevokedWork) => void;
   onRecoveryPending?: (readyAt: number | undefined) => void;
+  /** The signed-in person: the sidebar's person pill opens their card (D283). Absent, the pill keeps its small menu. */
+  person?: { name: string; username: string };
 }
 
 export interface ProductCanvas {
@@ -70,9 +82,11 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const embedded: { name: string; user?: string; os?: HostPlatform } = { name: options.host.name };
   let canvasReady: (() => void) | undefined, osAsked = false;
   const connection: MuxConnection = new MuxConnection({
+    ...(options.sessionIncarnation ? { sessionIncarnation: options.sessionIncarnation } : {}),
     ...(options.onRecoveryPending ? { onRecoveryPending: options.onRecoveryPending } : {}),
     onConnectionChange: (connected) => {
       core.setConnection(connected);
+      if (!connected) options.onSessionCheck?.();
       if (!connected || osAsked) return;
       osAsked = true;
       connection.call("host.facts.read", { includeLive: false }).then((facts) => {
@@ -86,15 +100,17 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   });
   // The details source is loaded on a pill press, so keep the last sample for its first read.
   let roundTrip: number | undefined;
-  const offRoundTrip = connection.onRoundTrip((ms) => { roundTrip = ms; core.setRoundTrip(ms); });
+  const offRoundTrip = connection.onRoundTrip((ms) => { roundTrip = ms; core.setRoundTrip(ms); setLinkRoundTrip(ms); });
   // More windows than one socket takes (the server allows 32 attachments per socket) open on further sockets.
   const pool = new ConnectionPool(connection);
   const inventory = createLiveInventory({ accountId: options.accountId, host: options.host.name });
   let disposed = false, hostsStarted = false, hostsReady = false;
   let startHosts = (): void => {};
   let offHosts: (() => void) | undefined;
+  const startupHints = createStartupHints(connection, core.toast);
   const sessions = createLiveSessions({
     core, connection, pool, host: embedded,
+    onStartupSession: (session, hostId, name) => { void startupHints.inspect(session, hostId, name); },
     ...(options.predictiveEcho ? { predictiveEcho: true } : {}),
     ...(options.firstHooks ? { firstHooks: options.firstHooks } : {}),
     ...(options.onFirstClient ? { onFirstClient: options.onFirstClient } : {}),
@@ -125,7 +141,23 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       }
     }
   });
-  const store = options.previewStore ?? new ServerCanvasStore(connection, options.accountId, (definitive) => { if (!disposed) core.toast.show({ message: definitive ? "That layout change was not saved. The saved layout is back." : "Layout changes are waiting to sync. Reconnect to try again.", tone: "error", duration: 5000 }); });
+  const store = options.previewStore ?? new ServerCanvasStore(connection, options.accountId, (definitive, delayed, capacity) => {
+    if (disposed) return;
+    if (capacity) core.toast.show({ message: "This tab has too many unsaved layout changes. Connect before making more.", tone: "error", duration: 0 });
+    else if (definitive) core.toast.show({ message: "That layout change was not saved. The saved layout is back.", tone: "error", duration: 5000 });
+    else if (delayed) core.toast.show({ message: "Your layout is waiting for the server. Keep this tab open.", icon: ICON_INFO, duration: 5000 });
+  }, options.onSessionRevoked);
+  const pendingNotice = mountToast(core.stage, { aboveNotifications: true });
+  let pendingShown = false;
+  const showPending = (): void => {
+    const pending = store.pending === true;
+    if (pending === pendingShown) return;
+    pendingShown = pending;
+    if (pending) pendingNotice.show({ message: "Not saved — keep this tab open", icon: ICON_INFO, duration: 0 });
+    else pendingNotice.dismiss();
+  };
+  const offPending = store.onPending?.(showPending); showPending();
+
   const details: DetailsSourceLoader = () => onDemand(() => import("./sessions/details-live.on-demand"))
     .then((m) => m.createLiveDetails({ host: embedded, connection, inventory, roundTrip: () => roundTrip }));
   // A ready result carries the admitted UUID; labels are only presentation.
@@ -174,6 +206,10 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     canvas.flush();
   })).then((adapter) => { readyRemoval = adapter; });
   const saved = await store.load();
+  if (options.isCurrent?.() === false) {
+    disposed = true; offPending?.(); pendingNotice.dispose(); store.dispose?.(); offRoundTrip(); offSessionInventory(); offAuthorityWelcome(); authority.dispose(); addHost.dispose(); inventory.dispose(); sessions.dispose(); pool.dispose(); connection.dispose();
+    throw Error("The signed-in screen changed while layout was loading.");
+  }
   // Positions the person pinned in the Mesh graph come back from the canvas document (D180).
   const savedMesh = saved?.views.find((v) => v.id === "mesh");
   const mesh = createLazyMeshApi({ transport: connectionTransport(connection), pins: savedMesh?.layout.type === "graph" ? savedMesh.layout.pinned : {} });
@@ -181,7 +217,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   // fetch in createCanvas and does not wait for it.
   if (saved && docHasGroups(saved)) await loadGroups();
   const canvas = createCanvas(core, {
-    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => { warmSetup(); addHost.open(); }, authority },
+    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => { warmSetup(); addHost.open(); }, authority, startupHints },
     float: false,
     persisted: (id) => id !== "settings",
   });
@@ -192,7 +228,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   };
   const resolve = (target: DocTarget, windowId: string): Partial<WindowModel> | undefined => {
     if (target.type !== "session") return undefined;
-    const reference = { host: target.host, ...(!store.unresolvedWindow?.(windowId) ? { sessionId: target.id } : {}), ...(target.name ? { session: target.name } : {}) };
+    const reference = { host: target.host, ...(!store.unresolvedWindow?.(windowId) ? { sessionId: target.id } : {}), ...(target.name ? { session: target.name } : {}), ...(target.pinned ? { sessionPinned: true } : {}) };
     if (target.hostId) {
       const identity = { ...(target.user ? { user: target.user } : {}), ...(target.address ? { address: target.address } : {}) };
       sessions.registerHost({ id: target.hostId, name: target.host, ...identity });
@@ -259,20 +295,55 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     }, () => { hostsStarted = false; });
   };
   const offHostWelcome = connection.onWelcome(() => { if (hostsReady) startHosts(); });
+  // The version pill and its panel join the sidebar footer once the canvas is up (#216); the first screen carries none of it (D188).
+  let versionArea: { dispose(): void } | undefined;
+  const build = buildVersion();
+  void onDemand(() => import("./version/mount.on-demand"))
+    .then((m) => m.mountProductVersionArea(core, { version: build.short, commit: build.full, hosts: () => sessions.hosts().map((host) => host.name) }))
+    .then((area) => { if (disposed) area?.dispose(); else versionArea = area; })
+    .catch(() => { /* the pill is news, not a dependency */ });
+  // The person's card (D283) hangs on the sidebar's person pill. Its code is its own chunk, fetched once the canvas is up.
+  let account: { dispose(): void } | undefined;
+  if (options.person) {
+    const person = options.person;
+    // The card's chunk can arrive after the sidebar is open (a slow link, a busy device). A press on the pill in that gap must not
+    // fall through to the pill's old small menu, which the card replaces: it is claimed here and the card opens once it is mounted.
+    const foot = core.stage.querySelector<HTMLElement>(".ui-sidebar-foot");
+    let pressedEarly = false;
+    const claimPress = (event: MouseEvent): void => {
+      if (!(event.target as Element | null)?.closest(".ui-sidebar-user")) return;
+      event.stopImmediatePropagation();
+      event.preventDefault();
+      pressedEarly = true;
+    };
+    foot?.addEventListener("click", claimPress, true);
+    void import("./account").then(({ mountAccountCard, identityModel }) => {
+      foot?.removeEventListener("click", claimPress, true);
+      if (disposed) return;
+      const mounted = mountAccountCard({ core, model: identityModel(person), openSettings: (section) => { window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${section}`, source: "pointer" } })); } });
+      account = mounted;
+      if (pressedEarly) mounted?.show();
+    }, () => { foot?.removeEventListener("click", claimPress, true); /* the old menu stays: better than a dead pill */ });
+  }
+
   return {
     canvas, sessions, connection,
     dispose() {
+      versionArea?.dispose();
+      account?.dispose();
       canvas.flush();
-      offLayout();
+      offLayout(); offPending?.(); pendingNotice.dispose();
       window.removeEventListener("pointerup", dropped);
       window.removeEventListener("pointercancel", dropped);
       offRoundTrip();
+      setLinkRoundTrip(undefined);
       disposed = true;
       offHosts?.();
       offHostWelcome();
       offSessionInventory();
       offAuthorityWelcome();
       authority.dispose();
+      startupHints.dispose();
       offMeshView();
       addHost.dispose();
       canvas.dispose();

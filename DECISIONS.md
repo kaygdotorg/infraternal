@@ -1380,6 +1380,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      the person takes an action (the add-host wizard, the share studio,
      Settings windows) has its own budget instead of counting as
      after-first-paint code.
+     **Critical budget raised to 320 KiB gzip / 267 KiB brotli (owner,
+     2026-11-01):** dev measured gzip 306,074 B (300 KiB cap) and the approved
+     #259 rename work alone reached 307,714 B; the owner chose a moderate
+     raise that keeps the gate (growth stays visible) over removing it or
+     loading rename on demand. Big features still load on demand.
 189. **Card and window transparency (owner, 2026-10-08):** four levels for each,
      "Glass" renamed **Frosted**. Dark/light tint and blur:
      - **Solid:** cards 1.00/1.00, 0 px; windows 1.00/1.00, 0 px.
@@ -2263,6 +2268,16 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      push starts now: measure where the bytes come from, cut, and ratchet the
      gate down to each new measured size so growth needs a justified,
      measured exception.
+     **Amended by the owner, 2026-11-01 (#284):** when told “every feature
+     slice comes in at 85–167 KB; the 16 KiB budget makes every feature a
+     size negotiation”, kayg replied: “let's remove that cap please”. Binary
+     size caps and the 16/64 KiB approval bands are removed. Measure and
+     report stripped static size and its signed delta against the recorded
+     baseline for each shipping target on every slice; avoid gratuitous
+     bloat. Size growth or shrinkage does not fail the gate or require a
+     size exception. Artifact correctness and static-linkage checks remain
+     gates. The orchestrator records the merged measurements as the next
+     baselines, as documented in `docs/PROCESS.md` §7.
 244. **CA key memory on static builds (owner, 2026-10-12, #154):** the static
      musl release builds get OpenSSL's locked, dump-excluded key heap by
      removing the `OPENSSL_NO_SECURE_MEMORY` define that the OpenSSL build
@@ -3445,6 +3460,19 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      to copy, plus a button that adds that line to the startup file after
      the person confirms, with undo. Every session still exports
      `INFRATERNAL_SESSION`. The per-host and global switches from D241 stay.
+     **Wording and flow amended (owner, 2026-11-01, #251, after the 18
+     review screenshots):** "don't say 'add guard'. just ask '<Existing
+     multiplexer> started automatically. Would you like to switch to the
+     Infraternal Multiplexer instead?' tick cross and ? — where ? points to
+     the docs about our multiplexer." The notice is that one question with
+     three icon buttons, each with a tooltip and accessible name: ✓ switches
+     (the same confirmed edit with the exact line shown, then a "Restore
+     <file>" undo; where no startup line can be edited, ✓ copies the line),
+     ✗ keeps the other multiplexer and does not ask again on this host, ?
+     opens the docs page about the Infraternal Multiplexer
+     (`docs/multiplexer.md`, published at infraternal.com/docs/multiplexer).
+     The word "guard" no longer appears in user-facing text. The safety
+     rules above are unchanged.
 316. **Mesh path finding, names and the reverse proxy (owner, 2026-10-30,
      #220; answers D313's Q8, confirms D165, refines D219):**
      - **Path finding uses str0m's ICE core** for host-to-host mesh paths,

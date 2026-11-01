@@ -195,6 +195,9 @@ fn build_node(node: &CommandNode<'_>, inherited: &[Arg]) -> Command {
                     .help_heading(format!("{heading} options"));
                 shared.push(hidden_inherited_arg(&argument));
             }
+            if action.command == ["sessions", "new"] && name == "command" {
+                argument = argument.num_args(1..).last(true);
+            }
             command = command.arg(argument);
         }
         if action.command == ["skill"] {

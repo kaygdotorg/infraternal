@@ -24,8 +24,11 @@ export function recoveryWords(body: HTMLElement, words: string[], saved: boolean
       const button = event.currentTarget as HTMLButtonElement;
       markMotion(true); // the copy status can change pane height; only the icon feedback should animate
       const copied = await copyFeedback(button, serializedWords, event.detail === 0);
+      // The tick on the button is the whole confirmation (TASTE: an action's confirmation lives on the control).
+      // The line only reports a failure, and a success clears one left by an earlier failed attempt. The advice
+      // to store the words safely is said once, in the step's own lede.
       body.querySelector<HTMLElement>("#recovery-message")!.textContent = copied
-        ? "Copied. Store the words somewhere private."
+        ? ""
         : "Copy is unavailable here. Select and copy the words.";
       button.blur();
     });

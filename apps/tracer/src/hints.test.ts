@@ -1,5 +1,4 @@
 import { beforeEach, expect, test } from "bun:test";
-import { hintsKey } from "./account-storage";
 import { recordSignIn, teachOnce } from "./hints";
 
 class FakeStorage {
@@ -22,12 +21,12 @@ test("sign-ins 1 to 5 show a hint once each; the sixth never does", () => {
   ]);
 });
 
-test("a reload inside a sign-in does not show the hint again, and hints and accounts are independent", () => {
+test("a reload inside a sign-in does not show the hint again, and different hints are independent and accounts share anonymous device counters", () => {
   recordSignIn("a");
   expect(teachOnce("a", "x")).toBe(true);
   expect(teachOnce("a", "x")).toBe(false);
   expect(teachOnce("a", "y")).toBe(true);
-  expect(teachOnce("b", "x")).toBe(true);
+  expect(teachOnce("b", "x")).toBe(false);
 });
 
 test("an account without a counter is in its first sign-in", () => {
@@ -40,7 +39,7 @@ test("storage that throws or holds junk shows nothing and never throws", () => {
   expect(() => recordSignIn("a")).not.toThrow();
   expect(teachOnce("a", "x")).toBe(false);
   g.localStorage = new FakeStorage();
-  (g.localStorage as FakeStorage).setItem(hintsKey("a"), "{not json");
+  (g.localStorage as FakeStorage).setItem("tracer.hints", "{not json");
   expect(teachOnce("a", "x")).toBe(false);
   g.localStorage = { getItem: () => null, setItem() { throw new Error("full"); } };
   expect(teachOnce("a", "x")).toBe(false);

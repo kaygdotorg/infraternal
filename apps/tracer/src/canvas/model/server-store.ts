@@ -1,130 +1,214 @@
-/** Account layout subscription, durable retry journal and drawing cache (D178, D183, D245, D248). */
-import { canvasKey, readStoredJson, createStoredJsonCache } from "../../account-storage";
-import type { CanvasDocument } from "./schema";
+/** Per-tab layout intents and same-ID snapshot recovery; the server is the only saved copy (D312). */
+import { canvasKey, readStoredJson } from "../../account-storage";
+import { parseDocument, type CanvasDocument } from "./schema";
 import type { LayoutEdit } from "./operations";
-import { layoutCacheValue, readLayoutCache } from "./cache";
 import { ActionRefused, type SubscriptionHandle } from "../../connection";
-import { LayoutJournal } from "./journal";
+import { registerAccountWork } from "../../account-lifetime";
+import { randomUuid } from "../../identifiers";
+import { LayoutJournal, LayoutQueueFull } from "./journal";
 import type { CanvasStore } from "./store";
 
 export interface LayoutTransport {
   readonly isWelcomed?: boolean;
+  readonly sessionIncarnation?: string | undefined;
+  readonly roundTripMs?: number | undefined;
+  readonly recoveryRoundTrips?: 1 | 4;
+  onRoundTrip?(listener: (ms: number | undefined) => void): () => void;
   call(action: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
   subscribe(filter: { topic: string }, event: (event: Record<string, unknown>) => void, open?: () => void): SubscriptionHandle;
 }
+/**
+ * What a session revocation did to this tab's queued layout work. Only a server receipt proves an
+ * edit committed (D312), so work is split by what the tab can actually know:
+ * - `unsent`: at least one edit never left the tab; clearing the queue dropped it.
+ * - `unconfirmed`: everything left the tab, but some has no receipt; it may or may not have committed.
+ * - `none`: nothing queued, or every queued edit has a receipt and reappears on the next sign-in.
+ */
+export type RevokedWork = "none" | "unconfirmed" | "unsent";
+
 export class ServerCanvasStore implements CanvasStore {
   readonly acceptsPendingReferences = true;
   readonly #journal: LayoutJournal;
+  readonly #listeners = new Set<() => void>();
+  readonly #status = new Set<() => void>();
   #disposed = false;
+  #paused = false;
+  readonly #offAccount: () => void;
   #resyncing = false;
-  readonly #cache: ReturnType<typeof createStoredJsonCache>;
-  readonly #off: SubscriptionHandle;
-  #resyncTimer: ReturnType<typeof setTimeout> | undefined;
-  #resyncDelay = 250;
-  #resyncTarget = 0;
+  #waiting = false;
+  #off: SubscriptionHandle | undefined;
+  readonly #offRtt: (() => void) | undefined;
+  #retry: ReturnType<typeof setTimeout> | undefined;
+  #watchdog: ReturnType<typeof setTimeout> | undefined;
+  #notice: ReturnType<typeof setTimeout> | undefined;
+  #delay = 250;
+  #target = 0;
+  #pendingSince: number | undefined;
+  #notified = false;
+  #rtt: number | undefined;
   #loaded: (() => void) | undefined;
   readonly #first: Promise<void>;
+  readonly #legacyKey: string;
+  #imported = false;
+  #incarnation: string | undefined;
+  #revoked = false;
 
-  constructor(private readonly transport: LayoutTransport, account: string, private readonly refused: (definitive?: boolean) => void = () => {}) {
-    const key = canvasKey(account);
-    const cache = readLayoutCache(readStoredJson(key));
-    this.#first = cache ? Promise.resolve() : new Promise<void>((resolve) => { this.#loaded = resolve; });
-    this.#journal = new LayoutJournal(cache);
-    this.#cache = createStoredJsonCache(key, () => layoutCacheValue(this.#journal));
+  constructor(
+    private readonly transport: LayoutTransport,
+    account: string,
+    private readonly refused: (definitive?: boolean, delayed?: boolean, capacity?: boolean) => void = () => {},
+    private readonly onSessionRevoked: (work: RevokedWork) => void = () => {},
+  ) {
+    this.#offAccount = registerAccountWork(account, { pause: (value) => { this.#paused = value; if (!value) this.#pump(); }, dispose: () => this.dispose() });
+    this.#incarnation = transport.sessionIncarnation;
+    this.#legacyKey = canvasKey(account);
+    // Read only the shipped v1 import. Unconfirmed/unreadable journals remain untouched for explicit export/discard.
+    const legacy = parseDocument(readStoredJson(this.#legacyKey));
+    this.#journal = new LayoutJournal(legacy ? { canonical: { format: "infraternal.canvas", version: 1, revision: 0, views: [] }, pending: [], unresolved: new Set(), migration: { op_id: randomUuid(), document: legacy } } : undefined);
+    this.#first = new Promise<void>((resolve) => { this.#loaded = resolve; });
+    this.#rtt = transport.roundTripMs;
+    this.#offRtt = transport.onRoundTrip?.((ms) => { this.#rtt = ms; this.#pendingChanged(); });
     this.#off = transport.subscribe({ topic: "canvas.layout" }, (event) => this.#event(event), () => {
-      this.#journal.restart();
-      this.#resyncing = true;
-      // Subscribe is already in flight. Leave room for a normal 300 ms round
-      // trip before replacing it; newly detected gaps still start at 250 ms.
-      clearTimeout(this.#resyncTimer); this.#resyncTimer = undefined;
-      this.#resyncDelay = Math.max(500, this.#resyncDelay);
-      this.#resync();
+      if (this.#disposed) return;
+      const incarnation = this.transport.sessionIncarnation;
+      if (incarnation !== this.#incarnation && (this.#incarnation !== undefined || this.pending)) {
+        const work = this.#revokedWork();
+        this.#journal.clear(); this.#revoked = true;
+        this.#publish(); this.#pendingChanged();
+        // A changed lifetime has no authority to keep drawing: the caller ends the old account screen.
+        this.onSessionRevoked(work);
+        return;
+      } else this.#incarnation = incarnation;
+      this.#journal.restart(); this.#resyncing = true; this.#waiting = true;
+      clearTimeout(this.#retry); this.#retry = undefined;
+      this.#watch();
     });
   }
+  #revokedWork(): RevokedWork {
+    const { pending, migration } = this.#journal;
+    if (pending.some((p) => !p.sent)) return "unsent";
+    // A migration keeps its legacy source on disk until confirmed, so it is never dropped outright.
+    if (pending.some((p) => p.revision === undefined) || (migration && migration.revision === undefined)) return "unconfirmed";
+    return "none";
+  }
+  get pending(): boolean { return this.#journal.pending.length > 0 || this.#journal.migration !== undefined; }
+  onPending(listener: () => void): () => void { if (!this.#disposed) this.#status.add(listener); return () => { this.#status.delete(listener); }; }
   async load(): Promise<CanvasDocument | undefined> {
     await this.#first;
+    if (this.#disposed) return undefined;
     const document = this.current();
     return this.#journal.initialized || this.#journal.migration || document.views.length ? document : undefined;
   }
-  /** A placeholder drawing ID must never be used to attach a terminal. */
   unresolvedWindow(id: string): boolean { return this.#journal.unresolved.has(id); }
-  /** Capture synchronously; network receipts never gate input. */
+  /** Local acceptance only: drawing and typing never await confirmation. */
   async save(doc: CanvasDocument, hints?: ReadonlyMap<string, LayoutEdit>, before?: CanvasDocument, unresolved: ReadonlySet<string> = new Set()): Promise<void> {
-    if (this.#disposed) return;
-    if (this.#journal.capture(doc, hints, before, unresolved)) this.#publish(); else this.#cache.schedule();
-    this.#pump();
+    if (this.#disposed || this.#revoked) return;
+    // Input is frozen by the screen during logout; admitted asynchronous references may
+    // still finish in RAM. The pump stays paused until revocation fails or disposal clears it.
+    try { if (this.#journal.capture(doc, hints, before, unresolved)) this.#publish(); }
+    catch (error) { if (!(error instanceof LayoutQueueFull)) throw error; this.refused(false, false, true); this.#publish(); }
+    this.#pendingChanged(); this.#pump();
   }
   current(): CanvasDocument { return this.#journal.current(); }
-  subscribe(listener: () => void): () => void { return this.#cache.subscribe(listener); }
+  subscribe(listener: () => void): () => void { if (!this.#disposed) this.#listeners.add(listener); return () => { this.#listeners.delete(listener); }; }
   #event(event: Record<string, unknown>): void {
-    if (this.#disposed) return;
+    if (this.#disposed || this.#revoked) return;
+    if (event.type === "error") {
+      const outstanding = this.#waiting;
+      this.#waiting = false; clearTimeout(this.#watchdog); this.#watchdog = undefined;
+      if (outstanding) this.#scheduleRetry(); else this.#recover();
+      return;
+    }
     if (event.type === "canvas.layout.operation" && this.#resyncing) return;
-    if (event.type === "canvas.layout.operation" && Number.isSafeInteger(event.revision) && Number(event.revision) > this.#journal.canonical.revision + 1) {
-      this.#resyncing = true;
-      this.#resync(Number(event.revision));
-      return;
-    }
-    let accepted: boolean;
-    try { accepted = this.#journal.accept(event); }
-    catch { this.#resyncing = true; this.#resync(); return; }
+    let accepted = false;
+    try { accepted = this.#journal.accept(event); } catch { /* malformed history needs a fresh snapshot */ }
     if (!accepted) {
-      // Withdrawals leave the transport healthy. A gap cannot be repaired by
-      // ignoring subsequent operations: request a canonical snapshot instead.
-      if (event.type === "error") { this.#resyncing = true; this.#resync(); }
-      else if (Number(event.revision) > this.#journal.canonical.revision) this.#resync(Number(event.revision));
+      if (Number(event.revision) > this.#journal.canonical.revision) this.#recover(Number(event.revision));
       return;
     }
-    if (event.type === "canvas.layout.snapshot") this.#resyncing = false;
-    if (this.#resyncTarget > 0 && (event.type === "canvas.layout.snapshot" || this.#journal.canonical.revision >= this.#resyncTarget)) {
-      clearTimeout(this.#resyncTimer); this.#resyncTimer = undefined;
-      this.#resyncTarget = 0; this.#resyncDelay = 250;
+    if (event.type === "canvas.layout.snapshot") {
+      this.#waiting = this.#resyncing = false;
+      clearTimeout(this.#watchdog); this.#watchdog = undefined;
     }
-    this.#publish(); this.#loaded?.(); this.#loaded = undefined; this.#pump();
+    if (event.type === "canvas.layout.snapshot" || this.#journal.canonical.revision >= this.#target) {
+      clearTimeout(this.#retry); this.#retry = undefined; this.#target = 0; this.#delay = 250;
+    }
+    this.#retireImport();
+    this.#publish(); this.#pendingChanged(); this.#loaded?.(); this.#loaded = undefined; this.#pump();
   }
-  /** One retry timer per account store, including while a replacement snapshot is absent. */
-  #resync(revision = Infinity): void {
+  /** Both receipt/snapshot orderings must reach canonical before retiring a confirmed import. */
+  #retireImport(): void {
+    if (!this.#imported || this.#journal.migration) return;
+    try { localStorage.removeItem(this.#legacyKey); this.#imported = false; }
+    catch { this.refused(false, true); }
+  }
+  /** First gap/withdrawal requests immediately. One outstanding snapshot owns its bounded watchdog. */
+  #recover(revision = Infinity): void {
     if (this.#disposed) return;
-    this.#resyncTarget = Math.max(this.#resyncTarget, revision);
-    if (this.#resyncTimer !== undefined) return;
-    // Keep the backoff base capped while independent account stores retry at different times.
-    const delay = this.#resyncDelay + Math.random() * (this.#resyncDelay / 2);
-    this.#resyncTimer = setTimeout(() => {
-      this.#resyncTimer = undefined;
-      this.#resyncDelay = Math.min(5000, this.#resyncDelay * 2);
-      this.#off.resync();
-      if (this.#resyncTarget > 0) this.#resync(this.#resyncTarget);
-    }, delay);
+    this.#target = Math.max(this.#target, revision); this.#resyncing = true;
+    if (this.#waiting || this.#retry !== undefined || this.transport.isWelcomed === false) return;
+    this.#waiting = true;
+    this.#off?.resync(); this.#watch();
   }
-  #publish(): void { this.#cache.changed(); }
+  #watch(): void {
+    clearTimeout(this.#watchdog);
+    if (!this.#waiting || this.#disposed || this.transport.isWelcomed === false) return;
+    this.#watchdog = setTimeout(() => {
+      this.#watchdog = undefined; this.#waiting = false; this.#scheduleRetry();
+    }, Math.max(30_000, (this.#rtt ?? 1000) * 4 + 50));
+  }
+  #scheduleRetry(): void {
+    if (this.#disposed || this.#retry !== undefined || this.transport.isWelcomed === false) return;
+    const delay = this.#delay * (1 + Math.random() / 2); this.#delay = Math.min(5000, this.#delay * 2);
+    this.#retry = setTimeout(() => { this.#retry = undefined; this.#recover(this.#target); }, delay);
+  }
+  #pendingChanged(): void {
+    for (const listener of this.#status) listener();
+    clearTimeout(this.#notice); this.#notice = undefined;
+    if (!this.pending) { this.#pendingSince = undefined; this.#notified = false; return; }
+    this.#pendingSince ??= performance.now();
+    if (this.#notified || this.#disposed) return;
+    const budget = (this.#rtt ?? 1000) * (this.transport.recoveryRoundTrips ?? 4) + 50;
+    this.#notice = setTimeout(() => { this.#notice = undefined; if (!this.#disposed && this.pending) { this.#notified = true; this.refused(false, true); } }, Math.max(0, budget - (performance.now() - this.#pendingSince)));
+  }
+  #publish(): void { for (const listener of this.#listeners) listener(); }
   #pump(): void {
-    if (this.#disposed || this.#resyncing || this.transport.isWelcomed === false) return;
+    if (this.#disposed || this.#revoked || this.#paused || this.#resyncing || this.transport.isWelcomed === false) return;
     const entry = this.#journal.next(); if (!entry) return;
-    const migration = "document" in entry;
-    const epoch = this.#journal.epoch;
-    const action = migration ? "canvas.layout.initialize" : "canvas.layout.apply";
-    const input = "document" in entry ? { op_id: entry.op_id, document: entry.document } : { op_id: entry.op_id, base_revision: entry.base_revision, intent: entry.intent };
-    void this.transport.call(action, input).then((result) => {
+    const migration = "document" in entry, epoch = this.#journal.epoch;
+    const binding = this.#incarnation === undefined ? {} : { session_incarnation: this.#incarnation };
+    const input = "document" in entry ? { ...binding, op_id: entry.op_id, document: entry.document } : { ...binding, op_id: entry.op_id, base_revision: entry.base_revision, intent: entry.intent };
+    void this.transport.call(migration ? "canvas.layout.initialize" : "canvas.layout.apply", input).then((result) => {
       if (this.#disposed || !this.#journal.release(entry, epoch)) return;
-      if (!Number.isSafeInteger(result.revision)) { this.#journal.fail(entry, epoch); this.refused(); this.#resync(); return; }
-      // The ordered event usually paints first. Its receipt changes journal metadata only.
-      if (this.#journal.acknowledge(entry, Number(result.revision), migration)) this.#publish(); else this.#cache.schedule();
-      if (Number(result.revision) > this.#journal.canonical.revision) this.#resync(Number(result.revision));
+      if (!Number.isSafeInteger(result.revision) || Number(result.revision) < 0) { this.#journal.fail(entry, epoch); this.#recover(); return; }
+      if (migration) this.#imported = true;
+      if (this.#journal.acknowledge(entry, Number(result.revision), migration)) this.#publish();
+      this.#retireImport(); this.#pendingChanged();
+      // A receipt ahead of canonical can still be followed by its ordinary ordered event.
+      if (Number(result.revision) > this.#journal.canonical.revision) {
+        this.#target = Math.max(this.#target, Number(result.revision));
+        if (this.#retry === undefined) this.#scheduleRetry();
+      }
       this.#pump();
     }, (error: unknown) => {
       if (this.#disposed) return;
       if (error instanceof ActionRefused) {
         if (!this.#journal.refuse(entry, epoch)) return;
-        // Roll back this overlay immediately; the subscription remains ready for independent edits.
-        this.#publish(); this.refused(true); this.#pump(); return;
+        this.#publish(); this.#pendingChanged(); this.refused(true); this.#pump(); return;
       }
       if (!this.#journal.fail(entry, epoch)) return;
-      // Keep the identical input for retry after the next snapshot, including its original base revision.
-      this.#cache.schedule(); this.refused();
-      this.#resync();
+      this.#pendingChanged(); this.#recover();
     });
-    // Bounded pipelining preserves socket order without making each independent edit wait for the previous RTT.
     if (!migration) this.#pump();
   }
-  flush(): void { this.#cache.flush(); }
-  dispose(): void { this.#cache.dispose(); this.#disposed = true; clearTimeout(this.#resyncTimer); this.#journal.restart(); this.#off(); this.#loaded?.(); }
+  /** Kept for the canvas adapter: there is no persistence or full-history serialization. */
+  flush(): void {}
+  dispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    clearTimeout(this.#retry); clearTimeout(this.#watchdog); clearTimeout(this.#notice);
+    this.#offAccount(); this.#offRtt?.(); this.#off?.(); this.#listeners.clear(); this.#status.clear();
+    this.#journal.clear();
+    this.#loaded?.(); this.#loaded = undefined;
+  }
 }

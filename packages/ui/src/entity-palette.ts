@@ -1,6 +1,6 @@
 /**
  * The categorical colours of named things (tags, groups): one curated palette per colour scheme, defined once as theme
- * tokens (`--ui-ent-0` ... `--ui-ent-11` and `--ui-ent-text`, set on every `.ui-entity` by `entityPaletteCss`, see
+ * tokens (`--ui-ent-0` ... `--ui-ent-11` and `--ui-ent-text`, set on every `.ui-entity` chip and every `.ui-entity-card` (a card that carries a tag's colour) by `entityPaletteCss`, see
  * themes.ts) so a tag has the same colour in every window, dialog and list, in every theme.
  *
  * Contrast is a guarantee, not a hope. Each scheme has ONE chip text colour (near-black on the pale dark-scheme fills,
@@ -47,10 +47,10 @@ export function entityColorIndex(name: string): number {
 /** The better text colour for a chosen hex fill. */
 export const entityTextFor = (hex: string): string => (contrastRatio(hex, DARK_TEXT) >= contrastRatio(hex, LIGHT_TEXT) ? DARK_TEXT : LIGHT_TEXT);
 
-/** CSS declaring the tokens for both schemes on every chip. */
+/** CSS declaring the tokens for both schemes on every chip, and on every card that wears a tag's colour. */
 export function entityPaletteCss(): string[] {
   return ([["dark", true], ["light", false]] as const).map(([scheme, dark]) => {
     const p = entityPalette(dark);
-    return `:root[data-scheme="${scheme}"] .ui-entity { ${p.fills.map((f, i) => `--ui-ent-${i}: ${f};`).join(" ")} --ui-ent-text: ${p.text}; }`;
+    return `:root[data-scheme="${scheme}"] .ui-entity, :root[data-scheme="${scheme}"] .ui-entity-card { ${p.fills.map((f, i) => `--ui-ent-${i}: ${f};`).join(" ")} --ui-ent-text: ${p.text}; }`;
   });
 }

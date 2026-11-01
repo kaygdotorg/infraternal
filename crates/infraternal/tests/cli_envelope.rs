@@ -208,9 +208,14 @@ fn component_commands_fail_in_the_envelope_when_the_agent_is_not_there() {
 #[test]
 fn bare_infraternal_is_the_overview_and_points_to_help() {
     let output = run(&["--json"]);
-    assert_eq!(output.status.code(), Some(0));
+    // The overview reports the real machine: a configured but stopped service
+    // is exit 5, while an unconfigured or healthy machine is exit 0 (#296).
+    assert!(matches!(output.status.code(), Some(0 | 5)));
     let found = envelopes("bare", &output);
-    assert_eq!(found[0]["ok"], true);
+    assert_eq!(found[0]["ok"], output.status.success());
+    if !output.status.success() {
+        assert_eq!(found[0]["error"]["code"], "component_down");
+    }
     assert!(found[0]["data"]["role"].is_string());
     let next = found[0]["next"].as_array().unwrap();
     assert!(
@@ -219,7 +224,7 @@ fn bare_infraternal_is_the_overview_and_points_to_help() {
     );
     // Text mode is the same answer, on standard output.
     let text = run(&[]);
-    assert_eq!(text.status.code(), Some(0));
+    assert!(matches!(text.status.code(), Some(0 | 5)));
     assert!(
         String::from_utf8(text.stdout)
             .unwrap()

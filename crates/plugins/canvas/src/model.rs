@@ -53,7 +53,9 @@ pub(crate) fn target(value: &Value) -> bool {
         Some("session") => {
             shape(
                 value,
-                &["type", "id", "host", "hostId", "user", "address", "name"],
+                &[
+                    "type", "id", "host", "hostId", "user", "address", "name", "pinned",
+                ],
             ) && string(value, "id").is_some()
                 && string(value, "host").is_some()
                 && value.get("hostId").is_none_or(|v| {
@@ -68,6 +70,7 @@ pub(crate) fn target(value: &Value) -> bool {
                 && ["user", "address", "name"]
                     .iter()
                     .all(|key| value.get(key).is_none() || string(value, key).is_some())
+                && value.get("pinned").is_none_or(Value::is_boolean)
         }
         Some("settings") => {
             shape(value, &["type", "section"]) && string(value, "section").is_some()
@@ -308,6 +311,18 @@ mod tests {
         doc.0["views"][0]["layout"]["pinned"]["node"]["x"] = json!(-100_000);
         doc.0["views"][0]["layout"]["pinned"]["node"]["y"] = json!(100_001);
         assert!(!doc.valid());
+    }
+
+    #[test]
+    fn session_name_pin_is_optional_and_boolean() {
+        let mut value = json!({"type":"session","id":"session","host":"host","name":"build"});
+        assert!(target(&value));
+        value["pinned"] = json!(true);
+        assert!(target(&value));
+        value["pinned"] = json!(false);
+        assert!(target(&value));
+        value["pinned"] = json!("true");
+        assert!(!target(&value));
     }
 
     #[test]

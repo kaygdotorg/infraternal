@@ -15,7 +15,9 @@
  *   a (default): two lines (name, then a quiet secondary line), a 40 px pill.
  *   b: one line, a 32 px pill, a thin gradient ring around the avatar.
  *
- * The build's version is not here: it lives in Settings, About (settings-overlay.ts).
+ * The version is a third small pill on the same line (version-pill.on-demand.ts), added by the canvas once the first screen
+ * is up (owner, 2026-10-15 and 2026-11-01; TASTE "Version lives in About" is superseded). The commit and the build date stay in
+ * Settings, About (settings-overlay.ts).
  *
  *   const foot = createSidebarFoot({ displayName, secondary, onOpen: () => settings.open("about", "pointer") });
  *   sidebar.append(foot.root);
@@ -45,9 +47,9 @@ export interface SidebarFoot {
 }
 
 /** The first letter of the name, upper-cased, for the avatar (never empty). */
-const initial = (name: string): string => [...name.trim()][0]?.toUpperCase() ?? "?";
+export const initial = (name: string): string => [...name.trim()][0]?.toUpperCase() ?? "?";
 /** A stable 0..60 degree hue offset per name: neighbours in the palette, never off it. */
-const hueOffset = (name: string): number => { let sum = 0; for (const char of name) sum = (sum * 31 + char.codePointAt(0)!) % 997; return sum % 61; };
+export const hueOffset = (name: string): number => { let sum = 0; for (const char of name) sum = (sum * 31 + char.codePointAt(0)!) % 997; return sum % 61; };
 
 export function createSidebarFoot(options: SidebarFootOptions): SidebarFoot {
   const variant = options.variant ?? "a";

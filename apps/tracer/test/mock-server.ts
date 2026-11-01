@@ -15,7 +15,8 @@ import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
 import { sessionDevices, sessionHosts } from "./session-fixtures";
 import { createPerfSink } from "./perf-sink";
 
-const HOST = "localhost";
+// Loopback unless a preview must be reachable on a private address (`TRACER_BIND_HOST`, e.g. a VM's mesh IP).
+const HOST = process.env.TRACER_BIND_HOST ?? "localhost";
 // The browser connects to TRACER_TEST_PORT; the TCP latency proxy reaches this private upstream port.
 const FRONT_PORT = Number(process.env.TRACER_TEST_PORT ?? "4621");
 const PORT = Number(process.env.TRACER_BACKEND_PORT ?? String(FRONT_PORT + 1));
