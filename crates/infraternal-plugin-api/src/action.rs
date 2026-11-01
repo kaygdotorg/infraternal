@@ -541,7 +541,7 @@ impl ActionDefinition {
         self
     }
 
-    /// Keep these inputs out of `--help`; they stay accepted and stay in generated skills.
+    /// Keep these inputs accepted for scripts while hiding them from help and generated skills.
     #[must_use]
     pub fn with_cli_hidden_inputs(
         mut self,
