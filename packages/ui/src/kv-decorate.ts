@@ -25,6 +25,8 @@ export function decorateKeyValueRow(row: Element | null | undefined, decoration:
   const { parts, chevron } = decoration;
   const text = cell.querySelector<HTMLElement>(".ui-kv-text");
   if (parts && text?.lastChild) {
+    // One wrapper holds the whole run, so drawing the row again replaces the run instead of adding to it (a list that is
+    // patched in place keeps this node, and the caller decorates after every `set`).
     const run = document.createDocumentFragment();
     parts.forEach((part, index) => {
       if (index) run.append(" ");
@@ -38,12 +40,19 @@ export function decorateKeyValueRow(row: Element | null | undefined, decoration:
       if (part.note) {
         const note = document.createElement("span");
         note.className = "ui-kv-part-note";
-        note.textContent = ` ${part.note}`;
+        note.textContent = ` ${part.note}`;
         item.append(note);
       }
       run.append(item);
     });
-    text.lastChild.replaceWith(run);
+    const existing = text.querySelector<HTMLElement>(":scope > .ui-kv-parts");
+    if (existing) existing.replaceChildren(run);
+    else {
+      const wrap = document.createElement("span");
+      wrap.className = "ui-kv-parts";
+      wrap.append(run);
+      text.lastChild.replaceWith(wrap);
+    }
   }
   if (chevron && cell.classList.contains("ui-kv-press") && !cell.querySelector(".ui-kv-chevron")) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");

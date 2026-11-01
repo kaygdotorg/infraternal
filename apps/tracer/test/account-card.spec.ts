@@ -83,6 +83,15 @@ test.describe("values say the state, and a concern says itself", () => {
     });
   }
 
+  test("the Logs in as row draws each account once, however often the card is redrawn", async ({ page }) => {
+    await openCard(page);
+    for (const id of ["recovery", "one-passkey", "community", "recovery-stale"]) await scenario(page, id);
+    expect(await page.locator(".ac .ui-kv-part").allInnerTexts()).toEqual(["kayg 12", "root 2"]);
+    await page.locator(".ac .ui-kv-row", { hasText: "Logs in as" }).locator(".ui-kv-value").click();
+    await expect(page.locator(".ac-pane[data-open]")).toBeVisible();
+    expect(await page.locator(".ac .ui-kv-part").count()).toBe(2);
+  });
+
   test("a concern in the value is a link to where it is fixed (Settings, Account)", async ({ page }) => {
     await openCard(page);
     await scenario(page, "recovery-stale");
