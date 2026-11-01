@@ -28,7 +28,9 @@ After connecting, the node opens one bidirectional QUIC stream and writes the
 four-byte hello `IFR1`. This stream carries link requests and notices. Mesh
 packets use QUIC DATAGRAM frames on the same connection. A reconnect replaces
 the previous connection for that host and ends its links; both peers must
-request their links again.
+request their links again. Queued DATAGRAM reservations from an older
+connection continue to count against that host if it reconnects before Quinn
+drops them.
 
 Before that authenticated control hello completes, the relay admits at most
 256 in-flight handshakes globally and eight per source IP by default. IPv4
@@ -68,20 +70,23 @@ QUIC DATAGRAM delivery is unreliable and unordered, matching the inner
 WireGuard datagram semantics. The relay-side receive queue is bounded to 8
 KiB per connection and its Quinn send queue to 128 KiB per connection. A
 separate forwarding budget bounds accepted DATAGRAM storage to 256 KiB per
-linked pair and 64 MiB across the relay. Each frame is charged in 1 KiB units
-after adding 128 bytes for per-DATAGRAM queue metadata, so small frames also
-consume budget. The relay forwards the existing shared `Bytes` storage; its
-budget reservations stay with that storage until Quinn drops the last
-reference after sending or discarding it. If either reservation is unavailable
-or Quinn's send queue is full, the relay drops the DATAGRAM and increments its
-dropped counter. This drop policy uses DATAGRAM's existing unreliable
-semantics and does not block the control stream.
+linked pair, 4 MiB per source host across all its pairs, and 64 MiB across the
+relay. Each frame is charged in 1 KiB units after adding 128 bytes for
+per-DATAGRAM queue metadata, so small frames also consume budget. The relay
+forwards the existing shared `Bytes` storage; its global, host and pair
+reservations stay with that storage until Quinn drops the last reference after
+sending or discarding it. If any reservation is unavailable or Quinn's send
+queue is full, the relay drops the DATAGRAM and increments its dropped
+counter. This drop policy uses DATAGRAM's existing unreliable semantics and
+does not block the control stream. A single source host can therefore use at
+most one sixteenth of the global forwarding budget, leaving the remaining
+quota available to other hosts.
 
 At the 4,096-host limit, the configured relay receive queues total at most 32
 MiB and the global forwarding budget accounts for at most another 64 MiB of
 queued DATAGRAM storage. The 128 KiB per-connection send setting is a local
-ceiling; the shared global and per-pair reservations bound aggregate queued
-payloads. These figures bound DATAGRAM buffering, not fixed connection,
+ceiling; the shared global, per-host and per-pair reservations bound aggregate
+queued payloads. These figures bound DATAGRAM buffering, not fixed connection,
 control or link-table overhead.
 
 ### Address observation probes
@@ -187,8 +192,9 @@ handling.
 ## Acceptance evidence
 
 Unit tests cover fixed-size control codecs, link-ID framing, authenticated
-probe parsing, forwarding-memory reservations, the real QUIC relay on loopback
-and relay RSS under a many-pair DATAGRAM flood. The rootless namespace
+probe parsing, forwarding-memory reservations including one host across 256
+backpressured pairs, the real QUIC relay on loopback and relay RSS under a
+many-pair DATAGRAM flood. The rootless namespace
 proof exercises the kernel WireGuard device, direct and relayed peers, two
 relays, link failover, recovery after relay restart, NAT rebinding and
 observation-generation retirement. It verifies a numbered TCP stream by

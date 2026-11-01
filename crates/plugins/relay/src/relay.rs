@@ -8,8 +8,9 @@
 //!
 //! Everything is bounded: pre-authentication handshakes, hosts, requests per
 //! host, the control writer queue, per-connection QUIC buffers (see `tls`) and
-//! shared DATAGRAM forwarding budgets. A host that reconnects replaces its
-//! previous connection; its links end and form again from the new requests.
+//! shared global, per-host and per-pair DATAGRAM forwarding budgets. A host
+//! that reconnects replaces its previous connection; its links end and form
+//! again from the new requests.
 //! The same UDP port answers authenticated address probes (`probe`), which are
 //! taken out in front of quinn so a relay needs one port.
 
@@ -37,8 +38,11 @@ const QUEUE_ACCOUNTING_UNIT_BYTES: usize = 1024;
 const QUEUE_ENTRY_OVERHEAD_BYTES: usize = 128;
 const GLOBAL_FORWARD_QUEUE_BYTES: usize = 64 * 1024 * 1024;
 const PAIR_FORWARD_QUEUE_BYTES: usize = 256 * 1024;
+/// One source host may retain at most one sixteenth of the global queue.
+const HOST_FORWARD_QUEUE_BYTES: usize = 4 * 1024 * 1024;
 const GLOBAL_FORWARD_QUEUE_UNITS: usize = GLOBAL_FORWARD_QUEUE_BYTES / QUEUE_ACCOUNTING_UNIT_BYTES;
 const PAIR_FORWARD_QUEUE_UNITS: usize = PAIR_FORWARD_QUEUE_BYTES / QUEUE_ACCOUNTING_UNIT_BYTES;
+const HOST_FORWARD_QUEUE_UNITS: usize = HOST_FORWARD_QUEUE_BYTES / QUEUE_ACCOUNTING_UNIT_BYTES;
 const MAX_HANDSHAKES: usize = 256;
 const MAX_HANDSHAKES_PER_IP: usize = 8;
 
@@ -171,6 +175,7 @@ struct Host {
     connection: quinn::Connection,
     notices: mpsc::Sender<Notice>,
     wants: HashSet<HostId>,
+    datagrams: Arc<QueueBudget>,
 }
 
 /// A nonblocking byte budget. Reservations travel with queued `Bytes` owners,
@@ -236,6 +241,7 @@ impl Drop for QueueReservation {
 struct ForwardedDatagram {
     payload: bytes::Bytes,
     _global: QueueReservation,
+    _host: QueueReservation,
     _pair: QueueReservation,
 }
 
@@ -254,15 +260,18 @@ fn queue_units(datagram_len: usize) -> Option<usize> {
 
 fn queue_forward_datagram(
     global: &Arc<QueueBudget>,
+    host: &Arc<QueueBudget>,
     pair: &Arc<QueueBudget>,
     payload: bytes::Bytes,
 ) -> Option<bytes::Bytes> {
     let units = queue_units(payload.len())?;
     let pair_reservation = pair.reserve(units)?;
+    let host_reservation = host.reserve(units)?;
     let global_reservation = global.reserve(units)?;
     Some(bytes::Bytes::from_owner(ForwardedDatagram {
         payload,
         _global: global_reservation,
+        _host: host_reservation,
         _pair: pair_reservation,
     }))
 }
@@ -278,6 +287,7 @@ struct Table {
     links: HashMap<LinkId, Link>,
     pairs: HashMap<(HostId, HostId), LinkId>,
     retired_datagrams: HashMap<(HostId, HostId), Weak<QueueBudget>>,
+    retired_host_datagrams: HashMap<HostId, Weak<QueueBudget>>,
     next: u32,
 }
 
@@ -306,6 +316,26 @@ impl Table {
             .remove(&key)
             .and_then(|budget| budget.upgrade())
             .unwrap_or_else(|| Arc::new(QueueBudget::new(PAIR_FORWARD_QUEUE_UNITS)))
+    }
+
+    fn datagrams_for_host(&mut self, host: HostId) -> Arc<QueueBudget> {
+        self.retired_host_datagrams
+            .remove(&host)
+            .and_then(|budget| budget.upgrade())
+            .unwrap_or_else(|| Arc::new(QueueBudget::new(HOST_FORWARD_QUEUE_UNITS)))
+    }
+
+    /// Retain a weak lookup while old forwarded datagrams still own this host's budget.
+    fn retire_host_datagrams(&mut self, host: HostId, budget: &Arc<QueueBudget>) {
+        if Arc::strong_count(budget) <= 1 {
+            return;
+        }
+        self.retired_host_datagrams
+            .insert(host, Arc::downgrade(budget));
+        if self.retired_host_datagrams.len() > GLOBAL_FORWARD_QUEUE_UNITS {
+            self.retired_host_datagrams
+                .retain(|_, budget| budget.strong_count() > 0);
+        }
     }
 
     /// Retain only a weak lookup while old QUIC datagrams still own this pair's budget.
@@ -365,6 +395,7 @@ impl Table {
 
     fn remove_host(&mut self, host: HostId) {
         if let Some(entry) = self.hosts.remove(&host) {
+            self.retire_host_datagrams(host, &entry.datagrams);
             for peer in entry.wants {
                 self.unlink(host, peer);
             }
@@ -426,12 +457,14 @@ impl Shared {
         } else if table.hosts.len() >= self.limits.hosts {
             return false;
         }
+        let datagrams = table.datagrams_for_host(host);
         table.hosts.insert(
             host,
             Host {
                 connection: connection.clone(),
                 notices,
                 wants: HashSet::new(),
+                datagrams,
             },
         );
         true
@@ -477,20 +510,22 @@ impl Shared {
         };
         let table = self.read();
         let target = table.links.get(&id).and_then(|link| {
-            let [(_, first), (_, second)] = &link.ends;
+            let [(first_host, first), (second_host, second)] = &link.ends;
             if first.stable_id() == connection {
-                Some((second, &link.datagrams))
+                Some((*first_host, second, &link.datagrams))
             } else if second.stable_id() == connection {
-                Some((first, &link.datagrams))
+                Some((*second_host, first, &link.datagrams))
             } else {
                 None
             }
         });
         // A frame for a link the sender is not part of, or one that ended,
         // is dropped: forwarding is never a way to reach an unlinked host.
-        let forwarded = target.is_some_and(|(target, pair_budget)| {
-            queue_forward_datagram(&self.datagrams, pair_budget, datagram)
-                .is_some_and(|datagram| target.send_datagram(datagram).is_ok())
+        let forwarded = target.is_some_and(|(source, target, pair_budget)| {
+            table.hosts.get(&source).is_some_and(|host| {
+                queue_forward_datagram(&self.datagrams, &host.datagrams, pair_budget, datagram)
+                    .is_some_and(|datagram| target.send_datagram(datagram).is_ok())
+            })
         });
         let counter = if forwarded {
             &self.counters.forwarded
@@ -780,6 +815,9 @@ mod datagram_budget_tests {
     #[test]
     fn forwarded_datagrams_share_storage_and_hold_global_and_pair_budgets_until_released() {
         let global = Arc::new(QueueBudget::new(4));
+        let first_host = Arc::new(QueueBudget::new(4));
+        let second_host = Arc::new(QueueBudget::new(2));
+        let third_host = Arc::new(QueueBudget::new(2));
         let first_pair = Arc::new(QueueBudget::new(2));
         let second_pair = Arc::new(QueueBudget::new(2));
         let third_pair = Arc::new(QueueBudget::new(2));
@@ -787,7 +825,7 @@ mod datagram_budget_tests {
 
         let first_frame = frame();
         let first_pointer = first_frame.as_ptr();
-        let first = queue_forward_datagram(&global, &first_pair, first_frame)
+        let first = queue_forward_datagram(&global, &first_host, &first_pair, first_frame)
             .expect("first pair can reserve its queue budget");
         assert_eq!(
             first.as_ptr(),
@@ -796,22 +834,23 @@ mod datagram_budget_tests {
         );
         assert_eq!(global.queued_units.load(Ordering::Relaxed), 2);
         assert_eq!(first_pair.queued_units.load(Ordering::Relaxed), 2);
-        assert!(queue_forward_datagram(&global, &first_pair, frame()).is_none());
+        assert!(queue_forward_datagram(&global, &first_host, &first_pair, frame()).is_none());
 
         let shared = first.clone();
         drop(first);
         assert_eq!(global.queued_units.load(Ordering::Relaxed), 2);
         assert_eq!(first_pair.queued_units.load(Ordering::Relaxed), 2);
 
-        let second = queue_forward_datagram(&global, &second_pair, frame())
+        let second = queue_forward_datagram(&global, &second_host, &second_pair, frame())
             .expect("another pair can use the remaining global budget");
         assert_eq!(global.queued_units.load(Ordering::Relaxed), 4);
-        assert!(queue_forward_datagram(&global, &third_pair, frame()).is_none());
+        assert!(queue_forward_datagram(&global, &third_host, &third_pair, frame()).is_none());
+        assert_eq!(third_host.queued_units.load(Ordering::Relaxed), 0);
 
         drop(shared);
         assert_eq!(global.queued_units.load(Ordering::Relaxed), 2);
         assert_eq!(first_pair.queued_units.load(Ordering::Relaxed), 0);
-        let third = queue_forward_datagram(&global, &third_pair, frame())
+        let third = queue_forward_datagram(&global, &third_host, &third_pair, frame())
             .expect("dropping the final shared buffer releases its reservation");
         assert_eq!(global.queued_units.load(Ordering::Relaxed), 4);
 
@@ -819,6 +858,9 @@ mod datagram_budget_tests {
         assert_eq!(global.queued_units.load(Ordering::Relaxed), 0);
         assert_eq!(second_pair.queued_units.load(Ordering::Relaxed), 0);
         assert_eq!(third_pair.queued_units.load(Ordering::Relaxed), 0);
+        assert_eq!(first_host.queued_units.load(Ordering::Relaxed), 0);
+        assert_eq!(second_host.queued_units.load(Ordering::Relaxed), 0);
+        assert_eq!(third_host.queued_units.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -841,6 +883,70 @@ mod datagram_budget_tests {
 
         drop(held);
         assert_eq!(relinked.queued_units.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn one_host_cannot_exhaust_global_budget_across_256_backpressured_pairs() {
+        let global = Arc::new(QueueBudget::new(GLOBAL_FORWARD_QUEUE_UNITS));
+        let attacker = Arc::new(QueueBudget::new(HOST_FORWARD_QUEUE_UNITS));
+        let pairs = (0..256)
+            .map(|_| Arc::new(QueueBudget::new(PAIR_FORWARD_QUEUE_UNITS)))
+            .collect::<Vec<_>>();
+        let frame = || bytes::Bytes::from_static(&[0x5a; 1_400]);
+        let mut held = Vec::new();
+
+        loop {
+            let mut queued_in_round = false;
+            for pair in &pairs {
+                if let Some(datagram) = queue_forward_datagram(&global, &attacker, pair, frame()) {
+                    held.push(datagram);
+                    queued_in_round = true;
+                }
+            }
+            if !queued_in_round {
+                break;
+            }
+        }
+
+        assert_eq!(
+            attacker.queued_units.load(Ordering::Relaxed),
+            HOST_FORWARD_QUEUE_UNITS,
+            "the source host should stop at its aggregate quota"
+        );
+        assert_eq!(
+            global.queued_units.load(Ordering::Relaxed),
+            HOST_FORWARD_QUEUE_UNITS,
+            "all queue budgets must charge the same forwarded storage"
+        );
+        assert!(global.queued_units.load(Ordering::Relaxed) < GLOBAL_FORWARD_QUEUE_UNITS);
+        let unrelated_host = Arc::new(QueueBudget::new(HOST_FORWARD_QUEUE_UNITS));
+        let unrelated_pair = Arc::new(QueueBudget::new(PAIR_FORWARD_QUEUE_UNITS));
+        assert!(
+            queue_forward_datagram(&global, &unrelated_host, &unrelated_pair, frame()).is_some(),
+            "one host holding 256 pairs consumed the budget for unrelated pairs"
+        );
+    }
+
+    #[test]
+    fn reconnecting_host_reuses_its_budget_while_old_datagrams_remain_queued() {
+        let host = HostId([1; 16]);
+        let mut table = Table::default();
+        let first = table.datagrams_for_host(host);
+        let held = first
+            .reserve(HOST_FORWARD_QUEUE_UNITS - 1)
+            .expect("first connection can reserve all but one unit");
+        table.retire_host_datagrams(host, &first);
+        drop(first);
+
+        let reconnected = table.datagrams_for_host(host);
+        assert_eq!(
+            reconnected.queued_units.load(Ordering::Relaxed),
+            HOST_FORWARD_QUEUE_UNITS - 1
+        );
+        assert!(reconnected.reserve(2).is_none());
+
+        drop(held);
+        assert_eq!(reconnected.queued_units.load(Ordering::Relaxed), 0);
     }
 }
 
