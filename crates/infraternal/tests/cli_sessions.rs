@@ -31,6 +31,43 @@ fn sessions_commands_are_registered_and_have_generated_skills() {
 }
 
 #[test]
+fn sessions_read_requires_last_before_connecting() {
+    let out = run(&[
+        "--json",
+        "sessions",
+        "--state",
+        "/tmp/infraternal-review-missing-state",
+        "read",
+        "local:build",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "missing --last must be usage, got {}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON envelope");
+    assert_eq!(envelope["error"]["code"], "usage");
+    assert_eq!(envelope["error"]["argument"], "--last");
+}
+
+#[test]
+fn generated_sessions_skill_does_not_expose_the_private_list_cursor() {
+    let out = run(&["skill", "sessions"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let skill = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !skill.contains("`after` (option"),
+        "generated sessions skill advertises the CLI-private pagination cursor:\n{skill}"
+    );
+}
+
+#[test]
 fn sessions_invalid_targets_have_usage_envelope_and_fix() {
     for args in [
         vec!["sessions", "send", "missing-separator", "hello", "--json"],
