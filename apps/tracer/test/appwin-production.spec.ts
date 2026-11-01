@@ -3,7 +3,9 @@ import { expect, test, type Page } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
 import { requireFixtureH264 } from "./appwin/codec-support";
 
-test.skip(process.env.TRACER_DOUBLE_APPWIN !== "1", "needs the desktop source double and rendered H264 fixtures");
+test.beforeAll(() => {
+  test.skip(process.env.TRACER_DOUBLE_APPWIN !== "1", "needs the desktop source double and rendered H264 fixtures");
+});
 const paletteShortcut = process.platform === "darwin" ? "Meta+K" : "Control+Shift+K";
 async function open(page: Page) {
   await page.request.post("/__mock/reset");

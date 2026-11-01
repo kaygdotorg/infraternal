@@ -18,8 +18,8 @@ const enabled = process.env.TRACER_DOUBLE_APPWIN === "1";
 const fixtures = process.env.APPWIN_FIXTURE_DIR ?? join(homedir(), ".cache/codex-scratch/ui-app-windows/fixtures");
 const paletteShortcut = process.platform === "darwin" ? "Meta+K" : "Control+Shift+K";
 const selectAllShortcut = process.platform === "darwin" ? "Meta+A" : "Control+A";
-test.skip(!enabled, "needs TRACER_DOUBLE_APPWIN=1 (the app-window double)");
 test.beforeAll(() => {
+  test.skip(!enabled, "needs TRACER_DOUBLE_APPWIN=1 (the app-window double)");
   if (!existsSync(join(fixtures, "editor-tall.h264"))) {
     const run = spawnSync("node", [join(import.meta.dirname, "appwin/render-fixtures.mjs"), fixtures], { stdio: "inherit" });
     if (run.status !== 0) throw new Error("the fixtures need ffmpeg with libx264");
