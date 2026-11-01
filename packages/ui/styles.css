@@ -9,6 +9,11 @@
 /* Focus rings appear only while the person navigates with the keyboard (focus-ring.ts sets
    data-focus-ring="on"); clicks, taps and shortcuts that move focus in script draw none. */
 :focus-visible { outline: none; }
+/* The ring is drawn outside its element and reaches 4 px past it (2 px line + 2 px offset). A container that
+   clips its overflow (overflow hidden, a height glide) must leave --focus-ring-room on every side of the
+   fields it holds, or the ring is cut off where a field touches the container's edge. 6 px is the reach plus
+   2 px for anti-aliasing. focus-ring-clip.spec.ts measures every ring against every clipping ancestor. */
+:root { --focus-ring-room: 6px; }
 [data-focus-ring="on"] :focus-visible { outline: 2px solid var(--focus-ring, var(--accent, #7a9cff)); outline-offset: 2px; }
 .countup { font-variant-numeric: tabular-nums; }
 .busy-count { font: var(--fw-label, 500) 13px/1 var(--font-face, "Maple Mono NF", ui-monospace, monospace); color: rgb(0 0 0 / 0.6); }
@@ -350,6 +355,10 @@
      that uses this token has a fixed height or min-height and centres its content, so only the text's offset changes. */
   --ui-type-button: 500 13.5px/normal var(--font-ui, "Geist Mono", ui-monospace, monospace);
   --ui-type-eyebrow: 500 12px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  /* Every section heading (the small uppercase titles above a group of rows) is padded with this one value:
+     6 px above, --ui-heading-gap between it and the group's first row. A new heading style uses it, never its own numbers. */
+  --ui-heading-gap: 8px;
+  --ui-heading-pad: 6px 0 var(--ui-heading-gap);
   --ui-tracking: -0.01em;
   /* Secondary text matches the sign-in card's secondary (rgb 161 161 170 on ink) and
      adapts to every theme, instead of the dimmer --fg-2. */
@@ -531,7 +540,7 @@
 /* Titled sections inside one list: the quiet eyebrow of the settings headings, no box or rule of its own. */
 .ui-kv-section + .ui-kv-section { margin-top: 12px; }
 .ui-kv-rows { display: flex; flex-direction: column; }
-.ui-kv-group { padding: 6px 0 2px; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.ui-kv-group { padding: var(--ui-heading-pad); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-kv-cell {
   display: block; min-width: 0; max-width: 100%; margin: 0; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; text-align: left; font: inherit;
   transition: transform 140ms var(--ease-out, ease-out);
@@ -761,7 +770,7 @@
 .ui-shortcuts-head { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; height: var(--pill-h, 38px); padding: 0 8px 0 14px; font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
 .ui-shortcuts-body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 4px 14px 14px; }
 .ui-shortcuts-section + .ui-shortcuts-section { margin-top: 12px; }
-.ui-shortcuts-title { margin: 0; padding: 6px 0 2px; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.ui-shortcuts-title { margin: 0; padding: var(--ui-heading-pad); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-shortcuts-list { display: grid; margin: 0; padding: 0; list-style: none; }
 .ui-shortcuts-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: var(--row, 28px); border-bottom: 1px solid var(--line); }
 .ui-shortcuts-row:last-child { border-bottom: 0; }
@@ -854,7 +863,7 @@
 
 /* Settings, Toolbar (toolbar-settings.ts): rows of controls with a grip, an icon, a name and a switch. */
 .ui-toolbar-settings { display: grid; gap: 14px; }
-.ui-ts-title { margin: 0; padding: 6px 0 2px; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.ui-ts-title { margin: 0; padding: var(--ui-heading-pad); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-ts-list { display: grid; margin: 0; padding: 0; list-style: none; }
 .ui-ts-item { position: relative; display: flex; align-items: center; gap: 10px; min-height: var(--ui-row-h, 32px); border-bottom: 1px solid var(--line); background: transparent; }
 .ui-ts-item:last-child { border-bottom: 0; }
@@ -921,12 +930,17 @@
    widest row does not fit (decided per list in fitHints) the list is `data-stacked` and every hint sits under its name,
    left-aligned, balanced and allowed two lines. The tick stays centred on the row. */
 .ui-sp-text { display: flex; flex: 1; align-items: baseline; column-gap: 10px; min-width: 0; padding: 5px 0; }
-.ui-sp-text .ui-sp-label { flex: none; max-width: 100%; margin-right: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Beside its name, a hint starts where the list's widest name ends (fitHints sets --ui-sp-label-w), so a list's hints
+   share one left edge instead of following each name's length. */
+.ui-sp-text .ui-sp-label { flex: none; width: var(--ui-sp-label-w, auto); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+[data-stacked] > .ui-sp-row .ui-sp-label { width: auto; }
 .ui-sp-text .ui-sp-hint { flex: none; white-space: nowrap; color: var(--ui-text-secondary); }
 .ui-sp-text .ui-sp-hint:empty { display: none; }
 [data-stacked] > .ui-sp-row .ui-sp-text { flex-direction: column; align-items: flex-start; row-gap: 1px; }
 [data-stacked] > .ui-sp-row .ui-sp-hint { white-space: normal; text-wrap: balance; max-width: 100%; }
 .ui-sp-hint { color: var(--ui-text-secondary); }
+/* A destructive row (remove, sign out) names its action in the danger colour; the hint under it stays quiet. */
+.ui-sp-row[data-tone="danger"] .ui-sp-label { color: var(--danger); }
 .ui-sp-tick { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); flex: none; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(0.6); transition: opacity 150ms ease, transform 180ms var(--ease-out, ease-out); }
 .ui-sp-row[data-current] .ui-sp-tick { opacity: 1; transform: none; }
 .ui-sp-devices { display: grid; margin: 0; padding: 0; list-style: none; }

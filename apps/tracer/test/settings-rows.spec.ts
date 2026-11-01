@@ -4,6 +4,9 @@
  * desktop, in the ink and paper themes. A list reads as one: when any row's hint does not fit beside its name, every row of
  * that list puts the hint under the name, left-aligned with it; otherwise every hint is beside its name. Each section's own
  * list must be on screen before anything is measured, so the spec cannot pass on the wrong view.
+ * Alignment (owner, 2026-11-01): hints never follow the length of their own name. Beside their names, every hint of a
+ * list starts at one x; under their names, at the name's own x; both within 0.5 px. Section headings sit one shared gap
+ * above their first row (`--ui-heading-gap`, packages/ui), in every heading style the package has.
  * Review screenshots land in the external job evidence directory.
  */
 import { tracerEvidencePath } from "./evidence-path";
@@ -78,9 +81,46 @@ for (const theme of ["ink", "paper"]) for (const { w, h, touch } of SIZES) test(
         expect(r.clipped, `${section.name}/${r.name}: name is clipped`).toBe(false);
         expect(r.labelH, `${section.name}/${r.name}: name is one line`).toBeLessThan(r.line * 1.6);
         if (r.hasHint) expect(r.hintRight, `${section.name}/${r.name}: hint stays inside the row`).toBeLessThanOrEqual(r.rowRight + 0.5);
-        if (r.stacked) expect(Math.abs(r.hintLeft - r.labelLeft), `${section.name}/${r.name}: stacked hint aligns with the name`).toBeLessThan(1.5);
+        if (r.stacked) expect(Math.abs(r.hintLeft - r.labelLeft), `${section.name}/${r.name}: stacked hint aligns with the name`).toBeLessThanOrEqual(0.5);
       }
+      // Beside their names: one column per list, whatever the length of each name.
+      for (const name of new Set(list.map((r) => r.list))) {
+        const beside = list.filter((r) => r.list === name && r.hasHint && !r.stacked).map((r) => r.hintLeft);
+        if (beside.length > 1) expect(Math.max(...beside) - Math.min(...beside), `${section.name}/${name}: hints share one left edge`).toBeLessThanOrEqual(0.5);
+        const names = list.filter((r) => r.list === name).map((r) => r.labelLeft);
+        expect(Math.max(...names) - Math.min(...names), `${section.name}/${name}: names share one left edge`).toBeLessThanOrEqual(0.5);
+      }
+      // The heading sits the shared gap above the first row: the gap is the heading's own bottom padding.
+      const gap = await page.evaluate((listName) => {
+        const l = document.querySelector(`.ui-sp-list[aria-label="${listName}"]`)!;
+        const h = l.previousElementSibling as HTMLElement;
+        return {
+          heading: h.className, padding: parseFloat(getComputedStyle(h).paddingBottom), between: l.getBoundingClientRect().top - h.getBoundingClientRect().bottom,
+          token: parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--ui-heading-gap")),
+        };
+      }, section.list);
+      expect(gap.heading, `${section.name}: the list follows its heading`).toContain("ui-ts-title");
+      expect(gap.token, `${section.name}: the heading gap token is 8 px`).toBe(8);
+      expect(Math.abs(gap.padding - gap.token), `${section.name}: heading gap equals the token`).toBeLessThanOrEqual(0.5);
+      expect(Math.abs(gap.between), `${section.name}: nothing but the heading's own padding sits between it and its list`).toBeLessThanOrEqual(0.5);
       await page.screenshot({ path: resolve(captures, `${section.name.replace(/ /g, "-").toLowerCase()}-${theme}-${w}x${h}.png`) });
     }
   } finally { await context.close(); }
+});
+
+test("every section heading style in packages/ui uses the one heading padding", async ({ page }) => {
+  await page.goto("/?mock=1");
+  const pads = await page.evaluate(() => ["ui-ts-title", "ui-kv-group", "ui-shortcuts-title"].map((cls) => {
+    const probe = document.createElement("div");
+    probe.className = cls;
+    document.body.append(probe);
+    const s = getComputedStyle(probe);
+    const out = { cls, top: s.paddingTop, bottom: s.paddingBottom };
+    probe.remove();
+    return out;
+  }));
+  for (const pad of pads) {
+    expect(pad.top, `${pad.cls}: 6 px above`).toBe("6px");
+    expect(pad.bottom, `${pad.cls}: the shared gap below`).toBe("8px");
+  }
 });

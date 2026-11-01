@@ -169,6 +169,9 @@ test("setup, recovery acknowledgement, welcome and returning sign-in match the b
   });
   await copyButton.click();
   await expect(copyButton).toHaveAttribute("data-done", "");
+  // The tick is the only confirmation: no "Copied" line, and the earlier failure line is gone.
+  await expect(page.locator("#recovery-message")).toHaveText("");
+  await expect(page.getByText("Store the words somewhere private")).toHaveCount(0);
   const copiedWords = await page.evaluate(() => navigator.clipboard.readText());
   expect(copiedWords.trim().split(/\s+/)).toHaveLength(24);
   const downloadPromise = page.waitForEvent("download");
