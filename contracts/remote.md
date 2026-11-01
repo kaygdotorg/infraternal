@@ -59,6 +59,16 @@ without regenerating the CA. Locked state blocks enrollment and renewal only:
 the public issuers still verify existing connections and reconnects. Notify
 administrators while locked and again before certificates approach expiry.
 
+The public CA status reports only lock state and public root metadata: generation,
+fingerprint, `not_after`, remaining seconds and warning level. Warning thresholds
+are 365, 90, 30 and 7 days; the server calculates them from its clock. An
+uncertain server clock reports status as unknown and cannot report a healthy
+expiry. The public trust response retains legacy `ca_der` and may add
+`ca_roots[]` containing the current and next public roots, each with generation,
+fingerprint, certificate DER and `not_after`. Clients validate both roots when
+present. This metadata support does not generate, activate or retire a root;
+the old root remains trusted until its leaves expire or are replaced.
+
 Certificates live seven days [133]. Store certificate fingerprints, host id,
 issuer generation, validity and revocation state in SQLite; never CA or host
 private keys. Renew over the authenticated live control stream, binding the
@@ -165,6 +175,41 @@ returns `{certificate_der, execution_uid}` only after commit. Admission and
 signer errors expose no secret or detailed crypto diagnostics. The join
 command verifies returned uid and certificate/key correspondence before
 publishing local identity. This API never unlocks a cold CA [168].
+
+### Expired-certificate recovery (#285 T2)
+
+Recovery is a separate TCP/TLS exchange on the existing remote port with ALPN
+`infraternal/remote-recovery/1`. The server certificate and configured server
+name are verified normally. A client certificate may be absent only for this
+ALPN; a connection on this ALPN cannot enter normal host admission, control,
+terminal, enrollment or action paths. Normal mTLS verification continues to
+reject expired leaves.
+
+The host submits a stable host UUID, the expired leaf fingerprint, a unique
+request ID and a CSR for the already registered Ed25519 identity key. The server
+returns a short-lived, single-use challenge bound to those values, the current
+registered key, CA generation and CSR digest. The host signs the canonical,
+domain-separated transcript with the registered identity private key. The
+server uses its clock and accepts only through exactly `not_after + 7,776,000`
+seconds, inclusive. It atomically checks the active host, certificate serial,
+key, challenge, CA generation and unlock state while consuming the challenge
+and recording issuance. Unknown, revoked, tombstoned, locked-CA and
+out-of-window hosts receive the same denial. Per-source and per-host limits run
+before signature work.
+
+Success returns only a seven-day leaf for the same host URI and key. It grants
+no enrollment, host session or other authority. The issued certificate is
+persisted with the request ID and CSR digest so a proved retry with identical
+content can recover the exact result after a lost response; a different CSR or
+replayed challenge is denied. Private keys, reusable challenges, proofs and
+full CSRs never enter logs. Offline hosts retry when the server is reachable;
+after the 90-day window they require administrator-assisted reenrollment.
+
+Recovery eligibility and CA warning calculations fail closed while server clock
+health is unknown. Clock health starts unknown and becomes healthy only after
+three consecutive one-second samples with nonnegative wall-time progress and a
+wall/monotonic delta within 250 ms. A backward wall step, invalid time, drift
+outside that bound or sample gap over five seconds returns it to unknown.
 
 ## Normal CLI activation (partial D168 adapter)
 

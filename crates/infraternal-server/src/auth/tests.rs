@@ -1162,7 +1162,7 @@ async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
     let mut proof = f.software.login(&start, ORIGIN, true);
     proof["response"]["userHandle"] =
         json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
-    let (status, headers, _) = http_post_json_with_cookie(
+    let (status, headers, login_body) = http_post_json_with_cookie(
         &router,
         "login-finish",
         json!({"ceremony":start["ceremony"],"proof":proof,"device":"flags"}),
@@ -1187,10 +1187,23 @@ async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
         assert!(cookie.contains(flag));
     }
     assert!(!cookie.contains("Domain="));
+    let (unlock_status, unlocked_headers, _) = http_post_json_with_cookie(
+        &router,
+        "unlock-finish",
+        json!({"pending_transaction":login_body["pending_transaction"]}),
+        cookie.split(';').next().unwrap(),
+    )
+    .await;
+    assert_eq!(unlock_status, axum::http::StatusCode::OK);
 
     // A response delayed from the older login may add its cookie back to the jar,
     // but the new login's higher sequence still selects the right device.
-    let current_cookie = cookie.split(';').next().unwrap();
+    let current_cookie = unlocked_headers["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
     let combined = format!("__Host-infraternal={}; {current_cookie}", f.session);
     let switched = axum::http::Request::builder()
         .method("POST")
@@ -2553,12 +2566,8 @@ async fn public_status_and_discoverable_http_login() {
     .await;
     assert_eq!(status, axum::http::StatusCode::OK);
     let cookie = headers[axum::http::header::SET_COOKIE].to_str().unwrap();
-    let token = cookie
-        .split(';')
-        .next()
-        .unwrap()
-        .strip_prefix("__Host-infraternal=")
-        .unwrap();
+    let (cookie_name, token) = cookie.split(';').next().unwrap().split_once('=').unwrap();
+    assert!(cookie_name.starts_with("__Host-infraternal-session-"));
     let now = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

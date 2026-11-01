@@ -27,6 +27,8 @@ pub struct RemoteService {
     pub identity: Option<Identity>,
     /// Public issuer overlap for mutual TLS.
     pub roots: Vec<X509>,
+    /// Clock health shared by expiry status, local diagnostics and renewal recovery.
+    pub clock_health: Arc<crate::clock_health::ClockHealth>,
 }
 
 /// One durable host actor survives transport replacement; every new peer is readmitted.

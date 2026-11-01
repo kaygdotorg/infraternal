@@ -18,7 +18,12 @@ pub struct Session {
     #[serde(skip)]
     pub(crate) owner: bool,
 }
-/// Pending recovery discloses an estimated deadline, including after bearer expiry.
+/// Publicly safe absolute cookie deadline and ordering value for one live session row.
+pub(super) struct CookieState {
+    pub login_sequence: i64,
+    pub expires: i64,
+}
+/// Pending recovery discloses only its original deadline, including after bearer expiry.
 #[derive(Serialize)]
 pub struct RecoveryPending {
     pub ready_at: i64,
@@ -93,6 +98,23 @@ impl Auth {
             passkey_provider: provider_name(row.get::<Option<&str>, _>("aaguid")),
             owner: row.get("owner"),
         })
+    }
+
+    /// Read the live row's cookie deadline after an authenticated action has succeeded.
+    /// The session read remains the only expiry write; this indexed lookup only returns the
+    /// committed deadline needed for the persistent cookie's absolute Expires attribute.
+    pub(super) async fn cookie_state(&self, token: &str, now: i64) -> Result<Option<CookieState>> {
+        let row = sqlx::query(
+            "SELECT login_sequence,expires FROM sessions WHERE token_hash=? AND expires>?",
+        )
+        .bind(hash(token))
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| CookieState {
+            login_sequence: row.get("login_sequence"),
+            expires: row.get("expires"),
+        }))
     }
 
     /// Activate only a still-live pending cookie after the browser confirms successful unwrap.
@@ -243,13 +265,19 @@ pub(super) async fn insert_session(
     now: i64,
     passkey_id: Option<&str>,
 ) -> Result<()> {
-    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,passkey_id) VALUES (?,?,?,?,?,?)")
+    let login_sequence: i64 = sqlx::query_scalar(
+        "UPDATE session_login_sequence SET value=value+1 WHERE singleton=1 AND value<9223372036854775807 RETURNING value",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,passkey_id,login_sequence) VALUES (?,?,?,?,?,?,?)")
         .bind(hash(token))
         .bind(user)
         .bind(device)
         .bind(now + SESSION)
         .bind(now)
         .bind(passkey_id)
+        .bind(login_sequence)
         .execute(&mut **tx)
         .await?;
     Ok(())

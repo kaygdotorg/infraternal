@@ -418,16 +418,20 @@ fn ca_router(
     hosts: crate::remote_runtime::RemoteHosts,
     store: crate::enrollment::EnrollmentStore,
 ) -> Result<Router, ServerError> {
-    remote
-        .and_then(|service| service.ca_administration.as_ref())
-        .map(|configuration| {
-            configuration
-                .with_runtime(auth.clone(), pool.clone(), hosts, store)
-                .map(|authority| crate::ca_http::router(auth.clone(), authority))
-                .map_err(|_| ServerError::TlsConfiguration)
-        })
-        .transpose()
-        .map(Option::unwrap_or_default)
+    if let Some(service) = remote {
+        service.clock_health.start_monitor();
+    }
+    let Some(service) = remote else {
+        return Ok(Router::new());
+    };
+    let Some(configuration) = service.ca_administration.as_ref() else {
+        return Ok(Router::new());
+    };
+    let clock_health = service.clock_health.clone();
+    configuration
+        .with_runtime(auth.clone(), pool.clone(), hosts, store)
+        .map(|authority| crate::ca_http::router(auth.clone(), authority, clock_health))
+        .map_err(|_| ServerError::TlsConfiguration)
 }
 
 /// Build the optional plugin adapter and retain listener ownership for the serving lifetime.
@@ -727,6 +731,7 @@ async fn build_router_core(
         bootstrap,
         ssh_key,
     ));
+    let app = app.layer(from_fn_with_state(auth.clone(), auth::refresh_api_cookie));
     let app = if let Some(web_root) = config.web_root {
         app.fallback_service(crate::web_assets::router(web_root))
     } else {

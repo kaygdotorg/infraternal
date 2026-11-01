@@ -109,6 +109,7 @@ impl RemoteStartup {
             },
             identity: Some(identity),
             roots: vec![issuer],
+            clock_health: Arc::new(crate::clock_health::ClockHealth::default()),
         })
     }
     fn fresh_service(
@@ -169,6 +170,7 @@ impl RemoteStartup {
             },
             identity: None,
             roots: vec![],
+            clock_health: Arc::new(crate::clock_health::ClockHealth::default()),
         })
     }
     fn legacy_service(
@@ -241,6 +243,7 @@ impl RemoteStartup {
             },
             identity: Some(Identity { certificate, key }),
             roots: vec![issuer],
+            clock_health: Arc::new(crate::clock_health::ClockHealth::default()),
         })
     }
 }

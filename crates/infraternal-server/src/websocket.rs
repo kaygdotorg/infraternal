@@ -526,7 +526,7 @@ async fn upgrade(
 
 /// Socket upgrades use exactly the same cookie shape and request-wide uniqueness as HTTP auth.
 pub(crate) fn session_cookie(headers: &HeaderMap) -> Option<&str> {
-    crate::auth::cookies::capability(headers, "__Host-infraternal=")
+    crate::auth::cookies::session(headers).map(|cookie| cookie.token)
 }
 
 // Plugin work has independent bounded admission; this loop dispatches shared control and terminal frames.

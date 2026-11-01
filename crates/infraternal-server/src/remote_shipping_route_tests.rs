@@ -122,6 +122,7 @@ async fn independent_review_configured_server_mounts_ca_unlock_routes() {
         },
         identity: Some(identity),
         roots: vec![issuer],
+        clock_health: Arc::new(crate::clock_health::ClockHealth::default()),
     };
     let (app, _, listeners, _, _) = build_router_core(
         config,

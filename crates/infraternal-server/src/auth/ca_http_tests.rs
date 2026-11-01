@@ -29,7 +29,8 @@ async fn http_fixture() -> (UnlockFixture, Router) {
         f.source.clone(),
         Arc::new(CaCopies::new(&f.root).unwrap()),
     ));
-    let router = crate::ca_http::router(f.auth.auth.clone(), authority);
+    let clock = Arc::new(crate::clock_health::ClockHealth::default());
+    let router = crate::ca_http::router(f.auth.auth.clone(), authority, clock);
     (f, router)
 }
 fn ca_request(
@@ -75,6 +76,34 @@ async fn ca_http_exact_origin_and_live_cookie_are_required() {
     }
     assert!(f.source.load().is_err());
 }
+
+#[tokio::test]
+async fn ca_http_status_includes_public_root_expiry_and_unknown_clock_state() {
+    let (f, app) = http_fixture().await;
+    let response = app
+        .oneshot(ca_request(
+            "/remote/ca/status",
+            Some(ORIGIN),
+            Some(&f.auth.session),
+            "{}".into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let status: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(status["locked"], true);
+    assert_eq!(status["initialized"], true);
+    let roots = status["roots"].as_array().expect("public root metadata");
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0]["generation"], 1);
+    assert!(roots[0]["fingerprint"].as_str().unwrap().starts_with("sha256:"));
+    assert!(roots[0]["not_after"].as_str().is_some());
+    assert_eq!(roots[0]["remaining_seconds"], Value::Null);
+    assert_eq!(roots[0]["warning_level"], "unknown");
+    assert!(status.get("private_key").is_none());
+}
+
 #[tokio::test]
 async fn ca_http_real_passkey_unlock_returns_only_lock_status_without_a_session_cookie() {
     let (mut f, app) = http_fixture().await;
@@ -367,6 +396,7 @@ async fn ca_status_distinguishes_initial_setup_from_locked_retained_trust() {
             Arc::new(crate::ca_memory::MemoryCaSource::unprovisioned(None)),
             Arc::new(CaCopies::new(&f.root).unwrap()),
         )),
+        Arc::new(crate::clock_health::ClockHealth::default()),
     );
     for (app, initialized) in [(retained, true), (fresh, false)] {
         let response = app
@@ -384,7 +414,7 @@ async fn ca_status_distinguishes_initial_setup_from_locked_retained_trust() {
                 .unwrap();
         assert_eq!(status["locked"], true);
         assert_eq!(status["initialized"], initialized);
-        assert_eq!(status.as_object().unwrap().len(), 2);
+        assert_eq!(status["roots"].as_array().unwrap().len(), usize::from(initialized));
     }
 }
 

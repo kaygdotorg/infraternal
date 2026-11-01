@@ -11,6 +11,8 @@ pub mod ca_administration;
 #[cfg(feature = "remote")]
 pub mod ca_bootstrap;
 #[cfg(feature = "remote")]
+pub mod ca_status;
+#[cfg(feature = "remote")]
 pub mod ca_copies;
 #[cfg(feature = "remote")]
 pub mod ca_handoff;
@@ -22,6 +24,8 @@ pub mod ca_http;
 pub mod ca_membership;
 #[cfg(feature = "remote")]
 pub mod ca_memory;
+#[cfg(feature = "remote")]
+pub mod clock_health;
 #[cfg(feature = "canvas")]
 pub mod canvas_store;
 #[cfg(feature = "cli-plugin")]

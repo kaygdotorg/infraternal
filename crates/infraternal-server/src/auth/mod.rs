@@ -16,6 +16,7 @@ mod devices;
 #[cfg(feature = "remote")]
 pub(crate) use devices::ApprovedMachineJoin;
 mod http;
+pub(crate) use http::refresh_api_cookie;
 mod recovery;
 mod recovery_rotation;
 mod security_settings;

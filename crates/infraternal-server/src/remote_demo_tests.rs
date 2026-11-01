@@ -546,6 +546,7 @@ async fn fixture_at_with_options(
             key: identity.key.clone(),
         }),
         roots: vec![root.clone()],
+        clock_health: Arc::new(crate::clock_health::ClockHealth::default()),
     };
     let (app, setup, listeners, _, _) = build_router_core(
         config,

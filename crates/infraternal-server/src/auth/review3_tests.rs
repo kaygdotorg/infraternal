@@ -553,8 +553,15 @@ async fn review3_completion_and_cleanup_are_transaction_bound() {
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::OK);
-        // A response may arrive after B replaces the shared cookie jar.
-        assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
+        // A delayed response may restore A's distinct cookie name, but B's
+        // higher login sequence still wins and only A's observed name is cleared.
+        let refreshed_a: Vec<_> = headers
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        assert!(refreshed_a[0].starts_with("__Host-infraternal-session-"));
+        assert!(refreshed_a.iter().any(|value| value.contains("Max-Age=0")));
         assert_eq!(
             http_post_json_with_cookie(
                 &app,
@@ -582,7 +589,7 @@ async fn review3_completion_and_cleanup_are_transaction_bound() {
             let (status, headers, _) =
                 http_post_json_with_cookie(&app, "session", json!({}), cookie).await;
             assert_eq!(status, axum::http::StatusCode::OK);
-            assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
+            assert!(headers.contains_key(axum::http::header::SET_COOKIE));
         }
         for action in ["unlock-finish", "logout"] {
             let (status, headers, _) =
@@ -599,7 +606,12 @@ async fn review3_completion_and_cleanup_are_transaction_bound() {
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::OK);
-        assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
+        assert!(
+            headers
+                .get_all(axum::http::header::SET_COOKIE)
+                .iter()
+                .any(|value| value.to_str().unwrap().contains("Max-Age=0"))
+        );
         // B remains active even if cleanup's response is delivered after this read.
         assert_eq!(
             http_post_json_with_cookie(&app, "session", json!({}), b)

@@ -304,13 +304,26 @@ then atomically consumes the pending flag and begins normal sliding expiry.
 Missing ids fail closed; mismatched, stale, replayed or expired ids return 401
 without activating/deleting another pending row or replacing its cookie.
 Failed-login cleanup sends `logout` with the same id and deletes only that exact
-pending login. Completion, authenticated action responses and logout never emit
-`Set-Cookie`, including on success: a response may arrive after another tab has
-replaced the shared cookie. Database expiry still slides; the browser cookie's
-30-day lifetime is measured from issuance and is not refreshed by identity reads.
-Ordinary authenticated logout still accepts `{}` and revokes its exact database
-row without clearing the shared cookie jar. Exact-Origin
-logout bypasses both admission layers, so exhaustion cannot prevent revocation.
+pending login. Each login stores a server-monotonic sequence with its session row.
+Its persistent host-only cookie is named
+`__Host-infraternal-session-<login-sequence>-<database-expiry>` and carries the
+opaque session token as its value. The cookie keeps Secure, HttpOnly,
+SameSite=Strict and Path=/, has no Domain, and uses an absolute `Expires` from
+the database row. Its name's sequence and expiry are ordering hints only; the
+live database row remains the authority. Older fixed-name cookies are accepted
+only during migration and are retired on a successful authenticated response.
+
+On a successful authenticated HTTP action, the server returns the cookie name
+for that session's current database deadline and expires older session-cookie
+names seen in the request. Login sequence sorts first, then the absolute expiry;
+Cookie-header order does not choose the session. A delayed reply can restore an
+older cookie name, but cannot replace a later login's distinct name. A response
+may clear only names it observed, so a delayed logout or login reply cannot
+remove a cookie issued after its request began. `unlock-finish` replaces the
+five-minute pending-cookie deadline with the session's 30-day sliding deadline.
+Logout expires the session names present in its request and revokes the matching
+database row. Exact-Origin logout bypasses both admission layers, so exhaustion
+cannot prevent revocation.
 
 Owner boundary (#29): this id binds a completion to its login; it is not a proof
 of DEK possession. A client holding its matching cookie/id can claim completion
