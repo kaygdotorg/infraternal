@@ -33,6 +33,8 @@ mod remote_peer_routes;
 #[cfg(feature = "transport")]
 pub mod remote_quic;
 #[cfg(feature = "transport")]
+pub mod remote_recovery;
+#[cfg(feature = "transport")]
 pub mod remote_renewal;
 #[cfg(feature = "transport")]
 pub mod remote_tls;

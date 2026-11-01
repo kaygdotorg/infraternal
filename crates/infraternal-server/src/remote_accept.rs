@@ -150,6 +150,7 @@ pub(crate) async fn tcp(
     hosts: RemoteHosts,
     store: EnrollmentStore,
     limits: Arc<Limits>,
+    recovery: Option<Arc<crate::remote_recovery::Service>>,
 ) {
     let idle = Arc::new(Semaphore::new(48));
     let idle_sources = Arc::new(SourceSlots::new(4));
@@ -197,6 +198,7 @@ pub(crate) async fn tcp(
         let hosts = hosts.for_local(socket.local_addr().ok().map(|address| address.ip()));
         let store = store.clone();
         let tls = tls.clone();
+        let recovery = recovery.clone();
         handshakes.spawn(async move {
             let mut byte = [0];
             if !matches!(
@@ -216,8 +218,21 @@ pub(crate) async fn tcp(
             let Some(permits) = permits else {
                 return;
             };
-            let Ok(connection) = remote_tls::accept(socket, &tls).await else {
-                return;
+            let connection = match recovery.as_ref() {
+                Some(service) => match remote_tls::accept_recovery_aware(socket, &tls).await {
+                    Ok(remote_tls::AcceptedConnection::Host(connection)) => connection,
+                    Ok(remote_tls::AcceptedConnection::Recovery(connection)) => {
+                        service.serve(connection.channel, address).await;
+                        return;
+                    }
+                    Err(_) => return,
+                },
+                None => {
+                    let Ok(connection) = remote_tls::accept(socket, &tls).await else {
+                        return;
+                    };
+                    connection
+                }
             };
             #[cfg(all(test, feature = "mesh-transport-proof"))]
             probe::record(probe::Kind::TlsHandshake, diagnostic_peer, 0);

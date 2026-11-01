@@ -472,13 +472,17 @@ async fn remote_router(
         enrollment_store.clone(),
     )?;
     let listeners = if let Some(remote) = remote.filter(|remote| remote.identity.is_some()) {
+        let source = remote.enrollment.source.clone();
+        let clock_health = remote.clock_health.clone();
         Some(
-            crate::remote_runtime::RemoteListeners::start(
+            crate::remote_runtime::RemoteListeners::start_with_recovery(
                 remote.enrollment.endpoint.endpoint,
                 &remote.identity.ok_or(ServerError::TlsConfiguration)?,
                 &remote.roots,
                 enrollment_store.clone(),
                 hosts.clone(),
+                source,
+                clock_health,
             )
             .await
             .map_err(ServerError::Listener)?,

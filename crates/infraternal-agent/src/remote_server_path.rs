@@ -92,7 +92,9 @@ fn current_credentials(
     let refreshed = renewal
         .map(crate::remote_renewal::RenewalIdentity::current)
         .transpose()?;
-    crate::remote_renewal::require_current(refreshed.as_ref().unwrap_or(&identity.identity))?;
+    if renewal.is_none() {
+        crate::remote_renewal::require_current(&identity.identity)?;
+    }
     Ok(refreshed)
 }
 
@@ -108,8 +110,7 @@ async fn connect(
     let enrolled_address = identity
         .endpoint
         .ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))?;
-    let refreshed = current_credentials(identity, renewal)?;
-    let credentials = refreshed.as_ref().unwrap_or(&identity.identity);
+    let mut refreshed = current_credentials(identity, renewal)?;
     let driver = DialRuntime::new();
     let path = PathSocket::from_udp(
         std::net::UdpSocket::bind(if enrolled_address.is_ipv6() {
@@ -129,15 +130,40 @@ async fn connect(
         path.clone(),
         driver.runtime(),
     )?;
-    endpoint.set_default_client_config(remote_quic::client_config(credentials, &identity.roots)?);
-    let connected = if kind == ServerLinkKind::Mesh {
-        // Mutual TLS keeps the enrolled SAN and identity unchanged. Application
-        // proof below completes before any Hello can replace the server actor.
-        // The shared dial already owns the five-second handshake deadline.
-        Connected::Quic(super::quic_connect(&endpoint, identity).await?)
-    } else {
-        let tls = remote_tls::client_config(credentials, &identity.roots)?;
-        dial_preferred(&endpoint, identity, &tls).await?
+    let mut recovery_attempted = false;
+    let connected = loop {
+        let credentials = refreshed.as_ref().unwrap_or(&identity.identity);
+        endpoint.set_default_client_config(remote_quic::client_config(credentials, &identity.roots)?);
+        let attempt = if kind == ServerLinkKind::Mesh {
+            // Mutual TLS keeps the enrolled SAN and identity unchanged. Application
+            // proof below completes before any Hello can replace the server actor.
+            // The shared dial already owns the five-second handshake deadline.
+            super::quic_connect(&endpoint, identity)
+                .await
+                .map(Connected::Quic)
+        } else {
+            let tls = remote_tls::client_config(credentials, &identity.roots)?;
+            dial_preferred(&endpoint, identity, &tls).await
+        };
+        match attempt {
+            Ok(connection) => break connection,
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    && !recovery_attempted
+                    && let Some(renewal) = renewal =>
+            {
+                recovery_attempted = true;
+                if renewal
+                    .recover(identity.endpoint, &identity.server_name)
+                    .await
+                    .is_err()
+                {
+                    return Err(error);
+                }
+                refreshed = current_credentials(identity, Some(renewal))?;
+            }
+            Err(error) => return Err(error),
+        }
     };
     let (endpoint, driver, path) = if matches!(&connected, Connected::Tcp(_)) {
         drop(endpoint);

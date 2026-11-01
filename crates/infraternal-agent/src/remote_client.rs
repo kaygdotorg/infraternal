@@ -269,14 +269,21 @@ async fn run_inner(
         #[cfg(any(test, feature = "native-streams"))]
         let supplied = supplied.clone();
         async move {
-            // Invalid enrollment creates no local state or plugin work. A clock or
-            // credential failure still leaves the retry owner alive for recovery.
+            // Host time is only a hint: try recovery early when it calls a leaf
+            // expired, but still let ordinary mTLS and the server's clock decide.
             if let Some(renewal) = renewal {
                 let current = trace_attempt("renewal-current", renewal.current())?;
-                trace_attempt(
+                if let Err(error) = trace_attempt(
                     "certificate-valid",
                     crate::remote_renewal::require_current(&current),
-                )?;
+                ) {
+                    if error.kind() != io::ErrorKind::PermissionDenied {
+                        return Err(error);
+                    }
+                    // A denial may mean the server clock still considers this
+                    // leaf current, so a refused recovery never blocks mTLS.
+                    let _ = renewal.recover(identity.endpoint, &identity.server_name).await;
+                }
             } else {
                 trace_attempt(
                     "certificate-valid",
@@ -316,13 +323,24 @@ async fn run_inner(
                     .await,
                 );
             }
-            trace_attempt(
+            let result = trace_attempt(
                 "server-path",
                 Box::pin(server_path::run(
                     identity, state, renewal, plugins, connected,
                 ))
                 .await,
-            )
+            );
+            // A host clock behind server time can misclassify an expired leaf as
+            // current. Try recovery only after an authentication failure; network
+            // failures keep the existing retry path and do not trigger signer work.
+            if result
+                .as_ref()
+                .is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied)
+                && let Some(renewal) = renewal
+            {
+                let _ = renewal.recover(identity.endpoint, &identity.server_name).await;
+            }
+            result
         }
     }))
     .await
@@ -350,12 +368,26 @@ async fn dial_preferred(
         biased;
         result = &mut quic => match result {
             Ok(connection) => Ok(Connected::Quic(connection)),
-            Err(_) => fallback.await.map(Connected::Tcp),
+            Err(quic_error) => fallback
+                .await
+                .map(Connected::Tcp)
+                .map_err(|fallback_error| prefer_auth_error(quic_error, fallback_error)),
         },
         result = &mut fallback => match result {
             Ok(connection) => Ok(Connected::Tcp(connection)),
-            Err(_) => quic.await.map(Connected::Quic),
+            Err(fallback_error) => quic
+                .await
+                .map(Connected::Quic)
+                .map_err(|quic_error| prefer_auth_error(fallback_error, quic_error)),
         },
+    }
+}
+
+fn prefer_auth_error(first: io::Error, second: io::Error) -> io::Error {
+    if first.kind() == io::ErrorKind::PermissionDenied {
+        first
+    } else {
+        second
     }
 }
 
@@ -461,7 +493,12 @@ async fn quic_connect(
     )
     .await
     .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
-    .map_err(io::Error::other)
+    .map_err(|error| match error {
+        quinn::ConnectionError::TransportError(_) => {
+            io::Error::from(io::ErrorKind::PermissionDenied)
+        }
+        error => io::Error::other(error),
+    })
 }
 
 fn client_greeting(renewal: bool, identity_rotation: bool) -> infraternal_protocol::Frame<'static> {

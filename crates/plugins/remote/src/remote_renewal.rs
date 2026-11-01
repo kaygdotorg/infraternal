@@ -137,6 +137,43 @@ impl RenewalIdentity {
             key: identity.key.clone(),
         })
     }
+    /// Recover an expired certificate without presenting it to the normal mTLS listener.
+    /// The response is checked against pinned roots and published before reconnect can use it.
+    /// # Errors
+    /// Refuses unavailable or denied recovery, invalid certificate metadata, changed identity,
+    /// transport failure, or failed durable publication.
+    pub async fn recover(&self, address: std::net::SocketAddr, server_name: &str) -> io::Result<()> {
+        let current = self.current()?;
+        let certificate = crate::remote_recovery::exchange(
+            address,
+            server_name,
+            &current,
+            &self.roots,
+        )
+        .await?;
+        let verify_at = epoch_seconds(certificate.not_before())?;
+        let mut identity = self.identity.try_write().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => io::Error::from(io::ErrorKind::WouldBlock),
+            std::sync::TryLockError::Poisoned(_) => denied(),
+        })?;
+        if identity
+            .certificate
+            .digest(MessageDigest::sha256())
+            .map_err(|_| denied())?
+            .as_ref()
+            != current
+                .certificate
+                .digest(MessageDigest::sha256())
+                .map_err(|_| denied())?
+                .as_ref()
+        {
+            return Err(denied());
+        }
+        validate_at(&certificate, &identity, &self.roots, Some(verify_at), true)?;
+        self.publisher.publish(&certificate)?;
+        identity.certificate = certificate;
+        Ok(())
+    }
     /// Only the pinned server can invoke these two control actions.
     /// # Errors
     /// Malformed/oversized input, altered host/key, invalid issuer/purpose/validity or failed publication.
@@ -199,6 +236,16 @@ impl RenewalIdentity {
 }
 
 fn validate(certificate: &X509, identity: &Identity, roots: &[X509]) -> io::Result<()> {
+    validate_at(certificate, identity, roots, None, false)
+}
+
+fn validate_at(
+    certificate: &X509,
+    identity: &Identity,
+    roots: &[X509],
+    verify_at: Option<i64>,
+    recovering: bool,
+) -> io::Result<()> {
     let mut trust = X509StoreBuilder::new().map_err(|_| denied())?;
     for issuer in roots {
         trust.add_cert(issuer.clone()).map_err(|_| denied())?;
@@ -206,6 +253,11 @@ fn validate(certificate: &X509, identity: &Identity, roots: &[X509]) -> io::Resu
     trust
         .set_purpose(openssl::x509::X509PurposeId::SSL_CLIENT)
         .map_err(|_| denied())?;
+    if let Some(verify_at) = verify_at {
+        let mut parameters = openssl::x509::verify::X509VerifyParam::new().map_err(|_| denied())?;
+        parameters.set_time(verify_at);
+        trust.set_param(&parameters).map_err(|_| denied())?;
+    }
     let chain = openssl::stack::Stack::new().map_err(|_| denied())?;
     if !X509StoreContext::new()
         .map_err(|_| denied())?
@@ -234,10 +286,20 @@ fn validate(certificate: &X509, identity: &Identity, roots: &[X509]) -> io::Resu
             .secs
             != 0
         || certificate.not_after() <= identity.certificate.not_after()
+        || (recovering && certificate.not_before() < identity.certificate.not_after())
     {
         return Err(denied());
     }
     Ok(())
+}
+
+fn epoch_seconds(time: &openssl::asn1::Asn1TimeRef) -> io::Result<i64> {
+    let epoch = Asn1Time::from_unix(0).map_err(|_| denied())?;
+    let difference = time.diff(epoch.as_ref()).map_err(|_| denied())?;
+    i64::from(difference.days)
+        .checked_mul(86_400)
+        .and_then(|days| days.checked_add(i64::from(difference.secs)))
+        .ok_or_else(denied)
 }
 fn host_uri(certificate: &X509) -> io::Result<String> {
     let names = certificate.subject_alt_names().ok_or_else(denied)?;

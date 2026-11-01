@@ -88,6 +88,8 @@ mod remote_mesh_revocation_tests;
 #[cfg(feature = "remote")]
 mod remote_renewal;
 #[cfg(feature = "remote")]
+mod remote_recovery;
+#[cfg(feature = "remote")]
 mod remote_runtime;
 #[cfg(feature = "remote")]
 mod remote_standby;
