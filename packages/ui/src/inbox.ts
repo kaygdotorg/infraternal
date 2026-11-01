@@ -20,6 +20,7 @@
  * or restarts what the person has open.
  */
 import { ICONS } from "./icons";
+import { createSidebarCard } from "./sidebar-card";
 
 export interface InboxAction {
   label: string;
@@ -83,28 +84,21 @@ const svg = (inner: string, className: string): SVGSVGElement => {
 let serial = 0;
 
 export function createInbox(options: InboxOptions): InboxController {
-  const card = document.createElement("section");
-  card.className = "ui-inbox";
-  card.hidden = true;
-  card.dataset.open = "false";
-  card.setAttribute("aria-label", "Inbox");
-  const header = document.createElement("div");
-  header.className = "ui-inbox-header";
-  const heading = document.createElement("span");
-  heading.className = "ui-inbox-heading";
-  heading.textContent = "Inbox";
+  const shell = createSidebarCard({
+    parent: options.parent, before: options.before ?? null, label: "Inbox", className: "ui-inbox",
+    onHidden: () => { rows.clear(); list.replaceChildren(); expanded = undefined; },
+  });
+  const card = shell.root;
   const badge = document.createElement("span");
   badge.className = "ui-inbox-count";
-  header.append(heading, badge);
+  shell.header.append(badge);
   const list = document.createElement("div");
   list.className = "ui-inbox-list";
-  card.append(header, list);
-  options.parent.insertBefore(card, options.before ?? null);
+  card.append(list);
 
   const sources = new Map<string, readonly InboxItem[]>();
   const rows = new Map<string, Row>();
   let expanded: string | undefined;
-  let hideTimer = 0;
   let shown = 0;
 
   const setExpanded = (id: string | undefined): void => {
@@ -194,18 +188,10 @@ export function createInbox(options: InboxOptions): InboxController {
       });
       setExpanded(expanded);
       badge.textContent = String(items.length);
-      window.clearTimeout(hideTimer);
-      if (card.hidden) {
-        card.hidden = false;
-        card.dataset.open = "false";
-        requestAnimationFrame(() => { if (!card.hidden) card.dataset.open = "true"; });
-      } else card.dataset.open = "true";
-    } else if (!card.hidden) {
-      card.dataset.open = "false";
+      shell.show();
+    } else {
       // Keep the last content while it fades out.
-      hideTimer = window.setTimeout(() => {
-        if (card.dataset.open === "false") { card.hidden = true; rows.clear(); list.replaceChildren(); expanded = undefined; }
-      }, 190);
+      shell.hide();
     }
     if (was !== shown) options.onCount?.(shown);
   };
@@ -213,6 +199,6 @@ export function createInbox(options: InboxOptions): InboxController {
   return {
     set(source, items) { if (items.length) sources.set(source, items); else sources.delete(source); render(); },
     count: () => shown,
-    dispose() { window.clearTimeout(hideTimer); card.remove(); sources.clear(); rows.clear(); },
+    dispose() { shell.dispose(); sources.clear(); rows.clear(); },
   };
 }

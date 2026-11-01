@@ -51,6 +51,7 @@ await Promise.all([
   cp("mesh.css", `${dist}/mesh.css`),
   cp("sessions.css", `${dist}/sessions.css`),
   cp("addhost.css", `${dist}/addhost.css`),
+  cp("version.css", `${dist}/version.css`),
   cp("../../packages/ui/styles.css", `${dist}/ui.css`),
   cp("fonts", `${dist}/fonts`, { recursive: true, filter: (source) => !source.endsWith(".sh") && !source.endsWith(".py") }),
   cp("node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", `${dist}/fonts/Geist-Variable.woff2`),

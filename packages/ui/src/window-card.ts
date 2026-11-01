@@ -20,6 +20,7 @@
  *   card.dispose()
  */
 import { createLockToggle, trackLockReveal, type LockSource, type LockToggle } from "./lock-toggle";
+import { createConnectionIndicator, type ConnectionIndicator, type ConnectionIndicatorState } from "./connection-indicator";
 import type { AnchoredPopover } from "./anchored-popover";
 import type { WindowMenuItem } from "./window-menu.on-demand";
 
@@ -66,8 +67,25 @@ export interface WindowCard {
   setActive(active: boolean): void;
   setTitle(title: WindowTitle): void;
   setStatus(status: WindowStatus): void;
+  /**
+   * The window's link in the shared connection indicator (#212): the exact state, an optional plain reason shown after
+   * "Offline.", and how many typed keys are kept for sending once the link is back. `setStatus` sets the indicator's
+   * default from its three states; a caller that knows more (slow, resumed, kept keys) says so here after it.
+   */
+  setConnection(state: ConnectionIndicatorState, detail?: string, held?: number): void;
   setIcon(svg: string): void;
   dispose(): void;
+}
+
+/**
+ * The browser-to-server round trip is one number for the whole page, so every window's indicator reads the same one: a link
+ * above the indicator's threshold reads as slow in all of them at once. A card made later starts from the latest number.
+ */
+const indicators = new Set<ConnectionIndicator>();
+let sharedRoundTrip: number | undefined;
+export function setLinkRoundTrip(ms: number | undefined): void {
+  sharedRoundTrip = ms;
+  for (const indicator of indicators) indicator.setRoundTrip(ms);
 }
 
 const STATUS_LABEL: Record<WindowStatus, string> = { live: "connected", connecting: "reconnecting", offline: "offline", none: "" };
@@ -85,7 +103,13 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
   pill.type = "button";
   pill.className = "ui-window-pill";
   pill.setAttribute("aria-haspopup", "dialog");
-  pill.innerHTML = `<span class="ui-window-mark"></span><span class="ui-window-title"><span class="ui-window-user"></span><span class="ui-window-host"></span></span><span class="ui-window-session"></span><span class="ui-window-dot" aria-hidden="true"></span>`;
+  pill.innerHTML = `<span class="ui-window-mark"></span><span class="ui-window-title"><span class="ui-window-user"></span><span class="ui-window-host"></span></span><span class="ui-window-session"></span>`;
+  // One indicator per window, in the place the status dot had: the same small icon as the top pill, with its warm tooltip.
+  const conn: ConnectionIndicator = createConnectionIndicator();
+  conn.root.classList.add("ui-window-conn");
+  pill.append(conn.root);
+  indicators.add(conn);
+  conn.setRoundTrip(sharedRoundTrip);
   const mark = pill.querySelector<HTMLElement>(".ui-window-mark")!;
   const user = pill.querySelector<HTMLElement>(".ui-window-user")!;
   const host = pill.querySelector<HTMLElement>(".ui-window-host")!;
@@ -152,6 +176,7 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
 
   let title = options.title;
   let status: WindowStatus = options.status ?? "live";
+  let shownStatus: WindowStatus | undefined;
   const label = (): void => {
     const name = `${title.user ? `${title.user}@` : ""}${title.host}${title.session ? `, ${title.session}` : ""}`;
     root.setAttribute("aria-label", options.label ?? name);
@@ -168,6 +193,10 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
   const setStatus = (next: WindowStatus): void => {
     status = next;
     root.dataset.status = next;
+    // The indicator follows the three states unless the caller then says more with `setConnection`. A repaint with the
+    // same status must not undo a richer state the caller set (slow, resumed, kept keys), so it only moves on a change.
+    if (next !== "none" && next !== shownStatus) conn.set(next === "live" ? "connected" : next === "connecting" ? "reconnecting" : "offline");
+    shownStatus = next;
     label();
   };
   const setIcon = (svg: string): void => {
@@ -197,8 +226,11 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
     },
     setTitle,
     setStatus,
+    setConnection: (state: ConnectionIndicatorState, detail?: string, held?: number): void => conn.set(state, detail, held),
     setIcon,
     dispose() {
+      indicators.delete(conn);
+      conn.dispose();
       stopReveal();
       lock.dispose();
       menu?.close("keyboard");

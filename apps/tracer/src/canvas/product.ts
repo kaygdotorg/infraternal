@@ -15,6 +15,7 @@ import { mountToast } from "../../../../packages/ui/src/toast";
 import { ICON_INFO } from "../../../../packages/ui/src/icons";
 import { onDemand } from "../on-demand";
 import { ensureHostMarks, hostPlatformFromOs, type HostPlatform } from "../../../../packages/ui/src/host-icons";
+import { setLinkRoundTrip } from "../../../../packages/ui/src/window-card";
 import { ConnectionPool, MuxConnection } from "../connection";
 import { isCanonicalUuid } from "../identifiers";
 import type { CoreScreen } from "../core-screen";
@@ -38,6 +39,7 @@ import { offerMeshView } from "./mesh/offer";
 import { createLiveSessions, type LiveSessions } from "./sessions/live";
 import { createLiveInventory } from "./sessions/live-inventory";
 import { teachOnce } from "../hints";
+import { buildVersion } from "../build-version";
 import type { DetailsSourceLoader } from "./windows/details-source";
 import { BUILTIN_SECTIONS, buildSettingsView } from "./views/settings";
 
@@ -95,7 +97,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   });
   // The details source is loaded on a pill press, so keep the last sample for its first read.
   let roundTrip: number | undefined;
-  const offRoundTrip = connection.onRoundTrip((ms) => { roundTrip = ms; core.setRoundTrip(ms); });
+  const offRoundTrip = connection.onRoundTrip((ms) => { roundTrip = ms; core.setRoundTrip(ms); setLinkRoundTrip(ms); });
   // More windows than one socket takes (the server allows 32 attachments per socket) open on further sockets.
   const pool = new ConnectionPool(connection);
   const inventory = createLiveInventory({ accountId: options.accountId, host: options.host.name });
@@ -288,14 +290,23 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     }, () => { hostsStarted = false; });
   };
   const offHostWelcome = connection.onWelcome(() => { if (hostsReady) startHosts(); });
+  // The version pill and its panel join the sidebar footer once the canvas is up (#216); the first screen carries none of it (D188).
+  let versionArea: { dispose(): void } | undefined;
+  const build = buildVersion();
+  void onDemand(() => import("./version/mount.on-demand"))
+    .then((m) => m.mountProductVersionArea(core, { version: build.short, commit: build.full, hosts: () => sessions.hosts().map((host) => host.name) }))
+    .then((area) => { if (disposed) area?.dispose(); else versionArea = area; })
+    .catch(() => { /* the pill is news, not a dependency */ });
   return {
     canvas, sessions, connection,
     dispose() {
+      versionArea?.dispose();
       canvas.flush();
       offLayout(); offPending?.(); pendingNotice.dispose();
       window.removeEventListener("pointerup", dropped);
       window.removeEventListener("pointercancel", dropped);
       offRoundTrip();
+      setLinkRoundTrip(undefined);
       disposed = true;
       offHosts?.();
       offHostWelcome();

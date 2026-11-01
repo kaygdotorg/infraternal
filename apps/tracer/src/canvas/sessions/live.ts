@@ -27,7 +27,7 @@ import { createStatusRelay } from "../status";
 import type { WindowModel } from "../model/types";
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import { onDemand, whenIdle } from "../../on-demand";
-import type { HostEntry, SessionBinding, SessionService } from "./adapter";
+import type { HostEntry, LinkInfo, SessionBinding, SessionService } from "./adapter";
 import type { ScreenCache } from "./screen-cache.on-demand";
 
 export interface LiveSessionsOptions {
@@ -103,6 +103,12 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     /** The host link missed a reply but is kept (#234): the pill reads reconnecting until it answers or retires. */
     private doubted = false;
     get connected(): boolean { return this.connectedNow && !this.doubted; }
+    // The finer state of the link for the window's connection indicator (adapter.ts `LinkInfo`).
+    private everConnected = false;
+    private resumedAt: number | undefined;
+    private approximateAt: number | undefined;
+    private heldKeys = 0;
+    get link(): LinkInfo { return { everConnected: this.everConnected, resumedAt: this.resumedAt, approximateAt: this.approximateAt, heldKeys: this.heldKeys }; }
     private setDoubted(doubted: boolean): void {
       if (doubted === this.doubted) return;
       const before = this.connected;
@@ -128,7 +134,8 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       const before = this.connected;
       this.connectedNow = connected;
       // A dropped or retargeted link replaces the doubt; a fresh attach starts undoubted.
-      if (!connected) this.doubted = false;
+      if (!connected) { this.doubted = false; this.approximateAt = undefined; this.resumedAt = undefined; }
+      else { if (this.everConnected) this.resumedAt = performance.now(); this.everConnected = true; }
       if (before !== this.connected) this.connectionChanged?.();
     }
     /** Marks for the switch timeline (`sw:<n>:<step>`); a few microseconds each, read by the real specs. */
@@ -202,6 +209,8 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         onAttached: (resumed, terminal) => { this.setConnected(true, resumed ? 300 : 0); this.mark("attached"); if (!firstSettled) window.setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(settle)), 1000); if (first) options.firstHooks?.onAttached?.(resumed, terminal); },
         onPaintedOutput: (bytes, at, sequence) => { if (!firstSettled && this.client?.readScreenText().trim()) settle(); if (!this.painted) { this.painted = true; this.mark("painted"); this.endGhost(); } if (first) options.firstHooks?.onPaintedOutput?.(bytes, at, sequence); },
         onLinkDoubt: (doubted) => this.setDoubted(doubted),
+        onApproximate: () => { this.approximateAt = performance.now(); this.connectionChanged?.(); },
+        onInputHeld: (keys) => { if (keys !== this.heldKeys) { this.heldKeys = keys; this.connectionChanged?.(); } },
         onDisconnected: (forced) => { this.setConnected(false); if (first) options.firstHooks?.onDisconnected?.(forced); },
         onExited: (status) => { this.exited?.(status); if (first) options.firstHooks?.onExited?.(status); },
         // The ghost of the last screen sits in the host element, which the ended state hides.
