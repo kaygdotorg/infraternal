@@ -57,7 +57,21 @@ window.draw=draw;draw(0);
 </script>`;
 
 await mkdir(out, { recursive: true });
-const browser = await chromium.launch();
+const appWindowBrowser = process.env.TRACER_APPWIN_BROWSER;
+const chromeExecutable = process.env.TRACER_CHROME_EXECUTABLE;
+if (appWindowBrowser !== undefined && appWindowBrowser !== "chrome") {
+  throw new Error("TRACER_APPWIN_BROWSER must be unset or chrome");
+}
+if (chromeExecutable !== undefined && appWindowBrowser !== "chrome") {
+  throw new Error("TRACER_CHROME_EXECUTABLE requires TRACER_APPWIN_BROWSER=chrome");
+}
+// Match the fixture renderer to Playwright's configured browser so it does not
+// fall back to the bundled Chromium when the test needs a proprietary codec.
+const browser = await chromium.launch({
+  ...(appWindowBrowser === "chrome"
+    ? chromeExecutable === undefined ? { channel: "chrome" } : { executablePath: chromeExecutable }
+    : {}),
+});
 try {
   for (const app of apps) for (const [shape, [w, h]] of Object.entries(shapes)) {
     const dir = join(out, `.frames-${app}-${shape}`);
