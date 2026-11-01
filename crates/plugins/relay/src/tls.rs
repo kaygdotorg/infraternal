@@ -29,12 +29,15 @@ pub const IDLE: Duration = Duration::from_secs(3);
 /// at least 1454. A 1500-byte IPv6 path (1452) is two bytes short: such pairs
 /// need a lower route MTU, which the low-MTU slice adds.
 const MAX_UDP_PAYLOAD: u16 = 1472;
-/// Received DATAGRAM bytes buffered per connection before the oldest is
-/// dropped. Forwarding reads promptly; a deep buffer would only add latency.
-const DATAGRAM_RECEIVE: usize = 512 * 1024;
-/// Queued outgoing DATAGRAM bytes per connection; QUIC drops the oldest when
-/// full, which is what a congested UDP path does to `WireGuard` anyway.
-const DATAGRAM_SEND: usize = 256 * 1024;
+/// Node-side receive buffer. The node's relay reader drains it independently.
+const CLIENT_DATAGRAM_RECEIVE: usize = 512 * 1024;
+/// Node-side send buffer; callers retain the existing congestion allowance.
+const CLIENT_DATAGRAM_SEND: usize = 256 * 1024;
+/// Relay-side receive buffer; its reader forwards promptly, so a deep queue
+/// would add latency without improving delivery.
+const SERVER_DATAGRAM_RECEIVE: usize = 8 * 1024;
+/// Relay-side send ceiling. Shared queue budgets bound aggregate retained data.
+const SERVER_DATAGRAM_SEND: usize = 128 * 1024;
 
 /// One end's certificate chain and key, plus the deployment CA roots.
 pub struct Credentials {
@@ -58,11 +61,15 @@ fn roots(certificates: &[CertificateDer<'static>]) -> io::Result<Arc<rustls::Roo
     Ok(Arc::new(roots))
 }
 
-fn transport(incoming_streams: u32) -> Arc<quinn::TransportConfig> {
+fn transport(
+    incoming_streams: u32,
+    datagram_receive: usize,
+    datagram_send: usize,
+) -> Arc<quinn::TransportConfig> {
     let mut config = quinn::TransportConfig::default();
     config
-        .datagram_receive_buffer_size(Some(DATAGRAM_RECEIVE))
-        .datagram_send_buffer_size(DATAGRAM_SEND)
+        .datagram_receive_buffer_size(Some(datagram_receive))
+        .datagram_send_buffer_size(datagram_send)
         .keep_alive_interval(Some(KEEP_ALIVE))
         .max_idle_timeout(Some(quinn::IdleTimeout::from(quinn::VarInt::from_u32(
             u32::try_from(IDLE.as_millis()).unwrap_or(3_000),
@@ -100,7 +107,7 @@ pub fn server_config(credentials: Credentials) -> io::Result<quinn::ServerConfig
     tls.alpn_protocols = vec![ALPN.to_vec()];
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).map_err(|_| denied())?;
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
-    config.transport_config(transport(1));
+    config.transport_config(transport(1, SERVER_DATAGRAM_RECEIVE, SERVER_DATAGRAM_SEND));
     Ok(config)
 }
 
@@ -120,7 +127,7 @@ pub fn client_config(credentials: Credentials) -> io::Result<quinn::ClientConfig
     tls.enable_early_data = false;
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|_| denied())?;
     let mut config = quinn::ClientConfig::new(Arc::new(crypto));
-    config.transport_config(transport(0));
+    config.transport_config(transport(0, CLIENT_DATAGRAM_RECEIVE, CLIENT_DATAGRAM_SEND));
     Ok(config)
 }
 

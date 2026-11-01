@@ -6,8 +6,9 @@
 //! the same id and forwards each frame unchanged to the other end, so
 //! forwarding is one table read and one `send_datagram` with no copy.
 //!
-//! Everything is bounded: hosts, requests per host, the control writer queue
-//! and the DATAGRAM buffers (see `tls`). A host that reconnects replaces its
+//! Everything is bounded: hosts, requests per host, the control writer queue,
+//! per-connection QUIC buffers (see `tls`) and shared DATAGRAM forwarding
+//! budgets. A host that reconnects replaces its
 //! previous connection; its links end and form again from the new requests.
 //! The same UDP port answers authenticated address probes (`probe`), which are
 //! taken out in front of quinn so a relay needs one port.
@@ -24,13 +25,20 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::{
-        Arc, RwLock,
-        atomic::{AtomicU64, Ordering},
+        Arc, RwLock, Weak,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     task::{Context, Poll, ready},
     time::Duration,
 };
 use tokio::sync::mpsc;
+
+const QUEUE_ACCOUNTING_UNIT_BYTES: usize = 1024;
+const QUEUE_ENTRY_OVERHEAD_BYTES: usize = 128;
+const GLOBAL_FORWARD_QUEUE_BYTES: usize = 64 * 1024 * 1024;
+const PAIR_FORWARD_QUEUE_BYTES: usize = 256 * 1024;
+const GLOBAL_FORWARD_QUEUE_UNITS: usize = GLOBAL_FORWARD_QUEUE_BYTES / QUEUE_ACCOUNTING_UNIT_BYTES;
+const PAIR_FORWARD_QUEUE_UNITS: usize = PAIR_FORWARD_QUEUE_BYTES / QUEUE_ACCOUNTING_UNIT_BYTES;
 
 /// Resource bounds; every table and queue in the relay has one.
 #[derive(Clone, Copy, Debug)]
@@ -81,8 +89,103 @@ struct Host {
     wants: HashSet<HostId>,
 }
 
+/// A nonblocking byte budget. Reservations travel with queued `Bytes` owners,
+/// so a capacity limit reflects memory still retained by Quinn's send queue.
+struct QueueBudget {
+    max_units: usize,
+    queued_units: AtomicUsize,
+}
+
+impl QueueBudget {
+    fn new(max_units: usize) -> Self {
+        Self {
+            max_units,
+            queued_units: AtomicUsize::new(0),
+        }
+    }
+
+    fn reserve(self: &Arc<Self>, units: usize) -> Option<QueueReservation> {
+        if units == 0 {
+            return None;
+        }
+        let mut queued = self.queued_units.load(Ordering::Relaxed);
+        loop {
+            let next = queued.checked_add(units)?;
+            if next > self.max_units {
+                return None;
+            }
+            match self.queued_units.compare_exchange_weak(
+                queued,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Some(QueueReservation {
+                        budget: self.clone(),
+                        units,
+                    });
+                }
+                Err(observed) => queued = observed,
+            }
+        }
+    }
+}
+
+/// Releases a budget reservation when its forwarded datagram is no longer queued.
+struct QueueReservation {
+    budget: Arc<QueueBudget>,
+    units: usize,
+}
+
+impl Drop for QueueReservation {
+    fn drop(&mut self) {
+        let previous = self
+            .budget
+            .queued_units
+            .fetch_sub(self.units, Ordering::Relaxed);
+        debug_assert!(previous >= self.units, "queue reservation released twice");
+    }
+}
+
+/// Adds budget ownership to an existing payload without copying its bytes.
+struct ForwardedDatagram {
+    payload: bytes::Bytes,
+    _global: QueueReservation,
+    _pair: QueueReservation,
+}
+
+impl AsRef<[u8]> for ForwardedDatagram {
+    fn as_ref(&self) -> &[u8] {
+        self.payload.as_ref()
+    }
+}
+
+fn queue_units(datagram_len: usize) -> Option<usize> {
+    datagram_len
+        .checked_add(QUEUE_ENTRY_OVERHEAD_BYTES)?
+        .checked_add(QUEUE_ACCOUNTING_UNIT_BYTES - 1)
+        .map(|rounded| rounded / QUEUE_ACCOUNTING_UNIT_BYTES)
+}
+
+fn queue_forward_datagram(
+    global: &Arc<QueueBudget>,
+    pair: &Arc<QueueBudget>,
+    payload: bytes::Bytes,
+) -> Option<bytes::Bytes> {
+    let units = queue_units(payload.len())?;
+    let pair_reservation = pair.reserve(units)?;
+    let global_reservation = global.reserve(units)?;
+    Some(bytes::Bytes::from_owner(ForwardedDatagram {
+        payload,
+        _global: global_reservation,
+        _pair: pair_reservation,
+    }))
+}
+
 struct Link {
     ends: [(HostId, quinn::Connection); 2],
+    datagrams: Arc<QueueBudget>,
 }
 
 #[derive(Default)]
@@ -90,6 +193,7 @@ struct Table {
     hosts: HashMap<HostId, Host>,
     links: HashMap<LinkId, Link>,
     pairs: HashMap<(HostId, HostId), LinkId>,
+    retired_datagrams: HashMap<(HostId, HostId), Weak<QueueBudget>>,
     next: u32,
 }
 
@@ -113,12 +217,33 @@ impl Table {
         }
     }
 
+    fn datagrams_for_pair(&mut self, key: (HostId, HostId)) -> Arc<QueueBudget> {
+        self.retired_datagrams
+            .remove(&key)
+            .and_then(|budget| budget.upgrade())
+            .unwrap_or_else(|| Arc::new(QueueBudget::new(PAIR_FORWARD_QUEUE_UNITS)))
+    }
+
+    /// Retain only a weak lookup while old QUIC datagrams still own this pair's budget.
+    fn retire_datagrams(&mut self, key: (HostId, HostId), budget: &Arc<QueueBudget>) {
+        if Arc::strong_count(budget) <= 1 {
+            return;
+        }
+        self.retired_datagrams.insert(key, Arc::downgrade(budget));
+        if self.retired_datagrams.len() > GLOBAL_FORWARD_QUEUE_UNITS {
+            self.retired_datagrams
+                .retain(|_, budget| budget.strong_count() > 0);
+        }
+    }
+
     /// Remove the link between two hosts, telling each end that is still current.
     fn unlink(&mut self, a: HostId, b: HostId) {
-        let Some(id) = self.pairs.remove(&pair(a, b)) else {
+        let key = pair(a, b);
+        let Some(id) = self.pairs.remove(&key) else {
             return;
         };
         if let Some(link) = self.links.remove(&id) {
+            self.retire_datagrams(key, &link.datagrams);
             for (index, (host, connection)) in link.ends.iter().enumerate() {
                 let peer = link.ends[1 - index].0;
                 if let Some(entry) = self.current(*host, connection.stable_id()) {
@@ -142,9 +267,10 @@ impl Table {
             (a, first.connection.clone()),
             (b, second.connection.clone()),
         ];
+        let datagrams = self.datagrams_for_pair(pair(a, b));
         let id = self.allocate();
         self.pairs.insert(pair(a, b), id);
-        self.links.insert(id, Link { ends });
+        self.links.insert(id, Link { ends, datagrams });
         if let Some(entry) = self.hosts.get(&a) {
             notify(entry, Notice::Linked { peer: b, id });
         }
@@ -175,6 +301,7 @@ struct Shared {
     table: RwLock<Table>,
     probes: RwLock<HashMap<u64, ProbeKey>>,
     counters: Counters,
+    datagrams: Arc<QueueBudget>,
     limits: Limits,
     admission: Admission,
 }
@@ -267,19 +394,25 @@ impl Shared {
         let target = table.links.get(&id).and_then(|link| {
             let [(_, first), (_, second)] = &link.ends;
             if first.stable_id() == connection {
-                Some(second)
+                Some((second, &link.datagrams))
             } else if second.stable_id() == connection {
-                Some(first)
+                Some((first, &link.datagrams))
             } else {
                 None
             }
         });
         // A frame for a link the sender is not part of, or one that ended,
         // is dropped: forwarding is never a way to reach an unlinked host.
-        match target.map(|target| target.send_datagram(datagram)) {
-            Some(Ok(())) => self.counters.forwarded.fetch_add(1, Ordering::Relaxed),
-            _ => self.counters.dropped.fetch_add(1, Ordering::Relaxed),
+        let forwarded = target.is_some_and(|(target, pair_budget)| {
+            queue_forward_datagram(&self.datagrams, pair_budget, datagram)
+                .is_some_and(|datagram| target.send_datagram(datagram).is_ok())
+        });
+        let counter = if forwarded {
+            &self.counters.forwarded
+        } else {
+            &self.counters.dropped
         };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
     fn answer(&self, payload: &[u8], source: SocketAddr) -> Option<[u8; probe::LEN]> {
@@ -385,6 +518,7 @@ impl Relay {
             table: RwLock::new(Table::default()),
             probes: RwLock::new(HashMap::new()),
             counters: Counters::default(),
+            datagrams: Arc::new(QueueBudget::new(GLOBAL_FORWARD_QUEUE_UNITS)),
             limits,
             admission,
         });
@@ -544,4 +678,77 @@ async fn serve(incoming: quinn::Incoming, shared: Arc<Shared>) {
             .remove(&session);
     }
     connection.close(quinn::VarInt::from_u32(0), b"control ended");
+}
+
+#[cfg(test)]
+/// Regressions for global and per-pair forwarding memory reservations.
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod datagram_budget_tests {
+    use super::*;
+
+    #[test]
+    fn forwarded_datagrams_share_storage_and_hold_global_and_pair_budgets_until_released() {
+        let global = Arc::new(QueueBudget::new(4));
+        let first_pair = Arc::new(QueueBudget::new(2));
+        let second_pair = Arc::new(QueueBudget::new(2));
+        let third_pair = Arc::new(QueueBudget::new(2));
+        let frame = || bytes::Bytes::from_static(&[0x5a; 900]);
+
+        let first_frame = frame();
+        let first_pointer = first_frame.as_ptr();
+        let first = queue_forward_datagram(&global, &first_pair, first_frame)
+            .expect("first pair can reserve its queue budget");
+        assert_eq!(
+            first.as_ptr(),
+            first_pointer,
+            "the payload buffer is shared"
+        );
+        assert_eq!(global.queued_units.load(Ordering::Relaxed), 2);
+        assert_eq!(first_pair.queued_units.load(Ordering::Relaxed), 2);
+        assert!(queue_forward_datagram(&global, &first_pair, frame()).is_none());
+
+        let shared = first.clone();
+        drop(first);
+        assert_eq!(global.queued_units.load(Ordering::Relaxed), 2);
+        assert_eq!(first_pair.queued_units.load(Ordering::Relaxed), 2);
+
+        let second = queue_forward_datagram(&global, &second_pair, frame())
+            .expect("another pair can use the remaining global budget");
+        assert_eq!(global.queued_units.load(Ordering::Relaxed), 4);
+        assert!(queue_forward_datagram(&global, &third_pair, frame()).is_none());
+
+        drop(shared);
+        assert_eq!(global.queued_units.load(Ordering::Relaxed), 2);
+        assert_eq!(first_pair.queued_units.load(Ordering::Relaxed), 0);
+        let third = queue_forward_datagram(&global, &third_pair, frame())
+            .expect("dropping the final shared buffer releases its reservation");
+        assert_eq!(global.queued_units.load(Ordering::Relaxed), 4);
+
+        drop((second, third));
+        assert_eq!(global.queued_units.load(Ordering::Relaxed), 0);
+        assert_eq!(second_pair.queued_units.load(Ordering::Relaxed), 0);
+        assert_eq!(third_pair.queued_units.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn relinking_same_pair_keeps_its_cap_while_old_datagrams_remain_queued() {
+        let pair = (HostId([1; 16]), HostId([2; 16]));
+        let mut table = Table::default();
+        let first = table.datagrams_for_pair(pair);
+        let held = first
+            .reserve(PAIR_FORWARD_QUEUE_UNITS - 1)
+            .expect("first link can reserve all but one unit");
+        table.retire_datagrams(pair, &first);
+        drop(first);
+
+        let relinked = table.datagrams_for_pair(pair);
+        assert_eq!(
+            relinked.queued_units.load(Ordering::Relaxed),
+            PAIR_FORWARD_QUEUE_UNITS - 1
+        );
+        assert!(relinked.reserve(2).is_none());
+
+        drop(held);
+        assert_eq!(relinked.queued_units.load(Ordering::Relaxed), 0);
+    }
 }

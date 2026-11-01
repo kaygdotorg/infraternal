@@ -14,6 +14,10 @@ runtime = ["dep:bytes", "dep:openssl", "dep:quinn", "dep:ring", "dep:rustls", "d
 # Disposable certificates for tests and namespace fixtures; never shipped.
 test-support = ["runtime"]
 
+[[example]]
+name = "memory-abuse"
+required-features = ["test-support"]
+
 [dependencies]
 infraternal-plugin-api = { path = "../../infraternal-plugin-api", version = "0.1.0" }
 bytes = { workspace = true, optional = true }

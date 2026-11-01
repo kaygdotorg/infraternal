@@ -11,8 +11,8 @@ contains the service and client, `infraternal-mesh/relay` contains the bounded
 peer-socket discovery book, and `infraternal-plugin-mesh/relay` contains the
 seam C shim. None of these features is enabled by the default `infraternal`
 shipping feature set. The relay CLI declarations can be compiled without the
-runtime. The D243 release check must confirm that this slice adds no bytes to
-the default shipping image.
+runtime. The D243 release check records this slice's static shipping-image
+delta.
 
 ## Relay identity and connection
 
@@ -58,8 +58,24 @@ link ID and sends the ciphertext to its local kernel WireGuard socket. The
 frame parser rejects a zero link ID and a header-only DATAGRAM; WireGuard
 validates the non-empty packet.
 QUIC DATAGRAM delivery is unreliable and unordered, matching the inner
-WireGuard datagram semantics. Per-connection receive and send queues are
-bounded to 512 KiB and 256 KiB respectively; congestion may drop datagrams.
+WireGuard datagram semantics. The relay-side receive queue is bounded to 8
+KiB per connection and its Quinn send queue to 128 KiB per connection. A
+separate forwarding budget bounds accepted DATAGRAM storage to 256 KiB per
+linked pair and 64 MiB across the relay. Each frame is charged in 1 KiB units
+after adding 128 bytes for per-DATAGRAM queue metadata, so small frames also
+consume budget. The relay forwards the existing shared `Bytes` storage; its
+budget reservations stay with that storage until Quinn drops the last
+reference after sending or discarding it. If either reservation is unavailable
+or Quinn's send queue is full, the relay drops the DATAGRAM and increments its
+dropped counter. This drop policy uses DATAGRAM's existing unreliable
+semantics and does not block the control stream.
+
+At the 4,096-host limit, the configured relay receive queues total at most 32
+MiB and the global forwarding budget accounts for at most another 64 MiB of
+queued DATAGRAM storage. The 128 KiB per-connection send setting is a local
+ceiling; the shared global and per-pair reservations bound aggregate queued
+payloads. These figures bound DATAGRAM buffering, not fixed connection,
+control or link-table overhead.
 
 ### Address observation probes
 
@@ -164,7 +180,8 @@ handling.
 ## Acceptance evidence
 
 Unit tests cover fixed-size control codecs, link-ID framing, authenticated
-probe parsing and the real QUIC relay on loopback. The rootless namespace
+probe parsing, forwarding-memory reservations, the real QUIC relay on loopback
+and relay RSS under a many-pair DATAGRAM flood. The rootless namespace
 proof exercises the kernel WireGuard device, direct and relayed peers, two
 relays, link failover, recovery after relay restart, NAT rebinding and
 observation-generation retirement. It verifies a numbered TCP stream by

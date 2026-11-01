@@ -36,7 +36,7 @@ use std::{
     io::{BufRead, Write},
     net::SocketAddr,
     sync::{Arc, OnceLock},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime},
 };
 
 static STARTED: OnceLock<Instant> = OnceLock::new();
@@ -83,11 +83,8 @@ fn key(text: &str) -> PublicKey {
     PublicKey(out)
 }
 
-fn unix_secs() -> u64 {
+fn unix_time() -> SystemTime {
     SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
 }
 
 fn certs() {
@@ -251,7 +248,7 @@ async fn node() {
     let observer = Observer::new(Seam::open(port).unwrap());
     let mut book = Discovery::new(1);
     let mut generation = 1;
-    let mut peers: HashMap<String, (Peer, u64)> = HashMap::new();
+    let mut peers: HashMap<String, (Peer, SystemTime)> = HashMap::new();
     let mut wg = Client::new().unwrap();
     let started = Instant::now();
     let since_start = || started.elapsed();
@@ -278,9 +275,10 @@ async fn node() {
                     })
                     .collect();
                 wg.peers(&installed, &[]).unwrap();
+                let installed_at = unix_time();
                 Device::routes(&installed, false).unwrap();
                 for (peer, kernel) in list.iter().zip(&installed) {
-                    peers.insert(peer.host.clone(), (kernel.clone(), unix_secs()));
+                    peers.insert(peer.host.clone(), (kernel.clone(), installed_at));
                     names
                         .lock()
                         .unwrap()
@@ -372,6 +370,7 @@ async fn node() {
                             "peer": name,
                             "endpoint": counters.endpoint,
                             "handshake_secs": counters.handshake_secs,
+                            "handshake_nanos": counters.handshake_nanos,
                             "received_bytes": counters.received_bytes,
                             "sent_bytes": counters.sent_bytes,
                             "active_relay": paths.active(host(name)),
