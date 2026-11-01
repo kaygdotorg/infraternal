@@ -7,7 +7,7 @@
  */
 import { existsSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { chromium, expect, test } from "playwright/test";
+import { expect, test, type Page } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
 
 const OUT = tracerEvidencePath("docs");
@@ -16,12 +16,23 @@ const SIZES = [
   { name: "phone", width: 393, height: 852, scale: 3, touch: true },
 ] as const;
 
+/**
+ * Headless Chromium reports a fine pointer even with touch emulation, so on a phone size the page's own `pointer: coarse`
+ * rule is lifted out of its stylesheet and applied unconditionally, as a phone would. The rule must exist: it is the real
+ * one that is measured and captured.
+ */
+async function asPhone(page: Page): Promise<void> {
+  const coarse = await page.evaluate(() => {
+    const rules = [...document.styleSheets].flatMap((sheet) => [...sheet.cssRules]).filter((rule): rule is CSSMediaRule => rule instanceof CSSMediaRule && rule.conditionText.includes("pointer: coarse"));
+    return rules.flatMap((rule) => [...rule.cssRules].map((inner) => inner.cssText)).join("\n");
+  });
+  expect(coarse).toContain("--text-body: 16px");
+  await page.addStyleTag({ content: coarse });
+}
+
 for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
-  test(`${size.name} ${scheme}: the index and the multiplexer page render and line up`, async ({ browser: shared }) => {
+  test(`${size.name} ${scheme}: the index and the multiplexer page render and line up`, async ({ browser }) => {
     mkdirSync(OUT, { recursive: true });
-    // Headless Chromium reports a fine pointer even with touch emulation; a phone's coarse pointer is switched on at launch,
-    // because the type scale and the 44 px targets follow `pointer: coarse`.
-    const browser = size.touch ? await chromium.launch({ args: ["--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=1,availableHoverTypes=1"] }) : shared;
     const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: size.scale, hasTouch: size.touch, isMobile: size.touch, colorScheme: scheme });
     const page = await context.newPage();
     const failures: string[] = [];
@@ -29,10 +40,12 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
     page.on("response", (response) => { if (response.status() >= 400) failures.push(`${response.status()} ${response.url()}`); });
     try {
       await page.goto("/docs/");
+      if (size.touch) await asPhone(page);
       await expect(page.getByRole("heading", { level: 1, name: "Documentation" })).toBeVisible();
       await page.screenshot({ path: `${OUT}/${size.name}-${scheme}-index.png` });
       await page.getByRole("link", { name: /The Infraternal Multiplexer/ }).click();
       await expect(page).toHaveURL(/\/docs\/multiplexer\/$/);
+      if (size.touch) await asPhone(page);
       await expect(page.getByRole("heading", { level: 1, name: "The Infraternal Multiplexer" })).toBeVisible();
       await page.evaluate(() => document.fonts.ready);
       await page.screenshot({ path: `${OUT}/${size.name}-${scheme}-multiplexer.png` });
@@ -64,7 +77,6 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
       expect(failures).toEqual([]);
     } finally {
       await context.close();
-      if (browser !== shared) await browser.close();
     }
   });
 }
