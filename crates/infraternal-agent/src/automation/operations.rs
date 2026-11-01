@@ -438,7 +438,10 @@ mod tests {
         };
         let shim_task = tokio::spawn(async move {
             let mut reader = Reader::default();
-            assert!(matches!(reader.read(&mut shim).await, Ok(Frame::ReadFrom(0))));
+            assert!(matches!(
+                reader.read(&mut shim).await,
+                Ok(Frame::ReadFrom(0))
+            ));
             send(&mut shim, &Frame::Output(0, output.to_vec()))
                 .await
                 .unwrap();

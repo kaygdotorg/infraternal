@@ -314,11 +314,17 @@ mod tests {
         let (caller, caller_peer_uid) = session(1);
         let (foreign, foreign_peer_uid) = session(2);
         let caller_uid = caller_peer_uid.wrapping_add(1);
-        let caller_id = uuid::Uuid::from_bytes(caller.id).to_string();
+        let caller_session_id = uuid::Uuid::from_bytes(caller.id).to_string();
         let foreign_id = uuid::Uuid::from_bytes(foreign.id).to_string();
         let mut names = operations::Names::new();
-        names.insert(caller_id, json!({"name":"caller", "uid":caller_uid}));
-        names.insert(foreign_id, json!({"name":"private", "uid":foreign_peer_uid}));
+        names.insert(
+            caller_session_id,
+            json!({"name":"caller", "uid":caller_uid}),
+        );
+        names.insert(
+            foreign_id,
+            json!({"name":"private", "uid":foreign_peer_uid}),
+        );
 
         let visible: Vec<_> = [caller, foreign]
             .into_iter()
