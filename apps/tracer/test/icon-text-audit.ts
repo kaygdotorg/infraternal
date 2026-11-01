@@ -24,7 +24,8 @@ export interface IconTextPair {
 export function auditIconText(): IconTextPair[] {
   const out: IconTextPair[] = [];
   const visible = (r: DOMRect): boolean => r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth;
-  const isIcon = (el: Element): boolean => el instanceof SVGSVGElement || (el.children.length === 1 && el.firstElementChild instanceof SVGSVGElement && !el.textContent?.trim()) || el.matches(".ui-status-icons");
+  // A drawing laid over a list (the sidebar's branch lines) is positioned out of the flow: it is not an icon beside text.
+  const isIcon = (el: Element): boolean => (el instanceof SVGSVGElement && getComputedStyle(el).position !== "absolute") ||(el.children.length === 1 && el.firstElementChild instanceof SVGSVGElement && !el.textContent?.trim()) || el.matches(".ui-status-icons");
   // A text element of its own: not a whole control beside the icon (an icon button next to a version pill is two controls).
   const hasText = (el: Element): boolean => !isIcon(el) && !(el instanceof HTMLButtonElement || el instanceof HTMLAnchorElement) && !el.querySelector("svg") && el.children.length <= 1 && Boolean(el.textContent?.trim());
   const firstLine = (el: Element): DOMRect | undefined => {
