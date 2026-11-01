@@ -57,6 +57,35 @@ test("device approval link reviews the exact laptop and scopes before approval",
   await expect(page.getByText("actions:dry-run", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Approve with passkey" })).toBeVisible();
 
+  const expectApprovalAlignment = async (): Promise<void> => {
+    const alignment = await page.evaluate(() => {
+      const rect = (selector: string) => {
+        const element = document.querySelector<HTMLElement>(selector);
+        if (!element) throw new Error(`Missing approval alignment element: ${selector}`);
+        const bounds = element.getBoundingClientRect();
+        return { left: bounds.left, centerY: bounds.top + bounds.height / 2 };
+      };
+      return {
+        label: rect(".auth-label"),
+        code: rect("#device-approval-code"),
+        hint: rect(".auth-hint"),
+        confirmation: rect(".auth-check"),
+        checkbox: rect("#device-approval-code-match"),
+        confirmationText: rect(".auth-check span"),
+        approveIcon: rect("#device-approval-approve svg"),
+        approveText: rect("#device-approval-approve > span:not(.busy-count)"),
+      };
+    });
+    const withinHalfPixel = (actual: number, expected: number): void => {
+      expect(Math.abs(actual - expected)).toBeLessThanOrEqual(0.5);
+    };
+    withinHalfPixel(alignment.code.left, alignment.label.left);
+    withinHalfPixel(alignment.hint.left, alignment.label.left);
+    withinHalfPixel(alignment.confirmation.left, alignment.label.left);
+    withinHalfPixel(alignment.checkbox.centerY, alignment.confirmationText.centerY);
+    withinHalfPixel(alignment.approveIcon.centerY, alignment.approveText.centerY);
+  };
+
   const evidenceDirectory = process.env.INFRATERAL_SIGNIN_EVIDENCE_DIR;
   if (evidenceDirectory) {
     await mkdir(evidenceDirectory, { recursive: true });
@@ -72,6 +101,7 @@ test("device approval link reviews the exact laptop and scopes before approval",
           await page.goto("/?device_code=AbCdEfGhIjKlMnOp");
           await expect(page.getByRole("heading", { name: "Approve device sign-in" })).toBeVisible();
         }
+        await expectApprovalAlignment();
         await page.screenshot({
           path: join(evidenceDirectory, `${theme}-${viewport.name}.png`),
           animations: "disabled",
