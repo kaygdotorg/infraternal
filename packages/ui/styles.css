@@ -334,6 +334,10 @@
   --ui-type-label: 450 13px/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   --ui-type-button: 500 13.5px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   --ui-type-eyebrow: 500 12px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  /* Every section heading (the small uppercase titles above a group of rows) is padded with this one value:
+     6 px above, --ui-heading-gap between it and the group's first row. A new heading style uses it, never its own numbers. */
+  --ui-heading-gap: 8px;
+  --ui-heading-pad: 6px 0 var(--ui-heading-gap);
   --ui-tracking: -0.01em;
   /* Secondary text matches the sign-in card's secondary (rgb 161 161 170 on ink) and
      adapts to every theme, instead of the dimmer --fg-2. */
@@ -512,7 +516,7 @@
 /* Titled sections inside one list: the quiet eyebrow of the settings headings, no box or rule of its own. */
 .ui-kv-section + .ui-kv-section { margin-top: 12px; }
 .ui-kv-rows { display: flex; flex-direction: column; }
-.ui-kv-group { padding: 6px 0 2px; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.ui-kv-group { padding: var(--ui-heading-pad); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-kv-cell {
   display: block; min-width: 0; margin: 0; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; text-align: left; font: inherit;
   transition: transform 140ms var(--ease-out, ease-out);
@@ -712,7 +716,7 @@
 .ui-shortcuts-head { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; height: var(--pill-h, 38px); padding: 0 8px 0 14px; font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
 .ui-shortcuts-body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 4px 14px 14px; }
 .ui-shortcuts-section + .ui-shortcuts-section { margin-top: 12px; }
-.ui-shortcuts-title { margin: 0; padding: 6px 0 2px; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.ui-shortcuts-title { margin: 0; padding: var(--ui-heading-pad); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-shortcuts-list { display: grid; margin: 0; padding: 0; list-style: none; }
 .ui-shortcuts-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: var(--row, 28px); border-bottom: 1px solid var(--line); }
 .ui-shortcuts-row:last-child { border-bottom: 0; }
@@ -800,7 +804,7 @@
 
 /* Settings, Toolbar (toolbar-settings.ts): rows of controls with a grip, an icon, a name and a switch. */
 .ui-toolbar-settings { display: grid; gap: 14px; }
-.ui-ts-title { margin: 0; padding: 6px 0 2px; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.ui-ts-title { margin: 0; padding: var(--ui-heading-pad); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-ts-list { display: grid; margin: 0; padding: 0; list-style: none; }
 .ui-ts-item { position: relative; display: flex; align-items: center; gap: 10px; min-height: var(--ui-row-h, 32px); border-bottom: 1px solid var(--line); background: transparent; }
 .ui-ts-item:last-child { border-bottom: 0; }
