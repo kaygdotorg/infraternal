@@ -15,7 +15,10 @@ use nix::{
 use std::{
     fs::{self, DirBuilder},
     io,
-    os::unix::fs::{DirBuilderExt, MetadataExt},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{DirBuilderExt, MetadataExt},
+    },
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
