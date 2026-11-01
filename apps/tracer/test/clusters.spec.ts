@@ -111,7 +111,7 @@ test("a window kind decides its controls, and a terminal splits", async ({ page 
   await expect(page.locator(".cl-badge[data-open='true']")).toContainText("session in Console");
   await open(page, 3);
   const before = await page.locator('.cl[data-view="console"] .ui-window').count();
-  await page.locator('.ui-window[data-window-id="w-studio-mac"] [data-action="split-down"]').click();
+  await page.locator('.ui-window[data-window-id="w-studio-mac"] [data-action="split-down"]').evaluate((b) => (b as HTMLElement).click()); // off screen at the 1.1 default: three windows no longer fit side by side
   await expect(page.locator('.cl[data-view="console"] .ui-window')).toHaveCount(before + 1);
 });
 
@@ -125,7 +125,7 @@ test("split right divides the window beside it, split down stacks below it, from
   const actions = await page.locator(`.ui-window[data-window-id="${id}"] .ui-window-action`).evaluateAll((b) => b.map((x) => [(x as HTMLElement).dataset.action, (x as HTMLElement).dataset.tip]));
   expect(actions.slice(0, 2)).toEqual([["split-right", "Split right"], ["split-down", "Split down"]]);
   const a0 = await rect(`.ui-window[data-window-id="${id}"]`);
-  await page.locator(`.ui-window[data-window-id="${id}"] [data-action="split-right"]`).click();
+  await page.locator(`.ui-window[data-window-id="${id}"] [data-action="split-right"]`).evaluate((b) => (b as HTMLElement).click());
   await expect.poll(count).toBe(n0 + 1);
   await page.waitForTimeout(1200);
   const created = await page.locator('.cl[data-view="console"] .ui-window[data-window-id^="w-studio-mac-s"]').first().evaluate((n) => { const r = n.getBoundingClientRect(); return { id: (n as HTMLElement).dataset.windowId, x: r.x, y: r.y, w: r.width, h: r.height }; });
@@ -788,7 +788,7 @@ test("droplet split: a goo layer exists only while it runs, the gap pulls past i
   await open(page, 3);
   await page.evaluate(() => ((window as unknown as { __splitProbe: unknown }).__splitProbe = { frames: 0, drawMs: 0, maxDrawMs: 0, trace: [] }));
   expect(await page.locator(".cl-goo").count()).toBe(0);
-  await page.locator('.ui-window[data-window-id="w-studio-mac"] [data-action="split-down"]').click();
+  await page.locator('.ui-window[data-window-id="w-studio-mac"] [data-action="split-down"]').evaluate((b) => (b as HTMLElement).click()); // off screen at the 1.1 default: three windows no longer fit side by side
   await expect(page.locator(".cl-goo")).toHaveCount(1, { timeout: 2000 });
   await expect(page.locator(".cl-goo")).toHaveCount(0, { timeout: 3000 });
   const r = await page.evaluate(() => (window as unknown as { __splitProbe: { frames: number; drawMs: number; maxDrawMs: number; trace: Array<[number, number]> } }).__splitProbe);
@@ -1025,7 +1025,7 @@ test("the window lock sits at the exact centre of its window and the title pill 
   // Keep the strict lock geometry checks on the Console's terminal windows.
   const centreOff = (): Promise<number[]> => page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.cl[data-view="console"] .ui-window')].map((w) => {
     const l = w.querySelector<HTMLElement>(".ui-window-lock")!.getBoundingClientRect(), r = w.getBoundingClientRect();
-    return r.width === 0 || l.width === 0 ? 0 : Math.abs((l.left + l.width / 2) - (r.left + r.width / 2)) + (Math.abs(l.width - 44 * (r.width / w.offsetWidth)) > 1 ? 1000 : 0);
+    return r.width === 0 || l.width === 0 ? 0 : Math.abs((l.left + l.width / 2) - (r.left + r.width / 2)) + (Math.abs(l.width - 44 * (parseFloat(getComputedStyle(document.documentElement).fontSize) / 16) * (r.width / w.offsetWidth)) > 1 ? 1000 : 0);
   }));
   const ok = async (label: string): Promise<void> => { for (const d of await centreOff()) expect(d, label).toBeLessThanOrEqual(0.5); };
   await ok("at rest");

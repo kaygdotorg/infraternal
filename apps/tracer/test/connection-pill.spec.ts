@@ -13,6 +13,7 @@ import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
+import { uiFactor } from "./ui-factor";
 
 const CAPTURES = tracerEvidencePath("connection-pill");
 mkdirSync(CAPTURES, { recursive: true });
@@ -53,10 +54,11 @@ test.describe("the scripted canvas", () => {
       await expect(card.locator(".ui-window-dot")).toHaveCount(0);
     }
     await expect(conn(page)).toHaveAttribute("data-state", "connected");
-    // The indicator is a small icon (14 px), level with the pill's text.
+    // The indicator is a small icon (14 px at the UI's standard size, in rem), level with the pill's text.
     const box = (await conn(page).boundingBox())!;
-    expect(box.width).toBeCloseTo(14, 0);
-    expect(box.height).toBeCloseTo(14, 0);
+    const factor = await uiFactor(page);
+    expect(box.width).toBeCloseTo(14 * factor, 0);
+    expect(box.height).toBeCloseTo(14 * factor, 0);
     // No status line is ever drawn as bordered text.
     await expect(page.locator(".ui-window-status, [data-status-line]")).toHaveCount(0);
   });

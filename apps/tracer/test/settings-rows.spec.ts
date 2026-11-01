@@ -13,6 +13,7 @@ import { tracerEvidencePath } from "./evidence-path";
 import { expect, test, type Page } from "playwright/test";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import { uiFactor } from "./ui-factor";
 
 const captures = tracerEvidencePath("settings-rows");
 const SIZES = [{ w: 375, h: 667, touch: true }, { w: 393, h: 852, touch: true }, { w: 1440, h: 900, touch: false }] as const;
@@ -96,11 +97,13 @@ for (const theme of ["ink", "paper"]) for (const { w, h, touch } of SIZES) test(
         const h = l.previousElementSibling as HTMLElement;
         return {
           heading: h.className, padding: parseFloat(getComputedStyle(h).paddingBottom), between: l.getBoundingClientRect().top - h.getBoundingClientRect().bottom,
-          token: parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--ui-heading-gap")),
+          // The token holds a rem length: resolve it to pixels through a probe, and report the factor it is measured against.
+          token: (() => { const p = document.createElement("div"); p.style.cssText = "position:absolute;visibility:hidden;padding-bottom:var(--ui-heading-gap)"; document.body.append(p); const px = parseFloat(getComputedStyle(p).paddingBottom); p.remove(); return px; })(),
+          factor: parseFloat(getComputedStyle(document.documentElement).fontSize) / 16,
         };
       }, section.list);
       expect(gap.heading, `${section.name}: the list follows its heading`).toContain("ui-ts-title");
-      expect(gap.token, `${section.name}: the heading gap token is 8 px`).toBe(8);
+      expect(gap.token, `${section.name}: the heading gap token is 8 px at the standard size`).toBeCloseTo(8 * gap.factor, 2);
       expect(Math.abs(gap.padding - gap.token), `${section.name}: heading gap equals the token`).toBeLessThanOrEqual(0.5);
       expect(Math.abs(gap.between), `${section.name}: nothing but the heading's own padding sits between it and its list`).toBeLessThanOrEqual(0.5);
       await page.screenshot({ path: resolve(captures, `${section.name.replace(/ /g, "-").toLowerCase()}-${theme}-${w}x${h}.png`) });
@@ -119,8 +122,9 @@ test("every section heading style in packages/ui uses the one heading padding", 
     probe.remove();
     return out;
   }));
+  const factor = await uiFactor(page);
   for (const pad of pads) {
-    expect(pad.top, `${pad.cls}: 6 px above`).toBe("6px");
-    expect(pad.bottom, `${pad.cls}: the shared gap below`).toBe("8px");
+    expect(parseFloat(pad.top), `${pad.cls}: 6 px above (times the UI factor)`).toBeCloseTo(6 * factor, 2);
+    expect(parseFloat(pad.bottom), `${pad.cls}: the shared gap below`).toBeCloseTo(8 * factor, 2);
   }
 });

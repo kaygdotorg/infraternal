@@ -4,6 +4,7 @@
  * live terminal's cursor staying on its text inside a window card.
  */
 import { chromium, expect, test, type BrowserContext, type Page } from "playwright/test";
+import { uiFactor } from "./ui-factor";
 
 type CanvasOffset = { x: number; y: number; minX: number; moving: boolean; transform: string };
 
@@ -440,10 +441,14 @@ test("lock: the icon appears near a window's top edge, locks with a click, stays
     const button = document.querySelector(".ui-window-lock")!.getBoundingClientRect();
     return { shackleBottom: shackle.bottom - w.top, shackleTop: shackle.top - w.top, bodyTop: body.top - w.top, hit: [button.width, button.height], bg: getComputedStyle(document.querySelector(".ui-window-lock")!).backgroundColor, border: getComputedStyle(document.querySelector(".ui-window-lock")!).borderTopWidth };
   });
+  // The glyph and its hit area are drawn in rem, the frame is a 1 px hairline: the glyph's offsets from the frame grow with the UI size's
+  // factor, and the button's own offset grows with it too, so the shackle's distance grows with its square (measured: 1.17 px at a
+  // factor of 1, 1.43 at 1.1, 2.01 at 1.32). The glyph's design is the same at every size (#283).
+  const factor = await uiFactor(page);
   expect(frame.shackleTop).toBeLessThan(-3);
-  expect(Math.abs(frame.bodyTop)).toBeLessThan(1.2);
-  expect(Math.abs(frame.shackleBottom)).toBeLessThan(1.2);
-  expect(frame.hit).toEqual([44, 44]);
+  expect(Math.abs(frame.bodyTop)).toBeLessThan(1.2 * factor);
+  expect(Math.abs(frame.shackleBottom)).toBeLessThan(1.2 * factor * factor);
+  for (const side of frame.hit as number[]) expect(Math.abs(side - 44 * factor), "the lock's hit area is 44 px at the standard factor").toBeLessThan(0.1);
   expect(frame.bg).toBe("rgba(0, 0, 0, 0)");
   expect(frame.border).toBe("0px");
   await expect(lock).toHaveAttribute("data-tip", "Lock input");
@@ -885,7 +890,7 @@ test("palette (desktop): centred, as tall as its results, never closer than a qu
   // The selected row keeps its inset highlight.
   await page.locator("#palette-input").fill("theme");
   const inset = await page.locator(".result[aria-selected='true']").first().evaluate((node) => getComputedStyle(node, "::before").top);
-  expect(inset).toBe("3px");
+  expect(parseFloat(inset)).toBeCloseTo(3 * (await uiFactor(page)), 1);
   await page.keyboard.press("Escape");
 });
 

@@ -94,57 +94,57 @@ button { color: inherit; }
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  width: min(100%, 440px);
+  gap: 0.875rem;
+  width: min(100%, 27.5rem);
   min-height: 100%;
   margin: auto;
-  padding: max(32px, env(safe-area-inset-top)) 24px max(32px, env(safe-area-inset-bottom));
+  padding: max(2rem, env(safe-area-inset-top)) 1.5rem max(2rem, env(safe-area-inset-bottom));
   justify-content: center;
 }
-.access h1 { margin: 0; font-size: 22px; font-weight: var(--fw-label); letter-spacing: -0.04em; }
-.lead { margin: -6px 0 10px; color: #a6a8ad; font-size: 14px; line-height: 1.6; }
-.access form { display: flex; flex-direction: column; gap: 10px; }
-.access label { color: #a6a8ad; font-size: 12px; }
+.access h1 { margin: 0; font-size: 1.375rem; font-weight: var(--fw-label); letter-spacing: -0.04em; }
+.lead { margin: -0.375rem 0 0.625rem; color: #a6a8ad; font-size: 0.875rem; line-height: 1.6; }
+.access form { display: flex; flex-direction: column; gap: 0.625rem; }
+.access label { color: #a6a8ad; font-size: 0.75rem; }
 .access input:not([type="checkbox"]) {
   width: 100%;
-  min-height: 48px;
+  min-height: 3rem;
   border: 1px solid #393b40;
-  border-radius: 9px;
+  border-radius: 0.5625rem;
   outline: none;
   background: #191a1d;
   color: #f2f3f5;
-  padding: 0 12px;
-  font-size: 16px;
+  padding: 0 0.75rem;
+  font-size: 1rem;
 }
 .access input:focus { border-color: color-mix(in oklab, currentColor 32%, transparent); }
 .access button {
-  min-height: 46px;
-  border-radius: 9px;
-  padding: 0 14px;
+  min-height: 2.875rem;
+  border-radius: 0.5625rem;
+  padding: 0 0.875rem;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .primary { border: 1px solid #c8ceff; background: #c8ceff; color: #171820 !important; font-weight: var(--fw-title); }
 .primary:disabled { opacity: 0.45; cursor: default !important; }
 .quiet { border: 1px solid #393b40; background: transparent; color: #d6d7da; }
-.message { min-height: 1.4em; margin: 0; color: #d0d2d7; font-size: 12px; line-height: 1.5; }
-.recovery { width: min(100%, 560px); }
+.message { min-height: 1.4em; margin: 0; color: #d0d2d7; font-size: 0.75rem; line-height: 1.5; }
+.recovery { width: min(100%, 35rem); }
 .recovery-words {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  padding: 20px;
+  padding: 1.25rem;
   border: 1px solid #393b40;
-  border-radius: 9px;
+  border-radius: 0.5625rem;
   background: #191a1d;
   color: #f2f3f5;
-  font: var(--fw-body) 15px/1.8 var(--font-face);
+  font: var(--fw-body) 0.9375rem/1.8 var(--font-face);
 }
-.account-copy { display: grid; grid-template-columns: 1fr auto; gap: 7px 10px; align-items: center; }
-.account-copy span { color: #a6a8ad; font-size: 12px; }
-.account-copy code { min-width: 0; overflow-wrap: anywhere; color: #f2f3f5; font-size: 12px; }
+.account-copy { display: grid; grid-template-columns: 1fr auto; gap: 0.4375rem 0.625rem; align-items: center; }
+.account-copy span { color: #a6a8ad; font-size: 0.75rem; }
+.account-copy code { min-width: 0; overflow-wrap: anywhere; color: #f2f3f5; font-size: 0.75rem; }
 .account-copy button { grid-column: 2; grid-row: 1 / span 2; }
-.check-row { display: flex; gap: 10px; align-items: center; min-height: 44px; }
-.check-row input { width: 20px; height: 20px; accent-color: #c8ceff; }
+.check-row { display: flex; gap: 0.625rem; align-items: center; min-height: 2.75rem; }
+.check-row input { width: 1.25rem; height: 1.25rem; accent-color: #c8ceff; }
 
 .terminal-screen {
   position: fixed;
@@ -159,7 +159,7 @@ button { color: inherit; }
   touch-action: pan-x pan-y;
 }
 :where(.terminal-screen) button { border: 0; background: none; color: inherit; cursor: pointer; font: inherit; letter-spacing: inherit; -webkit-tap-highlight-color: transparent; }
-.terminal-screen svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+.terminal-screen svg { width: 1.125rem; height: 1.125rem; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
 .terminal-host {
   /* The renderer measures its cells from the host's computed font settings, so UI
      typography (the mono UI's negative tracking) must never reach it: inherited
@@ -170,7 +170,7 @@ button { color: inherit; }
   inset: 0;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 14px 16px;
+  padding: 0.875rem 1rem;
   touch-action: none;
   overscroll-behavior: none;
   scrollbar-width: none;
@@ -184,16 +184,16 @@ button { color: inherit; }
 /* The live cursor (D249): one box over the cursor cell, blinked by a compositor-only opacity animation. */
 .terminal-cursor-layer { position: absolute; pointer-events: none; will-change: opacity; }
 .terminal-cursor-layer[hidden] { display: none; }
-[data-focus-ring="on"] .terminal-host:focus-visible { outline: 2px solid var(--accent, #7a9cff); outline-offset: -3px; }
+[data-focus-ring="on"] .terminal-host:focus-visible { outline: 2px solid var(--accent, #7a9cff); outline-offset: -0.1875rem; }
 .connection-status {
   position: absolute;
   z-index: 3;
-  left: max(16px, env(safe-area-inset-left));
-  bottom: max(12px, env(safe-area-inset-bottom));
+  left: max(1rem, env(safe-area-inset-left));
+  bottom: max(0.75rem, env(safe-area-inset-bottom));
   margin: 0;
-  padding: 7px 10px;
+  padding: 0.4375rem 0.625rem;
   border: 1px solid #393b40;
-  border-radius: 8px;
+  border-radius: 0.5rem;
   background: #191a1d;
   color: #d6d7da;
   font-size: var(--text-secondary);
@@ -203,17 +203,17 @@ button { color: inherit; }
 .test-double-badge {
   position: absolute;
   z-index: 4;
-  top: calc(env(safe-area-inset-top) + 10px + var(--pill-h) + 20px);
-  right: calc(var(--gutter) + 8px);
-  padding: 3px 6px;
+  top: calc(env(safe-area-inset-top) + 0.625rem + var(--pill-h) + 1.25rem);
+  right: calc(var(--gutter) + 0.5rem);
+  padding: 0.1875rem 0.375rem;
   pointer-events: none;
   opacity: 0.85;
   transition: opacity 120ms ease-out;
   border: 1px solid #695643;
-  border-radius: 5px;
+  border-radius: 0.3125rem;
   background: #211b15;
   color: #e4c8a3;
-  font-size: 10px;
+  font-size: 0.625rem;
   letter-spacing: 0.08em;
 }
 /* Translucent overlays would show the badge blurred through them; it steps aside instead. (A flag set from script,
@@ -222,45 +222,45 @@ button { color: inherit; }
 .probe-panel {
   position: absolute;
   z-index: 5;
-  top: max(12px, env(safe-area-inset-top));
-  right: max(12px, env(safe-area-inset-right));
-  width: min(360px, calc(100% - 24px));
-  max-height: min(76vh, 560px);
+  top: max(0.75rem, env(safe-area-inset-top));
+  right: max(0.75rem, env(safe-area-inset-right));
+  width: min(22.5rem, calc(100% - 1.5rem));
+  max-height: min(76vh, 35rem);
   overflow: auto;
-  padding: 14px;
+  padding: 0.875rem;
   border: 1px solid #393b40;
-  border-radius: 10px;
+  border-radius: 0.625rem;
   background: rgb(25 26 29 / 96%);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
+  box-shadow: 0 0.75rem 2rem rgb(0 0 0 / 28%);
   color: #e6e7e9;
   touch-action: pan-y;
 }
-.probe-panel h2 { margin: 0 0 10px; font-size: 13px; font-weight: var(--fw-label); }
-.probe-panel label { display: block; margin-bottom: 5px; color: #a6a8ad; font-size: 11px; }
+.probe-panel h2 { margin: 0 0 0.625rem; font-size: 0.8125rem; font-weight: var(--fw-label); }
+.probe-panel label { display: block; margin-bottom: 0.3125rem; color: #a6a8ad; font-size: 0.6875rem; }
 .probe-panel input {
   width: 100%;
-  min-height: 44px;
-  margin-bottom: 10px;
+  min-height: 2.75rem;
+  margin-bottom: 0.625rem;
   border: 1px solid #393b40;
-  border-radius: 7px;
+  border-radius: 0.4375rem;
   background: #101113;
   color: #f2f3f5;
-  padding: 0 10px;
-  font-size: 16px;
+  padding: 0 0.625rem;
+  font-size: 1rem;
 }
-.probe-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.probe-actions { display: flex; flex-wrap: wrap; gap: 0.375rem; }
 .probe-actions button {
-  min-height: 44px;
+  min-height: 2.75rem;
   border: 1px solid #45474d;
-  border-radius: 7px;
+  border-radius: 0.4375rem;
   background: #242529;
-  padding: 0 9px;
-  font-size: 11px;
+  padding: 0 0.5625rem;
+  font-size: 0.6875rem;
   touch-action: manipulation;
 }
 .probe-actions button:disabled { opacity: 0.45; }
-.probe-panel pre { margin: 12px 0 5px; white-space: pre-wrap; font-size: 12px; line-height: 1.7; }
-.probe-panel p { margin: 0; color: #b6b8bd; font-size: 11px; line-height: 1.5; }
+.probe-panel pre { margin: 0.75rem 0 0.3125rem; white-space: pre-wrap; font-size: 0.75rem; line-height: 1.7; }
+.probe-panel p { margin: 0; color: #b6b8bd; font-size: 0.6875rem; line-height: 1.5; }
 
 /* The pinned ghostty-web (0.5 line, D109) marks the terminal host itself
    contenteditable="true", not only its hidden textarea. iOS then draws its native
@@ -276,7 +276,7 @@ button { color: inherit; }
   opacity: 0 !important;
   color: transparent !important;
   caret-color: transparent !important;
-  font-size: 16px !important;
+  font-size: 1rem !important;
   background: transparent !important;
   width: 1px !important;
   height: 1px !important;
@@ -287,28 +287,32 @@ button { color: inherit; }
 }
 
 @media (max-width: 520px) {
-  .access { padding-right: 20px; padding-left: 20px; }
+  .access { padding-right: 1.25rem; padding-left: 1.25rem; }
 }
 
-.boot-error { margin: 30vh auto 0; max-width: 28rem; padding: 0 20px; text-align: center; color: #9a9aa2; font: var(--fw-body) 15px/1.5 var(--font-face); }
+.boot-error { margin: 30vh auto 0; max-width: 28rem; padding: 0 1.25rem; text-align: center; color: #9a9aa2; font: var(--fw-body) 0.9375rem/1.5 var(--font-face); }
 
 /* Core terminal shell: one padded pane card keeps the renderer ready for later splits. */
 .terminal-screen {
   --terminal-prediction-opacity: 0.74;
   --font-mono: var(--font-face);
-  --r-sm: 8px;
-  --r-md: 12px;
-  --r-lg: 18px;
+  --r-sm: 0.5rem;
+  --r-md: 0.75rem;
+  --r-lg: 1.125rem;
   --r-pill: 999px;
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
   --t-pop: 180ms;
   --t-panel: 240ms;
+  /* The canvas area's side margin is canvas geometry, so it stays in px (see canvas.css). In rem it widened with the UI size (20 px to
+     33 px at 150 %), the area a third of which is a window's default width shrank, and windows grew by less than the type inside
+     them: at 150 % the header pill ran out of room and cut host names. In px the area is the same width at every size and a
+     window is exactly the factor wider. */
   --gutter: max(20px, env(safe-area-inset-left));
-  --pill-h: 38px;
-  --keybar-height: 48px;
-  --keybar-gap: 16px;
-  --keybar-inset: 8px;
+  --pill-h: 2.375rem;
+  --keybar-height: 3rem;
+  --keybar-gap: 1rem;
+  --keybar-inset: 0.5rem;
   z-index: 1;
   isolation: isolate;
 }
@@ -328,14 +332,14 @@ button { color: inherit; }
 .terminal-screen[data-bg="mesh"] .backdrop { opacity: 1; background: var(--mesh-image, none) center / cover no-repeat, var(--bg); }
 .terminal-screen[data-bg="mesh"] .backdrop::before {
   content: ""; position: absolute; inset: 0; pointer-events: none;
-  background: var(--grain, none) 0 0 / calc(128px / var(--dpr, 1)) repeat;
+  background: var(--grain, none) 0 0 / calc(8rem / var(--dpr, 1)) repeat;
   opacity: 0.035; mix-blend-mode: overlay;
 }
 .panes {
   position: absolute; z-index: 1;
-  top: calc(env(safe-area-inset-top) + 10px + var(--pill-h) + 12px);
-  left: var(--gutter); right: var(--gutter); bottom: 16px;
-  display: grid; grid-template-columns: minmax(0, 1fr); grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 10px;
+  top: calc(env(safe-area-inset-top) + 0.625rem + var(--pill-h) + 0.75rem);
+  left: var(--gutter); right: var(--gutter); bottom: 1rem;
+  display: grid; grid-template-columns: minmax(0, 1fr); grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 0.625rem;
 }
 
 /* The top controls float over the pane; only the controls receive a light blur.
@@ -346,14 +350,14 @@ button { color: inherit; }
    two sides leave room for it, and otherwise shrinks to what the sides leave, so the pill truncates instead of overlapping.
    Widths are measured in the browser (test/top-centre.spec.ts), not offsets. */
 .top {
-  --capsule-min: 420px;
+  --capsule-min: 26.25rem;
   /* The width each side track keeps clear: the right-hand group's own width (one control by default; the canvas adds its
      two buttons where they are shown, see clusters.css). The pill's track shrinks to what both sides leave, so the pill
      never runs under a control and stays on the centre line. */
   --side: var(--pill-h);
   position: absolute; z-index: 3;
-  top: calc(10px + env(safe-area-inset-top)); left: var(--gutter); right: var(--gutter);
-  display: grid; grid-template-columns: minmax(var(--side), 1fr) minmax(min(var(--capsule-min), calc(100vw - 2 * var(--gutter) - 2 * var(--side) - 20px)), auto) minmax(var(--side), 1fr); align-items: center; gap: 10px;
+  top: calc(0.625rem + env(safe-area-inset-top)); left: var(--gutter); right: var(--gutter);
+  display: grid; grid-template-columns: minmax(var(--side), 1fr) minmax(min(var(--capsule-min), calc(100vw - 2 * var(--gutter) - 2 * var(--side) - 1.25rem)), auto) minmax(var(--side), 1fr); align-items: center; gap: 0.625rem;
   pointer-events: none;
 }
 .top > * { pointer-events: auto; }
@@ -371,45 +375,45 @@ button { color: inherit; }
    describe where the sidebar's header row sits relative to the closed position; the 9 px is the
    sidebar's 1 px border plus its 8 px padding, so the pill lines up with the header row exactly. */
 .sidebar-toggle {
-  --sb-w: 292px; --sb-head-y: calc(var(--pill-h) + 12px + 9px);
-  position: absolute; z-index: 6; top: calc(10px + env(safe-area-inset-top)); left: var(--gutter);
+  --sb-w: 18.25rem; --sb-head-y: calc(var(--pill-h) + 0.75rem + 0.5625rem);
+  position: absolute; z-index: 6; top: calc(0.625rem + env(safe-area-inset-top)); left: var(--gutter);
   transition: transform 260ms cubic-bezier(0.23, 1, 0.32, 1), opacity 120ms var(--ease-out);
 }
-.terminal-screen[data-sidebar-open] .sidebar-toggle { transform: translate(calc(var(--sb-w) - 9px - var(--pill-h)), var(--sb-head-y)); }
-.terminal-screen[data-sidebar-open] .sidebar-toggle:active:not(:disabled) { transform: translate(calc(var(--sb-w) - 9px - var(--pill-h)), var(--sb-head-y)) scale(0.97); }
+.terminal-screen[data-sidebar-open] .sidebar-toggle { transform: translate(calc(var(--sb-w) - 0.5625rem - var(--pill-h)), var(--sb-head-y)); }
+.terminal-screen[data-sidebar-open] .sidebar-toggle:active:not(:disabled) { transform: translate(calc(var(--sb-w) - 0.5625rem - var(--pill-h)), var(--sb-head-y)) scale(0.97); }
 .sidebar-toggle.instant { transition: none; }
 /* Something waits in the inbox (D234) while the sidebar is closed: a small accent dot on the toggle's corner. It rides
    the toggle's own transform, and fades (opacity only) when the sidebar opens, where the card itself is visible. */
 .sidebar-toggle::after {
-  content: ""; position: absolute; top: 3px; right: 3px; width: 9px; height: 9px; border-radius: 50%;
+  content: ""; position: absolute; top: 0.1875rem; right: 0.1875rem; width: 0.5625rem; height: 0.5625rem; border-radius: 50%;
   background: var(--accent); box-shadow: 0 0 0 2px var(--bg); opacity: 0; transition: opacity 160ms var(--ease-out);
 }
 .sidebar-toggle[data-pending]::after { opacity: 1; }
 .terminal-screen[data-sidebar-open] .sidebar-toggle[data-pending]::after { opacity: 0; }
 .keybar button:active { transform: scale(var(--ui-press-scale)); }
 .capsule {
-  justify-self: center; min-width: min(var(--capsule-min), 100%); padding: 0 8px 0 14px; justify-content: flex-start;
-  gap: 8px; color: var(--fg); font-weight: var(--fw-label); letter-spacing: -0.005em;
+  justify-self: center; min-width: min(var(--capsule-min), 100%); padding: 0 0.5rem 0 0.875rem; justify-content: flex-start;
+  gap: 0.5rem; color: var(--fg); font-weight: var(--fw-label); letter-spacing: -0.005em;
 }
 .capsule-host { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .capsule-sep { color: var(--fg-3); }
 .capsule-session { color: var(--fg-2); font-weight: var(--fw-secondary); white-space: nowrap; }
 .capsule-rtt { margin-left: auto; color: var(--fg-3); font: var(--fw-label) var(--text-caption)/1 var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.capsule-kbd { padding: 4px 6px; border-radius: 6px; background: var(--hover); color: var(--fg-2); font: var(--fw-label) var(--text-caption)/1 var(--font-ui); }
-.tabs { display: flex; align-items: center; gap: 6px; }
-.tab { position: relative; min-width: 0; padding: 0 14px; gap: 6px; color: var(--fg-2); font-weight: var(--fw-label); white-space: nowrap; opacity: 0.8; }
+.capsule-kbd { padding: 0.25rem 0.375rem; border-radius: 0.375rem; background: var(--hover); color: var(--fg-2); font: var(--fw-label) var(--text-caption)/1 var(--font-ui); }
+.tabs { display: flex; align-items: center; gap: 0.375rem; }
+.tab { position: relative; min-width: 0; padding: 0 0.875rem; gap: 0.375rem; color: var(--fg-2); font-weight: var(--fw-label); white-space: nowrap; opacity: 0.8; }
 .tab:disabled { cursor: default; }
 .tab-host { color: var(--fg-3); }
 .tab-name { color: var(--fg); }
-.tab-add svg { width: 14px; height: 14px; }
-.capsule-os { display: none; flex: none; width: 16px; height: 16px; color: var(--fg-2); }
+.tab-add svg { width: 0.875rem; height: 0.875rem; }
+.capsule-os { display: none; flex: none; width: 1rem; height: 1rem; color: var(--fg-2); }
 .capsule-os svg { width: 100%; height: 100%; fill: currentColor; stroke: none; }
 .capsule-os svg.is-line { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }
 /* In the canvas preview the pill shows the host's OS mark in place of the connection dot. */
 .terminal-screen[data-preview] .capsule-os { display: inline-grid; place-items: center; }
 .terminal-screen[data-preview] #connection-dot { display: none; }
-.dot { display: inline-block; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--fg-3); }
-.dot.live { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ok) 18%, transparent); }
+.dot { display: inline-block; flex: none; width: 0.4375rem; height: 0.4375rem; border-radius: 50%; background: var(--fg-3); }
+.dot.live { background: var(--ok); box-shadow: 0 0 0 0.1875rem color-mix(in oklab, var(--ok) 18%, transparent); }
 .dot.connecting { background: var(--fg-3); }
 
 @media (hover: hover) and (pointer: fine) {
@@ -418,40 +422,40 @@ button { color: inherit; }
 
 /* Floating host tree: it can open without taking a permanent column from the terminal. */
 .sidebar {
-  position: absolute; z-index: 5; top: calc(env(safe-area-inset-top) + 10px + var(--pill-h) + 12px); left: var(--gutter); bottom: 16px; width: 292px;
-  display: flex; flex-direction: column; padding: 8px; overflow: auto;
+  position: absolute; z-index: 5; top: calc(env(safe-area-inset-top) + 0.625rem + var(--pill-h) + 0.75rem); left: var(--gutter); bottom: 1rem; width: 18.25rem;
+  display: flex; flex-direction: column; padding: 0.5rem; overflow: auto;
   transform-origin: top left; transition: transform 240ms var(--ease-drawer), opacity 180ms ease-out;
 }
-.sidebar[hidden] { display: flex !important; visibility: hidden; opacity: 0; transform: translateX(-8px) scale(0.98); }
+.sidebar[hidden] { display: flex !important; visibility: hidden; opacity: 0; transform: translateX(-0.5rem) scale(0.98); }
 .sidebar.instant { transition: none; }
 /* Desktop: the open sidebar takes a column beside the windows (see dockPanes in core-screen.ts). */
 @media (hover: hover) and (pointer: fine) and (min-width: 1024px) {
-  .terminal-screen[data-sidebar="docked"] .panes { left: calc(var(--gutter) + 292px + 12px); }
+  .terminal-screen[data-sidebar="docked"] .panes { left: calc(var(--gutter) + 18.25rem + 0.75rem); }
   /* Docked, the sidebar starts level with the top bar; the toggle slides across and 8 px down
      into the header row, the same 8 px inset the sidebar keeps on every side. */
-  .sidebar { top: calc(env(safe-area-inset-top) + 10px); }
-  .sidebar-toggle { --sb-head-y: 9px; }
+  .sidebar { top: calc(env(safe-area-inset-top) + 0.625rem); }
+  .sidebar-toggle { --sb-head-y: 0.5625rem; }
 }
 /* The header row is exactly one pill tall so the travelling toggle sits on it, right-aligned. */
 .sidebar[data-foot] { overflow: hidden; }
 /* With a footer pinned at the bottom, only the host tree scrolls. */
 .sidebar[data-foot] #tree { flex: 0 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; }
-.sidebar-head { flex: none; display: flex; align-items: center; gap: 8px; height: var(--pill-h); margin-bottom: 4px; padding: 0 calc(var(--pill-h) + 8px) 0 8px; }
+.sidebar-head { flex: none; display: flex; align-items: center; gap: 0.5rem; height: var(--pill-h); margin-bottom: 0.25rem; padding: 0 calc(var(--pill-h) + 0.5rem) 0 0.5rem; }
 .sidebar-title { font-weight: var(--fw-title); letter-spacing: -0.01em; }
-.bm { --bm-line: color-mix(in oklab, var(--fg) 16%, transparent); position: relative; margin-left: 4px; padding-left: 14px; }
+.bm { --bm-line: color-mix(in oklab, var(--fg) 16%, transparent); position: relative; margin-left: 0.25rem; padding-left: 0.875rem; }
 /* The view-level line is drawn per section, in the section's own box, so it is as long as the content and never as long
    as the scrollport: each section carries its own stretch, the stretches meet, and the last one ends at its head's centre
    (its last child's connector). The first fades in from the top. */
 .bm-sec { position: relative; }
-.bm-sec::before { content: ""; position: absolute; left: -14px; top: 0; bottom: 0; width: 1.5px; background: var(--bm-line); }
-.bm > .bm-marker + .bm-sec::before { top: 0; -webkit-mask-image: linear-gradient(transparent, #000 28px); mask-image: linear-gradient(transparent, #000 28px); }
-.bm-sec.cl-divided::before { top: -8px; } /* the divider's gap is bridged: the trunk is one line */
+.bm-sec::before { content: ""; position: absolute; left: -0.875rem; top: 0; bottom: 0; width: 1.5px; background: var(--bm-line); }
+.bm > .bm-marker + .bm-sec::before { top: 0; -webkit-mask-image: linear-gradient(transparent, #000 1.75rem); mask-image: linear-gradient(transparent, #000 1.75rem); }
+.bm-sec.cl-divided::before { top: -0.5rem; } /* the divider's gap is bridged: the trunk is one line */
 .bm > .bm-sec:last-child::before { bottom: auto; height: calc(var(--row) / 2 + 0.75px); border-radius: 0 0 1px 1px; }
-.bm > .bm-sec.cl-divided:last-child::before { height: calc(var(--row) / 2 + 8px + 8px + 0.75px); }
-.bm-marker { position: absolute; left: 0; top: 0; width: 1.5px; height: calc(var(--row) - 12px); border-radius: 1px; background: var(--fg); will-change: transform; transition: opacity 150ms var(--ease-out); }
+.bm > .bm-sec.cl-divided:last-child::before { height: calc(var(--row) / 2 + 0.5rem + 0.5rem + 0.75px); }
+.bm-marker { position: absolute; left: 0; top: 0; width: 1.5px; height: calc(var(--row) - 0.75rem); border-radius: 1px; background: var(--fg); will-change: transform; transition: opacity 150ms var(--ease-out); }
 .bm-sec { list-style: none; }
 .bm-head, .bm-leaf {
-  display: flex; align-items: center; gap: 8px; width: 100%; height: var(--row); padding: 0 8px; border-radius: 6px;
+  display: flex; align-items: center; gap: 0.5rem; width: 100%; height: var(--row); padding: 0 0.5rem; border-radius: 0.375rem;
   color: var(--fg-2); text-align: left; cursor: default; transition: transform 140ms var(--ease-out);
 }
 .bm-head:active:not(:disabled), .bm-leaf:active:not(:disabled) { transform: scale(var(--ui-press-scale-soft)); }
@@ -460,19 +464,19 @@ button { color: inherit; }
 .bm-sec.is-current > .bm-head { color: var(--fg); }
 .bm-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--fw-label); }
 .bm-meta { margin-left: auto; color: var(--fg-3); font: var(--fw-secondary) var(--text-caption)/1.2 var(--font-mono); white-space: nowrap; }
-.bm-icon { display: grid; width: 18px; height: 18px; flex: none; place-items: center; color: var(--fg-3); }
-.bm-icon svg { width: 16px; height: 16px; fill: currentColor; stroke: none; }
+.bm-icon { display: grid; width: 1.125rem; height: 1.125rem; flex: none; place-items: center; color: var(--fg-3); }
+.bm-icon svg { width: 1rem; height: 1rem; fill: currentColor; stroke: none; }
 .bm-fold { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 240ms var(--ease-out); }
 .bm-sec[data-open] > .bm-fold { grid-template-rows: 1fr; }
 .bm-sec.no-motion > .bm-fold { transition: none; }
 .bm-fold-in { position: relative; min-height: 0; overflow: hidden; }
-.bm-list { --bm-x: 12px; list-style: none; margin: 0 0 4px; padding: 0 0 0 calc(var(--bm-x) + 8px + 12px + 6px); }
+.bm-list { --bm-x: 0.75rem; list-style: none; margin: 0 0 0.25rem; padding: 0 0 0 calc(var(--bm-x) + 0.5rem + 0.75rem + 0.375rem); }
 .bm-branches { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; fill: none; stroke-linecap: round; }
 .bm-dim path { stroke: var(--bm-line); stroke-width: 1.5; }
 .bm-lit { stroke: var(--fg); stroke-width: 1.5; stroke-dasharray: 1; stroke-dashoffset: 0; opacity: 0; }
 .bm-leaf { color: var(--fg-2); }
 .bm-leaf:disabled { opacity: 0.56; cursor: default; }
-.glyph { width: 18px; flex: none; color: var(--fg-3); font: var(--fw-label) var(--text-caption)/1 var(--font-mono); }
+.glyph { width: 1.125rem; flex: none; color: var(--fg-3); font: var(--fw-label) var(--text-caption)/1 var(--font-mono); }
 .bm-leaf[aria-current] { color: var(--fg); }
 .bm-leaf[aria-current] .glyph { color: var(--accent); }
 
@@ -481,9 +485,9 @@ button { color: inherit; }
 @starting-style { .palette-scrim:not([hidden]) { opacity: 0; } }
 .palette-scrim[hidden] { display: none; opacity: 0; }
 .palette {
-  position: absolute; z-index: 8; left: 50%; top: calc(max(66px, env(safe-area-inset-top) + 56px));
-  width: min(560px, calc(100% - 32px)); max-height: min(72vh, 620px); overflow: hidden;
-  transform: translate(-50%, 0); border-radius: 16px;
+  position: absolute; z-index: 8; left: 50%; top: calc(max(4.125rem, env(safe-area-inset-top) + 3.5rem));
+  width: min(35rem, calc(100% - 2rem)); max-height: min(72vh, 38.75rem); overflow: hidden;
+  transform: translate(-50%, 0); border-radius: 1rem;
   opacity: 1; transform-origin: 50% 0;
   /* Pointer opens grow out from under the capsule; closing is quicker than opening. The
      discrete display transition keeps the element painted until its fade finishes. The
@@ -495,11 +499,11 @@ button { color: inherit; }
    blur less than that on the shared material (8 and 24 px), which let terminal text and window titles read through the
    palette; here the palette alone takes the floor. Frosted already blurs 32 px and Solid has no glass, so neither is touched.
    The fill also never falls below a floor of the page colour. The blur is one static region while the palette is open. */
-:root[data-card="tinted"] .palette, :root[data-card="clear"] .palette { --ui-overlay-blur: 28px; }
+:root[data-card="tinted"] .palette, :root[data-card="clear"] .palette { --ui-overlay-blur: 1.75rem; }
 .palette { --ui-overlay-background: color-mix(in oklab, var(--overlay) 58%, var(--bg)); }
 .palette:not([hidden]) { transition-duration: 240ms; }
-@starting-style { .palette:not([hidden]) { opacity: 0; transform: translate(-50%, -6px) scale(0.98); } }
-.palette[hidden] { display: none; opacity: 0; transform: translate(-50%, -4px) scale(0.99); }
+@starting-style { .palette:not([hidden]) { opacity: 0; transform: translate(-50%, -0.375rem) scale(0.98); } }
+.palette[hidden] { display: none; opacity: 0; transform: translate(-50%, -0.25rem) scale(0.99); }
 /* Animation never gets in the way: a key-triggered open is a short 180 ms fade and scale (a pointer open
    takes 240 ms), input is never blocked while it plays (the field is focused at once), and filtering,
    arrowing and height changes are never animated. */
@@ -516,38 +520,38 @@ button { color: inherit; }
   @starting-style { .palette:not([hidden]) { opacity: 0; transform: translate(-50%, -50%) scale(0.98); } }
   .palette[hidden] { transform: translate(-50%, -50%) scale(0.99); }
 }
-.palette-input { display: flex; align-items: center; gap: 12px; padding: 0 16px; border-bottom: 1px solid var(--line); }
+.palette-input { display: flex; align-items: center; gap: 0.75rem; padding: 0 1rem; border-bottom: 1px solid var(--line); }
 .palette-input svg { flex: none; color: var(--fg-2); }
-.palette-input input { width: 100%; height: 56px; border: 0; outline: 0; background: transparent; color: var(--fg); font: var(--fw-body) var(--text-input)/1.3 var(--font-ui); }
+.palette-input input { width: 100%; height: 3.5rem; border: 0; outline: 0; background: transparent; color: var(--fg); font: var(--fw-body) var(--text-input)/1.3 var(--font-ui); }
 .palette-input input::placeholder { color: var(--fg-3); }
-.palette-results .result, .palette-results .group-label { content-visibility: auto; contain-intrinsic-size: auto 36px; }
-.palette-results { max-height: min(54vh, 470px); overflow: auto; padding: 8px; overscroll-behavior: contain; }
-.group-label { padding: 10px 8px 4px; color: var(--fg-3); font: var(--fw-title) var(--text-caption)/12px var(--font-ui); letter-spacing: 0.09em; text-transform: uppercase; }
-.result { display: flex; align-items: center; width: 100%; min-height: calc(var(--row) + 4px); gap: 8px; padding: 0 8px; border-radius: 6px; text-align: left; position: relative; isolation: isolate; }
+.palette-results .result, .palette-results .group-label { content-visibility: auto; contain-intrinsic-size: auto 2.25rem; }
+.palette-results { max-height: min(54vh, 29.375rem); overflow: auto; padding: 0.5rem; overscroll-behavior: contain; }
+.group-label { padding: 0.625rem 0.5rem 0.25rem; color: var(--fg-3); font: var(--fw-title) var(--text-caption)/0.75rem var(--font-ui); letter-spacing: 0.09em; text-transform: uppercase; }
+.result { display: flex; align-items: center; width: 100%; min-height: calc(var(--row) + 0.25rem); gap: 0.5rem; padding: 0 0.5rem; border-radius: 0.375rem; text-align: left; position: relative; isolation: isolate; }
 /* The highlight is drawn inset from the row (the row keeps its full hit area): 3 px above and below
    leave an even gap to the rows and section headers around it. */
-.result::before { content: ""; position: absolute; z-index: -1; inset: 3px 0; border-radius: 8px; background: transparent; }
+.result::before { content: ""; position: absolute; z-index: -1; inset: 0.1875rem 0; border-radius: 0.5rem; background: transparent; }
 .result:disabled { color: var(--fg-3); cursor: default; opacity: 0.72; }
 .result[aria-selected="true"]::before { background: var(--accent-soft); }
-.result-icon.has-svg svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.result-icon { display: grid; place-items: center; width: 20px; flex: none; color: var(--fg-2); font: var(--fw-label) var(--text-secondary)/1 var(--font-mono); }
+.result-icon.has-svg svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.result-icon { display: grid; place-items: center; width: 1.25rem; flex: none; color: var(--fg-2); font: var(--fw-label) var(--text-secondary)/1 var(--font-mono); }
 /* The title wins the row: the hint takes only what the title leaves (to an ellipsis), so a long hint never squeezes the title to nothing
    on a narrow screen (the Settings row read as a row with no title on a phone). */
 .result-label { line-height: normal; flex: none; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-hint { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: right; color: var(--fg-3); font: var(--fw-secondary) var(--text-caption)/1.2 var(--font-mono); white-space: nowrap; }
-.swatch { height: 14px; border-radius: 50%; }
-.palette-empty { margin: 16px 8px; color: var(--fg-2); font-size: var(--text-body); }
-.palette-foot { display: flex; align-items: center; gap: 5px; margin: 0; padding: 10px 14px; border-top: 1px solid var(--line); color: var(--fg-3); font-size: var(--text-caption); }
-.palette-foot kbd { padding: 3px 5px; border-radius: 4px; background: var(--hover); font: var(--fw-label) var(--text-caption)/1 var(--font-mono); }
+.swatch { height: 0.875rem; border-radius: 50%; }
+.palette-empty { margin: 1rem 0.5rem; color: var(--fg-2); font-size: var(--text-body); }
+.palette-foot { display: flex; align-items: center; gap: 0.3125rem; margin: 0; padding: 0.625rem 0.875rem; border-top: 1px solid var(--line); color: var(--fg-3); font-size: var(--text-caption); }
+.palette-foot kbd { padding: 0.1875rem 0.3125rem; border-radius: 0.25rem; background: var(--hover); font: var(--fw-label) var(--text-caption)/1 var(--font-mono); }
 /* The key hints are for a keyboard: with no fine pointer, or no hover, or a narrow screen they say nothing, so the footer
    goes and the list takes its space (TASTE: a phone sees phone things). The list's cap is the palette's own cap less
    the 57 px field, so what the footer used to hold is now rows. */
 @media (hover: none), (pointer: coarse), (max-width: 720px) { .palette-foot { display: none; } }
-@media (max-width: 720px) { .palette-results { max-height: calc(min(72vh, 620px) - 57px); } }
+@media (max-width: 720px) { .palette-results { max-height: calc(min(72vh, 38.75rem) - 3.5625rem); } }
 
 /* Variant A mobile tray: circular key targets over one blurred, edge-faded capsule. */
-.keyblur { display: none; position: absolute; z-index: 6; left: 0; right: 0; bottom: 0; height: 108px; pointer-events: none; background: linear-gradient(transparent, color-mix(in oklab, var(--bg) 58%, transparent)); transition: opacity 180ms ease-out; }
-.keybar { display: none; position: absolute; z-index: 7; left: 0; right: 0; bottom: calc(8px + env(safe-area-inset-bottom)); padding: 0 12px; transition: transform 240ms var(--ease-drawer), opacity 180ms ease-out; }
+.keyblur { display: none; position: absolute; z-index: 6; left: 0; right: 0; bottom: 0; height: 6.75rem; pointer-events: none; background: linear-gradient(transparent, color-mix(in oklab, var(--bg) 58%, transparent)); transition: opacity 180ms ease-out; }
+.keybar { display: none; position: absolute; z-index: 7; left: 0; right: 0; bottom: calc(0.5rem + env(safe-area-inset-bottom)); padding: 0 0.75rem; transition: transform 240ms var(--ease-drawer), opacity 180ms ease-out; }
 .keytray {
   position: relative; display: block; width: max-content; max-width: 100%; margin: 0 auto; overflow: hidden; overflow: clip; /* clip, not hidden: a hidden box can be scrolled by focus */
   --ui-pill-height: var(--keybar-height); padding: 0; border-radius: var(--r-pill);
@@ -556,45 +560,45 @@ button { color: inherit; }
 .keybar .keytray { display: block; height: var(--keybar-height); }
 .keyrows { display: grid; grid-auto-rows: calc(var(--keybar-height) - 2px); will-change: transform; }
 .keyrow {
-  display: flex; align-items: center; gap: 2px; min-width: 0; padding: 0 7px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scrollbar-width: none;
+  display: flex; align-items: center; gap: 2px; min-width: 0; padding: 0 0.4375rem; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scrollbar-width: none;
   touch-action: pan-x;
-  -webkit-mask-image: linear-gradient(to right, transparent, #000 14px, #000 calc(100% - 22px), transparent);
-  mask-image: linear-gradient(to right, transparent, #000 14px, #000 calc(100% - 22px), transparent);
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 0.875rem, #000 calc(100% - 1.375rem), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 0.875rem, #000 calc(100% - 1.375rem), transparent);
 }
 .keyrow[hidden] { display: none; }
-.keydots { position: absolute; z-index: 1; top: 0; right: 7px; bottom: 0; display: none; flex-direction: column; justify-content: center; gap: 4px; pointer-events: none; }
+.keydots { position: absolute; z-index: 1; top: 0; right: 0.4375rem; bottom: 0; display: none; flex-direction: column; justify-content: center; gap: 0.25rem; pointer-events: none; }
 .keytray[data-rows="2"] .keydots { display: flex; }
-.keydots i { width: 4px; height: 4px; border-radius: 50%; background: var(--fg-3); opacity: 0.5; transition: opacity 160ms ease, background-color 160ms ease; }
+.keydots i { width: 0.25rem; height: 0.25rem; border-radius: 50%; background: var(--fg-3); opacity: 0.5; transition: opacity 160ms ease, background-color 160ms ease; }
 .keydots i[data-on] { background: var(--fg); opacity: 0.9; }
-.keytray[data-rows="2"] .keyrow { padding-right: 16px; }
+.keytray[data-rows="2"] .keyrow { padding-right: 1rem; }
 .keyrow::-webkit-scrollbar { display: none; }
 /* `safe`: when the keys are wider than the tray, plain centring pushes the first ones out of reach to the
    left of the scroll origin (esc and tab could not be scrolled to or tapped on a phone). */
 .keytray.ui-pill { justify-content: safe center; }
 .keytray::-webkit-scrollbar { display: none; }
-[data-focus-ring="on"] .keytray:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.keybar button { position: relative; flex: none; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; color: var(--fg); scroll-snap-align: start; transition: transform 140ms var(--ease-out); }
-.keybar button svg { width: 24px; height: 24px; stroke-width: 1.75; }
+[data-focus-ring="on"] .keytray:focus-visible { outline: 2px solid var(--accent); outline-offset: 0.1875rem; }
+.keybar button { position: relative; flex: none; width: 3rem; height: 3rem; border-radius: 50%; display: grid; place-items: center; color: var(--fg); scroll-snap-align: start; transition: transform 140ms var(--ease-out); }
+.keybar button svg { width: 1.5rem; height: 1.5rem; stroke-width: 1.75; }
 /* The selection circle is its own layer, inset from the 48 px target: the tray's rows are 46 px tall (the capsule's 48 px less
    its hairline), so a circle as big as the target touched or crossed the capsule edge. 38 px leaves 4 px above and below
    and 5 px at the sides (TASTE: toolbar selection stays inside the capsule). */
 .keybar button { isolation: isolate; }
-.keybar button::before { content: ""; position: absolute; z-index: -1; inset: 5px; border-radius: 50%; background: transparent; transition: background-color 140ms ease; }
-.keybar .key-word { font: var(--fw-title) 15px/1 var(--font-ui); letter-spacing: 0.01em; }
+.keybar button::before { content: ""; position: absolute; z-index: -1; inset: 0.3125rem; border-radius: 50%; background: transparent; transition: background-color 140ms ease; }
+.keybar .key-word { font: var(--fw-title) 0.9375rem/1 var(--font-ui); letter-spacing: 0.01em; }
 /* Armed modifiers use a soft fill; locked modifiers add a small dot as a second cue. */
 .keybar button[data-mod-state="armed"], .keybar button[data-mod-state="locked"] { color: var(--accent); }
 .keybar button[data-mod-state="armed"]::before, .keybar button[data-mod-state="locked"]::before { background: var(--accent-soft); }
-.keybar button[data-mod-state="locked"]::after { content: ""; position: absolute; right: 8px; bottom: 8px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--overlay); }
+.keybar button[data-mod-state="locked"]::after { content: ""; position: absolute; right: 0.5rem; bottom: 0.5rem; width: 0.3125rem; height: 0.3125rem; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--overlay); }
 .keybar button[data-pressed="true"] { color: var(--accent); }
 .keybar button[data-pressed="true"]::before { background: var(--accent-soft); }
 .keybar button[data-disabled] { opacity: 0.35; }
 .keybar button[data-instant] { transition: none; }
 .keybar .dpad[hidden] { display: none !important; }
-.keybar.is-away { transform: translateY(calc(100% + 16px)); opacity: 0; pointer-events: none; transition-duration: 180ms, 140ms; }
+.keybar.is-away { transform: translateY(calc(100% + 1rem)); opacity: 0; pointer-events: none; transition-duration: 180ms, 140ms; }
 .keyblur.is-away { opacity: 0; }
 
 .terminal-host textarea, .terminal-host input {
-  opacity: 0 !important; color: transparent !important; caret-color: transparent !important; font-size: 16px !important;
+  opacity: 0 !important; color: transparent !important; caret-color: transparent !important; font-size: 1rem !important;
   background: transparent !important; width: 1px !important; height: 1px !important; line-height: 1px !important;
   max-height: 1px !important; resize: none !important; overflow: hidden !important;
 }
@@ -606,25 +610,25 @@ button { color: inherit; }
 @media (pointer: coarse) {
   /* A touch device has no keyboard to hint at (a hardware keyboard on a tablet still has the shortcuts panel). */
   .capsule-kbd { display: none; }
-  .terminal-screen { --gutter: max(20px, env(safe-area-inset-left)); --pill-h: 44px; }
-  .add-row, .result { min-height: 44px; }
+  .terminal-screen { --gutter: max(1.25rem, env(safe-area-inset-left)); --pill-h: 2.75rem; }
+  .add-row, .result { min-height: 2.75rem; }
   .keyblur, .keybar { display: block; }
   .panes { bottom: calc(var(--keybar-inset) + var(--keybar-height) + var(--keybar-gap) + env(safe-area-inset-bottom)); }
 }
 @media (max-width: 720px) {
-  .terminal-screen { --gutter: max(16px, env(safe-area-inset-left)); }
+  .terminal-screen { --gutter: max(1rem, env(safe-area-inset-left)); }
   .tabs { display: none; }
   .capsule { width: 100%; min-width: 0; justify-self: stretch; }
   .capsule-kbd { display: none; }
-  .sidebar { width: auto; right: var(--gutter); bottom: calc(60px + env(safe-area-inset-bottom)); }
+  .sidebar { width: auto; right: var(--gutter); bottom: calc(3.75rem + env(safe-area-inset-bottom)); }
   .sidebar-toggle { --sb-w: calc(100vw - 2 * var(--gutter)); }
   /* On a phone the palette grows from the top pill, over the bar: the corner controls it covers fade out (see above). */
-  .palette { top: calc(10px + env(safe-area-inset-top)); }
+  .palette { top: calc(0.625rem + env(safe-area-inset-top)); }
 }
 @media (max-width: 360px) {
-  .capsule { gap: 6px; padding-left: 10px; font-size: 12px; }
-  .capsule-rtt { font-size: 10px; }
-  .keybar { padding-right: 6px; padding-left: 6px; }
+  .capsule { gap: 0.375rem; padding-left: 0.625rem; font-size: 0.75rem; }
+  .capsule-rtt { font-size: 0.625rem; }
+  .keybar { padding-right: 0.375rem; padding-left: 0.375rem; }
 }
 @media (prefers-reduced-motion: reduce) {
   .sidebar { transition: opacity 180ms ease; }
@@ -641,23 +645,23 @@ button { color: inherit; }
 }
 :root[data-kb="open"] .keybar { bottom: calc(var(--keybar-inset) + env(safe-area-inset-bottom)); }
 :root[data-kb="open"] .panes { bottom: calc(var(--keybar-inset) + var(--keybar-height) + var(--keybar-gap) + env(safe-area-inset-bottom)); }
-:root[data-kb="open"] .keyblur { height: 80px; }
+:root[data-kb="open"] .keyblur { height: 5rem; }
 
 /* Recovery extends the existing floating card/capsule controls; no idle animation or polling. */
-.recovery-notice { position: absolute; z-index: 8; top: calc(env(safe-area-inset-top) + 76px); left: 50%; transform: translateX(-50%); width: min(520px, calc(100% - 24px)); padding: 12px 16px; }
-.recovery-notice p { margin: 0 0 8px; }
-.recovery-notice .ui-pill { min-width: 44px; padding: 0 14px; }
+.recovery-notice { position: absolute; z-index: 8; top: calc(env(safe-area-inset-top) + 4.75rem); left: 50%; transform: translateX(-50%); width: min(32.5rem, calc(100% - 1.5rem)); padding: 0.75rem 1rem; }
+.recovery-notice p { margin: 0 0 0.5rem; }
+.recovery-notice .ui-pill { min-width: 2.75rem; padding: 0 0.875rem; }
 .recovery-notice[hidden] { display: none; }
 
 
 /* Paste target for origins where the clipboard cannot be read: one field above the tray, same material. */
-.paste-target { position: absolute; z-index: 9; left: var(--gutter); right: var(--gutter); bottom: calc(var(--keybar-inset) + var(--keybar-height) + var(--keybar-gap) + env(safe-area-inset-bottom) + 8px); padding: 6px; border-radius: 14px; }
-.paste-target input { width: 100%; min-height: 44px; padding: 0 12px; border: 0; border-radius: 10px; background: var(--hover); color: var(--fg); font: var(--fw-body) 16px/1 var(--font-ui); outline: none; }
+.paste-target { position: absolute; z-index: 9; left: var(--gutter); right: var(--gutter); bottom: calc(var(--keybar-inset) + var(--keybar-height) + var(--keybar-gap) + env(safe-area-inset-bottom) + 0.5rem); padding: 0.375rem; border-radius: 0.875rem; }
+.paste-target input { width: 100%; min-height: 2.75rem; padding: 0 0.75rem; border: 0; border-radius: 0.625rem; background: var(--hover); color: var(--fg); font: var(--fw-body) 1rem/1 var(--font-ui); outline: none; }
 
 /* Hidden controls leave their row (Settings, Toolbar). */
 .keyrow > button[hidden] { display: none !important; }
 /* While the terminal history is scrolled back the toolbar shrinks to a slim strip; a tap or the bottom restores it. */
-.terminal-screen[data-scrolled="true"]:not([data-toolbar-open]) .keytray { transform: translateY(calc(var(--keybar-height) - 16px)); }
+.terminal-screen[data-scrolled="true"]:not([data-toolbar-open]) .keytray { transform: translateY(calc(var(--keybar-height) - 1rem)); }
 .terminal-screen[data-scrolled="true"]:not([data-toolbar-open]) .keyrows { opacity: 0.25; }
 .keytray { transition: transform 280ms var(--ease-drawer, cubic-bezier(0.23, 1, 0.32, 1)); }
 .keyrows { transition: opacity 180ms ease; }
@@ -666,15 +670,15 @@ button { color: inherit; }
 /* Editing the toolbar in place (long press): a gentle wiggle, a hide badge on each control, and a tray of hidden ones. */
 @keyframes keywiggle { 0% { rotate: -1.6deg; } 50% { rotate: 1.6deg; } 100% { rotate: -1.6deg; } }
 .terminal-screen[data-toolbar-edit] .keyrow > button { animation: keywiggle 260ms ease-in-out infinite; animation-delay: var(--wiggle, 0ms); touch-action: none; }
-.keyrow > button .keyx { position: absolute; left: 2px; top: 2px; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--overlay-solid); border: 1px solid var(--overlay-line); color: var(--fg); font: var(--fw-label) 14px/1 var(--font-ui); font-style: normal; }
+.keyrow > button .keyx { position: absolute; left: 2px; top: 2px; display: grid; place-items: center; width: 1.25rem; height: 1.25rem; border-radius: 50%; background: var(--overlay-solid); border: 1px solid var(--overlay-line); color: var(--fg); font: var(--fw-label) 0.875rem/1 var(--font-ui); font-style: normal; }
 .keyghost { display: grid; place-items: center; border-radius: 50%; background: var(--overlay-solid); box-shadow: var(--overlay-shadow-large, var(--shadow)); color: var(--fg); }
-.keyghost svg { width: 24px; height: 24px; stroke-width: 1.75; }
-.keyedit { position: absolute; z-index: 8; left: 50%; translate: -50% 0; bottom: calc(var(--keybar-inset) + var(--keybar-height) + env(safe-area-inset-bottom) + 14px); --pill-h: 52px; display: flex; z-index: 9; align-items: center; gap: 4px; max-width: calc(100% - 24px); padding: 0 6px 0 8px; }
+.keyghost svg { width: 1.5rem; height: 1.5rem; stroke-width: 1.75; }
+.keyedit { position: absolute; z-index: 8; left: 50%; translate: -50% 0; bottom: calc(var(--keybar-inset) + var(--keybar-height) + env(safe-area-inset-bottom) + 0.875rem); --pill-h: 3.25rem; display: flex; z-index: 9; align-items: center; gap: 0.25rem; max-width: calc(100% - 1.5rem); padding: 0 0.375rem 0 0.5rem; }
 .keyedit-list { display: flex; gap: 2px; overflow-x: auto; }
-.keyedit[data-empty="true"] .keyedit-list::before { content: "Nothing hidden"; padding: 0 10px; color: var(--fg-3); font: var(--ui-type-label); white-space: nowrap; }
-.keyedit-add { position: relative; flex: none; display: grid; place-items: center; width: 44px; height: 44px; border: 0; border-radius: 50%; background: none; color: var(--fg); }
-.keyedit-add svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.keyedit-add i { position: absolute; right: 3px; top: 3px; display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: var(--accent); color: var(--accent-fg); font: var(--fw-label) 13px/1 var(--font-ui); font-style: normal; }
-.keyedit-done { flex: none; min-height: 40px; padding: 0 14px; border: 0; border-radius: 999px; background: var(--hover); color: var(--fg); font: var(--ui-type-button); white-space: nowrap; }
+.keyedit[data-empty="true"] .keyedit-list::before { content: "Nothing hidden"; padding: 0 0.625rem; color: var(--fg-3); font: var(--ui-type-label); white-space: nowrap; }
+.keyedit-add { position: relative; flex: none; display: grid; place-items: center; width: 2.75rem; height: 2.75rem; border: 0; border-radius: 50%; background: none; color: var(--fg); }
+.keyedit-add svg { width: 1.375rem; height: 1.375rem; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.keyedit-add i { position: absolute; right: 0.1875rem; top: 0.1875rem; display: grid; place-items: center; width: 1rem; height: 1rem; border-radius: 50%; background: var(--accent); color: var(--accent-fg); font: var(--fw-label) 0.8125rem/1 var(--font-ui); font-style: normal; }
+.keyedit-done { flex: none; min-height: 2.5rem; padding: 0 0.875rem; border: 0; border-radius: 999px; background: var(--hover); color: var(--fg); font: var(--ui-type-button); white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) { .terminal-screen[data-toolbar-edit] .keyrow > button { animation: none; outline: 1px dashed var(--overlay-line); } }
 .terminal-screen[data-toolbar-edit] .test-double-badge { opacity: 0; }

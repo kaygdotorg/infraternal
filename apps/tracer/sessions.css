@@ -5,26 +5,26 @@
  * transform or will-change at rest, so text renders crisp (TASTE section 5).
  */
 .cl-sx-pop :focus, .cl-sx-strip :focus, .cl-sx-badge:focus { outline: none; }
-.cl-sx-pop { --sx-small: 450 12px/1.4 var(--font-ui, "Geist Mono", ui-monospace, monospace); position: absolute; z-index: 6; display: flex; flex-direction: column; min-height: 0; overflow: hidden; border-radius: 14px; color: var(--fg); }
-.cl-sx-head { display: flex; align-items: center; gap: 12px; padding: 14px 16px 12px; }
-.cl-sx-logo { display: grid; flex: none; place-items: center; width: 24px; height: 24px; color: var(--fg); }
+.cl-sx-pop { --sx-small: 450 0.75rem/1.4 var(--font-ui, "Geist Mono", ui-monospace, monospace); position: absolute; z-index: 6; display: flex; flex-direction: column; min-height: 0; overflow: hidden; border-radius: 0.875rem; color: var(--fg); }
+.cl-sx-head { display: flex; align-items: center; gap: 0.75rem; padding: 0.875rem 1rem 0.75rem; }
+.cl-sx-logo { display: grid; flex: none; place-items: center; width: 1.5rem; height: 1.5rem; color: var(--fg); }
 .cl-sx-logo:empty { display: none; }
-.cl-sx-names { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.cl-sx-names { display: flex; flex-direction: column; gap: 0.1875rem; min-width: 0; }
 .cl-sx-title { font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
 .cl-sx-sub { color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
 .cl-sx-scroll { min-height: 0; overflow: auto; overscroll-behavior: contain; border-top: 1px solid var(--line); }
-@media (pointer: coarse) { .cl-sx-pop { border-radius: 18px; } .cl-sx-head { padding: 16px 16px 12px; } .cl-sx-logo { width: 28px; height: 28px; } }
+@media (pointer: coarse) { .cl-sx-pop { border-radius: 1.125rem; } .cl-sx-head { padding: 1rem 1rem 0.75rem; } .cl-sx-logo { width: 1.75rem; height: 1.75rem; } }
 
 /* ---- the manager ---------------------------------------------------------------- */
-.cl-sx-scroll { padding: 8px; }
+.cl-sx-scroll { padding: 0.5rem; }
 .cl-sx-group:first-child .cl-sx-eyebrow { margin-top: 2px; }
 .cl-sx-group + .cl-sx-group { margin-top: 2px; }
-.cl-sx-eyebrow { margin: 8px 8px 2px; color: var(--fg-3); font: var(--ui-type-eyebrow); letter-spacing: var(--ui-tracking); }
+.cl-sx-eyebrow { margin: 0.5rem 0.5rem 2px; color: var(--fg-3); font: var(--ui-type-eyebrow); letter-spacing: var(--ui-tracking); }
 .cl-sx-list { margin: 0; padding: 0; list-style: none; }
-.cl-sx-row { position: relative; border-radius: 8px; }
+.cl-sx-row { position: relative; border-radius: 0.5rem; }
 .cl-sx-main {
-  display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; column-gap: 8px; width: 100%; min-height: 48px; margin: 0; padding: 5px 8px;
-  border: 0; border-radius: 8px; background: none; color: var(--fg); text-align: left; cursor: default;
+  display: grid; grid-template-columns: 1.125rem minmax(0, 1fr) auto; align-items: center; column-gap: 0.5rem; width: 100%; min-height: 3rem; margin: 0; padding: 0.3125rem 0.5rem;
+  border: 0; border-radius: 0.5rem; background: none; color: var(--fg); text-align: left; cursor: default;
   /* The press uses the individual `scale` property, so the swipe's own transform is never eased behind the finger. */
   transition: scale 140ms var(--ease-out, ease-out), background-color 140ms ease;
 }
@@ -32,51 +32,51 @@
 /* The window's own session is marked with a faint tinted fill, never a border or an outline. */
 .cl-sx-row[data-current] .cl-sx-main { background: var(--hover); }
 .cl-sx-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.cl-sx-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.cl-sx-line { display: flex; align-items: center; gap: 0.375rem; min-width: 0; }
 .cl-sx-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: var(--ui-type-button); line-height: 1.4; letter-spacing: var(--ui-tracking); }
 .cl-sx-sub-line { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-3); font: var(--sx-small); letter-spacing: var(--ui-tracking); }
 .cl-sx-row[data-state="detached"] .cl-sx-sub-line, .cl-sx-row[data-state="exited"] .cl-sx-sub-line { color: var(--ui-text-secondary); }
 .cl-sx-pin { display: inline-grid; flex: none; place-items: center; color: var(--fg-3); }
-.cl-sx-pin svg, .cl-sx-viewers svg { width: 12px; height: 12px; }
+.cl-sx-pin svg, .cl-sx-viewers svg { width: 0.75rem; height: 0.75rem; }
 .cl-sx-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; color: var(--fg-3); font: var(--sx-small); letter-spacing: var(--ui-tracking); white-space: nowrap; transition: opacity 120ms ease; }
-.cl-sx-meta-top { display: inline-flex; align-items: center; gap: 8px; }
-.cl-sx-viewers { display: inline-flex; align-items: center; gap: 3px; }
+.cl-sx-meta-top { display: inline-flex; align-items: center; gap: 0.5rem; }
+.cl-sx-viewers { display: inline-flex; align-items: center; gap: 0.1875rem; }
 .cl-sx-meta .is-fail { color: var(--danger); }
 .cl-sx-name-input {
-  min-width: 0; width: 100%; height: 22px; margin: 0 -6px; padding: 0 6px; border: 0; border-radius: 6px; background: var(--hover); color: var(--fg);
+  min-width: 0; width: 100%; height: 1.375rem; margin: 0 -0.375rem; padding: 0 0.375rem; border: 0; border-radius: 0.375rem; background: var(--hover); color: var(--fg);
   font: var(--ui-type-button); letter-spacing: var(--ui-tracking);
 }
 /* Row actions: the shared header icon button, in place of the age and size while the row is hovered or focused. */
-.cl-sx-acts { position: absolute; top: 0; right: 4px; bottom: 0; display: flex; align-items: center; gap: 0; opacity: 0; pointer-events: none; transition: opacity 120ms ease; }
+.cl-sx-acts { position: absolute; top: 0; right: 0.25rem; bottom: 0; display: flex; align-items: center; gap: 0; opacity: 0; pointer-events: none; transition: opacity 120ms ease; }
 @media (hover: hover) and (pointer: fine) {
   .cl-sx-main:hover { background: var(--hover); }
   .cl-sx-row:hover .cl-sx-acts, .cl-sx-row:focus-within .cl-sx-acts { opacity: 1; pointer-events: auto; }
   .cl-sx-row:hover .cl-sx-meta, .cl-sx-row:focus-within .cl-sx-meta { opacity: 0; }
 }
 @media (pointer: coarse) {
-  .cl-sx-main { min-height: 56px; }
+  .cl-sx-main { min-height: 3.5rem; }
   /* A swipe left moves the row 1:1 and the actions fade in behind it (set from script as --sx-open). */
   .cl-sx-row { touch-action: pan-y; overflow: hidden; }
   .cl-sx-acts { opacity: var(--sx-open, 0); pointer-events: none; }
   .cl-sx-row[data-swiped] .cl-sx-acts { pointer-events: auto; }
 }
-.cl-sx-empty { margin: 8px 8px 6px; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.cl-sx-empty { margin: 0.5rem 0.5rem 0.375rem; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
 
 /* Loading and failed states keep the sign-in card's rhythm: message, then 24 px, then the action. */
-.cl-sx-state { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 24px 16px 20px; color: var(--fg); text-align: center; }
-.cl-sx-state[data-kind="loading"] { flex-direction: row; justify-content: center; gap: 10px; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
-.cl-sx-state-icon { width: 22px; height: 22px; color: var(--danger); }
+.cl-sx-state { display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 1.5rem 1rem 1.25rem; color: var(--fg); text-align: center; }
+.cl-sx-state[data-kind="loading"] { flex-direction: row; justify-content: center; gap: 0.625rem; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.cl-sx-state-icon { width: 1.375rem; height: 1.375rem; color: var(--danger); }
 .cl-sx-state-title { font: var(--ui-type-button); line-height: 1.4; letter-spacing: var(--ui-tracking); }
-.cl-sx-state-note { margin-top: -8px; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
-.cl-sx-retry { margin-top: 12px; color: var(--fg-2); cursor: pointer; }
+.cl-sx-state-note { margin-top: -0.5rem; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.cl-sx-retry { margin-top: 0.75rem; color: var(--fg-2); cursor: pointer; }
 .cl-sx-retry svg { width: var(--ui-icon); height: var(--ui-icon); stroke-width: 1.5; }
 .cl-sx-retry:focus { outline: none; }
 
 /* ---- inside a window ---------------------------------------------------------------- */
 /* A session that exited shows its final screen read-only, with one floating pill to run it again. */
 .cl-sx-strip {
-  position: absolute; z-index: 2; left: 0; right: 0; bottom: 14px; margin-inline: auto; width: fit-content; height: fit-content; min-height: var(--pill-h, 38px);
-  display: inline-flex; align-items: center; gap: 8px; max-width: calc(100% - 24px); padding: 0 4px 0 14px; white-space: nowrap;
+  position: absolute; z-index: 2; left: 0; right: 0; bottom: 0.875rem; margin-inline: auto; width: fit-content; height: fit-content; min-height: var(--pill-h, 2.375rem);
+  display: inline-flex; align-items: center; gap: 0.5rem; max-width: calc(100% - 1.5rem); padding: 0 0.25rem 0 0.875rem; white-space: nowrap;
   color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking);
 }
 /* The strip is placed by auto margins, never by a transform: the shared pill's pressed state sets its own transform, and
@@ -87,23 +87,23 @@
 .cl-sx-strip-text { color: var(--ui-text-secondary); }
 .cl-sx-strip[data-result="fail"] .cl-sx-strip-text { color: var(--danger); }
 .cl-sx-again {
-  display: inline-flex; align-items: center; gap: 6px; height: calc(var(--pill-h, 38px) - 10px); padding: 0 12px 0 10px; border: 0; border-radius: 999px; background: var(--fg); color: var(--bg);
+  display: inline-flex; align-items: center; gap: 0.375rem; height: calc(var(--pill-h, 2.375rem) - 0.625rem); padding: 0 0.75rem 0 0.625rem; border: 0; border-radius: 999px; background: var(--fg); color: var(--bg);
   font: var(--ui-type-button); letter-spacing: var(--ui-tracking); cursor: pointer; transition: transform 140ms var(--ease-out, ease-out);
 }
 .cl-sx-again:active { transform: scale(var(--ui-press-scale)); }
-.cl-sx-again svg { width: 14px; height: 14px; }
-.cl-sx-dismiss { display: inline-grid; place-items: center; width: calc(var(--pill-h, 38px) - 10px); height: calc(var(--pill-h, 38px) - 10px); border: 0; border-radius: 999px; background: none; color: var(--fg-2); cursor: pointer; }
+.cl-sx-again svg { width: 0.875rem; height: 0.875rem; }
+.cl-sx-dismiss { display: inline-grid; place-items: center; width: calc(var(--pill-h, 2.375rem) - 0.625rem); height: calc(var(--pill-h, 2.375rem) - 0.625rem); border: 0; border-radius: 999px; background: none; color: var(--fg-2); cursor: pointer; }
 .cl-sx-dismiss:active { transform: scale(var(--ui-press-scale)); }
 .cl-sx-strip .ui-mark { margin-left: -2px; }
-.ui-window-body:has(.cl-sx-strip) .cl-preview { padding-bottom: 72px; }
+.ui-window-body:has(.cl-sx-strip) .cl-preview { padding-bottom: 4.5rem; }
 /* On a phone the pill sits at the start edge, clear of the corner the mock badge keeps. */
-@media (pointer: coarse) { .cl-sx-strip { left: 12px; right: auto; margin-inline: 0; } }
+@media (pointer: coarse) { .cl-sx-strip { left: 0.75rem; right: auto; margin-inline: 0; } }
 /* An ended session (#158) has no screen left to read: the empty terminal is hidden (no cursor that invites typing),
    and the pill sits in the middle of the window, on every device. */
 .ui-window-body:has(.cl-sx-strip:is([data-result="ended"], [data-result="refused"])) .terminal-host { visibility: hidden; }
 .cl-sx-strip:is([data-result="ended"], [data-result="refused"]) { inset: 0; margin: auto; animation: cl-sx-strip-in 200ms var(--ease-out, ease-out); }
 /* A refusal explains itself in a sentence or two, so it wraps; the buttons stay on the last line's side. */
-.cl-sx-strip[data-result="refused"] { white-space: normal; width: min(calc(100% - 24px), 420px); padding-block: 6px; border-radius: 22px; }
+.cl-sx-strip[data-result="refused"] { white-space: normal; width: min(calc(100% - 1.5rem), 26.25rem); padding-block: 0.375rem; border-radius: 1.375rem; }
 .cl-sx-strip[data-result="refused"] .cl-sx-strip-text { flex: 1; min-width: 0; }
 @keyframes cl-sx-strip-in { from { opacity: 0; } }
 @media (hover: hover) and (pointer: fine) { .cl-sx-dismiss:hover { background: var(--hover); color: var(--fg); } }
@@ -111,17 +111,17 @@
 /* Sized for another device (D183): the screen is scaled to fit, and a quiet badge offers the size back. */
 .cl-preview[data-scaled] { inset: 0 auto auto 0; width: calc(100% / var(--sx-k, 1)); height: calc(100% / var(--sx-k, 1)); transform: scale(var(--sx-k, 1)); transform-origin: 0 0; }
 .cl-sx-badge {
-  position: absolute; z-index: 2; left: 12px; bottom: 12px; display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px 0 8px;
+  position: absolute; z-index: 2; left: 0.75rem; bottom: 0.75rem; display: inline-flex; align-items: center; gap: 0.375rem; height: 1.625rem; padding: 0 0.625rem 0 0.5rem;
   border: 1px solid var(--overlay-line); border-radius: 999px; background: color-mix(in oklab, var(--bg) 84%, transparent); color: var(--fg-2); cursor: pointer;
-  font: 450 12px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: var(--ui-tracking); white-space: nowrap;
+  font: 450 0.75rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: var(--ui-tracking); white-space: nowrap;
   transition: transform 140ms var(--ease-out, ease-out), background-color 140ms ease;
 }
-.cl-sx-badge::after { content: ""; position: absolute; inset: -9px -4px; }
-.cl-sx-badge svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.cl-sx-badge::after { content: ""; position: absolute; inset: -0.5625rem -0.25rem; }
+.cl-sx-badge svg { width: 0.875rem; height: 0.875rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .cl-sx-badge:active { transform: scale(var(--ui-press-scale)); }
 @media (hover: hover) and (pointer: fine) { .cl-sx-badge:hover { background: var(--hover); color: var(--fg); } }
-@media (pointer: coarse) { .cl-sx-badge { height: 30px; } }
+@media (pointer: coarse) { .cl-sx-badge { height: 1.875rem; } }
 
 /* A moment of light on the frame when a window attaches to another session. */
-.cl-sx-flash { position: absolute; z-index: 3; inset: -1px; border-radius: var(--r-lg, 18px); box-shadow: inset 0 0 0 1.5px var(--accent); pointer-events: none; }
+.cl-sx-flash { position: absolute; z-index: 3; inset: -1px; border-radius: var(--r-lg, 1.125rem); box-shadow: inset 0 0 0 1.5px var(--accent); pointer-events: none; }
 @media (prefers-reduced-motion: reduce) { .cl-sx-again:active, .cl-sx-dismiss:active, .cl-sx-badge:active { transform: none; } .cl-sx-main:active { scale: none; } }
