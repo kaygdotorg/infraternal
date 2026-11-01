@@ -367,6 +367,24 @@ fn private_dir(path: &Path) -> io::Result<()> {
     }
     Ok(())
 }
+
+/// Same-UID shim clients are trusted; other UIDs need root privileges to connect.
+fn shim_peer_uid_allowed(peer_uid: u32, agent_uid: u32) -> bool {
+    peer_uid == 0 || peer_uid == agent_uid
+}
+
+#[cfg(test)]
+mod peer_uid_tests {
+    use super::shim_peer_uid_allowed;
+
+    #[test]
+    fn different_uid_shim_socket_peer_is_refused() {
+        assert!(shim_peer_uid_allowed(1500, 1500));
+        assert!(shim_peer_uid_allowed(0, 1500));
+        assert!(!shim_peer_uid_allowed(65534, 1500));
+    }
+}
+
 fn socket(config: &Config) -> io::Result<(UnixListener, SocketPath)> {
     let state = if let Some(path) = &config.state {
         path.clone()
@@ -686,7 +704,7 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
                 Ok((stream, _)) => {
                     let credentials =
                         getsockopt(&stream, PeerCredentials).map_err(io::Error::from)?;
-                    if (credentials.uid() == 0 || credentials.uid() == Uid::effective().as_raw())
+                    if shim_peer_uid_allowed(credentials.uid(), Uid::effective().as_raw())
                         && peers.len() < MAX_PEERS
                     {
                         stream.set_nonblocking(true)?;
