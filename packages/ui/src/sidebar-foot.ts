@@ -15,7 +15,9 @@
  *   a (default): two lines (name, then a quiet secondary line), a 40 px pill.
  *   b: one line, a 32 px pill, a thin gradient ring around the avatar.
  *
- * The build's version is not here: it lives in Settings, About (settings-overlay.ts).
+ * The version is a third small pill on the same line (version-pill.on-demand.ts), added by the canvas once the first screen
+ * is up (owner, 2026-10-15 and 2026-11-01; TASTE "Version lives in About" is superseded). The commit and the build date stay in
+ * Settings, About (settings-overlay.ts).
  *
  *   const foot = createSidebarFoot({ displayName, secondary, onOpen: () => settings.open("about", "pointer") });
  *   sidebar.append(foot.root);

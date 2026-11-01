@@ -42,6 +42,7 @@ import { createMockSettings } from "./settings";
 import { createMockSharing } from "./shares";
 import { createMockWorld } from "./world";
 import { connectionStates } from "./connection-states";
+import type { VersionMock } from "./version";
 import { mountTransparencyCompare } from "./transparency";
 
 const CLOSE = '<path d="m7 7 10 10M17 7 7 17"/>';
@@ -205,8 +206,11 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   };
   // Palette rows that put a window's connection icon in each state (#212): the test double has no network to break.
   const connection = connectionStates(cx);
+  // `?version=1`: the product's version pill and panel on a scripted source (#216); each state has a palette row.
+  let version: VersionMock | undefined;
+  if (query.get("version") === "1") void onDemand(() => import("./version")).then((m) => { version = m.createVersionMock(core); });
   const removeProvider = core.addPaletteProvider(() => {
-    const out: PaletteEntry[] = [...sessionScenes.entries(), ...connection.entries()];
+    const out: PaletteEntry[] = [...sessionScenes.entries(), ...connection.entries(), ...(version?.entries() ?? [])];
     scenes.forEach((sc, i) => out.push({ group: "Mockup", glyph: "◇", label: `Mockup: scene ${i + 1} – ${sc.name.toLowerCase()}`, hint: "scenes", action: `proto:scene:${i + 1}` }));
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: transparency", hint: "all card and window levels side by side", action: "proto:transparency" });
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: simulate device switch", hint: "continue from another device", action: "proto:devicechip" });
@@ -221,6 +225,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     const [prefix, kind, value] = action.split(":");
     if (prefix !== "proto") return;
     if (kind === "sessions-scene" && value) { void sessionScenes.run(Number(value)); return; }
+    if (kind === "ver" && value) { version?.run(value); return; }
     if (kind === "conn" && value) { connection.run(value); return; }
     if (kind === "transparency") mountTransparencyCompare(core);
     else if (kind === "devicechip") showContinueChip();
@@ -333,6 +338,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       window.clearInterval(streamTimer);
       window.clearInterval(seedTimer);
       removeProvider();
+      version?.dispose();
       sessionScenes.dispose();
       inventory.dispose();
       mockupTag.remove();
