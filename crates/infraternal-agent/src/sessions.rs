@@ -205,7 +205,12 @@ pub async fn connect(path: PathBuf, id: [u8; 16]) -> io::Result<Session> {
 /// # Errors
 /// Returns the same authentication and framing failures as `connect`.
 pub async fn connect_sequenced(path: PathBuf, id: [u8; 16]) -> io::Result<Session> {
-    connect_with(path, id, SEQUENCED_INPUT | APPROXIMATE_SNAPSHOT).await
+    connect_with(
+        path,
+        id,
+        SEQUENCED_INPUT | APPROXIMATE_SNAPSHOT | infraternal_shim::frame::CLOSE_SESSION,
+    )
+    .await
 }
 
 /// Select a stable leg-B writer and advertised queue deferral before querying cursors.
@@ -361,7 +366,16 @@ pub fn gone(error: &io::Error) -> bool {
 /// Discover every socket identity with bounded parallel handshakes.
 /// # Errors
 /// Returns directory errors or a live shim handshake failure.
-pub async fn discover(state: &Path) -> io::Result<Vec<Session>> {
+#[inline(never)]
+pub fn discover(
+    state: &Path,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<Vec<Session>>> + Send + '_>> {
+    // Discovery runs at recovery and automation boundaries, never per keystroke.
+    // Share one state machine across consumers rather than inlining its socket
+    // scans and bounded concurrent handshakes into each caller's poll/drop paths.
+    Box::pin(discover_inner(state))
+}
+async fn discover_inner(state: &Path) -> io::Result<Vec<Session>> {
     let mut tasks = JoinSet::new();
     let mut sessions = Vec::new();
     for entry in fs::read_dir(state.join("sessions"))? {
@@ -534,6 +548,25 @@ pub async fn launch_with_readiness(
     rows: u16,
     readiness: bool,
 ) -> io::Result<Session> {
+    launch_with_command(exe, state, manager, uid, cols, rows, readiness, false, &[]).await
+}
+
+/// Launch a literal program through a bounded private stdin pipe, never a shell string or argv secret.
+/// # Errors
+/// Returns invalid program arguments, startup or shim handshake failures.
+#[allow(clippy::too_many_arguments)]
+pub async fn launch_with_command(
+    exe: &Path,
+    state: &Path,
+    manager: Manager,
+    uid: u32,
+    cols: u16,
+    rows: u16,
+    readiness: bool,
+    retain_output: bool,
+    program: &[String],
+) -> io::Result<Session> {
+    let program_bytes = command_input(program, readiness)?;
     if cols == 0 || rows == 0 || usize::from(cols) * usize::from(rows) > 200_000 {
         return Err(invalid("invalid terminal dimensions"));
     }
@@ -577,6 +610,12 @@ pub async fn launch_with_readiness(
     if readiness {
         command.arg("--readiness");
     }
+    if retain_output {
+        command.arg("--retain-output");
+    }
+    if !program.is_empty() {
+        command.arg("--command-stdin");
+    }
     if matches!(manager, Manager::Detached) {
         command.arg("--detach");
     }
@@ -586,10 +625,22 @@ pub async fn launch_with_readiness(
         command.env(name, value);
     }
     let mut child = command
-        .stdin(Stdio::null())
+        .stdin(if program.is_empty() {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
+    if !program.is_empty() {
+        child
+            .stdin
+            .take()
+            .ok_or(io::ErrorKind::BrokenPipe)?
+            .write_all(&program_bytes)
+            .await?;
+    }
     // The scope launcher lives until its shim exits. Reap independently; waiting
     // here would hold terminal.open until the user closed the terminal.
     tokio::spawn(async move {
@@ -619,3 +670,22 @@ pub async fn launch_with_readiness(
 #[cfg(test)]
 #[path = "../tests/unit/sessions.rs"]
 mod tests;
+
+/// The startup pipe carries only bounded literal arguments; no shell or secret argv.
+fn command_input(program: &[String], readiness: bool) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    for argument in program {
+        if argument.contains('\0') {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        bytes.extend_from_slice(argument.as_bytes());
+        bytes.push(0);
+    }
+    if bytes.len() > 8192
+        || program.first().is_some_and(String::is_empty)
+        || (readiness && !program.is_empty())
+    {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    Ok(bytes)
+}

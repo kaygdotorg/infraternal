@@ -117,11 +117,21 @@ impl Pty {
     pub fn spawn(uid: u32, cols: u16, rows: u16) -> io::Result<Self> {
         Self::spawn_with_readiness(uid, cols, rows, false)
     }
+    #[cfg(any(test, feature = "process-per-user"))]
     pub fn spawn_with_readiness(
         uid: u32,
         cols: u16,
         rows: u16,
         readiness: bool,
+    ) -> io::Result<Self> {
+        Self::spawn_with_command(uid, cols, rows, readiness, &[])
+    }
+    pub fn spawn_with_command(
+        uid: u32,
+        cols: u16,
+        rows: u16,
+        readiness: bool,
+        program: &[std::ffi::OsString],
     ) -> io::Result<Self> {
         let user = User::from_uid(Uid::from_raw(uid))
             .map_err(errno)?
@@ -179,17 +189,7 @@ impl Pty {
         } else {
             user.shell.as_path()
         };
-        let mut command = Command::new(shell);
-        let login_name = format!(
-            "-{}",
-            shell.file_name().unwrap_or_default().to_string_lossy()
-        );
-        if readiness {
-            // Wait for attachment input without invoking any login rc files.
-            command.args(["-c", "read -r line; printf 'infraternal-ready\\n'"]);
-        } else {
-            command.arg0(login_name);
-        }
+        let mut command = session_command(shell, readiness, program);
         command
             .env_clear()
             .env("HOME", &user.dir)
@@ -268,6 +268,17 @@ impl Pty {
         } else {
             self.signal(number)
         }
+    }
+    /// Target the owned shell group even while a job owns the foreground PTY.
+    /// Child caches a reaped status. Check it even before output has drained:
+    /// a live or unreaped child reserves its PID until this loop can reap it.
+    pub(crate) fn close_session(&mut self, exited: bool) -> io::Result<()> {
+        if exited || self.child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        let group =
+            nix::unistd::Pid::from_raw(i32::try_from(self.child.id()).map_err(io::Error::other)?);
+        killpg(group, Signal::SIGHUP).map_err(errno)
     }
     pub fn signal(&self, number: u8) -> io::Result<()> {
         let signal = allowed_signal(number)?;
@@ -800,3 +811,25 @@ mod child_environment_tests {
 #[cfg(feature = "process-per-user")]
 #[path = "pty_handoff.rs"]
 pub(crate) mod handoff;
+
+/// Literal programs bypass login-shell argument conventions; the shell path is still exported.
+fn session_command(shell: &Path, readiness: bool, program: &[std::ffi::OsString]) -> Command {
+    let mut command = Command::new(
+        program
+            .first()
+            .map_or(shell.as_os_str(), std::ffi::OsString::as_os_str),
+    );
+    let login_name = format!(
+        "-{}",
+        shell.file_name().unwrap_or_default().to_string_lossy()
+    );
+    if readiness {
+        // Wait for attachment input without invoking any login rc files.
+        command.args(["-c", "read -r line; printf 'infraternal-ready\\n'"]);
+    } else if program.is_empty() {
+        command.arg0(login_name);
+    } else {
+        command.args(&program[1..]);
+    }
+    command
+}

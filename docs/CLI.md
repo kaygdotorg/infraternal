@@ -112,3 +112,60 @@ CLI service-creation path.
 With no default features the CLI keeps the action contracts and registry, while
 Tokio and SQLx in the plugin API are enabled only by `socket-host`. Node-side
 plugin descriptors and bounded action routing do not need those dependencies.
+
+## Saved-session automation (D314, #251)
+
+On Linux builds with `plugin-agent`, run these commands from a saved shell in
+this machine's app terminal, using the same operating-system account:
+
+```sh
+infraternal sessions [local]
+infraternal sessions new local --name build
+infraternal sessions new local --name check -- /bin/sh -c 'make check'
+infraternal sessions send local:build 'make check'
+infraternal sessions read local:build --last 20
+infraternal sessions close local:build
+```
+
+The machine's exact hostname also works. A target accepts its saved name or
+stable UUID after the colon. Lists retain stable UUID order across pages.
+Names contain 1–64 ASCII letters, digits, dots,
+dashes or underscores, excluding `.` and `..`. Names survive daemon restarts
+in private state; names of live sessions must be unique on that account.
+`send` adds no newline and reports only bytes acknowledged written to the PTY.
+It never retries an uncertain input write. `new -- …` executes literal program
+arguments, preserving empty arguments and metacharacters, through a bounded
+private pipe; it does not construct shell source. Without a program it starts
+the account's normal login shell. `close` reports that closure was requested;
+it does not claim that the process has exited. It requests shutdown of the saved
+shell even when a job owns the foreground terminal. An older shim without the
+close capability returns an upgrade/recreate instruction. CLI-created sessions retain output
+for the existing one-shot exit deadline (up to ten minutes), including programs
+that exit before a viewer connects. Other interactive launches keep their existing
+ownership and retention policy.
+
+`read --last N` accepts 1–10000 and returns up to N trailing lines from the
+latest 4096 retained bytes. It reports `truncated` when earlier bytes/lines
+were omitted or the bounded JSON reply required trimming. `snapshot` identifies
+screen recovery when exact retained bytes are unavailable. Output is text with
+lossy UTF-8 replacement; JSON escapes control characters and human output
+prints terminal control characters visibly. Reading never resizes the PTY.
+
+Every operation accepts `--json` and uses the existing version-1 envelope.
+The CLI combines bounded local pages into one complete list; if a later page
+fails, exit 6 preserves the rows already received. Listings reflect live discovery
+rather than a snapshot across concurrent creation/closure.
+Data fields are `sessions` (rows with `id`, `name`, `machine`), `session` for
+creation, `bytes_sent` for send, `text`/`truncated`/`snapshot` for read, and
+`session`/`close_requested` for close. Errors retain D303 exit codes and name
+the next step. A mistyped session name can suggest a nearby available name.
+Generated skills are available with `infraternal skill sessions <verb>`.
+`--state` selects an existing private infraternal-agent state folder for local
+installations using a non-default path.
+
+The daemon checks kernel peer credentials and live saved-shell ancestry before
+running an operation. An environment marker or a matching UID alone grants no
+session automation authority. Requests across machine or account boundaries
+are refused. Remote device credentials and approvals, wait/watch/rename/MCP,
+the compatible command subset, and canvas commands are later slices. There is
+no CLI attach operation; interactive use belongs in the app.

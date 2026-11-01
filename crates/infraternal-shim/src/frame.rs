@@ -23,6 +23,8 @@ pub const SESSION_OWNER: u64 = 8;
 pub const SHARED_WRITER: u64 = 16;
 /// Capability bit 5 permits bounded renderer replies without typing cursors or geometry changes [307].
 pub const QUERY_REPLIES: u64 = 32;
+/// Capability bit 6 permits an explicit saved-shell shutdown request [314].
+pub const CLOSE_SESSION: u64 = 64;
 
 /// Frozen v1 messages. Byte vectors are owned only after length validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +57,8 @@ pub enum Frame {
     /// Additive 0x1C, legal only after selecting `APPROXIMATE_SNAPSHOT`.
     SnapshotWithFlags(u64, u8, Vec<u8>),
     Signal(u8),
+    /// Additive 0x1F; requires negotiated `CLOSE_SESSION`, with no payload.
+    CloseSession,
     SequencedInput(u64, Vec<u8>),
     InputAck(u64),
     InputStateRequest,
@@ -300,6 +304,7 @@ impl Frame {
                 put!(seq);
             }
             Self::SnapshotRequest => body.push(0x14),
+            Self::CloseSession => body.push(0x1f),
             Self::Signal(signal) => {
                 body.push(0x16);
                 body.push(*signal);
@@ -378,6 +383,7 @@ impl Frame {
             0x14 => Self::SnapshotRequest,
             0x15 => Self::Snapshot(p.u64()?, p.bytes()),
             0x16 => Self::Signal(p.take::<1>()?[0]),
+            0x1f => Self::CloseSession,
             0x17 => Self::SequencedInput(p.u64()?, p.bytes()),
             0x18 => Self::InputAck(p.u64()?),
             0x19 => Self::InputStateRequest,
