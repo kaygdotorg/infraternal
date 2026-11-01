@@ -1,9 +1,32 @@
 //! Exercises drain, restart, and secret-safe proxy log behavior [#281, #289].
 
 use super::supervisor::{
-    DRAIN_TIMEOUT, Lifecycle, LifecycleAction, LifecyclePhase, redact_log_line,
+    DRAIN_TIMEOUT, Lifecycle, LifecycleAction, LifecyclePhase, check_private_ping,
+    redact_log_line,
 };
-use std::time::{Duration, Instant};
+use std::{
+    io::{Read, Write},
+    net::{SocketAddr, TcpListener},
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
+
+fn health_server(response: &'static [u8]) -> (SocketAddr, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind private health fixture");
+    let address = listener.local_addr().expect("health fixture address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept health probe");
+        let mut request = [0_u8; 20];
+        stream
+            .read_exact(&mut request)
+            .expect("read health request");
+        assert_eq!(&request, b"GET /ping HTTP/1.1\r\n");
+        stream
+            .write_all(response)
+            .expect("write health response");
+    });
+    (address, server)
+}
 
 #[test]
 fn final_exposure_starts_one_ten_second_drain_then_stops_once() {
@@ -108,4 +131,34 @@ fn authorization_cookie_and_query_credentials_are_redacted_without_known_values(
         assert!(!redacted.contains(secret), "credential leaked: {secret}");
     }
     assert!(redacted.contains("[REDACTED]"));
+}
+
+#[test]
+fn private_health_ping_accepts_a_success_response() {
+    let (address, server) =
+        health_server(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
+    check_private_ping(address, Duration::from_secs(1)).expect("healthy private ping");
+    server.join().expect("health fixture thread");
+}
+
+#[test]
+fn private_health_ping_rejects_non_loopback_addresses() {
+    assert_eq!(
+        check_private_ping(
+            "192.0.2.1:19999".parse().expect("non-loopback address"),
+            Duration::from_millis(1),
+        )
+            .expect_err("health probe must never leave loopback")
+            .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+}
+
+#[test]
+fn private_health_ping_rejects_an_unhealthy_response() {
+    let (address, server) = health_server(
+        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n",
+    );
+    assert!(check_private_ping(address, Duration::from_secs(1)).is_err());
+    server.join().expect("health fixture thread");
 }
