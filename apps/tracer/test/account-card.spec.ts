@@ -274,6 +274,21 @@ test.describe("Logs in as: a card for each tag, a gradient for each machine", ()
   });
 });
 
+test.describe("beside the version panel", () => {
+  test.setTimeout(120_000);
+
+  test("one card at a time: the version pill closes the person's card, and the person's pill closes the version panel", async ({ page }) => {
+    await openCard(page, `${MOCK}&version=1`);
+    await expect(page.locator(".ui-version-pill")).toBeVisible({ timeout: 8000 });
+    await page.locator(".ui-version-pill").click();
+    await expect(page.locator('.ac[data-open="true"]')).toHaveCount(0);
+    await expect(page.locator(".ui-version-pill")).toHaveAttribute("aria-expanded", "true");
+    await page.locator(".ui-sidebar-user").click();
+    await expect(page.locator('.ac[data-open="true"]')).toBeVisible();
+    await expect(page.locator(".ui-version-pill")).toHaveAttribute("aria-expanded", "false");
+  });
+});
+
 test.describe("on a phone", () => {
   test.setTimeout(180_000);
 

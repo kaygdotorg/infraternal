@@ -31,8 +31,6 @@ export interface AccountMountEnv {
   model: AccountModel;
   /** Opens a section of Settings. */
   openSettings(section: "account" | "grants"): void;
-  /** Closes a sibling card (the version panel) that is open in the same place: one card at a time. */
-  closeSiblings?(): void;
 }
 
 let styles: Promise<void> | undefined;
@@ -63,6 +61,9 @@ export function mountAccountCard(env: AccountMountEnv): AccountMount | undefined
   pill.setAttribute("aria-haspopup", "dialog");
   pill.setAttribute("aria-expanded", "false");
 
+  /** The version panel opens in the same place: one card at a time, whichever is pressed last. */
+  const closeVersion = (): void => { foot.querySelector<HTMLElement>('.ui-version-pill[aria-expanded="true"]')?.click(); };
+
   let panel: AccountPanel | undefined;
   let loading: Promise<AccountPanel> | undefined;
   /** The card, built once: its code and its styles arrive together. */
@@ -90,7 +91,7 @@ export function mountAccountCard(env: AccountMountEnv): AccountMount | undefined
   const toggle = (source: CardSource): void => {
     void load().then((p) => {
       if (p.isOpen()) { p.close(false, source); return; }
-      env.closeSiblings?.();
+      closeVersion();
       p.open(false, source);
     });
   };
@@ -98,6 +99,7 @@ export function mountAccountCard(env: AccountMountEnv): AccountMount | undefined
   const onFootClick = (event: MouseEvent): void => {
     const target = event.target as Element | null;
     if (target?.closest(".ui-sidebar-user")) { event.stopImmediatePropagation(); event.preventDefault(); toggle(event.detail === 0 ? "keyboard" : "pointer"); }
+    else if (target?.closest(".ui-version-pill") && panel?.isOpen()) panel.close(false, "keyboard");
   };
   foot.addEventListener("click", onFootClick, true);
 
@@ -107,7 +109,7 @@ export function mountAccountCard(env: AccountMountEnv): AccountMount | undefined
   return {
     show(after) {
       if (!core.stage.hasAttribute("data-sidebar-open")) core.stage.querySelector<HTMLElement>("#sidebar-toggle")?.click();
-      void load().then((p) => { window.setTimeout(() => { env.closeSiblings?.(); p.open(true, "keyboard"); after?.(p); }, 80); });
+      void load().then((p) => { window.setTimeout(() => { closeVersion(); p.open(true, "keyboard"); after?.(p); }, 80); });
     },
     panel: () => panel,
     dispose() {
