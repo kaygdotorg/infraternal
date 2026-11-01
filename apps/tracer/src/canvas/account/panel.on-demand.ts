@@ -284,6 +284,8 @@ export function createAccountPanel(env: AccountPanelEnv): AccountPanel {
     if ((event.target as Element | null)?.closest(".ui-rename-input")) return;
     event.preventDefault();
     event.stopPropagation();
+    // The "Logs in as" pane is the innermost thing that is open: Escape closes it first, the card after it.
+    if (built?.logins.isOpen()) { built.logins.close(true); return; }
     close(true, "keyboard");
   };
   card.root.addEventListener("keydown", onKey);

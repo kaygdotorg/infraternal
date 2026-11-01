@@ -72,17 +72,18 @@
 .ac-pane-clip { min-height: 0; overflow: hidden; }
 /* An opaque ground (the overlay's own solid colour) under the pane: the tag cards below are mixed into it, so every text on the
    pane has one known background and its contrast can be measured. */
-.ac-pane-body { display: grid; gap: 14px; margin: 6px 0 4px; padding: 12px; border-radius: 12px; background: color-mix(in oklab, var(--fg) 5%, var(--overlay-solid, var(--bg))); }
+.ac-pane-body { --ac-quiet: color-mix(in oklab, var(--fg) 88%, var(--overlay-solid, var(--bg))); display: grid; gap: 14px; margin: 6px 0 4px; padding: 12px; border-radius: 12px; background: color-mix(in oklab, var(--fg) 5%, var(--overlay-solid, var(--bg))); }
 @media (prefers-reduced-motion: reduce) { .ac-pane { transition: none; } }
 
 /* One block for each account: its name and how many machines, then a card for each tag. Accounts are told apart by a hairline and
-   the space around it, not by more boxes. */
+   the space around it, not by more boxes. The quiet text (counts, "+N more", the link) is --ac-quiet, 88% of the text colour: --fg-2
+   measured 3.4:1 on a tag's card in the dark theme (spec: account-card, 4.5:1 on the real background). */
 .ac-account { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .ac-account + .ac-account { padding-top: 14px; border-top: 1px solid var(--line); }
 .ac-account-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-width: 0; }
 /* An account's name identifies it: it wraps (at any point, a name has no spaces) rather than being cut; its count never moves. */
 .ac-account-name { min-width: 0; overflow-wrap: anywhere; color: var(--fg); font: var(--ui-type-label); font-weight: var(--fw-title, 600); letter-spacing: var(--ui-tracking); }
-.ac-account-count { flex: none; color: var(--fg-2); font: var(--ui-type-label); font-size: var(--text-secondary); letter-spacing: var(--ui-tracking); font-variant-numeric: tabular-nums; }
+.ac-account-count { flex: none; color: var(--ac-quiet); font: var(--ui-type-label); font-size: var(--text-secondary); letter-spacing: var(--ui-tracking); font-variant-numeric: tabular-nums; }
 
 /* A tag's card: the tag's colour (--tag, set from the same palette token as its chip) mixed into the pane's ground, with a
    hairline in the colour. A flat fill and a 1 px line, no glass (TASTE). The tag's chip is its title and its count sits opposite. */
@@ -95,14 +96,14 @@
 .ac-tag[data-untagged] { box-shadow: inset 0 0 0 1px var(--line); background: color-mix(in oklab, var(--fg) 4%, color-mix(in oklab, var(--fg) 5%, var(--overlay-solid, var(--bg)))); }
 .ac-tag-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; font: var(--ui-type-label); font-size: var(--text-secondary); letter-spacing: var(--ui-tracking); }
 .ac-tag-head .ui-entity { min-width: 0; max-width: calc(100% - 3ch); }
-.ac-tag-none { color: var(--fg-2); font-weight: var(--fw-label); }
-.ac-tag-count { flex: none; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.ac-tag-none { color: var(--ac-quiet); font-weight: var(--fw-label); }
+.ac-tag-count { flex: none; color: var(--ac-quiet); font-variant-numeric: tabular-nums; }
 .ac-tag-hosts { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
 .ac-tag-hosts .ui-entity { font-size: var(--text-secondary); }
-.ac-more { align-self: center; color: var(--fg-2); font: var(--ui-type-label); font-size: var(--text-secondary); letter-spacing: var(--ui-tracking); font-variant-numeric: tabular-nums; }
+.ac-more { align-self: center; color: var(--ac-quiet); font: var(--ui-type-label); font-size: var(--text-secondary); letter-spacing: var(--ui-tracking); font-variant-numeric: tabular-nums; }
 
 .ac-rules {
-  position: relative; display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 24px; padding: 0; border: 0; background: none; color: var(--fg-2);
+  position: relative; display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 24px; padding: 0; border: 0; background: none; color: var(--ac-quiet);
   font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: transform 140ms var(--ease-out, ease-out), color 120ms ease;
 }
 .ac-rules svg { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
