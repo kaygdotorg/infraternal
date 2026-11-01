@@ -2083,8 +2083,15 @@ dependencies = [
 name = "infraternal-plugin-proxy"
 version = "0.1.0"
 dependencies = [
+ "flate2",
+ "infraternal-plugin-api",
  "nix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
  "tokio",
+ "url",
  "uuid",
  "zeroize",
 ]

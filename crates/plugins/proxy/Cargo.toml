@@ -6,7 +6,13 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+infraternal-plugin-api = { path = "../../infraternal-plugin-api", version = "0.1.0" }
 nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+flate2 = "1"
+tar = "0.4"
 uuid.workspace = true
 zeroize.workspace = true
 
@@ -14,4 +20,6 @@ zeroize.workspace = true
 workspace = true
 
 [dev-dependencies]
+flate2 = "1"
+tar = "0.4"
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }

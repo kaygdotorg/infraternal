@@ -1,4 +1,4 @@
-//! Keeps DNS provider credentials in interim owner-only node files; node-key sealing or OpenBao can replace this implementation without changing callers [#281, #289].
+//! Keeps DNS provider credentials in interim owner-only node files; node-key sealing or `OpenBao` can replace this implementation without changing callers [#281, #289].
 
 use nix::fcntl::{Flock, FlockArg};
 use std::{
@@ -34,12 +34,24 @@ impl std::fmt::Debug for SecretToken {
 /// Storage boundary for provider tokens; callers receive paths, never token values.
 pub trait DnsTokenCustody {
     /// Store a provider credential if it does not already exist.
+    ///
+    /// # Errors
+    /// Returns an I/O error when the provider identity or owner-only store is invalid.
     fn put(&self, provider: &str, name: &str, token: SecretToken) -> io::Result<PathBuf>;
     /// Return the checked path to a stored provider credential.
+    ///
+    /// # Errors
+    /// Returns an I/O error when the provider identity or credential file is invalid.
     fn get(&self, provider: &str, name: &str) -> io::Result<PathBuf>;
     /// Atomically replace one provider credential.
+    ///
+    /// # Errors
+    /// Returns an I/O error when the provider identity or credential file is invalid.
     fn rotate(&self, provider: &str, name: &str, token: SecretToken) -> io::Result<PathBuf>;
     /// Remove every credential associated with a DNS provider.
+    ///
+    /// # Errors
+    /// Returns an I/O error when the provider directory is unsafe or cannot be removed.
     fn delete(&self, provider: &str) -> io::Result<()>;
 }
 
@@ -50,6 +62,9 @@ pub struct FileDnsTokenCustody {
 
 impl FileDnsTokenCustody {
     /// Open the private proxy secret directory beneath an owner-only infraternal state directory.
+    ///
+    /// # Errors
+    /// Returns an I/O error when the state directory or private custody directory is unsafe.
     pub fn open(state: &Path) -> io::Result<Self> {
         validate_directory(state, PRIVATE_DIRECTORY_MODE)?;
         let root = state.join(SECRET_DIRECTORY);
@@ -86,7 +101,7 @@ impl FileDnsTokenCustody {
         Flock::lock(lock_file, mode).map_err(|(_, error)| io::Error::from(error))
     }
 
-    fn checked_secret_path(&self, directory: &Path, name: &str) -> io::Result<PathBuf> {
+    fn checked_secret_path(directory: &Path, name: &str) -> io::Result<PathBuf> {
         validate_variable(name)?;
         let path = directory.join(name);
         let metadata = fs::symlink_metadata(&path)?;
@@ -127,13 +142,13 @@ impl DnsTokenCustody for FileDnsTokenCustody {
     fn get(&self, provider: &str, name: &str) -> io::Result<PathBuf> {
         let directory = self.provider_directory(provider, false)?;
         let _lock = Self::lock_provider(&directory, false)?;
-        self.checked_secret_path(&directory, name)
+        Self::checked_secret_path(&directory, name)
     }
 
     fn rotate(&self, provider: &str, name: &str, token: SecretToken) -> io::Result<PathBuf> {
         let directory = self.provider_directory(provider, false)?;
         let _lock = Self::lock_provider(&directory, true)?;
-        self.checked_secret_path(&directory, name)?;
+        Self::checked_secret_path(&directory, name)?;
         Self::write_atomic(&directory, name, &token, true)
     }
 
@@ -152,6 +167,9 @@ impl DnsTokenCustody for FileDnsTokenCustody {
 }
 
 /// Map an explicit provider environment variable to its file-only counterpart.
+///
+/// # Errors
+/// Returns an I/O error when the variable name or token path is not safe for provider use.
 pub fn provider_file_variable(name: &str, path: &Path) -> io::Result<(String, String)> {
     validate_variable(name)?;
     if !path.is_absolute() {
