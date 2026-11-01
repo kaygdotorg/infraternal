@@ -7,8 +7,8 @@
 //! sender cannot plant a mapping: a reply is accepted only with a valid tag
 //! and an outstanding transaction id.
 //! On the relay, each transaction stays bound to its first observed source in
-//! a 64-entry session window; same-source retries work, changed-source replays
-//! do not.
+//! a 64-entry, 30-second session window. Transaction IDs carry their issue
+//! time, so an expired or evicted ID cannot be rebound to a new source.
 //!
 //! The first byte is 0x2a. QUIC sets the fixed bit (0x40) in every packet it
 //! accepts and `WireGuard` messages start with a type 1–4 followed by three zero
@@ -22,6 +22,7 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 /// Every probe and reply is exactly this long.
@@ -33,24 +34,52 @@ const REPLY: u8 = 2;
 const SIGNED: usize = 52;
 const LABEL: &[u8] = b"infraternal relay probe v1";
 const PROBE_REPLAY_WINDOW: usize = 64;
+const PROBE_REPLAY_WINDOW_AGE_MS: u64 = 30_000;
 
 #[derive(Default)]
 struct ReplayWindow {
     entries: VecDeque<([u8; 16], SocketAddr)>,
+    retired_through_ms: Option<u64>,
 }
 
 impl ReplayWindow {
-    /// Bind a transaction to its first source while it remains in the bounded window.
+    /// Bind a transaction to its first source without allowing retired IDs to rebind.
     fn bind_source(&mut self, transaction: [u8; 16], source: SocketAddr) -> bool {
         if let Some((_, original)) = self.entries.iter().find(|(seen, _)| *seen == transaction) {
             return *original == source;
         }
-        if self.entries.len() == PROBE_REPLAY_WINDOW && self.entries.pop_front().is_none() {
+        let issued_at_ms = transaction_timestamp(&transaction);
+        if self
+            .retired_through_ms
+            .is_some_and(|retired| issued_at_ms <= retired)
+        {
+            return false;
+        }
+        if self.entries.len() == PROBE_REPLAY_WINDOW {
+            let Some((retired, _)) = self.entries.pop_front() else {
+                return false;
+            };
+            let retired_at_ms = transaction_timestamp(&retired);
+            self.retired_through_ms = Some(
+                self.retired_through_ms
+                    .map_or(retired_at_ms, |previous| previous.max(retired_at_ms)),
+            );
+        }
+        if self
+            .retired_through_ms
+            .is_some_and(|retired| issued_at_ms <= retired)
+        {
             return false;
         }
         self.entries.push_back((transaction, source));
         true
     }
+}
+
+fn transaction_timestamp(transaction: &[u8; 16]) -> u64 {
+    let mut timestamp = [0; 8];
+    timestamp.copy_from_slice(&transaction[..8]);
+    u64::from_be_bytes(timestamp)
 }
 
 /// Per-connection probe credentials, derived identically by node and relay.
@@ -112,6 +141,16 @@ impl ProbeKey {
         self.verify(request)?;
         let mut transaction = [0; 16];
         transaction.copy_from_slice(&request[16..32]);
+        let now_ms = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()?
+                .as_millis(),
+        )
+        .ok()?;
+        if now_ms.saturating_sub(transaction_timestamp(&transaction)) > PROBE_REPLAY_WINDOW_AGE_MS {
+            return None;
+        }
         let source = SocketAddr::new(canonical(observed.ip()), observed.port());
         if !self
             .replay
@@ -195,14 +234,21 @@ fn canonical(ip: IpAddr) -> IpAddr {
     }
 }
 
-/// Fresh unpredictable transaction id.
+/// Fresh time-stamped transaction id with an unpredictable nonce.
 /// # Errors
-/// Fails only if the system random source fails.
+/// Fails if the clock precedes the Unix epoch, the timestamp does not fit, or
+/// the system random source fails.
 pub fn transaction() -> io::Result<[u8; 16]> {
     use ring::rand::SecureRandom;
+    let issued_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| io::Error::other("system clock precedes Unix epoch"))?;
+    let issued_at_ms = u64::try_from(issued_at_ms.as_millis())
+        .map_err(|_| io::Error::other("probe transaction timestamp does not fit"))?;
     let mut out = [0; 16];
+    out[..8].copy_from_slice(&issued_at_ms.to_be_bytes());
     ring::rand::SystemRandom::new()
-        .fill(&mut out)
+        .fill(&mut out[8..])
         .map_err(|_| io::Error::other("system random source failed"))?;
     Ok(out)
 }
@@ -212,9 +258,19 @@ pub fn transaction() -> io::Result<[u8; 16]> {
 mod tests {
     //! Property checks: valid probes round trip, and any single-bit change or wrong key is refused.
     use super::*;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn key(seed: u8) -> ProbeKey {
         ProbeKey::from_material(&[seed; 40])
+    }
+
+    fn transaction_at(issued_at: SystemTime, nonce: u64) -> [u8; 16] {
+        let issued_ms =
+            u64::try_from(issued_at.duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap();
+        let mut transaction = [0; 16];
+        transaction[..8].copy_from_slice(&issued_ms.to_be_bytes());
+        transaction[8..].copy_from_slice(&nonce.to_be_bytes());
+        transaction
     }
 
     #[test]
@@ -228,8 +284,7 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            let mut transaction = [9; 16];
-            transaction[0] = u8::try_from(index).unwrap();
+            let transaction = transaction_at(SystemTime::now(), u64::try_from(index).unwrap());
             let request = key.request(transaction);
             assert!(is_probe(&request));
             assert_eq!(session(&request), Some(key.session()));
@@ -246,7 +301,7 @@ mod tests {
     #[test]
     fn a_captured_request_cannot_be_replayed_to_a_different_source() {
         let key = key(4);
-        let request = key.request([7; 16]);
+        let request = key.request(transaction_at(SystemTime::now(), 7));
         let original: SocketAddr = "198.51.100.7:40123".parse().unwrap();
         let spoofed: SocketAddr = "198.51.100.99:40123".parse().unwrap();
 
@@ -262,29 +317,48 @@ mod tests {
     }
 
     #[test]
-    fn replay_window_retains_only_its_most_recent_transactions() {
-        let mut window = ReplayWindow::default();
+    fn an_evicted_probe_transaction_cannot_be_rebound_to_another_source() {
+        let key = key(6);
         let source: SocketAddr = "198.51.100.7:40123".parse().unwrap();
         let spoofed: SocketAddr = "198.51.100.99:40123".parse().unwrap();
+        let now = SystemTime::now();
+        let evicted = key.request(transaction_at(now - Duration::from_secs(1), 1));
 
-        for value in 0..=PROBE_REPLAY_WINDOW {
-            let mut transaction = [0; 16];
-            transaction[8..].copy_from_slice(&(value as u64).to_be_bytes());
-            assert!(window.bind_source(transaction, source));
+        assert!(key.answer(&evicted, source).is_some());
+        for value in 1..=PROBE_REPLAY_WINDOW {
+            let newer = key.request(transaction_at(
+                now + Duration::from_nanos(u64::try_from(value).unwrap()),
+                u64::try_from(value).unwrap() + 1,
+            ));
+            assert!(key.answer(&newer, source).is_some());
         }
 
-        assert_eq!(window.entries.len(), PROBE_REPLAY_WINDOW);
-        let evicted = [0; 16];
-        assert!(window.bind_source(evicted, spoofed));
-        assert!(window.bind_source(evicted, spoofed));
-        assert!(!window.bind_source(evicted, source));
+        assert!(
+            key.answer(&evicted, spoofed).is_none(),
+            "evicted transaction was rebound to a new source"
+        );
+    }
+
+    #[test]
+    fn a_probe_transaction_older_than_the_time_window_is_refused() {
+        let key = key(7);
+        let stale = key.request(transaction_at(
+            SystemTime::now() - Duration::from_secs(31),
+            1,
+        ));
+        let source: SocketAddr = "198.51.100.7:40123".parse().unwrap();
+
+        assert!(
+            key.answer(&stale, source).is_none(),
+            "stale probe was answered"
+        );
     }
 
     #[test]
     fn every_single_bit_change_is_refused() {
         let key = key(5);
         let observed: SocketAddr = "203.0.113.4:1".parse().unwrap();
-        let request = key.request([1; 16]);
+        let request = key.request(transaction_at(SystemTime::now(), 1));
         let reply = key.answer(&request, observed).unwrap();
         for bit in 0..LEN * 8 {
             let mut changed = request;
@@ -299,7 +373,7 @@ mod tests {
     #[test]
     fn another_connection_key_or_length_is_refused() {
         let observed: SocketAddr = "203.0.113.4:1".parse().unwrap();
-        let request = key(1).request([1; 16]);
+        let request = key(1).request(transaction_at(SystemTime::now(), 1));
         assert_eq!(key(2).answer(&request, observed), None);
         let reply = key(1).answer(&request, observed).unwrap();
         assert_eq!(key(2).reply(&reply), None);

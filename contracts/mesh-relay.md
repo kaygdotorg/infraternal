@@ -94,8 +94,9 @@ control or link-table overhead.
 Probes share the relay's UDP port and are removed before QUIC packet parsing.
 Every request and response is exactly 84 bytes. Bytes 0–3 are `2a 49 46 31`
 (`0x2a` followed by `IF1`); byte 4 is request kind `1` or response kind `2`;
-bytes 5–7 are zero; bytes 8–15 are the connection session number; bytes 16–31
-are a random transaction ID. The request reserves bytes 32–51 as zero. The
+bytes 5–7 are zero; bytes 8–15 are the connection session number; bytes 16–23
+are the big-endian Unix-millisecond issue time and bytes 24–31 are a random
+transaction nonce. The request reserves bytes 32–51 as zero. The
 response uses byte 32 for address family (`4` or `6`), byte 33 as zero, bytes
 34–35 for the observed UDP port, and bytes 36–51 for the observed IP address
 (IPv4 is followed by twelve zero bytes). Bytes 52–83 are HMAC-SHA256 over the
@@ -105,10 +106,12 @@ The session number and HMAC key come from the authenticated QUIC TLS exporter
 using the label `infraternal relay probe v1`. The relay answers only a valid
 request for a live connection session, and the node accepts only a valid
 response with an outstanding transaction. The relay binds each transaction to
-its first observed source in a 64-entry per-session rolling window; a retry
-from that source is answered, while reuse from a different source is refused.
-Transactions older than the window are forgotten. Request and response sizes
-match, so probes do not amplify. A mapping reported by a relay is an
+its first observed source in a 64-entry per-session rolling window and rejects
+transactions older than 30 seconds. When an entry is evicted, its issue time
+advances a retired-time floor, so an older transaction cannot rebind to another
+source. A retry from its original source is answered; reuse from a different
+source is refused. Request and response sizes match, so probes do not amplify.
+A mapping reported by a relay is an
 observation, not proof of inbound reachability or NAT filtering behaviour. The
 discovery book keeps observations bounded, address-family-specific, expiring
 and tied to a network generation (`contracts/mesh-discovery.md`).
