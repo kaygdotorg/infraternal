@@ -15,6 +15,7 @@ import { renderAccount, renderAppearance, renderHosts, renderWindowSizes, type A
 import { askSignOut } from "../../sign-out";
 import type { AuthorityControl } from "../addhost/authority-unlock";
 import { SIZE_EVENT, readSizes, writeSize, type DesktopSize, type PhoneSize } from "../window-sizes";
+import { readUiSize, setUiSize, UI_SIZE, UI_SIZE_EVENT } from "../../../../../packages/ui/src/ui-scale";
 import type { Ctx } from "../context";
 import { el } from "../dom";
 import { EXTENDED_INFO_EVENT, readExtendedInfo, writeExtendedInfo } from "../windows/extended-info";
@@ -50,6 +51,7 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
     state: () => core.appearance(),
     act: (action) => core.act(action),
     onChange(listener) { window.addEventListener("tracer:appearance", listener); return () => window.removeEventListener("tracer:appearance", listener); },
+    uiSize: { ...UI_SIZE, get: readUiSize, set: (percent: number) => { setUiSize(percent); }, onChange(listener: () => void) { window.addEventListener(UI_SIZE_EVENT, listener); return () => window.removeEventListener(UI_SIZE_EVENT, listener); } },
   };
   // Plain names; the technical detail (the percentage) is in each option's subtitle (the plain-names rule).
   const windowSizes: WindowSizesApi = {

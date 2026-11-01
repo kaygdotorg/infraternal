@@ -11,6 +11,7 @@ import { installTooltips } from "../../../packages/ui/src/tooltip";
 import { installFocusRing } from "../../../packages/ui/src/focus-ring";
 import { installAutoScrollbars } from "../../../packages/ui/src/scrollbars";
 import { applyFontVars, loadFont } from "../../../packages/ui/src/fonts";
+import { applyStoredUiSize } from "../../../packages/ui/src/ui-scale";
 import { initialFont } from "./font-preference";
 import { mountOnboarding } from "./onboarding";
 import { BRAND_MARK } from "./auth-marks";
@@ -148,6 +149,8 @@ async function start(): Promise<void> {
   // The default is already declared in CSS and preloaded; another font is fetched here.
   const font = initialFont();
   applyFontVars(font, document.documentElement);
+  // The remembered UI size (#283) applies before the first paint too; 100 % (the default) changes nothing.
+  applyStoredUiSize();
   const fontsReady = Promise.race([
     loadFont(font),
     new Promise<void>((resolve) => window.setTimeout(resolve, 800)),
