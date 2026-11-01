@@ -57,6 +57,17 @@ fn edition_default_is_explicit_and_build_selected() {
         }
     );
 }
+
+#[test]
+fn compiled_mesh_snapshot_carries_stable_proxy_name_and_dns_suffix() {
+    let config =
+        configuration::compile(&coordinator(), NodeId(2), DefaultPolicy::Allow, &BTreeMap::new())
+            .unwrap();
+    let snapshot = serde_json::to_value(config).unwrap();
+
+    assert_eq!(snapshot["exposure"]["machine_name"], "host-2");
+    assert_eq!(snapshot["exposure"]["dns_suffix"], "internal");
+}
 #[test]
 fn port_grant_narrows_allow_opens_deny_and_preserves_direction() {
     let mut coord = coordinator();

@@ -57,7 +57,9 @@ fn release_manifest_rejects_a_different_architecture() {
 fn release_version_validation_matches_the_publisher_formats() {
     let mut edge = manifest();
     edge.release_version = "edge-20261101T123456Z".to_owned();
-    edge.mirror_path = "components/edge-20261101T123456Z/proxy/linux/amd64/traefik_v3.7.17_linux_amd64.tar.gz".to_owned();
+    edge.mirror_path =
+        "components/edge-20261101T123456Z/proxy/linux/amd64/traefik_v3.7.17_linux_amd64.tar.gz"
+            .to_owned();
     assert!(edge.validate_for("linux", "amd64").is_ok());
 
     for invalid in [
@@ -67,9 +69,8 @@ fn release_version_validation_matches_the_publisher_formats() {
     ] {
         let mut manifest = manifest();
         manifest.release_version = invalid.to_owned();
-        manifest.mirror_path = format!(
-            "components/{invalid}/proxy/linux/amd64/traefik_v3.7.17_linux_amd64.tar.gz"
-        );
+        manifest.mirror_path =
+            format!("components/{invalid}/proxy/linux/amd64/traefik_v3.7.17_linux_amd64.tar.gz");
         assert!(
             manifest.validate_for("linux", "amd64").is_err(),
             "accepted invalid release version: {invalid}"

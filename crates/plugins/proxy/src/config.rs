@@ -8,7 +8,7 @@ use std::{
     fmt::Write as _,
     fs::{self, File, OpenOptions},
     io::{self, Write},
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, SocketAddr, TcpListener},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
@@ -91,6 +91,21 @@ pub const fn select_listener_ports(
             https: 10443,
         }
     }
+}
+
+/// Probe only the address Traefik will bind, then use conventional ports when both are free.
+#[must_use]
+pub fn detect_listener_ports(rootful: bool, mesh_address: IpAddr, public: bool) -> ListenerPorts {
+    if !rootful {
+        return select_listener_ports(false, false, false);
+    }
+    let bind_address = if public {
+        IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+    } else {
+        mesh_address
+    };
+    let available = |port| TcpListener::bind(SocketAddr::new(bind_address, port)).is_ok();
+    select_listener_ports(rootful, available(80), available(443))
 }
 
 /// Render a complete Traefik static configuration in TOML.

@@ -4,6 +4,7 @@
 //! DNS provider custody is interim owner-only file storage behind `DnsTokenCustody` [#289].
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod agent;
 pub mod cli;
 pub mod config;
 pub mod custody;

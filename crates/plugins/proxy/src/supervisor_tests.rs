@@ -1,12 +1,17 @@
 //! Exercises drain, restart, and secret-safe proxy log behavior [#281, #289].
 
 use super::supervisor::{
-    DRAIN_TIMEOUT, Lifecycle, LifecycleAction, LifecyclePhase, check_private_ping,
-    redact_log_line,
+    DRAIN_TIMEOUT, Lifecycle, LifecycleAction, LifecyclePhase, SupervisorSettings,
+    TraefikSupervisor, check_private_ping, redact_log_line,
+};
+use crate::{
+    config::{DnsChallenge, ListenerPorts, PublishedService, StaticConfig},
+    names::CertificateName,
 };
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener},
+    os::unix::fs::PermissionsExt,
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -21,9 +26,7 @@ fn health_server(response: &'static [u8]) -> (SocketAddr, JoinHandle<()>) {
             .read_exact(&mut request)
             .expect("read health request");
         assert_eq!(&request, b"GET /ping HTTP/1.1\r\n");
-        stream
-            .write_all(response)
-            .expect("write health response");
+        stream.write_all(response).expect("write health response");
     });
     (address, server)
 }
@@ -135,8 +138,7 @@ fn authorization_cookie_and_query_credentials_are_redacted_without_known_values(
 
 #[test]
 fn private_health_ping_accepts_a_success_response() {
-    let (address, server) =
-        health_server(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
+    let (address, server) = health_server(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
     check_private_ping(address, Duration::from_secs(1)).expect("healthy private ping");
     server.join().expect("health fixture thread");
 }
@@ -148,17 +150,102 @@ fn private_health_ping_rejects_non_loopback_addresses() {
             "192.0.2.1:19999".parse().expect("non-loopback address"),
             Duration::from_millis(1),
         )
-            .expect_err("health probe must never leave loopback")
-            .kind(),
+        .expect_err("health probe must never leave loopback")
+        .kind(),
         std::io::ErrorKind::PermissionDenied
     );
 }
 
 #[test]
 fn private_health_ping_rejects_an_unhealthy_response() {
-    let (address, server) = health_server(
-        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n",
-    );
+    let (address, server) =
+        health_server(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n");
     assert!(check_private_ping(address, Duration::from_secs(1)).is_err());
     server.join().expect("health fixture thread");
+}
+
+#[test]
+fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state() {
+    let root = std::env::temp_dir().join(format!("proxy-supervisor-{}", uuid::Uuid::new_v4()));
+    let state = root.join("state");
+    std::fs::create_dir_all(&state).expect("create supervisor state");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .expect("private fixture root");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+        .expect("private fixture state");
+
+    let executable = root.join("fake-traefik");
+    std::fs::write(&executable, b"#!/bin/sh\nexec /bin/sleep 60\n").expect("write fake Traefik");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500))
+        .expect("private executable mode");
+    let acme_storage = state.join("acme.json");
+    std::fs::write(&acme_storage, b"{}").expect("write persistent ACME fixture");
+    std::fs::set_permissions(&acme_storage, std::fs::Permissions::from_mode(0o600))
+        .expect("private ACME mode");
+
+    let (health_address, health_server) =
+        health_server(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
+    let dynamic_directory = state.clone();
+    let settings = SupervisorSettings {
+        executable,
+        static_config_path: state.join("static.toml"),
+        dynamic_config_path: state.join("dynamic.json"),
+        static_config: StaticConfig {
+            mesh_address: "10.77.0.1".parse().expect("mesh address"),
+            ports: ListenerPorts {
+                http: 10080,
+                https: 10443,
+            },
+            public: false,
+            private_ping_port: health_address.port(),
+            dynamic_directory,
+            dns_challenge: DnsChallenge {
+                provider: "httpreq".to_owned(),
+                email: "operator@example.test".to_owned(),
+                storage_path: acme_storage.clone(),
+                ca_server: Some("https://127.0.0.1:14000/dir".to_owned()),
+            },
+        },
+        provider_files: Vec::new(),
+        private_ping_address: health_address,
+        startup_timeout: Duration::from_secs(2),
+    };
+    let log = std::sync::Arc::new(|_: String| {});
+    let supervisor = TraefikSupervisor::start(settings, log).expect("start idle supervisor");
+    assert!(!supervisor.is_running().expect("read initial process state"));
+
+    let service = PublishedService {
+        id: "docs".to_owned(),
+        hostname: "docs.n1.example.test".to_owned(),
+        backend: "127.0.0.1:3000".parse().expect("backend"),
+        allowed_sources: vec!["10.77.0.2".parse().expect("mesh peer")],
+        public: false,
+        certificate: CertificateName::Wildcard("*.n1.example.test".to_owned()),
+    };
+    supervisor
+        .replace(vec![service.clone()])
+        .expect("start one process for the first route");
+    assert!(supervisor.is_running().expect("process after first route"));
+    let dynamic_path = state.join("dynamic.json");
+    let dynamic = std::fs::read_to_string(&dynamic_path).expect("read published route");
+    assert!(dynamic.contains("docs.n1.example.test"));
+
+    supervisor
+        .replace(Vec::new())
+        .expect("remove final route and begin drain");
+    assert!(supervisor.is_running().expect("process during drain"));
+    let empty = std::fs::read_to_string(&dynamic_path).expect("read empty route snapshot");
+    assert!(!empty.contains("docs.n1.example.test"));
+
+    supervisor
+        .replace(vec![service])
+        .expect("new exposure cancels drain");
+    assert!(supervisor.is_running().expect("process after drain cancel"));
+    health_server.join().expect("join private health fixture");
+    drop(supervisor);
+    assert_eq!(
+        std::fs::read(&acme_storage).expect("retain ACME state"),
+        b"{}"
+    );
+    std::fs::remove_dir_all(root).expect("remove supervisor fixture");
 }

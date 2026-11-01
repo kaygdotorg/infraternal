@@ -8,7 +8,7 @@ use infraternal_plugin_api::{
 /// Stable plugin owner used by the shared action registry.
 pub const ID: &str = "proxy";
 
-const PUBLISH_ACTION: infraternal_plugin_api::ActionDef = infraternal_plugin_api::ActionDef {
+pub const PUBLISH_ACTION: infraternal_plugin_api::ActionDef = infraternal_plugin_api::ActionDef {
     id: "proxy.publish",
     summary: "Publish or list services on this node.",
     instructions: &[

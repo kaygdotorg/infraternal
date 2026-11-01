@@ -1,8 +1,8 @@
 //! Traefik configuration must preserve mesh grants and node-local certificate identity [#281].
 
 use super::config::{
-    DnsChallenge, ListenerPorts, PublishedService, StaticConfig, render_dynamic_config,
-    render_static_config, select_listener_ports, write_config_atomic,
+    DnsChallenge, ListenerPorts, PublishedService, StaticConfig, detect_listener_ports,
+    render_dynamic_config, render_static_config, select_listener_ports, write_config_atomic,
 };
 use crate::names::CertificateName;
 use serde_json::Value;
@@ -99,6 +99,17 @@ fn public_binding_is_explicit_and_root_and_rootless_ports_follow_the_owner_choic
 }
 
 #[test]
+fn rootless_port_detection_never_probes_or_selects_privileged_ports() {
+    assert_eq!(
+        detect_listener_ports(false, "10.77.0.1".parse().expect("mesh address"), false),
+        ListenerPorts {
+            http: 10080,
+            https: 10443,
+        }
+    );
+}
+
+#[test]
 fn dynamic_routes_match_one_host_and_apply_the_same_mesh_peer_grant() {
     let source = "100.64.0.5".parse().expect("mesh source");
     let bytes = render_dynamic_config(&[mesh_service(vec![source])]).expect("dynamic config");
@@ -129,10 +140,7 @@ fn https_router_uses_the_exposure_id_and_http_redirect_uses_a_disjoint_key() {
     let bytes = render_dynamic_config(&[mesh_service(vec![source])]).expect("dynamic config");
     let config: Value = serde_json::from_slice(&bytes).expect("dynamic JSON");
 
-    assert_eq!(
-        config["http"]["routers"]["docs"]["entryPoints"][0],
-        "https"
-    );
+    assert_eq!(config["http"]["routers"]["docs"]["entryPoints"][0], "https");
     assert_eq!(
         config["http"]["routers"]["http.docs"]["entryPoints"][0],
         "http"

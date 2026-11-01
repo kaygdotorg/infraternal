@@ -9,6 +9,8 @@ pub type SharedRegistry = std::sync::Arc<std::sync::Mutex<PluginRegistry>>;
 const DESCRIPTORS: &[&PluginDescriptor] = &[
     #[cfg(feature = "plugin-host-facts")]
     &infraternal_plugin_host_facts::DESCRIPTOR,
+    #[cfg(feature = "proxy")]
+    &infraternal_plugin_proxy::agent::DESCRIPTOR,
     #[cfg(feature = "remote")]
     &infraternal_plugin_remote::DESCRIPTOR,
     #[cfg(all(feature = "mesh", target_os = "linux"))]
@@ -48,6 +50,7 @@ pub fn registry(mode: ExecutionMode) -> Result<PluginRegistry, PluginError> {
 #[cfg_attr(
     not(any(
         feature = "plugin-host-facts",
+        feature = "proxy",
         feature = "remote",
         all(feature = "mesh", target_os = "linux")
     )),
@@ -63,6 +66,7 @@ pub(crate) fn registry_at(
 ) -> Result<PluginRegistry, PluginError> {
     #[cfg(any(
         feature = "plugin-host-facts",
+        feature = "proxy",
         feature = "remote",
         all(feature = "mesh", target_os = "linux"),
         all(feature = "desktop", target_os = "macos")
@@ -70,6 +74,7 @@ pub(crate) fn registry_at(
     let mut registry = PluginRegistry::default();
     #[cfg(not(any(
         feature = "plugin-host-facts",
+        feature = "proxy",
         feature = "remote",
         all(feature = "mesh", target_os = "linux"),
         all(feature = "desktop", target_os = "macos")
@@ -88,6 +93,8 @@ pub(crate) fn registry_at(
     }
     #[cfg(not(feature = "plugin-host-facts"))]
     let _ = mode;
+    #[cfg(feature = "proxy")]
+    registry.register(Box::new(infraternal_plugin_proxy::agent::ProxyAgentPlugin))?;
     #[cfg(all(feature = "remote", target_os = "linux"))]
     if mode == ExecutionMode::Remote
         && let Some(context) = installation
@@ -141,8 +148,8 @@ mod proxy_registry_tests {
 
     #[test]
     fn proxy_publish_is_registered_as_a_node_action() {
-        let mut registry = registry_at(ExecutionMode::Embedded, None, None)
-            .expect("build plugin registry");
+        let mut registry =
+            registry_at(ExecutionMode::Embedded, None, None).expect("build plugin registry");
         let result = registry.call_public("proxy.publish", br#"{"port":null}"#);
         assert!(
             !matches!(result, Err(PluginError::UnknownAction)),
@@ -152,8 +159,8 @@ mod proxy_registry_tests {
 
     #[test]
     fn publishing_without_an_accepted_mesh_context_fails_closed() {
-        let mut registry = registry_at(ExecutionMode::Embedded, None, None)
-            .expect("build plugin registry");
+        let mut registry =
+            registry_at(ExecutionMode::Embedded, None, None).expect("build plugin registry");
         assert!(matches!(
             registry.call_public("proxy.publish", br#"{"port":3000}"#),
             Err(PluginError::Rejected)
@@ -162,8 +169,8 @@ mod proxy_registry_tests {
 
     #[test]
     fn proxy_internal_context_update_is_not_a_public_action() {
-        let mut registry = registry_at(ExecutionMode::Embedded, None, None)
-            .expect("build plugin registry");
+        let mut registry =
+            registry_at(ExecutionMode::Embedded, None, None).expect("build plugin registry");
         assert!(matches!(
             registry.call_public("proxy.mesh-context", b"{}"),
             Err(PluginError::UnknownAction)
