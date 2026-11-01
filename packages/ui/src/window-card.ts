@@ -22,13 +22,12 @@
  * An action may carry an `alt` (#280): the same button when Option (macOS) or Alt (Windows, Linux) is held with the
  * pointer near the header's actions, or with keyboard focus on one of them. Its icon morphs into the alternative's
  * (icon-morph.ts), the warm tooltip and the accessible name change with it, and a click runs the alternative. The
- * listeners that watch for the key exist only while the pointer is over the window or focus is in the actions, so an
- * idle canvas has none running.
+ * key watching and the morph live in window-alt.on-demand.ts, which the card loads the first time the pointer enters
+ * the window or focus reaches its actions (D188): a window that nobody hovers carries none of that code.
  */
 import { createLockToggle, trackLockReveal, type LockSource, type LockToggle } from "./lock-toggle";
 import { createConnectionIndicator, type ConnectionIndicator, type ConnectionIndicatorState } from "./connection-indicator";
-import { createIconMorph, type IconMorph, type MorphSpec } from "./icon-morph";
-import { refreshTip } from "./tooltip";
+import type { AltButton } from "./window-alt.on-demand";
 import type { AnchoredPopover } from "./anchored-popover";
 import type { WindowMenuItem } from "./window-menu.on-demand";
 
@@ -46,8 +45,11 @@ export interface WindowAction {
   label: string;
   icon: string; // inner SVG markup on a 24×24 grid, stroked
   onSelect(event: MouseEvent): void;
-  /** What the button does while Option (Alt) is held: its icon morphs into this one (the base icon is the morph's start). */
-  alt?: { label: string; morph: MorphSpec; onSelect(event: MouseEvent): void };
+  /**
+   * What the button does while Option (Alt) is held: its icon morphs into this one (the base icon is the morph's start).
+   * `morph` names the shared pair in icon-morph.ts (`SPLIT_MORPH`), so the header need not carry the morph code to say which.
+   */
+  alt?: { label: string; morph: "right" | "down"; onSelect(event: MouseEvent): void };
 }
 
 export interface WindowCardOptions {
@@ -128,7 +130,7 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
   const actions = document.createElement("div");
   actions.className = "ui-window-actions";
   const handlers: Array<[HTMLButtonElement, (event: MouseEvent) => void]> = [];
-  const alts: Array<{ button: HTMLButtonElement; action: WindowAction & { alt: NonNullable<WindowAction["alt"]> }; morph: IconMorph }> = [];
+  const alts: AltButton[] = [];
   for (const action of options.actions ?? []) {
     const button = document.createElement("button");
     button.type = "button";
@@ -138,7 +140,7 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
     button.dataset.tip = action.label; // the warm tooltip names the control
     button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${action.icon}</svg>`;
     const alt = action.alt;
-    if (alt) alts.push({ button, action: action as (typeof alts)[number]["action"], morph: createIconMorph(button.querySelector("svg")!, alt.morph) });
+    if (alt) alts.push({ button, action: action as AltButton["action"] });
     // The key decides at the click itself, whatever the icon shows: a click that lands as Option is released still means what was pressed.
     // Ctrl or Meta with Alt is a different chord (AltGr on Windows reports it; Ctrl-click is a context click on a Mac).
     const handler = (event: MouseEvent): void => { if (alt && event.altKey && !event.ctrlKey && !event.metaKey) alt.onSelect(event); else action.onSelect(event); };
@@ -175,82 +177,25 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
   header.append(pill, actions);
 
   // ---- Option (Alt) turns the header's split buttons into "new window" (#280) ---------------------------------------
-  // The modifier is Option on a Mac and Alt on Windows and Linux; the browser reports both as `key === "Alt"` and
-  // `altKey`, so one code path serves every platform (AltGr reports "AltGraph" and never counts). The pointer being near
-  // the actions pill, or keyboard focus being on one of its buttons, is what counts: the key alone, far away, changes
-  // nothing. The card listens for the key only while the pointer is over the window or focus is in its actions, so an
-  // idle canvas has no listener running.
-  const NEAR = 28;
-  let altOn = false;
-  let pointer = { x: -1, y: -1 };
-  let pointerIn = false;
-  let focusIn = false;
-  let listening = false;
-  const nearActions = (): boolean => {
-    // Keyboard focus (shown by the focus ring) on a button counts as "near": Tab to the button, hold Alt, press Enter.
-    if (focusIn && actions.querySelector(":focus-visible")) return true;
-    if (!pointerIn) return false;
-    const r = actions.getBoundingClientRect();
-    return pointer.x >= r.left - NEAR && pointer.x <= r.right + NEAR && pointer.y >= r.top - NEAR && pointer.y <= r.bottom + NEAR;
+  // Everything that watches the key and morphs the icons is in window-alt.on-demand.ts. The card only notices that the
+  // pointer entered the window or focus reached its actions, and loads that module then (kept if it fails to load, so
+  // the next entry tries again). The module reads the pointer's state from the page, not from the waking event, because
+  // the first load takes a moment.
+  let altModule: { dispose(): void } | undefined;
+  let altLoading = false;
+  let disposed = false;
+  const wakeAlt = (seed: { x: number; y: number; altKey: boolean }): void => {
+    if (altModule || altLoading || disposed) return;
+    altLoading = true;
+    void import("./window-alt.on-demand").then((m) => { if (!disposed) altModule = m.createWindowAlt(root, actions, alts, seed); }, () => {}).finally(() => { altLoading = false; });
   };
-  const setAlt = (next: boolean): void => {
-    if (next === altOn) return;
-    altOn = next;
-    for (const { button, action, morph } of alts) {
-      const label = next ? action.alt.label : action.label;
-      morph.set(next);
-      button.dataset.tip = label;
-      button.setAttribute("aria-label", label);
-      if (next) button.dataset.alt = ""; else delete button.dataset.alt;
-      refreshTip(button, true);
-    }
+  const onWakePointer = (event: PointerEvent): void => {
+    if (event.pointerType === "mouse" || event.pointerType === "pen") wakeAlt({ x: event.clientX, y: event.clientY, altKey: event.altKey });
   };
-  const onKey = (event: KeyboardEvent): void => {
-    if (event.key !== "Alt") return;
-    const near = nearActions();
-    setAlt(event.altKey && near);
-    // On Windows and Linux a bare Alt press that is released alone moves focus to the browser's menu. Near the buttons the
-    // key means something else, so it is ours; any other time (and every Alt+key chord) it goes on as before.
-    if (near) event.preventDefault();
-  };
-  const onBlur = (): void => setAlt(false);
-  /** Key listeners exist exactly while the pointer is over the window or focus is in the actions. */
-  const listen = (): void => {
-    const want = pointerIn || focusIn;
-    if (want === listening) return;
-    listening = want;
-    const toggle = want ? window.addEventListener.bind(window) : window.removeEventListener.bind(window);
-    toggle("keydown", onKey as EventListener);
-    toggle("keyup", onKey as EventListener);
-    toggle("blur", onBlur);
-    if (!want) setAlt(false);
-  };
-  const onEnter = (event: PointerEvent): void => {
-    if (event.pointerType !== "mouse" && event.pointerType !== "pen") return;
-    pointer = { x: event.clientX, y: event.clientY };
-    pointerIn = true;
-    listen();
-    setAlt(event.altKey && nearActions());
-  };
-  const onMove = (event: PointerEvent): void => {
-    pointer = { x: event.clientX, y: event.clientY };
-    if (event.altKey || altOn) setAlt(event.altKey && nearActions());
-  };
-  // Leaving the window or the focus turns the buttons back, unless the other of the two still holds them.
-  const onLeave = (): void => { pointerIn = false; if (altOn && !nearActions()) setAlt(false); listen(); };
-  const onFocusIn = (): void => { focusIn = true; listen(); };
-  const onFocusOut = (event: FocusEvent): void => {
-    if (event.relatedTarget instanceof Node && actions.contains(event.relatedTarget)) return;
-    focusIn = false;
-    if (altOn && !nearActions()) setAlt(false);
-    listen();
-  };
+  const onWakeFocus = (): void => wakeAlt({ x: -1, y: -1, altKey: false });
   if (alts.length) {
-    root.addEventListener("pointerenter", onEnter);
-    root.addEventListener("pointermove", onMove, { passive: true });
-    root.addEventListener("pointerleave", onLeave);
-    actions.addEventListener("focusin", onFocusIn);
-    actions.addEventListener("focusout", onFocusOut);
+    root.addEventListener("pointerenter", onWakePointer);
+    actions.addEventListener("focusin", onWakeFocus);
   }
 
   const body = document.createElement("div");
@@ -328,17 +273,11 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
       stopReveal();
       lock.dispose();
       menu?.close("keyboard");
+      disposed = true;
       if (alts.length) {
-        root.removeEventListener("pointerenter", onEnter);
-        root.removeEventListener("pointermove", onMove);
-        root.removeEventListener("pointerleave", onLeave);
-        actions.removeEventListener("focusin", onFocusIn);
-        actions.removeEventListener("focusout", onFocusOut);
-        pointerIn = false;
-        focusIn = false;
-        listen();
-        setAlt(false);
-        for (const { morph } of alts) morph.dispose();
+        root.removeEventListener("pointerenter", onWakePointer);
+        actions.removeEventListener("focusin", onWakeFocus);
+        altModule?.dispose();
       }
       more.removeEventListener("click", openMenu);
       for (const [button, handler] of handlers) button.removeEventListener("click", handler);
