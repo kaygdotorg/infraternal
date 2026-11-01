@@ -22,7 +22,7 @@ libfuzzer-sys = "0.4"
 nix = { version = "0.30", features = ["poll", "socket", "time"] }
 infraternal-mesh = { path = "../../../infraternal-mesh" }
 serde = "1.0"
-simple-dns = "=0.13.0"
+hickory-proto = { version = "=0.26.3", default-features = false, features = ["std"] }
 zeroize = "1.9"
 
 [[bin]]

@@ -4,11 +4,11 @@
 //! `REFUSED` without records, so a node cannot use another resolver's broader visibility. Remote
 //! DNS service needs a per-asker snapshot path and belongs to a later slice.
 use crate::{dataplane::Config, policy::model::validate_dns};
-use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-use simple_dns::{
-    CLASS, Name, OPCODE, Packet, PacketFlag, QCLASS, QTYPE, RCODE, ResourceRecord, TYPE,
-    rdata::{A, AAAA, RData, SOA},
+use hickory_proto::{
+    op::{Message, MessageType, OpCode, ResponseCode},
+    rr::{DNSClass, Name, RData, Record, RecordType, rdata::SOA},
 };
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use std::{
     collections::BTreeMap,
     io::{self, Write as _},
@@ -144,38 +144,33 @@ fn response_for_source(
     if packet.len() > MAX_PACKET {
         return Err(invalid_packet());
     }
-    let request = Packet::parse(packet).map_err(|_| invalid_packet())?;
-    if request.has_flags(PacketFlag::RESPONSE)
-        || request.opcode() != OPCODE::StandardQuery
-        || request.questions.len() != 1
+    let request = Message::from_vec(packet).map_err(|_| invalid_packet())?;
+    if request.metadata.message_type != MessageType::Query
+        || request.metadata.op_code != OpCode::Query
+        || request.queries.len() != 1
         || !request.answers.is_empty()
-        || !request.name_servers.is_empty()
-        || !request.additional_records.is_empty()
+        || !request.authorities.is_empty()
+        || !request.additionals.is_empty()
+        || request.signature.is_some()
     {
         return Err(invalid_packet());
     }
 
-    let question = request
-        .questions
-        .first()
-        .ok_or_else(invalid_packet)?
-        .clone();
-    let opt = request.opt().cloned();
-    let mut reply = request.into_reply();
-    // `into_reply` replaces the DNS header, so preserve EDNS and the request's recursion bit.
-    *reply.opt_mut() = opt;
-    if request_had_rd(packet) {
-        reply.set_flags(PacketFlag::RECURSION_DESIRED);
-    }
+    let question = request.queries[0].clone();
+    let mut reply = Message::response(request.metadata.id, request.metadata.op_code);
+    reply.queries.push(question.clone());
+    reply.edns.clone_from(&request.edns);
+    // Responses copy RD, while the response constructor clears other query flags.
+    reply.metadata.recursion_desired = request.metadata.recursion_desired;
     if source != IpAddr::V4(records.local_address) {
         // Each resolver has only its local node's filtered view. Never answer another node from it.
-        *reply.rcode_mut() = RCODE::Refused;
+        reply.metadata.response_code = ResponseCode::Refused;
         return encode(&reply).map(Some);
     }
-    reply.set_flags(PacketFlag::AUTHORITATIVE_ANSWER);
+    reply.metadata.authoritative = true;
 
     let qname = question
-        .qname
+        .name()
         .to_string()
         .trim_end_matches('.')
         .to_ascii_lowercase();
@@ -183,8 +178,8 @@ fn response_for_source(
         return Ok(None);
     };
 
-    if question.qclass != QCLASS::CLASS(CLASS::IN) {
-        *reply.rcode_mut() = RCODE::Refused;
+    if question.query_class() != DNSClass::IN {
+        reply.metadata.response_code = ResponseCode::Refused;
         return encode(&reply).map(Some);
     }
 
@@ -194,25 +189,24 @@ fn response_for_source(
         records.names.get(label).copied()
     };
     let Some(address) = address else {
-        *reply.rcode_mut() = RCODE::NameError;
-        reply.name_servers.push(negative_soa(suffix));
+        reply.metadata.response_code = ResponseCode::NXDomain;
+        reply.authorities.push(negative_soa(suffix)?);
         return encode(&reply).map(Some);
     };
-    let rdata = match question.qtype {
-        QTYPE::TYPE(TYPE::A) => Some(RData::A(A::from(address.ipv4))),
-        QTYPE::TYPE(TYPE::AAAA) => Some(RData::AAAA(AAAA::from(address.ipv6))),
+    let rdata = match question.query_type() {
+        RecordType::A => Some(RData::A(address.ipv4.into())),
+        RecordType::AAAA => Some(RData::AAAA(address.ipv6.into())),
         _ => None,
     };
     if let Some(rdata) = rdata {
-        reply.answers.push(ResourceRecord::new(
-            question.qname,
-            CLASS::IN,
+        reply.answers.push(Record::from_rdata(
+            question.name().clone(),
             POSITIVE_TTL,
             rdata,
         ));
     } else {
         // NODATA is negative cache data too; advertise the same bounded TTL as NXDOMAIN.
-        reply.name_servers.push(negative_soa(suffix));
+        reply.authorities.push(negative_soa(suffix)?);
     }
     encode(&reply).map(Some)
 }
@@ -244,37 +238,22 @@ fn matching_zone<'zone, 'query>(
     empty_label.or(zone_apex)
 }
 
-fn request_had_rd(packet: &[u8]) -> bool {
-    packet.get(2).is_some_and(|flags| flags & 1 != 0)
-}
-
 fn invalid_packet() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid DNS query packet")
 }
 
-fn encode(packet: &Packet<'_>) -> io::Result<Vec<u8>> {
-    packet
-        .build_bytes_vec_compressed()
-        .map_err(|_| invalid_packet())
+fn encode(message: &Message) -> io::Result<Vec<u8>> {
+    message.to_vec().map_err(|_| invalid_packet())
 }
 
-fn negative_soa(suffix: &str) -> ResourceRecord<'static> {
-    // Records validated the configurable zone before using unchecked name construction.
-    let zone = Name::new_unchecked(suffix).into_owned();
-    ResourceRecord::new(
+fn negative_soa(suffix: &str) -> io::Result<Record> {
+    // Records validates the configured suffix before constructing Hickory's owned DNS name.
+    let zone = Name::from_ascii(suffix).map_err(|_| invalid_config())?;
+    Ok(Record::from_rdata(
         zone.clone(),
-        CLASS::IN,
         NEGATIVE_TTL,
-        RData::SOA(SOA {
-            mname: zone.clone(),
-            rname: zone,
-            serial: 1,
-            refresh: 30,
-            retry: 5,
-            expire: 60,
-            minimum: NEGATIVE_TTL,
-        }),
-    )
+        RData::SOA(SOA::new(zone.clone(), zone, 1, 30, 5, 60, NEGATIVE_TTL)),
+    ))
 }
 
 /// A UDP listener bound only to a mesh IPv4 address, with an atomically replaced snapshot.

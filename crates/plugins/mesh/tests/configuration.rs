@@ -178,8 +178,11 @@ fn denied_peer_name_is_absent_and_dns_returns_nxdomain() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        simple_dns::Packet::parse(&response).unwrap().rcode(),
-        simple_dns::RCODE::NameError
+        hickory_proto::op::Message::from_vec(&response)
+            .unwrap()
+            .metadata
+            .response_code,
+        hickory_proto::op::ResponseCode::NXDomain
     );
 }
 
@@ -213,19 +216,23 @@ fn one_way_node_grant_publishes_the_real_hostname_only_to_the_allowed_receiver()
     let response = infraternal_plugin_mesh::dns::response(&query("host-3.internal"), &allowed)
         .unwrap()
         .unwrap();
-    let answer = simple_dns::Packet::parse(&response).unwrap();
+    let answer = hickory_proto::op::Message::from_vec(&response).unwrap();
     assert_eq!(answer.answers.len(), 1);
-    assert_eq!(answer.answers[0].name.to_string(), "host-3.internal");
+    assert_eq!(
+        answer.answers[0].name.to_string().trim_end_matches('.'),
+        "host-3.internal"
+    );
 
     let reverse_response =
         infraternal_plugin_mesh::dns::response(&query("host-2.internal"), &denied)
             .unwrap()
             .unwrap();
     assert_eq!(
-        simple_dns::Packet::parse(&reverse_response)
+        hickory_proto::op::Message::from_vec(&reverse_response)
             .unwrap()
-            .rcode(),
-        simple_dns::RCODE::NameError
+            .metadata
+            .response_code,
+        hickory_proto::op::ResponseCode::NXDomain
     );
 }
 
@@ -261,7 +268,10 @@ fn a_port_limited_grant_still_publishes_the_reachable_hostname() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        simple_dns::Packet::parse(&response).unwrap().answers.len(),
+        hickory_proto::op::Message::from_vec(&response)
+            .unwrap()
+            .answers
+            .len(),
         1
     );
 }
@@ -403,9 +413,12 @@ fn configured_custom_suffix_is_used_for_peer_dns_answers() {
     let response = infraternal_plugin_mesh::dns::response(&query("host-3.mesh.kayg.org"), &config)
         .unwrap()
         .unwrap();
-    let answer = simple_dns::Packet::parse(&response).unwrap();
+    let answer = hickory_proto::op::Message::from_vec(&response).unwrap();
     assert_eq!(answer.answers.len(), 1);
-    assert_eq!(answer.answers[0].name.to_string(), "host-3.mesh.kayg.org");
+    assert_eq!(
+        answer.answers[0].name.to_string().trim_end_matches('.'),
+        "host-3.mesh.kayg.org"
+    );
     assert!(
         infraternal_plugin_mesh::dns::response(&query("host-3.external.example"), &config)
             .unwrap()
@@ -457,8 +470,11 @@ fn revoking_a_node_grant_removes_its_name_from_the_next_snapshot_and_chunk() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        simple_dns::Packet::parse(&denied).unwrap().rcode(),
-        simple_dns::RCODE::NameError
+        hickory_proto::op::Message::from_vec(&denied)
+            .unwrap()
+            .metadata
+            .response_code,
+        hickory_proto::op::ResponseCode::NXDomain
     );
     let chunks = configuration::chunks(Some(&old), &new).unwrap();
     let removed_names: Vec<_> = chunks

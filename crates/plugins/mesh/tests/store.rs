@@ -131,8 +131,11 @@ async fn reachable_placeholder_node_is_not_published_in_mesh_dns() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        simple_dns::Packet::parse(&response).unwrap().rcode(),
-        simple_dns::RCODE::NameError
+        hickory_proto::op::Message::from_vec(&response)
+            .unwrap()
+            .metadata
+            .response_code,
+        hickory_proto::op::ResponseCode::NXDomain
     );
 }
 

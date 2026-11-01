@@ -2,6 +2,10 @@
 #![cfg(all(feature = "agent", feature = "mesh-dns-spike", target_os = "linux"))]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use hickory_proto::{
+    op::{Message, MessageType, ResponseCode},
+    rr::RData,
+};
 use infraternal_plugin_mesh::{
     dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
     dns::{self, DNS_PORT, Resolver},
@@ -10,7 +14,6 @@ use infraternal_plugin_mesh::{
         rules::TrafficPolicy,
     },
 };
-use simple_dns::{CLASS, Packet, PacketFlag, RCODE, rdata::RData};
 use std::{
     collections::BTreeMap,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -25,7 +28,7 @@ fn query(name: &str, qtype: u16) -> Vec<u8> {
     }
     wire.push(0);
     wire.extend_from_slice(&qtype.to_be_bytes());
-    wire.extend_from_slice(&u16::from(CLASS::IN).to_be_bytes());
+    wire.extend_from_slice(&1_u16.to_be_bytes());
     wire
 }
 
@@ -71,40 +74,35 @@ fn response_wire(name: &str, qtype: u16) -> Vec<u8> {
 #[test]
 fn peer_and_local_names_answer_a_and_aaaa_with_positive_ttl() {
     let a_wire = response_wire("BUILD-01.INTERNAL", 1);
-    let a = Packet::parse(&a_wire).unwrap();
-    assert!(a.has_flags(PacketFlag::RESPONSE | PacketFlag::AUTHORITATIVE_ANSWER));
+    let a = Message::from_vec(&a_wire).unwrap();
+    assert_eq!(a.metadata.message_type, MessageType::Response);
+    assert!(a.metadata.authoritative);
     assert_eq!(a.answers.len(), 1);
     assert_eq!(a.answers[0].ttl, 30);
-    match &a.answers[0].rdata {
+    match &a.answers[0].data {
         RData::A(address) => {
-            assert_eq!(
-                Ipv4Addr::from(address.address),
-                Ipv4Addr::new(10, 254, 0, 1)
-            );
+            assert_eq!(address.0, Ipv4Addr::new(10, 254, 0, 1));
         }
         other => panic!("unexpected A response: {other:?}"),
     }
 
     let local_a_wire = response_wire("laptop.internal", 1);
-    let local_a = Packet::parse(&local_a_wire).unwrap();
-    match &local_a.answers[0].rdata {
+    let local_a = Message::from_vec(&local_a_wire).unwrap();
+    match &local_a.answers[0].data {
         RData::A(address) => {
-            assert_eq!(
-                Ipv4Addr::from(address.address),
-                Ipv4Addr::new(10, 254, 0, 2)
-            );
+            assert_eq!(address.0, Ipv4Addr::new(10, 254, 0, 2));
         }
         other => panic!("unexpected local A response: {other:?}"),
     }
 
     let aaaa_wire = response_wire("laptop.internal", 28);
-    let aaaa = Packet::parse(&aaaa_wire).unwrap();
+    let aaaa = Message::from_vec(&aaaa_wire).unwrap();
     assert_eq!(aaaa.answers.len(), 1);
     assert_eq!(aaaa.answers[0].ttl, 30);
-    match &aaaa.answers[0].rdata {
+    match &aaaa.answers[0].data {
         RData::AAAA(address) => {
             assert_eq!(
-                Ipv6Addr::from(address.address),
+                address.0,
                 "fd66:6821:bc63:834e::2".parse::<Ipv6Addr>().unwrap()
             );
         }
@@ -112,11 +110,11 @@ fn peer_and_local_names_answer_a_and_aaaa_with_positive_ttl() {
     }
 
     let peer_aaaa_wire = response_wire("build-01.internal", 28);
-    let peer_aaaa = Packet::parse(&peer_aaaa_wire).unwrap();
-    match &peer_aaaa.answers[0].rdata {
+    let peer_aaaa = Message::from_vec(&peer_aaaa_wire).unwrap();
+    match &peer_aaaa.answers[0].data {
         RData::AAAA(address) => {
             assert_eq!(
-                Ipv6Addr::from(address.address),
+                address.0,
                 "fd66:6821:bc63:834e::1".parse::<Ipv6Addr>().unwrap()
             );
         }
@@ -127,12 +125,12 @@ fn peer_and_local_names_answer_a_and_aaaa_with_positive_ttl() {
 #[test]
 fn unknown_internal_names_get_nxdomain_and_five_second_negative_ttl() {
     let response_wire = response_wire("missing.internal", 1);
-    let response = Packet::parse(&response_wire).unwrap();
-    assert_eq!(response.rcode(), RCODE::NameError);
+    let response = Message::from_vec(&response_wire).unwrap();
+    assert_eq!(response.metadata.response_code, ResponseCode::NXDomain);
     assert_eq!(response.answers.len(), 0);
-    assert_eq!(response.name_servers.len(), 1);
-    assert_eq!(response.name_servers[0].ttl, 5);
-    match &response.name_servers[0].rdata {
+    assert_eq!(response.authorities.len(), 1);
+    assert_eq!(response.authorities[0].ttl, 5);
+    match &response.authorities[0].data {
         RData::SOA(soa) => assert_eq!(soa.minimum, 5),
         other => panic!("unexpected negative cache record: {other:?}"),
     }
@@ -160,23 +158,35 @@ fn configured_custom_suffix_is_authoritative_and_owns_its_negative_soa() {
     let answer_wire = dns::response(&query("build-01.mesh.kayg.org", 1), &snapshot)
         .unwrap()
         .expect("configured suffix is authoritative");
-    let answer = Packet::parse(&answer_wire).unwrap();
+    let answer = Message::from_vec(&answer_wire).unwrap();
     assert_eq!(answer.answers.len(), 1);
-    assert_eq!(answer.answers[0].name.to_string(), "build-01.mesh.kayg.org");
+    assert_eq!(
+        answer.answers[0].name.to_string().trim_end_matches('.'),
+        "build-01.mesh.kayg.org"
+    );
 
     let missing_wire = dns::response(&query("missing.mesh.kayg.org", 1), &snapshot)
         .unwrap()
         .expect("unknown names below the configured zone are authoritative");
-    let missing = Packet::parse(&missing_wire).unwrap();
-    assert_eq!(missing.rcode(), RCODE::NameError);
-    assert_eq!(missing.name_servers[0].name.to_string(), "mesh.kayg.org");
+    let missing = Message::from_vec(&missing_wire).unwrap();
+    assert_eq!(missing.metadata.response_code, ResponseCode::NXDomain);
+    assert_eq!(
+        missing.authorities[0]
+            .name
+            .to_string()
+            .trim_end_matches('.'),
+        "mesh.kayg.org"
+    );
     let internal_alias = dns::response(&query("build-01.internal", 1), &snapshot)
         .unwrap()
         .expect(".internal remains an authoritative alias");
-    let internal_alias = Packet::parse(&internal_alias).unwrap();
+    let internal_alias = Message::from_vec(&internal_alias).unwrap();
     assert_eq!(internal_alias.answers.len(), 1);
     assert_eq!(
-        internal_alias.answers[0].name.to_string(),
+        internal_alias.answers[0]
+            .name
+            .to_string()
+            .trim_end_matches('.'),
         "build-01.internal"
     );
 }
@@ -190,21 +200,24 @@ fn origin_derived_suffix_and_internal_alias_both_resolve() {
         let wire = dns::response(&query(name, 1), &snapshot)
             .unwrap()
             .expect("both configured and internal mesh suffixes are authoritative");
-        let response = Packet::parse(&wire).unwrap();
+        let response = Message::from_vec(&wire).unwrap();
         assert_eq!(response.answers.len(), 1, "{name}");
-        assert_eq!(response.answers[0].name.to_string(), name);
+        assert_eq!(
+            response.answers[0].name.to_string().trim_end_matches('.'),
+            name
+        );
     }
 }
 
 #[test]
 fn unsupported_record_types_return_a_five_second_negative_ttl() {
     let srv_wire = response_wire("build-01.internal", 33);
-    let srv = Packet::parse(&srv_wire).unwrap();
+    let srv = Message::from_vec(&srv_wire).unwrap();
     assert_eq!(srv.answers.len(), 0);
-    assert_eq!(srv.rcode(), RCODE::NoError);
-    assert_eq!(srv.name_servers.len(), 1);
-    assert_eq!(srv.name_servers[0].ttl, 5);
-    match &srv.name_servers[0].rdata {
+    assert_eq!(srv.metadata.response_code, ResponseCode::NoError);
+    assert_eq!(srv.authorities.len(), 1);
+    assert_eq!(srv.authorities[0].ttl, 5);
+    match &srv.authorities[0].data {
         RData::SOA(soa) => assert_eq!(soa.minimum, 5),
         other => panic!("unexpected NODATA cache record: {other:?}"),
     }
@@ -221,17 +234,17 @@ fn accepted_snapshot_replacement_retires_renamed_records_together() {
     let old_wire = dns::response(&query("build-01.internal", 1), &old)
         .unwrap()
         .unwrap();
-    let old_record = Packet::parse(&old_wire).unwrap();
+    let old_record = Message::from_vec(&old_wire).unwrap();
     assert_eq!(old_record.answers.len(), 1);
     let retired_wire = dns::response(&query("build-01.internal", 1), &renamed)
         .unwrap()
         .unwrap();
-    let retired = Packet::parse(&retired_wire).unwrap();
-    assert_eq!(retired.rcode(), RCODE::NameError);
+    let retired = Message::from_vec(&retired_wire).unwrap();
+    assert_eq!(retired.metadata.response_code, ResponseCode::NXDomain);
     let current_wire = dns::response(&query("build-renamed.internal", 1), &renamed)
         .unwrap()
         .unwrap();
-    let current = Packet::parse(&current_wire).unwrap();
+    let current = Message::from_vec(&current_wire).unwrap();
     assert_eq!(current.answers.len(), 1);
 
     let mut revoked = old;
@@ -240,8 +253,11 @@ fn accepted_snapshot_replacement_retires_renamed_records_together() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        Packet::parse(&retired_wire).unwrap().rcode(),
-        RCODE::NameError
+        Message::from_vec(&retired_wire)
+            .unwrap()
+            .metadata
+            .response_code,
+        ResponseCode::NXDomain
     );
 }
 
@@ -304,10 +320,10 @@ fn edns0_opt_queries_still_receive_mesh_answers() {
     let response = dns::response(&request, &config())
         .unwrap()
         .expect("EDNS does not make an internal query external");
-    let parsed = Packet::parse(&response).unwrap();
+    let parsed = Message::from_vec(&response).unwrap();
     assert_eq!(parsed.answers.len(), 1);
     assert_eq!(parsed.answers[0].ttl, 30);
-    assert!(parsed.opt().is_some(), "EDNS replies retain an OPT record");
+    assert!(parsed.edns.is_some(), "EDNS replies retain an OPT record");
 }
 
 #[tokio::test]
@@ -340,7 +356,7 @@ async fn udp_resolver_answers_on_the_mesh_address_inside_a_network_namespace() {
     let mut response = [0; 512];
     let (len, _) = exchange(&client, &snapshot, "build-01.internal", &mut response).await;
     assert_eq!(
-        Packet::parse(&response[..len]).unwrap().answers.len(),
+        Message::from_vec(&response[..len]).unwrap().answers.len(),
         1,
         "the DNS socket must answer from the configured mesh address"
     );
@@ -352,11 +368,17 @@ async fn udp_resolver_answers_on_the_mesh_address_inside_a_network_namespace() {
     resolver.replace(&renamed).unwrap();
     let (len, _) = exchange(&client, &renamed, "build-01.internal", &mut response).await;
     assert_eq!(
-        Packet::parse(&response[..len]).unwrap().rcode(),
-        RCODE::NameError
+        Message::from_vec(&response[..len])
+            .unwrap()
+            .metadata
+            .response_code,
+        ResponseCode::NXDomain
     );
     let (len, _) = exchange(&client, &renamed, "build-renamed.internal", &mut response).await;
-    assert_eq!(Packet::parse(&response[..len]).unwrap().answers.len(), 1);
+    assert_eq!(
+        Message::from_vec(&response[..len]).unwrap().answers.len(),
+        1
+    );
 
     client
         .send_to(
@@ -425,6 +447,8 @@ async fn exchange(
     .unwrap()
 }
 
+// Keep the coordinator policy and both sides of the UDP boundary in one regression.
+#[allow(clippy::too_many_lines)]
 #[test]
 fn review_j68_remote_resolver_must_not_disclose_a_name_denied_to_the_asker() {
     use infraternal_plugin_mesh::{
@@ -471,7 +495,13 @@ fn review_j68_remote_resolver_must_not_disclose_a_name_denied_to_the_asker() {
     let own_reply = dns::response(&query("host-3.internal", 1), &asker)
         .unwrap()
         .unwrap();
-    assert_eq!(Packet::parse(&own_reply).unwrap().rcode(), RCODE::NameError);
+    assert_eq!(
+        Message::from_vec(&own_reply)
+            .unwrap()
+            .metadata
+            .response_code,
+        ResponseCode::NXDomain
+    );
 
     // Loopback addresses isolate the UDP boundary without requiring kernel mesh setup.
     server.addresses.ipv4 = Ipv4Addr::new(127, 68, 0, 1);
@@ -495,14 +525,13 @@ fn review_j68_remote_resolver_must_not_disclose_a_name_denied_to_the_asker() {
         .unwrap();
     let mut buffer = [0; 512];
     let (length, _) = client.recv_from(&mut buffer).unwrap();
-    let reply = Packet::parse(&buffer[..length]).unwrap();
-    let remote_rcode = reply.rcode();
+    let reply = Message::from_vec(&buffer[..length]).unwrap();
+    let remote_rcode = reply.metadata.response_code;
     let remote_answer_count = reply.answers.len();
-    let remote_authority_count = reply.name_servers.len();
+    let remote_authority_count = reply.authorities.len();
     eprintln!(
         "asker 2 -> target 3: denied; asker 2 -> server 1 DNS: permitted; remote response: {remote_rcode:?}, {remote_answer_count} answers"
     );
-    drop(reply);
 
     let local_client = std::net::UdpSocket::bind("127.68.0.1:0").unwrap();
     local_client
@@ -515,17 +544,17 @@ fn review_j68_remote_resolver_must_not_disclose_a_name_denied_to_the_asker() {
         )
         .unwrap();
     let (local_length, _) = local_client.recv_from(&mut buffer).unwrap();
-    let local_reply = Packet::parse(&buffer[..local_length]).unwrap();
+    let local_reply = Message::from_vec(&buffer[..local_length]).unwrap();
 
     drop(resolver);
     assert_eq!(
         remote_rcode,
-        RCODE::Refused,
+        ResponseCode::Refused,
         "remote mesh sources must not inherit the resolver host's broader policy"
     );
     assert_eq!(remote_answer_count, 0, "a remote refusal has no names");
     assert_eq!(remote_authority_count, 0, "a remote refusal has no names");
-    assert_eq!(local_reply.rcode(), RCODE::NoError);
+    assert_eq!(local_reply.metadata.response_code, ResponseCode::NoError);
     assert_eq!(local_reply.answers.len(), 1);
 }
 
@@ -535,15 +564,15 @@ fn review_j68b_nested_suffix_preserves_internal_hostname_alias() {
     snapshot.dns_suffix = "laptop.internal".to_owned();
     for name in ["laptop.laptop.internal", "laptop.internal"] {
         let wire = dns::response(&query(name, 1), &snapshot).unwrap().unwrap();
-        let reply = Packet::parse(&wire).unwrap();
+        let reply = Message::from_vec(&wire).unwrap();
         eprintln!(
             "{name}: {:?}, {} answers",
-            reply.rcode(),
+            reply.metadata.response_code,
             reply.answers.len()
         );
         assert_eq!(
-            reply.rcode(),
-            RCODE::NoError,
+            reply.metadata.response_code,
+            ResponseCode::NoError,
             "the configured suffix must preserve every .internal alias"
         );
         assert_eq!(reply.answers.len(), 1);
