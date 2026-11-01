@@ -288,4 +288,67 @@ mod tests {
         assert!(!belongs(pid, uid, u32::MAX));
         assert!(!belongs(u32::MAX, uid, parent));
     }
+
+    #[tokio::test]
+    async fn cross_account_session_name_has_the_same_not_found_reply_as_absent() {
+        fn session(number: u128) -> (Session, u32) {
+            let (peer, _shim) = tokio::net::UnixStream::pair().unwrap();
+            let credentials = peer.peer_cred().unwrap();
+            let pid = u32::try_from(credentials.pid().unwrap()).unwrap();
+            (
+                Session {
+                    id: uuid::Uuid::from_u128(number).into_bytes(),
+                    path: Path::new("/unused").to_owned(),
+                    peer,
+                    head: 0,
+                    size: (80, 24),
+                    pid,
+                    caps: 0,
+                    supports_owner: false,
+                },
+                credentials.uid(),
+            )
+        }
+
+        let (caller, caller_peer_uid) = session(1);
+        let (foreign, foreign_peer_uid) = session(2);
+        let caller_uid = caller_peer_uid.wrapping_add(1);
+        let caller_id = uuid::Uuid::from_bytes(caller.id).to_string();
+        let foreign_id = uuid::Uuid::from_bytes(foreign.id).to_string();
+        let mut names = operations::Names::new();
+        names.insert(caller_id, json!({"name":"caller", "uid":caller_uid}));
+        names.insert(foreign_id, json!({"name":"private", "uid":foreign_peer_uid}));
+
+        let visible: Vec<_> = [caller, foreign]
+            .into_iter()
+            .filter(|session| same_account(session, caller_uid, &names))
+            .collect();
+        assert_eq!(visible.len(), 1, "the foreign-UID session must be filtered");
+
+        let input = json!({"target":"local:private", "last":1});
+        let cross_account = operations::run(
+            Path::new("/unused"),
+            caller_uid,
+            "read",
+            &input,
+            visible,
+            names.clone(),
+        )
+        .await
+        .unwrap();
+        let absent = operations::run(
+            Path::new("/unused"),
+            caller_uid,
+            "read",
+            &input,
+            Vec::new(),
+            names,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(cross_account.code, 4);
+        assert_eq!(cross_account.message, absent.message);
+        assert_eq!(cross_account.next, absent.next);
+    }
 }

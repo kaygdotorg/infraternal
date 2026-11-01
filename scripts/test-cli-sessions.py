@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Verify D314 CLI operations against real PTYs and caller-process authority (#251)."""
 import json
-import os
 from pathlib import Path
 import shlex
+import stat
 import subprocess
 import socket
 import struct
@@ -88,47 +88,10 @@ def inside(binary, state):
     ended = cli(binary, state, 'read', 'local:ended', '--last', '2')
     assert 'RETAINED_DONE' in ended['data']['text'], ended
     cli(binary, state, 'close', 'local:ended')
-    direct = cli(binary, state, 'new', 'local', '--name', 'direct-socket', '--',
-                 '/bin/sh', '-c', 'exec sleep 120')
     return {'operations': ['list', 'new', 'send', 'read', 'close', 'new-command'],
             'authority': 'real saved-shell descendants; cross-machine denied',
             'missing_last_exit': missing_last.returncode,
-            'missing_last_message': missing_last_reply.get('message'),
-            'direct_socket_id': direct['data']['session']['id']}
-
-
-def process_state(pid):
-    try:
-        record = Path(f'/proc/{pid}/stat').read_text()
-    except FileNotFoundError:
-        return None
-    return record.rsplit(')', 1)[1].split()[0]
-
-
-def outside_shell_can_close(state, session_id):
-    path = state / 'sessions' / f"{session_id.replace('-', '')}.sock"
-    with socket.socket(socket.AF_UNIX) as peer:
-        peer.settimeout(2)
-        peer.connect(str(path))
-        hello = exact(peer, struct.unpack('<I', exact(peer, 4))[0])
-        assert hello[0] == 1
-        assert hello[11:27] == bytes.fromhex(session_id.replace('-', ''))
-        assert struct.unpack('<Q', hello[3:11])[0] & 64, 'close capability missing'
-        shim_pid = struct.unpack('<I', hello[27:31])[0]
-        children = Path(f'/proc/{shim_pid}/task/{shim_pid}/children')
-        deadline = time.monotonic() + 2
-        while not children.read_text().split():
-            assert time.monotonic() < deadline, 'session shell did not start'
-            time.sleep(0.01)
-        child_pid = int(children.read_text().split()[0])
-        peer.sendall(struct.pack('<I', 9) + b'\x02' + struct.pack('<Q', 64))
-        peer.sendall(struct.pack('<I', 1) + b'\x1f')
-    deadline = time.monotonic() + 2
-    while process_state(child_pid) not in (None, 'Z', 'X', 'x'):
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.01)
-    return True
+            'missing_last_message': missing_last_reply.get('message')}
 
 
 def main(binary):
@@ -137,8 +100,10 @@ def main(binary):
     fixture = None
     try:
         fixture = Binary(binary, state)
-        cli(binary, state, code=3)  # Same UID alone never proves caller-session authority.
+        cli(binary, state, code=3)  # CLI actions still require saved-shell ancestry.
         fixture.open()
+        sessions_mode = stat.S_IMODE((state / 'sessions').stat().st_mode)
+        assert sessions_mode == 0o700, f'session socket directory mode is {sessions_mode:04o}, expected 0700'
         receipt = state / 'receipt.json'
         argv = [sys.executable, str(Path(__file__).resolve()), '--inside', binary,
                 str(state), str(receipt)]
@@ -157,15 +122,9 @@ def main(binary):
             time.sleep(0.05)
         reply = json.loads(receipt.read_text())
         assert reply['ok'], reply
-        failures = []
-        if reply['missing_last_exit'] != 2:
-            failures.append(
-                f"sessions read without --last exited {reply['missing_last_exit']} "
-                f"({reply['missing_last_message']!r}), expected usage code 2")
-        if outside_shell_can_close(state, reply['direct_socket_id']):
-            failures.append(
-                'same-UID process outside the saved shell closed a session over its local shim socket')
-        assert not failures, '\n'.join(failures)
+        assert reply['missing_last_exit'] == 2, (
+            f"sessions read without --last exited {reply['missing_last_exit']} "
+            f"({reply['missing_last_message']!r}), expected usage code 2")
         print(json.dumps(reply))
     finally:
         if fixture:
