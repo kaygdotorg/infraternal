@@ -10,12 +10,50 @@
 //!    subcommand (`server` or `agent`), so any unit name and any description
 //!    works. `--state` comes from the same line, so a node with a
 //!    non-default runtime directory is read where it really keeps its state.
-//! 2. Ask the owning manager for the `ActiveState` of only those units (at most
-//!    a few `systemctl show` calls). A manager that does not answer makes that
+//! 2. Ask the owning manager for the runtime properties of only those units (at most
+//!    two observations per unit, four concurrent `systemctl show` calls). A manager that does not answer makes that
 //!    unit "Unknown"; it never makes the whole node unknown, because the
 //!    other manager's units are still readable.
 //! 3. Read mesh facts from the public snapshot the mesh writes next to the
 //!    runtime state, and the kernel's interface list under `/sys`.
+//!
+//! Headline/exit contract for configured roles (D299/D303). A retained server
+//! database establishes the server role even when its unit is masked/missing.
+//! A host role needs an installed infraternal-agent unit; an absent unconfigured
+//! role is not a failed component. An inactive masked host unit alone does not
+//! establish a host role; a running masked unit still does. Masked below means
+//! masked and inactive. Disabled below means disabled and inactive;
+//! disabling autostart or masking alone never overrides an observed running process.
+//!
+//! Standalone server or infraternal agent:
+//!
+//! | State | Headline predicate | Exit |
+//! | --- | --- | --- |
+//! | active | is running | 0 |
+//! | crash-looping | is restarting repeatedly | 5 |
+//! | failed | has failed | 5 |
+//! | masked / missing / disabled | is not running | 5 |
+//! | unknown | status of part of this machine's setup is unknown | 0 |
+//!
+//! Both configured roles; rows=server, columns=infraternal agent:
+//!
+//! | | active | looping | failed | masked | missing | disabled | unknown |
+//! | --- | --- | --- | --- | --- | --- | --- | --- |
+//! | active | R/0 | P/5 | P/5 | S/0 | P/5 | P/5 | U/0 |
+//! | looping | P/5 | L/5 | Q/5 | S/5 | Q/5 | Q/5 | X/5 |
+//! | failed | P/5 | Q/5 | F/5 | S/5 | P/5 | P/5 | X/5 |
+//! | masked | P/5 | Q/5 | P/5 | S/5 | D/5 | D/5 | X/5 |
+//! | missing | P/5 | Q/5 | P/5 | S/5 | D/5 | D/5 | X/5 |
+//! | disabled | P/5 | Q/5 | P/5 | S/5 | D/5 | D/5 | X/5 |
+//! | unknown | U/0 | X/5 | X/5 | S/0 | X/5 | X/5 | U/0 |
+//!
+//! S: only the server role is configured; use its standalone headline/exit.
+//! R/L/F/D: both running/restarting repeatedly/failed/not running on this
+//! machine. P: "Part of this machine's setup is not running." Q: "Part of
+//! this machine's setup is restarting repeatedly." U: "The status of part of
+//! this machine's setup is unknown." X: "Part of this machine's setup is not
+//! running; another status is unknown." Any known down role prevents a Running
+//! envelope; an unanswered manager alone retains the established Unknown/0.
 //!
 //! No network is touched and no file is written. Every path is injected through
 //! [`Roots`] so tests build whole nodes in a temporary directory.
@@ -68,6 +106,13 @@ pub enum Kind {
 pub enum Activity {
     /// Running.
     Active,
+    /// Repeated restarts, with the last observed main-process exit.
+    Restarting {
+        /// systemd wait code: 1 exited, 2 signalled, 3 core dumped; 0 unavailable.
+        code: u32,
+        /// Exit status or signal number.
+        status: i32,
+    },
     /// Installed and not running.
     Inactive,
     /// Exited with an error.
@@ -89,6 +134,10 @@ pub struct Unit {
     pub data: Option<PathBuf>,
     /// `--state` argument, when given.
     pub state: Option<PathBuf>,
+    /// A canonical installer unit masked on disk is unavailable by configuration.
+    masked: bool,
+    /// Plain local query failure, without manager output or sensitive arguments.
+    pub query_error: Option<&'static str>,
 }
 
 /// Every location the probe reads; tests substitute a temporary tree.
@@ -220,6 +269,18 @@ pub fn probe(
             (unit, state)
         })
         .collect();
+    assemble(roots, ids, units)
+}
+
+/// Assemble component facts after every unit has kept its own observation.
+fn assemble(roots: &Roots, ids: &[String], mut units: Vec<(Unit, Activity)>) -> NodeStatus {
+    // A bare host-service mask carries no installed ExecStart or retained data.
+    // Only an observed live service establishes that role despite the mask.
+    units.retain(|(unit, state)| {
+        !unit.masked
+            || unit.kind == Kind::Server
+            || matches!(state, Activity::Active | Activity::Restarting { .. })
+    });
     let has = |kind| units.iter().any(|(unit, _)| unit.kind == kind);
     let server_data = has(Kind::Server)
         || roots
@@ -241,6 +302,62 @@ pub fn probe(
         units,
         components,
     }
+}
+
+/// Query with at most four 128 KiB workers and four manager children. Each
+/// scope reserves two workers, so a stalled system manager cannot exhaust the
+/// user's capacity. Admission ends after 40 ms; each admitted unit has its own
+/// 40 ms deadline (including any second observation). Unqueried/refused work
+/// stays Unknown with a reason; neither spawn nor join is a panic path.
+#[must_use]
+pub fn probe_local(roots: &Roots, ids: &[String]) -> NodeStatus {
+    let mut units: Vec<_> = discover(roots)
+        .into_iter()
+        .map(|mut unit| {
+            unit.query_error = Some("service query worker unavailable");
+            let state = Activity::Unknown;
+            (unit, state)
+        })
+        .collect();
+    let admission = std::time::Instant::now() + std::time::Duration::from_millis(40);
+    // Discovery orders system units before user units. Keep observations in
+    // that order, so component rows and diagnostics use the same first unit.
+    let system = units.partition_point(|(unit, _)| unit.scope == Scope::System);
+    std::thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(4);
+        let (system, user) = units.split_at_mut(system);
+        for group in [system, user] {
+            let chunk_size = group.len().div_ceil(2).max(1);
+            for chunk in group.chunks_mut(chunk_size) {
+                let worker = std::thread::Builder::new()
+                    .stack_size(128 * 1024)
+                    .spawn_scoped(scope, move || {
+                        for (unit, state) in chunk {
+                            if std::time::Instant::now() >= admission {
+                                unit.query_error = Some("service query capacity exhausted");
+                                continue;
+                            }
+                            match manager_activity_result(unit.scope, &unit.name) {
+                                Ok(activity) => {
+                                    *state = activity;
+                                    unit.query_error = None;
+                                }
+                                Err(reason) => unit.query_error = Some(reason),
+                            }
+                        }
+                    });
+                if let Ok(worker) = worker {
+                    workers.push(worker);
+                }
+            }
+        }
+        // Explicitly join even a panicked worker, preventing scope's automatic
+        // join from unwinding the status command. Its unfinished rows stay unknown.
+        for worker in workers {
+            let _ = worker.join();
+        }
+    });
+    assemble(roots, ids, units)
 }
 
 /// Units in discovery order: system directories first, then the user's. A
@@ -311,6 +428,24 @@ pub fn server_data_directory(roots: &Roots) -> Option<PathBuf> {
 
 /// Classify a unit by its effective `ExecStart`.
 fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) -> Option<Unit> {
+    // A mask erases ExecStart, but canonical installer names still identify
+    // their configured role. Never guess the role of a masked custom name.
+    if fs::canonicalize(dir.join(name)).is_ok_and(|path| path == Path::new("/dev/null")) {
+        let kind = match name {
+            "infraternal-server.service" => Kind::Server,
+            "infraternal-agent.service" => Kind::Agent,
+            _ => return None,
+        };
+        return Some(Unit {
+            scope,
+            name: name.to_owned(),
+            kind,
+            data: None,
+            state: None,
+            masked: true,
+            query_error: None,
+        });
+    }
     let mut exec: Option<String> = None;
     let mut apply = |text: &str| {
         for line in text.lines() {
@@ -357,6 +492,8 @@ fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) ->
         kind,
         data: option(&words, "--data"),
         state: option(&words, "--state"),
+        masked: false,
+        query_error: None,
     })
 }
 
@@ -437,6 +574,7 @@ fn option(words: &[String], flag: &str) -> Option<PathBuf> {
 fn word(activity: Activity) -> &'static str {
     match activity {
         Activity::Active => "Running",
+        Activity::Restarting { .. } => "Restarting repeatedly",
         Activity::Inactive => "Stopped",
         Activity::Failed => "Failed",
         Activity::Unknown => "Unknown",
@@ -453,10 +591,25 @@ fn row(name: &str, state: &str, detail: impl Into<String>) -> Component {
 
 fn component(id: &str, role: Role, units: &[(Unit, Activity)], roots: &Roots) -> Component {
     let of = |kind| units.iter().find(|(unit, _)| unit.kind == kind);
-    let unit_detail = |unit: &Unit| format!("{} service", unit.scope.label());
+    let unit_detail = |unit: &Unit, activity: Activity| {
+        let scope = unit.scope.label();
+        if unit.masked {
+            format!("{scope} service; service is masked")
+        } else if let Activity::Restarting { code, status } = activity {
+            match code {
+                1 => format!("{scope} service; last exit status {status}"),
+                2 | 3 => format!("{scope} service; last signal {status}"),
+                _ => format!("{scope} service; last exit unavailable"),
+            }
+        } else if let Some(reason) = unit.query_error {
+            format!("{scope} service; {reason}")
+        } else {
+            format!("{scope} service")
+        }
+    };
     match id {
         "server" => match of(Kind::Server) {
-            Some((unit, state)) => row(id, word(*state), unit_detail(unit)),
+            Some((unit, state)) => row(id, word(*state), unit_detail(unit, *state)),
             None if matches!(role, Role::Server | Role::Both) => {
                 row(id, "Stopped", "data found, no service unit")
             }
@@ -466,8 +619,15 @@ fn component(id: &str, role: Role, units: &[(Unit, Activity)], roots: &Roots) ->
             // The server embeds an agent as its own subprocess, so it is
             // up exactly while the server is.
             let (state, detail) = match (of(Kind::Agent), of(Kind::Server)) {
-                (Some((unit, state)), _) => (word(*state), unit_detail(unit)),
-                (None, Some((_, state))) => (word(*state), "embedded in the server".to_owned()),
+                (Some((unit, state)), _) => (word(*state), unit_detail(unit, *state)),
+                (None, Some((unit, state))) => (
+                    word(*state),
+                    if matches!(state, Activity::Restarting { .. }) {
+                        unit_detail(unit, *state) + "; embedded in the server"
+                    } else {
+                        "embedded in the server".to_owned()
+                    },
+                ),
                 (None, None) => ("Not installed", String::new()),
             };
             row(id, state, detail)
@@ -563,42 +723,241 @@ fn mesh(units: &[(Unit, Activity)], roots: &Roots) -> Component {
     }
 }
 
-/// Ask the owning manager for one unit's `ActiveState`; a missing manager is
-/// "Unknown" for that unit only. Runs without a shell and with no secrets.
+/// A single manager observation. Borrowed properties keep the CLI-only parser small.
+#[derive(Default)]
+struct Observation<'a> {
+    active: &'a str,
+    sub: &'a str,
+    restarts: u64,
+    started: u64,
+    pid: u32,
+    code: u32,
+    status: i32,
+}
+
+impl<'a> Observation<'a> {
+    fn read(text: &'a str) -> Self {
+        let mut value = Self::default();
+        for line in text.lines() {
+            let Some((key, field)) = line.split_once('=') else {
+                continue;
+            };
+            match key {
+                "ActiveState" => value.active = field,
+                "SubState" => value.sub = field,
+                "NRestarts" => value.restarts = field.parse().unwrap_or(0),
+                "ExecMainStartTimestampMonotonic" => {
+                    value.started = field.parse().unwrap_or(0);
+                }
+                "MainPID" => value.pid = field.parse().unwrap_or(0),
+                "ExecMainCode" => value.code = field.parse().unwrap_or(0),
+                "ExecMainStatus" => value.status = field.parse().unwrap_or(0),
+                _ => {}
+            }
+        }
+        value
+    }
+
+    fn recent(&self, now: u64) -> bool {
+        self.started != 0
+            && now
+                .checked_sub(self.started)
+                .is_some_and(|age| age <= 10_000_000)
+    }
+
+    fn activity(&self, previous: Option<&Self>, now: u64) -> Activity {
+        // A failed/stopped unit stays failed/stopped, even if it restarted before.
+        // Historical restart counts alone never condemn a recovered service.
+        if matches!(self.active, "active" | "activating" | "reloading") {
+            let changed = previous.is_some_and(|old| {
+                self.restarts > old.restarts
+                    || (old.pid != 0 && self.pid != 0 && self.pid != old.pid)
+            });
+            if self.sub == "auto-restart"
+                || self.sub == "auto-restart-queued"
+                || changed
+                || (self.restarts >= 2 && self.recent(now))
+            {
+                return Activity::Restarting {
+                    code: self.code,
+                    status: self.status,
+                };
+            }
+            // Without a comparable start time, historical restart counts cannot
+            // prove either a stable process or a recent loop. Preserve unknown.
+            if self.restarts >= 2 && (self.started == 0 || now < self.started) {
+                return Activity::Unknown;
+            }
+        }
+        match self.active {
+            "active" | "reloading" => Activity::Active,
+            "failed" => Activity::Failed,
+            "inactive" | "deactivating" => Activity::Inactive,
+            // Starting is not evidence that a process is running yet.
+            _ => Activity::Unknown,
+        }
+    }
+}
+
+/// Ask only the owning local manager. The deadline includes a second observation
+/// for a newly started process, without a sampling sleep or network request.
 #[must_use]
 pub fn manager_activity(scope: Scope, unit: &str) -> Activity {
+    manager_activity_result(scope, unit).unwrap_or(Activity::Unknown)
+}
+
+fn manager_activity_result(scope: Scope, unit: &str) -> Result<Activity, &'static str> {
+    manager_activity_before(
+        scope,
+        unit,
+        std::time::Instant::now() + std::time::Duration::from_millis(40),
+    )
+}
+
+fn manager_activity_before(
+    scope: Scope,
+    unit: &str,
+    deadline: std::time::Instant,
+) -> Result<Activity, &'static str> {
+    let first = manager_properties(scope, unit, deadline)?;
+    let first = Observation::read(&first);
+    // systemd reports this property in microseconds of CLOCK_MONOTONIC.
+    // Wall time and boot time include different clock adjustments/suspends.
+    let now = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
+        .ok()
+        .and_then(|time| {
+            use nix::sys::time::TimeValLike;
+            u64::try_from(time.num_microseconds()).ok()
+        })
+        .unwrap_or(0);
+    let activity = first.activity(None, now);
+    if activity == Activity::Active && first.recent(now) {
+        // Only a fresh start needs another immediate look. Old healthy services
+        // cost one local query; the restart window expires without saved state.
+        let second = manager_properties(scope, unit, deadline)?;
+        return known_activity(Observation::read(&second).activity(Some(&first), now));
+    }
+    known_activity(activity)
+}
+
+fn known_activity(activity: Activity) -> Result<Activity, &'static str> {
+    if activity == Activity::Unknown {
+        Err("service manager did not provide a readable runtime state")
+    } else {
+        Ok(activity)
+    }
+}
+
+fn manager_properties(
+    scope: Scope,
+    unit: &str,
+    deadline: std::time::Instant,
+) -> Result<String, &'static str> {
+    if std::time::Instant::now() >= deadline {
+        return Err("service manager query timed out");
+    }
     let mut command = Command::new("systemctl");
     if scope == Scope::User {
         command.arg("--user");
     }
-    let Ok(output) = command
-        .args([
-            "show",
-            "--property=ActiveState",
-            "--value",
-            "--no-pager",
-            unit,
-        ])
-        .env("LC_ALL", "C")
-        .env("SYSTEMD_COLORS", "0")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-    else {
-        return Activity::Unknown;
-    };
-    if !output.status.success() {
-        return Activity::Unknown;
+    let mut child = command.args([
+        "show",
+        "--property=ActiveState,SubState,NRestarts,MainPID,ExecMainStartTimestampMonotonic,ExecMainCode,ExecMainStatus",
+        "--no-pager", unit,
+    ]).env("LC_ALL", "C").env("SYSTEMD_COLORS", "0")
+        .stdin(Stdio::null()).stderr(Stdio::null()).stdout(Stdio::piped()).spawn().map_err(|_| "could not start the service manager query")?;
+    let status = wait_manager_child(&mut child, deadline);
+    if let Ok(status) = status {
+        let output = child
+            .wait_with_output()
+            .map_err(|_| "could not read the service manager response")?;
+        if status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            Err("service manager query was refused")
+        }
+    } else {
+        // Reap only the process this probe started. An unresponsive
+        // manager is unknown, never grounds to claim a running service.
+        let _ = child.kill();
+        let _ = child.wait();
+        Err("service manager query timed out")
     }
-    match String::from_utf8_lossy(&output.stdout).trim() {
-        "active" | "reloading" | "activating" => Activity::Active,
-        "failed" => Activity::Failed,
-        "inactive" | "deactivating" => Activity::Inactive,
-        _ => Activity::Unknown,
+}
+
+/// Wait for this owned child's exit, keeping both observations on one deadline.
+/// The unreaped child pins its PID, so opening its lifetime descriptor cannot
+/// subscribe to a reused PID. Readiness wakes immediately without a sampling tick.
+fn wait_manager_child(
+    child: &mut std::process::Child,
+    deadline: std::time::Instant,
+) -> Result<std::process::ExitStatus, ()> {
+    #[cfg(target_os = "linux")]
+    if let Ok(descriptor) = infraternal_shim::process_exit_descriptor(child.id()) {
+        use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+        use std::os::fd::AsFd;
+
+        let mut fds = [PollFd::new(descriptor.as_fd(), PollFlags::POLLIN)];
+        loop {
+            let left = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .filter(|left| !left.is_zero())
+                .ok_or(())?;
+            // poll uses milliseconds; round up so sub-millisecond budget
+            // never becomes a busy loop or an early timeout.
+            let millis = left.as_nanos().div_ceil(1_000_000);
+            let timeout = PollTimeout::try_from(millis).map_err(|_| ())?;
+            match poll(&mut fds, timeout) {
+                Ok(0) => return Err(()),
+                Ok(_)
+                    if fds[0]
+                        .revents()
+                        .is_some_and(|flags| flags.contains(PollFlags::POLLIN)) =>
+                {
+                    return child.wait().map_err(|_| ());
+                }
+                Err(nix::errno::Errno::EINTR) => {}
+                _ => return Err(()),
+            }
+        }
+    }
+    // Non-Linux hosts, older kernels and denied/unavailable exit descriptors
+    // retain the existing bounded fallback. Readiness registration failure
+    // alone must not hide a manager response that was previously readable.
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            _ => return Err(()),
+        }
     }
 }
 
 impl NodeStatus {
+    /// Installed observations plus configured roles whose service disappeared.
+    fn activities(&self) -> impl Iterator<Item = Activity> + '_ {
+        self.units.iter().map(|(_, state)| *state).chain(
+            (matches!(self.role, Role::Server | Role::Both)
+                && !self.units.iter().any(|(unit, _)| unit.kind == Kind::Server))
+            .then_some(Activity::Inactive),
+        )
+    }
+
+    /// Count every configured role known down, including a missing server unit.
+    #[must_use]
+    pub fn confirmed_down_count(&self) -> usize {
+        self.activities()
+            .filter(|state| {
+                matches!(
+                    state,
+                    Activity::Inactive | Activity::Failed | Activity::Restarting { .. }
+                )
+            })
+            .count()
+    }
+
     /// Units that are installed here and not running: what a script should be told about.
     #[must_use]
     pub fn down(&self) -> Vec<&Unit> {
@@ -609,13 +968,18 @@ impl NodeStatus {
             .collect()
     }
 
-    /// Units that are confirmed not running (stopped or failed). A unit whose manager gave no
+    /// Units that are confirmed unavailable (stopped, failed or restarting). A unit whose manager gave no
     /// answer is unknown, not down: `status` exits 5 only for what is known to be down (D303).
     #[must_use]
     pub fn confirmed_down(&self) -> Vec<&Unit> {
         self.units
             .iter()
-            .filter(|(_, state)| matches!(state, Activity::Inactive | Activity::Failed))
+            .filter(|(_, state)| {
+                matches!(
+                    state,
+                    Activity::Inactive | Activity::Failed | Activity::Restarting { .. }
+                )
+            })
             .map(|(unit, _)| unit)
             .collect()
     }
@@ -636,7 +1000,8 @@ impl NodeStatus {
             );
         }
         let overall = self.overall();
-        let down = self.confirmed_down();
+        let down = self.confirmed_down_count();
+        let active = self.activities().any(|state| state == Activity::Active);
         let has_unknown = self
             .units
             .iter()
@@ -647,7 +1012,7 @@ impl NodeStatus {
             Role::Both => "The server and the infraternal agent",
         };
         let plural = self.role == Role::Both;
-        let message = if down.is_empty() {
+        let message = if down == 0 && (overall == Activity::Active || has_unknown) {
             if has_unknown {
                 "The status of part of this machine's setup is unknown.".to_owned()
             } else {
@@ -656,12 +1021,28 @@ impl NodeStatus {
                     if plural { "are" } else { "is" }
                 )
             }
-        } else if overall == Activity::Active {
+        } else if active {
             "Part of this machine's setup is not running.".to_owned()
         } else if has_unknown {
             "Part of this machine's setup is not running; another status is unknown.".to_owned()
+        } else if plural
+            && matches!(overall, Activity::Restarting { .. })
+            && self
+                .activities()
+                .any(|state| !matches!(state, Activity::Restarting { .. }))
+        {
+            // A grouped headline must not turn another stopped/failed role
+            // into a second restart loop; component rows keep their own facts.
+            "Part of this machine's setup is restarting repeatedly.".to_owned()
+        } else if plural
+            && !matches!(overall, Activity::Restarting { .. })
+            && self.activities().any(|state| state != overall)
+        {
+            "Part of this machine's setup is not running.".to_owned()
         } else {
             let state = match (overall, plural) {
+                (Activity::Restarting { .. }, false) => "is restarting repeatedly",
+                (Activity::Restarting { .. }, true) => "are restarting repeatedly",
                 (Activity::Failed, false) => "has failed",
                 (Activity::Failed, true) => "have failed",
                 (Activity::Unknown, false) => "is not answering",
@@ -671,37 +1052,79 @@ impl NodeStatus {
             };
             format!("{who} {state} on this machine.")
         };
-        let next = down
+        let mut next: Vec<_> = self
+            .down()
             .iter()
             .take(3)
-            .map(|unit| match unit.scope {
-                Scope::System => format!("systemctl status {}", unit.name),
-                Scope::User => format!("systemctl --user status {}", unit.name),
+            .map(|unit| {
+                let restarting = self.units.iter().any(|(u, a)| {
+                    u.scope == unit.scope
+                        && u.name == unit.name
+                        && matches!(a, Activity::Restarting { .. })
+                });
+                match (restarting, unit.scope) {
+                    (true, Scope::System) => {
+                        format!("journalctl -u {} -n 30 --no-pager", unit.name)
+                    }
+                    (true, Scope::User) => {
+                        format!("journalctl --user -u {} -n 30 --no-pager", unit.name)
+                    }
+                    (false, Scope::System) => format!("systemctl status {}", unit.name),
+                    (false, Scope::User) => format!("systemctl --user status {}", unit.name),
+                }
             })
             .collect();
+        if let Some(repair) = self.server_recovery_step() {
+            next.insert(0, repair);
+        }
+        // Repair actions share the CLI's three-step budget with diagnostics,
+        // including actions prepended above (D299).
+        next.truncate(3);
         (overall, message, next)
     }
 
-    /// Overall activity: any running unit means the node is up.
+    /// Recover retained server configuration only when runtime evidence needs it.
+    fn server_recovery_step(&self) -> Option<String> {
+        if let Some((unit, _)) = self.units.iter().find(|(unit, state)| {
+            unit.kind == Kind::Server
+                && unit.masked
+                && matches!(state, Activity::Inactive | Activity::Failed)
+        }) {
+            // A mask is recoverable without recreating the service. Preserve
+            // the owning scope; never advise a running service to be repaired.
+            let manager = match unit.scope {
+                Scope::System => "systemctl",
+                Scope::User => "systemctl --user",
+            };
+            Some(format!("{manager} unmask {}", unit.name))
+        } else if matches!(self.role, Role::Server | Role::Both)
+            && !self.units.iter().any(|(unit, _)| unit.kind == Kind::Server)
+        {
+            Some(
+                "Restore the server service for the existing data, then run infraternal status."
+                    .to_owned(),
+            )
+        } else {
+            None
+        }
+    }
+
+    /// Overall activity follows configured roles: a healthy companion cannot
+    /// hide a known down role. Unknown alone is not proof of a stopped service.
     #[must_use]
     pub fn overall(&self) -> Activity {
-        if self
-            .units
-            .iter()
-            .any(|(_, state)| *state == Activity::Active)
+        if let Some(state) = self
+            .activities()
+            .find(|state| matches!(state, Activity::Restarting { .. }))
         {
-            Activity::Active
-        } else if self
-            .units
-            .iter()
-            .any(|(_, state)| *state == Activity::Failed)
-        {
+            state
+        } else if self.activities().any(|state| state == Activity::Failed) {
             Activity::Failed
-        } else if self
-            .units
-            .iter()
-            .any(|(_, state)| *state == Activity::Unknown)
-        {
+        } else if self.activities().any(|state| state == Activity::Inactive) {
+            Activity::Inactive
+        } else if self.activities().any(|state| state == Activity::Active) {
+            Activity::Active
+        } else if self.activities().any(|state| state == Activity::Unknown) {
             Activity::Unknown
         } else {
             Activity::Inactive

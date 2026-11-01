@@ -12,6 +12,53 @@ const IDS: [&str; 8] = [
     "release", "server", "agent", "mesh", "host", "relay", "backup", "ssh",
 ];
 
+#[test]
+fn manager_completion_follows_child_exit_even_if_stdout_closes_first() {
+    use std::{process::Command, time::Duration, time::Instant};
+
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "exec 1>&-; /bin/sleep 0.02; exit 7"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let result = super::wait_manager_child(&mut child, Instant::now() + Duration::from_secs(1));
+    if result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    assert_eq!(result.unwrap().code(), Some(7));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn manager_completion_handles_an_already_exited_child_and_a_deadline() {
+    use std::{process::Command, time::Duration, time::Instant};
+
+    let mut exited = Command::new("/bin/false").spawn().unwrap();
+    // Leave the exited child unreaped, exactly as when it exits between spawn
+    // and readiness registration. waitid(WNOWAIT) observes without consuming it.
+    nix::sys::wait::waitid(
+        nix::sys::wait::Id::Pid(nix::unistd::Pid::from_raw(
+            i32::try_from(exited.id()).unwrap(),
+        )),
+        nix::sys::wait::WaitPidFlag::WEXITED | nix::sys::wait::WaitPidFlag::WNOWAIT,
+    )
+    .unwrap();
+    let result = super::wait_manager_child(&mut exited, Instant::now() + Duration::from_secs(1));
+    assert_eq!(result.unwrap().code(), Some(1));
+
+    let mut stalled = Command::new("/bin/sleep").arg("5").spawn().unwrap();
+    let started = Instant::now();
+    let result = super::wait_manager_child(&mut stalled, started + Duration::from_millis(40));
+    let _ = stalled.kill();
+    stalled.wait().unwrap();
+    assert!(
+        result.is_err(),
+        "a live manager cannot complete after its deadline"
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
 struct Fixture {
     root: std::path::PathBuf,
 }
@@ -319,4 +366,392 @@ fn installed_server_discovery_recognizes_the_running_executable_identity() {
         "[Service]\nExecStart=/unrelated/infraternal-versioned server --data /srv/other\n",
     );
     assert_eq!(server_data_directory(&fixture.roots()), None);
+}
+
+#[test]
+#[ignore = "requires the job-owned transient crash-loop user unit"]
+fn real_user_crash_loop_is_not_running() {
+    assert_eq!(
+        super::word(super::manager_activity(
+            Scope::User,
+            "status-crash-loop-237.service"
+        )),
+        "Restarting repeatedly"
+    );
+}
+
+#[test]
+fn manager_properties_report_each_role_and_scope_truthfully() {
+    use super::Observation;
+    let fixtures = [
+        (
+            "ActiveState=activating\nSubState=auto-restart\nMainPID=0\nResult=exit-code\nNRestarts=45\nExecMainStartTimestampMonotonic=100000000\nExecMainCode=1\nExecMainStatus=1\n",
+            "Restarting repeatedly",
+        ),
+        (
+            "ActiveState=active\nSubState=running\nMainPID=42\nNRestarts=46\nExecMainStartTimestampMonotonic=100000000\nExecMainCode=2\nExecMainStatus=11\n",
+            "Restarting repeatedly",
+        ),
+        (
+            "ActiveState=active\nSubState=running\nMainPID=42\nNRestarts=0\nExecMainStartTimestampMonotonic=100000000\n",
+            "Running",
+        ),
+        (
+            "ActiveState=active\nSubState=running\nMainPID=42\nNRestarts=46\nExecMainStartTimestampMonotonic=80000000\n",
+            "Running",
+        ),
+        (
+            "ActiveState=inactive\nSubState=dead\nNRestarts=45\nExecMainStartTimestampMonotonic=100000000\n",
+            "Stopped",
+        ),
+        (
+            "ActiveState=failed\nSubState=failed\nNRestarts=45\nExecMainStartTimestampMonotonic=100000000\nExecMainCode=1\nExecMainStatus=1\n",
+            "Failed",
+        ),
+        ("", "Unknown"),
+    ];
+    for scope in [Scope::System, Scope::User] {
+        for role in ["server", "agent"] {
+            for (properties, expected) in fixtures {
+                let fixture = Fixture::new();
+                let directory = if scope == Scope::System {
+                    "etc"
+                } else {
+                    "user"
+                };
+                let name = format!("infraternal-{role}.service");
+                fixture.write(
+                    &format!("{directory}/{name}"),
+                    &format!("[Service]\nExecStart=/usr/bin/infraternal {role}\n"),
+                );
+                let activity = Observation::read(properties).activity(None, 101_000_000);
+                let status = probe(&fixture.roots(), &IDS.map(str::to_owned), &|s, n| {
+                    assert_eq!(s, scope);
+                    assert_eq!(n, name);
+                    activity
+                });
+                assert_eq!(
+                    state(&status, role).0,
+                    expected,
+                    "{scope:?}/{role}: {properties}"
+                );
+                assert_eq!(
+                    status.role,
+                    if role == "server" {
+                        Role::Server
+                    } else {
+                        Role::Host
+                    }
+                );
+                let (_, message, next) = status.headline();
+                if expected == "Restarting repeatedly" {
+                    assert_eq!(status.confirmed_down().len(), 1);
+                    assert!(message.contains("restarting repeatedly"));
+                    assert!(next[0].starts_with("journalctl"));
+                    assert_eq!(next[0].contains("--user"), scope == Scope::User);
+                    let detail = state(&status, role).1;
+                    assert!(detail.contains(if properties.contains("ExecMainCode=2") {
+                        "last signal 11"
+                    } else {
+                        "last exit status 1"
+                    }));
+                    if role == "server" {
+                        assert_eq!(state(&status, "agent").0, expected);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn consecutive_observations_detect_restart_count_and_pid_churn() {
+    use super::Observation;
+    let first = Observation::read(
+        "ActiveState=active\nSubState=running\nNRestarts=1\nMainPID=41\nExecMainStartTimestampMonotonic=100000000\n",
+    );
+    for properties in [
+        "ActiveState=active\nSubState=running\nNRestarts=2\nMainPID=41\nExecMainStartTimestampMonotonic=100000000\n",
+        "ActiveState=active\nSubState=running\nNRestarts=1\nMainPID=42\nExecMainStartTimestampMonotonic=100000000\n",
+        "ActiveState=activating\nSubState=auto-restart\nNRestarts=1\nMainPID=0\nExecMainStartTimestampMonotonic=100000000\n",
+    ] {
+        assert!(matches!(
+            Observation::read(properties).activity(Some(&first), 101_000_000),
+            Activity::Restarting { .. }
+        ));
+    }
+    assert_eq!(first.activity(Some(&first), 101_000_000), Activity::Active);
+    assert_eq!(
+        Observation::read("ActiveState=activating\nSubState=start\n").activity(None, 101_000_000),
+        Activity::Unknown
+    );
+}
+
+#[test]
+fn a_restarting_role_does_not_describe_a_stopped_or_failed_role_as_restarting() {
+    let fixture = Fixture::new();
+    production_server(&fixture);
+    fixture.write(
+        "user/infraternal-agent.service",
+        "[Service]\nExecStart=/usr/bin/infraternal agent run\n",
+    );
+    let restarting = Activity::Restarting { code: 1, status: 1 };
+    for restarting_scope in [Scope::System, Scope::User] {
+        for other in [Activity::Inactive, Activity::Failed] {
+            let status = probe(&fixture.roots(), &IDS.map(str::to_owned), &|scope, _| {
+                if scope == restarting_scope {
+                    restarting
+                } else {
+                    other
+                }
+            });
+            assert_eq!(
+                status.headline().1,
+                "Part of this machine's setup is restarting repeatedly."
+            );
+            let (restarting_role, other_role) = if restarting_scope == Scope::System {
+                ("server", "agent")
+            } else {
+                ("agent", "server")
+            };
+            assert_eq!(state(&status, restarting_role).0, "Restarting repeatedly");
+            assert_eq!(state(&status, other_role).0, super::word(other));
+            assert_eq!(status.confirmed_down().len(), 2);
+        }
+    }
+    let both = probe(&fixture.roots(), &IDS.map(str::to_owned), &|_, _| {
+        restarting
+    });
+    assert_eq!(
+        both.headline().1,
+        "The server and the infraternal agent are restarting repeatedly on this machine."
+    );
+}
+
+#[test]
+fn restart_age_uses_only_comparable_monotonic_microseconds() {
+    let observation = super::Observation::read(
+        "ActiveState=active\nSubState=running\nNRestarts=3\nExecMainStartTimestampMonotonic=100000000\nExecMainStartTimestamp=@9999999999\n",
+    );
+    assert!(matches!(
+        observation.activity(None, 110_000_000),
+        Activity::Restarting { .. }
+    ));
+    assert_eq!(observation.activity(None, 110_000_001), Activity::Active);
+    assert_eq!(observation.activity(None, 99_000_000), Activity::Unknown);
+    assert_eq!(
+        super::Observation::read("ActiveState=active\nNRestarts=3\n").activity(None, 110_000_000),
+        Activity::Unknown
+    );
+}
+
+#[test]
+fn retained_data_has_an_honest_headline_and_repair_step() {
+    for masked in [false, true] {
+        for user in [false, true] {
+            let fixture = Fixture::new();
+            fixture.write("var-lib/infraternal.sqlite", "");
+            if masked {
+                std::os::unix::fs::symlink(
+                    "/dev/null",
+                    fixture.root.join(if user {
+                        "user/infraternal-server.service"
+                    } else {
+                        "etc/infraternal-server.service"
+                    }),
+                )
+                .unwrap();
+            }
+            let status = fixture.status(&[]);
+            let (activity, headline, next) = status.headline();
+            assert_eq!(activity, Activity::Inactive);
+            assert_eq!(headline, "The server is not running on this machine.");
+            assert_eq!(state(&status, "server").0, "Stopped");
+            if masked {
+                assert_eq!(
+                    next[0],
+                    if user {
+                        "systemctl --user unmask infraternal-server.service"
+                    } else {
+                        "systemctl unmask infraternal-server.service"
+                    }
+                );
+            } else {
+                assert!(next[0].contains("Restore the server service"));
+            }
+        }
+    }
+}
+
+#[test]
+fn stopped_and_failed_services_keep_distinct_headlines_and_diagnostics() {
+    let fixture = Fixture::new();
+    production_server(&fixture);
+    for activity in [Activity::Inactive, Activity::Failed, Activity::Unknown] {
+        let status = probe(&fixture.roots(), &IDS.map(str::to_owned), &|_, _| activity);
+        let (_, headline, next) = status.headline();
+        assert!(headline.contains(match activity {
+            Activity::Inactive => "not running",
+            Activity::Failed => "has failed",
+            _ => "unknown",
+        }));
+        assert_eq!(next, ["systemctl status infraternal-server.service"]);
+    }
+}
+
+/// The module's role/state table is checked for both standalone roles and all
+/// 49 server/companion combinations, including absent and masked server files.
+#[test]
+#[allow(clippy::too_many_lines)] // Keep the complete documented contract in one table.
+fn configured_role_state_table_controls_headline_and_exit() {
+    use Activity::{Active, Failed, Inactive, Restarting, Unknown};
+    let activities = [
+        Active,
+        Restarting { code: 1, status: 7 },
+        Failed,
+        Inactive,
+        Inactive,
+        Inactive,
+        Unknown,
+    ];
+    // R=running, L=all looping, F=all failed, D=all stopped,
+    // P=part stopped, Q=part looping, U=unknown, X=down plus unknown.
+    let matrix = [
+        ['R', 'P', 'P', 'P', 'P', 'P', 'U'],
+        ['P', 'L', 'Q', 'Q', 'Q', 'Q', 'X'],
+        ['P', 'Q', 'F', 'P', 'P', 'P', 'X'],
+        ['P', 'Q', 'P', 'D', 'D', 'D', 'X'],
+        ['P', 'Q', 'P', 'D', 'D', 'D', 'X'],
+        ['P', 'Q', 'P', 'D', 'D', 'D', 'X'],
+        ['U', 'X', 'X', 'X', 'X', 'X', 'U'],
+    ];
+    for (server_index, server) in activities.iter().enumerate() {
+        for (agent_index, agent) in activities.iter().enumerate() {
+            let fixture = Fixture::new();
+            fixture.write("var-lib/infraternal.sqlite", "");
+            match server_index {
+                3 => std::os::unix::fs::symlink(
+                    "/dev/null",
+                    fixture.root.join("etc/infraternal-server.service"),
+                )
+                .unwrap(),
+                4 => {}
+                _ => fixture.write(
+                    "etc/infraternal-server.service",
+                    "[Service]\nExecStart=/usr/bin/infraternal server\n",
+                ),
+            }
+            // A standalone host has an installed unit even when the manager
+            // reports missing/masked; without it no local host role is known.
+            fixture.write(
+                "user/infraternal-agent.service",
+                "[Service]\nExecStart=/usr/bin/infraternal agent run\n",
+            );
+            if agent_index == 3 {
+                fs::remove_file(fixture.root.join("user/infraternal-agent.service")).unwrap();
+                std::os::unix::fs::symlink(
+                    "/dev/null",
+                    fixture.root.join("user/infraternal-agent.service"),
+                )
+                .unwrap();
+            }
+            let node = probe(&fixture.roots(), &IDS.map(str::to_owned), &|scope, _| {
+                if scope == Scope::System {
+                    *server
+                } else if let Restarting { .. } = agent {
+                    Restarting {
+                        code: 2,
+                        status: 11,
+                    }
+                } else {
+                    *agent
+                }
+            });
+            let label = matrix[server_index][agent_index];
+            let expected = if agent_index == 3 {
+                assert_eq!(node.role, Role::Server);
+                match server_index {
+                    0 => "The server is running on this machine.",
+                    1 => "The server is restarting repeatedly on this machine.",
+                    2 => "The server has failed on this machine.",
+                    6 => "The status of part of this machine's setup is unknown.",
+                    _ => "The server is not running on this machine.",
+                }
+            } else {
+                match label {
+                    'R' => "The server and the infraternal agent are running on this machine.",
+                    'L' => {
+                        "The server and the infraternal agent are restarting repeatedly on this machine."
+                    }
+                    'F' => "The server and the infraternal agent have failed on this machine.",
+                    'D' => "The server and the infraternal agent are not running on this machine.",
+                    'Q' => "Part of this machine's setup is restarting repeatedly.",
+                    'U' => "The status of part of this machine's setup is unknown.",
+                    'X' => {
+                        "Part of this machine's setup is not running; another status is unknown."
+                    }
+                    _ => "Part of this machine's setup is not running.",
+                }
+            };
+            assert_eq!(
+                node.headline().1,
+                expected,
+                "server={server_index}, infraternal agent={agent_index}"
+            );
+            let exit = if node.confirmed_down_count() == 0 {
+                0
+            } else {
+                5
+            };
+            let healthy = if agent_index == 3 {
+                matches!(server_index, 0 | 6)
+            } else {
+                matches!(label, 'R' | 'U')
+            };
+            assert_eq!(exit, if healthy { 0 } else { 5 });
+            if exit == 5 {
+                assert_ne!(node.headline().0, Active);
+            }
+        }
+    }
+    for (kind, role) in [(Kind::Server, "server"), (Kind::Agent, "infraternal agent")] {
+        for (index, activity) in activities.iter().enumerate() {
+            let fixture = Fixture::new();
+            fixture.write(
+                "etc/infraternal.service",
+                &format!(
+                    "[Service]\nExecStart=/usr/bin/infraternal {}\n",
+                    if kind == Kind::Server {
+                        "server"
+                    } else {
+                        "agent run"
+                    }
+                ),
+            );
+            let node = probe(&fixture.roots(), &IDS.map(str::to_owned), &|_, _| *activity);
+            let (phrase, exit) = match index {
+                0 => ("is running", 0),
+                1 => ("is restarting repeatedly", 5),
+                2 => ("has failed", 5),
+                6 => ("unknown", 0),
+                _ => ("is not running", 5),
+            };
+            assert_eq!(
+                node.headline().1,
+                if index == 6 {
+                    "The status of part of this machine's setup is unknown.".to_owned()
+                } else {
+                    format!("The {role} {phrase} on this machine.")
+                }
+            );
+            assert_eq!(
+                if node.confirmed_down_count() == 0 {
+                    0
+                } else {
+                    5
+                },
+                exit
+            );
+        }
+    }
 }
