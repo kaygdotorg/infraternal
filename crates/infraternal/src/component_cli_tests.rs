@@ -19,8 +19,14 @@ fn publish_registry() -> ActionRegistry {
         JsonSchema::object(
             [
                 ("port".to_owned(), JsonSchema::integer("Local TCP port.")),
-                ("public".to_owned(), JsonSchema::boolean("Publish publicly.")),
-                ("flat_name".to_owned(), JsonSchema::boolean("Use flat service names.")),
+                (
+                    "public".to_owned(),
+                    JsonSchema::boolean("Publish publicly."),
+                ),
+                (
+                    "flat_name".to_owned(),
+                    JsonSchema::boolean("Use flat service names."),
+                ),
                 (
                     "confirm_public".to_owned(),
                     JsonSchema::boolean("Confirm first public use."),

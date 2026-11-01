@@ -59,10 +59,7 @@ fn a_new_exposure_cancels_the_drain_without_restarting_the_child() {
 fn unexpected_exits_back_off_and_never_restart_without_exposures() {
     let start = Instant::now();
     let mut lifecycle = Lifecycle::default();
-    assert_eq!(
-        lifecycle.child_exited(0, start),
-        LifecycleAction::Keep
-    );
+    assert_eq!(lifecycle.child_exited(0, start), LifecycleAction::Keep);
     assert_eq!(lifecycle.phase(), LifecyclePhase::Stopped);
 
     let first_delay = Duration::from_millis(200);

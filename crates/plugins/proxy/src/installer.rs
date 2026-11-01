@@ -197,10 +197,14 @@ impl Write for ArchiveStreamWriter<'_> {
         }
         let next = self
             .received
-            .checked_add(u64::try_from(bytes.len()).map_err(|_| invalid_data("archive is too large"))?)
+            .checked_add(
+                u64::try_from(bytes.len()).map_err(|_| invalid_data("archive is too large"))?,
+            )
             .ok_or_else(|| invalid_data("archive is too large"))?;
         if next > self.expected_size || next > MAX_COMPONENT_ARCHIVE_BYTES {
-            return Err(invalid_data("component archive exceeds its signed byte limit"));
+            return Err(invalid_data(
+                "component archive exceeds its signed byte limit",
+            ));
         }
         let written = self.output.write(bytes)?;
         self.received = self

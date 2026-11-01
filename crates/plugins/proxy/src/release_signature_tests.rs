@@ -2,12 +2,7 @@
 
 use super::verify_signature;
 use sha2::{Digest, Sha256};
-use std::{
-    fs,
-    os::unix::fs::PermissionsExt,
-    path::PathBuf,
-    process::Command,
-};
+use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 
 struct Fixture {
     root: PathBuf,
@@ -36,20 +31,18 @@ impl Fixture {
             "release@infraternal.com namespaces=\"infraternal-release\" {} {} fixture\n",
             fields[0], fields[1]
         );
-        let sums = format!("{:x}  fixture.json\n", Sha256::digest(b"signed component manifest"))
-            .into_bytes();
+        let sums = format!(
+            "{:x}  fixture.json\n",
+            Sha256::digest(b"signed component manifest")
+        )
+        .into_bytes();
         let sums_path = root.join("SHA256SUMS");
         fs::write(&sums_path, &sums).expect("write checksums");
         assert!(
             Command::new("ssh-keygen")
                 .args(["-Y", "sign", "-f"])
                 .arg(&key)
-                .args([
-                    "-n",
-                    "infraternal-release",
-                    "-O",
-                    "hashalg=sha512",
-                ])
+                .args(["-n", "infraternal-release", "-O", "hashalg=sha512",])
                 .arg(&sums_path)
                 .output()
                 .expect("sign fixture checksums")

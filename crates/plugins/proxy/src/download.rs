@@ -36,7 +36,9 @@ pub struct CurlTransport;
 impl ComponentTransport for CurlTransport {
     fn download(&self, url: &Url, limit: u64, output: &mut dyn Write) -> io::Result<()> {
         if url.scheme() != "https" || url.host_str().is_none() || limit == 0 {
-            return Err(invalid_input("component download requires HTTPS and a positive limit"));
+            return Err(invalid_input(
+                "component download requires HTTPS and a positive limit",
+            ));
         }
         let mut child = Command::new("curl")
             .env_clear()
@@ -119,7 +121,9 @@ impl<T: ComponentTransport> ComponentDownloader<T> {
             || mirror.query().is_some()
             || mirror.fragment().is_some()
         {
-            return Err(invalid_input("component mirror must be a plain HTTPS base URL"));
+            return Err(invalid_input(
+                "component mirror must be a plain HTTPS base URL",
+            ));
         }
         if !mirror.path().ends_with('/') {
             mirror
@@ -163,7 +167,10 @@ impl<T: ComponentTransport> ComponentDownloader<T> {
         }
 
         let manifest = verified.manifest();
-        let mirror_archive = self.mirror.join(&manifest.mirror_path).map_err(io::Error::other)?;
+        let mirror_archive = self
+            .mirror
+            .join(&manifest.mirror_path)
+            .map_err(io::Error::other)?;
         let upstream_archive = Url::parse(&manifest.archive_url).map_err(io::Error::other)?;
         match self.install_from(installer, &verified, &mirror_archive, os, arch) {
             Ok(path) => Ok(path),

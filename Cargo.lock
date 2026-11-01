@@ -1949,6 +1949,7 @@ dependencies = [
  "infraternal-plugin-desktop",
  "infraternal-plugin-host-facts",
  "infraternal-plugin-mesh",
+ "infraternal-plugin-proxy",
  "infraternal-plugin-relay",
  "infraternal-plugin-release",
  "infraternal-plugin-remote",
@@ -1982,6 +1983,7 @@ dependencies = [
  "infraternal-plugin-desktop",
  "infraternal-plugin-host-facts",
  "infraternal-plugin-mesh",
+ "infraternal-plugin-proxy",
  "infraternal-plugin-remote",
  "infraternal-protocol",
  "infraternal-shim",
@@ -2119,9 +2121,11 @@ dependencies = [
 name = "infraternal-plugin-proxy"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "flate2",
  "infraternal-plugin-api",
  "nix",
+ "openssl",
  "serde",
  "serde_json",
  "sha2",

@@ -2,7 +2,10 @@
 
 use crate::manifest::ComponentManifestVerifier;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use openssl::{pkey::{Id, PKey}, sign::Verifier};
+use openssl::{
+    pkey::{Id, PKey},
+    sign::Verifier,
+};
 use sha2::{Digest, Sha512};
 use std::io;
 
@@ -94,14 +97,17 @@ fn verify_signature(sums: &[u8], armor: &[u8], trust: &str) -> io::Result<()> {
 }
 
 fn is_trusted_key(trust: &str, public_blob: &[u8]) -> bool {
-    trust.lines().filter(|line| !line.starts_with('#')).any(|line| {
-        let fields: Vec<_> = line.split_whitespace().collect();
-        fields.len() == 5
-            && fields[0] == "release@infraternal.com"
-            && fields[1] == "namespaces=\"infraternal-release\""
-            && fields[2] == "ssh-ed25519"
-            && B64.decode(fields[3]).is_ok_and(|blob| blob == public_blob)
-    })
+    trust
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .any(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            fields.len() == 5
+                && fields[0] == "release@infraternal.com"
+                && fields[1] == "namespaces=\"infraternal-release\""
+                && fields[2] == "ssh-ed25519"
+                && B64.decode(fields[3]).is_ok_and(|blob| blob == public_blob)
+        })
 }
 
 fn take<'a>(input: &mut &'a [u8], size: usize) -> io::Result<&'a [u8]> {

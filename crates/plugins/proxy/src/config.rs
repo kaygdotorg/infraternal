@@ -5,6 +5,7 @@
 use crate::names::CertificateName;
 use serde_json::{Map, json};
 use std::{
+    fmt::Write as _,
     fs::{self, File, OpenOptions},
     io::{self, Write},
     net::{IpAddr, SocketAddr},
@@ -100,10 +101,16 @@ pub fn render_static_config(config: &StaticConfig) -> io::Result<String> {
     validate_static_config(config)?;
     let (http_address, https_address) = if config.public {
         (
-            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), config.ports.http)
-                .to_string(),
-            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), config.ports.https)
-                .to_string(),
+            SocketAddr::new(
+                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                config.ports.http,
+            )
+            .to_string(),
+            SocketAddr::new(
+                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                config.ports.https,
+            )
+            .to_string(),
         )
     } else {
         (
@@ -121,18 +128,61 @@ pub fn render_static_config(config: &StaticConfig) -> io::Result<String> {
         .to_str()
         .ok_or_else(|| invalid_input("ACME storage path must be UTF-8"))?;
     let mut rendered = String::with_capacity(1024);
-    writeln!(rendered, "[global]\ncheckNewVersion = false\nsendAnonymousUsage = false").map_err(io::Error::other)?;
-    writeln!(rendered, "\n[api]\ndashboard = false\ninsecure = false\ndebug = false").map_err(io::Error::other)?;
-    writeln!(rendered, "\n[entryPoints.http]\naddress = {}", toml_string(&http_address)?).map_err(io::Error::other)?;
-    writeln!(rendered, "\n[entryPoints.https]\naddress = {}", toml_string(&https_address)?).map_err(io::Error::other)?;
-    writeln!(rendered, "\n[entryPoints.health]\naddress = {}", toml_string(&format!("127.0.0.1:{}", config.private_ping_port))).map_err(io::Error::other)?;
-    writeln!(rendered, "\n[ping]\nentryPoint = \"health\"\nmanualRouting = true").map_err(io::Error::other)?;
-    writeln!(rendered, "\n[providers.file]\ndirectory = {}\nwatch = true", toml_string(dynamic_directory)?).map_err(io::Error::other)?;
-    writeln!(rendered, "\n[certificatesResolvers.dns.acme]\nemail = {}\nstorage = {}", toml_string(&config.dns_challenge.email)?, toml_string(storage_path)?).map_err(io::Error::other)?;
+    writeln!(
+        rendered,
+        "[global]\ncheckNewVersion = false\nsendAnonymousUsage = false"
+    )
+    .map_err(io::Error::other)?;
+    writeln!(
+        rendered,
+        "\n[api]\ndashboard = false\ninsecure = false\ndebug = false"
+    )
+    .map_err(io::Error::other)?;
+    writeln!(
+        rendered,
+        "\n[entryPoints.http]\naddress = {}",
+        toml_string(&http_address)?
+    )
+    .map_err(io::Error::other)?;
+    writeln!(
+        rendered,
+        "\n[entryPoints.https]\naddress = {}",
+        toml_string(&https_address)?
+    )
+    .map_err(io::Error::other)?;
+    let health_address = toml_string(&format!("127.0.0.1:{}", config.private_ping_port))?;
+    writeln!(
+        rendered,
+        "\n[entryPoints.health]\naddress = {health_address}"
+    )
+    .map_err(io::Error::other)?;
+    writeln!(
+        rendered,
+        "\n[ping]\nentryPoint = \"health\"\nmanualRouting = true"
+    )
+    .map_err(io::Error::other)?;
+    writeln!(
+        rendered,
+        "\n[providers.file]\ndirectory = {}\nwatch = true",
+        toml_string(dynamic_directory)?
+    )
+    .map_err(io::Error::other)?;
+    writeln!(
+        rendered,
+        "\n[certificatesResolvers.dns.acme]\nemail = {}\nstorage = {}",
+        toml_string(&config.dns_challenge.email)?,
+        toml_string(storage_path)?
+    )
+    .map_err(io::Error::other)?;
     if let Some(ca_server) = &config.dns_challenge.ca_server {
         writeln!(rendered, "caServer = {}", toml_string(ca_server)?).map_err(io::Error::other)?;
     }
-    writeln!(rendered, "\n[certificatesResolvers.dns.acme.dnsChallenge]\nprovider = {}", toml_string(&config.dns_challenge.provider)?).map_err(io::Error::other)?;
+    writeln!(
+        rendered,
+        "\n[certificatesResolvers.dns.acme.dnsChallenge]\nprovider = {}",
+        toml_string(&config.dns_challenge.provider)?
+    )
+    .map_err(io::Error::other)?;
     if rendered.len() > MAX_RENDERED_CONFIG_BYTES {
         return Err(invalid_data("static configuration exceeds its byte limit"));
     }
@@ -157,10 +207,14 @@ pub fn render_dynamic_config(services: &[PublishedService]) -> io::Result<Vec<u8
         validate_hostname(&service.hostname)?;
         validate_certificate_name(&service.certificate, &service.hostname)?;
         if !service.backend.ip().is_loopback() || service.backend.port() == 0 {
-            return Err(invalid_input("published backends must use a loopback TCP address"));
+            return Err(invalid_input(
+                "published backends must use a loopback TCP address",
+            ));
         }
         if !seen_ids.insert(service.id.as_str()) || !seen_hosts.insert(service.hostname.as_str()) {
-            return Err(invalid_data("published service identifiers and names must be unique"));
+            return Err(invalid_data(
+                "published service identifiers and names must be unique",
+            ));
         }
         let access_middleware = format!("{}-mesh-access", service.id);
         let redirect_middleware = format!("{}-https-redirect", service.id);
@@ -300,11 +354,13 @@ fn validate_static_config(config: &StaticConfig) -> io::Result<()> {
             .chars()
             .any(|character| matches!(character, '\n' | '\r' | '\0'))
     {
-        return Err(invalid_input("static Traefik configuration is outside policy"));
+        return Err(invalid_input(
+            "static Traefik configuration is outside policy",
+        ));
     }
     if let Some(ca_server) = &config.dns_challenge.ca_server {
-        let url = url::Url::parse(ca_server)
-            .map_err(|_| invalid_input("ACME server URL is invalid"))?;
+        let url =
+            url::Url::parse(ca_server).map_err(|_| invalid_input("ACME server URL is invalid"))?;
         if url.scheme() != "https" || url.host_str().is_none() {
             return Err(invalid_input("ACME server must use HTTPS"));
         }
@@ -315,9 +371,9 @@ fn validate_static_config(config: &StaticConfig) -> io::Result<()> {
 fn valid_provider(provider: &str) -> bool {
     !provider.is_empty()
         && provider.len() <= 63
-        && provider.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
-        })
+        && provider
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
         && provider.as_bytes()[0].is_ascii_lowercase()
         && provider.as_bytes()[provider.len() - 1].is_ascii_alphanumeric()
 }
@@ -326,17 +382,23 @@ fn validate_certificate_name(certificate: &CertificateName, hostname: &str) -> i
     match certificate {
         CertificateName::Wildcard(name) => {
             let Some(suffix) = name.strip_prefix("*.") else {
-                return Err(invalid_input("wildcard certificate must have one leading wildcard"));
+                return Err(invalid_input(
+                    "wildcard certificate must have one leading wildcard",
+                ));
             };
             validate_hostname(suffix)?;
             if !hostname.ends_with(&format!(".{suffix}")) {
-                return Err(invalid_input("wildcard certificate does not cover the route host"));
+                return Err(invalid_input(
+                    "wildcard certificate does not cover the route host",
+                ));
             }
         }
         CertificateName::Exact(name) => {
             validate_hostname(name)?;
             if name != hostname {
-                return Err(invalid_input("exact certificate name must match the route host"));
+                return Err(invalid_input(
+                    "exact certificate name must match the route host",
+                ));
             }
         }
     }
@@ -363,7 +425,9 @@ fn validate_label(label: &str) -> io::Result<()> {
             .iter()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
     {
-        return Err(invalid_input("published service identifier is not a DNS label"));
+        return Err(invalid_input(
+            "published service identifier is not a DNS label",
+        ));
     }
     Ok(())
 }
@@ -378,7 +442,9 @@ fn validate_private_directory(path: &Path) -> io::Result<()> {
         || metadata.uid() != nix::unistd::Uid::effective().as_raw()
         || metadata.mode() & 0o7777 != PRIVATE_DIRECTORY_MODE
     {
-        return Err(permission_error("configuration directory has unsafe owner or mode"));
+        return Err(permission_error(
+            "configuration directory has unsafe owner or mode",
+        ));
     }
     Ok(())
 }
@@ -389,7 +455,9 @@ fn validate_private_file(metadata: &fs::Metadata) -> io::Result<()> {
         || metadata.mode() & 0o7777 != PRIVATE_FILE_MODE
         || metadata.nlink() != 1
     {
-        return Err(permission_error("configuration file has unsafe owner, mode, or links"));
+        return Err(permission_error(
+            "configuration file has unsafe owner, mode, or links",
+        ));
     }
     Ok(())
 }
