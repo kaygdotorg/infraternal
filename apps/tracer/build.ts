@@ -3,6 +3,7 @@ import { cp, mkdir, rm } from "node:fs/promises";
 import { precompress } from "./precompress";
 import { browserFileLoader } from "./browser-build";
 import { classifyChunks, type MetaOutput } from "./chunk-classes";
+import { buildDocs } from "./docs-build";
 
 // TRACER_DIST builds elsewhere (a build next to a running preview server must not replace its files).
 const dist = process.env.TRACER_DIST ?? "dist";
@@ -60,9 +61,8 @@ await Promise.all([
   cp("fonts", `${dist}/fonts`, { recursive: true, filter: (source) => !source.endsWith(".sh") && !source.endsWith(".py") }),
   cp("node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", `${dist}/fonts/Geist-Variable.woff2`),
 ]);
-// The mockup's "?" opens a stand-in for the public docs page (D44, D223), rendered from docs/multiplexer.md into this dist. Preview
-// builds only: it is never part of a release. It must exist before the encodings below are written.
-if (clustersPreview) await import("./test/render-docs-preview");
+// The pages for the version this build is (the app's ? links open them); plain HTML and CSS, outside the JS budget.
+await buildDocs(`${dist}/docs`);
 // The budget gate reads this: which chunks the first screen needs and which load later (D188).
 const meta = (build as unknown as { metafile: { outputs: Record<string, MetaOutput> } }).metafile;
 await Bun.write(`${dist}/chunks.json`, JSON.stringify(classifyChunks(meta.outputs), null, 1));
