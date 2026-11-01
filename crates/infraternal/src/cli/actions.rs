@@ -87,21 +87,11 @@ fn factories() -> &'static [PluginFactory] {
         },
         #[cfg(feature = "plugin-ssh")]
         PluginFactory {
-            id: infraternal_plugin_ssh::accounts::DESCRIPTOR.id,
-            build: ssh_accounts_plugin,
-        },
-        #[cfg(feature = "plugin-ssh")]
-        PluginFactory {
             id: infraternal_plugin_ssh::cli::ID,
             build: infraternal_plugin_ssh::cli::plugin,
         },
     ];
     FACTORIES
-}
-
-#[cfg(feature = "plugin-ssh")]
-fn ssh_accounts_plugin() -> PluginDefinition {
-    infraternal_plugin_ssh::accounts::DESCRIPTOR.cli_plugin(ActionTarget::Global)
 }
 
 fn build_registry(root: Option<&str>) -> Result<ActionRegistry, RegistryError> {
