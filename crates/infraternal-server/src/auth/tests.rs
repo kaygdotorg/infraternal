@@ -1153,8 +1153,11 @@ async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
         .unwrap();
     let response = router.clone().oneshot(request(ORIGIN)).await.unwrap();
     assert_eq!(response.status(), axum::http::StatusCode::OK);
-    assert!(!response.headers().contains_key("set-cookie"));
-    // Cookie flags belong to explicit issuance; identity reads cannot refresh a stale jar.
+    let refreshed = response.headers()["set-cookie"].to_str().unwrap().to_owned();
+    assert!(refreshed.starts_with("__Host-infraternal-session-"));
+    assert!(refreshed.contains("Expires="));
+    // The name carries the server login sequence and sliding deadline, so delayed
+    // responses write a distinct cookie instead of replacing a newer login.
     let (_, binding, start) = http_post_json(&router, "login-start", json!({})).await;
     let mut proof = f.software.login(&start, ORIGIN, true);
     proof["response"]["userHandle"] =
@@ -1173,16 +1176,40 @@ async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
     .await;
     assert_eq!(status, axum::http::StatusCode::OK);
     let cookie = headers["set-cookie"].to_str().unwrap();
+    assert!(cookie.starts_with("__Host-infraternal-session-"));
     for flag in [
         "Secure",
         "HttpOnly",
         "SameSite=Strict",
         "Path=/",
-        "Max-Age=2592000",
+        "Expires=",
     ] {
         assert!(cookie.contains(flag));
     }
     assert!(!cookie.contains("Domain="));
+
+    // A response delayed from the older login may add its cookie back to the jar,
+    // but the new login's higher sequence still selects the right device.
+    let current_cookie = cookie.split(';').next().unwrap();
+    let combined = format!("__Host-infraternal={}; {current_cookie}", f.session);
+    let switched = axum::http::Request::builder()
+        .method("POST")
+        .uri("/auth/session")
+        .header("Origin", ORIGIN)
+        .header("Cookie", combined)
+        .header("Content-Type", "application/json")
+        .body(axum::body::Body::from("{}"))
+        .unwrap();
+    let switched = router.clone().oneshot(switched).await.unwrap();
+    assert_eq!(switched.status(), axum::http::StatusCode::OK);
+    let switched: Value = serde_json::from_slice(
+        &axum::body::to_bytes(switched.into_body(), 16 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(switched["device"], "flags");
+
     let wraps_request = axum::http::Request::builder()
         .method("POST")
         .uri("/auth/wraps")
@@ -1192,7 +1219,7 @@ async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
         .body(axum::body::Body::from("{}"))
         .unwrap();
     let wraps_response = router.clone().oneshot(wraps_request).await.unwrap();
-    assert!(!wraps_response.headers().contains_key("set-cookie"));
+    assert!(wraps_response.headers().contains_key("set-cookie"));
 
     assert_eq!(response.headers()["cache-control"], "no-store");
     let oversized = axum::http::Request::builder()
