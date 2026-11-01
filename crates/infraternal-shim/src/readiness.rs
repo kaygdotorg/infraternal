@@ -18,6 +18,12 @@ mod sealed {
             self.as_raw_fd()
         }
     }
+    #[cfg(unix)]
+    impl Source for std::os::unix::net::UnixStream {
+        fn descriptor(&self) -> RawFd {
+            self.as_fd().as_raw_fd()
+        }
+    }
     #[cfg(target_os = "linux")]
     impl Source for nix::sys::inotify::Inotify {
         fn descriptor(&self) -> RawFd {

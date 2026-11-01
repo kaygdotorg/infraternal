@@ -805,14 +805,14 @@ async fn launch_configured(
         let peer = timeout(HANDSHAKE, UnixStream::connect(endpoint))
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "login connection timed out"))??;
-        let peer = tokio::io::unix::AsyncFd::new(peer.into_std()?)?;
+        let peer = Registration::new(peer.into_std()?)?;
         let pin = PathBuf::from(format!("/proc/self/fd/{}", process.as_raw_fd()));
         timeout(HANDSHAKE, async {
             loop {
                 let mut ready = peer.writable().await?;
                 if let Ok(result) = ready.try_io(|connection| {
                     prepared.request(
-                        connection.get_ref(),
+                        connection,
                         id.as_bytes(),
                         pid,
                         &pin,
