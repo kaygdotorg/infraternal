@@ -55,6 +55,56 @@ fn custody_refuses_a_group_readable_secret_directory() {
 }
 
 #[test]
+fn custody_refuses_a_group_readable_state_directory() {
+    let state = TempState::new();
+    fs::set_permissions(&state.0, fs::Permissions::from_mode(0o750))
+        .expect("make state mode unsafe");
+
+    assert!(FileDnsTokenCustody::open(&state.0).is_err());
+}
+
+#[test]
+fn custody_uses_private_state_provider_and_secret_modes() {
+    let state = TempState::new();
+    let custody = FileDnsTokenCustody::open(&state.0).expect("open custody");
+    let path = custody
+        .put(
+            "cloudflare",
+            "CF_DNS_API_TOKEN",
+            SecretToken::new(b"private".to_vec()),
+        )
+        .expect("store token");
+
+    for (path, expected_mode) in [
+        (state.0.join("proxy-secrets"), 0o700),
+        (state.0.join("proxy-secrets/cloudflare"), 0o700),
+        (path, 0o600),
+    ] {
+        let metadata = fs::symlink_metadata(path).expect("private path metadata");
+        assert_eq!(metadata.uid(), nix::unistd::geteuid().as_raw());
+        assert_eq!(metadata.mode() & 0o777, expected_mode);
+    }
+}
+
+#[test]
+fn get_refuses_a_provider_directory_with_changed_mode() {
+    let state = TempState::new();
+    let custody = FileDnsTokenCustody::open(&state.0).expect("open custody");
+    let path = custody
+        .put(
+            "cloudflare",
+            "CF_DNS_API_TOKEN",
+            SecretToken::new(b"private".to_vec()),
+        )
+        .expect("store token");
+    let provider_dir = path.parent().expect("provider directory");
+    fs::set_permissions(provider_dir, fs::Permissions::from_mode(0o755))
+        .expect("make provider directory unsafe");
+
+    assert!(custody.get("cloudflare", "CF_DNS_API_TOKEN").is_err());
+}
+
+#[test]
 fn custody_refuses_a_symlinked_secret_directory() {
     use std::os::unix::fs::symlink;
 
@@ -112,13 +162,15 @@ fn put_does_not_replace_and_delete_is_scoped_to_one_provider() {
         )
         .expect("store second provider token");
 
-    assert!(custody
-        .put(
-            "cloudflare",
-            "CF_DNS_API_TOKEN",
-            SecretToken::new(b"replacement".to_vec()),
-        )
-        .is_err());
+    assert!(
+        custody
+            .put(
+                "cloudflare",
+                "CF_DNS_API_TOKEN",
+                SecretToken::new(b"replacement".to_vec()),
+            )
+            .is_err()
+    );
     custody.delete("cloudflare").expect("remove one provider");
     assert!(!first.exists());
     assert_eq!(fs::read(&second).unwrap(), b"other-provider");
@@ -137,8 +189,7 @@ fn get_refuses_a_token_file_with_changed_mode_or_a_symlink() {
             SecretToken::new(b"private".to_vec()),
         )
         .expect("store token");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
-        .expect("make token mode unsafe");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("make token mode unsafe");
     assert!(custody.get("cloudflare", "CF_DNS_API_TOKEN").is_err());
 
     fs::remove_file(&path).expect("remove unsafe token file");
@@ -152,18 +203,22 @@ fn get_refuses_a_token_file_with_changed_mode_or_a_symlink() {
 fn custody_rejects_provider_and_variable_names_that_can_escape_or_override() {
     let state = TempState::new();
     let custody = FileDnsTokenCustody::open(&state.0).expect("open custody");
-    assert!(custody
-        .put(
-            "../outside",
-            "CF_DNS_API_TOKEN",
-            SecretToken::new(b"token".to_vec()),
+    assert!(
+        custody
+            .put(
+                "../outside",
+                "CF_DNS_API_TOKEN",
+                SecretToken::new(b"token".to_vec()),
+            )
+            .is_err()
+    );
+    assert!(
+        super::custody::provider_file_variable(
+            "CF_DNS_API_TOKEN=value",
+            std::path::Path::new("/private/token"),
         )
-        .is_err());
-    assert!(super::custody::provider_file_variable(
-        "CF_DNS_API_TOKEN=value",
-        std::path::Path::new("/private/token"),
-    )
-    .is_err());
+        .is_err()
+    );
 }
 
 #[test]
@@ -178,6 +233,9 @@ fn secret_debug_and_provider_file_environment_never_include_the_value() {
     )
     .expect("provider file variable");
     assert_eq!(variable.0, "CF_DNS_API_TOKEN_FILE");
-    assert_eq!(variable.1, "/private/state/proxy-secrets/cloudflare/CF_DNS_API_TOKEN");
+    assert_eq!(
+        variable.1,
+        "/private/state/proxy-secrets/cloudflare/CF_DNS_API_TOKEN"
+    );
     assert!(!variable.1.contains("must-not-appear-in-debug-or-env"));
 }

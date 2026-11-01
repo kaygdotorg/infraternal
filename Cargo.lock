@@ -2080,6 +2080,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "infraternal-plugin-proxy"
+version = "0.1.0"
+dependencies = [
+ "nix",
+ "tokio",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "infraternal-plugin-relay"
 version = "0.1.0"
 dependencies = [
