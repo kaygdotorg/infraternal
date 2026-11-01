@@ -52,31 +52,31 @@ const temporaryTips = new WeakMap<HTMLElement, { previous: string | undefined; t
 
 const STYLE = `
 .tip-pos { position: fixed; left: 0; top: 0; z-index: 1002; pointer-events: none; will-change: transform; }
-.tip { position: relative; box-sizing: border-box; padding: 6px 10px; border-radius: 8px; max-width: 280px; overflow: hidden;
-  font: var(--fw-label, 500) var(--text-secondary, 12px)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; }
-.tip-label.is-leaving { position: absolute; left: 10px; top: 6px; }
-.tip-arrow { position: absolute; left: 0; width: 8px; height: 8px; margin-left: -4px; transform-origin: center;
+.tip { position: relative; box-sizing: border-box; padding: 0.375rem 0.625rem; border-radius: 0.5rem; max-width: 17.5rem; overflow: hidden;
+  font: var(--fw-label, 500) var(--text-secondary, 0.75rem)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; }
+.tip-label.is-leaving { position: absolute; left: 0.625rem; top: 0.375rem; }
+.tip-arrow { position: absolute; left: 0; width: 0.5rem; height: 0.5rem; margin-left: -0.25rem; transform-origin: center;
   background: var(--overlay, var(--fg)); border-radius: 1.5px; }
-.tip-measure { position: fixed; visibility: hidden; width: max-content; max-width: 260px; pointer-events: none;
-  font: var(--fw-label, 500) var(--text-secondary, 12px)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
+.tip-measure { position: fixed; visibility: hidden; width: max-content; max-width: 16.25rem; pointer-events: none;
+  font: var(--fw-label, 500) var(--text-secondary, 0.75rem)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
 [data-tip], button[aria-label], a[aria-label] { -webkit-touch-callout: none; }
-.ui-confirm-tip { position: fixed; z-index: 1001; display: grid; width: max-content; max-width: min(340px, calc(100vw - 24px)); gap: 12px; padding: 14px 14px 12px;
-  border-radius: 14px; opacity: 0; transform: scale(0.96); pointer-events: none;
+.ui-confirm-tip { position: fixed; z-index: 1001; display: grid; width: max-content; max-width: min(21.25rem, calc(100vw - 1.5rem)); gap: 0.75rem; padding: 0.875rem 0.875rem 0.75rem;
+  border-radius: 0.875rem; opacity: 0; transform: scale(0.96); pointer-events: none;
   transition: opacity 150ms ease-out, transform 180ms cubic-bezier(0.23, 1, 0.32, 1); }
 .ui-confirm-tip[hidden] { display: none !important; }
 .ui-confirm-tip[data-open="true"] { opacity: 1; transform: none; pointer-events: auto; }
-.ui-confirm-tip-arrow { position: absolute; left: var(--ui-confirm-tail, 50%); width: 10px; height: 10px; margin-left: -5px; background: inherit;
+.ui-confirm-tip-arrow { position: absolute; left: var(--ui-confirm-tail, 50%); width: 0.625rem; height: 0.625rem; margin-left: -0.3125rem; background: inherit;
   border: inherit; border-radius: 2px; transform: rotate(45deg); }
-.ui-confirm-tip[data-side="bottom"] .ui-confirm-tip-arrow { top: -5px; border-right: 0; border-bottom: 0; clip-path: polygon(0 0, 100% 0, 0 100%); }
-.ui-confirm-tip[data-side="top"] .ui-confirm-tip-arrow { bottom: -5px; border-top: 0; border-left: 0; clip-path: polygon(0 100%, 100% 100%, 100% 0); }
-.ui-confirm-tip-text { display: grid; gap: 3px; }
-.ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 var(--text-body, 13px)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
-.ui-confirm-tip-detail { margin: 0; white-space: pre-line; overflow-wrap: anywhere; color: var(--fg-2); font: 450 var(--text-secondary, 12px)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
-.ui-confirm-tip-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
-.ui-confirm-tip button { display: inline-grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent;
+.ui-confirm-tip[data-side="bottom"] .ui-confirm-tip-arrow { top: -0.3125rem; border-right: 0; border-bottom: 0; clip-path: polygon(0 0, 100% 0, 0 100%); }
+.ui-confirm-tip[data-side="top"] .ui-confirm-tip-arrow { bottom: -0.3125rem; border-top: 0; border-left: 0; clip-path: polygon(0 100%, 100% 100%, 100% 0); }
+.ui-confirm-tip-text { display: grid; gap: 0.1875rem; }
+.ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 var(--text-body, 0.8125rem)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
+.ui-confirm-tip-detail { margin: 0; white-space: pre-line; overflow-wrap: anywhere; color: var(--fg-2); font: 450 var(--text-secondary, 0.75rem)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
+.ui-confirm-tip-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.375rem; }
+.ui-confirm-tip button { display: inline-grid; width: 1.75rem; height: 1.75rem; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent;
   color: var(--fg-2); cursor: pointer;
   transition: transform 120ms cubic-bezier(0.23, 1, 0.32, 1), background-color 120ms ease, color 120ms ease; }
-.ui-confirm-tip button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-confirm-tip button svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ui-confirm-tip button:active { transform: scale(0.97); }
 .ui-confirm-tip button:focus { outline: none; }
 :root[data-focus-ring="on"] .ui-confirm-tip button:focus-visible { outline: 2px solid color-mix(in oklab, var(--fg) 55%, transparent); outline-offset: 2px; }
@@ -91,19 +91,19 @@ const STYLE = `
 .ui-confirm-tip .ui-confirm-alt { margin-right: auto; }
 /* With three actions a phone-width card stacks them full width in priority order (answer, way out, dismiss), never a ragged wrap. */
 @media (max-width: 480px) {
-  .ui-confirm-tip[data-stack] .ui-confirm-tip-actions { display: grid; grid-template-columns: minmax(0, 1fr); justify-content: stretch; gap: 4px; }
+  .ui-confirm-tip[data-stack] .ui-confirm-tip-actions { display: grid; grid-template-columns: minmax(0, 1fr); justify-content: stretch; gap: 0.25rem; }
   .ui-confirm-tip[data-stack] .ui-confirm-yes { order: 1; }
   .ui-confirm-tip[data-stack] .ui-confirm-alt { order: 2; margin-right: 0; }
   .ui-confirm-tip[data-stack] .ui-confirm-no { order: 3; }
   .ui-confirm-tip[data-stack][data-named] button { width: 100%; }
 }
 /* Named actions: the buttons carry their words. */
-.ui-confirm-tip[data-named] button { width: auto; min-width: 28px; padding: 0 12px; font: 500 var(--text-secondary, 12px)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
+.ui-confirm-tip[data-named] button { width: auto; min-width: 1.75rem; padding: 0 0.75rem; font: 500 var(--text-secondary, 0.75rem)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
 @media (pointer: coarse) {
-  .ui-confirm-tip { gap: 14px; padding: 16px; }
-  .ui-confirm-tip[data-named] button { width: auto; padding: 0 12px; }
-  .ui-confirm-tip button { width: 44px; height: 44px; }
-  .ui-confirm-tip button svg { width: 18px; height: 18px; }
+  .ui-confirm-tip { gap: 0.875rem; padding: 1rem; }
+  .ui-confirm-tip[data-named] button { width: auto; padding: 0 0.75rem; }
+  .ui-confirm-tip button { width: 2.75rem; height: 2.75rem; }
+  .ui-confirm-tip button svg { width: 1.125rem; height: 1.125rem; }
 }
 @media (prefers-reduced-motion: reduce) { .ui-confirm-tip { transition: opacity 120ms ease; transform: none; } }
 `;

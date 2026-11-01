@@ -130,7 +130,8 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
   const neighbors = options.aboveNotifications ? [...parent.children].filter((el): el is HTMLElement => el !== host && el instanceof HTMLElement && el.classList.contains("ui-toast")) : [];
   const spacing = neighbors.length ? new ResizeObserver(() => {
     const height = Math.max(0, ...neighbors.map((el) => el.hidden ? 0 : el.offsetHeight));
-    host.style.setProperty("--ui-toast-stack-offset", `${height ? height + 12 : 0}px`);
+    // The measured height is in pixels; the gap beside it is a length of the interface (rem), so it grows with the UI size.
+    host.style.setProperty("--ui-toast-stack-offset", height ? `calc(${height}px + 0.75rem)` : "0px");
   }) : undefined;
   for (const neighbor of neighbors) spacing?.observe(neighbor);
 
