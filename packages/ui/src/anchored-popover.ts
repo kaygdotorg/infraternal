@@ -13,6 +13,7 @@
  *   transformed at rest, so text stays crisp (TASTE section 5).
  * - Dismissal: a press outside (the anchor toggles it itself) or Escape closes it.
  */
+import { currentUiScale } from "./ui-scale";
 export type PopoverSource = "pointer" | "keyboard";
 
 export interface AnchoredPopoverOptions {
@@ -69,7 +70,7 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
     const win = host?.getBoundingClientRect() ?? screen;
     const frame = parseFloat(getComputedStyle(host ?? anchor).borderLeftWidth) || 0;
     const inset = INSET + frame;
-    const room = Math.min(options.maxWidth ?? 400, win.width - inset * 2);
+    const room = Math.min((options.maxWidth ?? 400) * currentUiScale(), win.width - inset * 2);
     if (options.hug) { root.style.width = ""; root.style.maxWidth = `${Math.round(room)}px`; }
     const width = options.hug ? Math.min(room, root.offsetWidth) : room;
     const wanted = options.align === "end" ? box.right - width : box.left;

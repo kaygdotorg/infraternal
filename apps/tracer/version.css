@@ -16,9 +16,9 @@
 .ui-sidebar-card[data-morph="none"], .ui-sidebar-card[data-morph="none"] > * { transition: none; }
 
 /* Scroll fade (scroll-fade.ts): a scrolling body fades the edge that has more behind it, so a row is never cut at a hard line. */
-.ui-scroll-fade[data-fade~="bottom"] { -webkit-mask-image: linear-gradient(#000 calc(100% - 22px), transparent); mask-image: linear-gradient(#000 calc(100% - 22px), transparent); }
-.ui-scroll-fade[data-fade~="top"] { -webkit-mask-image: linear-gradient(transparent, #000 22px); mask-image: linear-gradient(transparent, #000 22px); }
-.ui-scroll-fade[data-fade="top bottom"] { -webkit-mask-image: linear-gradient(transparent, #000 22px, #000 calc(100% - 22px), transparent); mask-image: linear-gradient(transparent, #000 22px, #000 calc(100% - 22px), transparent); }
+.ui-scroll-fade[data-fade~="bottom"] { -webkit-mask-image: linear-gradient(#000 calc(100% - 1.375rem), transparent); mask-image: linear-gradient(#000 calc(100% - 1.375rem), transparent); }
+.ui-scroll-fade[data-fade~="top"] { -webkit-mask-image: linear-gradient(transparent, #000 1.375rem); mask-image: linear-gradient(transparent, #000 1.375rem); }
+.ui-scroll-fade[data-fade="top bottom"] { -webkit-mask-image: linear-gradient(transparent, #000 1.375rem, #000 calc(100% - 1.375rem), transparent); mask-image: linear-gradient(transparent, #000 1.375rem, #000 calc(100% - 1.375rem), transparent); }
 
 /* ---- the pill ------------------------------------------------------------------------------------------------------------- */
 /* The footer's third pill: the shared `.ui-pill` at the footer's own height (`--pill-h`: 40 px on desktop, 44 px on touch), the same
@@ -28,11 +28,11 @@
    still names the edition), and last the name goes and the avatar stands for the person. The thresholds are the footer's own
    width, measured at each platform's type size. */
 .ui-sidebar-foot[data-version] { container-type: inline-size; }
-.ui-sidebar-foot[data-version] .ui-sidebar-user { flex: 0 4 auto; min-width: calc(var(--pill-h) + 8px + 4ch + 10px); max-width: none; gap: 8px; padding-right: 10px; overflow: hidden; }
+.ui-sidebar-foot[data-version] .ui-sidebar-user { flex: 0 4 auto; min-width: calc(var(--pill-h) + 0.5rem + 4ch + 0.625rem); max-width: none; gap: 0.5rem; padding-right: 0.625rem; overflow: hidden; }
 .ui-sidebar-foot[data-version] .ui-sidebar-names { min-width: 4ch; }
 .ui-sidebar-foot[data-version] .ui-sidebar-settings { flex: none; }
 .ui-version-pill {
-  position: relative; flex: none; min-width: 0; gap: 6px; margin-left: auto; padding: 0 12px 0 10px; color: var(--ui-text-secondary);
+  position: relative; flex: none; min-width: 0; gap: 0.375rem; margin-left: auto; padding: 0 0.75rem 0 0.625rem; color: var(--ui-text-secondary);
   overflow: hidden; white-space: nowrap; cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) { .ui-version-pill:hover { color: var(--fg); } }
@@ -40,7 +40,7 @@
 /* The tick, the number and the letters sit on one text baseline. Centring each in the pill would put them on three different lines:
    the tick is a box, and the letters have no descenders. So the three are baseline-aligned inside one line box, and the tick is
    as tall as a capital (0.72 em) so its middle is the middle of the digits and the letters. The line box is then centred. */
-.ui-version-line { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; line-height: 1; }
+.ui-version-line { display: inline-flex; align-items: baseline; gap: 0.375rem; min-width: 0; line-height: 1; }
 .ui-version-mark { flex: none; align-self: baseline; width: 0.8em; height: 0.8em; position: relative; top: 0.07em; }
 @media (pointer: coarse) { .ui-version-mark { top: 0.02em; } }
 .ui-version-number { min-width: 0; max-width: 14ch; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
@@ -49,29 +49,29 @@
 .ui-version-edition { flex: none; color: var(--fg-3); font-weight: 600; letter-spacing: 0.02em; transition: color 160ms ease; }
 .ui-version-edition[data-attention] { color: var(--warn); }
 .ui-version-pill[data-status="offline"] .ui-version-mark { color: var(--fg-2); }
-@container (max-width: 238px) { .ui-version-edition { display: none; } .ui-version-pill { padding-right: 10px; } }
-@container (max-width: 219px) { .ui-sidebar-foot[data-version] .ui-sidebar-names { display: none; } .ui-sidebar-foot[data-version] .ui-sidebar-user { flex: none; justify-content: center; width: var(--pill-h); min-width: var(--pill-h); padding: 0; } }
+@container (max-width: 14.875rem) { .ui-version-edition { display: none; } .ui-version-pill { padding-right: 0.625rem; } }
+@container (max-width: 13.6875rem) { .ui-sidebar-foot[data-version] .ui-sidebar-names { display: none; } .ui-sidebar-foot[data-version] .ui-sidebar-user { flex: none; justify-content: center; width: var(--pill-h); min-width: var(--pill-h); padding: 0; } }
 
 /* ---- the panel ------------------------------------------------------------------------------------------------------------ */
 /* A card in the sidebar (the shared `.ui-sidebar-card`, which the Inbox uses too). The body is the one part that scrolls, so a short
    sidebar shows the header and as much of the list as fits. The card keeps its height and the host tree above it gives way
    (it scrolls on its own), down to a header's worth of tree. */
-.cl-vp { flex: 0 0 auto; grid-template-rows: auto minmax(0, 1fr); max-height: calc(100% - 140px); }
+.cl-vp { flex: 0 0 auto; grid-template-rows: auto minmax(0, 1fr); max-height: calc(100% - 8.75rem); }
 /* The heading is the product and its version, said once, in the text colour; section titles are the edition, as written. */
 .cl-vp .ui-sidebar-card-title { color: var(--fg); font-size: var(--text-secondary); font-weight: var(--fw-label); }
 .cl-vp .ui-kv-group { text-transform: none; letter-spacing: 0; overflow-wrap: anywhere; }
 /* The heading is the one cell of the card's header that copies (the build id): it reads as the title, not as a key. */
 .cl-vp-heading { display: inline-block; max-width: 100%; color: inherit; font: inherit; letter-spacing: inherit; }
-.cl-vp-body { min-height: 0; padding: 0 6px 4px; overflow: auto; overscroll-behavior: contain; }
-.cl-vp-note { margin: 8px 0 0; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.cl-vp-body { min-height: 0; padding: 0 0.375rem 0.25rem; overflow: auto; overscroll-behavior: contain; }
+.cl-vp-note { margin: 0.5rem 0 0; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
 .cl-vp-note[hidden] { display: none; }
 .cl-vp .ui-kv-row:has(.ui-mark[data-mark="warn"]) .ui-kv-meter::after { background: var(--warn); }
 /* A host's name identifies it, so it wraps (anywhere: a name has no spaces) and its versions drop to their own line when there is no room beside it. */
 
 /* The narrowest the sidebar allows: the three pills at their smallest (avatar, status and gear) and the gaps between them fit
    with a little room. Touch type is larger, so the floor is a little higher there. */
-.sidebar:has(.ui-sidebar-foot[data-version]) { min-width: 200px; }
-@media (pointer: coarse) { .sidebar:has(.ui-sidebar-foot[data-version]) { min-width: 212px; } }
+.sidebar:has(.ui-sidebar-foot[data-version]) { min-width: 12.5rem; }
+@media (pointer: coarse) { .sidebar:has(.ui-sidebar-foot[data-version]) { min-width: 13.25rem; } }
 
 /* Rows are as tall as a touch target on a phone: their text sits in the middle of the row, not at its top. */
 .cl-vp .ui-kv-row { align-content: center; }

@@ -1,5 +1,6 @@
 /** Builds the accessible host/session tree and updates its current-host indicators. */
 
+import { cssPx } from "./ui-scale";
 export interface BranchLeaf {
   id: string;
   label: string;
@@ -174,7 +175,7 @@ export function branchedMenu(
     const sections = [...host.querySelectorAll<HTMLElement>(".bm-sec")].map((section) => {
       const list = section.querySelector<HTMLElement>("ul")!;
       const leaves = [...list.querySelectorAll<HTMLElement>(".bm-leaf")];
-      branchX ??= Number.parseFloat(getComputedStyle(list).getPropertyValue("--bm-x")) || 0;
+      branchX ??= cssPx(list, "--bm-x", 0);
       const x = branchX;
       return {
         section, list, leaves, x, width: list.offsetWidth, height: list.offsetHeight,

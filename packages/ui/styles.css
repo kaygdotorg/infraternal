@@ -3,8 +3,12 @@
 /* One type scale per platform (TASTE.md section 2). Desktop follows the macOS sizes, touch the iOS
    sizes. Every product surface (top bar, sidebar, palette, tooltip, toast, windows) uses these
    tokens rather than its own pixel values. --row is the list row height (macOS sidebar 28 px, iOS 44 px). --text-input stays 16 px on touch so iOS never zooms. */
-:root { --ui-press-scale: 0.97; --ui-press-scale-small: 0.94; --ui-press-scale-soft: 0.98; --text-body: 13px; --text-secondary: 12px; --text-caption: 11px; --text-input: 13px; --row: 28px; }
-@media (pointer: coarse) { :root { --text-body: 16px; --text-secondary: 15px; --text-caption: 13px; --text-input: 16px; --row: 44px; } }
+:root { --ui-base: 1.1; font-size: calc(16px * var(--ui-base) * var(--ui-scale, 1)); --ui-press-scale: 0.97; --ui-press-scale-small: 0.94; --ui-press-scale-soft: 0.98; --text-body: 0.8125rem; --text-secondary: 0.75rem; --text-caption: 0.6875rem; --text-input: 0.8125rem; --row: 1.75rem; }
+/* The UI's base size (owner, 2026-11-01: "110% should be the new 100%"): a desktop's UI is drawn at 1.1 times the 16 px root and
+   the UI size slider (--ui-scale, 50-150 %) is relative to it. A touch screen keeps 1: it already has its own larger sizes below
+   (16 px text, 44 px rows) and its width is the screen's. Phones taking the 1.1 as well is this one number. */
+@media (pointer: coarse) { :root { --ui-base: 1; } }
+@media (pointer: coarse) { :root { --text-body: 1rem; --text-secondary: 0.9375rem; --text-caption: 0.8125rem; --text-input: 1rem; --row: 2.75rem; } }
 
 /* Focus rings appear only while the person navigates with the keyboard (focus-ring.ts sets
    data-focus-ring="on"); clicks, taps and shortcuts that move focus in script draw none. */
@@ -13,13 +17,13 @@
    clips its overflow (overflow hidden, a height glide) must leave --focus-ring-room on every side of the
    fields it holds, or the ring is cut off where a field touches the container's edge. 6 px is the reach plus
    2 px for anti-aliasing. focus-ring-clip.spec.ts measures every ring against every clipping ancestor. */
-:root { --focus-ring-room: 6px; }
+:root { --focus-ring-room: 0.375rem; }
 [data-focus-ring="on"] :focus-visible { outline: 2px solid var(--focus-ring, var(--accent, #7a9cff)); outline-offset: 2px; }
 .countup { font-variant-numeric: tabular-nums; }
-.busy-count { font: var(--fw-label, 500) 13px/1 var(--font-face, "Maple Mono NF", ui-monospace, monospace); color: rgb(0 0 0 / 0.6); }
+.busy-count { font: var(--fw-label, 500) 0.8125rem/1 var(--font-face, "Maple Mono NF", ui-monospace, monospace); color: rgb(0 0 0 / 0.6); }
 /* Icons (icons.ts) follow the product's icon scale: 16 px on desktop, 18 px on touch, 1.5 stroke. */
-.ui-icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-@media (pointer: coarse) { .ui-icon { width: 18px; height: 18px; } }
+.ui-icon { width: 1rem; height: 1rem; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+@media (pointer: coarse) { .ui-icon { width: 1.125rem; height: 1.125rem; } }
 .terminal-text-overlay { position: absolute; z-index: 2; pointer-events: none; }
 
 /* The card tint is read by the element that carries it and by nothing inside it, so it does not inherit: a change then
@@ -30,7 +34,7 @@
 
 /* The one material's blur and saturation: surfaces and pills read these two tokens, so tuning them
    here tunes every floating thing at once. */
-:root { --ui-overlay-blur: 16px; --ui-overlay-saturation: 160%; }
+:root { --ui-overlay-blur: 1rem; --ui-overlay-saturation: 160%; }
 
 /* One theme-aware glass material for every floating surface (D72, D160): popovers, sheets,
    palette, sidebar and tooltips, never in-page controls. No top-edge highlight (TASTE §1).
@@ -41,7 +45,7 @@
   box-shadow: var(--ui-overlay-shadow, var(--shadow));
   color: var(--ui-overlay-color, var(--fg));
   /* A soft halo in the tint colour keeps text legible over a dense terminal without adding tint. */
-  text-shadow: 0 0 1px var(--ui-overlay-halo, transparent), 0 0 2px var(--ui-overlay-halo, transparent), 0 0 3px var(--ui-overlay-halo, transparent), 0 0 4px var(--ui-overlay-halo, transparent), 0 0 6px var(--ui-overlay-halo, transparent), 0 0 10px var(--ui-overlay-halo, transparent);
+  text-shadow: 0 0 1px var(--ui-overlay-halo, transparent), 0 0 2px var(--ui-overlay-halo, transparent), 0 0 0.1875rem var(--ui-overlay-halo, transparent), 0 0 0.25rem var(--ui-overlay-halo, transparent), 0 0 0.375rem var(--ui-overlay-halo, transparent), 0 0 0.625rem var(--ui-overlay-halo, transparent);
   -webkit-backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
   backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
 }
@@ -53,15 +57,15 @@
 .ui-overlay-surface[data-overlay-size="large"] { --ui-overlay-shadow: var(--overlay-shadow-large, var(--shadow)); }
 /* Trigger labels stay one line; only point previews carrying this per-call attribute may wrap. */
 .tip-label { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tip-pos[data-tip-lines="2"], .tip-measure[data-tip-lines="2"] { --tip-content-max: min(258px, calc(100vw - 38px)); }
-.tip-pos[data-tip-lines="2"] .tip { max-width: calc(var(--tip-content-max) + 22px); }
+.tip-pos[data-tip-lines="2"], .tip-measure[data-tip-lines="2"] { --tip-content-max: min(16.125rem, calc(100vw - 2.375rem)); }
+.tip-pos[data-tip-lines="2"] .tip { max-width: calc(var(--tip-content-max) + 1.375rem); }
 .tip-pos[data-tip-lines="2"] .tip-label:not(.is-leaving) { display: -webkit-box; max-height: 2.4em; overflow: hidden; overflow-wrap: anywhere;
   -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; text-overflow: ellipsis; white-space: normal; }
 .tip-measure[data-tip-lines="2"] { box-sizing: border-box; max-width: var(--tip-content-max); line-height: 1.2; overflow-wrap: anywhere; white-space: normal; }
 .ui-button {
-  min-height: var(--ui-button-height, 44px);
-  padding: var(--ui-button-padding, 0 12px);
-  border-radius: var(--ui-button-radius, 8px);
+  min-height: var(--ui-button-height, 2.75rem);
+  padding: var(--ui-button-padding, 0 0.75rem);
+  border-radius: var(--ui-button-radius, 0.5rem);
   color: var(--fg);
   font: inherit;
   cursor: pointer;
@@ -72,10 +76,10 @@
 .ui-button[data-button] {
   display: inline-flex;
   min-width: var(--ui-button-min-width, 0);
-  height: var(--ui-button-height, 44px);
+  height: var(--ui-button-height, 2.75rem);
   align-items: center;
   justify-content: center;
-  gap: var(--ui-button-gap, 10px);
+  gap: var(--ui-button-gap, 0.625rem);
   border: 0;
   font: var(--ui-button-font, inherit);
   letter-spacing: var(--ui-button-letter-spacing, normal);
@@ -92,14 +96,14 @@
    quiet tint of the foreground, and the label a stronger one (measured in test/top-centre.spec.ts). */
 .ui-button[data-button="primary"]:disabled { background: var(--ui-button-disabled-background, color-mix(in oklab, var(--fg) 12%, var(--bg))); color: var(--ui-button-disabled-color, color-mix(in oklab, var(--fg) 58%, var(--bg))); }
 @media (hover: hover) and (pointer: fine) { .ui-button[data-button="secondary"]:hover:not(:disabled) { color: var(--ui-button-hover-color, var(--fg)); } }
-.ui-source-icon { display: block; width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.ui-source-icon { display: block; width: 1rem; height: 1rem; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
 /* One native switch keeps pointer, keyboard, and assistive-technology state aligned. */
 .ui-switch {
   position: relative;
   display: inline-block;
-  width: 48px;
-  height: 46px;
+  width: 3rem;
+  height: 2.875rem;
   flex: none;
   margin: 0;
   border: 0;
@@ -118,24 +122,24 @@
 }
 .ui-switch::before {
   left: 1px;
-  width: 46px;
-  height: 26px;
+  width: 2.875rem;
+  height: 1.625rem;
   border: 1px solid var(--overlay-line);
   border-radius: 999px;
   background: var(--overlay-solid);
   transition: background 180ms ease-out, border-color 180ms ease-out;
 }
 .ui-switch::after {
-  left: 4px;
-  width: 20px;
-  height: 20px;
+  left: 0.25rem;
+  width: 1.25rem;
+  height: 1.25rem;
   border-radius: 50%;
   background: var(--fg-2);
   box-shadow: 0 1px 2px rgb(0 0 0 / 0.18);
   transition: transform 180ms cubic-bezier(0.23, 1, 0.32, 1), background 180ms ease-out;
 }
 .ui-switch:checked::before { border-color: var(--accent); background: var(--accent); }
-.ui-switch:checked::after { transform: translate(20px, -50%); background: var(--bg); }
+.ui-switch:checked::after { transform: translate(1.25rem, -50%); background: var(--bg); }
 .ui-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ui-switch:disabled { cursor: default; opacity: 0.5; }
 
@@ -143,18 +147,18 @@
 .ui-toast {
   position: fixed;
   z-index: 900;
-  right: max(12px, env(safe-area-inset-right));
-  bottom: calc(max(16px, env(safe-area-inset-bottom)) + var(--ui-toast-stack-offset, 0px));
-  left: max(12px, env(safe-area-inset-left));
+  right: max(0.75rem, env(safe-area-inset-right));
+  bottom: calc(max(1rem, env(safe-area-inset-bottom)) + var(--ui-toast-stack-offset, 0px));
+  left: max(0.75rem, env(safe-area-inset-left));
   display: flex;
   width: max-content;
-  max-width: min(520px, calc(100% - 24px));
-  min-height: 54px;
+  max-width: min(32.5rem, calc(100% - 1.5rem));
+  min-height: 3.375rem;
   align-items: center;
-  gap: 12px;
+  gap: 0.75rem;
   margin-inline: auto;
-  padding: 7px 9px 7px 12px;
-  border-radius: 15px;
+  padding: 0.4375rem 0.5625rem 0.4375rem 0.75rem;
+  border-radius: 0.9375rem;
   opacity: 1;
   /* No transform at rest: settled toast text stays on the pixel grid. */
   transform: none;
@@ -164,65 +168,65 @@
 /* A toast is a small card of its own, not text over a busy terminal: the material's halo would only smear its glyphs. */
 .ui-toast, .ui-toast * { text-shadow: none; }
 .ui-toast[hidden] { display: none !important; }
-.ui-toast[data-open="false"] { opacity: 0; transform: translateY(8px) scale(0.97); pointer-events: none; }
+.ui-toast[data-open="false"] { opacity: 0; transform: translateY(0.5rem) scale(0.97); pointer-events: none; }
 /* One type scale per platform (docs/design/TASTE.md): desktop 13 px body, touch 16 px. */
-.ui-toast { min-height: 44px; gap: 10px; padding: 6px 8px 6px 12px; border-radius: 14px; }
+.ui-toast { min-height: 2.75rem; gap: 0.625rem; padding: 0.375rem 0.5rem 0.375rem 0.75rem; border-radius: 0.875rem; }
 /* A long message with actions stacks them under it (toast.ts sets data-stacked) instead of squeezing the text beside them. */
 /* Explicit cells: mark | message | close on the first row, the actions on the second. Auto-placement left the glyph, text and
    close in separate rows with an empty column between them at phone width. */
-.ui-toast[data-stacked="true"] { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; column-gap: 10px; row-gap: 0; }
-.ui-toast[data-stacked="true"] .ui-toast-marker, .ui-toast[data-stacked="true"] .ui-toast-glyph { grid-column: 1; grid-row: 1; margin-top: 4px; }
-.ui-toast[data-stacked="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 5px; padding-bottom: 5px; }
+.ui-toast[data-stacked="true"] { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; column-gap: 0.625rem; row-gap: 0; }
+.ui-toast[data-stacked="true"] .ui-toast-marker, .ui-toast[data-stacked="true"] .ui-toast-glyph { grid-column: 1; grid-row: 1; margin-top: 0.25rem; }
+.ui-toast[data-stacked="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 0.3125rem; padding-bottom: 0.3125rem; }
 .ui-toast[data-stacked="true"] .ui-toast-close { grid-column: 3; grid-row: 1; }
 .ui-toast[data-stacked="true"] .ui-toast-actions { grid-column: 2 / -1; grid-row: 2; justify-self: end; }
 .ui-toast-message { min-width: 0; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.4; }
-.ui-toast-marker { display: grid; width: 22px; height: 22px; flex: none; place-items: center; }
-.ui-toast-marker .tick { width: 20px; height: 20px; }
+.ui-toast-marker { display: grid; width: 1.375rem; height: 1.375rem; flex: none; place-items: center; }
+.ui-toast-marker .tick { width: 1.25rem; height: 1.25rem; }
 .ui-toast-marker .tick-fill { background: var(--ok); }
-.ui-toast-marker .tick svg { width: 14px; height: 14px; stroke: var(--bg); }
+.ui-toast-marker .tick svg { width: 0.875rem; height: 0.875rem; stroke: var(--bg); }
 .ui-toast-actions { display: flex; flex: none; align-items: center; gap: 2px; }
 .ui-toast-actions[hidden] { display: none !important; }
-.ui-toast-action { min-height: 32px; flex: none; padding: 0 8px; border-radius: 8px; color: var(--accent) !important; font-size: var(--text-body); font-weight: var(--fw-label); white-space: nowrap; }
+.ui-toast-action { min-height: 2rem; flex: none; padding: 0 0.5rem; border-radius: 0.5rem; color: var(--accent) !important; font-size: var(--text-body); font-weight: var(--fw-label); white-space: nowrap; }
 .ui-toast-action[hidden] { display: none !important; }
 /* Icon choices after the message: the same 28 px desktop / 44 px touch size as the confirmation popover's icon buttons, flat and quiet. */
 /* A question with choices gets room for its sentence beside them; on a phone it wraps inside the screen width. */
-.ui-toast[data-choices="true"] { max-width: min(640px, calc(100% - 24px)); }
+.ui-toast[data-choices="true"] { max-width: min(40rem, calc(100% - 1.5rem)); }
 /* On a phone the 44 px buttons would squeeze the sentence into a narrow column: the choices take a row of their own under it. */
 @media (max-width: 520px) {
-  .ui-toast[data-choices="true"] { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; column-gap: 10px; row-gap: 0; }
-  .ui-toast[data-choices="true"] .ui-toast-glyph, .ui-toast[data-choices="true"] .ui-toast-marker { grid-column: 1; grid-row: 1; margin-top: 4px; }
-  .ui-toast[data-choices="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 5px; }
+  .ui-toast[data-choices="true"] { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; column-gap: 0.625rem; row-gap: 0; }
+  .ui-toast[data-choices="true"] .ui-toast-glyph, .ui-toast[data-choices="true"] .ui-toast-marker { grid-column: 1; grid-row: 1; margin-top: 0.25rem; }
+  .ui-toast[data-choices="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 0.3125rem; }
   .ui-toast[data-choices="true"] .ui-toast-icons { grid-column: 1 / -1; grid-row: 2; justify-self: end; }
 }
 .ui-toast-icons { display: flex; flex: none; align-items: center; gap: 2px; }
 .ui-toast-icons[hidden] { display: none !important; }
-.ui-toast-icon { display: grid; width: 28px; min-height: 28px; flex: none; place-items: center; padding: 0; border-radius: 8px; color: var(--fg-2); }
+.ui-toast-icon { display: grid; width: 1.75rem; min-height: 1.75rem; flex: none; place-items: center; padding: 0; border-radius: 0.5rem; color: var(--fg-2); }
 .ui-toast-icon svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .ui-toast-icon:first-child { color: var(--accent); }
 @media (hover: hover) and (pointer: fine) { .ui-toast-icon:hover { background: var(--hover); color: var(--fg); } }
-.ui-toast-marker .tick { width: 18px; height: 18px; }
+.ui-toast-marker .tick { width: 1.125rem; height: 1.125rem; }
 /* A glyph in place of the tick (toast icon): neutral, so a waiting state never reads as success. */
-.ui-toast-glyph { display: grid; width: 22px; height: 22px; flex: none; place-items: center; color: var(--fg-2); }
+.ui-toast-glyph { display: grid; width: 1.375rem; height: 1.375rem; flex: none; place-items: center; color: var(--fg-2); }
 .ui-toast-glyph[hidden] { display: none; }
 .ui-toast[data-tone="error"] .ui-toast-glyph { color: var(--danger); }
 .ui-toast-glyph svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .ui-toast[data-icon="true"] .ui-toast-marker { display: none; }
 /* The optional dismiss control: a quiet icon, the same height as the action. */
-.ui-toast-close { display: grid; width: 32px; min-height: 32px; flex: none; place-items: center; padding: 0; border-radius: 8px; color: var(--fg-3); }
+.ui-toast-close { display: grid; width: 2rem; min-height: 2rem; flex: none; place-items: center; padding: 0; border-radius: 0.5rem; color: var(--fg-3); }
 .ui-toast-close[hidden] { display: none; }
 .ui-toast-close svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }
 @media (hover: hover) and (pointer: fine) { .ui-toast-close:hover { background: var(--hover); color: var(--fg); } }
 @media (pointer: coarse) {
-  .ui-toast-close { width: 44px; min-height: 44px; }
-  .ui-toast-icon { width: 44px; min-height: 44px; }
-  .ui-toast { min-height: 54px; gap: 12px; padding: 7px 9px 7px 12px; border-radius: 15px; }
-  .ui-toast-action { min-height: 44px; padding: 0 10px; }
-  .ui-toast-marker .tick { width: 20px; height: 20px; }
+  .ui-toast-close { width: 2.75rem; min-height: 2.75rem; }
+  .ui-toast-icon { width: 2.75rem; min-height: 2.75rem; }
+  .ui-toast { min-height: 3.375rem; gap: 0.75rem; padding: 0.4375rem 0.5625rem 0.4375rem 0.75rem; border-radius: 0.9375rem; }
+  .ui-toast-action { min-height: 2.75rem; padding: 0 0.625rem; }
+  .ui-toast-marker .tick { width: 1.25rem; height: 1.25rem; }
 }
 
 @media (pointer: coarse) {
   .terminal-screen .ui-toast {
-    bottom: calc(var(--keybar-inset, 0px) + var(--keybar-height, 0px) + var(--keybar-gap, 0px) + 10px + env(safe-area-inset-bottom) + var(--ui-toast-stack-offset, 0px));
+    bottom: calc(var(--keybar-inset, 0px) + var(--keybar-height, 0px) + var(--keybar-gap, 0px) + 0.625rem + env(safe-area-inset-bottom) + var(--ui-toast-stack-offset, 0px));
   }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -246,8 +250,8 @@
 }
 
 /* One spring drives the fill, tick draw-on and label treatment. */
-.tick { position: relative; display: inline-grid; place-items: center; flex: none; width: 20px; height: 20px;
-  border-radius: 6px; box-shadow: inset 0 0 0 var(--ui-tick-border-width, 1.5px) var(--ui-tick-border-color, rgb(255 255 255 / 0.35)); color: #000; will-change: transform; }
+.tick { position: relative; display: inline-grid; place-items: center; flex: none; width: 1.25rem; height: 1.25rem;
+  border-radius: 0.375rem; box-shadow: inset 0 0 0 var(--ui-tick-border-width, 1.5px) var(--ui-tick-border-color, rgb(255 255 255 / 0.35)); color: #000; will-change: transform; }
 .tick-fill { position: absolute; inset: 0; border-radius: inherit; background: var(--fg); transform: scale(0); will-change: transform; }
 .tick svg { position: relative; width: 78%; height: 78%; overflow: visible; }
 .tick path { fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 1; stroke-dashoffset: 1; }
@@ -259,8 +263,8 @@
 /* One reusable spinner mark; hosts tune size and color through instance variables. */
 .ui-spinner {
   display: inline-block;
-  width: var(--ui-spinner-size, 16px);
-  height: var(--ui-spinner-size, 16px);
+  width: var(--ui-spinner-size, 1rem);
+  height: var(--ui-spinner-size, 1rem);
   flex: none;
   border: var(--ui-spinner-border-width, 1.5px) solid color-mix(in oklab, var(--ui-spinner-color, var(--accent)) 30%, transparent);
   border-top-color: var(--ui-spinner-color, var(--accent));
@@ -272,7 +276,7 @@
 
 /* A quiet, non-interactive step mark composes shared spinner and tick behavior. */
 .ui-step-status {
-  --ui-step-status-size: 20px;
+  --ui-step-status-size: 1.25rem;
   display: inline-grid;
   width: var(--ui-step-status-size);
   height: var(--ui-step-status-size);
@@ -285,15 +289,15 @@
 .ui-step-status > .ui-step-status-failed,
 .ui-step-status > .ui-spinner { grid-area: 1 / 1; }
 .ui-step-status-pending {
-  width: var(--ui-step-status-dot-size, 7px);
-  height: var(--ui-step-status-dot-size, 7px);
+  width: var(--ui-step-status-dot-size, 0.4375rem);
+  height: var(--ui-step-status-dot-size, 0.4375rem);
   border: 1.5px solid currentColor;
   border-radius: 50%;
 }
-.ui-step-status-tick { display: none; width: 18px; height: 18px; color: var(--bg); }
+.ui-step-status-tick { display: none; width: 1.125rem; height: 1.125rem; color: var(--bg); }
 .ui-step-status-tick .tick-fill { background: var(--ok); }
 .ui-step-status-tick .tick path { stroke: var(--bg); }
-.ui-step-status-failed { display: none; width: 15px; height: 15px; fill: none; stroke: var(--danger); stroke-width: 1.8; stroke-linecap: round; }
+.ui-step-status-failed { display: none; width: 0.9375rem; height: 0.9375rem; fill: none; stroke: var(--danger); stroke-width: 1.8; stroke-linecap: round; }
 .ui-step-status[data-state="running"] .ui-step-status-pending,
 .ui-step-status[data-state="running"] .ui-step-status-tick,
 .ui-step-status[data-state="running"] .ui-step-status-failed,
@@ -307,8 +311,8 @@
 /* Glitch text is monochrome and settles after its welcome interval. */
 .glitch { position: relative; display: inline-block; white-space: nowrap; }
 .glitch::before, .glitch::after { content: attr(data-text); position: absolute; top: 0; left: 0; width: 100%; color: inherit; background: #000; overflow: hidden; clip-path: inset(0 0 0 0); pointer-events: none; }
-.glitch::after { transform: translateX(6px); text-shadow: var(--g-after-shadow); animation: ui-glitch-bands var(--g-after-dur, 1.5s) infinite linear alternate-reverse; }
-.glitch::before { transform: translateX(-6px); text-shadow: var(--g-before-shadow); animation: ui-glitch-bands var(--g-before-dur, 1s) infinite linear alternate-reverse; }
+.glitch::after { transform: translateX(0.375rem); text-shadow: var(--g-after-shadow); animation: ui-glitch-bands var(--g-after-dur, 1.5s) infinite linear alternate-reverse; }
+.glitch::before { transform: translateX(-0.375rem); text-shadow: var(--g-before-shadow); animation: ui-glitch-bands var(--g-before-dur, 1s) infinite linear alternate-reverse; }
 .glitch.is-settled::before, .glitch.is-settled::after { animation: none; opacity: 0; transition: opacity 260ms var(--ease); }
 @keyframes ui-glitch-bands {
   0% { clip-path: inset(20% 0 50% 0); } 10% { clip-path: inset(15% 0 55% 0); } 20% { clip-path: inset(30% 0 40% 0); }
@@ -319,7 +323,7 @@
 
 /* DECISION 103: one glyph cell morphs to a tick for 900 ms, then returns. */
 .icon-action { display: inline-grid; place-items: center; }
-.swap { display: inline-grid; width: 17px; height: 17px; }
+.swap { display: inline-grid; width: 1.0625rem; height: 1.0625rem; }
 .swap svg { grid-area: 1 / 1; width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; transition: opacity 150ms var(--ease), transform 150ms var(--ease), filter 150ms var(--ease); }
 .swap .is-done { opacity: 0; transform: scale(0.6); filter: blur(2px); stroke-width: 2.2; }
 .swap .is-done path { stroke-dasharray: 1; stroke-dashoffset: 1; transition: stroke-dashoffset 0ms 150ms; }
@@ -346,29 +350,29 @@
      eyebrow 500 12px/1     +0.02em  (auth-eyebrow)
    --------------------------------------------------------------------------------------- */
 :root {
-  --ui-type-name: 600 14px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
-  --ui-type-body: 450 14px/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
-  --ui-type-label: 450 13px/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-name: 600 0.875rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-body: 450 0.875rem/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-label: 450 0.8125rem/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   /* Line height `normal`, never a number: next to an icon, a label's line box must be the font's own height. With a smaller
      line height (it was 1) Blink rounds the half-leading asymmetrically and the glyphs sit up to 0.75 px above the centre the
      icon is centred on (TASTE "Icon and text share one centre line", #282; icon-text-centre.spec.ts measures it). Every control
      that uses this token has a fixed height or min-height and centres its content, so only the text's offset changes. */
-  --ui-type-button: 500 13.5px/normal var(--font-ui, "Geist Mono", ui-monospace, monospace);
-  --ui-type-eyebrow: 500 12px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-button: 500 0.84375rem/normal var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-eyebrow: 500 0.75rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   /* Every section heading (the small uppercase titles above a group of rows) is padded with this one value:
      6 px above, --ui-heading-gap between it and the group's first row. A new heading style uses it, never its own numbers. */
-  --ui-heading-gap: 8px;
-  --ui-heading-pad: 6px 0 var(--ui-heading-gap);
+  --ui-heading-gap: 0.5rem;
+  --ui-heading-pad: 0.375rem 0 var(--ui-heading-gap);
   --ui-tracking: -0.01em;
   /* Secondary text matches the sign-in card's secondary (rgb 161 161 170 on ink) and
      adapts to every theme, instead of the dimmer --fg-2. */
   --ui-text-secondary: color-mix(in oklab, var(--fg) 70%, var(--bg));
-  --ui-row-h: 32px;
-  --ui-control-h: 30px;
-  --ui-icon: 16px;
+  --ui-row-h: 2rem;
+  --ui-control-h: 1.875rem;
+  --ui-icon: 1rem;
 }
 @media (pointer: coarse) {
-  :root { --ui-row-h: 44px; --ui-control-h: 44px; --ui-icon: 18px; }
+  :root { --ui-row-h: 2.75rem; --ui-control-h: 2.75rem; --ui-icon: 1.125rem; }
 }
 
 /* Window card (window-card.ts): the pane card's surface plus a quiet header. */
@@ -376,7 +380,7 @@
   position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0;
   /* Not clipped: the lock's shackle rises over the frame line. The body clips its own content. */
   background: var(--bg);
-  border: 1px solid var(--overlay-line); border-radius: var(--r-lg, 18px); box-shadow: var(--shadow);
+  border: 1px solid var(--overlay-line); border-radius: var(--r-lg, 1.125rem); box-shadow: var(--shadow);
   transition: border-color 180ms var(--ease-out, ease-out);
 }
 /* Window transparency (themes.ts WINDOW_LEVELS): Solid is the line above, with no alpha and no filter. The other
@@ -386,13 +390,13 @@
 /* Solid cards paint no blur at all. */
 :root[data-card="solid"] .ui-overlay-surface, :root[data-card="solid"] .ui-panel, :root[data-card="solid"] .ui-pill { -webkit-backdrop-filter: none; backdrop-filter: none; }
 .ui-window[data-active] { border-color: color-mix(in oklab, var(--accent) 50%, var(--overlay-line)); }
-.ui-window-head { display: flex; flex: none; align-items: center; gap: 8px; padding: 8px 8px 0 8px; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+.ui-window-head { display: flex; flex: none; align-items: center; gap: 0.5rem; padding: 0.5rem 0.5rem 0 0.5rem; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 .ui-window-pill {
-  display: inline-flex; align-items: center; gap: 8px; min-width: 0; height: var(--ui-control-h); padding: 0 10px 0 8px;
+  display: inline-flex; align-items: center; gap: 0.5rem; min-width: 0; height: var(--ui-control-h); padding: 0 0.625rem 0 0.5rem;
   border: 1px solid var(--overlay-line); border-radius: 999px; background: transparent; color: var(--fg);
   font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; cursor: pointer;
   /* The lock owns the exact centre of the frame line: the pill never reaches past half the header minus the lock's hit area. */
-  max-width: calc(50% - 26px); line-height: 1.4; /* room for descenders: the title clips its overflow */
+  max-width: calc(50% - 1.625rem); line-height: 1.4; /* room for descenders: the title clips its overflow */
   transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out);
 }
 .ui-window-pill:active { transform: scale(var(--ui-press-scale)); }
@@ -440,12 +444,12 @@
 .ui-window-session { flex: 0 100 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg-3); font-weight: var(--fw-secondary); }
 /* In a narrow header the login goes first (it is the quietest part of the name). */
 .ui-window-head { container-type: inline-size; }
-@container (max-width: 560px) { .ui-window-user { display: none; } }
-.ui-window-session::before { content: "·"; margin-right: 8px; color: var(--fg-3); }
+@container (max-width: 35rem) { .ui-window-user { display: none; } }
+.ui-window-session::before { content: "·"; margin-right: 0.5rem; color: var(--fg-3); }
 /* The window's connection indicator (window-card.ts, connection-indicator.ts): the pill's status, in the place the dot had.
    It is the same icon as the top pill's, 14 px here so it sits level with the pill's text; a window that is not a link yet
    (a flow in progress) shows none. */
-.ui-window-conn { --ui-conn-size: 14px; }
+.ui-window-conn { --ui-conn-size: 0.875rem; }
 /* On touch the pill's hit area (`::after`, 44 px tall) is drawn over its children; the icon stays above it so a tap on it shows its sentence. */
 .ui-window-pill .ui-window-conn { z-index: 1; }
 .ui-window[data-status="none"] .ui-window-conn { display: none; }
@@ -458,38 +462,38 @@
 }
 .ui-window-actions:empty { display: none; }
 .ui-window-action {
-  position: relative; display: grid; place-items: center; width: calc(var(--ui-control-h) - 6px); height: calc(var(--ui-control-h) - 6px); padding: 0; border: 0; border-radius: 50%;
+  position: relative; display: grid; place-items: center; width: calc(var(--ui-control-h) - 0.375rem); height: calc(var(--ui-control-h) - 0.375rem); padding: 0; border: 0; border-radius: 50%;
   background: none; color: var(--fg-3); cursor: pointer; transition: background-color 140ms ease, color 140ms ease, transform 140ms var(--ease-out, ease-out);
 }
 /* On touch there is no frame lock to leave room for, so the pill may use the whole header less the actions: the host's name is
    never cut while there is room. The session name is secondary and goes whole (never as a lone "· …") in a phone-width card. */
 @media (pointer: coarse) {
   .ui-window-pill { max-width: 100%; }
-  @container (max-width: 400px) { .ui-window-session { display: none; } }
+  @container (max-width: 25rem) { .ui-window-session { display: none; } }
   /* One visible size for every header pill (TASTE: window header pills are one size): the title pill and the actions pill are
      36 px tall, and the 44 px touch target comes from invisible padding around each (::after), never from a bigger pill. */
-  .ui-window-pill, .ui-window-actions { height: 36px; }
+  .ui-window-pill, .ui-window-actions { height: 2.25rem; }
   .ui-window-pill { position: relative; }
   /* The header is a container (layout containment makes it its own stacking level), so it must sit above the body itself:
      otherwise the body covers the 4 px of hit area below the pill and the pill is a 40 px target, not 44. */
   .ui-window-head { position: relative; z-index: 1; }
-  .ui-window-pill::after { content: ""; position: absolute; inset: -6px -3px; }
-  .ui-window-actions { gap: 0; padding: 0 3px; position: relative; z-index: 1; } /* above the body, so the hit area below the pill is not covered by it */
-  .ui-window-action { width: 30px; height: 30px; }
-  .ui-window-action::after { content: ""; position: absolute; inset: -7px; } /* 44 px square around the 30 px button */
+  .ui-window-pill::after { content: ""; position: absolute; inset: -0.375rem -0.1875rem; }
+  .ui-window-actions { gap: 0; padding: 0 0.1875rem; position: relative; z-index: 1; } /* above the body, so the hit area below the pill is not covered by it */
+  .ui-window-action { width: 1.875rem; height: 1.875rem; }
+  .ui-window-action::after { content: ""; position: absolute; inset: -0.4375rem; } /* 44 px square around the 30 px button */
 }
 .ui-window-action:active { transform: scale(var(--ui-press-scale)); }
 /* A column at the weight floor is only a few dozen pixels wide (a layout drawn on a wide screen, shown on a phone).
    Chrome never overlaps or clips there: the title text goes first, then the whole title pill, then the actions. The
    window itself stays reachable through the canvas row and the search palette. */
-@container (max-width: 150px) { .ui-window-title, .ui-window-conn { display: none; } }
-@container (max-width: 84px) { .ui-window-pill { display: none; } }
-@container (max-width: 40px) { .ui-window-actions { display: none; } }
+@container (max-width: 9.375rem) { .ui-window-title, .ui-window-conn { display: none; } }
+@container (max-width: 5.25rem) { .ui-window-pill { display: none; } }
+@container (max-width: 2.5rem) { .ui-window-actions { display: none; } }
 .ui-window-action svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 /* Title first (TASTE): in a header this narrow the actions give way to one ⋯, so the title keeps its room. A card with one
    action never collapses (the actions container says so with data-collapsible). The ⋯ opens the same actions in a menu. */
 .ui-window-action.ui-window-more { display: none; }
-@container (max-width: 320px) {
+@container (max-width: 20rem) {
   .ui-window-actions[data-collapsible] > .ui-window-action:not(.ui-window-more) { display: none; }
   .ui-window-actions[data-collapsible] > .ui-window-action.ui-window-more { display: grid; }
   /* The title's room is the pill's half of the header: the window's mark and session name give way first, at any narrow
@@ -499,46 +503,46 @@
   @media (pointer: fine) { .ui-window-mark { display: none; } }
 }
 /* The anchored popover (anchored-popover.ts) floats inside its stage at the coordinates the placement computes. */
-.ui-anchored-popover { position: absolute; z-index: 6; overflow: hidden; border-radius: 14px; }
-.ui-window-menu { display: flex; flex-direction: column; gap: 2px; min-width: 168px; padding: 6px; }
+.ui-anchored-popover { position: absolute; z-index: 6; overflow: hidden; border-radius: 0.875rem; }
+.ui-window-menu { display: flex; flex-direction: column; gap: 2px; min-width: 10.5rem; padding: 0.375rem; }
 .ui-window-menu-item {
-  display: flex; align-items: center; gap: 10px; width: 100%; height: 34px; padding: 0 10px; border: 0; border-radius: 10px;
+  display: flex; align-items: center; gap: 0.625rem; width: 100%; height: 2.125rem; padding: 0 0.625rem; border: 0; border-radius: 0.625rem;
   background: none; color: var(--fg-2); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; text-align: left; cursor: pointer;
 }
 .ui-window-menu-item svg { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-@media (pointer: coarse) { .ui-window-menu-item { height: 44px; } }
+@media (pointer: coarse) { .ui-window-menu-item { height: 2.75rem; } }
 @media (hover: hover) and (pointer: fine) { .ui-window-menu-item:hover { background: var(--hover); color: var(--fg); } }
-.ui-window-body { position: relative; flex: 1; min-height: 0; overflow: hidden; border-radius: 0 0 calc(var(--r-lg, 18px) - 1px) calc(var(--r-lg, 18px) - 1px); }
+.ui-window-body { position: relative; flex: 1; min-height: 0; overflow: hidden; border-radius: 0 0 calc(var(--r-lg, 1.125rem) - 1px) calc(var(--r-lg, 1.125rem) - 1px); }
 @media (hover: hover) and (pointer: fine) {
   .ui-window-pill:hover { background: var(--hover); }
   .ui-window-action:hover { background: var(--hover); color: var(--fg-2); }
 }
 
 /* Capsule tabs (capsule-tabs.ts): flat track, one gliding capsule. */
-.ui-tabs { position: relative; display: inline-flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--hover); isolation: isolate; }
+.ui-tabs { position: relative; display: inline-flex; gap: 2px; padding: 0.1875rem; border-radius: 999px; background: var(--hover); isolation: isolate; }
 .ui-tabs-capsule {
-  position: absolute; z-index: -1; top: 3px; bottom: 3px; left: 0; border-radius: 999px;
+  position: absolute; z-index: -1; top: 0.1875rem; bottom: 0.1875rem; left: 0; border-radius: 999px;
   background: var(--overlay-solid); box-shadow: 0 1px 2px rgb(0 0 0 / 0.14), 0 0 0 1px var(--overlay-line);
 }
 .ui-tab {
-  display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; height: calc(var(--ui-control-h) - 6px);
-  padding: 0 12px; border: 0; border-radius: 999px; background: none; color: var(--fg-2); cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.375rem; min-width: 0; height: calc(var(--ui-control-h) - 0.375rem);
+  padding: 0 0.75rem; border: 0; border-radius: 999px; background: none; color: var(--fg-2); cursor: pointer;
   font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; transition: color 160ms ease;
 }
 .ui-tab[aria-selected="true"] { color: var(--fg); }
 .ui-tabs[data-compact] .ui-tab[aria-selected="false"] > span { display: none; }
-.ui-tabs[data-compact] .ui-tab[aria-selected="false"] { padding: 0 10px; }
+.ui-tabs[data-compact] .ui-tab[aria-selected="false"] { padding: 0 0.625rem; }
 .ui-tab svg { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 
 /* Key/value list (kv-list.ts): keys left, values right, every cell copies. */
 .ui-kv { display: flex; flex-direction: column; }
 .ui-kv-row {
-  display: grid; grid-template-columns: fit-content(55%) minmax(0, 1fr); column-gap: 16px; align-items: baseline;
-  min-height: var(--ui-row-h); padding: 4px 0; border-bottom: 1px solid var(--line);
+  display: grid; grid-template-columns: fit-content(55%) minmax(0, 1fr); column-gap: 1rem; align-items: baseline;
+  min-height: var(--ui-row-h); padding: 0.25rem 0; border-bottom: 1px solid var(--line);
 }
 .ui-kv-row:last-child { border-bottom: 0; }
 /* Titled sections inside one list: the quiet eyebrow of the settings headings, no box or rule of its own. */
-.ui-kv-section + .ui-kv-section { margin-top: 12px; }
+.ui-kv-section + .ui-kv-section { margin-top: 0.75rem; }
 .ui-kv-rows { display: flex; flex-direction: column; }
 .ui-kv-group { padding: var(--ui-heading-pad); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-kv-cell {
@@ -548,13 +552,13 @@
 }
 .ui-kv-key { justify-self: start; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); white-space: nowrap; }
 .ui-kv-key { display: grid; justify-items: start; }
-.ui-kv-hint { color: var(--fg-3); font: var(--ui-type-label); font-size: 11px; letter-spacing: var(--ui-tracking); white-space: nowrap; }
+.ui-kv-hint { color: var(--fg-3); font: var(--ui-type-label); font-size: 0.6875rem; letter-spacing: var(--ui-tracking); white-space: nowrap; }
 .ui-kv-value { justify-self: end; color: var(--fg); font: var(--ui-type-body); letter-spacing: var(--ui-tracking); text-align: right; }
 .ui-kv-cell:active { transform: scale(var(--ui-press-scale-soft)); }
 /* The highlighted run: 6 px of even padding either side (cancelled by a -6 px margin so the text
    still lines up with the row's edges), cloned across wrapped lines. */
 .ui-kv-text {
-  display: inline; margin: 0 -6px; padding: 3px 6px; border-radius: 6px; overflow-wrap: anywhere;
+  display: inline; margin: 0 -0.375rem; padding: 0.1875rem 0.375rem; border-radius: 0.375rem; overflow-wrap: anywhere;
   -webkit-box-decoration-break: clone; box-decoration-break: clone;
 }
 /* A value that changes (kv-list `patch`) fades out, says its new thing while it is gone, and fades back in. */
@@ -566,21 +570,21 @@
 .ui-kv-cell { position: relative; }
 .ui-kv-cell[data-copied] > .ui-kv-text { opacity: 0; transition: background-color 120ms ease, opacity 110ms ease-out; }
 .ui-copied {
-  position: absolute; top: 0; display: inline-flex; align-items: center; gap: 6px; padding: 3px 0; white-space: nowrap; pointer-events: none;
+  position: absolute; top: 0; display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.1875rem 0; white-space: nowrap; pointer-events: none;
   color: var(--fg); opacity: 0; transition: opacity 120ms ease-out;
 }
 .ui-kv-value > .ui-copied { right: 0; }
 .ui-kv-key > .ui-copied { left: 0; }
 .ui-kv-cell[data-copied] > .ui-copied { opacity: 1; transition: opacity 160ms ease-out 40ms; }
-.ui-copied-icon { display: inline-grid; place-items: center; width: 14px; height: 14px; transform: scale(0.7); transition: transform 200ms cubic-bezier(0.23, 1, 0.32, 1); }
+.ui-copied-icon { display: inline-grid; place-items: center; width: 0.875rem; height: 0.875rem; transform: scale(0.7); transition: transform 200ms cubic-bezier(0.23, 1, 0.32, 1); }
 .ui-kv-cell[data-copied] .ui-copied-icon { transform: none; }
-.ui-copied-icon svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ui-copied-icon svg { width: 0.875rem; height: 0.875rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .ui-kv-cell[data-instant] > .ui-kv-text, .ui-kv-cell[data-instant] > .ui-copied, .ui-kv-cell[data-instant] .ui-copied-icon { transition: none; }
 @media (prefers-reduced-motion: reduce) { .ui-copied-icon { transform: none; transition: none; } }
 /* A value that is its row's action (kv-list `press`) reads as one: it keeps the pointer and takes the press scale. */
 .ui-kv-press { cursor: pointer; }
 /* A mark before a value (kv-list `mark`), from the shared mark vocabulary: a tick, an exclamation, a quiet cross, a turning arc. */
-.ui-kv-mark { display: inline-block; margin-right: 6px; vertical-align: -1px; }
+.ui-kv-mark { display: inline-block; margin-right: 0.375rem; vertical-align: -1px; }
 .ui-mark[data-mark="off"], .ui-mark[data-mark="warn"] { background: currentColor; -webkit-mask: var(--ui-mark-icon) center / contain no-repeat; mask: var(--ui-mark-icon) center / contain no-repeat; }
 .ui-mark[data-mark="off"] { color: var(--fg-3); --ui-mark-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cpath d='M6.5 6.5l11 11M17.5 6.5l-11 11'/%3E%3C/svg%3E"); }
 .ui-mark[data-mark="warn"] { color: var(--warn); --ui-mark-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3.2' stroke-linecap='round'%3E%3Cpath d='M12 5.5v8.5M12 18.5h.01'/%3E%3C/svg%3E"); }
@@ -589,11 +593,11 @@
 @keyframes ui-mark-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .ui-mark[data-mark="busy"] { animation: none; } }
 /* A wide row (kv-list `wide`): no key, the value runs the whole row; a link ends in a quiet chevron. */
-.ui-kv-wide > .ui-kv-value { grid-column: 1 / -1; justify-self: stretch; padding-right: 20px; text-align: left; }
+.ui-kv-wide > .ui-kv-value { grid-column: 1 / -1; justify-self: stretch; padding-right: 1.25rem; text-align: left; }
 .ui-kv-wide:not(:has(.ui-kv-press)) > .ui-kv-value { color: var(--ui-text-secondary); padding-right: 0; }
 .ui-kv-wide > .ui-kv-value > .ui-copied { right: auto; left: 0; }
-.ui-kv-chevron { position: absolute; right: 0; top: calc(50% - 8px); width: 14px; height: 14px; fill: none; stroke: var(--ui-text-secondary); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.ui-kv-meter { grid-column: 1 / -1; position: relative; height: 3px; margin: 4px 0 2px; overflow: hidden; border-radius: 2px; background: var(--line); }
+.ui-kv-chevron { position: absolute; right: 0; top: calc(50% - 0.5rem); width: 0.875rem; height: 0.875rem; fill: none; stroke: var(--ui-text-secondary); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ui-kv-meter { grid-column: 1 / -1; position: relative; height: 0.1875rem; margin: 0.25rem 0 2px; overflow: hidden; border-radius: 2px; background: var(--line); }
 .ui-kv-meter::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--accent); transform: scaleX(var(--meter, 0)); transform-origin: left; }
 @media (hover: hover) and (pointer: fine) {
   .ui-kv-cell:hover .ui-kv-text { background: var(--hover); }
@@ -603,8 +607,8 @@
 }
 
 /* DECISION 120 icon slot for branched-menu hosts. */
-.bm-icon { display: grid; place-items: center; width: 16px; height: 16px; flex: none; color: var(--fg-2); }
-.bm-icon svg { display: block; width: 15px; height: 15px; fill: currentColor; stroke: none; }
+.bm-icon { display: grid; place-items: center; width: 1rem; height: 1rem; flex: none; color: var(--fg-2); }
+.bm-icon svg { display: block; width: 0.9375rem; height: 0.9375rem; fill: currentColor; stroke: none; }
 
 /* Shared step transitions (pane-stepper.ts): leaving panes stack over the incoming one. */
 .ui-pane-viewport { position: relative; }
@@ -615,23 +619,23 @@
 .ui-chip-field {
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 0.75rem;
   background: rgb(from var(--fg) r g b / 0.05);
   cursor: text;
   transition: border-color 120ms ease, background-color 120ms ease;
 }
 .ui-chip-field:focus-within { border-color: rgb(from var(--fg) r g b / 0.28); background: rgb(from var(--fg) r g b / 0.09); }
-.ui-chip-flow { display: flex; min-height: 46px; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px 6px var(--ui-chip-field-inset, 14px); }
+.ui-chip-flow { display: flex; min-height: 2.875rem; flex-wrap: wrap; align-items: center; gap: 0.375rem; padding: 0.375rem 0.5rem 0.375rem var(--ui-chip-field-inset, 0.875rem); }
 .ui-chip-text {
   min-width: 8ch;
-  height: 32px;
+  height: 2rem;
   flex: 1 1 8ch;
   padding: 0;
   border: 0;
   outline: none;
   background: transparent;
   color: var(--fg);
-  font: var(--fw-body) 16px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  font: var(--fw-body) 1rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   letter-spacing: 0.01em;
 }
 /* With chips present the input needs room for a few characters only; it grows on its own row
@@ -641,36 +645,36 @@
 .ui-chip {
   display: inline-flex;
   max-width: 100%;
-  height: 30px;
+  height: 1.875rem;
   align-items: center;
-  gap: 6px;
-  padding: 0 4px 0 10px;
+  gap: 0.375rem;
+  padding: 0 0.25rem 0 0.625rem;
   border-radius: 999px;
   background: rgb(from var(--fg) r g b / 0.08);
   color: var(--fg);
-  font: var(--fw-label) 13px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  font: var(--fw-label) 0.8125rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   letter-spacing: -0.01em;
   transform-origin: left center;
   transition: background-color 120ms ease;
 }
-.ui-chip > svg:first-child { width: 14px; height: 14px; flex: none; fill: currentColor; color: var(--fg-2); }
+.ui-chip > svg:first-child { width: 0.875rem; height: 0.875rem; flex: none; fill: currentColor; color: var(--fg-2); }
 .ui-chip > svg.is-line:first-child { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ui-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ui-chip-remove { display: grid; width: 22px; height: 22px; flex: none; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--fg-3); cursor: pointer; }
-.ui-chip-remove svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+.ui-chip-remove { display: grid; width: 1.375rem; height: 1.375rem; flex: none; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--fg-3); cursor: pointer; }
+.ui-chip-remove svg { width: 0.75rem; height: 0.75rem; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
 @media (hover: hover) and (pointer: fine) { .ui-chip-remove:hover { background: rgb(from var(--fg) r g b / 0.1); color: var(--fg); } }
-@media (pointer: coarse) { .ui-chip { height: 34px; font-size: 15px; } .ui-chip-remove { width: 28px; height: 28px; } }
+@media (pointer: coarse) { .ui-chip { height: 2.125rem; font-size: 0.9375rem; } .ui-chip-remove { width: 1.75rem; height: 1.75rem; } }
 /* Pill: the one container for floating capsule controls (the top-bar capsule, icon buttons, the
    sidebar toggle, session tabs). Instances set only their size and content layout; the material,
    hairline, shadow, radius and press feedback live here so they can never drift apart. */
 .ui-pill {
-  appearance: none; display: inline-flex; align-items: center; justify-content: center; height: var(--pill-h, 38px);
+  appearance: none; display: inline-flex; align-items: center; justify-content: center; height: var(--pill-h, 2.375rem);
   border: 1px solid var(--overlay-line) !important; border-radius: 999px; background: var(--overlay); box-shadow: var(--shadow);
   -webkit-backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation)); backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
   transition: transform 140ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 .ui-pill:active:not(:disabled) { transform: scale(var(--ui-press-scale)); }
-.ui-pill-icon { width: var(--pill-h, 38px); padding: 0; color: var(--fg-2); }
+.ui-pill-icon { width: var(--pill-h, 2.375rem); padding: 0; color: var(--fg-2); }
 .ui-pill-icon svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.6; }
 @media (hover: hover) and (pointer: fine) { .ui-pill:hover:not(:disabled) { background: var(--overlay-solid); } }
 @media (prefers-reduced-motion: reduce) { .ui-pill:active:not(:disabled) { transform: none; } }
@@ -679,20 +683,20 @@
 .ui-window canvas { display: block; }
 
 /* Panel: the same material for large floating surfaces such as the sidebar; only the radius differs. */
-.ui-panel { border-radius: var(--r-lg, 18px); }
+.ui-panel { border-radius: var(--r-lg, 1.125rem); }
 
 /* Window resize handles (window-resize.ts): invisible hit strips on the card's edges for a
    mouse; a finger gets four corner grips only after a press-and-hold on the header. */
 .ui-window-resize { position: absolute; z-index: 5; touch-action: none; }
-.ui-window-resize[data-edge="n"], .ui-window-resize[data-edge="s"] { left: 18px; right: 18px; height: 6px; }
-.ui-window-resize[data-edge="e"], .ui-window-resize[data-edge="w"] { top: 18px; bottom: 18px; width: 6px; }
+.ui-window-resize[data-edge="n"], .ui-window-resize[data-edge="s"] { left: 1.125rem; right: 1.125rem; height: 0.375rem; }
+.ui-window-resize[data-edge="e"], .ui-window-resize[data-edge="w"] { top: 1.125rem; bottom: 1.125rem; width: 0.375rem; }
 .ui-window-resize[data-edge="n"] { top: 0; cursor: ns-resize; }
 .ui-window-resize[data-edge="s"] { bottom: 0; cursor: ns-resize; }
 .ui-window-resize[data-edge="e"] { right: 0; cursor: ew-resize; }
 .ui-window-resize[data-edge="w"] { left: 0; cursor: ew-resize; }
 .ui-window-resize[data-edge$="e"][data-edge^="n"], .ui-window-resize[data-edge$="w"][data-edge^="s"] { cursor: nesw-resize; }
 .ui-window-resize[data-edge$="w"][data-edge^="n"], .ui-window-resize[data-edge$="e"][data-edge^="s"] { cursor: nwse-resize; }
-.ui-window-resize[data-edge="ne"], .ui-window-resize[data-edge="nw"], .ui-window-resize[data-edge="se"], .ui-window-resize[data-edge="sw"] { width: 18px; height: 18px; }
+.ui-window-resize[data-edge="ne"], .ui-window-resize[data-edge="nw"], .ui-window-resize[data-edge="se"], .ui-window-resize[data-edge="sw"] { width: 1.125rem; height: 1.125rem; }
 .ui-window-resize[data-edge="ne"] { top: 0; right: 0; }
 .ui-window-resize[data-edge="nw"] { top: 0; left: 0; }
 .ui-window-resize[data-edge="se"] { bottom: 0; right: 0; }
@@ -706,40 +710,40 @@
 .ui-window[data-resize="touch"] .ui-window-resize[data-edge]:not([data-edge="ne"], [data-edge="nw"], [data-edge="se"], [data-edge="sw"]) { display: none; }
 .ui-window[data-resize="touch"] .ui-window-resize[data-edge="ne"], .ui-window[data-resize="touch"] .ui-window-resize[data-edge="nw"],
 .ui-window[data-resize="touch"] .ui-window-resize[data-edge="se"], .ui-window[data-resize="touch"] .ui-window-resize[data-edge="sw"] {
-  width: 44px; height: 44px; cursor: auto;
+  width: 2.75rem; height: 2.75rem; cursor: auto;
   animation: ui-grip-in 220ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)) both;
 }
 .ui-window[data-resize="touch"] .ui-window-resize::after {
-  content: ""; position: absolute; width: 22px; height: 22px; border: 0 solid var(--accent);
+  content: ""; position: absolute; width: 1.375rem; height: 1.375rem; border: 0 solid var(--accent);
   transition: transform 140ms var(--ease-out, ease-out);
 }
 .ui-window[data-resize="touch"] .ui-window-resize:active::after { transform: scale(1.12); }
-.ui-window[data-resize="touch"] .ui-window-resize[data-edge="ne"]::after { top: 6px; right: 6px; border-width: 3px 3px 0 0; border-top-right-radius: 14px; }
-.ui-window[data-resize="touch"] .ui-window-resize[data-edge="nw"]::after { top: 6px; left: 6px; border-width: 3px 0 0 3px; border-top-left-radius: 14px; }
-.ui-window[data-resize="touch"] .ui-window-resize[data-edge="se"]::after { bottom: 6px; right: 6px; border-width: 0 3px 3px 0; border-bottom-right-radius: 14px; }
-.ui-window[data-resize="touch"] .ui-window-resize[data-edge="sw"]::after { bottom: 6px; left: 6px; border-width: 0 0 3px 3px; border-bottom-left-radius: 14px; }
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge="ne"]::after { top: 0.375rem; right: 0.375rem; border-width: 0.1875rem 0.1875rem 0 0; border-top-right-radius: 0.875rem; }
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge="nw"]::after { top: 0.375rem; left: 0.375rem; border-width: 0.1875rem 0 0 0.1875rem; border-top-left-radius: 0.875rem; }
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge="se"]::after { bottom: 0.375rem; right: 0.375rem; border-width: 0 0.1875rem 0.1875rem 0; border-bottom-right-radius: 0.875rem; }
+.ui-window[data-resize="touch"] .ui-window-resize[data-edge="sw"]::after { bottom: 0.375rem; left: 0.375rem; border-width: 0 0 0.1875rem 0.1875rem; border-bottom-left-radius: 0.875rem; }
 @keyframes ui-grip-in { from { opacity: 0; } to { opacity: 1; } }
 
 /* Sidebar footer (sidebar-foot.ts): the person's pill and the settings pill share one height, so
    their centres sit on one line. Pills are the shared `.ui-pill`; only layout lives here. */
-.ui-sidebar-foot { --pill-h: 40px; display: flex; flex: none; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; padding: 9px 0 0; box-shadow: 0 -1px 0 var(--line); }
-.ui-sidebar-foot[data-variant="b"] { --pill-h: 32px; }
-@media (pointer: coarse) { .ui-sidebar-foot, .ui-sidebar-foot[data-variant="b"] { --pill-h: 44px; } }
+.ui-sidebar-foot { --pill-h: 2.5rem; display: flex; flex: none; align-items: center; justify-content: space-between; gap: 0.5rem; margin-top: auto; padding: 0.5625rem 0 0; box-shadow: 0 -1px 0 var(--line); }
+.ui-sidebar-foot[data-variant="b"] { --pill-h: 2rem; }
+@media (pointer: coarse) { .ui-sidebar-foot, .ui-sidebar-foot[data-variant="b"] { --pill-h: 2.75rem; } }
 .ui-sidebar-foot .ui-pill { cursor: pointer; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); line-height: 1; white-space: nowrap; transition: transform 140ms var(--ease-out, ease-out), background-color 140ms ease, box-shadow 160ms ease; }
-@media (hover: hover) and (pointer: fine) { .ui-sidebar-foot .ui-pill:hover:not(:active) { box-shadow: var(--shadow), 0 2px 8px -2px rgb(0 0 0 / 0.18); } }
-.ui-sidebar-user { flex: 0 1 auto; min-width: 0; max-width: calc(100% - var(--pill-h) - 8px); justify-content: flex-start; gap: 10px; padding: 0 14px 0 5px; text-align: left; }
-.ui-sidebar-foot[data-variant="b"] .ui-sidebar-user { padding-right: 12px; }
+@media (hover: hover) and (pointer: fine) { .ui-sidebar-foot .ui-pill:hover:not(:active) { box-shadow: var(--shadow), 0 2px 0.5rem -2px rgb(0 0 0 / 0.18); } }
+.ui-sidebar-user { flex: 0 1 auto; min-width: 0; max-width: calc(100% - var(--pill-h) - 0.5rem); justify-content: flex-start; gap: 0.625rem; padding: 0 0.875rem 0 0.3125rem; text-align: left; }
+.ui-sidebar-foot[data-variant="b"] .ui-sidebar-user { padding-right: 0.75rem; }
 .ui-sidebar-avatar {
-  display: grid; flex: none; place-items: center; width: calc(var(--pill-h) - 10px); height: calc(var(--pill-h) - 10px); border-radius: 50%; color: #fff;
+  display: grid; flex: none; place-items: center; width: calc(var(--pill-h) - 0.625rem); height: calc(var(--pill-h) - 0.625rem); border-radius: 50%; color: #fff;
   background: linear-gradient(145deg, oklch(from var(--accent) calc(l + 0.06) c calc(h + var(--ui-avatar-hue, 0))), oklch(from var(--accent) calc(l - 0.12) c calc(h + var(--ui-avatar-hue, 0) + 28)));
-  font: 600 12px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-shadow: 0 1px 1px rgb(0 0 0 / 0.25);
+  font: 600 0.75rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-shadow: 0 1px 1px rgb(0 0 0 / 0.25);
 }
 .ui-sidebar-foot[data-variant="b"] .ui-sidebar-avatar { box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--accent) 40%, transparent); }
-@media (pointer: coarse) { .ui-sidebar-avatar { font-size: 14px; } .ui-sidebar-foot .ui-pill { font-size: var(--text-secondary); } }
-.ui-sidebar-names { display: grid; min-width: 0; gap: 3px; }
+@media (pointer: coarse) { .ui-sidebar-avatar { font-size: 0.875rem; } .ui-sidebar-foot .ui-pill { font-size: var(--text-secondary); } }
+.ui-sidebar-names { display: grid; min-width: 0; gap: 0.1875rem; }
 .ui-sidebar-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg); font-weight: var(--fw-label); }
-.ui-sidebar-secondary { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ui-text-secondary); font-size: 11px; }
-@media (pointer: coarse) { .ui-sidebar-secondary { font-size: 12px; } }
+.ui-sidebar-secondary { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ui-text-secondary); font-size: 0.6875rem; }
+@media (pointer: coarse) { .ui-sidebar-secondary { font-size: 0.75rem; } }
 .ui-sidebar-settings svg { stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 
 /* Window lock (lock-toggle.ts, window-card.ts): the padlock glyph itself, no chip. It is centred on
@@ -749,11 +753,11 @@
    44 px invisible hit area. On touch there is no frame lock: locking lives in the toolbar and the
    palette. */
 .ui-window-lock {
-  position: absolute; z-index: 6; top: -22px; left: 50%; width: 44px; height: 44px; margin-left: -22px;
-  display: grid; place-items: center; padding: 0; border: 0; border-radius: 10px; background: none; color: var(--fg);
+  position: absolute; z-index: 6; top: -1.375rem; left: 50%; width: 2.75rem; height: 2.75rem; margin-left: -1.375rem;
+  display: grid; place-items: center; padding: 0; border: 0; border-radius: 0.625rem; background: none; color: var(--fg);
   opacity: 0; pointer-events: none; cursor: pointer; transition: opacity 160ms ease-out, color 160ms ease-out;
 }
-.ui-window-lock svg { width: 16px; height: 16px; transform: translateY(0.5px); fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; overflow: visible; }
+.ui-window-lock svg { width: 1rem; height: 1rem; transform: translateY(0.5px); fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; overflow: visible; }
 .ui-window[data-lock-near] .ui-window-lock { opacity: 0.35; pointer-events: auto; }
 .ui-window[data-locked] .ui-window-lock { opacity: 0.9; pointer-events: auto; color: var(--accent); }
 .ui-window-lock:focus-visible { opacity: 0.8; }
@@ -766,33 +770,33 @@
 
 /* Shortcuts view (shortcuts-view.ts): the capsule's morph target. The material is the shared
    overlay surface; only the layout lives here. */
-.ui-shortcuts { position: absolute; z-index: 7; display: flex; flex-direction: column; min-height: 0; border-radius: var(--r-lg, 18px); color: var(--fg); outline: none; }
-.ui-shortcuts-head { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; height: var(--pill-h, 38px); padding: 0 8px 0 14px; font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
-.ui-shortcuts-body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 4px 14px 14px; }
-.ui-shortcuts-section + .ui-shortcuts-section { margin-top: 12px; }
+.ui-shortcuts { position: absolute; z-index: 7; display: flex; flex-direction: column; min-height: 0; border-radius: var(--r-lg, 1.125rem); color: var(--fg); outline: none; }
+.ui-shortcuts-head { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 0.75rem; height: var(--pill-h, 2.375rem); padding: 0 0.5rem 0 0.875rem; font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
+.ui-shortcuts-body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 0.25rem 0.875rem 0.875rem; }
+.ui-shortcuts-section + .ui-shortcuts-section { margin-top: 0.75rem; }
 .ui-shortcuts-title { margin: 0; padding: var(--ui-heading-pad); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-shortcuts-list { display: grid; margin: 0; padding: 0; list-style: none; }
-.ui-shortcuts-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: var(--row, 28px); border-bottom: 1px solid var(--line); }
+.ui-shortcuts-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: var(--row, 1.75rem); border-bottom: 1px solid var(--line); }
 .ui-shortcuts-row:last-child { border-bottom: 0; }
 .ui-shortcuts-label { min-width: 0; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
-.ui-shortcuts-keys { display: inline-flex; flex: none; gap: 4px; }
-.ui-shortcuts kbd { min-width: 22px; padding: 4px 6px; border-radius: 6px; background: var(--hover); color: var(--fg-2); font: 500 var(--text-caption)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-align: center; }
+.ui-shortcuts-keys { display: inline-flex; flex: none; gap: 0.25rem; }
+.ui-shortcuts kbd { min-width: 1.375rem; padding: 0.25rem 0.375rem; border-radius: 0.375rem; background: var(--hover); color: var(--fg-2); font: 500 var(--text-caption)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-align: center; }
 /* An alternate binding: the same keycap, quieter, so the primary reads first (TASTE: hierarchy by weight and tone). */
 .ui-shortcuts kbd.ui-shortcuts-alt { color: var(--fg-3); opacity: 0.7; }
-@media (pointer: coarse) { .ui-shortcuts-label { font-size: var(--text-body); } .ui-shortcuts-head { padding-right: 14px; } }
+@media (pointer: coarse) { .ui-shortcuts-label { font-size: var(--text-body); } .ui-shortcuts-head { padding-right: 0.875rem; } }
 
 /* Settings overlay (settings-overlay.ts): one centred card in the shared overlay material. */
-.ui-settings { position: absolute; z-index: 8; top: 50%; left: 50%; display: flex; flex-direction: column; width: min(560px, calc(100% - 24px)); max-height: min(520px, calc(100% - 24px)); margin: 0; translate: -50% -50%; border-radius: var(--r-lg, 18px); color: var(--fg); outline: none; }
-.ui-settings-head { display: flex; flex: none; align-items: center; justify-content: space-between; height: 52px; padding: 0 8px 0 18px; }
+.ui-settings { position: absolute; z-index: 8; top: 50%; left: 50%; display: flex; flex-direction: column; width: min(35rem, calc(100% - 1.5rem)); max-height: min(32.5rem, calc(100% - 1.5rem)); margin: 0; translate: -50% -50%; border-radius: var(--r-lg, 1.125rem); color: var(--fg); outline: none; }
+.ui-settings-head { display: flex; flex: none; align-items: center; justify-content: space-between; height: 3.25rem; padding: 0 0.5rem 0 1.125rem; }
 .ui-settings-title { font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
 .ui-settings-nav-row:active { transform: scale(var(--ui-press-scale)); }
 @media (hover: hover) and (pointer: fine) { .ui-settings-nav-row:hover { background: var(--hover); } }
 .ui-settings-main { display: flex; min-height: 0; flex: 1; border-top: 1px solid var(--line); }
-.ui-settings-nav { display: flex; flex: none; flex-direction: column; gap: 2px; width: 150px; padding: 8px; border-right: 1px solid var(--line); }
-.ui-settings-nav-row { display: flex; align-items: center; gap: 8px; height: var(--ui-row-h, 32px); padding: 0 8px; border: 0; border-radius: 8px; background: none; color: var(--fg-2); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-settings-nav { display: flex; flex: none; flex-direction: column; gap: 2px; width: 9.375rem; padding: 0.5rem; border-right: 1px solid var(--line); }
+.ui-settings-nav-row { display: flex; align-items: center; gap: 0.5rem; height: var(--ui-row-h, 2rem); padding: 0 0.5rem; border: 0; border-radius: 0.5rem; background: none; color: var(--fg-2); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
 .ui-settings-nav-row[aria-current="true"] { background: var(--hover); color: var(--fg); }
 .ui-settings-nav-row svg { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.ui-settings-pane { min-width: 0; flex: 1; overflow: auto; padding: 6px 18px 14px; overscroll-behavior: contain; }
+.ui-settings-pane { min-width: 0; flex: 1; overflow: auto; padding: 0.375rem 1.125rem 0.875rem; overscroll-behavior: contain; }
 @media (max-width: 520px) {
   .ui-settings-main { flex-direction: column; }
   .ui-settings-nav { width: auto; flex-direction: row; border-right: 0; border-bottom: 1px solid var(--line); }
@@ -802,12 +806,12 @@
    One 16 px box; each glyph is its own layer. The shown glyph is chosen by transitions on
    opacity and transform only, so a state change retargets from the current frame. Looping
    animations are paused (never removed) when hidden, so they cannot jump. */
-.ui-conn { position: relative; display: inline-block; flex: none; width: var(--ui-conn-size, 16px); height: var(--ui-conn-size, 16px); vertical-align: middle; cursor: default; -webkit-tap-highlight-color: transparent; }
+.ui-conn { position: relative; display: inline-block; flex: none; width: var(--ui-conn-size, 1rem); height: var(--ui-conn-size, 1rem); vertical-align: middle; cursor: default; -webkit-tap-highlight-color: transparent; }
 .ui-conn[hidden] { display: none; }
-@media (pointer: coarse) { .ui-conn::after { content: ""; position: absolute; inset: -8px; } }
+@media (pointer: coarse) { .ui-conn::after { content: ""; position: absolute; inset: -0.5rem; } }
 /* Keys that were typed while the link was down and are kept to be sent (connection-indicator.ts `queued`): one small amber key at the glyph's corner. */
-.ui-conn-q { position: absolute; right: -3px; top: -3px; display: grid; place-items: center; width: 9px; height: 9px; border-radius: 50%; background: var(--ui-conn-ground, var(--bg)); opacity: 0; transform: scale(0.4); transition: opacity 160ms ease-out, transform 220ms cubic-bezier(0.34, 1.4, 0.64, 1); pointer-events: none; }
-.ui-conn-q svg { width: 9px; height: 9px; fill: none; stroke: var(--warn); stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.ui-conn-q { position: absolute; right: -0.1875rem; top: -0.1875rem; display: grid; place-items: center; width: 0.5625rem; height: 0.5625rem; border-radius: 50%; background: var(--ui-conn-ground, var(--bg)); opacity: 0; transform: scale(0.4); transition: opacity 160ms ease-out, transform 220ms cubic-bezier(0.34, 1.4, 0.64, 1); pointer-events: none; }
+.ui-conn-q svg { width: 0.5625rem; height: 0.5625rem; fill: none; stroke: var(--warn); stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 .ui-conn[data-queued] .ui-conn-q { opacity: 1; transform: none; }
 .ui-conn-g { position: absolute; inset: 0; display: grid; place-items: center; opacity: 0; transform: scale(0.6); pointer-events: none;
   transition: opacity 160ms ease-out, transform 240ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
@@ -862,40 +866,40 @@
 }
 
 /* Settings, Toolbar (toolbar-settings.ts): rows of controls with a grip, an icon, a name and a switch. */
-.ui-toolbar-settings { display: grid; gap: 14px; }
+.ui-toolbar-settings { display: grid; gap: 0.875rem; }
 .ui-ts-title { margin: 0; padding: var(--ui-heading-pad); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-ts-list { display: grid; margin: 0; padding: 0; list-style: none; }
-.ui-ts-item { position: relative; display: flex; align-items: center; gap: 10px; min-height: var(--ui-row-h, 32px); border-bottom: 1px solid var(--line); background: transparent; }
+.ui-ts-item { position: relative; display: flex; align-items: center; gap: 0.625rem; min-height: var(--ui-row-h, 2rem); border-bottom: 1px solid var(--line); background: transparent; }
 .ui-ts-item:last-child { border-bottom: 0; }
-.ui-ts-item[data-dragging] { z-index: 2; background: var(--overlay-solid); border-radius: 10px; box-shadow: var(--shadow); }
-.ui-ts-grip { display: grid; flex: none; place-items: center; width: var(--ui-control-h, 30px); height: var(--ui-control-h, 30px); padding: 0; border: 0; border-radius: 8px; background: none; color: var(--fg-3); cursor: grab; touch-action: none; }
-.ui-ts-grip svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-linecap: round; }
+.ui-ts-item[data-dragging] { z-index: 2; background: var(--overlay-solid); border-radius: 0.625rem; box-shadow: var(--shadow); }
+.ui-ts-grip { display: grid; flex: none; place-items: center; width: var(--ui-control-h, 1.875rem); height: var(--ui-control-h, 1.875rem); padding: 0; border: 0; border-radius: 0.5rem; background: none; color: var(--fg-3); cursor: grab; touch-action: none; }
+.ui-ts-grip svg { width: var(--ui-icon, 1rem); height: var(--ui-icon, 1rem); fill: none; stroke: currentColor; stroke-linecap: round; }
 .ui-ts-item[data-dragging] .ui-ts-grip { cursor: grabbing; }
 .ui-ts-icon { display: grid; flex: none; color: var(--fg-2); }
-.ui-ts-icon svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-ts-icon svg { width: var(--ui-icon, 1rem); height: var(--ui-icon, 1rem); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ui-ts-label { flex: 1; min-width: 0; color: var(--fg); font: var(--ui-type-label); line-height: normal; letter-spacing: var(--ui-tracking); } /* the label's line box is the font's own height, so it shares the icon's centre line (#282) */
-.ui-ts-reset { justify-self: start; min-height: var(--ui-control-h, 30px); padding: 0 12px; border: 1px solid var(--overlay-line); border-radius: 999px; background: none; color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-ts-reset { justify-self: start; min-height: var(--ui-control-h, 1.875rem); padding: 0 0.75rem; border: 1px solid var(--overlay-line); border-radius: 999px; background: none; color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
 .ui-ts-reset:active { transform: scale(var(--ui-press-scale, 0.97)); }
 @media (hover: hover) and (pointer: fine) { .ui-ts-reset:hover, .ui-ts-grip:hover { background: var(--hover); } }
 
 /* Settings, Shortcuts (shortcuts-settings.ts): the registry's rows; a row is a button that listens for the new keys. */
-.ui-shortcuts-settings { display: grid; gap: 12px; }
+.ui-shortcuts-settings { display: grid; gap: 0.75rem; }
 .ui-ss-list { display: grid; margin: 0; padding: 0; list-style: none; }
 .ui-ss-row { position: relative; display: flex; flex-wrap: wrap; align-items: center; border-bottom: 1px solid var(--line); }
 .ui-ss-row:last-child { border-bottom: 0; }
-.ui-ss-main { display: flex; flex: 1; align-items: center; justify-content: space-between; gap: 16px; min-height: var(--row, 28px); padding: 0; border: 0; background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; }
+.ui-ss-main { display: flex; flex: 1; align-items: center; justify-content: space-between; gap: 1rem; min-height: var(--row, 1.75rem); padding: 0; border: 0; background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; }
 .ui-ss-main:disabled { cursor: default; color: var(--ui-text-secondary); }
-.ui-ss-keys { display: inline-flex; flex: none; gap: 4px; }
+.ui-ss-keys { display: inline-flex; flex: none; gap: 0.25rem; }
 .ui-ss-keys[data-capturing] { color: var(--accent); }
-.ui-ss-keys kbd { min-width: 22px; padding: 4px 6px; border-radius: 6px; background: var(--hover); color: var(--fg-2); font: var(--fw-label, 500) var(--text-caption, 11px)/1 var(--font-ui); text-align: center; }
-.ui-ss-reset { display: grid; place-items: center; width: var(--ui-control-h, 30px); height: var(--ui-control-h, 30px); margin-left: 6px; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--fg-3); cursor: pointer; }
-.ui-ss-reset svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.ui-ss-warn { display: flex; flex: 1 0 100%; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0 8px; color: var(--warn, var(--fg-2)); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
-.ui-ss-actions { display: inline-flex; gap: 6px; }
-.ui-ss-actions button { min-height: var(--ui-control-h, 30px); padding: 0 12px; border: 1px solid var(--overlay-line); border-radius: 999px; background: none; color: var(--fg); font: var(--ui-type-button); cursor: pointer; }
+.ui-ss-keys kbd { min-width: 1.375rem; padding: 0.25rem 0.375rem; border-radius: 0.375rem; background: var(--hover); color: var(--fg-2); font: var(--fw-label, 500) var(--text-caption, 0.6875rem)/1 var(--font-ui); text-align: center; }
+.ui-ss-reset { display: grid; place-items: center; width: var(--ui-control-h, 1.875rem); height: var(--ui-control-h, 1.875rem); margin-left: 0.375rem; padding: 0; border: 0; border-radius: 0.5rem; background: none; color: var(--fg-3); cursor: pointer; }
+.ui-ss-reset svg { width: var(--ui-icon, 1rem); height: var(--ui-icon, 1rem); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-ss-warn { display: flex; flex: 1 0 100%; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.25rem 0 0.5rem; color: var(--warn, var(--fg-2)); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.ui-ss-actions { display: inline-flex; gap: 0.375rem; }
+.ui-ss-actions button { min-height: var(--ui-control-h, 1.875rem); padding: 0 0.75rem; border: 1px solid var(--overlay-line); border-radius: 999px; background: none; color: var(--fg); font: var(--ui-type-button); cursor: pointer; }
 @media (hover: hover) and (pointer: fine) { .ui-ss-reset:hover, .ui-ss-actions button:hover, .ui-ss-main:not(:disabled):hover { background: var(--hover); } }
-.ui-ts-source { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.ui-ts-tag { padding: 3px 9px; border-radius: 999px; background: var(--hover); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.ui-ts-source { display: flex; align-items: center; justify-content: space-between; gap: 0.625rem; }
+.ui-ts-tag { padding: 0.1875rem 0.5625rem; border-radius: 999px; background: var(--hover); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-ts-tag[data-device="true"] { background: var(--accent-soft); color: var(--accent); }
 .ui-ts-tag, .ui-ts-source .ui-ts-reset, .ui-ss-actions button { white-space: nowrap; }
 .keyedit-list::before { white-space: nowrap; }
@@ -919,17 +923,18 @@
 }
 
 /* Settings windows (settings-panels.ts): choice rows with a tick, device rows, headings; every colour, size and radius is a token. */
-.ui-sp { display: grid; gap: 14px; }
+/* One column that is the pane's width, never wider: a window keeps its width when the UI size grows (#283), and a row that cannot wrap (a theme and its "dark") must not widen the whole column and push every section's right edge out of the window. */
+.ui-sp { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.875rem; }
 .ui-sp-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
-.ui-sp-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: var(--ui-row-h, 32px); padding: 0 8px; border: 0; border-radius: 8px; background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-sp-row { display: flex; align-items: center; gap: 0.625rem; width: 100%; min-height: var(--ui-row-h, 2rem); padding: 0 0.5rem; border: 0; border-radius: 0.5rem; background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
 .ui-sp-row:active { transform: scale(var(--ui-press-scale, 0.97)); }
 @media (hover: hover) and (pointer: fine) { .ui-sp-row:hover { background: var(--hover); } }
-.ui-sp-swatch { position: relative; flex: none; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--overlay-line); }
-.ui-sp-swatch::after { content: ""; position: absolute; right: 2px; bottom: 2px; width: 6px; height: 6px; border-radius: 50%; background: var(--dot); }
+.ui-sp-swatch { position: relative; flex: none; width: 1.125rem; height: 1.125rem; border-radius: 50%; border: 1px solid var(--overlay-line); }
+.ui-sp-swatch::after { content: ""; position: absolute; right: 2px; bottom: 2px; width: 0.375rem; height: 0.375rem; border-radius: 50%; background: var(--dot); }
 /* Name and hint share a line: the name is one unbreakable line and the hint sits right-aligned beside it. When the list's
    widest row does not fit (decided per list in fitHints) the list is `data-stacked` and every hint sits under its name,
    left-aligned, balanced and allowed two lines. The tick stays centred on the row. */
-.ui-sp-text { display: flex; flex: 1; align-items: baseline; column-gap: 10px; min-width: 0; padding: 5px 0; }
+.ui-sp-text { display: flex; flex: 1; align-items: baseline; column-gap: 0.625rem; min-width: 0; padding: 0.3125rem 0; }
 /* Beside its name, a hint starts where the list's widest name ends (fitHints sets --ui-sp-label-w), so a list's hints
    share one left edge instead of following each name's length. */
 .ui-sp-text .ui-sp-label { flex: none; width: var(--ui-sp-label-w, auto); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -941,49 +946,49 @@
 .ui-sp-hint { color: var(--ui-text-secondary); }
 /* A destructive row (remove, sign out) names its action in the danger colour; the hint under it stays quiet. */
 .ui-sp-row[data-tone="danger"] .ui-sp-label { color: var(--danger); }
-.ui-sp-tick { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); flex: none; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(0.6); transition: opacity 150ms ease, transform 180ms var(--ease-out, ease-out); }
+.ui-sp-tick { width: var(--ui-icon, 1rem); height: var(--ui-icon, 1rem); flex: none; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(0.6); transition: opacity 150ms ease, transform 180ms var(--ease-out, ease-out); }
 .ui-sp-row[data-current] .ui-sp-tick { opacity: 1; transform: none; }
 .ui-sp-devices { display: grid; margin: 0; padding: 0; list-style: none; }
-.ui-sp-device { display: flex; align-items: center; gap: 10px; min-height: 52px; border-bottom: 1px solid var(--line); }
+.ui-sp-device { display: flex; align-items: center; gap: 0.625rem; min-height: 3.25rem; border-bottom: 1px solid var(--line); }
 .ui-sp-device:last-child { border-bottom: 0; }
-.ui-sp-kind { position: relative; display: grid; flex: none; place-items: center; width: 28px; height: 28px; color: var(--fg-2); }
-.ui-sp-kind svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.ui-sp-dot { position: absolute; right: 1px; bottom: 1px; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 2px var(--bg); }
+.ui-sp-kind { position: relative; display: grid; flex: none; place-items: center; width: 1.75rem; height: 1.75rem; color: var(--fg-2); }
+.ui-sp-kind svg { width: var(--ui-icon, 1rem); height: var(--ui-icon, 1rem); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-sp-dot { position: absolute; right: 1px; bottom: 1px; width: 0.4375rem; height: 0.4375rem; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 2px var(--bg); }
 .ui-sp-dot[data-online="false"] { background: var(--fg-3); }
 /* A static row (a fact and its action): no press scale or hover fill, because the row itself does nothing. The action fades
    instead of vanishing so the words keep their place. */
-.ui-sp-status { cursor: default; min-height: var(--ui-row-h, 32px); }
+.ui-sp-status { cursor: default; min-height: var(--ui-row-h, 2rem); }
 .ui-sp-status:active { transform: none; }
 @media (hover: hover) and (pointer: fine) { .ui-sp-status:hover { background: none; } }
 .ui-sp-status-action { flex: none; transition: opacity 160ms ease, background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
 .ui-sp-status-action[data-shown="false"] { opacity: 0; pointer-events: none; }
 @media (prefers-reduced-motion: reduce) { .ui-sp-status-action { transition: none; } }
 .ui-sp-names { display: grid; flex: 1; min-width: 0; gap: 2px; }
-.ui-sp-name-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-.ui-sp-name { min-width: 0; max-width: 100%; padding: 0 2px; margin: 0 -2px; border: 0; border-radius: 6px; background: none; outline: none; color: var(--fg); font: var(--ui-type-label); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); }
+.ui-sp-name-row { display: flex; align-items: baseline; gap: 0.5rem; min-width: 0; }
+.ui-sp-name { min-width: 0; max-width: 100%; padding: 0 2px; margin: 0 -2px; border: 0; border-radius: 0.375rem; background: none; outline: none; color: var(--fg); font: var(--ui-type-label); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); }
 .ui-sp-name:focus { background: var(--hover); }
-.ui-sp-here { color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary, 12px); white-space: nowrap; }
-.ui-sp-sub { color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary, 12px); letter-spacing: var(--ui-tracking); }
+.ui-sp-here { color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary, 0.75rem); white-space: nowrap; }
+.ui-sp-sub { color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary, 0.75rem); letter-spacing: var(--ui-tracking); }
 .ui-sp-actions { display: flex; flex: none; gap: 2px; }
 .ui-ts-tag, .ui-ts-source .ui-ts-reset, .ui-ss-actions button { white-space: nowrap; }
 .keyedit-list::before { white-space: nowrap; }
 
 /* A chip used as a toggle (a view to share, a filter): pressed is a quiet accent fill, nothing else changes. */
-.ui-chip[aria-pressed] { padding-right: 10px; cursor: pointer; }
+.ui-chip[aria-pressed] { padding-right: 0.625rem; cursor: pointer; }
 .ui-chip[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
 
 /* Item states (branched.ts `state` and `mark`, and the session manager): an item is open (filled dot), detached
    (hollow dot) or exited (hollow square). A mark follows: new output is a quiet dot, a finished command a tick
    or a cross, so the exit code beside it reads "✓ 0" or "✗ 1". One drawing, used by every list of such items. */
-.ui-state-dot { display: grid; flex: none; place-items: center; width: 18px; }
-.ui-state-dot::before { content: ""; box-sizing: border-box; width: 7px; height: 7px; border-radius: 50%; }
+.ui-state-dot { display: grid; flex: none; place-items: center; width: 1.125rem; }
+.ui-state-dot::before { content: ""; box-sizing: border-box; width: 0.4375rem; height: 0.4375rem; border-radius: 50%; }
 .ui-state-dot[data-state="open"]::before { background: var(--fg-2); }
 .ui-state-dot[data-state="detached"]::before { box-shadow: inset 0 0 0 1.5px var(--fg-3); }
-.ui-state-dot[data-state="exited"]::before { width: 6px; height: 6px; border-radius: 1.5px; box-shadow: inset 0 0 0 1.5px var(--fg-3); }
+.ui-state-dot[data-state="exited"]::before { width: 0.375rem; height: 0.375rem; border-radius: 1.5px; box-shadow: inset 0 0 0 1.5px var(--fg-3); }
 .bm-leaf[aria-current] .ui-state-dot[data-state="open"]::before { background: var(--accent); }
-.ui-mark { flex: none; width: 12px; height: 12px; }
+.ui-mark { flex: none; width: 0.75rem; height: 0.75rem; }
 .ui-mark.is-new { animation: ui-mark-in 180ms var(--ease-out, ease-out); }
-.ui-mark[data-mark="output"] { width: 6px; height: 6px; margin: 0 3px; border-radius: 50%; background: var(--accent); }
+.ui-mark[data-mark="output"] { width: 0.375rem; height: 0.375rem; margin: 0 0.1875rem; border-radius: 50%; background: var(--accent); }
 .ui-mark[data-mark="ok"], .ui-mark[data-mark="fail"] { background: currentColor; -webkit-mask: var(--ui-mark-icon) center / contain no-repeat; mask: var(--ui-mark-icon) center / contain no-repeat; }
 .ui-mark[data-mark="ok"] { color: var(--ok); --ui-mark-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E"); }
 /* Ended: the session is gone without an exit code to report. Quiet, not an error: a stopped square. */
@@ -991,14 +996,14 @@
 .ui-mark[data-mark="fail"] { color: var(--danger); --ui-mark-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cpath d='M6.5 6.5l11 11M17.5 6.5l-11 11'/%3E%3C/svg%3E"); }
 /* In a branched menu the mark sits on the right, against the note beside it. */
 .bm-leaf .ui-mark { margin-left: auto; }
-.bm-leaf .ui-mark[data-mark="output"] { margin-right: 3px; }
-.bm-leaf .ui-mark + .bm-meta { margin-left: 6px; }
+.bm-leaf .ui-mark[data-mark="output"] { margin-right: 0.1875rem; }
+.bm-leaf .ui-mark + .bm-meta { margin-left: 0.375rem; }
 @keyframes ui-mark-in { from { opacity: 0; transform: scale(0.5); } }
 @media (prefers-reduced-motion: reduce) { .ui-mark.is-new { animation: none; } }
 /* A long leaf name gives way to its marks and notes instead of wrapping onto a second line. */
 .bm-leaf .bm-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A caption between groups inside one section: the host above its sessions. It has no branch of its own. */
-.bm-subhead { display: flex; align-items: center; height: var(--row); padding: 0 8px; color: var(--fg-2); font: var(--fw-label) var(--text-caption)/1.2 var(--font-mono); letter-spacing: 0; }
+.bm-subhead { display: flex; align-items: center; height: var(--row); padding: 0 0.5rem; color: var(--fg-2); font: var(--fw-label) var(--text-caption)/1.2 var(--font-mono); letter-spacing: 0; }
 
 /* Entity chips (entity-chip.ts): a recognised thing named in text. Text-height, on the baseline, one unit when the line
    wraps, never animated. The fill is set inline from the palette tokens, so a theme switch recolours it with no script. */
@@ -1031,10 +1036,10 @@
   :where(*:not(.terminal-host))[data-scrolling] { scrollbar-color: color-mix(in srgb, var(--fg-2) 45%, transparent) transparent; }
 }
 @supports not (-moz-appearance: none) {
-  *:not(.terminal-host)::-webkit-scrollbar { width: 8px; height: 8px; background: transparent; }
+  *:not(.terminal-host)::-webkit-scrollbar { width: 0.5rem; height: 0.5rem; background: transparent; }
   *:not(.terminal-host)::-webkit-scrollbar-button { display: none; }
   *:not(.terminal-host)::-webkit-scrollbar-track { background: transparent; }
-  *:not(.terminal-host)::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; transition: background-color 240ms cubic-bezier(0.23, 1, 0.32, 1); }
+  *:not(.terminal-host)::-webkit-scrollbar-thumb { background: transparent; border-radius: 0.25rem; transition: background-color 240ms cubic-bezier(0.23, 1, 0.32, 1); }
   *:not(.terminal-host)[data-scrolling]::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--fg-2) 45%, transparent); }
 }
 }
@@ -1046,8 +1051,8 @@
    sidebar's 8 px padding, as a quiet tinted card (no second glass layer inside the glass). The Inbox (inbox.ts) is the
    first, the version and licence panel the second. Only opacity and transform move, and the transform is cleared at rest. */
 .ui-sidebar-card {
-  display: grid; flex: 0 1 auto; gap: 4px; min-height: 0; margin: auto 0 8px; padding: 8px;
-  border-radius: calc(var(--r-lg, 18px) - 8px); background: color-mix(in oklab, var(--fg) 6%, transparent);
+  display: grid; flex: 0 1 auto; gap: 0.25rem; min-height: 0; margin: auto 0 0.5rem; padding: 0.5rem;
+  border-radius: calc(var(--r-lg, 1.125rem) - 0.5rem); background: color-mix(in oklab, var(--fg) 6%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--fg) 12%, transparent);
   transition: opacity 160ms var(--ease-out, ease-out), transform 180ms var(--ease-out, ease-out);
 }
@@ -1056,84 +1061,40 @@
 /* A card of its own, like the toast: the glass halo would only smear its glyphs (and the solid action takes none). */
 .ui-sidebar-card, .ui-sidebar-card * { text-shadow: none; }
 .ui-sidebar-card[hidden] { display: none; }
-.ui-sidebar-card[data-open="false"] { opacity: 0; transform: translateY(6px); pointer-events: none; }
+.ui-sidebar-card[data-open="false"] { opacity: 0; transform: translateY(0.375rem); pointer-events: none; }
 /* The first card shown pushes itself and what follows to the bottom; a card after it, and the footer, follow it directly. */
 .ui-sidebar-card:not([hidden]) ~ .ui-sidebar-card, .ui-sidebar-card:not([hidden]) ~ .ui-sidebar-foot { margin-top: 0; }
-.ui-sidebar-card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 22px; padding: 2px 6px 0; color: var(--ui-text-secondary); font-size: var(--text-caption); font-weight: var(--fw-label); line-height: 1.4; }
+.ui-sidebar-card-header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; min-height: 1.375rem; padding: 2px 0.375rem 0; color: var(--ui-text-secondary); font-size: var(--text-caption); font-weight: var(--fw-label); line-height: 1.4; }
 /* The card's close control: an icon button, 24 px on desktop; its hit area is 44 px on touch without making the header taller. */
-.ui-sidebar-card-close { position: relative; display: grid; flex: none; place-items: center; width: 24px; height: 24px; margin: -2px -4px -2px 0; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--fg-3); cursor: pointer; transition: transform 140ms var(--ease-out, ease-out), background-color 140ms ease, color 140ms ease; }
-.ui-sidebar-card-close svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.ui-sidebar-card-close { position: relative; display: grid; flex: none; place-items: center; width: 1.5rem; height: 1.5rem; margin: -2px -0.25rem -2px 0; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--fg-3); cursor: pointer; transition: transform 140ms var(--ease-out, ease-out), background-color 140ms ease, color 140ms ease; }
+.ui-sidebar-card-close svg { width: 0.875rem; height: 0.875rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
 .ui-sidebar-card-close:active { transform: scale(var(--ui-press-scale)); }
 @media (hover: hover) and (pointer: fine) { .ui-sidebar-card-close:hover { background: color-mix(in oklab, var(--fg) 8%, transparent); color: var(--fg); } }
-@media (pointer: coarse) { .ui-sidebar-card-close::after { content: ""; position: absolute; inset: -10px; } }
+@media (pointer: coarse) { .ui-sidebar-card-close::after { content: ""; position: absolute; inset: -0.625rem; } }
 .ui-inbox-count { font-variant-numeric: tabular-nums; }
 .ui-inbox-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
 .ui-inbox-row {
-  display: flex; align-items: center; gap: 8px; width: 100%; min-height: var(--row); padding: 0 6px; border: 0; border-radius: 8px;
+  display: flex; align-items: center; gap: 0.5rem; width: 100%; min-height: var(--row); padding: 0 0.375rem; border: 0; border-radius: 0.5rem;
   background: none; color: var(--fg); font: inherit; font-size: var(--text-body); font-weight: var(--fw-label); text-align: left; cursor: pointer;
   -webkit-tap-highlight-color: transparent;
   transition: background-color 120ms ease, transform 140ms var(--ease-out, ease-out);
 }
 @media (hover: hover) and (pointer: fine) { .ui-inbox-row:hover { background: color-mix(in oklab, var(--fg) 6%, transparent); } }
 .ui-inbox-row:active { transform: scale(var(--ui-press-scale-soft)); }
-.ui-inbox-glyph, .ui-inbox-chevron { flex: none; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ui-inbox-glyph, .ui-inbox-chevron { flex: none; width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .ui-inbox-glyph { color: var(--accent); }
-.ui-inbox-chevron { margin-left: auto; width: 14px; height: 14px; color: var(--ui-text-secondary); transition: transform 180ms var(--ease-out, ease-out); }
+.ui-inbox-chevron { margin-left: auto; width: 0.875rem; height: 0.875rem; color: var(--ui-text-secondary); transition: transform 180ms var(--ease-out, ease-out); }
 .ui-inbox-item[data-expanded="true"] .ui-inbox-chevron { transform: rotate(90deg); }
 .ui-inbox-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The panel's height is a grid track, so opening is a plain CSS transition: it can be reversed mid-way and costs no script. */
 .ui-inbox-panel { display: grid; grid-template-rows: 0fr; visibility: hidden; transition: grid-template-rows 180ms var(--ease-out, ease-out), visibility 0s 180ms; }
 .ui-inbox-item[data-expanded="true"] .ui-inbox-panel { grid-template-rows: 1fr; visibility: visible; transition-delay: 0s; }
-.ui-inbox-panel-inner { display: grid; gap: 8px; min-height: 0; overflow: hidden; padding: 0 6px 0 30px; opacity: 0; transition: opacity 150ms ease, padding-bottom 180ms var(--ease-out, ease-out); }
-.ui-inbox-item[data-expanded="true"] .ui-inbox-panel-inner { opacity: 1; padding-bottom: 6px; }
+.ui-inbox-panel-inner { display: grid; gap: 0.5rem; min-height: 0; overflow: hidden; padding: 0 0.375rem 0 1.875rem; opacity: 0; transition: opacity 150ms ease, padding-bottom 180ms var(--ease-out, ease-out); }
+.ui-inbox-item[data-expanded="true"] .ui-inbox-panel-inner { opacity: 1; padding-bottom: 0.375rem; }
 .ui-inbox-body { margin: 0; padding-top: 2px; color: var(--ui-text-secondary); font-size: var(--text-secondary); line-height: 1.4; }
-.ui-inbox-actions { display: flex; justify-content: flex-end; gap: 6px; }
-.ui-inbox-action { --ui-button-height: 28px; --ui-button-font: 500 var(--text-secondary)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); min-height: 28px; padding: 0 12px; border-radius: 8px; }
-@media (pointer: coarse) { .ui-inbox { padding: 6px; } .ui-inbox-action { --ui-button-height: 44px; min-height: 44px; } }
-@media (prefers-reduced-motion: reduce) { .ui-inbox, .ui-inbox[data-open="false"] { transform: none; transition: opacity 150ms ease; } .ui-inbox-panel, .ui-inbox-panel-inner, .ui-inbox-chevron, .ui-inbox-row { transition-duration: 1ms; } .ui-inbox-panel-inner { transition: opacity 150ms ease; } }
-
-/* Shared window status strip [D160]; terminal and desktop bodies supply only their content. */
-/* A session that exited shows its final screen read-only, with one floating pill to run it again. */
-.cl-sx-strip {
-  position: absolute; z-index: 2; left: 0; right: 0; bottom: 14px; margin-inline: auto; width: fit-content; height: fit-content; min-height: var(--pill-h, 38px);
-  display: inline-flex; align-items: center; gap: 8px; max-width: calc(100% - 24px); padding: 0 4px 0 14px; white-space: nowrap;
-  color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking);
-}
-/* The strip is placed by auto margins, never by a transform: the shared pill's pressed state sets its own transform, and
-   a centring transform would be replaced by it, so the strip jumped away from the button under the pointer (#185).
-   Only the buttons inside it are pressable; the strip itself neither scales nor changes on hover. */
-.cl-sx-strip.ui-pill:active:not(:disabled) { transform: none; }
-@media (hover: hover) and (pointer: fine) { .cl-sx-strip.ui-pill:hover:not(:disabled) { background: var(--overlay); } }
-.cl-sx-strip-text { color: var(--ui-text-secondary); }
-.cl-sx-strip[data-result="fail"] .cl-sx-strip-text { color: var(--danger); }
-.cl-sx-again {
-  display: inline-flex; align-items: center; gap: 6px; height: calc(var(--pill-h, 38px) - 10px); padding: 0 12px 0 10px; border: 0; border-radius: 999px; background: var(--fg); color: var(--bg);
-  font: var(--ui-type-button); letter-spacing: var(--ui-tracking); cursor: pointer; transition: transform 140ms var(--ease-out, ease-out);
-}
-.cl-sx-again:active { transform: scale(var(--ui-press-scale)); }
-.cl-sx-again svg { width: 14px; height: 14px; }
-.cl-sx-dismiss { display: inline-grid; place-items: center; width: calc(var(--pill-h, 38px) - 10px); height: calc(var(--pill-h, 38px) - 10px); border: 0; border-radius: 999px; background: none; color: var(--fg-2); cursor: pointer; }
-.cl-sx-dismiss:active { transform: scale(var(--ui-press-scale)); }
-.cl-sx-strip .ui-mark { margin-left: -2px; }
-/* On a phone the pill sits at the start edge, clear of the corner the mock badge keeps. */
-@media (pointer: coarse) { .cl-sx-strip { left: 12px; right: auto; margin-inline: 0; } }
-/* An ended session (#158) has no screen left to read: the empty terminal is hidden (no cursor that invites typing),
-   and the pill sits in the middle of the window, on every device. */
-.cl-sx-strip:is([data-result="ended"], [data-result="refused"]) { inset: 0; margin: auto; animation: cl-sx-strip-in 200ms var(--ease-out, ease-out); }
-/* A refusal explains itself in a sentence or two, so it wraps; the buttons stay on the last line's side. */
-.cl-sx-strip[data-result="refused"] { white-space: normal; width: min(calc(100% - 24px), 420px); padding-block: 6px; border-radius: 22px; }
-.cl-sx-strip[data-result="refused"] .cl-sx-strip-text { flex: 1; min-width: 0; }
-@keyframes cl-sx-strip-in { from { opacity: 0; } }
-@media (hover: hover) and (pointer: fine) { .cl-sx-dismiss:hover { background: var(--hover); color: var(--fg); } }
-
-.cl-sx-strip[data-result="info"] .cl-sx-strip-text { color: var(--fg-2); }
-.cl-sx-strip[data-bare] { padding-right: 14px; }
-.cl-sx-glyph { display: inline-grid; flex: none; place-items: center; width: 14px; height: 14px; margin-left: -2px; color: var(--fg-2); }
-.cl-sx-glyph svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-
-.cl-sx-strip :focus { outline: none; }
-@media (prefers-reduced-motion: reduce) { .cl-sx-again:active, .cl-sx-dismiss:active { transform: none; } .cl-sx-strip { animation: none; } }
-@media (pointer: coarse) { .ui-sidebar-card { padding: 6px; } .ui-inbox-action { --ui-button-height: 44px; min-height: 44px; } }
+.ui-inbox-actions { display: flex; justify-content: flex-end; gap: 0.375rem; }
+.ui-inbox-action { --ui-button-height: 1.75rem; --ui-button-font: 500 var(--text-secondary)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); min-height: 1.75rem; padding: 0 0.75rem; border-radius: 0.5rem; }
+@media (pointer: coarse) { .ui-sidebar-card { padding: 0.375rem; } .ui-inbox-action { --ui-button-height: 2.75rem; min-height: 2.75rem; } }
 @media (prefers-reduced-motion: reduce) { .ui-sidebar-card, .ui-sidebar-card[data-open="false"] { transform: none; transition: opacity 150ms ease; } .ui-inbox-panel, .ui-inbox-panel-inner, .ui-inbox-chevron, .ui-inbox-row { transition-duration: 1ms; } .ui-inbox-panel-inner { transition: opacity 150ms ease; } }
 
 
@@ -1149,20 +1110,36 @@
 .ui-sidebar-card[data-morph="none"], .ui-sidebar-card[data-morph="none"] > * { transition: none; }
 
 /* Scroll fade (scroll-fade.ts): a scrolling body fades the edge that has more behind it, so a row is never cut at a hard line. */
-.ui-scroll-fade[data-fade~="bottom"] { -webkit-mask-image: linear-gradient(#000 calc(100% - 22px), transparent); mask-image: linear-gradient(#000 calc(100% - 22px), transparent); }
-.ui-scroll-fade[data-fade~="top"] { -webkit-mask-image: linear-gradient(transparent, #000 22px); mask-image: linear-gradient(transparent, #000 22px); }
-.ui-scroll-fade[data-fade="top bottom"] { -webkit-mask-image: linear-gradient(transparent, #000 22px, #000 calc(100% - 22px), transparent); mask-image: linear-gradient(transparent, #000 22px, #000 calc(100% - 22px), transparent); }
+.ui-scroll-fade[data-fade~="bottom"] { -webkit-mask-image: linear-gradient(#000 calc(100% - 1.375rem), transparent); mask-image: linear-gradient(#000 calc(100% - 1.375rem), transparent); }
+.ui-scroll-fade[data-fade~="top"] { -webkit-mask-image: linear-gradient(transparent, #000 1.375rem); mask-image: linear-gradient(transparent, #000 1.375rem); }
+.ui-scroll-fade[data-fade="top bottom"] { -webkit-mask-image: linear-gradient(transparent, #000 1.375rem, #000 calc(100% - 1.375rem), transparent); mask-image: linear-gradient(transparent, #000 1.375rem, #000 calc(100% - 1.375rem), transparent); }
 
 /* The field a name turns into while it is renamed where it stands (inline-rename.ts). Quiet fill, no border, no ring; the
    font comes from the text it replaces. */
-.ui-rename-input { min-width: 0; width: 100%; height: 22px; margin: 0 -6px; padding: 0 6px; border: 0; border-radius: 6px; background: var(--hover); color: var(--fg); }
+.ui-rename-input { min-width: 0; width: 100%; height: 1.375rem; margin: 0 -0.375rem; padding: 0 0.375rem; border: 0; border-radius: 0.375rem; background: var(--hover); color: var(--fg); }
 .ui-rename-input:focus { outline: none; }
 .ui-rename-input::placeholder { color: var(--fg-3); }
 
 /* A value run (kv-decorate.ts `parts`): small items that wrap only between them; each is one unit, tinted, with its note one
    step quieter than the name but still readable (--fg-2 clears 4.5:1 on the tint). */
-.ui-kv-part { display: inline-flex; max-width: 100%; margin: 1px 0; padding: 0 7px; border-radius: 999px; background: color-mix(in oklab, var(--fg) 9%, transparent); font-size: var(--text-secondary, 12px); line-height: 20px; vertical-align: top; }
+.ui-kv-part { display: inline-flex; max-width: 100%; margin: 1px 0; padding: 0 0.4375rem; border-radius: 999px; background: color-mix(in oklab, var(--fg) 9%, transparent); font-size: var(--text-secondary, 0.75rem); line-height: 1.25rem; vertical-align: top; }
 .ui-kv-part-name { min-width: 4ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-kv-part-note { flex: none; margin-left: 0.4em; color: var(--fg-2); font-variant-numeric: tabular-nums; }
 /* A pressable value with a chevron (kv-decorate.ts `chevron`): the room for the chevron is the value's own padding. */
-.ui-kv-value.ui-kv-has-chevron { position: relative; padding-right: 20px; }
+.ui-kv-value.ui-kv-has-chevron { position: relative; padding-right: 1.25rem; }
+
+/* ---- The slider (slider.ts, #283): a native range input, flat. The fill up to the thumb is --fill, written on every input. ---- */
+.ui-slider { display: flex; align-items: center; gap: 0.75rem; }
+.ui-slider-input { --fill: 50%; -webkit-appearance: none; appearance: none; flex: 1; min-width: 0; height: 1.75rem; margin: 0; padding: 0; background: none; cursor: pointer; touch-action: pan-y; }
+.ui-slider-input:focus { outline: none; }
+.ui-slider-input::-webkit-slider-runnable-track { height: 0.25rem; border-radius: 2px; background: linear-gradient(to right, var(--fg-2) var(--fill), var(--hover) var(--fill)); }
+.ui-slider-input::-moz-range-track { height: 0.25rem; border-radius: 2px; background: var(--hover); }
+.ui-slider-input::-moz-range-progress { height: 0.25rem; border-radius: 2px; background: var(--fg-2); }
+.ui-slider-input::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 1rem; height: 1rem; margin-top: -0.375rem; border: 0; border-radius: 50%; background: var(--fg); transition: transform 120ms var(--ease-out, ease-out); }
+.ui-slider-input::-moz-range-thumb { width: 1rem; height: 1rem; border: 0; border-radius: 50%; background: var(--fg); transition: transform 120ms var(--ease-out, ease-out); }
+.ui-slider-input:active::-webkit-slider-thumb { transform: scale(1.12); }
+.ui-slider-input:active::-moz-range-thumb { transform: scale(1.12); }
+[data-focus-ring="on"] .ui-slider-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 0.375rem; }
+.ui-slider-value { flex: none; min-width: 5ch; text-align: right; color: var(--fg-2); font: var(--ui-type-label); font-variant-numeric: tabular-nums; letter-spacing: var(--ui-tracking); }
+@media (pointer: coarse) { .ui-slider-input { height: 2.75rem; } .ui-slider-input::-webkit-slider-thumb { width: 1.375rem; height: 1.375rem; margin-top: -0.5625rem; } .ui-slider-input::-moz-range-thumb { width: 1.375rem; height: 1.375rem; } }
+@media (prefers-reduced-motion: reduce) { .ui-slider-input::-webkit-slider-thumb, .ui-slider-input::-moz-range-thumb { transition: none; } }

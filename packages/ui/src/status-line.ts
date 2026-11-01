@@ -26,7 +26,7 @@ export type StatusState = "idle" | "ok" | "error";
 export interface StatusLine { set(state: StatusState, text: string): void }
 
 const STYLE = `
-.ui-status-line { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.ui-status-line { display: flex; align-items: flex-start; gap: 0.5rem; min-width: 0; }
 .ui-status-icons { position: relative; display: inline-grid; flex: none; height: 1lh; align-items: center; }
 .ui-status-icons > .ui-icon { grid-area: 1 / 1; opacity: 0; transform: scale(0.6); filter: blur(2px);
   transition: opacity 140ms ease-out, transform 160ms cubic-bezier(0.23, 1, 0.32, 1), filter 140ms ease-out; }

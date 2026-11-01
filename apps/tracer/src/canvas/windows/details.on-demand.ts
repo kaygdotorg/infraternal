@@ -15,6 +15,7 @@ import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
 import { createKeyValueList } from "../../../../../packages/ui/src/kv-list";
 import type { Ctx, WinRec } from "../context";
 import type { DetailsFacts, DetailsSource } from "./details-source";
+import { currentUiScale } from "../../../../../packages/ui/src/ui-scale";
 
 export interface DetailsPopover {
   readonly windowId: string;
@@ -122,7 +123,7 @@ export function openDetailsPopover(
     const screen = stage.getBoundingClientRect();
     const frame = parseFloat(getComputedStyle(anchor.closest(".ui-window") ?? anchor).borderLeftWidth) || 0;
     const inset = INSET + frame;
-    const width = Math.min(400, win.width - inset * 2);
+    const width = Math.min(400 * currentUiScale(), win.width - inset * 2);
     const left = Math.round(Math.max(win.left + inset, Math.min(pill.left, win.right - inset - width)));
     const top = Math.round(pill.bottom + INSET);
     const tray = stage.querySelector<HTMLElement>("#keybar");

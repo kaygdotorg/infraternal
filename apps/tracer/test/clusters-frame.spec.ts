@@ -2,6 +2,7 @@
  * The window frame (#126): the lock glyph on the frame line is never clipped, and a resize moves only the grabbed edge.
  */
 import { expect, test, type Page } from "playwright/test";
+import { uiFactor } from "./ui-factor";
 
 const api = (page: Page, fn: string, ...args: unknown[]): Promise<unknown> => page.evaluate(([f, a]) => ((window as unknown as { __tracerClusters: Record<string, (...x: unknown[]) => unknown> }).__tracerClusters[f as string] as (...x: unknown[]) => unknown)(...(a as unknown[])), [fn, args] as const);
 
@@ -110,7 +111,8 @@ async function clamps(page: Page, id: string, label: string): Promise<void> {
   await drag(page, id, "e", 3000, 0);
   expect(Math.abs((await width()) - Math.round((await page.evaluate(() => document.querySelector<HTMLElement>(".cl-viewport")!.clientWidth)) * 0.99)), `${label}: the widest Window Sizes option`).toBeLessThanOrEqual(1);
   await drag(page, id, "w", 3000, 0);
-  expect(Math.abs((await width()) - 300), `${label}: the minimum`).toBeLessThanOrEqual(1);
+  // 300 px at the standard factor; the minimum grows with the UI size like the windows do (#283).
+  expect(Math.abs((await width()) - Math.round(300 * (await uiFactor(page)))), `${label}: the minimum`).toBeLessThanOrEqual(1);
 }
 
 test("every window resizes from its own edges and corners (D195)", async ({ page }) => {

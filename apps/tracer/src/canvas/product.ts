@@ -310,10 +310,24 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   let account: { dispose(): void } | undefined;
   if (options.person) {
     const person = options.person;
+    // The card's chunk can arrive after the sidebar is open (a slow link, a busy device). A press on the pill in that gap must not
+    // fall through to the pill's old small menu, which the card replaces: it is claimed here and the card opens once it is mounted.
+    const foot = core.stage.querySelector<HTMLElement>(".ui-sidebar-foot");
+    let pressedEarly = false;
+    const claimPress = (event: MouseEvent): void => {
+      if (!(event.target as Element | null)?.closest(".ui-sidebar-user")) return;
+      event.stopImmediatePropagation();
+      event.preventDefault();
+      pressedEarly = true;
+    };
+    foot?.addEventListener("click", claimPress, true);
     void import("./account").then(({ mountAccountCard, identityModel }) => {
+      foot?.removeEventListener("click", claimPress, true);
       if (disposed) return;
-      account = mountAccountCard({ core, model: identityModel(person), openSettings: (section) => { window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${section}`, source: "pointer" } })); } });
-    });
+      const mounted = mountAccountCard({ core, model: identityModel(person), openSettings: (section) => { window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${section}`, source: "pointer" } })); } });
+      account = mounted;
+      if (pressedEarly) mounted?.show();
+    }, () => { foot?.removeEventListener("click", claimPress, true); /* the old menu stays: better than a dead pill */ });
   }
 
   return {

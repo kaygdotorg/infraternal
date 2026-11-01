@@ -13,6 +13,7 @@
 import { createCapsuleTabs } from "./capsule-tabs";
 import { ICONS } from "./icons";
 import { createKeyValueList } from "./kv-list";
+import { createSlider } from "./slider";
 import { enhanceSwitch } from "./switch";
 import { mountConfirmTip } from "./tooltip";
 import { LEVEL_NAMES } from "./themes";
@@ -26,6 +27,8 @@ export interface AppearanceApi {
   act(action: string): void;
   /** Called after any appearance change; returns a remover. */
   onChange(listener: () => void): () => void;
+  /** The whole UI's size (#283): a percentage within `min` and `max`, in `step`s, of the standard size. */
+  uiSize?: { min: number; max: number; step: number; get(): number; set(percent: number): void; onChange(listener: () => void): () => void };
 }
 
 /** One on/off preference: a titled row with a label, a quiet subtitle and a switch. */
@@ -69,8 +72,9 @@ function fitHints(list: HTMLElement): void {
     const texts = [...list.querySelectorAll<HTMLElement>(".ui-sp-text")];
     const hinted = texts.filter((t) => t.querySelector<HTMLElement>(".ui-sp-hint")!.textContent !== "");
     if (hinted.length === 0) return;
-    // Rounded up so a name never loses a fraction of a pixel to its own column and gets an ellipsis.
-    const column = Math.ceil(Math.max(...texts.map((t) => t.querySelector<HTMLElement>(".ui-sp-label")!.getBoundingClientRect().width)));
+    // Rounded up so a name never loses a fraction of a pixel to its own column and gets an ellipsis. The used width, not a
+    // rect: a rect carries every transform above it (the canvas camera's zoom), and a column measured at 0.8 would clip at 1.
+    const column = Math.ceil(Math.max(...texts.map((t) => Number.parseFloat(getComputedStyle(t.querySelector<HTMLElement>(".ui-sp-label")!).width) || 0)));
     list.style.setProperty("--ui-sp-label-w", `${column}px`);
     const stack = hinted.some((t) => column + 10 + t.querySelector<HTMLElement>(".ui-sp-hint")!.scrollWidth > t.clientWidth);
     if (stack) list.dataset.stacked = "";
@@ -210,7 +214,7 @@ function paintChoice(block: HTMLElement, current: string): void {
   }
 }
 
-/** Theme, font, background and card transparency. */
+/** Theme, font, background, card transparency and the size of the whole UI. */
 export function renderAppearance(container: HTMLElement, api: AppearanceApi): () => void {
   const root = document.createElement("div");
   root.className = "ui-sp";
@@ -233,6 +237,19 @@ export function renderAppearance(container: HTMLElement, api: AppearanceApi): ()
   const windowTabs = createCapsuleTabs(levels, String(api.state().windows), (id) => api.act(`windows:${id}`), "Window transparency");
   windows.append(windowTabs.root);
   root.append(theme, font, background, card, windows);
+  // The size of the whole UI (#283): live while the thumb moves; the terminal's own font size is a separate setting.
+  const size = api.uiSize;
+  const sizeSlider = size ? createSlider({ label: "UI size", min: size.min, max: size.max, step: size.step, value: size.get(), format: (v) => `${v} %`, onInput: (v) => size.set(v) }) : undefined;
+  if (size && sizeSlider) {
+    const section = document.createElement("section");
+    section.append(heading("UI size"), sizeSlider.root);
+    const hint = document.createElement("p");
+    hint.className = "ui-sp-sub";
+    hint.textContent = "Scales text, rows, buttons and icons together. The terminal's own font size is separate.";
+    section.append(hint);
+    root.insertBefore(section, theme);
+  }
+  const offSize = size?.onChange(() => sizeSlider?.set(size.get()));
 
   const paint = (): void => {
     const s = api.state();
@@ -243,7 +260,7 @@ export function renderAppearance(container: HTMLElement, api: AppearanceApi): ()
   };
   paint();
   const off = api.onChange(paint);
-  return () => { off(); bgTabs.dispose(); cardTabs.dispose(); windowTabs.dispose(); root.remove(); };
+  return () => { off(); offSize?.(); sizeSlider?.dispose(); bgTabs.dispose(); cardTabs.dispose(); windowTabs.dispose(); root.remove(); };
 }
 
 export interface WindowSizesApi {

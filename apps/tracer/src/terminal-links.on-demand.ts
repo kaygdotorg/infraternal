@@ -2,6 +2,7 @@
 import { hideTipAt as hideSharedTipAt, hoverTipAt, peekTipAt } from "../../../packages/ui/src/tooltip";
 import { formatLinkTooltipText, linkTooltipLineCount } from "../../../packages/ui/src/tooltip-link-text";
 import { isMacPlatform } from "../../../packages/ui/src/platform";
+import { cssPx } from "../../../packages/ui/src/ui-scale";
 
 interface TerminalLinkUnderlineRange {
   startX: number;
@@ -230,7 +231,7 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
 
   const tooltipTextStyle = (): { fontSize: number; contentWidth: number; font: string } => {
     const style = getComputedStyle(options.host);
-    const fontSize = Number.parseFloat(style.getPropertyValue("--text-secondary")) || 12;
+    const fontSize = cssPx(options.host, "--text-secondary", 12);
     const weight = style.getPropertyValue("--fw-label").trim() || "500";
     const family = style.getPropertyValue("--font-ui").trim() || "ui-monospace";
     return {

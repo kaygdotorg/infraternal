@@ -25,6 +25,7 @@ import { createFlip } from "./layout/flip";
 import { metricsFor, type Metrics } from "./layout/geometry";
 import { columnEls } from "./layout/columns";
 import { SIZE_EVENT, edgeToEdge, readSizes } from "./window-sizes";
+import { UI_SIZE_EVENT, currentUiScale } from "../../../../packages/ui/src/ui-scale";
 import { createMesh } from "./mesh";
 import { createDocumentSync } from "./model/sync";
 import type { ViewModel } from "./model/types";
@@ -90,7 +91,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   const events = new AbortController();
 
   const state: CanvasState = {
-    metrics: metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches, readSizes()),
+    metrics: metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches, readSizes(), currentUiScale()),
     activeWin: undefined, currentView: "console", canvasLock: true, snapIdx: 0, movingWindow: false, serial: 0, recent: new Map(),
   };
   let frameQueued = 0;
@@ -151,8 +152,8 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     cx.camera.resized();
     backdrop?.measure();
     const previous = state.metrics;
-    const next = metricsFor(w, h, coarse.matches, sizes);
-    if (next.colW === previous.colW && next.peekW === previous.peekW && next.clh === previous.clh && next.narrow === previous.narrow && next.minW === previous.minW && next.maxW === previous.maxW) {
+    const next = metricsFor(w, h, coarse.matches, sizes, currentUiScale());
+    if (next.colW === previous.colW && next.peekW === previous.peekW && next.clh === previous.clh && next.narrow === previous.narrow && next.minW === previous.minW && next.maxW === previous.maxW && next.scale === previous.scale) {
       // Nothing about the windows changed (the area did): keep the framing centred, unless a flight is under way.
       if (performance.now() >= animatingUntil) { if (cx.camera.target && cx.views.size) cx.camera.set(cx.camera.target()); else cx.camera.apply(true); }
       return;
@@ -179,6 +180,8 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     relayout(false);
   });
   window.addEventListener(SIZE_EVENT, () => relayout(true), { signal: events.signal });
+  // The UI size: windows grow with it, live, with the same layout spring as a change of Window Sizes (#283).
+  window.addEventListener(UI_SIZE_EVENT, () => relayout(true), { signal: events.signal });
   // Attaching or removing a trackpad or mouse flips the pointer kind without a resize; the touch minimum
   // column (D309) must follow it, or a fine pointer keeps the wide touch columns.
   coarse.addEventListener("change", () => relayout(true), { signal: events.signal });
@@ -203,7 +206,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     setViews(models) {
       cx.inputLock.reset();
       cx.view.clear();
-      state.metrics = metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches, readSizes());
+      state.metrics = metricsFor(viewport.clientWidth || innerWidth, viewport.clientHeight || innerHeight, coarse.matches, readSizes(), currentUiScale());
       cx.camera.resized();
       world.style.setProperty("--clh", `${state.metrics.clh}px`);
       for (const v of typeof models === "function" ? models(state.metrics) : models) cx.views.set(v.id, cx.view.build(v));

@@ -12,6 +12,7 @@
  *     above the ring other than the field's own ancestors.
  */
 import { expect, test, type Page, type TestInfo } from "playwright/test";
+import { uiFactor } from "./ui-factor";
 
 const viewports = [
   { id: "desktop", width: 1440, height: 900 },
@@ -176,9 +177,11 @@ test("every setup and sign-in focus ring is whole: not clipped, not covered", as
     const top = (selector: string) => document.querySelector(selector)!.getBoundingClientRect();
     return { aboveTitle: top(".auth-pane").top - top(".auth-steps").bottom, belowFields: top(".auth-footer").top - top(".auth-pane").bottom };
   });
-  expect(gaps.aboveTitle).toBe(30);
-  expect(gaps.belowFields).toBeGreaterThanOrEqual(26);
-  expect(gaps.belowFields).toBeLessThan(27);
+  // The gaps are lengths of the interface (rem), so they are 30 and 26 px times the UI's factor (1.1 on a desktop).
+  const factor = await uiFactor(page);
+  expect(gaps.aboveTitle).toBeCloseTo(30 * factor, 1);
+  expect(gaps.belowFields).toBeGreaterThanOrEqual(26 * factor - 0.01);
+  expect(gaps.belowFields).toBeLessThan(27 * factor);
   await collectRingProblems(page, testInfo, "setup-2-identity", problems);
   await page.getByRole("button", { name: "Continue" }).click();
 

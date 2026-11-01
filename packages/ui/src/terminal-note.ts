@@ -12,13 +12,13 @@
  */
 
 const STYLE = `
-.ui-terminal-note { position: absolute; z-index: 2; right: 10px; max-width: calc(100% - 20px); margin: 0; padding: 3px 8px;
-  border-radius: 6px; background: color-mix(in srgb, var(--bg, #101113) 82%, transparent); color: var(--fg-3, #8d9096);
-  font: var(--fw-secondary, 400) var(--text-caption, 11px)/1.3 var(--font-mono, ui-monospace, monospace);
+.ui-terminal-note { position: absolute; z-index: 2; right: 0.625rem; max-width: calc(100% - 1.25rem); margin: 0; padding: 0.1875rem 0.5rem;
+  border-radius: 0.375rem; background: color-mix(in srgb, var(--bg, #101113) 82%, transparent); color: var(--fg-3, #8d9096);
+  font: var(--fw-secondary, 400) var(--text-caption, 0.6875rem)/1.3 var(--font-mono, ui-monospace, monospace);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; user-select: none; opacity: 0;
   transition: opacity 120ms ease-out; }
-.ui-terminal-note[data-edge="top"] { top: 8px; }
-.ui-terminal-note[data-edge="bottom"] { bottom: 8px; }
+.ui-terminal-note[data-edge="top"] { top: 0.5rem; }
+.ui-terminal-note[data-edge="bottom"] { bottom: 0.5rem; }
 .ui-terminal-note[data-shown] { opacity: 1; }
 .ui-terminal-note[hidden] { display: none; }
 @media (prefers-reduced-motion: reduce) { .ui-terminal-note { transition: none; } }
