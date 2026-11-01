@@ -78,17 +78,23 @@ active text caret; it clicks the target window center before warmup, so use it
 only when that point is an editor. The Rust helper launches this same bundle through
 LaunchServices with `open -n -W -g` and a fresh mode-0600 Unix socket in a
 mode-0700 temporary directory; it refuses loose executables. In measurement
-mode, companion metrics flow to the helper's stderr, including
-LaunchServices-to-PID startup time. `summarize RUN STDERR` joins frame receipts with
-the companion's METRIC lines by capture stamp: capture-to-encoded and
-capture-to-client percentiles exclude sharp refreshes of the retained picture
-(`surface_delivery fresh=false`), whose stamp age is not latency. CPU covers the
-helper, its LaunchServices-detached companion, and `VTEncoderXPCService`,
-`replayd` and `WindowServer`, which also serve other clients. With `--socket`,
-pass `--helper-pid` and `--metrics-log` pointing to that helper's stderr file;
-the sampler follows its `launch_services pid=...` receipt to include the
-companion's CPU and RSS. The JSON records the sampled companion PIDs. Decode
-`stream.h264` with any H.264 decoder for pixels.
+mode, the helper writes LaunchServices-to-PID timing to its stderr, while the
+companion writes capture, encode and pixel-damage metrics to the path set by
+`INFRATERNAL_DESKTOP_MEASURE_STDERR`. `summarize RUN HELPER-STDERR
+--companion-stderr COMPANION-STDERR` joins both logs with frame receipts by
+capture stamp. Direct `--app` captures include the run's `companion.stderr`
+automatically. Capture-to-encoded and capture-to-client percentiles exclude
+sharp refreshes of the retained picture (`surface_delivery fresh=false`), whose
+stamp age is not latency. CPU covers the helper, its LaunchServices-detached
+companion, and `VTEncoderXPCService`, `replayd` and `WindowServer`, which also
+serve other clients. With `--socket`, pass `--helper-pid` and `--metrics-log`
+pointing to that helper's stderr file; the sampler follows its
+`launch_services pid=...` receipt to include the companion's CPU and RSS. The
+JSON records the sampled companion PIDs and every
+`pixel_damage` receipt with its class, changed bounds, changed-pixel count,
+completeness and matching phase. Run `python3
+tests/fixtures/test_measure_app_window.py` to check that the summary preserves
+those classifier inputs. Decode `stream.h264` with any H.264 decoder for pixels.
 
 `encoder-matrix.swift` lists every VideoToolbox encoder on the Mac and encodes a
 decoded PNG of a real captured window (static, typing-sized damage and 8 px

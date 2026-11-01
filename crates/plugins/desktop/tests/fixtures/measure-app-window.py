@@ -12,12 +12,16 @@ stops. `--focus` clicks the window center before warmup, for measurements where
 the idle caret must already be visible. It saves the Annex-B stream and one
 receipt per received video frame.
 
-`summarize` joins those receipts with the companion's opt-in METRIC lines
-(helper stderr with INFRATERNAL_DESKTOP_MEASURE=1) by capture timestamp and
-prints per-phase latency percentiles, bytes and bitrate, CPU and raw
-SCFrameStatus callback receipts. All native stamps and the receipts use the
-same clock (mach_absolute_time in ns == CLOCK_UPTIME_RAW), so differences are
-exact on one host. Standard library only; runs with the system python3.
+`summarize` joins those receipts with the helper and companion's opt-in METRIC
+lines by capture timestamp. Pass the companion's separate stderr log with
+`--companion-stderr` for a socket capture; direct `--app` captures read their
+`companion.stderr` file automatically. It prints per-phase latency percentiles,
+bytes and bitrate, CPU and raw SCFrameStatus callback receipts. It also
+preserves each pixel-damage class, changed bound and phase so the receipt shows
+what the caret classifier saw.
+All native stamps and the receipts use the same clock (mach_absolute_time in
+ns == CLOCK_UPTIME_RAW), so differences are exact on one host. Standard
+library only; runs with the system python3.
 
 No permission is requested here: Screen Recording and Accessibility must already
 be granted to the signed companion. Observed on macOS 26.5 (#146): a companion
@@ -368,27 +372,55 @@ def summarize(args):
     for line in open(os.path.join(args.run, "frames.tsv")).read().splitlines()[1:]:
         recv, cap, key, size = (int(v) for v in line.split("\t"))
         receipts.append({"recv": recv, "capture": cap, "key": key, "bytes": size})
-    encodes, deliveries, callbacks, lifecycle = {}, {}, [], []
+    encodes, deliveries, callbacks, lifecycle, pixel_damage = {}, {}, [], [], []
     companion_pids = set()
-    for line in open(args.stderr, errors="replace"):
-        match = METRIC.match(line.strip())
-        if not match:
-            continue
-        values = fields(match.group(1))
-        if "encode_ns" in values:
-            # A settled refresh re-encodes the retained picture with its original
-            # capture stamp; keep encodes per stamp in order and pair them FIFO.
-            encodes.setdefault(int(values["capture_ns"]), []).append(values)
-        elif match.group(1).startswith("surface_delivery"):
-            deliveries.setdefault(int(values["capture_ns"]), []).append(values["fresh"] == "true")
-        elif match.group(1).startswith("capture_callback"):
-            callbacks.append(values)
-        elif match.group(1).startswith("launch_services"):
-            lifecycle.append(match.group(1))
-        elif match.group(1).startswith(("capture_lifecycle", "capture_window", "source_capture_config", "capture_start_failed", "capture_stopped", "hardware=")):
-            lifecycle.append(match.group(1))
-        if "pid" in values and match.group(1).startswith(("source_capture_config", "capture_window")):
-            companion_pids.add(int(values["pid"]))
+    metric_logs = [args.stderr]
+    if args.companion_stderr:
+        metric_logs.append(args.companion_stderr)
+    else:
+        private_companion_stderr = os.path.join(args.run, "companion.stderr")
+        if os.path.isfile(private_companion_stderr):
+            metric_logs.append(private_companion_stderr)
+    for metric_log in dict.fromkeys(metric_logs):
+        for line in open(metric_log, errors="replace"):
+            match = METRIC.match(line.strip())
+            if not match:
+                continue
+            values = fields(match.group(1))
+            if "encode_ns" in values:
+                # A settled refresh re-encodes the retained picture with its original
+                # capture stamp; keep encodes per stamp in order and pair them FIFO.
+                encodes.setdefault(int(values["capture_ns"]), []).append(values)
+            elif match.group(1).startswith("surface_delivery"):
+                deliveries.setdefault(int(values["capture_ns"]), []).append(values["fresh"] == "true")
+            elif match.group(1).startswith("capture_callback"):
+                callbacks.append(values)
+            elif match.group(1).startswith("pixel_damage"):
+                capture_ns = int(values["capture_ns"])
+                phase = next(
+                    (
+                        phase["name"]
+                        for phase in events["phases"]
+                        if phase["begin_ns"] <= capture_ns < phase["end_ns"]
+                    ),
+                    None,
+                )
+                pixel_damage.append(
+                    {
+                        "capture_ns": capture_ns,
+                        "phase": phase,
+                        "kind": values["kind"],
+                        "bounds": values["bounds"],
+                        "pixels": int(values["pixels"]),
+                        "complete": values["complete"] == "true",
+                    }
+                )
+            elif match.group(1).startswith("launch_services"):
+                lifecycle.append(match.group(1))
+            elif match.group(1).startswith(("capture_lifecycle", "capture_window", "source_capture_config", "capture_start_failed", "capture_stopped", "hardware=")):
+                lifecycle.append(match.group(1))
+            if "pid" in values and match.group(1).startswith(("source_capture_config", "capture_window")):
+                companion_pids.add(int(values["pid"]))
     companion_pids.update(events.get("companion_pids", []))
     result = {"window": {k: events["window"].get(k) for k in ("app_name", "window_id", "owner_pid", "frame")},
               "output": [events["start"]["size"]["width"], events["start"]["size"]["height"]],
@@ -396,7 +428,8 @@ def summarize(args):
               "launch_ms": events.get("launch_ms"),
               "companion_pids": sorted(companion_pids),
               "start_reply_ms": (events["start_reply_ns"] - events["start_sent_ns"]) / 1e6,
-              "typed": events.get("typed"), "scrolled": events.get("scrolled"), "phases": [], "callbacks": callbacks, "lifecycle": lifecycle}
+              "typed": events.get("typed"), "scrolled": events.get("scrolled"), "phases": [], "callbacks": callbacks, "lifecycle": lifecycle,
+              "pixel_damage": pixel_damage}
     launches = [fields(entry) for entry in lifecycle if entry.startswith("launch_services")]
     if launches and "launch_ms" in launches[-1]:
         result["launch_ms"] = float(launches[-1]["launch_ms"])
@@ -479,6 +512,7 @@ def main():
     report = commands.add_parser("summarize")
     report.add_argument("run")
     report.add_argument("stderr")
+    report.add_argument("--companion-stderr", help="separate stderr log from the LaunchServices-launched companion")
     args = parser.parse_args()
     capture(args) if args.command == "capture" else summarize(args)
 
