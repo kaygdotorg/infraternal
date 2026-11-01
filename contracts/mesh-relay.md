@@ -104,11 +104,14 @@ first 52 bytes.
 The session number and HMAC key come from the authenticated QUIC TLS exporter
 using the label `infraternal relay probe v1`. The relay answers only a valid
 request for a live connection session, and the node accepts only a valid
-response with an outstanding transaction. Request and response sizes match,
-so probes do not amplify. A mapping reported by a relay is an observation,
-not proof of inbound reachability or NAT filtering behaviour. The discovery
-book keeps observations bounded, address-family-specific, expiring and tied
-to a network generation (`contracts/mesh-discovery.md`).
+response with an outstanding transaction. The relay binds each transaction to
+its first observed source in a 64-entry per-session rolling window; a retry
+from that source is answered, while reuse from a different source is refused.
+Transactions older than the window are forgotten. Request and response sizes
+match, so probes do not amplify. A mapping reported by a relay is an
+observation, not proof of inbound reachability or NAT filtering behaviour. The
+discovery book keeps observations bounded, address-family-specific, expiring
+and tied to a network generation (`contracts/mesh-discovery.md`).
 
 ## Seam C socket ownership
 
@@ -192,12 +195,12 @@ handling.
 ## Acceptance evidence
 
 Unit tests cover fixed-size control codecs, link-ID framing, authenticated
-probe parsing, forwarding-memory reservations including one host across 256
-backpressured pairs, the real QUIC relay on loopback and relay RSS under a
-many-pair DATAGRAM flood. The rootless namespace
-proof exercises the kernel WireGuard device, direct and relayed peers, two
-relays, link failover, recovery after relay restart, NAT rebinding and
-observation-generation retirement. It verifies a numbered TCP stream by
+probe parsing and captured-request source binding, forwarding-memory
+reservations including one host across 256 backpressured pairs, the real QUIC
+relay on loopback and relay RSS under a many-pair DATAGRAM flood. The rootless
+namespace proof exercises the kernel WireGuard device, direct and relayed
+peers, two relays, link failover, recovery after relay restart, NAT rebinding
+and observation-generation retirement. It verifies a numbered TCP stream by
 SHA-256 and checks that host links, namespaces, modules and `net.*` sysctls
 are unchanged after the run. This functional proof is not performance
 evidence; performance claims come only from the locked perf-VM results on

@@ -6,6 +6,9 @@
 //! relay connection, so the relay answers only enrolled nodes and an off-path
 //! sender cannot plant a mapping: a reply is accepted only with a valid tag
 //! and an outstanding transaction id.
+//! On the relay, each transaction stays bound to its first observed source in
+//! a 64-entry session window; same-source retries work, changed-source replays
+//! do not.
 //!
 //! The first byte is 0x2a. QUIC sets the fixed bit (0x40) in every packet it
 //! accepts and `WireGuard` messages start with a type 1–4 followed by three zero
@@ -15,8 +18,10 @@
 //! a relay never amplifies.
 
 use std::{
+    collections::VecDeque,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    sync::Mutex,
 };
 
 /// Every probe and reply is exactly this long.
@@ -27,11 +32,32 @@ const REQUEST: u8 = 1;
 const REPLY: u8 = 2;
 const SIGNED: usize = 52;
 const LABEL: &[u8] = b"infraternal relay probe v1";
+const PROBE_REPLAY_WINDOW: usize = 64;
+
+#[derive(Default)]
+struct ReplayWindow {
+    entries: VecDeque<([u8; 16], SocketAddr)>,
+}
+
+impl ReplayWindow {
+    /// Bind a transaction to its first source while it remains in the bounded window.
+    fn bind_source(&mut self, transaction: [u8; 16], source: SocketAddr) -> bool {
+        if let Some((_, original)) = self.entries.iter().find(|(seen, _)| *seen == transaction) {
+            return *original == source;
+        }
+        if self.entries.len() == PROBE_REPLAY_WINDOW && self.entries.pop_front().is_none() {
+            return false;
+        }
+        self.entries.push_back((transaction, source));
+        true
+    }
+}
 
 /// Per-connection probe credentials, derived identically by node and relay.
 pub struct ProbeKey {
     session: u64,
     key: ring::hmac::Key,
+    replay: Mutex<ReplayWindow>,
 }
 
 impl ProbeKey {
@@ -54,6 +80,7 @@ impl ProbeKey {
         Self {
             session: u64::from_be_bytes(session),
             key: ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &material[8..]),
+            replay: Mutex::new(ReplayWindow::default()),
         }
     }
 
@@ -83,9 +110,20 @@ impl ProbeKey {
             return None;
         }
         self.verify(request)?;
+        let mut transaction = [0; 16];
+        transaction.copy_from_slice(&request[16..32]);
+        let source = SocketAddr::new(canonical(observed.ip()), observed.port());
+        if !self
+            .replay
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bind_source(transaction, source)
+        {
+            return None;
+        }
         let mut out = *request;
         out[4] = REPLY;
-        match canonical(observed.ip()) {
+        match source.ip() {
             IpAddr::V4(ip) => {
                 out[32] = 4;
                 out[36..40].copy_from_slice(&ip.octets());
@@ -95,7 +133,7 @@ impl ProbeKey {
                 out[36..52].copy_from_slice(&ip.octets());
             }
         }
-        out[34..36].copy_from_slice(&observed.port().to_be_bytes());
+        out[34..36].copy_from_slice(&source.port().to_be_bytes());
         self.sign(&mut out);
         Some(out)
     }
@@ -182,22 +220,64 @@ mod tests {
     #[test]
     fn a_signed_request_gets_a_reply_naming_the_observed_source() {
         let key = key(3);
-        for observed in [
+        for (index, observed) in [
             "198.51.100.7:40123".parse::<SocketAddr>().unwrap(),
             "[2001:db8::7]:40123".parse().unwrap(),
             "[::ffff:198.51.100.7]:9".parse().unwrap(),
-        ] {
-            let request = key.request([9; 16]);
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut transaction = [9; 16];
+            transaction[0] = u8::try_from(index).unwrap();
+            let request = key.request(transaction);
             assert!(is_probe(&request));
             assert_eq!(session(&request), Some(key.session()));
             let reply = key.answer(&request, observed).unwrap();
             assert_eq!(reply.len(), request.len());
             let expected = SocketAddr::new(canonical(observed.ip()), observed.port());
-            assert_eq!(key.reply(&reply), Some(([9; 16], expected)));
+            assert_eq!(key.reply(&reply), Some((transaction, expected)));
             // A request is never accepted as a reply, nor a reply as a request.
             assert_eq!(key.reply(&request), None);
             assert_eq!(key.answer(&reply, observed), None);
         }
+    }
+
+    #[test]
+    fn a_captured_request_cannot_be_replayed_to_a_different_source() {
+        let key = key(4);
+        let request = key.request([7; 16]);
+        let original: SocketAddr = "198.51.100.7:40123".parse().unwrap();
+        let spoofed: SocketAddr = "198.51.100.99:40123".parse().unwrap();
+
+        assert!(key.answer(&request, original).is_some());
+        assert!(
+            key.answer(&request, original).is_some(),
+            "same-source retry"
+        );
+        assert!(
+            key.answer(&request, spoofed).is_none(),
+            "captured request was reflected to a different source"
+        );
+    }
+
+    #[test]
+    fn replay_window_retains_only_its_most_recent_transactions() {
+        let mut window = ReplayWindow::default();
+        let source: SocketAddr = "198.51.100.7:40123".parse().unwrap();
+        let spoofed: SocketAddr = "198.51.100.99:40123".parse().unwrap();
+
+        for value in 0..=PROBE_REPLAY_WINDOW {
+            let mut transaction = [0; 16];
+            transaction[8..].copy_from_slice(&(value as u64).to_be_bytes());
+            assert!(window.bind_source(transaction, source));
+        }
+
+        assert_eq!(window.entries.len(), PROBE_REPLAY_WINDOW);
+        let evicted = [0; 16];
+        assert!(window.bind_source(evicted, spoofed));
+        assert!(window.bind_source(evicted, spoofed));
+        assert!(!window.bind_source(evicted, source));
     }
 
     #[test]
