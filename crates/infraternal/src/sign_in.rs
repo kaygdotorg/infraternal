@@ -777,19 +777,13 @@ fn read_credential_file(directory: &LockedCredentialDirectory) -> io::Result<Cre
     Ok(file)
 }
 
-fn replace_file_atomically(
-    directory: &LockedCredentialDirectory,
-    bytes: &[u8],
-) -> io::Result<()> {
+fn replace_file_atomically(directory: &LockedCredentialDirectory, bytes: &[u8]) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     directory.verify_path_identity()?;
     for _ in 0..32 {
         let sequence = TEMPORARY_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let temporary = format!(
-            ".credentials-{}-{sequence}.tmp",
-            std::process::id()
-        );
+        let temporary = format!(".credentials-{}-{sequence}.tmp", std::process::id());
         let fd = match nix::fcntl::openat(
             &*directory.lock,
             temporary.as_str(),

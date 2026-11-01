@@ -319,38 +319,7 @@ pub(crate) async fn post_json(
     let port = url
         .port_or_known_default()
         .ok_or(ClientFailure::HttpHandshake)?;
-    let mut tls = SslConnector::builder(SslMethod::tls_client())
-        .map_err(|_| ClientFailure::TlsConfiguration)?;
-    tls.set_min_proto_version(Some(SslVersion::TLS1_3))
-        .map_err(|_| ClientFailure::TlsConfiguration)?;
-    tls.set_verify(SslVerifyMode::PEER);
-    if let Some(root) = root {
-        let mut trust = X509StoreBuilder::new().map_err(|_| ClientFailure::TlsConfiguration)?;
-        trust
-            .add_cert(root.clone())
-            .map_err(|_| ClientFailure::TlsConfiguration)?;
-        // A pinned root may issue the HTTPS leaf, but does not bypass hostname or validity checks.
-        trust
-            .set_flags(openssl::x509::verify::X509VerifyFlags::PARTIAL_CHAIN)
-            .map_err(|_| ClientFailure::TlsConfiguration)?;
-        tls.set_cert_store(trust.build());
-    } else {
-        tls.set_default_verify_paths()
-            .map_err(|_| ClientFailure::TlsConfiguration)?;
-        // Vendored OpenSSL may have a build-time prefix absent on this host.
-        // Use the system's public bundle, never an enrollment TOFU pin.
-        for bundle in [
-            "/etc/ssl/certs/ca-certificates.crt",
-            "/etc/pki/tls/certs/ca-bundle.crt",
-            "/etc/ssl/ca-bundle.pem",
-        ] {
-            if Path::new(bundle).is_file() {
-                tls.set_ca_file(bundle)
-                    .map_err(|_| ClientFailure::TlsConfiguration)?;
-                break;
-            }
-        }
-    }
+    let tls = outbound_tls_connector(root)?;
     let socket =
         connect_enrollment(name, port)
             .await
@@ -362,7 +331,6 @@ pub(crate) async fn post_json(
         .set_nodelay(true)
         .map_err(|error| ClientFailure::SocketOption(error.kind()))?;
     let ssl = tls
-        .build()
         .configure()
         .map_err(|_| ClientFailure::TlsConfiguration)?
         .into_ssl(name)
@@ -431,6 +399,46 @@ pub(crate) async fn post_json(
     })
 }
 
+/// Builds the shared TLS connector before a request opens its socket.
+///
+/// Sign-in uses platform trust; join may supply its existing pinned root. Both retain TLS 1.3,
+/// peer verification, and hostname checks so the shared transport cannot weaken either flow.
+fn outbound_tls_connector(root: Option<&X509>) -> Result<SslConnector, ClientFailure> {
+    let mut tls = SslConnector::builder(SslMethod::tls_client())
+        .map_err(|_| ClientFailure::TlsConfiguration)?;
+    tls.set_min_proto_version(Some(SslVersion::TLS1_3))
+        .map_err(|_| ClientFailure::TlsConfiguration)?;
+    tls.set_verify(SslVerifyMode::PEER);
+    if let Some(root) = root {
+        let mut trust = X509StoreBuilder::new().map_err(|_| ClientFailure::TlsConfiguration)?;
+        trust
+            .add_cert(root.clone())
+            .map_err(|_| ClientFailure::TlsConfiguration)?;
+        // A pinned root may issue the HTTPS leaf, but does not bypass hostname or validity checks.
+        trust
+            .set_flags(openssl::x509::verify::X509VerifyFlags::PARTIAL_CHAIN)
+            .map_err(|_| ClientFailure::TlsConfiguration)?;
+        tls.set_cert_store(trust.build());
+    } else {
+        tls.set_default_verify_paths()
+            .map_err(|_| ClientFailure::TlsConfiguration)?;
+        // Vendored OpenSSL may have a build-time prefix absent on this host.
+        // Use the system's public bundle, never an enrollment TOFU pin.
+        for bundle in [
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/ssl/ca-bundle.pem",
+        ] {
+            if Path::new(bundle).is_file() {
+                tls.set_ca_file(bundle)
+                    .map_err(|_| ClientFailure::TlsConfiguration)?;
+                break;
+            }
+        }
+    }
+    Ok(tls.build())
+}
+
 /// CLI output can carry only these authored public sentences, never arbitrary errors.
 pub(crate) fn public_error(error: &io::Error) -> &'static str {
     match Failure::of(error) {
@@ -476,8 +484,10 @@ fn client_failure_to_io(failure: ClientFailure) -> io::Error {
         ClientFailure::Connect(kind) => Failure::Connect.error(kind),
         ClientFailure::SocketOption(kind) => io::Error::from(kind),
         ClientFailure::TlsHandshake => Failure::Tls.error(io::ErrorKind::PermissionDenied),
-        ClientFailure::TlsConfiguration | ClientFailure::HttpHandshake => refused(),
-        ClientFailure::Request | ClientFailure::ResponseBody => refused(),
+        ClientFailure::TlsConfiguration
+        | ClientFailure::HttpHandshake
+        | ClientFailure::Request
+        | ClientFailure::ResponseBody => refused(),
     }
 }
 
