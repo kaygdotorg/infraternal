@@ -533,7 +533,7 @@ button { color: inherit; }
 .result-icon { display: grid; place-items: center; width: 20px; flex: none; color: var(--fg-2); font: var(--fw-label) var(--text-secondary)/1 var(--font-mono); }
 /* The title wins the row: the hint takes only what the title leaves (to an ellipsis), so a long hint never squeezes the title to nothing
    on a narrow screen (the Settings row read as a row with no title on a phone). */
-.result-label { flex: none; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-label { line-height: normal; flex: none; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-hint { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: right; color: var(--fg-3); font: var(--fw-secondary) var(--text-caption)/1.2 var(--font-mono); white-space: nowrap; }
 .swatch { height: 14px; border-radius: 50%; }
 .palette-empty { margin: 16px 8px; color: var(--fg-2); font-size: var(--text-body); }
