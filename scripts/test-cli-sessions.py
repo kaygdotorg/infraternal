@@ -59,7 +59,7 @@ def inside(binary, state):
         peer.settimeout(2)
         for body in [b'\x02' + struct.pack('<Q', 0), b'\x1f']:
             peer.sendall(struct.pack('<I', len(body)) + body)
-        assert peer.recv(1) == b'', 'unnegotiated close was accepted' 
+        assert peer.recv(1) == b'', 'unnegotiated close was accepted'
     shell_pid = (Path(f'/proc/{shim_pid}/task/{shim_pid}/children').read_text().split())[0]
     cli(binary, state, 'send', 'local:build', "sh -c \"printf 'FOREGROUND_%s\\\\n' READY; exec sleep 20\"\n")
     deadline = time.monotonic() + 10
