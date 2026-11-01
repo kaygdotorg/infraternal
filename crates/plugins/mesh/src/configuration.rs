@@ -11,8 +11,9 @@ use std::{collections::BTreeMap, net::SocketAddr};
 
 /// Compile one node's Access view into the same directional peer policy `WireGuard` installs.
 ///
-/// The public origin suffix is supplied by the server runtime; the persisted mesh suffix
-/// remains the explicit user override. DNS clients additionally keep `.internal` as an alias.
+/// The server runtime supplies the default suffix. The persisted mesh suffix is used when
+/// explicitly selected; legacy non-`internal` values remain overrides. DNS clients also keep
+/// `.internal` as an alias.
 /// # Errors
 /// Returns unknown membership or invalid persisted address allocation.
 pub fn compile_with_dns_suffix(
@@ -60,10 +61,12 @@ fn compile_inner(
         .find(|member| member.node.id == node)
         .map(|member| member.node.host.clone());
     #[cfg(feature = "mesh-dns-spike")]
-    let dns_suffix = if checkpoint.settings.dns_suffix == crate::dataplane::DEFAULT_DNS_SUFFIX {
-        default_dns_suffix.to_owned()
-    } else {
+    let dns_suffix = if checkpoint.settings.dns_suffix_is_explicit
+        || checkpoint.settings.dns_suffix != crate::dataplane::DEFAULT_DNS_SUFFIX
+    {
         checkpoint.settings.dns_suffix.clone()
+    } else {
+        default_dns_suffix.to_owned()
     };
     let fallback = if default == DefaultPolicy::Allow {
         TrafficPolicy::All

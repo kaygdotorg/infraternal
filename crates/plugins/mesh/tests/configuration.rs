@@ -517,3 +517,27 @@ fn name_renames_are_carried_by_the_existing_versioned_configuration_chunks() {
     assert_eq!(chunks[0].peer_names[&NodeId(3)], "renamed-peer");
     assert!(chunks[0].last);
 }
+
+#[test]
+#[cfg(feature = "mesh-dns-spike")]
+fn review_j68b_explicit_internal_suffix_overrides_origin() {
+    let mut coord = coordinator();
+    coord.set_suffix("temporary.example".to_owned()).unwrap();
+    coord.set_suffix("internal".to_owned()).unwrap();
+    let snapshot = configuration::compile_with_dns_suffix(
+        &coord,
+        NodeId(2),
+        DefaultPolicy::Deny,
+        &BTreeMap::new(),
+        "ssh.kayg.org",
+    )
+    .unwrap();
+    eprintln!(
+        "explicit internal setting compiled as {}",
+        snapshot.dns_suffix
+    );
+    assert_eq!(
+        snapshot.dns_suffix, "internal",
+        "explicit suffix overrides the origin-derived default"
+    );
+}
