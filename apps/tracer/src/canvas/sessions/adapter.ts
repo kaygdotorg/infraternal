@@ -15,9 +15,26 @@
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import type { ViewId, WindowModel } from "../model/types";
 
+/**
+ * What the window's connection indicator needs beyond "connected or not" (#212). Times are `performance.now()` values so
+ * a repaint can tell a moment that just happened from one that is over.
+ */
+export interface LinkInfo {
+  /** The window has been attached at least once, so a lost link is "reconnecting" rather than the first "connecting". */
+  readonly everConnected: boolean;
+  /** When the link came back after being lost (undefined: it did not, or not since the last loss). */
+  readonly resumedAt: number | undefined;
+  /** When the screen came back rebuilt from the latest state, so some scrollback may be approximate. */
+  readonly approximateAt: number | undefined;
+  /** Keys typed while the link could not carry them, kept to be sent. Only a count; what was typed is never exposed. */
+  readonly heldKeys: number;
+}
+
 export interface SessionBinding {
   /** Runtime attachment readiness; surviving inventory alone does not prove typing reaches the shim. */
   readonly connected?: boolean;
+  /** The finer state of the link, for the window's connection indicator. */
+  readonly link?: LinkInfo;
   /** Puts the window's content (a live renderer, or a preview) into the card body. Called once. */
   mount(body: HTMLElement): void;
   /** Input focus: the next key goes to this session. */

@@ -13,6 +13,7 @@
  */
 import { onDemand } from "../on-demand";
 import { ensureHostMarks, hostPlatformFromOs, type HostPlatform } from "../../../../packages/ui/src/host-icons";
+import { setLinkRoundTrip } from "../../../../packages/ui/src/window-card";
 import { ConnectionPool, MuxConnection } from "../connection";
 import { isCanonicalUuid } from "../identifiers";
 import type { CoreScreen } from "../core-screen";
@@ -86,7 +87,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   });
   // The details source is loaded on a pill press, so keep the last sample for its first read.
   let roundTrip: number | undefined;
-  const offRoundTrip = connection.onRoundTrip((ms) => { roundTrip = ms; core.setRoundTrip(ms); });
+  const offRoundTrip = connection.onRoundTrip((ms) => { roundTrip = ms; core.setRoundTrip(ms); setLinkRoundTrip(ms); });
   // More windows than one socket takes (the server allows 32 attachments per socket) open on further sockets.
   const pool = new ConnectionPool(connection);
   const inventory = createLiveInventory({ accountId: options.accountId, host: options.host.name });
@@ -267,6 +268,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       window.removeEventListener("pointerup", dropped);
       window.removeEventListener("pointercancel", dropped);
       offRoundTrip();
+      setLinkRoundTrip(undefined);
       disposed = true;
       offHosts?.();
       offHostWelcome();

@@ -7,6 +7,7 @@
 import type { Ctx, WinRec } from "../context";
 import { el } from "../dom";
 import { onDemand } from "../../on-demand";
+import { paintLink } from "../windows/link";
 
 /** True for kinds whose window is a terminal session: the only kind that can split or take input. */
 export const isTerminal = (rec: WinRec): boolean => rec.model.kind === "terminal" && !rec.model.noAccess;
@@ -33,7 +34,7 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
       const anchor = rec.card.root.querySelector<HTMLButtonElement>('[data-action="sessions"]');
       cx.sessionUi?.toggleManager(rec, anchor, event?.detail === 0 ? "keyboard" : "pointer");
     } } : {}), connectionChanged: () => {
-      rec.card.setStatus(rec.binding?.connected === false ? "connecting" : "live");
+      paintLink(rec, false, undefined);
       cx.sessionUi?.paint(rec);
     }, changed: () => {
       cx.store.changed();
@@ -44,7 +45,7 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
       if (shouldCloseWindowAfterExit(status, setupPending)) cx.win.close(rec);
     }, refused: (message) => cx.sessionUi?.refused(rec, message) ?? false });
     rec.binding = binding;
-    if (binding.connected === false) rec.card.setStatus("connecting");
+    if (binding.connected === false) paintLink(rec, false, undefined);
     binding.mount(body);
     return;
   }

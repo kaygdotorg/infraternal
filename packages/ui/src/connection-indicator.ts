@@ -50,7 +50,7 @@ export interface ConnectionIndicator {
   /** The state being shown (after any slow derivation or settling). */
   readonly state: ConnectionIndicatorState;
   /** Sets the link state; `detail` is a reason shown after "Offline —". */
-  set(state: ConnectionIndicatorState, detail?: string): void;
+  set(state: ConnectionIndicatorState, detail?: string, queued?: number): void;
   setRoundTrip(ms: number | undefined): void;
   dispose(): void;
 }
@@ -65,19 +65,21 @@ const GLYPHS = `
 <span class="ui-conn-g ui-conn-g-reconnecting"><span class="ui-conn-spin"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" class="track"/><circle cx="8" cy="8" r="5.5" class="arc" pathLength="100"/></svg></span></span>
 <span class="ui-conn-g ui-conn-g-resumed"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2" class="disc"/><path d="m5 8.4 2.2 2.2 3.9-4.6" class="tick"/></svg></span>
 <span class="ui-conn-g ui-conn-g-approximate"><svg viewBox="0 0 16 16"><rect x="2.4" y="3" width="11.2" height="8" rx="2" class="frame"/><path d="M3.6 7.6h8.8v1.6a1.3 1.3 0 0 1-1.3 1.3H4.9a1.3 1.3 0 0 1-1.3-1.3z" class="fill"/><path d="M6 13.4h4" class="foot"/></svg></span>
-<span class="ui-conn-g ui-conn-g-offline"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.6" class="ring"/><path d="m4.4 11.6 7.2-7.2" class="slash"/></svg></span>`;
+<span class="ui-conn-g ui-conn-g-offline"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.6" class="ring"/><path d="m4.4 11.6 7.2-7.2" class="slash"/></svg></span>
+<span class="ui-conn-q" aria-hidden="true"><svg viewBox="0 0 16 16"><circle cx="5" cy="11" r="3"/><path d="m7.2 8.8 5.8-5.8M11.2 4.8l1.6 1.6M9.4 6.6l1.2 1.2"/></svg></span>`;
 
 /** The sentence for a state: plain, warm, and honest about what was kept. */
-export function connectionSentence(state: ConnectionIndicatorState, rtt?: number, detail?: string): string {
+export function connectionSentence(state: ConnectionIndicatorState, rtt?: number, detail?: string, queued = 0): string {
+  const keys = queued === 1 ? "1 key you typed is kept" : `${queued} keys you typed are kept`;
   const ms = rtt === undefined ? "" : ` · ${Math.round(rtt)} ms`;
   switch (state) {
     case "connecting": return "Connecting to this machine…";
     case "connected": return `Connected${ms}`;
     case "slow": return `Slow connection${ms}. Typing may feel a little delayed.`;
-    case "reconnecting": return "Connection lost — resuming without losing anything";
+    case "reconnecting": return queued > 0 ? `Connection lost — resuming. ${keys} and will be sent.` : "Connection lost — resuming without losing anything";
     case "resumed": return "Back online. You are exactly where you left off.";
     case "approximate": return "Back online. The screen was rebuilt from the latest state; a little scrollback may be approximate.";
-    case "offline": return detail ? `Offline. ${detail}` : "Offline. This machine can't be reached right now.";
+    case "offline": return queued > 0 ? `Offline. ${keys} and will be sent when it is back.` : detail ? `Offline. ${detail}` : "Offline. This machine can't be reached right now.";
   }
 }
 
@@ -99,6 +101,7 @@ export function createConnectionIndicator(options: ConnectionIndicatorOptions = 
 
   let base: ConnectionIndicatorState = "connecting";
   let detail: string | undefined;
+  let queued = 0;
   let rtt: number | undefined;
   let slow = false;
   let shown: ConnectionIndicatorState | undefined;
@@ -110,7 +113,9 @@ export function createConnectionIndicator(options: ConnectionIndicatorOptions = 
   const effective = (): ConnectionIndicatorState => (base === "connected" && slow ? "slow" : base);
   const render = (): void => {
     const next = effective();
-    const text = connectionSentence(next, rtt, detail);
+    const text = connectionSentence(next, rtt, detail, queued);
+    // Keys waiting to be sent show as one small amber key on the glyph, only while the link is down or coming back.
+    if (queued > 0 && (next === "offline" || next === "reconnecting")) root.dataset.queued = ""; else delete root.dataset.queued;
     const changed = next !== shown;
     shown = next;
     root.dataset.state = next;
@@ -129,10 +134,11 @@ export function createConnectionIndicator(options: ConnectionIndicatorOptions = 
     }
   };
 
-  const set = (state: ConnectionIndicatorState, reason?: string): void => {
+  const set = (state: ConnectionIndicatorState, reason?: string, held = 0): void => {
     window.clearTimeout(settle);
     base = state;
     detail = reason;
+    queued = held;
     if (state !== "connected") slow = false;
     render();
     const after = SETTLE_MS[state];

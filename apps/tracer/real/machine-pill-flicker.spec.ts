@@ -166,7 +166,7 @@ test("machine pill state stays tied to the session connection during PTY redraws
   const traceDuration = Number(process.env.PILL_FLICKER_TRACE_MS ?? "10500");
   await page.evaluate((durationMs) => {
     const root = document.querySelector<HTMLElement>('.cl[data-view="console"] .ui-window');
-    const dot = root?.querySelector<HTMLElement>(".ui-window-dot");
+    const dot = root?.querySelector<HTMLElement>(".ui-window-conn");
     if (!root || !dot) throw new Error("machine pill is missing");
     const trace = {
       epoch: Date.now(),
