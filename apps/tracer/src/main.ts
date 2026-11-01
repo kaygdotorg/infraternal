@@ -31,6 +31,7 @@ declare global {
       graphemeText: () => string;
       injectInput: (data: string) => void;
       seedPrompt: () => Promise<void>;
+      writeText: (text: string) => Promise<void>;
       setPredictiveEcho: (enabled: boolean) => void;
       baselineScreenText: (bytes: number[]) => Promise<string>;
       predictiveEcho: () => import("./predictive-echo").PredictiveEchoState | undefined;
@@ -533,6 +534,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
         graphemeText: () => currentTerminal?.readGraphemeText() ?? "",
         injectInput: (data) => currentTerminal?.injectInput(data),
         seedPrompt: () => currentTerminal?.seedPromptForTest() ?? Promise.resolve(),
+        writeText: (text) => currentTerminal?.writeTextForTest(text) ?? Promise.resolve(),
         setPredictiveEcho: (enabled) => currentTerminal?.setPredictiveEchoForTest(enabled),
         baselineScreenText: (bytes) => currentTerminal?.baselineScreenText(Uint8Array.from(bytes)) ?? Promise.resolve(""),
         predictiveEcho: () => currentTerminal?.predictiveEchoState,
