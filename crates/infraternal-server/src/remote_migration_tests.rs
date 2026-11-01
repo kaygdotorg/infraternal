@@ -1,5 +1,5 @@
 //! Proves deployed schema upgrades preserve remote identity and route data, and
-//! that the release migration chain stays contiguous through shared canvas storage [9][19][64][133], #78, #243.
+//! that the release migration chain stays contiguous through preferred account storage [9][19][64][133], #78, #243.
 
 use sqlx::sqlite::SqlitePoolOptions;
 
@@ -95,12 +95,12 @@ async fn remote_identity_and_sessions_upgrade_dev_v11_and_remain_idempotent() {
 #[tokio::test]
 async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_order() {
     let migrations = sqlx::migrate!("./migrations");
-    let expected: Vec<i64> = (1..=31).collect();
+    let expected: Vec<i64> = (1..=32).collect();
     let versions: Vec<i64> = migrations
         .iter()
         .map(|migration| migration.version)
         .collect();
-    assert_eq!(versions, expected, "fresh releases apply 0001 through 0031");
+    assert_eq!(versions, expected, "fresh releases apply 0001 through 0032");
 
     let production = SqlitePoolOptions::new()
         .max_connections(1)

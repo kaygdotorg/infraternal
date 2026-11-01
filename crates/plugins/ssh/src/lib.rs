@@ -13,6 +13,13 @@ pub mod install;
 mod lifecycle;
 #[cfg(feature = "session-bridge")]
 pub mod session_bridge;
+pub mod mesh_admission;
+pub mod mesh_certificate;
+pub mod mesh_flow;
+pub mod mesh_login;
+#[cfg(target_os = "linux")]
+pub mod mesh_port;
+pub mod mesh_server;
 pub mod setup;
 pub mod stdio;
 

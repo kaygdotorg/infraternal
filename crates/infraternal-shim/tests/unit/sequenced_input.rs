@@ -145,6 +145,7 @@ fn negotiated_queue_deferral_validates_ranges_before_waiting() {
         pending: Vec::new(),
         written: 0,
         exited_sent: false,
+        stopping: false,
         request: None,
     };
     let mut cursors = Inputs::with_geometry(peer.size);
@@ -240,6 +241,7 @@ fn a_completed_deferred_frame_gives_its_trailing_input_a_fresh_ticket() {
             pending: Vec::new(),
             written: 0,
             exited_sent: false,
+            stopping: false,
             request: None,
         }
     };
@@ -465,6 +467,7 @@ fn coalesced_ack_never_overwrites_a_partial_output_and_cursors_survive_peer_loss
         pending: Vec::new(),
         written: 0,
         exited_sent: false,
+        stopping: false,
         request: None,
     };
     let mut cursors = InputCursors::default();

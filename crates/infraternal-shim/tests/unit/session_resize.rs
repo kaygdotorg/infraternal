@@ -78,6 +78,7 @@ fn resize_refusal_session_probe() {
             pending: Vec::new(),
             written: 0,
             exited_sent: false,
+            stopping: false,
             request: None,
         };
         if case == "control" {

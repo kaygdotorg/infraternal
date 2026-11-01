@@ -333,3 +333,6 @@ fn guard_rss() -> u64 {
 
 #[path = "remote_retirement_tests.rs"]
 mod retirement;
+
+#[path = "remote_login_revocation_tests.rs"]
+mod login_revocation;

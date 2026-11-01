@@ -4,6 +4,7 @@ use crate::{
     frame::{
         APPROXIMATE_SNAPSHOT, CLOSE_SESSION, Decoder, Frame, FrameRef, MAX_FRAME, MULTI_WRITER,
         QUERY_REPLIES, SEQUENCED_INPUT, SESSION_OWNER, SHARED_WRITER,
+        SHELL_CLEANUP,
     },
     pty::Pty,
     ring::{DEFAULT_CAPACITY, Ring},
@@ -29,7 +30,7 @@ use std::{
     os::{
         fd::AsFd,
         unix::{
-            fs::{DirBuilderExt, MetadataExt, PermissionsExt},
+            fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::{UnixListener, UnixStream},
             process::ExitStatusExt,
         },
@@ -81,6 +82,14 @@ pub struct Config {
     pub retain_output: bool,
     pub session: [u8; 16],
     pub uid: u32,
+    /// Private host-login worker endpoint; None retains legacy local startup.
+    pub login_socket: Option<PathBuf>,
+    /// Kernel-authenticated worker PID pins the proxy connection to the validated unit.
+    pub login_worker_pid: Option<i32>,
+    /// Original privileged host login parent; None for systemd workers.
+    pub login_worker_parent: Option<i32>,
+    /// Root controller descriptor link to the authenticated process directory.
+    pub login_worker_proc: Option<PathBuf>,
     pub cols: u16,
     pub rows: u16,
     /// None selects /run/infraternal or $`XDG_RUNTIME_DIR/infraternal`.
@@ -97,6 +106,10 @@ impl Config {
             retain_output: false,
             session,
             uid,
+            login_socket: None,
+            login_worker_pid: None,
+            login_worker_parent: None,
+            login_worker_proc: None,
             cols: 80,
             rows: 24,
             state: None,
@@ -104,10 +117,14 @@ impl Config {
         }
     }
 }
-struct SocketPath(PathBuf);
+struct SocketPath(PathBuf, bool);
 impl Drop for SocketPath {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
+        if self.1 {
+            // Preserve the exemption until the probe's socket is unlinked.
+            let _ = fs::remove_file(self.0.with_extension("readiness"));
+        }
     }
 }
 enum Request {
@@ -119,6 +136,9 @@ enum InputReply {
     Ack,
     State,
 }
+// Attachment, shared selection, exit delivery and cleanup are independent states.
+// Keep their valid combinations compact rather than imposing exclusive phases.
+#[allow(clippy::struct_excessive_bools)]
 struct Peer {
     stream: UnixStream,
     decoder: Decoder,
@@ -137,6 +157,7 @@ struct Peer {
     pending: Vec<u8>,
     written: usize,
     exited_sent: bool,
+    stopping: bool,
     request: Option<Request>,
 }
 impl Peer {
@@ -184,9 +205,10 @@ impl Peer {
                 | SESSION_OWNER
                 | SHARED_WRITER
                 | QUERY_REPLIES
-                | CLOSE_SESSION);
-        if self.caps & SESSION_OWNER != 0 {
-            if self.caps != SESSION_OWNER {
+                | CLOSE_SESSION
+                | SHELL_CLEANUP);
+        if self.caps & (SESSION_OWNER | SHELL_CLEANUP) != 0 {
+            if self.caps != SESSION_OWNER && self.caps != SHELL_CLEANUP {
                 return Err(invalid_input());
             }
             self.writer = None;
@@ -423,9 +445,19 @@ fn socket(config: &Config) -> io::Result<(UnixListener, SocketPath)> {
         ));
     }
     let listener = UnixListener::bind(&path)?;
-    let guard = SocketPath(path);
+    let mut guard = SocketPath(path, false);
     fs::set_permissions(&guard.0, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
+    if config.readiness {
+        // Only the fixed non-login probe publishes this role, before admitting
+        // peers. A person terminal must never acquire this cleanup exemption.
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(guard.0.with_extension("readiness"))?;
+        guard.1 = true;
+    }
     Ok((listener, guard))
 }
 /// Run one Linux session through final delivery, owner release or the bounded exit ceiling.
@@ -439,7 +471,89 @@ pub fn run(config: Config) -> io::Result<()> {
 /// # Errors
 /// Returns the same errors as [`run`]; durations above ten minutes are clamped.
 #[allow(clippy::too_many_lines)]
-pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result<()> {
+pub fn run_with_retention(config: Config, retention: Duration) -> io::Result<()> {
+    run_configured(config, retention, None, None)
+}
+
+/// Place the privileged PTY owner in its authenticated login before Hello.
+/// The account worker starts the real shell first, so shell initialization can
+/// overlap the owner's cgroup migration. Account sockets remain authenticated
+/// on the descriptor-transfer connection; this does not change shell membership.
+/// # Errors
+/// Rejects invalid placement coordinates and returns normal shim startup errors.
+#[cfg(feature = "host-login")]
+pub fn run_with_login_group(config: Config, retention: Duration, group: &Path) -> io::Result<()> {
+    // Placement failure is cleaned up by the authenticated worker's terminal
+    // lease. Local/probe Child drop cannot provide that lifetime guarantee.
+    if config.login_socket.is_none() || config.readiness {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "host login placement requires a login worker terminal",
+        ));
+    }
+    run_configured(config, retention, Some(group), None)
+}
+
+/// Adopt a controller-prestarted shell on the same pinned worker connection.
+/// Inherited descriptor integers are borrowed for this dedicated shim process;
+/// all originals must close when it exits. No pathname reconnect can substitute
+/// a different worker. Placement still precedes framed Hello.
+/// # Errors
+/// Rejects local/probe modes, absent identity, invalid descriptors and startup refusal.
+#[cfg(feature = "host-login")]
+pub fn run_with_prestarted_login(
+    config: Config,
+    retention: Duration,
+    group: Option<&Path>,
+    master: i32,
+    lease: i32,
+) -> io::Result<()> {
+    if config.readiness
+        || config.login_socket.is_none()
+        || (!Uid::effective().is_root() && config.uid != Uid::effective().as_raw())
+    {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let pid = config.login_worker_pid.ok_or(io::ErrorKind::InvalidInput)?;
+    let pin = config
+        .login_worker_proc
+        .as_deref()
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    let pty = crate::login_handoff::adopt(
+        master,
+        lease,
+        config.uid,
+        pid,
+        pin,
+        config.login_worker_parent,
+    )?;
+    run_configured(config, retention, group, Some(pty))
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_configured(
+    mut config: Config,
+    retention: Duration,
+    group: Option<&Path>,
+    prestarted: Option<Pty>,
+) -> io::Result<()> {
+    #[cfg(feature = "host-login")]
+    let placement = group
+        .map(|path| {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            if !path.starts_with("/sys/fs/cgroup")
+                || path.file_name().is_none_or(|name| name != "cgroup.procs")
+            {
+                return Err(io::Error::other("invalid host login cgroup path"));
+            }
+            fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(nix::libc::O_NOFOLLOW)
+                .open(path)
+        })
+        .transpose()?;
+    #[cfg(not(feature = "host-login"))]
+    debug_assert!(group.is_none());
     if config.cols == 0
         || config.rows == 0
         || usize::from(config.cols) * usize::from(config.rows) > 200_000
@@ -462,15 +576,50 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
     mask.thread_block().map_err(io::Error::from)?;
     let signals = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC)
         .map_err(io::Error::from)?;
+    #[cfg(feature = "host-login")]
+    if !Uid::effective().is_root() && config.login_socket.is_none() && !config.readiness {
+        // Own only this terminal's descendants, never every process of the
+        // inherited host account. Detached jobs are adopted for revocation.
+        nix::sys::prctl::set_child_subreaper(true).map_err(io::Error::from)?;
+    }
     let (listener, path) = socket(&config)?;
-    let mut pty = Pty::spawn_with_command(
-        config.uid,
-        config.cols,
-        config.rows,
-        config.readiness,
-        &config.command,
-        child_thp,
-    )?;
+    // Bind before spawning: a conflicting endpoint must not leave a new
+    // untracked shell behind. Cleanup Hello carries identity only.
+    #[cfg(feature = "host-login")]
+    let mut cleanup =
+        if !Uid::effective().is_root() && config.login_socket.is_none() && !config.readiness {
+            Some(terminal_cleanup(&path.0, &config)?)
+        } else {
+            None
+        };
+
+    let mut pty = if let Some(pty) = prestarted {
+        pty
+    } else if config.login_socket.is_some() {
+        Pty::spawn_with_login(
+            config.uid,
+            config.cols,
+            config.rows,
+            &config.session,
+            config.login_socket.as_deref(),
+            config.login_worker_pid,
+            config.login_worker_parent,
+            config.login_worker_proc.as_deref(),
+        )?
+    } else {
+        Pty::spawn_with_command(
+            config.uid,
+            config.cols,
+            config.rows,
+            config.readiness,
+            &config.command,
+            child_thp,
+        )?
+    };
+    #[cfg(feature = "host-login")]
+    if let Some(mut placement) = placement {
+        placement.write_all(nix::unistd::getpid().as_raw().to_string().as_bytes())?;
+    }
     let created = u64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -510,6 +659,17 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
                     .unwrap_or_else(|| -status.signal().unwrap_or(1)),
             );
         }
+        #[cfg(feature = "host-login")]
+        if let Some(cleanup) = &mut cleanup
+            && cleanup.requested()
+        {
+            if exit.is_none() {
+                pty.child.kill()?;
+            } else {
+                crate::login::finish_children()?;
+                cleanup.confirm();
+            }
+        }
         // The oldest deferred request reserves newly freed queue space. Smaller
         // fresh inputs cannot repeatedly consume it; duplicates need no space.
         let oldest = peers.iter().filter_map(|p| p.deferred).min();
@@ -548,6 +708,14 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
             continue;
         }
         for p in &mut peers {
+            // Cleanup is independent of output credit and a retained owner.
+            // SIGCHLD/try_wait supplies proof; sending a signal alone does not.
+            if p.stopping && exit.is_some() && p.pending.is_empty() {
+                #[cfg(feature = "host-login")]
+                crate::login::finish_children()?;
+                p.queue(&Frame::ShellStopped)?;
+                p.stopping = false;
+            }
             if p.caps & SEQUENCED_INPUT != 0
                 && p.writer.is_some()
                 && cursors.get(p.writer)?.written > p.ack_queued
@@ -598,6 +766,9 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
         if config.readiness
             && exit.is_some()
             && drained
+            // An input-only control peer can finish the fixed command before
+            // its output peer attaches. Empty all() is not delivery evidence.
+            && peers.iter().any(|p| p.cursor.is_some() && p.exited_sent)
             && peers
                 .iter()
                 .filter(|p| p.cursor.is_some())
@@ -609,7 +780,21 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
         // its data link but retains this small control link until ordered delivery
         // or close. The one-shot deadline cannot be renewed by another attach.
         let expired = exit_deadline.is_some_and(|deadline| Instant::now() >= deadline);
-        let owned = peers.iter().any(|p| p.attached && p.caps == SESSION_OWNER);
+        let owned = peers
+            .iter()
+            .any(|p| p.attached && matches!(p.caps, SESSION_OWNER | SHELL_CLEANUP))
+            || {
+                #[cfg(feature = "host-login")]
+                {
+                    cleanup
+                        .as_ref()
+                        .is_some_and(|cleanup| cleanup.peer().is_some())
+                }
+                #[cfg(not(feature = "host-login"))]
+                {
+                    false
+                }
+            };
         if !config.readiness
             && let Some(status) = exit
             && (expired
@@ -621,7 +806,17 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
                         .filter(|p| p.cursor.is_some())
                         .all(|p| p.exited_sent && p.pending.is_empty())))
         {
+            #[cfg(feature = "host-login")]
+            if !Uid::effective().is_root() && config.login_socket.is_none() {
+                // An ended record also certifies retirement of adopted jobs.
+                // Never leave descendants beyond the owning shim's lifetime.
+                crate::login::finish_children()?;
+            }
             crate::ended::record(&path.0, status, ring.head())?;
+            #[cfg(feature = "host-login")]
+            if let Some(cleanup) = &cleanup {
+                cleanup.retire_attribution()?;
+            }
             return Ok(());
         }
         // Borrow descriptors only through poll. Every queue and ownership
@@ -639,7 +834,7 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
             let has_input = !input.is_empty();
             // Stack slots preserve the allocation-free readiness loop. Disabled
             // PTYs are omitted because level-triggered HUP would otherwise spin.
-            let mut fds: [PollFd<'_>; MAX_PEERS + 3] =
+            let mut fds: [PollFd<'_>; MAX_PEERS + 6] =
                 std::array::from_fn(|_| PollFd::new(listener.as_fd(), PollFlags::empty()));
             fds[0] = PollFd::new(listener.as_fd(), PollFlags::POLLIN);
             fds[1] = PollFd::new(signals.as_fd(), PollFlags::POLLIN);
@@ -657,6 +852,30 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
                     }),
                 );
             }
+            // A login shell is reaped by its worker. Its fixed status arrives
+            // on the retained lease socket, replacing proxy SIGCHLD readiness.
+            #[cfg(feature = "host-login")]
+            if let Some(descriptor) = pty.child.descriptor() {
+                fds[3] = PollFd::new(descriptor, PollFlags::POLLIN);
+            }
+            #[cfg(feature = "host-login")]
+            if let Some(cleanup) = &cleanup {
+                fds[4] = PollFd::new(cleanup.listener().as_fd(), PollFlags::POLLIN);
+                if let Some(peer) = cleanup.peer() {
+                    fds[5] = PollFd::new(
+                        peer.as_fd(),
+                        (if cleanup.reading() {
+                            PollFlags::POLLIN
+                        } else {
+                            PollFlags::empty()
+                        }) | if cleanup.writable() {
+                            PollFlags::POLLOUT
+                        } else {
+                            PollFlags::empty()
+                        },
+                    );
+                }
+            }
             for (index, p) in peers.iter().enumerate() {
                 let mut flags = PollFlags::empty();
                 if p.deferred.is_none() && p.trailing.is_empty() {
@@ -667,7 +886,7 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
                 }
                 // Empty flags still observe HUP. A deferred peer is retired on
                 // HUP without reading; live deferred sockets create no wakeups.
-                fds[index + 3] = PollFd::new(p.stream.as_fd(), flags);
+                fds[index + 6] = PollFd::new(p.stream.as_fd(), flags);
             }
             // Once the owned child exits, a descendant may hold the slave open
             // without producing a readiness event. Probe the nonblocking master
@@ -690,17 +909,47 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
                         .unwrap_or(nix::poll::PollTimeout::MAX)
                     })
             };
-            match poll(&mut fds[..peers.len() + 3], timeout) {
+            match poll(&mut fds[..peers.len() + 6], timeout) {
                 Ok(_) => {}
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(e) => return Err(e.into()),
             }
             let flags = |i: usize| fds[i].revents().unwrap_or_else(PollFlags::empty);
-            let peer_flags: [PollFlags; MAX_PEERS] = std::array::from_fn(|i| flags(i + 3));
-            (flags(0), flags(1), flags(2), peer_flags)
+            let peer_flags: [PollFlags; MAX_PEERS] = std::array::from_fn(|i| flags(i + 6));
+            (flags(0), flags(1), flags(2), peer_flags, flags(4), flags(5))
         };
         if ready.1.contains(PollFlags::POLLIN) {
             while signals.read_signal().map_err(io::Error::from)?.is_some() {}
+            #[cfg(feature = "host-login")]
+            if !Uid::effective().is_root() && config.login_socket.is_none() && !config.readiness {
+                // Reap only on child readiness, with no idle scan or timer.
+                // OwnedChild must retain the main shell's actual exit status.
+                // Once status is owned, its old numeric PID can be reused and
+                // must no longer exclude another adopted job from reaping.
+                crate::login::reap_terminal_jobs(exit.is_none().then(|| pty.child.id()))?;
+            }
+        }
+        #[cfg(feature = "host-login")]
+        if let Some(cleanup) = &mut cleanup {
+            // Lifecycle descriptors never depend on input capacity or ordinary
+            // link admission. Its fixed request is independent of input bytes.
+            if ready.5.intersects(PollFlags::POLLHUP | PollFlags::POLLERR) {
+                cleanup.disconnect();
+            } else if ready.5.contains(PollFlags::POLLOUT) {
+                cleanup.flush();
+            }
+            if ready.5.contains(PollFlags::POLLIN) {
+                cleanup.read_request();
+                if cleanup.requested() {
+                    continue;
+                }
+            }
+            if ready.4.contains(PollFlags::POLLIN) {
+                cleanup.accept()?;
+                if cleanup.requested() {
+                    continue;
+                }
+            }
         }
         if ready.0.contains(PollFlags::POLLIN) {
             // Accept at most one per iteration: a peer flooding connect cannot
@@ -729,6 +978,7 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
                             pending: Vec::new(),
                             written: 0,
                             exited_sent: false,
+                            stopping: false,
                             request: None,
                         };
                         next.queue(&Frame::Hello {
@@ -736,10 +986,15 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
                             caps: SEQUENCED_INPUT
                                 | MULTI_WRITER
                                 | APPROXIMATE_SNAPSHOT
-                                | SESSION_OWNER
                                 | SHARED_WRITER
                                 | QUERY_REPLIES
-                                | CLOSE_SESSION,
+                                | CLOSE_SESSION
+                                // A private probe has no durable ended record.
+                                // Its ownership EOF could otherwise overtake
+                                // buffered output/Exited in the host relay.
+                                | if config.readiness { 0 } else { SESSION_OWNER }
+                                | if cfg!(feature = "host-login") && !Uid::effective().is_root() && config.login_socket.is_none() && !config.readiness { SHELL_CLEANUP } else { 0 }
+                                | SHARED_WRITER,
                             session: config.session,
                             pid: std::process::id(),
                             cols: config.cols,
@@ -879,6 +1134,54 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
         }
     }
 }
+
+#[cfg(feature = "host-login")]
+#[cold]
+fn terminal_cleanup(path: &Path, config: &Config) -> io::Result<crate::cleanup::Cleanup> {
+    let mut proof = Vec::new();
+    Frame::Hello {
+        version: 1,
+        caps: SHELL_CLEANUP,
+        session: config.session,
+        pid: std::process::id(),
+        cols: config.cols,
+        rows: config.rows,
+        created: 0,
+        head: 0,
+        start: 0,
+    }
+    .encode_into(&mut proof)?;
+    // encode_into resets reusable storage; these are two consecutive frames.
+    proof.extend_from_slice(&Frame::ShellStopped.encode()?);
+    crate::cleanup::Cleanup::bind(path, Uid::effective().as_raw(), proof)
+}
+// Cleanup must not enlarge the ordinary input request's instruction working set.
+#[cold]
+#[inline(never)]
+fn stop_shell(
+    frame: &FrameRef<'_>,
+    p: &mut Peer,
+    pty: &mut Pty,
+    config: &Config,
+    exited: bool,
+) -> io::Result<bool> {
+    if !matches!(frame, FrameRef::Owned(Frame::StopShell))
+        || !cfg!(feature = "host-login")
+        || Uid::effective().is_root()
+        || config.login_socket.is_some()
+        || config.readiness
+    {
+        return Err(invalid_input());
+    }
+    // Kill the owned shell, even when a foreground job has a different group.
+    // Only its reaped exit and retired descendants produce ShellStopped.
+    if !exited && pty.child.try_wait()?.is_none() {
+        pty.child.kill()?;
+    }
+    p.stopping = true;
+    Ok(false)
+}
+
 /// Stop exactly at an unaccepted input frame; trailing wire belongs to this peer.
 #[allow(clippy::too_many_arguments)]
 fn consume_peer(
@@ -953,6 +1256,9 @@ fn handle<'a>(
     if let FrameRef::Owned(Frame::Attach(caps)) = frame {
         p.attach(caps)?;
         return Ok(false);
+    }
+    if p.attached && p.caps == SHELL_CLEANUP {
+        return stop_shell(&frame, p, pty, config, exited);
     }
     if p.attached && p.caps == SESSION_OWNER {
         // A fixed zero State reply is a handshake barrier, never writer state.
@@ -1163,3 +1469,38 @@ fn invalid_request() -> io::Error {
 #[cfg(test)]
 #[path = "../tests/unit/session_resize.rs"]
 mod resize_checks;
+
+#[cfg(test)]
+mod readiness_marker_checks {
+    //! A fixed private probe publishes its role before admission and removes it with its socket.
+    use super::*;
+
+    #[test]
+    fn readiness_role_lives_only_as_long_as_its_socket() {
+        let root = PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(format!(".cache/codex-scratch/rl12/m{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        for readiness in [false, true] {
+            let mut config = Config::new([u8::from(readiness); 16], Uid::effective().as_raw());
+            config.state = Some(root.clone());
+            config.readiness = readiness;
+            let (listener, guard) = socket(&config).unwrap();
+            let path = guard.0.clone();
+            let marker = path.with_extension("readiness");
+            assert_eq!(marker.exists(), readiness);
+            if readiness {
+                let metadata = fs::symlink_metadata(&marker).unwrap();
+                assert!(metadata.is_file());
+                assert_eq!(metadata.mode() & 0o7777, 0o600);
+                assert_eq!(metadata.len(), 0);
+                assert_eq!(metadata.uid(), Uid::effective().as_raw());
+            }
+            drop(listener);
+            drop(guard);
+            assert!(!path.exists());
+            assert!(!marker.exists());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}

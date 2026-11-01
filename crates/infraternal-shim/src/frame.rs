@@ -16,6 +16,8 @@ pub const APPROXIMATE_SNAPSHOT: u64 = 4;
 /// Capability bit 3 selects an ownership-only link. It neither selects a writer
 /// nor reads output; closing it releases the window independently of data credit.
 pub const SESSION_OWNER: u64 = 8;
+/// Capability bit 5 selects a cleanup-only link whose reply proves shell reaping.
+pub const SHELL_CLEANUP: u64 = 32;
 /// Capability bit 4 permits a shared peer and bounded sequenced-input deferral.
 /// It requires [`SEQUENCED_INPUT`] and [`MULTI_WRITER`]. Deferral applies
 /// independently of peer selection mode; ordinary writer selection and
@@ -68,6 +70,10 @@ pub enum Frame {
     SelectSharedWriter(u32),
     Exited(i32, u64),
     ExitAck,
+    /// Additive cleanup request, legal only on a `SHELL_CLEANUP` link.
+    StopShell,
+    /// Sent only after the shim has reaped its owned shell.
+    ShellStopped,
     Error(u16, String),
 }
 /// Borrowed payload decoding for frame-scoped consumers; scalar layouts reuse
@@ -338,6 +344,8 @@ impl Frame {
                 put!(seq);
             }
             Self::ExitAck => body.push(0x21),
+            Self::StopShell => body.push(0x22),
+            Self::ShellStopped => body.push(0x23),
             Self::Error(code, message) => {
                 body.push(0x7f);
                 put!(code);
@@ -400,6 +408,8 @@ impl Frame {
             }
             0x20 => Self::Exited(i32::from_le_bytes(p.take()?), p.u64()?),
             0x21 => Self::ExitAck,
+            0x22 => Self::StopShell,
+            0x23 => Self::ShellStopped,
             0x7f => Self::Error(
                 p.u16()?,
                 String::from_utf8(p.bytes()).map_err(|_| invalid())?,

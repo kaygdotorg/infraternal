@@ -1198,9 +1198,30 @@ fn run_embedded_agent(
     }
 }
 
+// Parse the paired private handoff capability without reserving fixed slots.
+#[cfg(feature = "plugin-agent")]
+fn prestarted_descriptors(matches: &ArgMatches) -> Result<Option<(i32, i32)>, ExitCode> {
+    match (
+        matches.get_one::<i64>("login_master_fd"),
+        matches.get_one::<i64>("login_lease_fd"),
+    ) {
+        (None, None) => Ok(None),
+        (Some(master), Some(lease)) => match (i32::try_from(*master), i32::try_from(*lease)) {
+            (Ok(master), Ok(lease)) if master >= 8 && lease >= 8 && master != lease => {
+                Ok(Some((master, lease)))
+            }
+            _ => Err(ExitCode::from(2)),
+        },
+        _ => Err(ExitCode::from(2)),
+    }
+}
+
+// This startup entry is absent from a running daemon; keep its code away
+// from hot dispatch pages without changing the terminal/worker pump itself.
+#[cold]
 fn run_shim_command(matches: &ArgMatches) -> ExitCode {
-    let options: Result<shim_cli::Options, String> = (|| {
-        Ok(shim_cli::Options {
+    let options = match (|| {
+        Ok::<_, String>(shim_cli::Options {
             session: matches
                 .get_one::<String>("session")
                 .cloned()
@@ -1221,8 +1242,7 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
             command_stdin: matches.get_flag("command_stdin"),
             retain_output: matches.get_flag("retain_output"),
         })
-    })();
-    let options = match options {
+    })() {
         Ok(options) => options,
         Err(error) => {
             eprintln!("shim startup/session failed: {error}");
@@ -1238,12 +1258,142 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
         eprintln!("--host-accounting requires --host-sessions");
         return ExitCode::from(2);
     }
+
+    #[cfg(feature = "plugin-agent")]
+    {
+    #[cfg(feature = "plugin-agent")]
+    let login_socket = matches.get_one::<String>("login_socket").map(PathBuf::from);
+    #[cfg(feature = "plugin-agent")]
+    if matches
+        .get_one::<String>("login_worker_proc")
+        .is_some_and(|path| infraternal_shim::protect_login_process_at(Path::new(path)).is_err())
+    {
+        return ExitCode::FAILURE;
+    }
+    let prestarted = match prestarted_descriptors(matches) {
+        Ok(descriptors) => descriptors,
+        Err(code) => return code,
+    };
+    if matches.get_flag("login_worker") || matches.get_flag("login_proxy") {
+        if prestarted.is_some() {
+            return ExitCode::from(2);
+        }
+        let Some(endpoint) = login_socket.as_deref() else {
+            return ExitCode::from(2);
+        };
+        return run_login_command(matches, &options.session, options.uid, endpoint);
+    }
+    let login_cgroup = matches.get_one::<String>("login_cgroup").map(PathBuf::from);
+    let login_worker_pid = matches
+        .get_one::<i64>("login_worker_pid")
+        .and_then(|pid| i32::try_from(*pid).ok());
+    let login_worker_parent = matches
+        .get_one::<i64>("login_worker_parent")
+        .and_then(|pid| i32::try_from(*pid).ok());
+    let login_worker_proc = matches
+        .get_one::<String>("login_worker_proc")
+        .map(PathBuf::from);
+    let has_login_config = login_socket.is_some()
+        || login_cgroup.is_some()
+        || login_worker_pid.is_some()
+        || login_worker_parent.is_some()
+        || login_worker_proc.is_some()
+        || prestarted.is_some();
+    if has_login_config {
+        if options.command_stdin {
+            eprintln!("command startup with a host login is unavailable");
+            return ExitCode::from(2);
+        }
+        return match run_shim(
+            &options.session,
+            options.uid,
+            options.cols,
+            options.rows,
+            options.state.clone(),
+            options.detach,
+            options.ring_capacity,
+            login_socket,
+            login_cgroup.as_deref(),
+            login_worker_pid,
+            login_worker_parent,
+            login_worker_proc,
+            options.exit_retention_ms,
+            options.readiness,
+            options.retain_output,
+            prestarted,
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("shim startup/session failed: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    }
     match options.run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("shim startup/session failed: {error}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(feature = "plugin-agent")]
+// This startup entry is absent from a running daemon; keep its code away
+// from hot dispatch pages without changing the terminal/worker pump itself.
+#[cold]
+fn run_login_command(
+    matches: &ArgMatches,
+    session: &str,
+    uid: u32,
+    endpoint: &std::path::Path,
+) -> ExitCode {
+    let result = if matches.get_flag("login_worker") {
+        let startup = match matches.get_one::<i64>("login_ready_fd") {
+            None => infraternal_shim::login::worker_as_controller,
+            Some(1) => infraternal_shim::login::worker_announced,
+            Some(_) => return ExitCode::from(2),
+        };
+        startup(
+            endpoint,
+            infraternal_shim::login::GRACE,
+            shim_integer(matches, "controller_uid", Some(0)).unwrap_or(u32::MAX),
+        )
+        .map(|()| 0)
+    } else {
+        let Ok(id) = uuid::Uuid::parse_str(session) else {
+            return ExitCode::from(2);
+        };
+        infraternal_shim::login::proxy_at_parent(
+            endpoint,
+            uid,
+            id.as_bytes(),
+            matches
+                .get_one::<i64>("login_ready_fd")
+                .is_some_and(|fd| *fd == 4),
+            matches
+                .get_one::<i64>("login_worker_pid")
+                .and_then(|pid| i32::try_from(*pid).ok()),
+            matches
+                .get_one::<String>("login_worker_proc")
+                .map(std::path::Path::new),
+            matches
+                .get_one::<i64>("login_worker_parent")
+                .and_then(|pid| i32::try_from(*pid).ok()),
+        )
+    };
+    match result {
+        Ok(status) if status < 0 => {
+            if let Some(number) = status.checked_neg()
+                && let Ok(signal) = nix::sys::signal::Signal::try_from(number)
+            {
+                let _ = nix::sys::signal::kill(nix::unistd::getpid(), signal);
+            }
+            ExitCode::FAILURE
+        }
+        Ok(status) => ExitCode::from(u8::try_from(status).unwrap_or(1)),
+        Err(_) => ExitCode::FAILURE,
     }
 }
 
@@ -1576,6 +1726,91 @@ mod setup_token_tests {
         );
         server.await.expect("token test socket server");
     }
+}
+
+/// Validate identifiers before forking; clamp exited-screen retention inside the shim.
+#[allow(clippy::too_many_arguments)]
+// This startup entry is absent from a running daemon; keep its code away
+// from hot dispatch pages without changing the terminal/worker pump itself.
+#[cold]
+#[cfg(feature = "plugin-agent")]
+fn run_shim(
+    session: &str,
+    uid: u32,
+    cols: u16,
+    rows: u16,
+    state: Option<std::path::PathBuf>,
+    detach: bool,
+    ring_capacity: usize,
+    login_socket: Option<PathBuf>,
+    login_cgroup: Option<&std::path::Path>,
+    login_worker_pid: Option<i32>,
+    login_worker_parent: Option<i32>,
+    login_worker_proc: Option<PathBuf>,
+    exit_retention_ms: u64,
+    readiness: bool,
+    retain_output: bool,
+    prestarted: Option<(i32, i32)>,
+) -> std::io::Result<()> {
+    if prestarted.is_some() && (readiness || detach) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    if session.len() != 32 || !session.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "session must be 32 hexadecimal characters",
+        ));
+    }
+    let mut id = [0; 16];
+    for (i, value) in id.iter_mut().enumerate() {
+        *value =
+            u8::from_str_radix(&session[i * 2..i * 2 + 2], 16).map_err(std::io::Error::other)?;
+    }
+    if detach && !infraternal_shim::detach()? {
+        return Ok(());
+    }
+    #[cfg(not(feature = "plugin-agent"))]
+    if login_cgroup.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "host login support was compiled out",
+        ));
+    }
+    let config = infraternal_shim::Config {
+        session: id,
+        uid,
+        cols,
+        rows,
+        state,
+        ring_capacity,
+        login_socket,
+        login_worker_pid,
+        login_worker_parent,
+        login_worker_proc,
+        readiness,
+        command: Vec::new(),
+        retain_output,
+    };
+    let retention = std::time::Duration::from_millis(exit_retention_ms);
+    #[cfg(feature = "plugin-agent")]
+    if let Some((master, lease)) = prestarted {
+        return infraternal_shim::run_with_prestarted_login(
+            config,
+            retention,
+            login_cgroup,
+            master,
+            lease,
+        );
+    }
+    #[cfg(not(feature = "plugin-agent"))]
+    if prestarted.is_some() {
+        return Err(io::ErrorKind::Unsupported.into());
+    }
+    #[cfg(feature = "plugin-agent")]
+    if let Some(group) = login_cgroup {
+        return infraternal_shim::run_with_login_group(config, retention, group);
+    }
+    infraternal_shim::run_with_retention(config, retention)
 }
 
 #[cfg(test)]
