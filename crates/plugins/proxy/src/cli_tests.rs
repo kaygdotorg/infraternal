@@ -11,9 +11,18 @@ fn publish_is_the_single_root_command_with_optional_port_and_public_scope() {
     assert_eq!(action.command, ["publish"]);
     assert!(action.input_schema.properties.contains_key("port"));
     assert!(action.input_schema.properties.contains_key("public"));
+    assert!(action.input_schema.properties.contains_key("flat_name"));
+    assert!(
+        action
+            .input_schema
+            .properties
+            .contains_key("confirm_public")
+    );
     assert!(action.input_schema.required.is_empty());
-    assert!(!definition
-        .actions
-        .iter()
-        .any(|candidate| candidate.command.first().is_some_and(|word| word == "serve")));
+    assert!(!definition.actions.iter().any(|candidate| {
+        candidate
+            .command
+            .first()
+            .is_some_and(|word| word == "serve")
+    }));
 }

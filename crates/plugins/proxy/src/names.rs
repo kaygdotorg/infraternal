@@ -42,13 +42,56 @@ pub const fn default_name_shape() -> NameShape {
 /// # Errors
 /// Returns an invalid-input error when any DNS label or the final name violates DNS limits.
 pub fn exposure_names(
-    _shape: NameShape,
-    _machine: &str,
-    _service: &str,
-    _suffix: &str,
+    shape: NameShape,
+    machine: &str,
+    service: &str,
+    suffix: &str,
 ) -> io::Result<ExposureNames> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "proxy naming is not implemented",
-    ))
+    validate_label(machine)?;
+    validate_label(service)?;
+    for label in suffix.split('.') {
+        validate_label(label)?;
+    }
+
+    let (hostname, certificate) = match shape {
+        NameShape::PerMachineWildcard => {
+            let host = format!("{service}.{machine}.{suffix}");
+            let wildcard = format!("*.{machine}.{suffix}");
+            (host, CertificateName::Wildcard(wildcard))
+        }
+        NameShape::FlatService => {
+            let host = format!("{service}.{suffix}");
+            (host.clone(), CertificateName::Exact(host))
+        }
+    };
+    if hostname.len() > 253
+        || match &certificate {
+            CertificateName::Wildcard(name) | CertificateName::Exact(name) => name.len() > 253,
+        }
+    {
+        return Err(invalid_name());
+    }
+    Ok(ExposureNames {
+        hostname,
+        certificate,
+    })
+}
+
+fn validate_label(label: &str) -> io::Result<()> {
+    let bytes = label.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > 63
+        || !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit()
+        || !bytes[bytes.len() - 1].is_ascii_lowercase() && !bytes[bytes.len() - 1].is_ascii_digit()
+        || !bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+    {
+        return Err(invalid_name());
+    }
+    Ok(())
+}
+
+fn invalid_name() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, "invalid published DNS name")
 }

@@ -86,6 +86,26 @@ impl ComponentInstaller {
         Ok(destination.join("bin").join("traefik"))
     }
 
+    /// Install bytes streamed directly from an authenticated component source.
+    ///
+    /// # Errors
+    /// Returns an error when source streaming, digest validation, extraction or store permissions fail.
+    pub fn install_stream<F>(
+        &self,
+        _manifest: &VerifiedComponentManifest,
+        _download: F,
+        _os: &str,
+        _arch: &str,
+    ) -> io::Result<PathBuf>
+    where
+        F: FnOnce(&mut dyn Write) -> io::Result<()>,
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "stream installation is not implemented",
+        ))
+    }
+
     /// Import the offline bundle using the same signed manifest and archive verification path.
     ///
     /// # Errors

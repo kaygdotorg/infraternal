@@ -47,7 +47,7 @@ impl ComponentManifestVerifier for AcceptSignature {
     }
 }
 
-fn archive(executable: &[u8], extra: Option<(&str, tar::EntryType)>) -> Vec<u8> {
+pub(super) fn archive(executable: &[u8], extra: Option<(&str, tar::EntryType)>) -> Vec<u8> {
     let encoder = GzEncoder::new(Vec::new(), Compression::default());
     let mut builder = tar::Builder::new(encoder);
     let mut header = tar::Header::new_gnu();
