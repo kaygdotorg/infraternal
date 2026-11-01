@@ -4,7 +4,6 @@ use infraternal_plugin_proxy::supervisor::TraefikChild;
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
-    path::Path,
     sync::{Arc, mpsc},
     time::{Duration, Instant},
 };

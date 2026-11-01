@@ -82,7 +82,7 @@ impl AgentPlugin for ProxyAgentPlugin {
         let value: Value = serde_json::from_slice(output).map_err(|_| PluginError::Rejected)?;
         match action_id {
             "proxy.publish" => present_publications(value),
-            "proxy.unpublish" => present_unpublish(value),
+            "proxy.unpublish" => present_unpublish(&value),
             _ => Err(PluginError::UnknownAction),
         }
     }
@@ -162,7 +162,7 @@ fn present_publications(value: Value) -> Result<Presented, PluginError> {
     })
 }
 
-fn present_unpublish(value: Value) -> Result<Presented, PluginError> {
+fn present_unpublish(value: &Value) -> Result<Presented, PluginError> {
     let message = value
         .get("message")
         .and_then(Value::as_str)

@@ -15,7 +15,7 @@ plugin-host-facts = ["dep:infraternal-plugin-host-facts"]
 
 ee = ["infraternal-plugin-mesh?/ee"]
 mesh = ["dep:infraternal-plugin-mesh"]
-proxy = ["dep:infraternal-plugin-proxy"]
+proxy = ["dep:infraternal-plugin-proxy", "dep:tracing"]
 
 [dependencies]
 infraternal-plugin-desktop = { path = "../plugins/desktop", version = "0.1.0", default-features = false, features = ["source"], optional = true }
@@ -33,6 +33,7 @@ uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tracing = { workspace = true, optional = true }
 
 openssl = { workspace = true, optional = true }
 tokio-openssl = { workspace = true, optional = true }

@@ -157,13 +157,14 @@ pub struct MeshNodePlugin {
     owner: Arc<Mutex<Owner>>,
     changed: AtomicBool,
     server_link: infraternal_plugin_api::server_path::ServerLink,
-    configuration_observer:
-        Option<Arc<dyn Fn(Option<Config>) -> std::io::Result<()> + Send + Sync>>,
+    configuration_observer: Option<ConfigurationObserver>,
     // The kernel dump behind the first `mesh.peers` page, reused by the pages that follow it (see `peer_page`).
     dump: Option<(std::time::Instant, Counters)>,
 }
 type Counters =
     std::collections::BTreeMap<crate::policy::model::PublicKey, crate::wireguard::Counters>;
+type ConfigurationObserver =
+    Arc<dyn Fn(Option<Config>) -> std::io::Result<()> + Send + Sync>;
 /// How long the following pages of one listing reuse the first page's kernel dump. A listing pages through in
 /// milliseconds; anything older is a new listing and reads the kernel again.
 const DUMP_REUSE: std::time::Duration = std::time::Duration::from_secs(2);
@@ -236,7 +237,7 @@ impl MeshNodePlugin {
     #[must_use]
     pub fn with_configuration_observer(
         mut self,
-        observer: Arc<dyn Fn(Option<Config>) -> std::io::Result<()> + Send + Sync>,
+        observer: ConfigurationObserver,
     ) -> Self {
         self.configuration_observer = Some(observer);
         self

@@ -77,10 +77,10 @@ pub struct PublishedService {
 #[must_use]
 pub const fn select_listener_ports(
     rootful: bool,
-    http_available: bool,
-    https_available: bool,
+    http_port_available: bool,
+    https_port_available: bool,
 ) -> ListenerPorts {
-    if rootful && http_available && https_available {
+    if rootful && http_port_available && https_port_available {
         ListenerPorts {
             http: 80,
             https: 443,
@@ -114,7 +114,7 @@ pub fn detect_listener_ports(rootful: bool, mesh_address: IpAddr, public: bool) 
 /// Returns an error when a path, provider value, or endpoint cannot be represented safely.
 pub fn render_static_config(config: &StaticConfig) -> io::Result<String> {
     validate_static_config(config)?;
-    let (http_address, https_address) = if config.public {
+    let (plain_address, tls_address) = if config.public {
         (
             SocketAddr::new(
                 IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
@@ -156,13 +156,13 @@ pub fn render_static_config(config: &StaticConfig) -> io::Result<String> {
     writeln!(
         rendered,
         "\n[entryPoints.http]\naddress = {}",
-        toml_string(&http_address)?
+        toml_string(&plain_address)?
     )
     .map_err(io::Error::other)?;
     writeln!(
         rendered,
         "\n[entryPoints.https]\naddress = {}",
-        toml_string(&https_address)?
+        toml_string(&tls_address)?
     )
     .map_err(io::Error::other)?;
     let health_address = toml_string(&format!("127.0.0.1:{}", config.private_ping_port))?;
@@ -218,88 +218,8 @@ pub fn render_dynamic_config(services: &[PublishedService]) -> io::Result<Vec<u8
     let mut seen_ids = std::collections::BTreeSet::new();
     let mut seen_hosts = std::collections::BTreeSet::new();
     for service in services {
-        validate_label(&service.id)?;
-        validate_hostname(&service.hostname)?;
-        validate_certificate_name(&service.certificate, &service.hostname)?;
-        if !service.backend.ip().is_loopback() || service.backend.port() == 0 {
-            return Err(invalid_input(
-                "published backends must use a loopback TCP address",
-            ));
-        }
-        if !seen_ids.insert(service.id.as_str()) || !seen_hosts.insert(service.hostname.as_str()) {
-            return Err(invalid_data(
-                "published service identifiers and names must be unique",
-            ));
-        }
-        let access_middleware = format!("{}-mesh-access", service.id);
-        let redirect_middleware = format!("{}-https-redirect", service.id);
-        if !service.public {
-            if service.allowed_sources.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "mesh exposure has no accepted peer grant",
-                ));
-            }
-            let mut sources = service.allowed_sources.clone();
-            sources.sort_unstable();
-            sources.dedup();
-            let ranges: Vec<_> = sources
-                .into_iter()
-                .map(|address| {
-                    if address.is_unspecified() || address.is_loopback() || address.is_multicast() {
-                        return Err(invalid_input("mesh source address is not a peer address"));
-                    }
-                    Ok(format!(
-                        "{address}/{}",
-                        if address.is_ipv4() { 32 } else { 128 }
-                    ))
-                })
-                .collect::<io::Result<_>>()?;
-            middlewares.insert(
-                access_middleware.clone(),
-                json!({"ipAllowList": {"sourceRange": ranges}}),
-            );
-        }
-        middlewares.insert(
-            redirect_middleware.clone(),
-            json!({"redirectScheme": {"scheme": "https", "permanent": true}}),
-        );
-        let rule = format!("Host(`{}`)", service.hostname);
-        let mut http_middlewares = vec![redirect_middleware];
-        let mut https_middlewares = Vec::new();
-        if !service.public {
-            http_middlewares.insert(0, access_middleware.clone());
-            https_middlewares.push(access_middleware);
-        }
-        routers.insert(
-            format!("http.{}", service.id),
-            json!({
-                "rule": rule,
-                "entryPoints": ["http"],
-                "middlewares": http_middlewares,
-                "service": service.id,
-            }),
-        );
-        let certificate_name = match &service.certificate {
-            CertificateName::Wildcard(name) | CertificateName::Exact(name) => name,
-        };
-        routers.insert(
-            service.id.clone(),
-            json!({
-                "rule": rule,
-                "entryPoints": ["https"],
-                "middlewares": https_middlewares,
-                "service": service.id,
-                "tls": {
-                    "certResolver": "dns",
-                    "domains": [{"main": certificate_name}],
-                },
-            }),
-        );
-        proxy_services.insert(
-            service.id.clone(),
-            json!({"loadBalancer": {"servers": [{"url": format!("http://{}", service.backend)}]}}),
-        );
+        validate_published_service(service, &mut seen_ids, &mut seen_hosts)?;
+        render_published_service(service, &mut routers, &mut middlewares, &mut proxy_services)?;
     }
     let bytes = serde_json::to_vec(&json!({
         "http": {
@@ -313,6 +233,105 @@ pub fn render_dynamic_config(services: &[PublishedService]) -> io::Result<Vec<u8
         return Err(invalid_data("dynamic configuration exceeds its byte limit"));
     }
     Ok(bytes)
+}
+
+fn validate_published_service<'a>(
+    service: &'a PublishedService,
+    seen_ids: &mut std::collections::BTreeSet<&'a str>,
+    seen_hosts: &mut std::collections::BTreeSet<&'a str>,
+) -> io::Result<()> {
+    validate_label(&service.id)?;
+    validate_hostname(&service.hostname)?;
+    validate_certificate_name(&service.certificate, &service.hostname)?;
+    if !service.backend.ip().is_loopback() || service.backend.port() == 0 {
+        return Err(invalid_input(
+            "published backends must use a loopback TCP address",
+        ));
+    }
+    if !seen_ids.insert(service.id.as_str()) || !seen_hosts.insert(service.hostname.as_str()) {
+        return Err(invalid_data(
+            "published service identifiers and names must be unique",
+        ));
+    }
+    Ok(())
+}
+
+fn render_published_service(
+    service: &PublishedService,
+    routers: &mut Map<String, serde_json::Value>,
+    middlewares: &mut Map<String, serde_json::Value>,
+    proxy_services: &mut Map<String, serde_json::Value>,
+) -> io::Result<()> {
+    let access_middleware = format!("{}-mesh-access", service.id);
+    let redirect_middleware = format!("{}-https-redirect", service.id);
+    if !service.public {
+        if service.allowed_sources.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "mesh exposure has no accepted peer grant",
+            ));
+        }
+        let mut sources = service.allowed_sources.clone();
+        sources.sort_unstable();
+        sources.dedup();
+        let ranges: Vec<_> = sources
+            .into_iter()
+            .map(|address| {
+                if address.is_unspecified() || address.is_loopback() || address.is_multicast() {
+                    return Err(invalid_input("mesh source address is not a peer address"));
+                }
+                Ok(format!(
+                    "{address}/{}",
+                    if address.is_ipv4() { 32 } else { 128 }
+                ))
+            })
+            .collect::<io::Result<_>>()?;
+        middlewares.insert(
+            access_middleware.clone(),
+            json!({"ipAllowList": {"sourceRange": ranges}}),
+        );
+    }
+    middlewares.insert(
+        redirect_middleware.clone(),
+        json!({"redirectScheme": {"scheme": "https", "permanent": true}}),
+    );
+    let rule = format!("Host(`{}`)", service.hostname);
+    let mut plain_middlewares = vec![redirect_middleware];
+    let mut tls_middlewares = Vec::new();
+    if !service.public {
+        plain_middlewares.insert(0, access_middleware.clone());
+        tls_middlewares.push(access_middleware);
+    }
+    routers.insert(
+        format!("http.{}", service.id),
+        json!({
+            "rule": rule,
+            "entryPoints": ["http"],
+            "middlewares": plain_middlewares,
+            "service": service.id,
+        }),
+    );
+    let certificate_name = match &service.certificate {
+        CertificateName::Wildcard(name) | CertificateName::Exact(name) => name,
+    };
+    routers.insert(
+        service.id.clone(),
+        json!({
+            "rule": rule,
+            "entryPoints": ["https"],
+            "middlewares": tls_middlewares,
+            "service": service.id,
+            "tls": {
+                "certResolver": "dns",
+                "domains": [{"main": certificate_name}],
+            },
+        }),
+    );
+    proxy_services.insert(
+        service.id.clone(),
+        json!({"loadBalancer": {"servers": [{"url": format!("http://{}", service.backend)}]}}),
+    );
+    Ok(())
 }
 
 /// Atomically replace a private static or dynamic configuration file.

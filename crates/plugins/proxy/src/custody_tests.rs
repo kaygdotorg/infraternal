@@ -287,3 +287,78 @@ fn agent_start_removes_custody_files_for_a_removed_dns_provider() {
         "token file for the removed DNS provider survived agent startup"
     );
 }
+
+#[test]
+fn agent_restart_retains_the_configured_dns_provider_files_for_renewal() {
+    const CHILD_STATE: &str = "INFRATERAL_PROXY_CUSTODY_TEST_STATE";
+    if let Some(state) = std::env::var_os(CHILD_STATE) {
+        let provider = std::env::var("INFRATERAL_DNS_PROVIDER")
+            .expect("configured provider identity is present in the child");
+        let profile = super::controller::DnsProviderProfile::from_environment()
+            .expect("configured DNS provider profile is valid");
+        assert_eq!(
+            profile.as_ref().map(|profile| profile.provider.as_str()),
+            Some(provider.as_str()),
+            "restart selected a different DNS provider"
+        );
+        let custody = FileDnsTokenCustody::open(Path::new(&state)).expect("open child custody");
+        custody
+            .get(&provider, "TEST_DNS_API_TOKEN")
+            .expect("configured provider file exists before controller startup");
+        custody
+            .remove_unconfigured_providers(Some(&provider))
+            .expect("cleanup preserves the configured provider");
+        custody
+            .get(&provider, "TEST_DNS_API_TOKEN")
+            .expect("configured provider survives direct cleanup");
+        let log: Arc<super::supervisor::ProxyLog> = Arc::new(|_| {});
+        let _controller = super::controller::ProxyController::for_agent(Path::new(&state), log)
+            .expect("load proxy with its configured DNS provider");
+        custody
+            .get(&provider, "TEST_DNS_API_TOKEN")
+            .expect("configured provider file survives controller startup");
+        return;
+    }
+
+    let state = TempState::new();
+    let custody = FileDnsTokenCustody::open(&state.0).expect("open custody");
+    let provider = format!("renewal-{}", uuid::Uuid::new_v4().simple());
+    let path = custody
+        .put(
+            &provider,
+            "TEST_DNS_API_TOKEN",
+            SecretToken::new(b"renewal-test-value".to_vec()),
+        )
+        .expect("store provider token");
+
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--exact",
+            "tests::agent_restart_retains_the_configured_dns_provider_files_for_renewal",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env(CHILD_STATE, &state.0)
+        .env("INFRATERAL_DNS_PROVIDER", &provider)
+        .env("INFRATERAL_DNS_EMAIL", "proxy-test@example.org")
+        .env("INFRATERAL_DNS_CREDENTIAL_VARIABLES", "TEST_DNS_API_TOKEN")
+        .output()
+        .expect("start isolated configured agent");
+    let child_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success(),
+        "configured agent startup failed: {child_output}"
+    );
+    assert!(
+        child_output.contains("1 passed"),
+        "isolated process did not run the renewal custody regression: {child_output}"
+    );
+    assert!(
+        path.exists(),
+        "token file for the active DNS provider did not survive agent restart"
+    );
+}

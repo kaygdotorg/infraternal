@@ -2,6 +2,7 @@
 //! Per-machine wildcard certificates are the default, and their private keys remain on that machine.
 //! Flat exact-service certificate names are visible in public Certificate Transparency logs.
 //! DNS provider custody is interim owner-only file storage behind `DnsTokenCustody` [#289].
+//! Node-key sealing or OpenBao can replace the file implementation later without changing callers.
 //! The CLI pairs `publish [port]` with `unpublish <port|name>`; the separate inverse is the
 //! orchestrator's choice on #281, pending any owner rename. A missing unpublish target is an
 //! idempotent D303 `missing` result (exit 4), including the shared `--json` envelope.

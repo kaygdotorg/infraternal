@@ -1996,6 +1996,7 @@ dependencies = [
  "tokio",
  "tokio-openssl",
  "tokio-tungstenite",
+ "tracing",
  "url",
  "uuid",
 ]

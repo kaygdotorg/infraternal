@@ -40,7 +40,7 @@ pub struct DnsProviderProfile {
 }
 
 impl DnsProviderProfile {
-    fn from_environment() -> io::Result<Option<Self>> {
+    pub(crate) fn from_environment() -> io::Result<Option<Self>> {
         let provider = env::var("INFRATERNAL_DNS_PROVIDER").ok();
         let email = env::var("INFRATERNAL_DNS_EMAIL").ok();
         let variables = env::var("INFRATERNAL_DNS_CREDENTIAL_VARIABLES").ok();
@@ -183,6 +183,12 @@ impl ProxyController {
             .unwrap_or(env!("CARGO_PKG_VERSION"))
             .to_owned();
         let profile = DnsProviderProfile::from_environment()?;
+        let custody = FileDnsTokenCustody::open(state_dir)?;
+        custody.remove_unconfigured_providers(
+            profile
+                .as_ref()
+                .map(|configured| configured.provider.as_str()),
+        )?;
         let factory = Arc::new(DownloadedTraefikFactory {
             state_dir: state_dir.to_owned(),
             mirror,
@@ -313,7 +319,7 @@ impl ProxyController {
                 NameShape::PerMachineWildcard
             },
         };
-        let route = route_for(&spec, &context)
+        let route = route_for(spec, &context)
             .map_err(|_| infraternal_plugin_api::PluginError::Rejected)?;
         if !route.public && route.allowed_sources.is_empty() {
             return error_reply(
@@ -341,21 +347,23 @@ impl ProxyController {
         &self,
         request: UnpublishRequest,
     ) -> Result<Vec<u8>, infraternal_plugin_api::PluginError> {
-        if !valid_unpublish_target(&request.target) {
+        let UnpublishRequest { target } = request;
+        if !valid_unpublish_target(&target) {
             return error_reply("usage", "Give a local port or exact published DNS name.");
         }
         let mut state = self
             .state
             .lock()
             .map_err(|_| infraternal_plugin_api::PluginError::Rejected)?;
-        let port = find_publication(&state, &request.target);
+        let port = find_publication(&state, &target);
         let Some(port) = port else {
-            let target = request
-                .target
+            let display_target = target
                 .parse::<u16>()
-                .ok()
-                .map_or_else(|| request.target.clone(), |port| format!("port {port}"));
-            return error_reply("missing", &format!("No publication matches {target}."));
+                .map_or(target, |port| format!("port {port}"));
+            return error_reply(
+                "missing",
+                &format!("No publication matches {display_target}."),
+            );
         };
         let exposure = state
             .exposures
@@ -421,7 +429,7 @@ impl ProxyController {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PublishRequest {
     #[serde(default)]
@@ -600,7 +608,7 @@ fn ensure_private_file(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn route_for(spec: &ExposureSpec, context: &AcceptedMeshContext) -> io::Result<PublishedService> {
+fn route_for(spec: ExposureSpec, context: &AcceptedMeshContext) -> io::Result<PublishedService> {
     let service_label = format!("port-{}", spec.port);
     let names = exposure_names(
         spec.shape,
@@ -626,7 +634,7 @@ fn refresh_routes(state: &mut ControllerState) -> io::Result<Vec<PublishedServic
     let mut routes = Vec::new();
     for exposure in state.exposures.values_mut() {
         if let Some(context) = &context {
-            exposure.last_route = Some(route_for(&exposure.spec, context)?);
+            exposure.last_route = Some(route_for(exposure.spec, context)?);
         }
         let Some(route) = exposure.last_route.as_ref() else {
             continue;
@@ -663,8 +671,7 @@ fn publication_list(
                 "reachable": reachable,
                 "access": if reachable && exposure.spec.public {"internet"} else if reachable {"mesh grant"} else if !state.enabled {"proxy is off"} else if exposure.spec.public {"proxy is starting"} else {"blocked by Mesh grants"},
                 "certificate": match &route.certificate {
-                    CertificateName::Wildcard(name) => name,
-                    CertificateName::Exact(name) => name,
+                    CertificateName::Wildcard(name) | CertificateName::Exact(name) => name,
                 },
             }))
         })

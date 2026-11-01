@@ -72,6 +72,34 @@ impl FileDnsTokenCustody {
         Ok(Self { root })
     }
 
+    /// Remove provider directories that are no longer selected by the node configuration.
+    ///
+    /// The active provider remains available for restart-safe renewal. All other credential
+    /// material is deleted before the agent accepts the new profile; unsafe entries fail closed.
+    ///
+    /// # Errors
+    /// Returns an I/O error when the store contains an unsafe entry or a provider cannot be removed.
+    pub fn remove_unconfigured_providers(&self, active_provider: Option<&str>) -> io::Result<()> {
+        if let Some(provider) = active_provider {
+            validate_provider(provider)?;
+        }
+
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let directory = entry.path();
+            validate_directory(&directory, PRIVATE_DIRECTORY_MODE)?;
+            let provider = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| invalid_input("invalid DNS provider directory name"))?;
+            validate_provider(&provider)?;
+            if active_provider != Some(provider.as_str()) {
+                self.delete(&provider)?;
+            }
+        }
+        Ok(())
+    }
+
     fn provider_directory(&self, provider: &str, create: bool) -> io::Result<PathBuf> {
         validate_provider(provider)?;
         let directory = self.root.join(provider);

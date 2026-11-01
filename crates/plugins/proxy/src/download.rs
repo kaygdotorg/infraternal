@@ -71,7 +71,7 @@ impl ComponentTransport for CurlTransport {
             .stdout
             .take()
             .ok_or_else(|| io::Error::other("component transport output unavailable"))?;
-        let mut buffer = [0_u8; 64 * 1024];
+        let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
         loop {
             let count = match stdout.read(&mut buffer) {
                 Ok(count) => count,
@@ -128,7 +128,7 @@ impl<T: ComponentTransport> ComponentDownloader<T> {
         if !mirror.path().ends_with('/') {
             mirror
                 .path_segments_mut()
-                .map_err(|_| invalid_input("component mirror URL cannot hold a path"))?
+                .map_err(|()| invalid_input("component mirror URL cannot hold a path"))?
                 .push("");
         }
         Ok(Self { mirror, transport })
@@ -144,7 +144,7 @@ impl<T: ComponentTransport> ComponentDownloader<T> {
         release_version: &str,
         os: &str,
         arch: &str,
-        verifier: &dyn ComponentManifestVerifier,
+        manifest_verifier: &dyn ComponentManifestVerifier,
     ) -> io::Result<PathBuf> {
         if !crate::manifest::valid_release_version(release_version) {
             return Err(invalid_input("component release version is invalid"));
@@ -159,32 +159,32 @@ impl<T: ComponentTransport> ComponentDownloader<T> {
         let checksums = self.fetch_metadata(&release_mirror, "SHA256SUMS", MAX_CHECKSUM_BYTES)?;
         let signature =
             self.fetch_metadata(&release_mirror, "SHA256SUMS.sig", MAX_SIGNATURE_BYTES)?;
-        let verified = verify_component_manifest(
+        let verified_manifest = verify_component_manifest(
             &manifest_bytes,
             &manifest_filename,
             &checksums,
             &signature,
             os,
             arch,
-            verifier,
+            manifest_verifier,
         )?;
-        if verified.manifest().release_version != release_version {
+        if verified_manifest.manifest().release_version != release_version {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "component manifest belongs to a different infraternal release",
             ));
         }
 
-        let manifest = verified.manifest();
+        let manifest = verified_manifest.manifest();
         let mirror_archive = self
             .mirror
             .join(&manifest.mirror_path)
             .map_err(io::Error::other)?;
         let upstream_archive = Url::parse(&manifest.archive_url).map_err(io::Error::other)?;
-        match self.install_from(installer, &verified, &mirror_archive, os, arch) {
+        match self.install_from(installer, &verified_manifest, &mirror_archive, os, arch) {
             Ok(path) => Ok(path),
             Err(error) if may_use_upstream_fallback(&error) => {
-                self.install_from(installer, &verified, &upstream_archive, os, arch)
+                self.install_from(installer, &verified_manifest, &upstream_archive, os, arch)
             }
             Err(error) => Err(error),
         }

@@ -488,7 +488,6 @@ impl Node {
                 config.name.clone_from(&chunk.name);
                 config.dns_suffix.clone_from(&chunk.dns_suffix);
             }
-            config.exposure = chunk.exposure.clone();
             self.pending = Some(Pending {
                 server: chunk.server,
                 next: 0,
@@ -528,7 +527,6 @@ impl Node {
         pending.config.version = chunk.version;
         pending.config.default_policy = chunk.default_policy;
         pending.config.server = chunk.server;
-        pending.config.exposure = chunk.exposure.clone();
         crate::access_updates::apply(&mut pending.config, &chunk.access_updates)?;
         for node in chunk.removed {
             pending.config.peers.remove(&node);
