@@ -68,20 +68,15 @@ impl Options {
         if detach && !crate::detach()? {
             return Ok(());
         }
-        crate::run_with_retention(
-            crate::Config {
-                session: id,
-                uid,
-                cols,
-                rows,
-                state,
-                ring_capacity,
-                readiness,
-                command,
-                retain_output,
-            },
-            std::time::Duration::from_millis(exit_retention_ms),
-        )
+        let mut config = crate::Config::new(id, uid);
+        config.cols = cols;
+        config.rows = rows;
+        config.state = state;
+        config.ring_capacity = ring_capacity;
+        config.readiness = readiness;
+        config.command = command;
+        config.retain_output = retain_output;
+        crate::run_with_retention(config, std::time::Duration::from_millis(exit_retention_ms))
     }
 }
 

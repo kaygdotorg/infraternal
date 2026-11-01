@@ -159,7 +159,6 @@ pub fn finish_final_output() {
 #[path = "../tests/unit/heap_accounting.rs"]
 mod heap_accounting;
 mod session;
-mod startup;
 mod terminal;
 #[cfg(feature = "process-per-user")]
 mod terminal_limits;
