@@ -197,7 +197,7 @@ export class MuxConnection {
   private attachedCount = 0;
   /** Streams that attached on this server-side connection: the server keeps a writer row for each, up to its cap. */
   private readonly writersUsed = new Set<number>();
-  /** Streams that sent AttachTerm on the current WebSocket; resume retains writers but replaces attachments. */
+  /** Streams attached on the current WebSocket; resume retains terminal writers but replaces their attachments. */
   private readonly attachedOnSocket = new Set<number>();
 
   private readonly onVisibility = (): void => this.pageVisibilityChanged();
@@ -255,7 +255,7 @@ export class MuxConnection {
   closeStream(id: number): void {
     if (!this.streams.delete(id)) return;
     this.unacknowledgedInput.delete(id);
-    // A retained writer can belong to the resumed connection's old socket; Close requires a new AttachTerm first.
+    // Close is valid only after this stream attached on the current socket; an old attachment cannot be closed here.
     if (this.attachedOnSocket.delete(id)) this.send(id, { type: "Close", code: 1000, reason: "window closed" });
   }
 
@@ -277,8 +277,8 @@ export class MuxConnection {
       }
       onEncoded?.(performance.now());
       socket.send(this.sendScratch.subarray(0, length));
-      // Server writer identity survives resume, but the attached route is recreated on each WebSocket.
-      if (frame.type === "AttachTerm") this.attachedOnSocket.add(streamId);
+      // Terminal and desktop viewer attachments both need a Close to retire their server-side route.
+      if (frame.type === "AttachTerm" || (frame.type === "Desktop" && frame.message.kind === "attach")) this.attachedOnSocket.add(streamId);
       onSent?.(performance.now());
     } catch {
       this.fail("could not encode an infraternal wire frame");

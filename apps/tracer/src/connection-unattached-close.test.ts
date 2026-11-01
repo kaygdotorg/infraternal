@@ -43,6 +43,42 @@ test("disposing a window before its welcome microtask sends no unbound Close", a
 });
 
 
+test("closing a desktop viewer sends Close to retire its remote lease", () => {
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket };
+  const frames: Array<{ stream: number; frame: WireFrame }> = [];
+  let socket: Socket | undefined;
+  class Socket {
+    static OPEN = 1;
+    readyState = 1;
+    binaryType = "";
+    onopen?: () => void;
+    onmessage?: (event: { data: ArrayBuffer }) => void;
+    constructor() { socket = this; }
+    send(bytes: Uint8Array) { new WebSocketFrameDecoder().feed(bytes, (stream, frame) => frames.push({ stream, frame })); }
+    close() {}
+  }
+  let connection: MuxConnection | undefined;
+  const handler: StreamHandler = { onSocketOpen() {}, onWelcome() {}, onFrame() {}, onDisconnected() {}, hasSession: () => false, onStatus() {} };
+  try {
+    globals.window = { setTimeout: () => 1, clearTimeout() {} };
+    globals.location = { protocol: "https:", host: "stream.example.test" };
+    globals.WebSocket = Socket;
+    connection = new MuxConnection();
+    connection.subscribe({ topic: "canvas.layout" }, () => {});
+    socket!.onopen?.();
+    socket!.onmessage?.({ data: encodeMuxedFrame(0, { type: "Welcome", connectionId: new Uint8Array(16), resumeToken: new Uint8Array(32), resumeWindowSeconds: 120 }).slice().buffer as ArrayBuffer });
+    const stream = connection.openStream(handler);
+    connection.send(stream, { type: "Desktop", message: { kind: "attach", sessionId: new Uint8Array(16), delivery: 0 } });
+    connection.closeStream(stream);
+    expect(frames.filter((entry) => entry.stream === stream).map((entry) => entry.frame.type)).toEqual(["Desktop", "Close"]);
+  } finally {
+    connection?.dispose();
+    for (const [key, value] of Object.entries(original)) { if (value === undefined) delete globals[key]; else globals[key] = value; }
+  }
+});
+
+
 /** A retained writer row does not recreate a terminal attachment on a replacement socket. */
 test("review #250: disposing a previously attached window during reconnect sends no unbound Close", () => {
   const globals = globalThis as unknown as Record<string, unknown>;
