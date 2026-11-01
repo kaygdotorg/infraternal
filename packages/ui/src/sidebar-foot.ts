@@ -47,9 +47,9 @@ export interface SidebarFoot {
 }
 
 /** The first letter of the name, upper-cased, for the avatar (never empty). */
-const initial = (name: string): string => [...name.trim()][0]?.toUpperCase() ?? "?";
+export const initial = (name: string): string => [...name.trim()][0]?.toUpperCase() ?? "?";
 /** A stable 0..60 degree hue offset per name: neighbours in the palette, never off it. */
-const hueOffset = (name: string): number => { let sum = 0; for (const char of name) sum = (sum * 31 + char.codePointAt(0)!) % 997; return sum % 61; };
+export const hueOffset = (name: string): number => { let sum = 0; for (const char of name) sum = (sum * 31 + char.codePointAt(0)!) % 997; return sum % 61; };
 
 export function createSidebarFoot(options: SidebarFootOptions): SidebarFoot {
   const variant = options.variant ?? "a";
