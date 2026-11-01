@@ -1,4 +1,5 @@
 /** Builds the accessible host/session tree and updates its current-host indicators. */
+import { ICON_DETACHED, icon } from "./icons";
 import { beginInlineRename, onDoubleActivate, placeOverName, type InlineRename } from "./inline-rename";
 
 export interface BranchLeaf {
@@ -50,7 +51,8 @@ export interface BranchedMenu {
   dispose(): void;
 }
 
-const MARK_NAME = { output: "new output", ok: "command finished", fail: "command failed" } as const;
+const DETACHED_NAME = "Detached";
+const MARK_NAME ={ output: "new output", ok: "command finished", fail: "command failed" } as const;
 const RADIUS = 8;
 const STUB = 12;
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
@@ -133,7 +135,15 @@ function makeSection(section: BranchSection): HTMLElement {
     const label = el("span", "bm-label");
     label.textContent = leaf.label;
     const leafMeta = el("span", "bm-meta");
-    leafMeta.textContent = leaf.meta ?? "";
+    if (leaf.state === "detached") {
+      // The note for a detached session is an icon, not the word: the hollow dot already says "not open" and the
+      // word took a third of the row. The warm tooltip and the accessible name carry the word (TASTE: icons with tooltips).
+      leafMeta.classList.add("is-detached");
+      leafMeta.dataset.tip = DETACHED_NAME;
+      leafMeta.setAttribute("role", "img");
+      leafMeta.setAttribute("aria-label", DETACHED_NAME);
+      leafMeta.innerHTML = icon(ICON_DETACHED);
+    } else leafMeta.textContent = leaf.meta ?? "";
     button.append(glyph, label);
     if (leaf.mark) {
       const mark = el("span", "ui-mark");

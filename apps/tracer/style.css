@@ -460,6 +460,8 @@ button { color: inherit; }
 .bm-sec.is-current > .bm-head { color: var(--fg); }
 .bm-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--fw-label); }
 .bm-meta { margin-left: auto; color: var(--fg-3); font: var(--fw-secondary) var(--text-caption)/1.2 var(--font-mono); white-space: nowrap; }
+/* The detached note is an icon, drawn like the marks beside it: small, quiet, on the right of the row. */
+.bm-meta.is-detached { display: grid; flex: none; place-items: center; }
 .bm-icon { display: grid; width: 18px; height: 18px; flex: none; place-items: center; color: var(--fg-3); }
 .bm-icon svg { width: 16px; height: 16px; fill: currentColor; stroke: none; }
 .bm-fold { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 240ms var(--ease-out); }
