@@ -221,7 +221,7 @@ pub enum Exit {
     Unreachable,
     /// Some of the work was done and some was not.
     #[allow(dead_code)]
-    // D303 fixes the code now; the first batch command that needs it is not built yet.
+    // The remote operation may have succeeded, but the client cannot confirm or finish it.
     Partial,
     /// Stopped by the person (Ctrl-C); `--json` runs print the `interrupted` envelope, then re-raise SIGINT.
     Interrupted,
@@ -263,13 +263,25 @@ impl Exit {
 /// the signal handler may only copy bytes (see `infraternal_shim::exit_on_interrupt`).
 #[must_use]
 pub fn interrupted_notice(command: &str) -> Vec<u8> {
-    let message = "Stopped before it finished.";
+    let (message, next) = if command == "sign-in" {
+        (
+            "Sign-in stopped before it finished; the server may have issued a key.",
+            Some(
+                "Check the server's device keys and revoke a matching device key before retrying sign-in.",
+            ),
+        )
+    } else {
+        ("Stopped before it finished.", None)
+    };
     let mut result = CommandResult::new(
         command,
         CommandState::Stopped,
         message,
         serde_json::json!({}),
     );
+    if let Some(next) = next {
+        result = result.with_next_step(next);
+    }
     result.ok = false;
     result.error = Some(ErrorInfo {
         code: Exit::Interrupted.error_code().to_owned(),
@@ -815,6 +827,27 @@ mod tests {
         .map(|exit| exit.code())
         .collect();
         assert_eq!(codes, [0, 1, 2, 3, 4, 5, 6, 130]);
+    }
+
+    #[test]
+    fn interrupted_sign_in_warns_that_the_server_key_may_need_revocation() {
+        let notice = super::interrupted_notice("sign-in");
+        let result: serde_json::Value =
+            serde_json::from_slice(&notice).expect("interrupted JSON envelope");
+
+        assert_eq!(result["error"]["code"], "interrupted");
+        assert!(
+            result["message"]
+                .as_str()
+                .expect("message")
+                .contains("may have issued a key")
+        );
+        assert!(
+            result["next_step"]
+                .as_str()
+                .expect("next step")
+                .contains("revoke a matching device key")
+        );
     }
 
     #[test]

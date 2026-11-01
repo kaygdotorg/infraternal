@@ -239,6 +239,16 @@
 .auth-signin:has(.auth-text-button) { padding-bottom: calc(var(--auth-pad) - var(--auth-tail)); }
 .auth-signin .auth-lede { margin-bottom: 1.75rem; }
 .auth-login { width: 100%; height: 3rem; border-radius: 0.75rem; font-size: 0.9375rem; }
+.device-approval-facts { display: grid; gap: 0.75rem; margin: 0 0 1.25rem; }
+.device-approval-facts > div { display: grid; grid-template-columns: 4.5rem minmax(0, 1fr); align-items: baseline; gap: 0.75rem; }
+.device-approval-facts dt { color: var(--fg-2); font-size: 0.8125rem; }
+.device-approval-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-weight: var(--fw-label); }
+.device-approval-code { display: flex; align-items: center; }
+.device-approval-access { margin: 0 0 1.25rem; }
+.device-approval-access h2 { margin: 0 0 0.5rem; color: var(--fg-2); font: var(--fw-label) 0.8125rem/1.4 var(--font-face); }
+.device-approval-scopes { display: grid; gap: 0.5rem; margin: 0; padding: 0; list-style: none; }
+.device-approval-scopes li { min-width: 0; overflow-wrap: anywhere; }
+.device-approval-note { margin: 0 0 1.5rem; color: var(--fg-2); font-size: 0.8125rem; }
 .auth-loading { min-height: 1em; margin: 0.875rem 0 0; text-align: center; }
 /* A line that exists only while it has something to say (the passkey wait counter, an error): the
    row is 0fr while empty, so the card hugs its content, and eases open when text arrives. */

@@ -1380,6 +1380,7 @@ dependencies = [
  "url",
  "uuid",
  "vt100",
+ "zeroize",
 ]
 
 [[package]]

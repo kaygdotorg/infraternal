@@ -102,6 +102,13 @@ and instructions. Skills include the original wire schema references and exact
 permission alternatives; destructive actions retain required dry-run guidance.
 The `mesh` Cargo feature remains an alias for `plugin-mesh`.
 
+`infraternal sign-in <server>` starts a device approval, prints its browser
+link and short code, and waits for a fresh passkey approval. It stores the
+resulting server credential in the user's private config directory; the
+polling token and API key are never printed. Terminal QR output is a measured
+follow-up. The stored credential is not yet used by hosted CLI actions, which
+remain hidden until the authenticated device-session transport is implemented.
+
 The authenticated CLI device-session transport is not implemented yet, so
 hosted actions that need it are hidden placeholders (see above); they cannot
 bypass authorization or change a temporary local collector.

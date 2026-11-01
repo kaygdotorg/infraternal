@@ -1,5 +1,5 @@
 /** Starts auth and the terminal, keeping the terminal bundle off the unauthenticated path. */
-import { AuthError, checkStatus, checkSession, recoveryAuth, type AuthStatus } from "./auth";
+import { AuthError, checkStatus, checkSession, recoveryAuth, isDeviceUserCode, type AuthStatus } from "./auth";
 import { registerSignOut } from "./sign-out";
 import { warmOfflineShell } from "./offline-cache";
 import type { DrawingIdentity } from "./offline-drawing";
@@ -99,6 +99,9 @@ declare global {
 }
 
 const app = document.querySelector<HTMLElement>("#app") ?? missingMount();
+type DeviceApprovalLink = { code: string } | { error: string } | undefined;
+let deviceApprovalLink = consumeDeviceApprovalLink();
+let deviceApprovalComplete = false;
 type UiFont = "sans" | "mono";
 
 const uiFont = uiFontPreference();
@@ -155,6 +158,12 @@ async function start(): Promise<void> {
     loadFont(font),
     new Promise<void>((resolve) => window.setTimeout(resolve, 800)),
   ]).catch(() => undefined);
+  if (deviceApprovalLink && "error" in deviceApprovalLink) {
+    await fontsReady;
+    installTooltips();
+    await showDeviceApproval(undefined, deviceApprovalLink.error);
+    return;
+  }
   try {
     const [status] = await Promise.all([
       checkStatus(),
@@ -178,6 +187,25 @@ async function refreshAuth(): Promise<void> {
 }
 
 async function showAuthState(status: AuthStatus): Promise<void> {
+  if (deviceApprovalComplete) {
+    await showDeviceApprovalSuccess();
+    return;
+  }
+  if (deviceApprovalLink && "code" in deviceApprovalLink) {
+    const code = deviceApprovalLink.code;
+    if (!isDeviceUserCode(code)) {
+      await showDeviceApproval(code);
+      return;
+    }
+    const session = status.setupRequired ? undefined : await checkSession();
+    if (session) {
+      activeUserId = session.user_id;
+      await showDeviceApproval(code);
+    } else {
+      renderAuth(status.setupRequired, "", status.setupTokenCommand);
+    }
+    return;
+  }
   const session = status.setupRequired ? undefined : await checkSession();
   if (session) {
     activeUserId = session.user_id;
@@ -263,10 +291,58 @@ function renderAuth(
     recordSignIn(userId);
     peerSessions.forget(userId);
     activeUserId = userId;
+    if (deviceApprovalLink && "code" in deviceApprovalLink) {
+      void showDeviceApproval(deviceApprovalLink.code);
+      return;
+    }
     if (firstSetup) showWelcome(welcomeName ?? "", instant);
     else void showTerminal(undefined, instant);
   }, setupTokenCommand);
   scheduleBackdrop();
+}
+
+/** Shows the request and requires a separate, user-initiated fresh passkey tap to approve it. */
+async function showDeviceApproval(code?: string, error?: string): Promise<void> {
+  authLight();
+  document.documentElement.removeAttribute("data-ui-font");
+  try {
+    const { mountDeviceApproval } = await onDemand(() => import("./device-approval.on-demand"));
+    await mountDeviceApproval(app, code ?? null, error, () => { deviceApprovalComplete = true; });
+  } catch {
+    renderUnavailable("Could not load device sign-in. Check your connection and reopen the link.");
+    return;
+  }
+  scheduleBackdrop();
+}
+
+async function showDeviceApprovalSuccess(): Promise<void> {
+  authLight();
+  document.documentElement.removeAttribute("data-ui-font");
+  try {
+    const { mountDeviceApprovalSuccess } = await onDemand(() => import("./device-approval.on-demand"));
+    mountDeviceApprovalSuccess(app);
+  } catch {
+    renderUnavailable("The device was approved. Return to the terminal to finish sign-in.");
+    return;
+  }
+  scheduleBackdrop();
+}
+
+/** Synchronously removes every device code before `start` can issue any auth request. */
+function consumeDeviceApprovalLink(): DeviceApprovalLink {
+  const url = new URL(location.href);
+  const codes = url.searchParams.getAll("device_code");
+  if (codes.length === 0) return undefined;
+  url.searchParams.delete("device_code");
+  try {
+    history.replaceState(history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  } catch {
+    return { error: "This sign-in link could not be cleared from the address bar. Close this page and open the link again." };
+  }
+  if (codes.length !== 1) {
+    return { error: "This sign-in link has more than one code. Ask the person who started it to run infraternal sign-in again." };
+  }
+  return { code: codes[0] ?? "" };
 }
 
 function showWelcome(displayName: string, instant = false): void {

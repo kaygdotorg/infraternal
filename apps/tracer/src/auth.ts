@@ -62,6 +62,65 @@ export interface AuthStatus {
   setupTokenCommand: string;
 }
 
+/** The exact device identity and access requested by the CLI, before passkey approval. */
+export interface DeviceApprovalReview {
+  device: string;
+  scopes: string[];
+}
+
+const DEVICE_APPROVAL_SCOPES = ["hosts:read", "terminal:connect", "actions:dry-run"] as const;
+
+/** Server-generated user codes are 12 random bytes encoded as unpadded base64url. */
+export function isDeviceUserCode(code: string): boolean {
+  return /^[A-Za-z0-9_-]{16}$/.test(code);
+}
+
+/** Reads the requested device and scopes; the browser session is required by the server. */
+export async function inspectDeviceApproval(code: string): Promise<DeviceApprovalReview> {
+  if (!isDeviceUserCode(code)) throw invalidDeviceApprovalLink();
+  let review: { device?: unknown; scopes?: unknown };
+  try {
+    review = await post("device-inspect", { code });
+  } catch (error: unknown) {
+    throw deviceApprovalError(error);
+  }
+  const scopes = review?.scopes;
+  if (typeof review?.device !== "string"
+    || review.device.length === 0
+    || review.device.length > 128
+    || /[\u0000-\u001f\u007f]/.test(review.device)
+    || !Array.isArray(scopes)
+    || scopes.length !== DEVICE_APPROVAL_SCOPES.length
+    || !DEVICE_APPROVAL_SCOPES.every((scope, index) => scopes[index] === scope)) {
+    throw new AuthError("The server's sign-in request could not be reviewed. Check that the server is up to date, then ask for a new link.");
+  }
+  return { device: review.device, scopes: [...DEVICE_APPROVAL_SCOPES] };
+}
+
+/** Approves only after the caller has completed a fresh passkey login from a user action. */
+export async function approveDeviceApproval(code: string): Promise<void> {
+  if (!isDeviceUserCode(code)) throw invalidDeviceApprovalLink();
+  try {
+    await post("device-approve", { code });
+  } catch (error: unknown) {
+    throw deviceApprovalError(error);
+  }
+}
+
+function invalidDeviceApprovalLink(): AuthError {
+  return new AuthError("This sign-in link is incomplete. Ask the person who started it to run infraternal sign-in again.");
+}
+
+function deviceApprovalError(error: unknown): unknown {
+  if (error instanceof AuthError && error.status === 401) {
+    return new AuthError("This sign-in request expired or was already used. Ask the person who started it to run infraternal sign-in again.", 401);
+  }
+  if (error instanceof AuthError && error.status === 404) {
+    return new AuthError("This server does not support device sign-in yet. Upgrade the server, then ask for a new link.", 404);
+  }
+  return error;
+}
+
 /** Reads the public first-run state before choosing an access screen. */
 export async function checkStatus(): Promise<AuthStatus> {
   const status = await post<{ setup_required: unknown; setup_token_command?: unknown }>("status", {});

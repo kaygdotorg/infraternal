@@ -1242,7 +1242,8 @@ function traceRange(start: bigint, length: number, stage: TraceEvent["stage"], a
 async function serveDist(pathname: string, headOnly: boolean, response: ServerResponse): Promise<void> {
   let decoded: string;
   try { decoded = decodeURIComponent(pathname); } catch { return sendJson(response, 400, { error: "invalid path" }); }
-  const relative = decoded === "/" ? "index.html" : decoded.slice(1);
+  // A directory is served by its index.html, as the real server's web root does (the docs pages live in directories).
+  const relative = decoded === "/" ? "index.html" : decoded.endsWith("/") ? `${decoded.slice(1)}index.html` : decoded.slice(1);
   const path = resolve(DIST_ROOT, relative);
   if (!path.startsWith(`${DIST_ROOT}${sep}`) && path !== DIST_ROOT) return sendJson(response, 404, { error: "not found" });
   let file = path;
