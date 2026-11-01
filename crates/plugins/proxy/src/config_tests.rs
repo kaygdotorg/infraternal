@@ -59,6 +59,16 @@ fn mesh_listener_uses_the_mesh_ip_and_disables_admin_and_usage_surfaces() {
 }
 
 #[test]
+fn private_ping_is_routed_automatically_without_enabling_the_admin_api() {
+    let rendered = render_static_config(&static_config(false)).expect("render static config");
+    assert!(rendered.contains("[ping]"));
+    assert!(rendered.contains("manualRouting = false"));
+    assert!(!rendered.contains("[api]"));
+    assert!(!rendered.contains("dashboard ="));
+    assert!(!rendered.contains("insecure ="));
+}
+
+#[test]
 fn public_binding_is_explicit_and_root_and_rootless_ports_follow_the_owner_choice() {
     let root_free = select_listener_ports(true, true, true);
     assert_eq!(

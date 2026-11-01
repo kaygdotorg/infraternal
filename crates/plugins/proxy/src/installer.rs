@@ -59,16 +59,37 @@ impl ComponentInstaller {
     pub fn install_archive<R: Read>(
         &self,
         manifest: &VerifiedComponentManifest,
-        archive: R,
+        mut archive: R,
         os: &str,
         arch: &str,
     ) -> io::Result<PathBuf> {
+        self.install_stream(
+            manifest,
+            |output| io::copy(&mut archive, output).map(|_| ()),
+            os,
+            arch,
+        )
+    }
+
+    /// Install bytes streamed directly from an authenticated component source.
+    ///
+    /// # Errors
+    /// Returns an error when source streaming, digest validation, extraction or store permissions fail.
+    pub fn install_stream<F>(
+        &self,
+        manifest: &VerifiedComponentManifest,
+        download: F,
+        os: &str,
+        arch: &str,
+    ) -> io::Result<PathBuf>
+    where
+        F: FnOnce(&mut dyn Write) -> io::Result<()>,
+    {
         manifest.manifest().validate_for(os, arch)?;
         let root = self.store_directory()?;
         let _lock = lock_store(&root)?;
-        let archive_file = stage_archive(&root, manifest, archive)?;
-        let digest = &manifest.manifest().executable_sha256;
-        let destination = root.join(digest);
+        let archive_file = stage_archive(&root, manifest, download)?;
+        let destination = root.join(&manifest.manifest().executable_sha256);
         if path_exists(&destination)? {
             validate_installed(&destination, manifest)?;
             return Ok(destination.join("bin").join("traefik"));
@@ -84,26 +105,6 @@ impl ComponentInstaller {
         staging.disarm();
         sync_directory(&root)?;
         Ok(destination.join("bin").join("traefik"))
-    }
-
-    /// Install bytes streamed directly from an authenticated component source.
-    ///
-    /// # Errors
-    /// Returns an error when source streaming, digest validation, extraction or store permissions fail.
-    pub fn install_stream<F>(
-        &self,
-        _manifest: &VerifiedComponentManifest,
-        _download: F,
-        _os: &str,
-        _arch: &str,
-    ) -> io::Result<PathBuf>
-    where
-        F: FnOnce(&mut dyn Write) -> io::Result<()>,
-    {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "stream installation is not implemented",
-        ))
     }
 
     /// Import the offline bundle using the same signed manifest and archive verification path.
@@ -140,47 +141,79 @@ impl ComponentInstaller {
     }
 }
 
-fn stage_archive<R: Read>(
+fn stage_archive<F>(
     root: &Path,
     verified: &VerifiedComponentManifest,
-    mut source: R,
-) -> io::Result<TemporaryFile> {
+    write_source: F,
+) -> io::Result<TemporaryFile>
+where
+    F: FnOnce(&mut dyn Write) -> io::Result<()>,
+{
     let manifest = verified.manifest();
     if manifest.archive_size == 0 || manifest.archive_size > MAX_COMPONENT_ARCHIVE_BYTES {
         return Err(invalid_data("component archive exceeds its byte limit"));
     }
-    let temporary = TemporaryFile::create(root, ".archive-")?;
-    let mut output = OpenOptions::new()
-        .write(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-        .open(&temporary.path)?;
-    let mut digest = Sha256::new();
-    let mut received = 0_u64;
-    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
-    loop {
-        let count = source.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        received = received
-            .checked_add(u64::try_from(count).map_err(|_| invalid_data("archive is too large"))?)
-            .ok_or_else(|| invalid_data("archive is too large"))?;
-        if received > manifest.archive_size || received > MAX_COMPONENT_ARCHIVE_BYTES {
-            return Err(invalid_data("component archive exceeds its declared size"));
-        }
-        output.write_all(&buffer[..count])?;
-        digest.update(&buffer[..count]);
-    }
-    if received != manifest.archive_size
-        || format!("{:x}", digest.finalize()) != manifest.archive_sha256
-    {
-        return Err(invalid_data(
-            "component archive does not match its signed digest",
-        ));
-    }
+    let (temporary, mut output) = TemporaryFile::create(root, ".archive-")?;
+    output.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
+    let mut writer = ArchiveStreamWriter {
+        output: &mut output,
+        expected_size: manifest.archive_size,
+        expected_digest: &manifest.archive_sha256,
+        received: 0,
+        digest: Sha256::new(),
+    };
+    write_source(&mut writer)?;
+    writer.finish()?;
     output.sync_all()?;
     validate_file_metadata(&output.metadata()?, PRIVATE_FILE_MODE)?;
     Ok(temporary)
+}
+
+struct ArchiveStreamWriter<'a> {
+    output: &'a mut File,
+    expected_size: u64,
+    expected_digest: &'a str,
+    received: u64,
+    digest: Sha256,
+}
+
+impl ArchiveStreamWriter<'_> {
+    fn finish(self) -> io::Result<()> {
+        if self.received != self.expected_size
+            || format!("{:x}", self.digest.finalize()) != self.expected_digest
+        {
+            return Err(invalid_data(
+                "component archive does not match its signed length and digest",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Write for ArchiveStreamWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let next = self
+            .received
+            .checked_add(u64::try_from(bytes.len()).map_err(|_| invalid_data("archive is too large"))?)
+            .ok_or_else(|| invalid_data("archive is too large"))?;
+        if next > self.expected_size || next > MAX_COMPONENT_ARCHIVE_BYTES {
+            return Err(invalid_data("component archive exceeds its signed byte limit"));
+        }
+        let written = self.output.write(bytes)?;
+        self.received = self
+            .received
+            .checked_add(u64::try_from(written).map_err(|_| invalid_data("archive is too large"))?)
+            .ok_or_else(|| invalid_data("archive is too large"))?;
+        self.digest.update(&bytes[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.output.flush()
+    }
 }
 
 fn extract_executable(
@@ -353,6 +386,7 @@ fn lock_store(root: &Path) -> io::Result<Flock<File>> {
         .mode(PRIVATE_FILE_MODE)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
         .open(path)?;
+    lock.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
     validate_file_metadata(&lock.metadata()?, PRIVATE_FILE_MODE)?;
     Flock::lock(lock, FlockArg::LockExclusive).map_err(|(_, error)| io::Error::from(error))
 }
@@ -427,15 +461,15 @@ struct TemporaryFile {
 }
 
 impl TemporaryFile {
-    fn create(parent: &Path, prefix: &str) -> io::Result<Self> {
+    fn create(parent: &Path, prefix: &str) -> io::Result<(Self, File)> {
         let path = parent.join(format!("{prefix}{}.tmp", uuid::Uuid::new_v4()));
-        let _file = OpenOptions::new()
+        let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(PRIVATE_FILE_MODE)
             .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
             .open(&path)?;
-        Ok(Self { path, armed: true })
+        Ok((Self { path, armed: true }, file))
     }
 }
 

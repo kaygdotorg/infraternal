@@ -104,6 +104,10 @@ pub(crate) fn run_action(
     }
 }
 
+#[cfg(test)]
+#[path = "component_cli_tests.rs"]
+mod tests;
+
 /// Say which of the possible causes it was, and the one thing to do about it.
 fn refuse(json_output: bool, command: &str, error: &io::Error) -> ExitCode {
     let cause = error

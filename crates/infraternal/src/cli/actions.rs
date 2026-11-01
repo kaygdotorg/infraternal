@@ -70,6 +70,11 @@ fn factories() -> &'static [PluginFactory] {
             id: infraternal_plugin_mesh::descriptor::DESCRIPTOR.id,
             build: infraternal_plugin_mesh::descriptor::cli_plugin,
         },
+        #[cfg(feature = "plugin-proxy")]
+        PluginFactory {
+            id: infraternal_plugin_proxy::cli::ID,
+            build: infraternal_plugin_proxy::cli::plugin,
+        },
         #[cfg(feature = "plugin-host-facts")]
         PluginFactory {
             id: infraternal_plugin_host_facts::DESCRIPTOR.id,
@@ -617,6 +622,7 @@ mod tests {
         not(feature = "plugin-agent"),
         not(feature = "plugin-backup"),
         not(feature = "plugin-mesh"),
+        not(feature = "plugin-proxy"),
         not(feature = "plugin-relay"),
         not(feature = "plugin-server"),
         not(feature = "plugin-ssh")
@@ -989,10 +995,11 @@ mod default_build_tests {
         let registry = registry().expect("registry");
         assert!(registry.actions().all(|a| a.action.availability
             != infraternal_plugin_api::ActionAvailability::NotAvailableYet),);
-        let commands: [&[&str]; 4] = [
+        let commands: [&[&str]; 5] = [
             &["up"],
             &["relay", "up"],
             &["mesh", "list"],
+            &["publish"],
             &["host", "facts", "read"],
         ];
         for command in commands {

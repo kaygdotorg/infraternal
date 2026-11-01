@@ -11,6 +11,8 @@ pub mod download;
 pub mod installer;
 pub mod manifest;
 pub mod names;
+pub mod release_signature;
+pub mod supervisor;
 
 #[cfg(test)]
 #[path = "custody_tests.rs"]
@@ -39,3 +41,7 @@ mod download_tests;
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod config_tests;
+
+#[cfg(test)]
+#[path = "supervisor_tests.rs"]
+mod supervisor_tests;

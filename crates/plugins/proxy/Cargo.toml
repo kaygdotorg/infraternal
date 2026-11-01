@@ -7,7 +7,9 @@ license.workspace = true
 
 [dependencies]
 infraternal-plugin-api = { path = "../../infraternal-plugin-api", version = "0.1.0" }
+base64.workspace = true
 nix.workspace = true
+openssl.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
