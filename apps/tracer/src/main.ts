@@ -447,6 +447,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
         host: { name: hostName },
         accountId: activeUserId ?? "account",
         predictiveEcho,
+        ...(identity?.username ? { person: { name: identity.display_name ?? "", username: identity.username } } : {}),
         ...(__CLUSTERS_PREVIEW__ && productTestMode ? { previewStore: layoutReview?.store ?? new (await import("./canvas/model/store")).LocalCanvasStore(activeUserId ?? "account") } : {}),
         ...(productTestMode ? { onFirstClient: (client: TerminalClient) => {
           window.__tracerProductTestDouble = {

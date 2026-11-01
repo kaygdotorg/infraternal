@@ -52,6 +52,10 @@ await Promise.all([
   cp("sessions.css", `${dist}/sessions.css`),
   cp("addhost.css", `${dist}/addhost.css`),
   cp("version.css", `${dist}/version.css`),
+  // The person's card (D283) loads its own styles when it is first wanted, so they are not part of the first screen (D188).
+  cp("account.css", `${dist}/account.css`),
+  // The mockups' dev-only data toggle: in the preview build only.
+  ...(clustersPreview ? [cp("data-toggle.css", `${dist}/data-toggle.css`)] : []),
   cp("../../packages/ui/styles.css", `${dist}/ui.css`),
   cp("fonts", `${dist}/fonts`, { recursive: true, filter: (source) => !source.endsWith(".sh") && !source.endsWith(".py") }),
   cp("node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", `${dist}/fonts/Geist-Variable.woff2`),
