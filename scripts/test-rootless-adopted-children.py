@@ -15,12 +15,12 @@ import uuid
 sys.dont_write_bytecode = True
 repo = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo / 'scripts'))
-from agent_fixture import Binary, cleanup, control, detach, marker, select_terminal
+from agent_fixture import Binary, cleanup, control, detach, fixture_state, select_terminal, terminal_marker
 
 
 def main():
     assert os.geteuid() != 0
-    root = Path.home() / '.cache/codex-scratch/real-logins-review' / ('z' + uuid.uuid4().hex[:8])
+    root = fixture_state('adopt')
     root.mkdir(mode=0o700, parents=True)
     os.environ['INFRATERNAL_TEST_RTT'] = '0'
     client = None
@@ -39,7 +39,7 @@ def main():
             command = f'printf "%s\\n" "$$" > {shlex.quote(str(path))}; read x < {shlex.quote(str(release))}'
             os.mkfifo(release, 0o600)
             client.input(f"sh -c {shlex.quote('sh -c ' + shlex.quote(command) + ' </dev/null >/dev/null 2>&1 &')}\n".encode())
-            marker(client, f'review-job{index}-started')
+            terminal_marker(client, f'review-job{index}-started')
             deadline = time.monotonic() + 5
             while not path.exists() and time.monotonic() < deadline:
                 time.sleep(.01)
@@ -58,7 +58,7 @@ def main():
         assert all(select.select([fd], [], [], 5)[0] for _, fd in pins), 'fixture jobs did not end'
         # Further input gives the shim another normal poll iteration after
         # every SIGCHLD. No idle timing or performance measurement is asserted.
-        marker(client, 'review-jobs-ended')
+        terminal_marker(client, 'review-jobs-ended')
         zombies = []
         for pid, _ in pins:
             try:

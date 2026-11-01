@@ -15,7 +15,7 @@ import uuid
 sys.dont_write_bytecode = True
 repo = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo / 'scripts'))
-from agent_fixture import Binary, cleanup, exact, control, detach, marker, select_terminal
+from agent_fixture import Binary, cleanup, exact, control, detach, fixture_state, select_terminal, terminal_marker
 
 
 def frame(kind, body=b''):
@@ -28,7 +28,7 @@ def receive(peer):
 
 def main():
     assert os.geteuid() != 0
-    root = Path.home() / '.cache/codex-scratch/real-logins-review' / ('p' + uuid.uuid4().hex[:8])
+    root = fixture_state('capacity')
     root.mkdir(mode=0o700, parents=True)
     os.environ['INFRATERNAL_TEST_RTT'] = '0'
     client = None
@@ -42,7 +42,7 @@ def main():
         select_terminal(client, session)
         pid_path = root / 'shell.pid'
         client.input(f'printf "%s\\n" "$$" > {shlex.quote(str(pid_path))}\n'.encode())
-        marker(client, 'review-capacity-ready')
+        terminal_marker(client, 'review-capacity-ready')
         pin = os.pidfd_open(int(pid_path.read_text().strip()))
         detach(client)
         path = root / 'sessions' / (uuid.UUID(session).hex + '.sock')

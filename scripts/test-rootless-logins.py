@@ -10,7 +10,7 @@ import uuid
 sys.dont_write_bytecode = True
 repo = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo / 'scripts'))
-from agent_fixture import Binary, cleanup, control, detach, marker, select_terminal
+from agent_fixture import Binary, cleanup, control, detach, select_terminal, terminal_marker
 
 
 def main():
@@ -38,7 +38,7 @@ def main():
         opened = control(client, 2, 'terminal.open', values)
         assert not opened['fallback']
         select_terminal(client, opened['session_id'])
-        marker(client, 'rootless-ready')
+        terminal_marker(client, 'rootless-ready')
         client.input(b'exit\n')
         client.wait_event('terminal.exited')
         detach(client)

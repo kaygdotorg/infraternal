@@ -699,7 +699,7 @@ def detach(client):
     client.fence()
 
 
-def marker(client, text):
+def terminal_marker(client, text):
     """Write and observe a fixture-owned shell marker without retaining output."""
     prefix, suffix = text.split('-', 1)
     client.input(f"printf '{prefix}-%s\\n' '{suffix}'\n".encode())

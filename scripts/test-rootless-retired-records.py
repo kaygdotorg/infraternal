@@ -12,12 +12,12 @@ import uuid
 sys.dont_write_bytecode = True
 repo = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo / 'scripts'))
-from agent_fixture import Binary, cleanup, control, detach, marker, select_terminal
+from agent_fixture import Binary, cleanup, control, detach, fixture_state, select_terminal
 
 
 def main():
     assert os.geteuid() != 0
-    root = Path.home() / '.cache/codex-scratch/real-logins-review' / ('r' + uuid.uuid4().hex[:8])
+    root = fixture_state('retire')
     root.mkdir(mode=0o700, parents=True)
     os.environ['INFRATERNAL_TEST_RTT'] = '0'
     client = None

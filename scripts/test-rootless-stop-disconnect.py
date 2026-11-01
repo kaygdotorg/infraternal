@@ -16,12 +16,12 @@ import uuid
 sys.dont_write_bytecode = True
 repo = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo / 'scripts'))
-from agent_fixture import Binary, cleanup, shim_socket_count, control, detach, marker, select_terminal
+from agent_fixture import Binary, cleanup, fixture_state, shim_socket_count, control, detach, select_terminal, terminal_marker
 
 
 def main():
     assert os.geteuid() != 0
-    root = Path.home() / '.cache/codex-scratch/real-logins-review' / ('e' + uuid.uuid4().hex[:8])
+    root = fixture_state('stop')
     root.mkdir(mode=0o700, parents=True)
     os.environ['INFRATERNAL_TEST_RTT'] = '0'
     client = None
@@ -36,7 +36,7 @@ def main():
         select_terminal(client, session)
         pid_path = root / 'shell.pid'
         client.input(f'printf "%s\\n" "$$" > {shlex.quote(str(pid_path))}\n'.encode())
-        marker(client, 'review-shell-started')
+        terminal_marker(client, 'review-shell-started')
         shell_pid = int(pid_path.read_text().strip())
         shell_pin = os.pidfd_open(shell_pid)
         # The local shell is a direct child of its shim. Pinned descriptors

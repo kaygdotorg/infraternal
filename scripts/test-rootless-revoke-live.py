@@ -14,7 +14,7 @@ import uuid
 sys.dont_write_bytecode = True
 repo = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo / 'scripts'))
-from agent_fixture import Binary, cleanup, control, detach, marker, select_terminal
+from agent_fixture import Binary, cleanup, control, detach, select_terminal, terminal_marker
 
 
 
@@ -42,7 +42,7 @@ def main():
         select_terminal(client, sessions[0])
         pid_path = root / 'shell.pid'
         client.input(f'printf "%s\\n" "$$" > {shlex.quote(str(pid_path))}\n'.encode())
-        marker(client, 'review-shell-started')
+        terminal_marker(client, 'review-shell-started')
         # Pin the actual shell, so PID reuse cannot make a retained process
         # appear stopped. No unrelated process or host login is touched.
         pin = os.pidfd_open(int(pid_path.read_text().strip()))
@@ -57,7 +57,7 @@ def main():
             # foreground group. Subreaper cleanup must still retire it.
             command = f'trap "" HUP TERM; printf "%s\\n" "$$" > {shlex.quote(str(descendant))}; exec sleep 600'
             client.input(f"setsid sh -c {shlex.quote(command)} </dev/null >/dev/null 2>&1 &\n".encode())
-            marker(client, 'review-descendant-started')
+            terminal_marker(client, 'review-descendant-started')
             deadline = time.monotonic() + 5
             while not descendant.exists() and time.monotonic() < deadline:
                 time.sleep(.01)
@@ -79,7 +79,7 @@ def main():
                            values | dict(person=str(people[0])), expected=False)
         stopped = bool(select.select([pin], [], [], 5)[0])
         select_terminal(client, sessions[1])
-        marker(client, 'review-other-person-survives')
+        terminal_marker(client, 'review-other-person-survives')
         detach(client)
         if expanded:
             assert all(select.select([fd], [], [], 5)[0] for fd in extra_pins), 'restart revocation retained another shell or detached descendant'
