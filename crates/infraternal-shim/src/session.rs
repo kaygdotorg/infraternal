@@ -595,6 +595,8 @@ fn run_configured(
 
     let mut pty = if let Some(pty) = prestarted {
         pty
+    } else if config.readiness {
+        Pty::spawn_with_readiness(config.uid, config.cols, config.rows, true, child_thp)?
     } else if config.login_socket.is_some() {
         Pty::spawn_with_login(
             config.uid,
@@ -611,7 +613,7 @@ fn run_configured(
             config.uid,
             config.cols,
             config.rows,
-            config.readiness,
+            false,
             &config.command,
             child_thp,
         )?

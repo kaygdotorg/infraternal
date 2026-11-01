@@ -442,8 +442,9 @@ impl Pty {
         cols: u16,
         rows: u16,
         readiness: bool,
+        child_thp: Option<nix::libc::c_int>,
     ) -> io::Result<Self> {
-        Self::spawn_with_command(uid, cols, rows, readiness, &[], None)
+        Self::spawn_with_command(uid, cols, rows, readiness, &[], child_thp)
     }
     pub fn spawn_with_command(
         uid: u32,

@@ -285,8 +285,13 @@ impl Session {
         // The bound socket owns the complete pathname. Runtime geometry and
         // wire handling never need a second copy of its startup directory.
         config.state = None;
-        let pty =
-            Pty::spawn_with_readiness(config.uid, config.cols, config.rows, config.readiness)?;
+        let pty = Pty::spawn_with_readiness(
+            config.uid,
+            config.cols,
+            config.rows,
+            config.readiness,
+            None,
+        )?;
         Ok(Self {
             terminal: LazyTerminal::new(config.cols, config.rows, history),
             ring: Ring::new(config.ring_capacity),
