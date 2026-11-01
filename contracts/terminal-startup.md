@@ -49,6 +49,17 @@ path still names the original content/inode, then renames and syncs the director
 An independent editor can still race the final pathname check and rename; like
 other atomic editors, the helper cannot provide a filesystem compare-and-swap.
 
+## What the person sees (owner wording, 2026-11-01, #251)
+
+The notice is one question with three icon buttons, never the word "guard":
+"<tmux|Zellij> started automatically. Would you like to switch to the
+Infraternal Multiplexer instead?" ✓ switches (the `apply` flow above: shared
+confirmation first, then a "Restore <file>" undo), ✗ keeps the other
+multiplexer (no write: the host's notice is already claimed), ? opens
+`docs/multiplexer.md` on the docs site. When no startup line can be edited,
+✓ copies the line instead. Each button has a tooltip and the same accessible
+name. The switches stay in Settings under Multiplexer.
+
 ## Production browser fixture
 
 The dedicated `real/startup-guard.spec.ts` runs with `D315_NAMESPACE=1` only in a

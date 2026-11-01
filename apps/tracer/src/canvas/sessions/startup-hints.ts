@@ -1,7 +1,15 @@
-/** D315 startup notices and saved hint switches; file changes always go through confirmation. */
+/**
+ * D315 startup offer and its saved switches; file changes always go through confirmation.
+ *
+ * When a multiplexer (tmux, Zellij) starts by itself in a new terminal, one quiet notice asks whether to switch
+ * to the Infraternal Multiplexer instead (owner wording, #251). Three icon choices: ✓ switch (after a
+ * confirmation, with a restoring undo), ✗ keep the other multiplexer, ? the docs page. Switching adds the
+ * guard line `[ -n "$INFRATERNAL_SESSION" ] || <command>` to the startup file; the copy never says "guard".
+ * The server shows the offer once per host, so ✗ needs no write of its own; the switches live in Settings.
+ */
 import type { ToastController, ToastMessage } from "../../../../../packages/ui/src/toast";
 import { mountConfirmTip } from "../../../../../packages/ui/src/tooltip";
-import { ICON_INFO } from "../../../../../packages/ui/src/icons";
+import { ICON_CHECK, ICON_HELP, ICON_X, ICONS } from "../../../../../packages/ui/src/icons";
 import type { SwitchPref } from "../../../../../packages/ui/src/settings-panels";
 
 interface Connection {
@@ -9,7 +17,22 @@ interface Connection {
   onWelcome(listener: () => void): () => void;
   readonly isWelcomed: boolean;
 }
-export function createStartupHints(connection: Connection, toast: ToastController, confirm = mountConfirmTip) {
+
+/** The page about our multiplexer on the public docs site (D44, D223: infraternal.com/docs). Source: docs/multiplexer.md. */
+export const MULTIPLEXER_DOCS_URL = "https://infraternal.com/docs/multiplexer";
+const MULTIPLEXER_NAMES: Record<string, string> = { tmux: "tmux", zellij: "Zellij" };
+/** The name people know the program by; an unknown future one shows as the server reports it. */
+export const multiplexerName = (id: string): string => MULTIPLEXER_NAMES[id] ?? id;
+
+export interface StartupHintOptions {
+  /** Where ? goes; a mockup points it at its own rendered copy of the page. */
+  docsUrl?: string;
+  /** Opens the docs; the default is a new tab that cannot reach back into this one. */
+  openDocs?: (url: string) => void;
+}
+export function createStartupHints(connection: Connection, toast: ToastController, confirm = mountConfirmTip, options: StartupHintOptions = {}) {
+  const docsUrl = options.docsUrl ?? MULTIPLEXER_DOCS_URL;
+  const openDocs = options.openDocs ?? ((url: string) => { window.open(url, "_blank", "noopener,noreferrer"); });
   let disposed = false;
   let globalEnabled = true;
   let revision = 0;
@@ -49,28 +72,40 @@ export function createStartupHints(connection: Connection, toast: ToastControlle
         const result = await call({ op: "inspect", session });
         if (disposed || !["tmux", "zellij"].includes(String(result.multiplexer))) return;
         const proposal = result.proposal as { file: string; guard: string } | undefined;
-        const guard = proposal?.guard ?? `[ -n "$INFRATERNAL_SESSION" ] || ${result.multiplexer}`;
-        const copy = { label: "Copy guard", onSelect: () => { void navigator.clipboard.writeText(guard).then(() => { if (!disposed) toast.show({ message: "Guard copied." }); }, failure); } };
+        const other = multiplexerName(String(result.multiplexer));
+        const line = proposal?.guard ?? `[ -n "$INFRATERNAL_SESSION" ] || ${result.multiplexer}`;
         const change = async (op: "apply" | "undo"): Promise<void> => {
           try {
             await call({ op, session, proposal, confirmed: true });
-            if (!disposed) toast.show({ message: op === "apply" ? `Guard added to ${proposal?.file}.` : `Guard removed from ${proposal?.file}.`,
-              ...(op === "apply" ? { action: { label: "Remove guard", onSelect: () => { void change("undo"); } }, duration: 0, dismissible: true } : {}),
-            });
+            if (!disposed) toast.show(op === "apply"
+              ? { message: `Switched. ${other} no longer starts in Infraternal terminals (changed ${proposal?.file}).`,
+                  action: { label: `Restore ${proposal?.file}`, onSelect: () => { void change("undo"); } }, duration: 0, dismissible: true }
+              : { message: `${proposal?.file} restored. ${other} starts automatically again.` });
           } catch { failure(); }
         };
-        const notice: ToastMessage = { message: `${result.multiplexer} started${proposal ? ` from ${proposal.file}` : " during shell startup"}.`,
-          icon: ICON_INFO, duration: 0, dismissible: true,
-          action: proposal ? { label: "Add guard", onSelect: (event) => {
-            const anchor = event?.currentTarget as HTMLElement | undefined;
-            if (disposed || !anchor) return;
-            tip = confirm(anchor, { label: "Guard terminal startup", title: `Add this guard to ${proposal.file}?`,
-              effect: `${proposal.guard}\n${result.multiplexer} will start only outside infraternal. This session keeps running.`,
-              confirmLabel: "Add guard", cancelLabel: "Keep file", onConfirm: () => { void change("apply"); },
-              onCancel: () => { if (!disposed) toast.show(notice); },
-            });
-          } } : copy,
-          ...(proposal ? { secondaryAction: copy } : {}),
+        // ✓: with a recognised startup line the file is edited after a confirmation; otherwise the person gets the line to place themselves.
+        const switchChoice = (event?: MouseEvent): void => {
+          if (!proposal) {
+            void navigator.clipboard.writeText(line).then(() => { if (!disposed) toast.show({ message: `Copied the line that switches. Add it before ${other} starts in your startup file.` }); }, failure);
+            return;
+          }
+          const anchor = event?.currentTarget as HTMLElement | undefined;
+          if (disposed || !anchor) return;
+          const sentence = `${other} will stop starting in Infraternal terminals. This terminal keeps running, and you can undo it.`;
+          tip = confirm(anchor, { label: "Switch to the Infraternal Multiplexer", title: `Switch to the Infraternal Multiplexer in ${proposal.file}?`,
+            // The line sits on its own row: the confirmation keeps a line break in its effect text.
+            effect: `${proposal.guard}\n${sentence}`,
+            confirmLabel: "Switch", cancelLabel: "Keep as is", onConfirm: () => { void change("apply"); },
+            onCancel: () => { if (!disposed) toast.show(notice); },
+          });
+        };
+        const notice: ToastMessage = { message: `${other} started automatically. Would you like to switch to the Infraternal Multiplexer instead?`,
+          icon: ICONS.terminal, duration: 0, actionGroupLabel: "Switch to the Infraternal Multiplexer?",
+          iconActions: [
+            { label: proposal ? "Switch to the Infraternal Multiplexer" : "Copy the line that switches", icon: ICON_CHECK, onSelect: switchChoice },
+            { label: `Keep ${other}, don't ask again on this host`, icon: ICON_X, onSelect() {} },
+            { label: "About the Infraternal Multiplexer", icon: ICON_HELP, keepOpen: true, onSelect: () => { openDocs(docsUrl); } },
+          ],
         };
         toast.show(notice);
       } catch { /* Detection fails open: shell startup is always the person's own startup. */ }
@@ -79,8 +114,8 @@ export function createStartupHints(connection: Connection, toast: ToastControlle
     enabled: () => globalEnabled,
     switches(): SwitchPref[] {
       const save = (on: boolean, host?: string, global = true) => { void set(on, host, global).catch(() => { if (!disposed) toast.show({ message: "Could not save startup hints. Try again.", tone: "error" }); }); };
-      return [{ id: "startup-hints", title: "Startup hints", label: "Show hints", hint: "Offer a guard when tmux or zellij starts with a shell", get: () => globalEnabled, set: (on) => save(on), onChange: this.onChange },
-        ...[...hosts].map(([id, host]) => ({ id: `startup-${id || "local"}`, title: host.name, label: "Show startup hints", hint: "Only for this host", get: () => host.override ?? globalEnabled, set: (on: boolean) => save(on, id || undefined, false), onChange: this.onChange }))];
+      return [{ id: "startup-hints", title: "Multiplexer", label: "Offer the Infraternal Multiplexer", hint: "When tmux or Zellij starts by itself in a terminal", get: () => globalEnabled, set: (on) => save(on), onChange: this.onChange },
+        ...[...hosts].map(([id, host]) => ({ id: `startup-${id || "local"}`, title: host.name, label: "Offer the Infraternal Multiplexer", hint: "Only for this host", get: () => host.override ?? globalEnabled, set: (on: boolean) => save(on, id || undefined, false), onChange: this.onChange }))];
     },
     refresh,
     onChange(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },

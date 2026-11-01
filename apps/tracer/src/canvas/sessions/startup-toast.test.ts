@@ -12,6 +12,8 @@ class Element {
   innerHTML = "";
   append(...children: Element[]) { this.children.push(...children); }
   querySelector() { return new Element(); }
+  querySelectorAll() { return []; }
+  replaceChildren(...children: Element[]) { this.children = children; }
   setAttribute() {}
   removeAttribute() {}
   addEventListener() {}
@@ -37,10 +39,10 @@ test("a closing notice cannot hide its replacement before the next animation fra
     const parent = new Element();
     const toast = mountToast(parent as unknown as HTMLElement);
     const host = parent.children[0]!;
-    toast.show({ message: "tmux started from .zshrc.", duration: 0 });
+    toast.show({ message: "tmux started automatically. Would you like to switch to the Infraternal Multiplexer instead?", duration: 0 });
     frames.splice(0).forEach((frame) => frame(0));
     toast.dismiss();
-    toast.show({ message: "Guard added to .zshrc.", action: { label: "Remove guard", onSelect() {} }, duration: 0 });
+    toast.show({ message: "Switched. tmux no longer starts in Infraternal terminals (changed .zshrc).", action: { label: "Restore .zshrc", onSelect() {} }, duration: 0 });
     // A busy renderer may not deliver the replacement's opening frame before
     // the previous notice finishes closing. That timer belongs to the old message.
     [...timers.values()].forEach((callback) => callback());

@@ -42,10 +42,12 @@ for (const [name, width, height] of [["desktop", 1440, 900], ["phone", 393, 852]
         await page.locator(".auth-check").click();
         await page.getByRole("button", { name: "Open infraternal" }).click();
         await page.locator(".cl-viewport").waitFor();
-        const add = page.locator(".ui-toast").getByRole("button", { name: "Add guard", exact: true });
+        const add = page.locator(".ui-toast").getByRole("button", { name: "Switch to the Infraternal Multiplexer", exact: true });
         await expect(add).toBeVisible({ timeout: 20_000 });
         expect(await readFile(file, "utf8")).toBe(original);
-        await expect(page.getByRole("button", { name: "Copy guard", exact: true })).toBeVisible();
+        await expect(page.locator(".ui-toast-message")).toHaveText("tmux started automatically. Would you like to switch to the Infraternal Multiplexer instead?");
+        await expect(page.getByRole("button", { name: "Keep tmux, don't ask again on this host", exact: true })).toBeVisible();
+        await expect(page.getByRole("button", { name: "About the Infraternal Multiplexer", exact: true })).toBeVisible();
         await page.screenshot({ path: join(captures, `${name}-${theme}-notice.png`) });
         await add.click();
         await expect(page.locator(".ui-confirm-tip")).toBeVisible();
@@ -57,7 +59,7 @@ for (const [name, width, height] of [["desktop", 1440, 900], ["phone", 393, 852]
         expect(await readFile(file, "utf8")).toBe(original);
         await add.click();
         await page.locator(".ui-confirm-yes").click();
-        const undo = page.getByRole("button", { name: "Remove guard", exact: true });
+        const undo = page.getByRole("button", { name: "Restore .zshrc", exact: true });
         await expect(undo).toBeVisible();
         expect(await readFile(file, "utf8")).toBe(original.replace(command, `[ -n "$INFRATERNAL_SESSION" ] || ${command}`));
         await page.screenshot({ path: join(captures, `${name}-${theme}-added.png`) });
