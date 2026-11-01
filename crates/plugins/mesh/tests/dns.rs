@@ -424,3 +424,107 @@ async fn exchange(
     .unwrap()
     .unwrap()
 }
+
+#[test]
+fn review_j68_remote_resolver_must_not_disclose_a_name_denied_to_the_asker() {
+    use infraternal_plugin_mesh::{
+        configuration,
+        policy::{
+            coordinator::Coordinator,
+            model::{MeshSettings, Node},
+            rules::{Arrow, Endpoint, RuleId},
+        },
+    };
+    let member = |id| Node {
+        id: NodeId(id),
+        public_key: PublicKey([u8::try_from(id).unwrap(); 32]),
+        host: format!("host-{id}"),
+        tags: std::collections::BTreeSet::new(),
+    };
+    let mut coordinator = Coordinator::new(MeshSettings::new([1; 5]), &[], member(1)).unwrap();
+    coordinator.join(member(2)).unwrap();
+    coordinator.join(member(3)).unwrap();
+    coordinator
+        .add_arrow(Arrow {
+            id: RuleId(1),
+            from: Endpoint::Node(NodeId(1)),
+            to: Endpoint::Node(NodeId(3)),
+            both_ways: false,
+            ports: TrafficPolicy::All,
+        })
+        .unwrap();
+    let compile = |id| {
+        configuration::compile(
+            &coordinator,
+            NodeId(id),
+            DefaultPolicy::Deny,
+            &BTreeMap::new(),
+        )
+        .unwrap()
+    };
+    let asker = compile(2);
+    let mut server = compile(1);
+    assert_eq!(asker.peers[&NodeId(3)].outbound, TrafficPolicy::None);
+    assert!(!asker.peer_names.contains_key(&NodeId(3)));
+    assert_eq!(asker.peers[&NodeId(1)].outbound, TrafficPolicy::All);
+    assert_eq!(server.peers[&NodeId(2)].inbound, TrafficPolicy::All);
+    let own_reply = dns::response(&query("host-3.internal", 1), &asker)
+        .unwrap()
+        .unwrap();
+    assert_eq!(Packet::parse(&own_reply).unwrap().rcode(), RCODE::NameError);
+
+    // Loopback addresses isolate the UDP boundary without requiring kernel mesh setup.
+    server.addresses.ipv4 = Ipv4Addr::new(127, 68, 0, 1);
+    server
+        .peers
+        .get_mut(&NodeId(2))
+        .unwrap()
+        .peer
+        .addresses
+        .ipv4 = Ipv4Addr::new(127, 68, 0, 2);
+    let resolver = Resolver::bind(&server).unwrap();
+    let client = std::net::UdpSocket::bind("127.68.0.2:0").unwrap();
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    client
+        .send_to(
+            &query("host-3.internal", 1),
+            (server.addresses.ipv4, DNS_PORT),
+        )
+        .unwrap();
+    let mut buffer = [0; 512];
+    let (length, _) = client.recv_from(&mut buffer).unwrap();
+    let reply = Packet::parse(&buffer[..length]).unwrap();
+    let remote_rcode = reply.rcode();
+    let remote_answer_count = reply.answers.len();
+    let remote_authority_count = reply.name_servers.len();
+    eprintln!(
+        "asker 2 -> target 3: denied; asker 2 -> server 1 DNS: permitted; remote response: {remote_rcode:?}, {remote_answer_count} answers"
+    );
+    drop(reply);
+
+    let local_client = std::net::UdpSocket::bind("127.68.0.1:0").unwrap();
+    local_client
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    local_client
+        .send_to(
+            &query("host-3.internal", 1),
+            (server.addresses.ipv4, DNS_PORT),
+        )
+        .unwrap();
+    let (local_length, _) = local_client.recv_from(&mut buffer).unwrap();
+    let local_reply = Packet::parse(&buffer[..local_length]).unwrap();
+
+    drop(resolver);
+    assert_eq!(
+        remote_rcode,
+        RCODE::Refused,
+        "remote mesh sources must not inherit the resolver host's broader policy"
+    );
+    assert_eq!(remote_answer_count, 0, "a remote refusal has no names");
+    assert_eq!(remote_authority_count, 0, "a remote refusal has no names");
+    assert_eq!(local_reply.rcode(), RCODE::NoError);
+    assert_eq!(local_reply.answers.len(), 1);
+}

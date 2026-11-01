@@ -1,4 +1,8 @@
-//! Serves the accepted mesh name snapshot on the Linux mesh address [#266].
+//! Serves one node's accepted mesh name snapshot on its Linux mesh address [#266].
+//!
+//! Slice 1 answers only queries sourced from this node's own mesh address. Other sources receive
+//! `REFUSED` without records, so a node cannot use another resolver's broader visibility. Remote
+//! DNS service needs a per-asker snapshot path and belongs to a later slice.
 use crate::{dataplane::Config, policy::model::validate_dns};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use simple_dns::{
@@ -8,7 +12,7 @@ use simple_dns::{
 use std::{
     collections::BTreeMap,
     io::{self, Write as _},
-    net::{Ipv4Addr, SocketAddr, UdpSocket},
+    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     os::{fd::AsFd, unix::net::UnixStream},
     sync::{Arc, RwLock},
     thread::{self, JoinHandle},
@@ -29,20 +33,20 @@ struct Addresses {
 /// A canonical, immutable-by-convention view of names from one accepted revision.
 #[derive(Clone)]
 pub(crate) struct Records {
+    local_address: Ipv4Addr,
     suffixes: Vec<String>,
     names: BTreeMap<String, Addresses>,
 }
 
-impl Default for Records {
-    fn default() -> Self {
+impl Records {
+    fn empty(local_address: Ipv4Addr) -> Self {
         Self {
+            local_address,
             suffixes: vec![crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned()],
             names: BTreeMap::new(),
         }
     }
-}
 
-impl Records {
     pub(crate) fn from_config(config: &Config) -> io::Result<Self> {
         validate_dns(&config.dns_suffix, false).map_err(|_| invalid_config())?;
         let mut suffixes = vec![config.dns_suffix.clone()];
@@ -51,6 +55,7 @@ impl Records {
         }
         suffixes.sort_unstable_by_key(|suffix| std::cmp::Reverse(suffix.len()));
         let mut records = Self {
+            local_address: config.addresses.ipv4,
             suffixes,
             names: BTreeMap::new(),
         };
@@ -128,6 +133,14 @@ pub fn response(packet: &[u8], config: &Config) -> io::Result<Option<Vec<u8>>> {
 }
 
 fn response_for_records(packet: &[u8], records: &Records) -> io::Result<Option<Vec<u8>>> {
+    response_for_source(packet, records, IpAddr::V4(records.local_address))
+}
+
+fn response_for_source(
+    packet: &[u8],
+    records: &Records,
+    source: IpAddr,
+) -> io::Result<Option<Vec<u8>>> {
     if packet.len() > MAX_PACKET {
         return Err(invalid_packet());
     }
@@ -147,6 +160,20 @@ fn response_for_records(packet: &[u8], records: &Records) -> io::Result<Option<V
         .first()
         .ok_or_else(invalid_packet)?
         .clone();
+    let opt = request.opt().cloned();
+    let mut reply = request.into_reply();
+    // `into_reply` replaces the DNS header, so preserve EDNS and the request's recursion bit.
+    *reply.opt_mut() = opt;
+    if request_had_rd(packet) {
+        reply.set_flags(PacketFlag::RECURSION_DESIRED);
+    }
+    if source != IpAddr::V4(records.local_address) {
+        // Each resolver has only its local node's filtered view. Never answer another node from it.
+        *reply.rcode_mut() = RCODE::Refused;
+        return encode(&reply).map(Some);
+    }
+    reply.set_flags(PacketFlag::AUTHORITATIVE_ANSWER);
+
     let qname = question
         .qname
         .to_string()
@@ -156,14 +183,6 @@ fn response_for_records(packet: &[u8], records: &Records) -> io::Result<Option<V
         return Ok(None);
     };
 
-    let opt = request.opt().cloned();
-    let mut reply = request.into_reply();
-    // `into_reply` replaces the DNS header, so preserve EDNS capabilities from the request.
-    *reply.opt_mut() = opt;
-    reply.set_flags(PacketFlag::AUTHORITATIVE_ANSWER);
-    if request_had_rd(packet) {
-        reply.set_flags(PacketFlag::RECURSION_DESIRED);
-    }
     if question.qclass != QCLASS::CLASS(CLASS::IN) {
         *reply.rcode_mut() = RCODE::Refused;
         return encode(&reply).map(Some);
@@ -263,7 +282,7 @@ impl Resolver {
     }
 
     pub(crate) fn bind_empty(address: Ipv4Addr) -> io::Result<Self> {
-        Self::bind_records(address, Records::default())
+        Self::bind_records(address, Records::empty(address))
     }
 
     pub(crate) const fn address(&self) -> Ipv4Addr {
@@ -312,7 +331,9 @@ impl Resolver {
                     let records = worker_records
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if let Ok(Some(reply)) = response_for_records(&query[..length], &records) {
+                    if let Ok(Some(reply)) =
+                        response_for_source(&query[..length], &records, source.ip())
+                    {
                         let _ = worker_socket.send_to(&reply, source);
                     }
                 }
