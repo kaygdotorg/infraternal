@@ -450,6 +450,10 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
             "invalid terminal dimensions or ring capacity",
         ));
     }
+    // Sparse terminal mappings can gain ~2 MiB of resident holes while idle
+    // when khugepaged collapses them (#24). Opt out before allocating terminal
+    // state; the PTY child restores the inherited policy before exec.
+    let child_thp = crate::pty::disable_shim_thp()?;
     // Startup is single threaded; restrictive umask also protects bind's brief
     // interval before chmod. The shim retains this mask for its whole lifetime.
     umask(Mode::from_bits_truncate(0o077));
@@ -465,6 +469,7 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
         config.rows,
         config.readiness,
         &config.command,
+        child_thp,
     )?;
     let created = u64::try_from(
         SystemTime::now()
