@@ -230,14 +230,25 @@ fn valid_digest(digest: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn valid_release_version(version: &str) -> bool {
-    let stable = version.split('.').count() == 3
-        && version
-            .split('.')
-            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
+pub(crate) fn valid_release_version(version: &str) -> bool {
+    let mut parts = version.split('.');
+    let stable = matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(major), Some(minor), Some(patch), None)
+            if [major, minor, patch].iter().all(|part| {
+                !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+            })
+    );
     let edge = version
         .strip_prefix("edge-")
-        .is_some_and(|value| value.len() == 16 && value.as_bytes().get(8) == Some(&b'T'));
+        .and_then(|version| version.strip_suffix('Z'))
+        .and_then(|version| version.split_once('T'))
+        .is_some_and(|(date, time)| {
+            date.len() == 8
+                && date.bytes().all(|byte| byte.is_ascii_digit())
+                && time.len() == 6
+                && time.bytes().all(|byte| byte.is_ascii_digit())
+        });
     stable || edge
 }
 

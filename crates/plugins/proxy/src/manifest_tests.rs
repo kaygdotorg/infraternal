@@ -54,6 +54,30 @@ fn release_manifest_rejects_a_different_architecture() {
 }
 
 #[test]
+fn release_version_validation_matches_the_publisher_formats() {
+    let mut edge = manifest();
+    edge.release_version = "edge-20261101T123456Z".to_owned();
+    edge.mirror_path = "components/edge-20261101T123456Z/proxy/linux/amd64/traefik_v3.7.17_linux_amd64.tar.gz".to_owned();
+    assert!(edge.validate_for("linux", "amd64").is_ok());
+
+    for invalid in [
+        "edge-20261101T12345XZ",
+        "edge-20261101T12/456Z",
+        "1.2.3/../../escape",
+    ] {
+        let mut manifest = manifest();
+        manifest.release_version = invalid.to_owned();
+        manifest.mirror_path = format!(
+            "components/{invalid}/proxy/linux/amd64/traefik_v3.7.17_linux_amd64.tar.gz"
+        );
+        assert!(
+            manifest.validate_for("linux", "amd64").is_err(),
+            "accepted invalid release version: {invalid}"
+        );
+    }
+}
+
+#[test]
 fn release_manifest_rejects_an_unbounded_archive_and_malformed_digest() {
     let mut manifest = manifest();
     manifest.archive_size = super::manifest::MAX_COMPONENT_ARCHIVE_BYTES + 1;

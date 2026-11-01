@@ -146,10 +146,19 @@ impl<T: ComponentTransport> ComponentDownloader<T> {
         arch: &str,
         verifier: &dyn ComponentManifestVerifier,
     ) -> io::Result<PathBuf> {
+        if !crate::manifest::valid_release_version(release_version) {
+            return Err(invalid_input("component release version is invalid"));
+        }
+        let release_mirror = self
+            .mirror
+            .join(&format!("{release_version}/"))
+            .map_err(io::Error::other)?;
         let manifest_filename = ComponentManifest::signed_filename(os, arch);
-        let manifest_bytes = self.fetch_metadata(&manifest_filename, MAX_MANIFEST_BYTES)?;
-        let checksums = self.fetch_metadata("SHA256SUMS", MAX_CHECKSUM_BYTES)?;
-        let signature = self.fetch_metadata("SHA256SUMS.sig", MAX_SIGNATURE_BYTES)?;
+        let manifest_bytes =
+            self.fetch_metadata(&release_mirror, &manifest_filename, MAX_MANIFEST_BYTES)?;
+        let checksums = self.fetch_metadata(&release_mirror, "SHA256SUMS", MAX_CHECKSUM_BYTES)?;
+        let signature =
+            self.fetch_metadata(&release_mirror, "SHA256SUMS.sig", MAX_SIGNATURE_BYTES)?;
         let verified = verify_component_manifest(
             &manifest_bytes,
             &manifest_filename,
@@ -181,8 +190,8 @@ impl<T: ComponentTransport> ComponentDownloader<T> {
         }
     }
 
-    fn fetch_metadata(&self, name: &str, limit: u64) -> io::Result<Vec<u8>> {
-        let url = self.mirror.join(name).map_err(io::Error::other)?;
+    fn fetch_metadata(&self, release_mirror: &Url, name: &str, limit: u64) -> io::Result<Vec<u8>> {
+        let url = release_mirror.join(name).map_err(io::Error::other)?;
         let mut body = BoundedBody::new(limit);
         self.transport.download(&url, limit, &mut body)?;
         if body.bytes.is_empty() {

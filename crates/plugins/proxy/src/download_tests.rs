@@ -230,3 +230,28 @@ fn an_untrusted_manifest_never_triggers_an_archive_request() {
     assert!(!requests.contains(&upstream_archive));
     assert!(!state.0.join("components").exists());
 }
+
+#[test]
+fn an_invalid_release_version_is_rejected_before_metadata_is_requested() {
+    let transport = fixture_transport(Vec::new(), "", None);
+    let requests = transport.requests.clone();
+    let state = TempState::new();
+    let installer = ComponentInstaller::new(&state.0);
+
+    let error = ComponentDownloader::new(
+        Url::parse("https://mirror.example/releases/").expect("mirror URL"),
+        transport,
+    )
+    .expect("valid mirror")
+    .install(
+        &installer,
+        "../edge-20261101T123456Z",
+        "linux",
+        "amd64",
+        &FixtureVerifier(true),
+    )
+    .expect_err("release version must not escape its mirror directory");
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert!(requests.lock().expect("request fixture lock").is_empty());
+}
