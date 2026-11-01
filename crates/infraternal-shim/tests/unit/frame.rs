@@ -426,8 +426,33 @@ fn query_reply_extension_is_bounded_and_fragment_safe() {
 }
 
 #[test]
-fn cleanup_and_shared_writer_capabilities_do_not_overlap() {
-    use crate::frame::{SHARED_WRITER, SHELL_CLEANUP};
+fn capability_bits_are_distinct() {
+    use crate::frame::{
+        APPROXIMATE_SNAPSHOT, CLOSE_SESSION, MULTI_WRITER, QUERY_REPLIES, SEQUENCED_INPUT,
+        SESSION_OWNER, SHARED_WRITER, SHELL_CLEANUP,
+    };
+    let capabilities = [
+        SEQUENCED_INPUT,
+        MULTI_WRITER,
+        APPROXIMATE_SNAPSHOT,
+        SESSION_OWNER,
+        SHARED_WRITER,
+        QUERY_REPLIES,
+        CLOSE_SESSION,
+        SHELL_CLEANUP,
+    ];
+    for (index, capability) in capabilities.iter().enumerate() {
+        assert_eq!(
+            (*capability).count_ones(),
+            1,
+            "capability must use one bit"
+        );
+        for other in &capabilities[index + 1..] {
+            assert_eq!(*capability & *other, 0, "capability bits must not overlap");
+        }
+    }
     assert_eq!(SHARED_WRITER, 16, "preserve the shipped shared-writer bit");
-    assert_eq!(SHARED_WRITER & SHELL_CLEANUP, 0);
+    assert_eq!(QUERY_REPLIES, 32, "preserve the shipped query-reply bit");
+    assert_eq!(CLOSE_SESSION, 64, "preserve the shipped close-session bit");
+    assert_eq!(SHELL_CLEANUP, 128, "keep cleanup on the next free bit");
 }

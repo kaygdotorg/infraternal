@@ -16,8 +16,8 @@ pub const APPROXIMATE_SNAPSHOT: u64 = 4;
 /// Capability bit 3 selects an ownership-only link. It neither selects a writer
 /// nor reads output; closing it releases the window independently of data credit.
 pub const SESSION_OWNER: u64 = 8;
-/// Capability bit 5 selects a cleanup-only link whose reply proves shell reaping.
-pub const SHELL_CLEANUP: u64 = 32;
+/// Capability bit 7 selects a cleanup-only link whose reply proves shell reaping.
+pub const SHELL_CLEANUP: u64 = 128;
 /// Capability bit 4 permits a shared peer and bounded sequenced-input deferral.
 /// It requires [`SEQUENCED_INPUT`] and [`MULTI_WRITER`]. Deferral applies
 /// independently of peer selection mode; ordinary writer selection and
