@@ -119,12 +119,17 @@ and trusted-ingress source limits as other auth actions; it creates no ceremony,
 sets no cookie and changes no setup state. `setup-start` remains the enrollment
 entry point, and registration finish remains the one-shot token consumption [26,53].
 
-A cookie is `__Host-infraternal=<opaque random id>; Secure; HttpOnly;
-SameSite=Strict; Path=/; Max-Age=2592000` with no Domain. Storage slides 30 days
-on authenticated use; every successful cookie-authenticated HTTP action also
-refreshes the cookie. The client calls `session` on app resume to check validity. Fresh tap lifetime is five
-minutes; obtain a new session via login for destructive UI actions. Server action
-adapters call `Auth::fresh_session` to enforce this without duplicating policy. CLI keys
+A cookie is named `__Host-infraternal-session-<login-sequence>-<database-expiry>`
+and carries the opaque session token as its value. It is Secure, HttpOnly,
+SameSite=Strict, Path=/, has no Domain and uses an absolute `Expires` from the
+live database row. Storage slides 30 days on authenticated use; each successful
+cookie-authenticated HTTP action refreshes the name and expiry from that row.
+The server selects by login sequence, then expiry, never by Cookie-header order.
+Older fixed-name cookies are accepted only during migration and retired on a
+successful authenticated response. The client calls `session` on app resume to
+check validity. Fresh tap lifetime is five minutes; obtain a new session via
+login for destructive UI actions. Server action adapters call
+`Auth::fresh_session` to enforce this without duplicating policy. CLI keys
 never establish a fresh browser session. Initial scopes are `hosts:read`,
 `terminal:connect`, `actions:dry-run`; destructive MCP execution is not granted
 by this lane. Action adapters must require the separate dry-run contract [28].

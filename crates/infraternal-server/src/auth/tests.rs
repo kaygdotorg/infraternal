@@ -1118,12 +1118,12 @@ async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
     let _guard = SERIAL.lock().await;
     let mut f = fixture().await;
     let router = router(f.auth.clone());
-    let request = |origin: &str| {
+    let request = |origin: &str, cookie: &str| {
         axum::http::Request::builder()
             .method("POST")
             .uri("/auth/session")
             .header("Origin", origin)
-            .header("Cookie", format!("__Host-infraternal={}", f.session))
+            .header("Cookie", cookie)
             .header("Content-Type", "application/json")
             .body(axum::body::Body::from("{}"))
             .unwrap()
@@ -1131,7 +1131,10 @@ async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
     assert_eq!(
         router
             .clone()
-            .oneshot(request("https://evil.example.test"))
+            .oneshot(request(
+                "https://evil.example.test",
+                &format!("__Host-infraternal={}", f.session)
+            ))
             .await
             .unwrap()
             .status(),
@@ -1151,11 +1154,6 @@ async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
         .execute(&f.auth.pool)
         .await
         .unwrap();
-    let response = router.clone().oneshot(request(ORIGIN)).await.unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
-    let refreshed = response.headers()["set-cookie"].to_str().unwrap().to_owned();
-    assert!(refreshed.starts_with("__Host-infraternal-session-"));
-    assert!(refreshed.contains("Expires="));
     // The name carries the server login sequence and sliding deadline, so delayed
     // responses write a distinct cookie instead of replacing a newer login.
     let (_, binding, start) = http_post_json(&router, "login-start", json!({})).await;
@@ -1195,15 +1193,32 @@ async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
     )
     .await;
     assert_eq!(unlock_status, axum::http::StatusCode::OK);
-
-    // A response delayed from the older login may add its cookie back to the jar,
-    // but the new login's higher sequence still selects the right device.
     let current_cookie = unlocked_headers["set-cookie"]
         .to_str()
         .unwrap()
         .split(';')
         .next()
         .unwrap();
+    let response = router
+        .clone()
+        .oneshot(request(ORIGIN, current_cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let refreshed = response.headers()["set-cookie"].to_str().unwrap().to_owned();
+    assert!(refreshed.starts_with("__Host-infraternal-session-"));
+    assert!(refreshed.contains("Expires="));
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["device"], "flags");
+
+    // A response delayed from the older login may add its cookie back to the jar,
+    // but the new login's higher sequence still selects the right device.
     let combined = format!("__Host-infraternal={}; {current_cookie}", f.session);
     let switched = axum::http::Request::builder()
         .method("POST")
@@ -1227,14 +1242,13 @@ async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
         .method("POST")
         .uri("/auth/wraps")
         .header("Origin", ORIGIN)
-        .header("Cookie", format!("__Host-infraternal={}", f.session))
+        .header("Cookie", current_cookie)
         .header("Content-Type", "application/json")
         .body(axum::body::Body::from("{}"))
         .unwrap();
     let wraps_response = router.clone().oneshot(wraps_request).await.unwrap();
     assert!(wraps_response.headers().contains_key("set-cookie"));
 
-    assert_eq!(response.headers()["cache-control"], "no-store");
     let oversized = axum::http::Request::builder()
         .method("POST")
         .uri("/auth/device-start")
