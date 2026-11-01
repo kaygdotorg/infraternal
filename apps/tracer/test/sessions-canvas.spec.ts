@@ -252,7 +252,18 @@ test("the sidebar is the inventory: markers, detached notes and exit codes, in f
     const leaf = (id: string) => page.locator(`#tree .bm-leaf[data-id='s:${id}']`);
     await expect(leaf("build-01/deploy").locator(".ui-state-dot")).toHaveAttribute("data-state", "open");
     await expect(leaf("build-01/journal").locator(".ui-state-dot")).toHaveAttribute("data-state", "detached");
-    await expect(leaf("build-01/journal").locator(".bm-meta")).toHaveText("detached");
+    // A detached session shows an icon, never the word; its name is the icon's accessible label, its tooltip, and part of the row's own name.
+    const note = leaf("build-01/journal").locator(".bm-meta");
+    await expect(note).toHaveText("");
+    await expect(note.locator("svg")).toHaveCount(1);
+    await expect(note).toHaveAttribute("role", "img");
+    await expect(note).toHaveAttribute("aria-label", "Detached");
+    await expect(leaf("build-01/journal")).toHaveAttribute("aria-label", /build-01.*detached|journal, detached/);
+    await expect(leaf("build-01/deploy").locator(".bm-meta svg")).toHaveCount(0);
+    await expect(leaf("build-01/bench").locator(".bm-meta svg")).toHaveCount(0);
+    await note.hover();
+    await expect(page.locator(".tip")).toHaveText("Detached");
+    await page.mouse.move(700, 450);
     await expect(leaf("build-01/journal").locator(".ui-mark")).toHaveAttribute("data-mark", "output");
     await expect(leaf("build-01/release").locator(".ui-mark")).toHaveAttribute("data-mark", "ok");
     await expect(leaf("build-01/bench").locator(".bm-meta")).toHaveText("0");
