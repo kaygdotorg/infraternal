@@ -17,6 +17,15 @@ export interface LayoutTransport {
   call(action: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
   subscribe(filter: { topic: string }, event: (event: Record<string, unknown>) => void, open?: () => void): SubscriptionHandle;
 }
+/**
+ * What a session revocation did to this tab's queued layout work. Only a server receipt proves an
+ * edit committed (D312), so work is split by what the tab can actually know:
+ * - `unsent`: at least one edit never left the tab; clearing the queue dropped it.
+ * - `unconfirmed`: everything left the tab, but some has no receipt; it may or may not have committed.
+ * - `none`: nothing queued, or every queued edit has a receipt and reappears on the next sign-in.
+ */
+export type RevokedWork = "none" | "unconfirmed" | "unsent";
+
 export class ServerCanvasStore implements CanvasStore {
   readonly acceptsPendingReferences = true;
   readonly #journal: LayoutJournal;
@@ -48,7 +57,7 @@ export class ServerCanvasStore implements CanvasStore {
     private readonly transport: LayoutTransport,
     account: string,
     private readonly refused: (definitive?: boolean, delayed?: boolean, capacity?: boolean) => void = () => {},
-    private readonly onSessionRevoked: (pendingLost: boolean) => void = () => {},
+    private readonly onSessionRevoked: (work: RevokedWork) => void = () => {},
   ) {
     this.#offAccount = registerAccountWork(account, { pause: (value) => { this.#paused = value; if (!value) this.#pump(); }, dispose: () => this.dispose() });
     this.#incarnation = transport.sessionIncarnation;
@@ -63,17 +72,24 @@ export class ServerCanvasStore implements CanvasStore {
       if (this.#disposed) return;
       const incarnation = this.transport.sessionIncarnation;
       if (incarnation !== this.#incarnation && (this.#incarnation !== undefined || this.pending)) {
-        const lost = this.pending;
+        const work = this.#revokedWork();
         this.#journal.clear(); this.#revoked = true;
         this.#publish(); this.#pendingChanged();
         // A changed lifetime has no authority to keep drawing: the caller ends the old account screen.
-        this.onSessionRevoked(lost);
+        this.onSessionRevoked(work);
         return;
       } else this.#incarnation = incarnation;
       this.#journal.restart(); this.#resyncing = true; this.#waiting = true;
       clearTimeout(this.#retry); this.#retry = undefined;
       this.#watch();
     });
+  }
+  #revokedWork(): RevokedWork {
+    const { pending, migration } = this.#journal;
+    if (pending.some((p) => !p.sent)) return "unsent";
+    // A migration keeps its legacy source on disk until confirmed, so it is never dropped outright.
+    if (pending.some((p) => p.revision === undefined) || (migration && migration.revision === undefined)) return "unconfirmed";
+    return "none";
   }
   get pending(): boolean { return this.#journal.pending.length > 0 || this.#journal.migration !== undefined; }
   onPending(listener: () => void): () => void { if (!this.#disposed) this.#status.add(listener); return () => { this.#status.delete(listener); }; }

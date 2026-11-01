@@ -451,11 +451,14 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
         predictiveEcho,
         isCurrent: () => generation === sessionGeneration,
         onSessionCheck: () => { void checkForegroundSession(); },
-        onSessionRevoked: (pendingLost) => {
+        onSessionRevoked: (work) => {
           if (generation !== sessionGeneration) return;
-          endSession(pendingLost
+          // Receipt-confirmed edits are committed and come back on sign-in; never call them lost.
+          endSession(work === "unsent"
             ? "Not saved. Changes waiting to save were lost. Sign in again to continue."
-            : "Your sign-in changed. Sign in again to continue.");
+            : work === "unconfirmed"
+              ? "Your sign-in changed. Your last changes may not have saved. Sign in again to check."
+              : "Your sign-in changed. Sign in again to continue.");
         },
         ...(__CLUSTERS_PREVIEW__ && productTestMode ? { previewStore: layoutReview?.store ?? new (await import("./canvas/model/store")).LocalCanvasStore(activeUserId ?? "account") } : {}),
         ...(productTestMode ? { onFirstClient: (client: TerminalClient) => {

@@ -29,7 +29,7 @@ import { createCanvas, type CanvasController } from "./create";
 import { CELL, boxOf } from "./layout/geometry";
 import { columnsFromDocument, viewFromDocument, docHasGroups, type DocTarget } from "./model/document";
 import { loadGroups } from "./layout/groups-handle";
-import { ServerCanvasStore } from "./model/server-store";
+import { ServerCanvasStore, type RevokedWork } from "./model/server-store";
 import { reconcile } from "./model/reconcile";
 import type { ViewModel, WindowModel } from "./model/types";
 import { createLazyMeshApi } from "./mesh/lazy";
@@ -57,8 +57,8 @@ export interface ProductCanvasOptions {
   onFirstClient?: (client: TerminalClient) => void;
   isCurrent?: () => boolean;
   onSessionCheck?: () => void;
-  /** Ends the old account screen when its authenticated lifetime changes; true means unconfirmed layout edits were lost. */
-  onSessionRevoked?: (pendingLost: boolean) => void;
+  /** Ends the old account screen when its authenticated lifetime changes; `work` says what happened to queued layout edits. */
+  onSessionRevoked?: (work: RevokedWork) => void;
   onRecoveryPending?: (readyAt: number | undefined) => void;
 }
 

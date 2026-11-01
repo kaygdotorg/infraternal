@@ -20,7 +20,7 @@ class Transport implements LayoutTransport {
 }
 for (const replacement of ["original", "replacement"]) test(`reconnect ${replacement} fences unsent work before the snapshot pump`, async () => {
   const transport = new Transport(); let lost = 0;
-  const store = new ServerCanvasStore(transport, "session-test", () => {}, (pending) => { if (pending) lost++; });
+  const store = new ServerCanvasStore(transport, "session-test", () => {}, (work) => { if (work === "unsent") lost++; });
   try {
     transport.snapshot(); transport.isWelcomed = false;
     const next = document(); next.views[0]!.name = "Unconfirmed"; await store.save(next);
@@ -38,7 +38,7 @@ for (const replacement of ["original", "replacement"]) test(`reconnect ${replace
 test("queued work with no original binding cannot adopt a later incarnation", async () => {
   const transport = new Transport(); transport.sessionIncarnation = undefined;
   let lost = 0;
-  const store = new ServerCanvasStore(transport, "session-test", () => {}, (pending) => { if (pending) lost++; });
+  const store = new ServerCanvasStore(transport, "session-test", () => {}, (work) => { if (work === "unsent") lost++; });
   try {
     transport.snapshot(); transport.isWelcomed = false;
     const next = document(); next.views[0]!.name = "Unbound edit"; await store.save(next);
@@ -49,14 +49,14 @@ test("queued work with no original binding cannot adopt a later incarnation", as
 });
 
 test("a session-incarnation change ends the old canvas and refuses later edits", async () => {
-  const transport = new Transport(); let lost: boolean[] = [];
-  const store = new ServerCanvasStore(transport, "session-test", () => {}, (pending) => { lost.push(pending); });
+  const transport = new Transport(); const lost: string[] = [];
+  const store = new ServerCanvasStore(transport, "session-test", () => {}, (work) => { lost.push(work); });
   try {
     transport.snapshot();
     transport.sessionIncarnation = "replacement";
     transport.open();
     transport.snapshot(document("Replacement account"));
-    expect(lost).toEqual([false]);
+    expect(lost).toEqual(["none"]);
     expect(store.pending).toBe(false);
     expect(store.current()).toEqual(emptyDocument());
     await store.save(document("Late edit"));
@@ -76,4 +76,30 @@ test("a revoked store does not adopt a replacement account snapshot", () => {
     transport.snapshot(document("Replacement account"));
     expect(store.current()).toEqual(emptyDocument());
   } finally { store.dispose(); }
+});
+
+class ReceiptTransport extends Transport {
+  receipts: Array<(result: Record<string, unknown>) => void> = [];
+  override call(_action: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
+    this.calls.push(input); return new Promise((resolve) => { this.receipts.push(resolve); });
+  }
+}
+const revokeAfter = async (receipt: boolean): Promise<string[]> => {
+  const transport = new ReceiptTransport(); const work: string[] = [];
+  const store = new ServerCanvasStore(transport, "session-test", () => {}, (value) => { work.push(value); });
+  try {
+    transport.snapshot();
+    const next = document(); next.views[0]!.name = "Renamed"; await store.save(next);
+    expect(transport.calls).toHaveLength(1);
+    // R250-R3-01: the receipt arrives, its ordered event does not, then the sign-in is replaced.
+    if (receipt) { transport.receipts[0]!({ revision: 2 }); await Promise.resolve(); await Promise.resolve(); }
+    transport.sessionIncarnation = "replacement"; transport.open();
+    return work;
+  } finally { store.dispose(); }
+};
+test("R250-R3-01: a server-confirmed edit is never reported as lost on session replacement", async () => {
+  expect(await revokeAfter(true)).toEqual(["none"]);
+});
+test("a sent edit without a receipt is reported as uncertain, not lost", async () => {
+  expect(await revokeAfter(false)).toEqual(["unconfirmed"]);
 });
