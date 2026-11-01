@@ -24,6 +24,13 @@ class ReleaseScripts(unittest.TestCase):
             repo = Path(directory)
             shutil.copytree(ROOT / 'scripts/release', repo / 'scripts/release')
             shutil.copy(ROOT / 'Cargo.toml', repo / 'Cargo.toml')
+            (repo / 'scripts/release/traefik_component.py').write_text('''import argparse, hashlib, json
+from pathlib import Path
+p=argparse.ArgumentParser(); p.add_argument("--release-version", required=True); p.add_argument("--os", required=True); p.add_argument("--arch", required=True); p.add_argument("--output", type=Path, required=True); a=p.parse_args()
+name=f"traefik_v3.7.17_{a.os}_{a.arch}.tar.gz"; relative=f"components/{a.release_version}/proxy/{a.os}/{a.arch}/{name}"; payload=f"fixture:{a.os}:{a.arch}".encode(); destination=a.output/relative; destination.parent.mkdir(parents=True, exist_ok=True); destination.write_bytes(payload)
+manifest={"component":"traefik","version":"3.7.17","release_version":a.release_version,"os":a.os,"arch":a.arch,"archive_filename":name,"archive_url":f"https://github.com/traefik/traefik/releases/download/v3.7.17/{name}","mirror_path":relative,"archive_sha256":hashlib.sha256(payload).hexdigest(),"archive_size":len(payload),"executable":"traefik","executable_sha256":"0"*64,"executable_size":1,"license":"MIT"}
+(a.output/f"proxy-traefik-{a.os}-{a.arch}.json").write_text(json.dumps(manifest)+"\\n")
+''')
             # This isolated packaging stand-in observes build inputs; real binaries are checked separately.
             for name, body in (
                 ('auth-toolchain', '#!/usr/bin/env bash\nexit 0\n'),
@@ -54,8 +61,14 @@ class ReleaseScripts(unittest.TestCase):
                     self.assertLessEqual(stamp, finished)
                 for name in ('VERSION','infraternal','infraternal-x86_64-musl','infraternal-aarch64-musl','infraternal-x86_64-session-musl','infraternal-aarch64-session-musl'):
                     self.assertEqual((bundle / name).read_text(), bundle.name+'\n')
+                targets = [('linux', 'amd64'), ('linux', 'arm64'), ('darwin', 'amd64'), ('darwin', 'arm64')]
+                for os_name, arch in targets:
+                    name = f'traefik_v3.7.17_{os_name}_{arch}.tar.gz'
+                    relative = Path('components') / bundle.name / 'proxy' / os_name / arch / name
+                    self.assertTrue((bundle / f'proxy-traefik-{os_name}-{arch}.json').is_file())
+                    self.assertTrue((bundle / relative).is_file())
                 checksums = (bundle / 'SHA256SUMS').read_text().splitlines()
-                self.assertEqual({line.split()[1] for line in checksums}, {p.name for p in bundle.iterdir() if p.name != 'SHA256SUMS'})
+                self.assertEqual({line.split()[1] for line in checksums}, {p.name for p in bundle.iterdir() if p.is_file() and p.name != 'SHA256SUMS'})
                 self.assertEqual(subprocess.run(['sha256sum', '--strict', '--check', 'SHA256SUMS'], cwd=bundle, capture_output=True).returncode, 0)
                 if channel == 'stable':
                     self.assertNotEqual(build('--channel',channel).returncode, 0)
@@ -126,9 +139,29 @@ class ReleaseScripts(unittest.TestCase):
                 for arch in ('x86_64', 'aarch64'):
                     name = f'infraternal-{arch}-session-musl'
                     files[name] = ('synthetic ' + name).encode()
+            component_archives = {}
+            for os_name, arch in [('linux', 'amd64'), ('linux', 'arm64'), ('darwin', 'amd64'), ('darwin', 'arm64')]:
+                filename = f'traefik_v3.7.17_{os_name}_{arch}.tar.gz'
+                relative = f'components/{version}/proxy/{os_name}/{arch}/{filename}'
+                payload = f'synthetic archive {os_name} {arch}'.encode()
+                manifest = {
+                    'component': 'traefik', 'version': '3.7.17', 'release_version': version,
+                    'os': os_name, 'arch': arch, 'archive_filename': filename,
+                    'archive_url': f'https://github.com/traefik/traefik/releases/download/v3.7.17/{filename}',
+                    'mirror_path': relative, 'archive_sha256': hashlib.sha256(payload).hexdigest(),
+                    'archive_size': len(payload), 'executable': 'traefik',
+                    'executable_sha256': hashlib.sha256(b'synthetic executable').hexdigest(),
+                    'executable_size': len(b'synthetic executable'), 'license': 'MIT',
+                }
+                files[f'proxy-traefik-{os_name}-{arch}.json'] = (json.dumps(manifest, sort_keys=True, separators=(',', ':')) + '\n').encode()
+                component_archives[relative] = payload
             files["VERSION"] = (version + "\n").encode()
             for name, body in files.items():
                 (bundle / name).write_bytes(body)
+            for relative, body in component_archives.items():
+                path = bundle / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(body)
             store = {}
             requests = []
             error = [None]
@@ -225,8 +258,9 @@ class ReleaseScripts(unittest.TestCase):
                 self.assertIn('Published and verified', result.stdout)
                 self.assertIsNone(error[0])
                 self.assertFalse(any(method == "HEAD" for method, _ in requests))
-                self.assertEqual(len([r for r in requests if r[0] == 'PUT']), 6)
-                self.assertEqual({path.rsplit('/', 1)[-1] for method, path in requests if method == 'PUT'}, set(files))
+                puts = {path.split(f'/releases/{version}/', 1)[-1] for method, path in requests if method == 'PUT'}
+                self.assertEqual(len(puts), len(files) + len(component_archives))
+                self.assertEqual(puts, set(files) | set(component_archives))
                 before = len(requests)
                 self.assertNotEqual(run('publish').returncode, 0)
                 self.assertFalse(any(r[0] in ('PUT', 'POST') for r in requests[before:]))
