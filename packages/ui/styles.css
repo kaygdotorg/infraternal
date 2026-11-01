@@ -503,7 +503,7 @@
 /* Key/value list (kv-list.ts): keys left, values right, every cell copies. */
 .ui-kv { display: flex; flex-direction: column; }
 .ui-kv-row {
-  display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 16px; align-items: baseline;
+  display: grid; grid-template-columns: fit-content(55%) minmax(0, 1fr); column-gap: 16px; align-items: baseline;
   min-height: var(--ui-row-h); padding: 4px 0; border-bottom: 1px solid var(--line);
 }
 .ui-kv-row:last-child { border-bottom: 0; }
@@ -512,7 +512,7 @@
 .ui-kv-rows { display: flex; flex-direction: column; }
 .ui-kv-group { padding: 6px 0 2px; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-kv-cell {
-  display: block; min-width: 0; margin: 0; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; text-align: left; font: inherit;
+  display: block; min-width: 0; max-width: 100%; margin: 0; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; text-align: left; font: inherit;
   transition: transform 140ms var(--ease-out, ease-out);
   -webkit-user-select: text; user-select: text; -webkit-tap-highlight-color: transparent; touch-action: manipulation;
 }

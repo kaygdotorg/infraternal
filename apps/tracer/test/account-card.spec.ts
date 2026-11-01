@@ -170,6 +170,12 @@ test.describe("Logs in as: a card for each tag, a gradient for each machine", ()
     // Nothing leaves the pane, the long account name wraps, and the card never scrolls sideways.
     for (const a of facts.accounts) expect(a.overflow, `${a.name} overflows`).toBe(0);
     expect(facts.paneOverflow).toBe(false);
+    // The row's own value never covers its key: the account chips stay in the value column.
+    const rowBoxes = await page.evaluate(() => {
+      const row = [...document.querySelectorAll<HTMLElement>(".ac .ui-kv-row")].find((r) => r.querySelector(".ui-kv-key")?.textContent?.trim() === "Logs in as")!;
+      return { key: row.querySelector(".ui-kv-key")!.getBoundingClientRect().right, valueLeft: row.querySelector(".ui-kv-value")!.getBoundingClientRect().left };
+    });
+    expect(rowBoxes.valueLeft).toBeGreaterThanOrEqual(rowBoxes.key - 0.5);
     // The card is inside the sidebar and the page has no horizontal scroll.
     const inside = await page.evaluate(() => {
       const card = document.querySelector<HTMLElement>(".ac")!.getBoundingClientRect();
