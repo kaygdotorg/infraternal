@@ -4,7 +4,9 @@ use super::custody::{DnsTokenCustody, FileDnsTokenCustody, SecretToken};
 use std::{
     fs,
     os::unix::fs::{MetadataExt, PermissionsExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::Arc,
 };
 
 struct TempState(PathBuf);
@@ -238,4 +240,50 @@ fn secret_debug_and_provider_file_environment_never_include_the_value() {
         "/private/state/proxy-secrets/cloudflare/CF_DNS_API_TOKEN"
     );
     assert!(!variable.1.contains("must-not-appear-in-debug-or-env"));
+}
+
+#[test]
+fn agent_start_removes_custody_files_for_a_removed_dns_provider() {
+    const CHILD_STATE: &str = "INFRATERAL_PROXY_CUSTODY_TEST_STATE";
+    if let Some(state) = std::env::var_os(CHILD_STATE) {
+        let log: Arc<super::supervisor::ProxyLog> = Arc::new(|_| {});
+        let _controller = super::controller::ProxyController::for_agent(Path::new(&state), log)
+            .expect("load proxy without a DNS provider");
+        return;
+    }
+
+    let state = TempState::new();
+    let custody = FileDnsTokenCustody::open(&state.0).expect("open custody");
+    let provider = format!("removed-{}", uuid::Uuid::new_v4().simple());
+    let path = custody
+        .put(
+            &provider,
+            "TEST_DNS_API_TOKEN",
+            SecretToken::new(b"removed-provider-test-value".to_vec()),
+        )
+        .expect("store removed provider token");
+
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--exact",
+            "tests::agent_start_removes_custody_files_for_a_removed_dns_provider",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env(CHILD_STATE, &state.0)
+        .output()
+        .expect("start isolated agent configuration check");
+    let child_output = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "isolated agent configuration failed: {child_output}"
+    );
+    assert!(
+        child_output.contains("1 passed"),
+        "isolated process did not run the custody regression: {child_output}"
+    );
+    assert!(
+        !path.exists(),
+        "token file for the removed DNS provider survived agent startup"
+    );
 }
