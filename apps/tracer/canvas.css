@@ -66,6 +66,8 @@
   -webkit-mask-image: linear-gradient(transparent, #000 10px, #000 calc(100% - 10px), transparent);
   mask-image: linear-gradient(transparent, #000 10px, #000 calc(100% - 10px), transparent);
 }
+/* The destructive action under the facts: the settings row's own 8 px padding plus this 8 px puts its label on the keys' 16 px edge. */
+.canvas-popover-action { flex: none; padding: 6px 8px 8px; border-top: 1px solid var(--line); }
 @media (pointer: coarse) {
   .canvas-popover { border-radius: 18px; }
   .canvas-popover-head { padding: 16px 16px 12px; }

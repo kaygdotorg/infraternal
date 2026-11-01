@@ -873,6 +873,8 @@
 [data-stacked] > .ui-sp-row .ui-sp-text { flex-direction: column; align-items: flex-start; row-gap: 1px; }
 [data-stacked] > .ui-sp-row .ui-sp-hint { white-space: normal; text-wrap: balance; max-width: 100%; }
 .ui-sp-hint { color: var(--ui-text-secondary); }
+/* A destructive row (remove, sign out) names its action in the danger colour; the hint under it stays quiet. */
+.ui-sp-row[data-tone="danger"] .ui-sp-label { color: var(--danger); }
 .ui-sp-tick { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); flex: none; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(0.6); transition: opacity 150ms ease, transform 180ms var(--ease-out, ease-out); }
 .ui-sp-row[data-current] .ui-sp-tick { opacity: 1; transform: none; }
 .ui-sp-devices { display: grid; margin: 0; padding: 0; list-style: none; }
