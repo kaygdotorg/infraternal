@@ -3,13 +3,8 @@
 # `nix develop` gives every build machine the same compiler (read from
 # rust-toolchain.toml, so the toml stays the single source of truth), the same
 # JS runtime and the same helper tools. Nothing is installed outside nix.
-# This flake builds nothing of the product; it only provides tools.
-#
-# Not from nix: Zig 0.15.2. scripts/auth-toolchain downloads that exact
-# checksum-pinned release into target/auth-tools, and the static C builds
-# depend on the pin, so it stays there.
 {
-  description = "infraternal development shell";
+  description = "infraternal build and development environment";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -26,6 +21,13 @@
       forAll = f: nixpkgs.lib.genAttrs systems (system:
         f (import nixpkgs { inherit system; overlays = [ rust-overlay.overlays.default ]; }));
     in {
+      packages = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ] (system:
+        let pkgs = import nixpkgs { inherit system; overlays = [ rust-overlay.overlays.default ]; };
+        in { default = pkgs.callPackage ./nix/package.nix {
+          source = self.outPath;
+          revision = self.rev or self.dirtyRev or "";
+          epoch = self.lastModified or 0;
+        }; });
       devShells = forAll (pkgs:
         let
           # Channel, components and musl targets come from rust-toolchain.toml.
@@ -55,6 +57,7 @@
               pkgs.gcc                 # host-side build scripts and proc macros
               pkgs.curl pkgs.xz pkgs.gnutar pkgs.gzip  # scripts/auth-toolchain fetches Zig
               pkgs.git pkgs.cacert
+              pkgs.ripgrep              # release bundle ELF validation
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               pkgs.file pkgs.binutils  # static-binary linkage checks (file, readelf)
               pkgs.util-linux          # prlimit for the key-memory check
