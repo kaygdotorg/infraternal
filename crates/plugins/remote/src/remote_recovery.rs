@@ -193,8 +193,8 @@ pub async fn exchange(
         not_after,
     );
     let mut signer = openssl::sign::Signer::new_without_digest(&identity.key).map_err(|_| denied())?;
-    signer.update(&transcript).map_err(|_| denied())?;
-    let signature = signer.sign_to_vec().map_err(|_| denied())?;
+    // Ed25519 consumes the complete transcript in one operation; streaming updates are unsupported.
+    let signature = signer.sign_oneshot_to_vec(&transcript).map_err(|_| denied())?;
     write_request(
         &connection.channel,
         &RecoveryRequest::Prove {

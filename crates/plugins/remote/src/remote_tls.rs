@@ -277,9 +277,8 @@ pub async fn dial_recovery(
     {
         return Err(denied());
     }
-    if stream.ssl().peer_certificate().is_some() {
-        return Err(denied());
-    }
+    // This connector is built without a local identity; its peer certificate is
+    // the verified server leaf and cannot prove which client certificate was sent.
     Ok(RecoveryConnection {
         channel: channel(stream),
     })

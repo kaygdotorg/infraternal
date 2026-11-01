@@ -457,8 +457,11 @@ impl Service {
         let public_key = PKey::public_key_from_raw_bytes(&public_key, Id::ED25519)
             .map_err(|_| Denied)?;
         let mut verifier = Verifier::new_without_digest(&public_key).map_err(|_| Denied)?;
-        verifier.update(&transcript).map_err(|_| Denied)?;
-        if !verifier.verify(&signature).map_err(|_| Denied)? {
+        // Ed25519 verifies the complete transcript in one operation; streaming updates are unsupported.
+        if !verifier
+            .verify_oneshot(&signature, &transcript)
+            .map_err(|_| Denied)?
+        {
             return Err(Denied);
         }
         if let Some(certificate_der) = certificate {
