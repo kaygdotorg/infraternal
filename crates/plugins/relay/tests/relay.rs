@@ -176,6 +176,48 @@ async fn relay_bounds_stalled_handshakes_from_one_source_ip() {
 }
 
 #[tokio::test]
+async fn stalled_control_hello_times_out_and_releases_its_permit() {
+    let mut ca = Authority::new();
+    let handshake = Duration::from_millis(500);
+    let limits = Limits {
+        handshakes: 1,
+        handshakes_per_ip: 1,
+        handshake,
+        ..Limits::default()
+    };
+    let relay = Relay::start(
+        "127.0.0.1:0".parse().unwrap(),
+        ca.issue(Purpose::Relay(NAME)),
+        limits,
+        everyone(),
+    )
+    .unwrap();
+    let address = relay.local_addr().unwrap();
+    let (_first_endpoint, first) = stalled_client(&mut ca, address, host(1))
+        .await
+        .expect("first stalled client completed its QUIC handshake");
+
+    let started = tokio::time::Instant::now();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), first.closed())
+            .await
+            .is_ok(),
+        "relay kept a pre-auth control hello open past its deadline"
+    );
+    assert!(
+        started.elapsed() >= handshake,
+        "relay closed a stalled hello before its configured deadline"
+    );
+
+    let Some((second_endpoint, second)) = stalled_client(&mut ca, address, host(2)).await else {
+        panic!("timed-out control hello did not release its pre-auth permit");
+    };
+    second.close(quinn::VarInt::from_u32(0), b"test finished");
+    drop(second_endpoint);
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn unlink_and_disconnect_end_the_link_for_the_other_end() {
     let mut ca = Authority::new();
     let relay = relay(&mut ca, everyone());
