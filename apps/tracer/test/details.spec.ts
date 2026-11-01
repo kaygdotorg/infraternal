@@ -30,7 +30,7 @@ test("a click on the pill opens the popover, with plain names and a subtitle for
   // Every value copies on click.
   await popover(page).locator(".ui-tab", { hasText: "Host" }).click();
   await popover(page).locator(".ui-kv-value").first().click();
-  await expect(popover(page).locator(".ui-kv-cell[data-done]")).toHaveCount(1);
+  await expect(popover(page).locator(".ui-kv-cell[data-copied]")).toHaveCount(1);
   // The pill toggles it.
   await pill(page).click();
   await expect(popover(page)).toHaveCount(0);

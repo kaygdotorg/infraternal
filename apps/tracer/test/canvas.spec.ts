@@ -98,7 +98,7 @@ test("details popover: keys left, values right, each cell copies with a tick", a
   expect(key!.x).toBeLessThan(rowBox.x + 8);
   expect(Math.abs(value!.x + value!.width - (rowBox.x + rowBox.width))).toBeLessThan(8);
   await row.locator(".ui-kv-value").click();
-  await expect(row.locator(".ui-kv-value")).toHaveAttribute("data-done", "");
+  await expect(row.locator(".ui-kv-value")).toHaveAttribute("data-copied", "");
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("6.8.0-58-generic");
   await row.locator(".ui-kv-key").click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("Kernel");
@@ -382,15 +382,15 @@ test("sidebar footer: the person and settings pills line up, press, and open Set
   await expect(page.locator(".ui-settings")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.locator(".ui-settings")).toHaveCount(0);
-  // Settings, About: the gear opens it; a value copies with the shared tick and "Copied".
+  // Settings, About: the gear opens it; a value copies and confirms in place (clipboard icon and "Copied").
   await foot.locator(".ui-sidebar-settings").click();
   const about = page.locator(".ui-settings");
   await expect(about.locator(".ui-settings-nav-row[aria-current='true']")).toHaveText("About");
   const commit = about.locator(".ui-kv-row", { hasText: "Commit" }).locator(".ui-kv-value");
   await commit.click();
-  await expect(commit).toHaveAttribute("data-done", "");
+  await expect(commit).toHaveAttribute("data-copied", "");
   expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(/^[0-9a-f]{40}$|^dev$/);
-  await expect(page.locator(".tip")).toContainText("Copied");
+  await expect(commit.locator(".ui-copied")).toHaveText("Copied");
   const version = about.locator(".ui-kv-row", { hasText: "Version" }).locator(".ui-kv-value");
   await version.click();
   expect((await page.evaluate(() => navigator.clipboard.readText())).length).toBeGreaterThanOrEqual(3);
@@ -819,19 +819,21 @@ test("copy works from a plain-http, non-localhost origin: no async clipboard, th
     await page.locator(".ui-window").first().locator(".ui-window-pill").click();
     const value = page.locator(".canvas-popover .ui-kv-value").first();
     await value.click();
-    await expect(value).toHaveAttribute("data-done", "");
+    await expect(value).toHaveAttribute("data-copied", "");
     expect(await page.evaluate(() => (window as unknown as { __copied: string[] }).__copied)).toEqual(["6.8.0-58-generic"]);
-    // The tick morphs in (opacity rises) and the shared "Copied" tooltip shows.
-    await expect(value.locator(".ui-inline-tick .is-done")).toHaveCSS("opacity", "1");
-    await expect(page.locator(".tip")).toContainText("Copied");
+    // The text fades out and the clipboard icon with "Copied" takes its place; there is no tooltip.
+    await expect(value.locator(".ui-copied")).toHaveCSS("opacity", "1");
+    await expect(value.locator(".ui-kv-text")).toHaveCSS("opacity", "0");
+    await expect(value.locator(".ui-copied svg")).toHaveCount(1);
+    expect((await page.locator(".tip").allInnerTexts()).join(" ")).not.toContain("Copied");
     // The cursor over a copyable value is the pointer, never the green plus of `copy`.
     expect(await value.evaluate((node) => getComputedStyle(node).cursor)).toBe("pointer");
     // If both paths fail, the same slot says so.
     await page.evaluate(() => { document.execCommand = () => false; });
     const key = page.locator(".canvas-popover .ui-kv-key").first();
     await key.click();
-    await expect(page.locator(".tip")).toContainText("Couldn't copy");
-    await expect(key).not.toHaveAttribute("data-done", "");
+    await expect(key.locator(".ui-copied")).toHaveText("Couldn't copy");
+    await expect(key.locator(".ui-copied svg")).toHaveCount(0);
   } finally {
     await browser.close();
   }

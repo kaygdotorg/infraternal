@@ -5,8 +5,8 @@
  * shell its sections will hang on, not a one-off. A section is `{ id, title, icon, render }`,
  * where `render(container)` fills the pane and may return a disposer.
  *
- * About is the build's facts as a shared key/value list: tap or click a value to copy it with
- * the shared inline tick and "Copied" tooltip (no copy buttons).
+ * About is the build's facts as a shared key/value list: tap or click a value to copy it; the text fades
+ * out and a clipboard icon with "Copied" replaces it in place (no copy buttons, no tooltip).
  *
  * Motion: a pointer open scales in from 0.96 with opacity (200 ms strong ease-out), closing is
  * quicker; keyboard opens and closes are instant. Escape, the close icon and a press outside
