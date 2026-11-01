@@ -3450,6 +3450,19 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      to copy, plus a button that adds that line to the startup file after
      the person confirms, with undo. Every session still exports
      `INFRATERNAL_SESSION`. The per-host and global switches from D241 stay.
+     **Wording and flow amended (owner, 2026-11-01, #251, after the 18
+     review screenshots):** "don't say 'add guard'. just ask '<Existing
+     multiplexer> started automatically. Would you like to switch to the
+     Infraternal Multiplexer instead?' tick cross and ? — where ? points to
+     the docs about our multiplexer." The notice is that one question with
+     three icon buttons, each with a tooltip and accessible name: ✓ switches
+     (the same confirmed edit with the exact line shown, then a "Restore
+     <file>" undo; where no startup line can be edited, ✓ copies the line),
+     ✗ keeps the other multiplexer and does not ask again on this host, ?
+     opens the docs page about the Infraternal Multiplexer
+     (`docs/multiplexer.md`, published at infraternal.com/docs/multiplexer).
+     The word "guard" no longer appears in user-facing text. The safety
+     rules above are unchanged.
 316. **Mesh path finding, names and the reverse proxy (owner, 2026-10-30,
      #220; answers D313's Q8, confirms D165, refines D219):**
      - **Path finding uses str0m's ICE core** for host-to-host mesh paths,
