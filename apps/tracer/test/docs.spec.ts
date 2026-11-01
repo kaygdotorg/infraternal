@@ -7,7 +7,7 @@
  */
 import { existsSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { expect, test } from "playwright/test";
+import { chromium, expect, test } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
 
 const OUT = tracerEvidencePath("docs");
@@ -17,8 +17,11 @@ const SIZES = [
 ] as const;
 
 for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
-  test(`${size.name} ${scheme}: the index and the multiplexer page render and line up`, async ({ browser }) => {
+  test(`${size.name} ${scheme}: the index and the multiplexer page render and line up`, async ({ browser: shared }) => {
     mkdirSync(OUT, { recursive: true });
+    // Headless Chromium reports a fine pointer even with touch emulation; a phone's coarse pointer is switched on at launch,
+    // because the type scale and the 44 px targets follow `pointer: coarse`.
+    const browser = size.touch ? await chromium.launch({ args: ["--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=1,availableHoverTypes=1"] }) : shared;
     const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: size.scale, hasTouch: size.touch, isMobile: size.touch, colorScheme: scheme });
     const page = await context.newPage();
     const failures: string[] = [];
@@ -61,6 +64,7 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
       expect(failures).toEqual([]);
     } finally {
       await context.close();
+      if (browser !== shared) await browser.close();
     }
   });
 }
