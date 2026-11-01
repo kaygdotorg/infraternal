@@ -140,9 +140,8 @@ fn root_status(
 
 fn epoch_seconds(issuer: &X509) -> Result<i64, crate::ca::CaError> {
     let epoch = Asn1Time::from_unix(0).map_err(|_| crate::ca::CaError)?;
-    let difference = issuer
-        .not_after()
-        .diff(epoch.as_ref())
+    let difference = epoch
+        .diff(issuer.not_after())
         .map_err(|_| crate::ca::CaError)?;
     i64::from(difference.days)
         .checked_mul(DAY)
@@ -231,6 +230,7 @@ mod tests {
         assert_eq!(status.roots[1].generation, 5);
         assert_eq!(status.roots[0].warning_level, "unknown");
         assert_eq!(status.roots[0].remaining_seconds, None);
+        assert_eq!(status.roots[0].not_after, 1_900_000_000);
         assert!(!status.roots[0].certificate_der.is_empty());
     }
 

@@ -295,7 +295,7 @@ fn validate_at(
 
 fn epoch_seconds(time: &openssl::asn1::Asn1TimeRef) -> io::Result<i64> {
     let epoch = Asn1Time::from_unix(0).map_err(|_| denied())?;
-    let difference = time.diff(epoch.as_ref()).map_err(|_| denied())?;
+    let difference = epoch.diff(time).map_err(|_| denied())?;
     i64::from(difference.days)
         .checked_mul(86_400)
         .and_then(|days| days.checked_add(i64::from(difference.secs)))
@@ -327,6 +327,13 @@ fn denied() -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unix_time_conversion_uses_time_after_epoch() {
+        let expected = 1_900_000_000;
+        let time = Asn1Time::from_unix(expected).unwrap();
+        assert_eq!(epoch_seconds(time.as_ref()).unwrap(), expected);
+    }
 
     struct Publisher;
     impl CertificatePublisher for Publisher {

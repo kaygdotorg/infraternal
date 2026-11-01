@@ -230,7 +230,7 @@ fn host_id(certificate: &openssl::x509::X509) -> io::Result<Uuid> {
 
 fn epoch_seconds(time: &openssl::asn1::Asn1TimeRef) -> io::Result<i64> {
     let epoch = openssl::asn1::Asn1Time::from_unix(0).map_err(|_| denied())?;
-    let difference = time.diff(epoch.as_ref()).map_err(|_| denied())?;
+    let difference = epoch.diff(time).map_err(|_| denied())?;
     i64::from(difference.days)
         .checked_mul(86_400)
         .and_then(|days| days.checked_add(i64::from(difference.secs)))
@@ -331,6 +331,13 @@ fn denied() -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unix_time_conversion_uses_time_after_epoch() {
+        let expected = 1_900_000_000;
+        let time = openssl::asn1::Asn1Time::from_unix(expected).unwrap();
+        assert_eq!(epoch_seconds(time.as_ref()).unwrap(), expected);
+    }
 
     #[test]
     fn request_identity_and_proof_transcript_bind_every_public_field() {
