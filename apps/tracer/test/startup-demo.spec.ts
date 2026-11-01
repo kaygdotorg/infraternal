@@ -62,6 +62,8 @@ for (const size of SIZES) for (const theme of ["ink", "paper"] as const) {
       await expect(page.locator(".ui-toast-message")).toHaveText(QUESTION, { timeout: 30_000 });
       const [docs] = await Promise.all([context.waitForEvent("page"), choice(page, "About the Infraternal Multiplexer").click()]);
       await docs.waitForLoadState();
+      // The page is this server's own (an instance carries the docs for the version it runs), never another site's.
+      expect(new URL(docs.url()).origin + new URL(docs.url()).pathname).toBe(new URL(page.url()).origin + "/docs/multiplexer/");
       await expect(docs.getByRole("heading", { level: 1, name: "The Infraternal Multiplexer" })).toBeVisible();
       await docs.setViewportSize({ width: size.width, height: size.height });
       await docs.screenshot({ path: `${OUT}/${size.name}-${theme}-docs.png` });

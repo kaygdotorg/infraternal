@@ -18,14 +18,14 @@ interface Connection {
   readonly isWelcomed: boolean;
 }
 
-/** The page about our multiplexer on the public docs site (D44, D223: infraternal.com/docs). Source: docs/multiplexer.md. */
-export const MULTIPLEXER_DOCS_URL = "https://infraternal.com/docs/multiplexer";
+/** The page about our multiplexer, served by this same server: every instance carries the docs for the version it runs (D44, D223; source docs/multiplexer.md, built by docs-build.ts). */
+export const MULTIPLEXER_DOCS_URL = "/docs/multiplexer/";
 const MULTIPLEXER_NAMES: Record<string, string> = { tmux: "tmux", zellij: "Zellij" };
 /** The name people know the program by; an unknown future one shows as the server reports it. */
 export const multiplexerName = (id: string): string => MULTIPLEXER_NAMES[id] ?? id;
 
 export interface StartupHintOptions {
-  /** Where ? goes; a mockup points it at its own rendered copy of the page. */
+  /** Where ? goes; the default is this server's own page. */
   docsUrl?: string;
   /** Opens the docs; the default is a new tab that cannot reach back into this one. */
   openDocs?: (url: string) => void;
