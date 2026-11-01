@@ -47,6 +47,13 @@ pub fn prepare_child(command: &mut std::process::Command) {
     pty::prepare_child(command);
 }
 
+/// Whether atomic replacement would drop extended attributes, including access-control lists.
+/// # Errors
+/// Returns the kernel metadata-query error. Callers refuse replacement when present.
+pub fn startup_file_has_attributes(file: &std::fs::File) -> std::io::Result<bool> {
+    pty::file_has_attributes(file)
+}
+
 /// Apply child signal policy and close the trusted fd3 before direct exec.
 /// This avoids an intermediate shell changing `/proc/self/exe` for anonymous images.
 pub fn prepare_child_without_control(command: &mut std::process::Command) {

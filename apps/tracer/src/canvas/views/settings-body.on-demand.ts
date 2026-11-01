@@ -74,7 +74,7 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
       id: "extended-info", title: "Details", label: "Extended info", hint: "Init, virtualization, shell and locale in each window's details",
       get: readExtendedInfo, set: writeExtendedInfo,
       onChange(listener) { window.addEventListener(EXTENDED_INFO_EVENT, listener); return () => window.removeEventListener(EXTENDED_INFO_EVENT, listener); },
-    }],
+    }, ...(cx.adapters.startupHints?.switches() ?? [])],
     ...(cx.adapters.authority ? { statuses: [authorityPref(cx.adapters.authority)] } : {}),
   };
   const pane = el("div", "ui-settings-pane");

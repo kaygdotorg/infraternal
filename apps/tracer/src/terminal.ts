@@ -810,6 +810,14 @@ export class TerminalClient {
     this.prediction?.refresh();
   }
 
+  /** Writes text onto the screen without the wire (mock pages only): a mockup prints what a shell would show. */
+  async writeTextForTest(text: string): Promise<void> {
+    if (this.closed) throw new Error("terminal is closed");
+    this.wakeTerminal(); // the render loop idles between outputs; a local write must be painted too
+    await new Promise<void>((resolve) => this.terminal.write(text, resolve));
+    this.prediction?.refresh();
+  }
+
   /**
    * Parks the terminal while its window is off screen, in another view or a thumbnail. Output keeps flowing
    * into the terminal state (cheap, and credit keeps returning), but nothing is drawn and the canvas gives its

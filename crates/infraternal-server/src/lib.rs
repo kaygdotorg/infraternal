@@ -36,6 +36,7 @@ mod release_http;
 #[cfg(feature = "release")]
 mod release_latest;
 mod terminal_queries;
+pub(crate) mod terminal_startup;
 #[cfg(feature = "release")]
 pub use release_latest::release_service;
 #[cfg(feature = "parser-checks")]

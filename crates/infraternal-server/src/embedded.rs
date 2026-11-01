@@ -1725,7 +1725,7 @@ async fn process_command(
         }
         Command::Call {
             action_id,
-            input_json,
+            mut input_json,
             reply,
         } => {
             if pending.len() >= COMMAND_CAPACITY {
@@ -1736,6 +1736,23 @@ async fn process_command(
                 let _ = reply.send(Err(AgentError::Unavailable));
                 return true;
             };
+            if action_id == "terminal.startup" {
+                let Ok(mut input) = serde_json::from_slice::<serde_json::Value>(&input_json) else {
+                    let _ = reply.send(Err(AgentError::Rejected));
+                    return true;
+                };
+                let Some(object) = input.as_object_mut() else {
+                    let _ = reply.send(Err(AgentError::Rejected));
+                    return true;
+                };
+                // This identity is the actor's admitted host login, never browser JSON.
+                object.insert("uid".to_owned(), connection.execution_uid.into());
+                let Ok(json) = serde_json::to_vec(&input) else {
+                    let _ = reply.send(Err(AgentError::Rejected));
+                    return true;
+                };
+                input_json = json;
+            }
             let frame = Frame::Call {
                 call_id,
                 action_id: &action_id,

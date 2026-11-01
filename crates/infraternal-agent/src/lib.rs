@@ -21,6 +21,7 @@ pub use infraternal_plugin_remote::remote_renewal;
 #[cfg(feature = "remote")]
 pub use infraternal_plugin_remote::remote_tls;
 pub mod sessions;
+pub mod startup_guard;
 pub mod transport;
 
 /// Resolve the per-job root used by tests that bind local socket fixtures.

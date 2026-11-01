@@ -71,7 +71,7 @@ const STYLE = `
 .ui-confirm-tip[data-side="top"] .ui-confirm-tip-arrow { bottom: -5px; border-top: 0; border-left: 0; clip-path: polygon(0 100%, 100% 100%, 100% 0); }
 .ui-confirm-tip-text { display: grid; gap: 3px; }
 .ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 var(--text-body, 13px)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
-.ui-confirm-tip-detail { margin: 0; color: var(--fg-2); font: 450 var(--text-secondary, 12px)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
+.ui-confirm-tip-detail { margin: 0; white-space: pre-line; overflow-wrap: anywhere; color: var(--fg-2); font: 450 var(--text-secondary, 12px)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
 .ui-confirm-tip-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .ui-confirm-tip button { display: inline-grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent;
   color: var(--fg-2); cursor: pointer;

@@ -47,6 +47,7 @@ import { mountTransparencyCompare } from "./transparency";
 import { createDataMode, mountDataToggle } from "./data-mode";
 import { DATA_IDS, type DataId } from "./data-ids";
 import type { AccountMock } from "./account";
+import { createStartupDemo } from "./startup-demo";
 
 const CLOSE = '<path d="m7 7 10 10M17 7 7 17"/>';
 
@@ -70,6 +71,8 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   // `addhost-demo=pill` (#189, D255): every host added in this tab follows a script that opens its shell at once and
   // finishes setting up in the machine pill; `fail=install|join|start|ready` makes that stage fail the first time.
   const setupDemo = query.get("addhost-demo") === "pill" ? createSetupDemo(failStageFrom(query.get("fail")), Math.max(1, Number(query.get("slow")) || 1)) : undefined;
+  // `startup-demo=1` (#251, D315): the "switch to the Infraternal Multiplexer?" question on a live terminal window.
+  const startupDemo = query.get("startup-demo") === "1" ? createStartupDemo(core, query) : undefined;
   const base = createMockProvisioning({ savedKey: query.get("savedkey") === "1", authority: query.get("ca") ?? "ready" });
   const provisioning = setupDemo ? setupDemo.wrap(base) : base;
   // The lock on host connections: administrators (the operator role) can unlock it, anyone else only sees the state.
@@ -111,6 +114,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     dots: new URLSearchParams(location.search).get("dots") !== "0",
     adapters: {
       teach: (hint) => teachOnce("mock", hint),
+      ...(startupDemo ? { startupHints: startupDemo.hints } : {}),
       sessions, inventory, details: () => onDemand(() => import("./details.on-demand")).then((m) => m.createMockDetails(world, inventory)), mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
       containers: { host: "build-01", rows: () => (world.role === "operator" ? CONTAINERS : []) },
       addHost: openAddHost,
@@ -225,7 +229,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     void onDemand(() => import("./account")).then((m) => { if (!signal.aborted) account = m.createAccountMock(core, dataMode); });
   }
   const removeProvider = core.addPaletteProvider(() => {
-    const out: PaletteEntry[] = [...sessionScenes.entries(), ...connection.entries(), ...(version?.entries() ?? []), ...(account?.entries() ?? [])];
+    const out: PaletteEntry[] = [...sessionScenes.entries(), ...connection.entries(), ...(version?.entries() ?? []), ...(account?.entries() ?? []), ...(startupDemo?.entries() ?? [])];
     scenes.forEach((sc, i) => out.push({ group: "Mockup", glyph: "◇", label: `Mockup: scene ${i + 1} – ${sc.name.toLowerCase()}`, hint: "scenes", action: `proto:scene:${i + 1}` }));
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: transparency", hint: "all card and window levels side by side", action: "proto:transparency" });
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: simulate device switch", hint: "continue from another device", action: "proto:devicechip" });
@@ -243,6 +247,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     if (kind === "ver" && value) { version?.run(value); return; }
     if (kind === "conn" && value) { connection.run(value); return; }
     if (kind === "acct" && value) { account?.run(action.split(":").slice(2).join(":")); return; }
+    if (kind === "startup") { startupDemo?.replay(); return; }
     if (kind === "transparency") mountTransparencyCompare(core);
     else if (kind === "devicechip") showContinueChip();
     else if (kind === "scene" && value) goScene(Number(value) - 1);
@@ -276,9 +281,10 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
 
   // ---- start ----------------------------------------------------------------------------------------
   // The pill demo starts where a terminal window is on screen (scene 3: Console), so the new window opens beside it.
-  const startScene = Math.min(scenes.length - 1, Math.max(0, ((options.scene ?? (setupDemo ? 3 : 1)) | 0) - 1));
+  const startScene = Math.min(scenes.length - 1, Math.max(0, ((options.scene ?? (setupDemo || startupDemo ? 3 : 1)) | 0) - 1));
   goScene(startScene);
   if (setupDemo && query.get("autopilot") !== "0") window.setTimeout(() => { void runAutopilot(openAddHost); }, 500);
+  startupDemo?.start();
   const sessionsScene = Number(new URLSearchParams(location.search).get("sessions")) || 0;
   if (sessionsScene) window.setTimeout(() => { void sessionScenes.run(sessionsScene); }, 400);
 
@@ -350,6 +356,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     dispose() {
       authority.dispose();
       setupDemo?.dispose();
+      startupDemo?.dispose();
       events.abort();
       window.clearInterval(streamTimer);
       window.clearInterval(seedTimer);

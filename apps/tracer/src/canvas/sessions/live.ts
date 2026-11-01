@@ -47,6 +47,8 @@ export interface LiveSessionsOptions {
   onFirstTerminalSettled?: () => void;
   /** Called when the window shows a session (restored or new). */
   onSessionCreated?: (sessionId: string) => void;
+  /** Read-only startup discovery for a newly opened shell; never runs on reattachment. */
+  onStartupSession?: (sessionId: string, hostId: string | undefined, host: string) => void;
   /** The host no longer has a window's session (#158): the inventory marks it ended and the window paints that. */
   onSessionGone?: (host: string, sessionId: string, status?: number) => void;
   /** Reads saved retirement before an asynchronously loaded stream attaches. */
@@ -230,6 +232,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
           this.model.sessionId = id;
           this.changed();
           options.onSessionCreated?.(id);
+          options.onStartupSession?.(id, this.model.hostId, this.model.host);
         },
       };
       // Reserved before the module loads: windows restored together all ask now, and each must count against its socket.
