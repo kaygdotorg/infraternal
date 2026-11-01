@@ -29,12 +29,16 @@ struct State {
     origin_dns_suffix: Option<String>,
 }
 /// One DB stores inventory, stable non-recycled addresses and policy defaults; no private keys.
-type Loaded = (
-    std::sync::Arc<Coordinator>,
-    std::sync::Arc<BTreeMap<NodeId, SocketAddr>>,
-    DefaultPolicy,
-    u64,
-);
+#[derive(Clone)]
+struct Loaded {
+    coordinator: std::sync::Arc<Coordinator>,
+    endpoints: std::sync::Arc<BTreeMap<NodeId, SocketAddr>>,
+    default: DefaultPolicy,
+    revision: u64,
+    /// Synthetic unnamed labels remain reachable without creating DNS records.
+    #[cfg(feature = "mesh-dns-spike")]
+    dns_placeholders: std::sync::Arc<BTreeSet<NodeId>>,
+}
 /// Workers retain the shared source of their acknowledged version. Recompiling
 /// its node view preserves exact deltas while idle memory stays proportional to
 /// shared inventory and policy, rather than the number of delivered peer maps.
@@ -47,24 +51,36 @@ pub(crate) struct Snapshot {
 impl Snapshot {
     pub(crate) fn config(&self, node: NodeId) -> Result<Config, crate::api::MeshApiError> {
         use crate::{api::MeshApiError, policy::model::MeshError};
-        let (coordinator, endpoints, default, revision) = &self.loaded;
+        let coordinator = &self.loaded.coordinator;
+        let endpoints = &self.loaded.endpoints;
+        let default = self.loaded.default;
+        let revision = self.loaded.revision;
         #[cfg(feature = "cutoff-measure")]
-        let _compile = crate::cutoff_measure::Stage::new(node, *revision, "compile");
+        let _compile = crate::cutoff_measure::Stage::new(node, revision, "compile");
         #[cfg(feature = "mesh-dns-spike")]
         let compiled = configuration::compile_with_dns_suffix(
             coordinator,
             node,
-            *default,
+            default,
             endpoints,
             &self.default_dns_suffix,
         );
         #[cfg(not(feature = "mesh-dns-spike"))]
-        let compiled = configuration::compile(coordinator, node, *default, endpoints);
+        let compiled = configuration::compile(coordinator, node, default, endpoints);
         let mut config = compiled.map_err(|error| match error {
             MeshError::UnknownNode => MeshApiError::NotFound,
             _ => storage_error("configuration compilation failed"),
         })?;
-        config.version = *revision;
+        #[cfg(feature = "mesh-dns-spike")]
+        {
+            if self.loaded.dns_placeholders.contains(&node) {
+                config.name = None;
+            }
+            config
+                .peer_names
+                .retain(|peer, _| !self.loaded.dns_placeholders.contains(peer));
+        }
+        config.version = revision;
         Ok(config)
     }
 }
@@ -649,7 +665,10 @@ impl Store {
     ) -> Result<serde_json::Value, crate::api::MeshApiError> {
         self.preview_diagnostics.run(async {
             use crate::api::{MAX_MESH_FRAME_LEN, MeshApiError, MeshCursor};
-            let (coordinator, _, default, revision) = self.load().await?;
+            let loaded = self.load().await?;
+            let coordinator = &loaded.coordinator;
+            let default = loaded.default;
+            let revision = loaded.revision;
             if cursor.is_some_and(|cursor| cursor.revision != revision) {
                 return Err(MeshApiError::Conflict);
             }
@@ -733,7 +752,7 @@ impl Store {
                 let revision =
                     u64::try_from(revision).map_err(|_| storage_error("Mesh revision invalid."))?;
                 if let Some(loaded) = cached.as_ref()
-                    && loaded.3 == revision
+                    && loaded.revision == revision
                 {
                     return Ok(loaded.clone());
                 }
@@ -756,14 +775,22 @@ impl Store {
         .await
         .map_err(|error| storage_sql_error(error))?
         .flatten();
-        let rows = sqlx::query(
+        #[cfg(feature = "mesh-dns-spike")]
+        let nodes_query = sqlx::query(
+            "SELECT id,name,name_source,public_key,dataplane_host,endpoint FROM mesh_nodes ORDER BY id",
+        );
+        #[cfg(not(feature = "mesh-dns-spike"))]
+        let nodes_query = sqlx::query(
             "SELECT id,name,public_key,dataplane_host,endpoint FROM mesh_nodes ORDER BY id",
-        )
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|error| storage_sql_error(error))?;
+        );
+        let rows = nodes_query
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|error| storage_sql_error(error))?;
         let mut nodes = Vec::new();
         let mut endpoints = BTreeMap::new();
+        #[cfg(feature = "mesh-dns-spike")]
+        let mut dns_placeholders = BTreeSet::new();
         let mut server = None;
         let mut tags_by_node = std::collections::BTreeMap::<i64, BTreeSet<String>>::new();
         for row in
@@ -784,19 +811,20 @@ impl Store {
                 );
         }
         for row in rows {
-            let id = NodeId(
-                u64::try_from(
-                    row.try_get::<i64, _>("id")
-                        .map_err(|error| storage_sql_error(error))?,
-                )
-                .map_err(|_| storage_error("Mesh identity invalid."))?,
-            );
-            let tags = tags_by_node
-                .remove(
-                    &row.try_get::<i64, _>("id")
-                        .map_err(|error| storage_sql_error(error))?,
-                )
-                .unwrap_or_default();
+            let raw_id: i64 = row
+                .try_get("id")
+                .map_err(|error| storage_sql_error(error))?;
+            let id =
+                NodeId(u64::try_from(raw_id).map_err(|_| storage_error("Mesh identity invalid."))?);
+            #[cfg(feature = "mesh-dns-spike")]
+            if row
+                .try_get::<String, _>("name_source")
+                .map_err(|error| storage_sql_error(error))?
+                == "placeholder"
+            {
+                dns_placeholders.insert(id);
+            }
+            let tags = tags_by_node.remove(&raw_id).unwrap_or_default();
             let key: Vec<u8> = row
                 .try_get("public_key")
                 .map_err(|error| storage_sql_error(error))?;
@@ -979,12 +1007,15 @@ impl Store {
         tx.commit()
             .await
             .map_err(|error| storage_sql_error(error))?;
-        Ok((
-            std::sync::Arc::new(coordinator),
-            std::sync::Arc::new(endpoints),
+        Ok(Loaded {
+            coordinator: std::sync::Arc::new(coordinator),
+            endpoints: std::sync::Arc::new(endpoints),
             default,
-            u64::try_from(revision).map_err(|_| storage_error("Mesh revision invalid."))?,
-        ))
+            revision: u64::try_from(revision)
+                .map_err(|_| storage_error("Mesh revision invalid."))?,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_placeholders: std::sync::Arc::new(dns_placeholders),
+        })
     }
 }
 fn endpoint(kind: &str, value: &str) -> Result<Endpoint, crate::api::MeshApiError> {
