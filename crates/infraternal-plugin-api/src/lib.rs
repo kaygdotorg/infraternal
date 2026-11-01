@@ -111,6 +111,10 @@ pub trait SocketHost: Send + Sync {
         false
     }
     fn token_hash(&self) -> &str;
+    /// Public authenticated lifetime for binding pending layout requests. Test hosts may omit it.
+    fn session_incarnation(&self) -> Option<&str> {
+        None
+    }
     /// Each viewer retains this socket's own live authority, never another login
     /// belonging to the same user. Unimplemented adapters fail closed.
     #[cfg(feature = "native-streams")]

@@ -16,10 +16,9 @@
  * stale row. Ended records stay available to their existing window but disappear from every session list.
  */
 import { documentWindows, type CanvasDocument } from "../model/schema";
-import { inventoryKey, createStoredJsonCache, readStoredJson } from "../../account-storage";
+import { createAccountNotifications } from "../../account-storage";
 import type { DeviceInfo, InventoryCapabilities, InventoryStatus, SessionInventory, SessionRecord } from "./inventory";
 
-interface Stored { host?: string; id: string; name: string; pinned: boolean; frecency: number }
 
 export interface LiveInventory extends SessionInventory {
   /** The server answered that the host no longer has this session (#158): it becomes exited and `gone`. */
@@ -35,7 +34,6 @@ export interface LiveInventory extends SessionInventory {
 }
 
 export function createLiveInventory(options: { accountId: string; host: string }): LiveInventory {
-  const key = inventoryKey(options.accountId);
   const records = new Map<string, SessionRecord>();
   const owners = new Map<string, string>();
   // Only windows opened on this device need status after its sidecar is superseded.
@@ -45,14 +43,10 @@ export function createLiveInventory(options: { accountId: string; host: string }
   const verifiedHosts = new Set<string>();
   let top = 0;
   let shared: Set<string> | undefined;
-  const storage = () => window.localStorage;
-  const cache = createStoredJsonCache(key, () => [...records.values()].filter((s) => !s.gone).map((s): Stored => ({ host: owners.get(s.id) ?? options.host, id: s.id, name: s.name, pinned: s.pinned, frecency: s.frecency })), storage);
-  const save = cache.flush, emit = cache.notify;
+  const cache = createAccountNotifications();
+  const save = (): void => {};
+  const emit = cache.notify;
   const blank = (id: string, name: string): SessionRecord => ({ id, name, pinned: false, state: "detached", lastOutput: "", age: "", viewers: 0, size: "", frecency: 0, screen: [] });
-  try {
-    const rows = (readStoredJson(key, storage) ?? []) as Stored[];
-    for (const r of rows) if (typeof r.id === "string" && typeof r.name === "string") { owners.set(r.id, typeof r.host === "string" && r.host.length <= 200 ? r.host : options.host); records.set(r.id, { ...blank(r.id, r.name), pinned: Boolean(r.pinned), frecency: Number(r.frecency) || 0 }); top = Math.max(top, Number(r.frecency) || 0); }
-  } catch { /* unreadable: start empty */ }
 
   const can: InventoryCapabilities = { rename: true, end: false, runAgain: false, dismiss: false };
   const only = (host: string, id: string): boolean => owners.get(id) === host;

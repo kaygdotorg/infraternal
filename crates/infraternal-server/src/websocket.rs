@@ -306,6 +306,7 @@ impl WebSocketState {
             state: Arc::clone(self),
             user: user.to_owned(),
             hash: crate::auth::hash(token),
+            incarnation: crate::auth::session_incarnation(token),
             token: token.to_owned(),
         });
         SocketPlugins::new(self.plugins.clone(), host)
@@ -1575,19 +1576,21 @@ where
     } else {
         return Err(());
     };
-    let (resume, link_doubt_notices, viewer_visibility) = match (decoded.stream_id, decoded.frame) {
-        (
-            CONTROL_STREAM,
-            Frame::Hello {
-                version: 1, caps, ..
-            },
-        ) => (
-            caps & RESUME_NEXT != 0,
-            caps & LINK_DOUBT_NOTICES != 0,
-            caps & VIEWER_VISIBILITY != 0,
-        ),
-        _ => return Err(()),
-    };
+    let (resume, link_doubt_notices, viewer_visibility, layout_session) =
+        match (decoded.stream_id, decoded.frame) {
+            (
+                CONTROL_STREAM,
+                Frame::Hello {
+                    version: 1, caps, ..
+                },
+            ) => (
+                caps & RESUME_NEXT != 0,
+                caps & LINK_DOUBT_NOTICES != 0,
+                caps & VIEWER_VISIBILITY != 0,
+                caps & 16 != 0,
+            ),
+            _ => return Err(()),
+        };
     let welcome = if resume {
         let request = next_wire(source, sink, receive).await?.ok_or(())?;
         socket_deadline(state, user_id, session_token).await?;
@@ -1631,6 +1634,7 @@ where
     // Subscribe and finish the initial authority read before sending Welcome.
     // The shared loop reuses this exact absolute expiry without another SQL read.
     let proof_authority = probe_authority::Lease::new(state, user_id, session_token).await?;
+    let incarnation = crate::auth::session_incarnation(session_token);
     if send_frame(
         sink,
         CONTROL_STREAM,
@@ -1638,6 +1642,7 @@ where
             connection_id: &welcome.connection_id,
             resume_token: &welcome.resume_token,
             resume_window_seconds: RESUME_WINDOW_SECONDS,
+            session_incarnation: layout_session.then_some(incarnation.as_str()),
         },
         encode,
     )
@@ -3210,8 +3215,12 @@ struct PluginHost {
     user: String,
     token: String,
     hash: String,
+    incarnation: String,
 }
 impl SocketHost for PluginHost {
+    fn session_incarnation(&self) -> Option<&str> {
+        Some(&self.incarnation)
+    }
     fn node_action_declared(&self, id: &str) -> bool {
         self.state.action(id).is_some()
     }

@@ -30,6 +30,20 @@ def main():
             assert "RUN test\n" in result.stdout, result.stdout
             print(f"{host} {mode}: native tests run; static dispatch PASS")
 
+    # Size reporting must not turn an unsuccessful build into a successful row.
+    result = subprocess.run(
+        ["bash", "-c",
+         'source "$1"; scripts/auth-toolchain() { :; }; '
+         'python3() { :; }; scripts/static-cargo() { return 37; }; '
+         'rust_check_static_binary() { echo UNEXPECTED_ARTIFACT_CHECK; }; '
+         'rust_static_build_check',
+         "verify-build-failure", str(ROOT / "scripts/verify.d/rust.sh")],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert result.returncode == 37, result.stdout + result.stderr
+    assert "UNEXPECTED_ARTIFACT_CHECK" not in result.stdout, result.stdout
+    print("static build failure: rejected before artifact reporting PASS")
+
 
 if __name__ == "__main__":
     main()

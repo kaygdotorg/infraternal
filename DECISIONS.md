@@ -2268,6 +2268,16 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      push starts now: measure where the bytes come from, cut, and ratchet the
      gate down to each new measured size so growth needs a justified,
      measured exception.
+     **Amended by the owner, 2026-11-01 (#284):** when told “every feature
+     slice comes in at 85–167 KB; the 16 KiB budget makes every feature a
+     size negotiation”, kayg replied: “let's remove that cap please”. Binary
+     size caps and the 16/64 KiB approval bands are removed. Measure and
+     report stripped static size and its signed delta against the recorded
+     baseline for each shipping target on every slice; avoid gratuitous
+     bloat. Size growth or shrinkage does not fail the gate or require a
+     size exception. Artifact correctness and static-linkage checks remain
+     gates. The orchestrator records the merged measurements as the next
+     baselines, as documented in `docs/PROCESS.md` §7.
 244. **CA key memory on static builds (owner, 2026-10-12, #154):** the static
      musl release builds get OpenSSL's locked, dump-excluded key heap by
      removing the `OPENSSL_NO_SECURE_MEMORY` define that the OpenSSL build

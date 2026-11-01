@@ -1,8 +1,12 @@
 /** Independent real-server review of split admission, offline journals and durable account layouts (D178, D183, D248; #243). */
+import { layoutRequestJson } from "./layout-devices";
+import { cache } from "./layout-observer";
+import { watchLayout } from "./layout-observer";
 import { devices, expect, test, type Page, type BrowserContext, type Browser } from "playwright/test";
 import { WebSocket } from "ws";
 import { isMacPlatform } from "../../../packages/ui/src/platform";
 import { encodeMuxedFrame, WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
+import { LAYOUT_SESSION_INCARNATION } from "../src/connection";
 import { startRealServer, type RealServer } from "./server";
 import { tracerEvidencePath } from "../test/evidence-path";
 import type { CanvasDocument } from "../src/canvas/model/schema";
@@ -14,13 +18,10 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 test.setTimeout(180_000);
 const windows = (page: Page) => page.locator('.cl[data-view="console"] .ui-window');
 interface Cache { canonical: CanvasDocument; document: CanvasDocument; pending: Array<{ intent: { type: string }; op_id: string }> }
-async function cache(page: Page): Promise<Cache> {
-  return page.evaluate(() => {
-    const key = Object.keys(localStorage).find((key) => key.startsWith("infraternal.canvas."));
-    return key ? JSON.parse(localStorage.getItem(key)!) : undefined;
-  });
-}
+
 const settled = async (page: Page): Promise<void> => {
+  await expect.poll(async () => (await cache(page)).initialized).toBe(true);
+  await expect(page.getByText("Not saved — keep this tab open", { exact: true })).toBeHidden();
   await expect.poll(async () => (await cache(page))?.pending.length, { timeout: 15_000 }).toBe(0);
 };
 async function enrol(page: Page, server: RealServer): Promise<void> {
@@ -51,11 +52,11 @@ async function request(server: RealServer, context: BrowserContext, action: stri
       const timer = setTimeout(() => reject(Error("review protocol response absent")), 15_000);
       socket.on("error", () => { clearTimeout(timer); reject(Error("review protocol connection failed")); });
       socket.on("message", (bytes) => decoder.feed(new Uint8Array(Buffer.from(bytes as Buffer)), (_stream, frame) => {
-        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: 0n, clientInfo: "layout-review" });
+        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: LAYOUT_SESSION_INCARNATION, clientInfo: "layout-review" });
         if (frame.type === "Ping") send({ ...frame, type: "Pong" });
         if (frame.type === "Welcome") {
           if (snapshot) send({ type: "Subscribe", subId: 1, filterJson: Buffer.from('{"topic":"canvas.layout"}') });
-          else send({ type: "Call", callId: 1, actionId: action, inputJson: Buffer.from(typeof input === "string" ? input : JSON.stringify(input)) });
+          else send({ type: "Call", callId: 1, actionId: action, inputJson: action.startsWith("canvas.layout.") ? layoutRequestJson(input, frame.sessionIncarnation) : Buffer.from(typeof input === "string" ? input : JSON.stringify(input)) });
         }
         if (frame.type === "Result" || snapshot && frame.type === "Event") {
           clearTimeout(timer);
@@ -72,9 +73,9 @@ async function pair(browser: Browser): Promise<{ server: RealServer; desktop: Br
   const desktop = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
   const phone = await browser.newContext({ ...devices["iPhone 15"], ignoreHTTPSErrors: true });
   try {
-    const page = await desktop.newPage(); await enrol(page, server);
+    const page = watchLayout(await desktop.newPage()); await enrol(page, server);
     await phone.addCookies(await desktop.cookies());
-    const mobile = await phone.newPage(); await mobile.goto(server.origin + "/?theme=ink&bg=none");
+    const mobile = watchLayout(await phone.newPage()); await mobile.goto(server.origin + "/?theme=ink&bg=none");
     await expect(windows(mobile)).toHaveCount(1); await settled(mobile);
     return { server, desktop, phone, page, mobile, async dispose() { await phone.close(); await desktop.close(); await server.dispose(); } };
   } catch (error) { await phone.close(); await desktop.close(); await server.dispose(); throw error; }
@@ -128,6 +129,9 @@ test("offline close races and later edits survive restart without duplicate wind
     expect((await cache(page)).canonical).toEqual((await cache(mobile)).canonical);
     await page.screenshot({ path: tracerEvidencePath("review-restart-desktop.png") });
     await mobile.screenshot({ path: tracerEvidencePath("review-restart-phone.png") });
+  } catch (error) {
+    await writeFile(tracerEvidencePath("review-offline-recovery-failure.json"), JSON.stringify({ desktop: await cache(page), phone: await cache(mobile), controls: server.bridges.map((bridge) => ({ closed: bridge.closed, control: bridge.control })) }, null, 2));
+    throw error;
   } finally { await desktop.setOffline(false); await fixture.dispose(); }
 });
 
@@ -176,7 +180,7 @@ test("a second account cannot read or retarget the first account layout", async 
     await secondAccount(server, other);
     const isolated = (await request(server, other, "", {}, true)).value;
     expect((isolated.document as CanvasDocument).views).toEqual([]);
-    const victim = await other.newPage(); await victim.goto(server.origin + "/?theme=ink&bg=none");
+    const victim = watchLayout(await other.newPage()); await victim.goto(server.origin + "/?theme=ink&bg=none");
     await expect(windows(victim)).toHaveCount(1); await settled(victim);
     const base = Number((await request(server, other, "", {}, true)).value.revision);
     for (const intent of [
@@ -283,15 +287,16 @@ test("layout event latency reaches two protocol subscribers at scale", async ({ 
       // A failed private route is bounded by the awaited operation's deadline,
       // so teardown still runs instead of leaving a detached fixture behind.
       socket.on("error", () => {});
+      let incarnation: string | undefined;
       let callId = 0, revision = -1, ready: () => void = () => {};
       const loaded = new Promise<void>((resolve) => { ready = resolve; });
       const calls = new Map<number, (revision: number) => void>();
       const waiting = new Set<{ revision: number; resolve(): void }>();
       const send = (frame: Parameters<typeof encodeMuxedFrame>[1]): void => { socket.send(encodeMuxedFrame(0, frame)); };
       socket.on("message", (bytes) => decoder.feed(new Uint8Array(Buffer.from(bytes as Buffer)), (_stream, frame) => {
-        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: 0n, clientInfo: "layout-event-measurement" });
+        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: LAYOUT_SESSION_INCARNATION, clientInfo: "layout-event-measurement" });
         else if (frame.type === "Ping") send({ ...frame, type: "Pong" });
-        else if (frame.type === "Welcome") send({ type: "Subscribe", subId: 1, filterJson: Buffer.from('{"topic":"canvas.layout"}') });
+        else if (frame.type === "Welcome") { incarnation = frame.sessionIncarnation; send({ type: "Subscribe", subId: 1, filterJson: Buffer.from('{"topic":"canvas.layout"}') }); }
         else if (frame.type === "Event") {
           const event = JSON.parse(new TextDecoder().decode(frame.eventJson)) as { revision?: number };
           if (Number.isSafeInteger(event.revision)) {
@@ -307,7 +312,7 @@ test("layout event latency reaches two protocol subscribers at scale", async ({ 
       clients.push({
         apply: (intent) => bounded(new Promise<number>((resolve) => {
           const id = ++callId; calls.set(id, resolve);
-          send({ type: "Call", callId: id, actionId: "canvas.layout.apply", inputJson: Buffer.from(JSON.stringify({ op_id: randomUUID(), base_revision: 0, intent })) });
+          send({ type: "Call", callId: id, actionId: "canvas.layout.apply", inputJson: Buffer.from(JSON.stringify({ session_incarnation: incarnation, op_id: randomUUID(), base_revision: 0, intent })) });
         })),
         wait: (target) => revision >= target ? Promise.resolve() : bounded(new Promise<void>((resolve) => waiting.add({ revision: target, resolve }))),
         close: () => socket.terminate(),
@@ -454,6 +459,7 @@ for (const reconnect of [false, true]) test(`review r2: a raced split refusal pr
     await expect.poll(async () => (await cache(page)).canonical.revision).toBe(baseline.revision + 1);
     let held = false, armed = true;
     const queued: Array<string | Buffer> = [];
+    const captured: Array<{ intent?: { type?: string } }> = [];
     let release = (): void => {};
     let disconnect = (): void => {};
     // Hold the real split and its ordered suffix while the other device changes
@@ -464,21 +470,28 @@ for (const reconnect of [false, true]) test(`review r2: a raced split refusal pr
       disconnect = () => route.close();
       release = () => { armed = false; held = false; for (const bytes of queued.splice(0)) upstream.send(bytes); };
       route.onMessage((bytes) => {
+        let layout = false;
         if (armed && typeof bytes !== "string") decoder.feed(new Uint8Array(bytes), (_stream, frame) => {
           if (frame.type !== "Call" || frame.actionId !== "canvas.layout.apply") return;
+          layout = true;
           const input = JSON.parse(new TextDecoder().decode(frame.inputJson)) as { intent?: { type?: string } };
+          captured.push(input);
           if (input.intent?.type === "split") held = true;
         });
-        if (held) queued.push(bytes); else upstream.send(bytes);
+        // Terminal credit and liveness proofs must keep flowing while layout waits.
+        if (held && layout) queued.push(bytes); else upstream.send(bytes);
       });
     });
     await page.reload(); await expect(windows(page)).toHaveCount(2); await settled(page);
     await page.keyboard.press("Control+Shift+D"); await expect(windows(page)).toHaveCount(3);
     await expect.poll(() => held).toBe(true);
-    await windows(page).first().locator('[data-action="close"]').evaluate((el) => (el as HTMLElement).click());
+    // Close a confirmed membership by identity. The new split can become the
+    // first DOM window, where closing it would exercise cancellation instead.
+    await page.locator(`[data-window-id="${column.windows[0]!.id}"] [data-action="close"]`).evaluate((el) => (el as HTMLElement).click());
     await expect(windows(page)).toHaveCount(2);
-    await expect.poll(async () => (await cache(page)).pending.length).toBeGreaterThanOrEqual(2);
-    const pending = await cache(page);
+    // Routed frames are held before the upstream wire observer can see them.
+    await expect.poll(() => captured.slice(0, 2).map((input) => input.intent?.type)).toEqual(["split", "close"]);
+    const pending = structuredClone(captured);
     expect((await request(server, phone, "canvas.layout.apply", { op_id: randomUUID(), base_revision: baseline.revision, intent: { type: "weight", view_id: view.id, column_id: column.id, weight: 0.1 } })).ok).toBe(true);
     const notice = page.getByText("That layout change was not saved. The saved layout is back.", { exact: true }).waitFor({ state: "visible" });
     void notice.catch(() => undefined);

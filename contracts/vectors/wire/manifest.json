@@ -105,6 +105,8 @@
       "frame": { "type": "Input", "inSeq": "0", "replyTo": "18446744073709551614", "bytesHex": "1b5b313b3152" }
     },
     {"name": "replay-complete-legacy", "file": "replay-complete-legacy.bin", "frame": {"type": "Event", "subId": 0, "eventJson": "{\"type\":\"terminal.replay_complete\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"out_seq\":\"18446744073709551615\"}"}},
-    {"name": "replay-complete-size", "file": "replay-complete-size.bin", "frame": {"type": "Event", "subId": 0, "eventJson": "{\"type\":\"terminal.replay_complete\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"out_seq\":\"18446744073709551615\",\"cols\":120,\"rows\":40}"}}
+    {"name": "replay-complete-size", "file": "replay-complete-size.bin", "frame": {"type": "Event", "subId": 0, "eventJson": "{\"type\":\"terminal.replay_complete\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"out_seq\":\"18446744073709551615\",\"cols\":120,\"rows\":40}"}},
+    {"name": "welcome-layout-session", "file": "welcome-layout-session.bin", "frame": {"type": "Welcome", "connectionId": "000102030405060708090a0b0c0d0e0f", "resumeToken": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f", "resumeWindowSeconds": 120, "sessionIncarnation": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},
+    {"name": "result-layout-session-changed", "file": "result-layout-session-changed.bin", "frame": {"type": "Result", "callId": 42, "ok": false, "json": "{\"error\":\"layout session changed\",\"reason\":\"layout_session_changed\"}"}}
   ]
 }

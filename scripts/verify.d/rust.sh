@@ -43,7 +43,10 @@ rust_check_static_binary() {
     local description
     local size_bytes
     local delta_bytes
-    local max_size_bytes
+    local baseline_bytes
+    local expected_machine
+    local elf_header
+    local program_headers
     local build_host
 
     if [[ ! -x "$binary" ]]; then
@@ -59,16 +62,23 @@ rust_check_static_binary() {
         printf 'file did not identify a static executable: %s\n' "$binary" >&2
         return 1
     fi
-    if readelf -l "$binary" | grep -q 'INTERP'; then
+    program_headers="$(readelf -l "$binary")" || return $?
+    if grep -q 'INTERP' <<< "$program_headers"; then
         printf 'unexpected PT_INTERP in %s\n' "$binary" >&2
         return 1
     fi
 
-    # D243 records exact stripped sizes for each shipping target.
+    # Keep the last merged measurements for per-slice attribution, not approval.
     build_host="$(uname -m)"
     case "$target" in
-        x86_64-unknown-linux-musl) max_size_bytes=21443824 ;;
-        aarch64-unknown-linux-musl) max_size_bytes=19629240 ;;
+        x86_64-unknown-linux-musl)
+            baseline_bytes=21443824
+            expected_machine='Advanced Micro Devices X86-64'
+            ;;
+        aarch64-unknown-linux-musl)
+            baseline_bytes=19629240
+            expected_machine='AArch64'
+            ;;
         *)
             printf 'no static binary size baseline configured for host %s and target %s\n' \
                 "$build_host" "$target" >&2
@@ -76,22 +86,17 @@ rust_check_static_binary() {
             ;;
     esac
 
-    size_bytes="$(stat -c '%s' "$binary")"
-    delta_bytes=$((size_bytes - max_size_bytes))
-    printf 'PT_INTERP: absent; size: %s bytes; cap: %s bytes; delta: %+d bytes\n' \
-        "$size_bytes" "$max_size_bytes" "$delta_bytes"
-    if ((size_bytes > max_size_bytes)); then
-        printf 'binary exceeds the %s-byte size budget: %s bytes\n' \
-            "$max_size_bytes" "$size_bytes" >&2
+    elf_header="$(LC_ALL=C readelf -h "$binary")" || return $?
+    if ! grep -Eq "Class:[[:space:]]+ELF64$" <<< "$elf_header" ||
+        ! grep -Eq "Machine:[[:space:]]+${expected_machine}$" <<< "$elf_header"; then
+        printf 'wrong ELF target: expected %s in %s\n' "$target" "$binary" >&2
         return 1
     fi
-    # A cut must update its ceiling, or later regrowth would spend hidden slack.
-    # D243 and D264 ratchet each shipping target to its measured bytes, with no allowance.
-    if ((size_bytes < max_size_bytes)); then
-        printf 'binary shrank to %s bytes; ratchet the %s ceiling down from %s bytes\n' \
-            "$size_bytes" "$target" "$max_size_bytes" >&2
-        return 1
-    fi
+
+    size_bytes="$(stat -c '%s' "$binary")" || return $?
+    delta_bytes=$((size_bytes - baseline_bytes))
+    printf 'PT_INTERP: absent; size: %s bytes; baseline %s; delta %+d bytes (report only, D243 amended 2026-11-01)\n' \
+        "$size_bytes" "$baseline_bytes" "$delta_bytes"
 }
 
 rust_check_cli_stub() {
@@ -239,7 +244,7 @@ rust_static_build_check() {
                 printf 'x86_64 AES-GCM vector runtime check skipped on host %s\n' "$host"
             fi
         fi
-        # Keep every size failure, but still exercise both shipping providers.
+        # Keep every artifact defect, but still exercise both shipping providers.
         rust_check_static_binary "$target" || failed=1
         rust_check_static_key_memory "$target" "${target_dir}/${target}/release/infraternal" || failed=1
     done

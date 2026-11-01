@@ -4,6 +4,8 @@ use super::{Auth, Error, FRESH, Result, Row, SESSION, Serialize, hash};
 /// Authenticated browser device, including the last successful passkey verification.
 #[derive(Serialize)]
 pub struct Session {
+    /// Public lifetime label; never grants authority and never enters browser storage.
+    pub session_incarnation: String,
     pub recovery_words_need_replacing: bool,
     pub recovery_pending: Option<RecoveryPending>,
     pub user_id: String,
@@ -58,6 +60,7 @@ impl Auth {
             return Err(Error::Denied);
         };
         Ok(Session {
+            session_incarnation: super::session_incarnation(token),
             recovery_words_need_replacing: row.get("recovery_words_need_replacing"),
             recovery_pending: row
                 .get::<Option<i64>, _>("recovery_ready")

@@ -1,9 +1,9 @@
 /** Starts auth and the terminal, keeping the terminal bundle off the unauthenticated path. */
 import { AuthError, checkStatus, checkSession, recoveryAuth, type AuthStatus } from "./auth";
 import { registerSignOut } from "./sign-out";
-import { cacheDrawingIdentity } from "./offline-cache";
+import { warmOfflineShell } from "./offline-cache";
 import type { DrawingIdentity } from "./offline-drawing";
-import { lastAccountKey, tabSessionKey } from "./account-storage";
+import { forgetAccountWork, sessionNotifications } from "./account-lifetime";
 import { recordSignIn } from "./hints";
 import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/src/faulty-terminal";
 import { glitchText } from "../../../packages/ui/src/glitch";
@@ -161,11 +161,7 @@ async function start(): Promise<void> {
   } catch (error: unknown) {
     await fontsReady;
     installTooltips();
-    const cached = error instanceof AuthError && error.status !== undefined
-      ? undefined
-      : await import("./offline-drawing").then(({ cachedDrawingIdentity }) => cachedDrawingIdentity()).catch(() => undefined);
-    if (cached) { activeUserId = cached.user_id; await showTerminal(cached, true); }
-    else renderUnavailable(safeMessage(error));
+    renderUnavailable("Connect to load your layout");
   }
 }
 
@@ -237,7 +233,7 @@ function renderUnavailable(message: string): void {
   document.documentElement.removeAttribute("data-ui-font");
   app.innerHTML = `<section class="auth-screen" aria-label="Server unavailable"><section class="auth-card auth-signin ui-overlay-surface" aria-labelledby="unavailable-title">
     <div class="auth-mark">${BRAND_MARK}<span>infraternal</span></div>
-    <h1 id="unavailable-title">Could not reach the server</h1>
+    <h1 id="unavailable-title">Connect to load your layout</h1>
     <p id="status-error" class="auth-lede" role="alert"></p>
     <button id="retry-status" class="auth-primary auth-login" type="button"><span>Try again</span><span class="busy-count" hidden></span></button></section></section>`;
   mustGet<HTMLElement>("#status-error").textContent = message;
@@ -260,8 +256,8 @@ function renderAuth(
   authLight();
   document.documentElement.removeAttribute("data-ui-font");
   mountOnboarding(app, setupRequired, message, (userId, firstSetup, welcomeName, instant) => {
-    saveBrowserId(lastAccountKey, userId);
     recordSignIn(userId);
+    peerSessions.forget(userId);
     activeUserId = userId;
     if (firstSetup) showWelcome(welcomeName ?? "", instant);
     else void showTerminal(undefined, instant);
@@ -338,13 +334,16 @@ function stopBackdrop(instant = false): void {
 async function showTerminal(knownSession?: DrawingIdentity, instant = false): Promise<void> {
   // Startup already authenticated this snapshot. Reuse it rather than adding
   // another network round trip; the socket still checks authority on connection.
+  const generation = ++sessionGeneration;
+  sessionStarted = performance.timeOrigin + performance.now();
   const identity = knownSession ?? await checkSession();
+  if (generation !== sessionGeneration) return;
   const hostName = sessionHostname(identity);
   if (!hostName) {
     renderUnavailable("Could not read this server's name. Try again.");
     return;
   }
-  if (identity) cacheDrawingIdentity({ ...identity, hostname: hostName });
+  warmOfflineShell();
   window.clearTimeout(welcomeTimer);
   welcomeEffect?.destroy();
   welcomeEffect = undefined;
@@ -387,6 +386,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     // The screen mounts only after its selected face is ready, preventing a one-frame
     // fallback and keeping the mobile layout stable while the font loads.
     await (uiFont === "mono" ? loadFont(initialFont()) : document.fonts.load('450 14px "Geist Sans"'));
+    if (generation !== sessionGeneration) return;
     // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
     document.documentElement.dataset.uiFont = uiFont;
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
@@ -443,10 +443,23 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
           activeUserId ?? "account", hostName, query.get("reviewSession") ?? "review-session", query.get("reviewWide") === "1",
         ))
         : undefined;
-      productCanvas = await mountProductCanvas(screen, {
+      if (generation !== sessionGeneration) return;
+      const mounted = await mountProductCanvas(screen, {
         host: { name: hostName },
         accountId: activeUserId ?? "account",
+        ...(identity && "session_incarnation" in identity && identity.session_incarnation ? { sessionIncarnation: identity.session_incarnation } : {}),
         predictiveEcho,
+        isCurrent: () => generation === sessionGeneration,
+        onSessionCheck: () => { void checkForegroundSession(); },
+        onSessionRevoked: (work) => {
+          if (generation !== sessionGeneration) return;
+          // Receipt-confirmed edits are committed and come back on sign-in; never call them lost.
+          endSession(work === "unsent"
+            ? "Not saved. Changes waiting to save were lost. Sign in again to continue."
+            : work === "unconfirmed"
+              ? "Your sign-in changed. Your last changes may not have saved. Sign in again to check."
+              : "Your sign-in changed. Sign in again to continue.");
+        },
         ...(__CLUSTERS_PREVIEW__ && productTestMode ? { previewStore: layoutReview?.store ?? new (await import("./canvas/model/store")).LocalCanvasStore(activeUserId ?? "account") } : {}),
         ...(productTestMode ? { onFirstClient: (client: TerminalClient) => {
           window.__tracerProductTestDouble = {
@@ -461,6 +474,8 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
         } } : {}),
         onRecoveryPending: (readyAt) => { recoveryNoticeGeneration++; screen.setRecoveryPending(readyAt); },
       });
+      if (generation !== sessionGeneration) { mounted.dispose(); return; }
+      productCanvas = mounted;
       if (layoutReview) window.__tracerLayoutReviewDouble = {
         revisions: layoutReview.revision,
         currentView: () => (productCanvas as unknown as { canvas?: { cx?: { state?: { currentView?: string }; views?: Map<string, unknown> } } } | undefined)?.canvas?.cx?.state?.currentView ?? "",
@@ -469,6 +484,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
         skipRevision: layoutReview.skipRevision,
       };
     } catch (error: unknown) {
+      if (generation !== sessionGeneration) return;
       console.error("canvas failed to start", error);
       screen.dispose();
       renderUnavailable(safeMessage(error));
@@ -480,15 +496,13 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   // Session continuity across reloads (integration, #34): the tab remembers its
   // public session id so a reload reattaches to the same terminal.
   screen.setRecoveryPending(identity?.recovery_pending?.ready_at);
-  const sessionKey = activeUserId ? tabSessionKey(activeUserId) : undefined;
-  const initialSessionId = query.get("session") ?? (sessionKey ? loadTabSession(sessionKey) : undefined);
+  const initialSessionId = query.get("session") ?? undefined;
   const hooks = {
     ...probeHooks,
     onSessionCreated: (sessionId: string): void => {
       // Public session ids are scoped to the authenticated owner, not input
       // writers. The server still authorizes every attachment [50]. No pending
       // keystrokes or bearer resume credentials enter tab storage or the URL.
-      if (sessionKey) saveBrowserId(sessionKey, sessionId, true);
       const url = new URL(location.href);
       url.searchParams.set("session", sessionId);
       history.replaceState(null, "", url);
@@ -577,8 +591,8 @@ async function showRecovery(): Promise<void> {
   delete window.__tracerTestDouble;
   document.documentElement.removeAttribute("data-ui-font");
   mountRecovery(app, () => { void showTerminal(); }, (userId, _, displayName, instant) => {
+    peerSessions.forget(userId);
     activeUserId = userId;
-    saveBrowserId(lastAccountKey, userId);
     recordSignIn(userId);
     showWelcome(displayName ?? "", instant);
   });
@@ -626,7 +640,13 @@ let productCanvas: { dispose(): void } | undefined;
  * is gone and when the person signs out (sign-out.ts). Local preferences stay; sign-out
  * removes the account's stored data afterwards (sign-out.ts).
  */
+let sessionGeneration = 0;
+let sessionStarted = 0;
+const peerSessions = sessionNotifications((account, before) => {
+  if (activeUserId === account && sessionStarted <= before) endSession("Your session ended. Sign in again to reconnect.");
+});
 function endSession(message = ""): void {
+  sessionGeneration++; forgetAccountWork(activeUserId);
   welcomeEffect?.destroy();
   welcomeEffect = undefined;
   window.clearTimeout(welcomeTimer);
@@ -647,14 +667,15 @@ function endSession(message = ""): void {
   activeUserId = undefined;
   renderAuth(false, message);
 }
-registerSignOut(() => endSession(), () => activeUserId);
+registerSignOut(() => endSession(), () => activeUserId, (value) => { if (coreScreen) coreScreen.stage.inert = value; }, (account) => peerSessions.forget(account), () => sessionGeneration);
 
 async function checkForegroundSession(): Promise<void> {
   if (checkingResume || !activeUserId) return;
   checkingResume = true;
-  const noticeGeneration = recoveryNoticeGeneration;
+  const noticeGeneration = recoveryNoticeGeneration, generation = sessionGeneration, account = activeUserId;
   try {
     const session = await checkSession();
+    if (generation !== sessionGeneration || account !== activeUserId) return;
     // A delayed HTTP snapshot must not overwrite a newer WebSocket state event.
     if (session && noticeGeneration === recoveryNoticeGeneration) coreScreen?.setRecoveryPending(session.recovery_pending?.ready_at);
     if (!session && previewProto()) { location.reload(); return; }
@@ -669,15 +690,6 @@ async function checkForegroundSession(): Promise<void> {
   }
 }
 
-function saveBrowserId(key: string, value: string, tab = false): void {
-  try { (tab ? sessionStorage : localStorage).setItem(key, value); }
-  catch { /* public identifiers are conveniences; authorization stays on the server */ }
-}
-
-function loadTabSession(key: string): string | undefined {
-  try { return sessionStorage.getItem(key) ?? undefined; }
-  catch { return undefined; }
-}
 
 function safeMessage(error: unknown): string {
   if (error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "AbortError")) {

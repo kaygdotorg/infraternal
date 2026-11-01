@@ -9,6 +9,13 @@ pub(super) fn random() -> String {
 pub(crate) fn hash(value: &str) -> String {
     B64.encode(Sha256::digest(value.as_bytes()))
 }
+/// Domain-separated public session label. It is neither the bearer nor its database lookup hash.
+pub(crate) fn session_incarnation(token: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"infraternal/layout/session-incarnation/v1\0");
+    digest.update(token.as_bytes());
+    B64.encode(digest.finalize())
+}
 pub(super) fn prf_salt(user: Option<&str>) -> String {
     // Stored v1/v2 envelopes keep their original input; never relabel ciphertext.
     let context = user.map_or_else(

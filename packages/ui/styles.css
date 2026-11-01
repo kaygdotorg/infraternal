@@ -139,7 +139,7 @@
   position: fixed;
   z-index: 900;
   right: max(12px, env(safe-area-inset-right));
-  bottom: max(16px, env(safe-area-inset-bottom));
+  bottom: calc(max(16px, env(safe-area-inset-bottom)) + var(--ui-toast-stack-offset, 0px));
   left: max(12px, env(safe-area-inset-left));
   display: flex;
   width: max-content;
@@ -200,7 +200,7 @@
 
 @media (pointer: coarse) {
   .terminal-screen .ui-toast {
-    bottom: calc(var(--keybar-inset, 0px) + var(--keybar-height, 0px) + var(--keybar-gap, 0px) + 10px + env(safe-area-inset-bottom));
+    bottom: calc(var(--keybar-inset, 0px) + var(--keybar-height, 0px) + var(--keybar-gap, 0px) + 10px + env(safe-area-inset-bottom) + var(--ui-toast-stack-offset, 0px));
   }
 }
 @media (prefers-reduced-motion: reduce) {

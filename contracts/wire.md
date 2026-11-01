@@ -851,3 +851,22 @@ agent sends `terminal.query_replies_unavailable` with its `session_id`; the
 server validates and forwards it only in response to marked input, so an old
 browser never receives this new notice. The browser says to open a new shell.
 Ordinary legacy Input remains available. No session is automatically ended.
+
+### Layout session incarnation (#250, D312)
+
+Hello capability bit 4 (`16`) requests an additive Welcome suffix: a length-prefixed
+43-byte base64url `session_incarnation`. The label is opaque and non-secret; it is
+stable only for the authenticated browser session, including reconnects and server
+restarts. Authenticated HTTP session responses include the same label so the tab
+binds its store before its first WebSocket handshake. It is separate from both
+bearer and resume credentials. Keep it in RAM;
+never put it in logs, URLs or browser storage.
+
+Every `canvas.layout.apply` and `canvas.layout.initialize` request carries
+`session_incarnation` beside its existing fields. Before receipt lookup or mutation,
+the server compares it with the calling session. Missing or mismatched labels receive
+`ok=false`, `{"error":"layout session changed","reason":"layout_session_changed"}`.
+This refusal does not reveal another account or session. On Welcome, a tab drops its
+old queue without sending if the incarnation changed; it reports lost edits with the
+existing not-saved notice. Account-only binding is insufficient because signing out
+and signing back into the same account revokes the original lifetime too.

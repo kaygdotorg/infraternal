@@ -1,4 +1,5 @@
 /** Production-shaped recovery and operation delivery through desktop and phone browsers (#243, D248). */
+import { watchLayout } from "./layout-observer";
 import { WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
 import { isMacPlatform } from "../../../packages/ui/src/platform";
 import { devices, expect, test } from "playwright/test";
@@ -43,7 +44,7 @@ test("44-window recovered account sends edits from both devices", async ({ brows
     });
   };
   try {
-    const page = await desktop.newPage(); record(page, "desktop"); await enrol(page, server);
+    const page = watchLayout(await desktop.newPage()); record(page, "desktop"); await enrol(page, server);
     const initial = (await cache(page)).canonical;
     const first = initial.views.find((v) => v.id === "console")!;
     if (first.layout.type !== "tiled") throw Error("missing console");
@@ -95,15 +96,10 @@ with sqlite3.connect(sys.argv[1]) as db:
 `, `${server.dataDir}/infraternal.sqlite`, JSON.stringify(doc), baseline ? "1" : "0"], { encoding: "utf8" });
       expect(seeded.status).toBe(0);
     });
-    // Existing devices can mount the historical drawing cache before the repaired snapshot arrives.
-    await page.evaluate((document) => {
-      const key = Object.keys(localStorage).find((key) => key.startsWith("infraternal.canvas."))!;
-      const value = JSON.parse(localStorage.getItem(key)!);
-      localStorage.setItem(key, JSON.stringify({ ...value, canonical: document, document, pending: [], unresolved: [] }));
-    }, doc);
+    // D312 mounts the repaired server snapshot without a private cached drawing.
     await page.reload(); await expect(windows(page)).toHaveCount(baseline ? 44 : 45); await settled(page);
     await phone.addCookies(await desktop.cookies());
-    const mobile = await phone.newPage(); record(mobile, "phone"); await mobile.goto(server.origin + "/?theme=ink&bg=none");
+    const mobile = watchLayout(await phone.newPage()); record(mobile, "phone"); await mobile.goto(server.origin + "/?theme=ink&bg=none");
     await expect(windows(mobile)).toHaveCount(baseline ? 44 : 45); await settled(mobile);
     for (const [name, device] of [["desktop", page], ["phone", mobile]] as const) {
       await device.locator("#capsule").click();
@@ -177,17 +173,14 @@ test("a repaired cached graph cannot build after its view was removed", async ({
   const gate = new Promise<void>((resolve) => { release = resolve; });
   const errors: string[] = [];
   try {
-    const page = await context.newPage(); page.on("pageerror", (error) => errors.push(error.message));
+    const page = watchLayout(await context.newPage()); page.on("pageerror", (error) => errors.push(error.message));
     await enrol(page, server);
     await expect.poll(async () => (await cache(page)).canonical.views.some((view) => view.id === "mesh")).toBe(true);
     const historical = structuredClone((await cache(page)).canonical);
     const mesh = historical.views.find((view) => view.id === "mesh")!;
     historical.views.push({ ...mesh, id: "delayed-recovery", name: "Recovered: Mesh", cell: { x: 0, y: 0 } });
-    await page.evaluate((document) => {
-      const key = Object.keys(localStorage).find((key) => key.startsWith("infraternal.canvas."))!;
-      const value = JSON.parse(localStorage.getItem(key)!);
-      localStorage.setItem(key, JSON.stringify({ ...value, canonical: document, document, pending: [], unresolved: [] }));
-    }, historical);
+    const account = await page.evaluate(async () => (await (await fetch("/auth/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).json()).user_id as string);
+    await page.evaluate(({ account, document }) => localStorage.setItem(`infraternal.canvas.${account}`, JSON.stringify(document)), { account, document: historical });
     let blocked = false;
     await page.route("**/*.js", async (route) => {
       const response = await route.fetch();

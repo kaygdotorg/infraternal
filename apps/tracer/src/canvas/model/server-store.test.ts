@@ -1,11 +1,10 @@
-/** Subscription, migration and durable retry ordering regressions for the product canvas (#243). */
+/** Subscription, migration and per-tab retry ordering regressions for the product canvas (#243). */
 import { beforeEach, expect, test } from "bun:test";
 import { ServerCanvasStore, type LayoutTransport } from "./server-store";
 import { ActionRefused } from "../../connection";
 import { reduce, type Intent } from "./operations";
 import type { CanvasDocument } from "./document";
 import { canvasKey, clearAccountStorage } from "../../account-storage";
-const moduleMathRandom = Math.random;
 const document = (): CanvasDocument => ({ format: "infraternal.canvas", version: 1, revision: 0, views: [{ id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [] } }] });
 class Transport implements LayoutTransport {
   resyncs = 0;
@@ -97,9 +96,7 @@ test("a negative drop on a 1,025-node mesh writes one pin, and the peer ends wit
     graphOf(dropped).pinned["node-1000"] = { x: -1280, y: -480 };
     const saved = first.save(dropped);
     first.flush();
-    const raw = localStorage.getItem(canvasKey("mesh-owner"));
-    const cached = JSON.parse(raw ?? "{}") as { pending?: unknown[] };
-    expect(cached.pending).toHaveLength(1);
+    expect(first.pending).toBe(true);
     await saved;
     await transport.drain(baseline + 1);
     expect(transport.refused).toBe(0);
@@ -140,44 +137,6 @@ test("repeated pin moves reach both coordinate limits; the next move is refused 
     expect(graphOf(second.current()).pinned["node-0"]).toEqual({ x: -100_000, y: 100_000 });
   } finally { first.dispose(); second.dispose(); }
 });
-test("a layout gap or withdrawn worker requests one fresh snapshot with bounded backoff", async () => {
-  const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
-  const originalRandom = Math.random;
-  const timers = new Map<number, { run: () => void; delay: number }>(); let id = 0;
-  globalThis.setTimeout = ((run: () => void, delay: number) => { timers.set(++id, { run, delay }); return id; }) as unknown as typeof setTimeout;
-  globalThis.clearTimeout = ((timer: number) => { timers.delete(timer); }) as unknown as typeof clearTimeout;
-  Math.random = () => 0;
-  const transport = new Transport(), store = new ServerCanvasStore(transport, "a");
-  const retry = (delay: number): void => {
-    const timer = [...timers].find(([, timer]) => timer.delay === delay); expect(timer).toBeDefined();
-    timers.delete(timer![0]); timer![1].run();
-  };
-  try {
-    transport.snapshot();
-    for (let n = 0; n < 100; n++) transport.event({ type: "canvas.layout.operation", revision: n + 5, intent: opened });
-    expect(store.current().revision).toBe(0); expect(transport.resyncs).toBe(0);
-    retry(250); expect(transport.resyncs).toBe(1);
-    transport.event({ type: "error", error: "forbidden" });
-    retry(500); expect(transport.resyncs).toBe(2);
-    for (const delay of [1000, 2000, 4000, 5000, 5000]) {
-      transport.event({ type: "error", error: "canvas unavailable" }); retry(delay);
-    }
-    const head = document(); reduce(head, opened); head.revision = 104;
-    transport.snapshot(head); expect(store.current()).toEqual(head);
-    const next = store.current(); next.views[0]!.name = "After receipt";
-    await store.save(next);
-    const call = transport.calls[0]!; call.resolve({ revision: 105 }); await tick();
-    expect([...timers.values()].some((timer) => timer.delay === 250)).toBe(true);
-    transport.event({ type: "canvas.layout.operation", revision: 105, op_id: call.input.op_id, intent: call.input.intent });
-    expect([...timers.values()].some((timer) => timer.delay === 250)).toBe(false);
-    transport.event({ type: "error", error: "canvas unavailable" }); retry(250);
-    expect(transport.resyncs).toBe(8);
-    store.dispose(); expect(timers.size).toBe(0);
-  } finally { store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
-});
-test("layout recovery restores Math.random after its virtual timer test", () => {
-  expect(Math.random).toBe(moduleMathRandom);
-});
 test("event before Result and duplicate events do not apply an optimistic edit twice", async () => {
   const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
   const next = document(); reduce(next, opened); await store.save(next);
@@ -194,20 +153,20 @@ test("reconnect retries the exact request and an old receipt removes its optimis
   const head = document(); reduce(head, opened); head.revision = 2; transport.snapshot(head); await tick();
   const retry = transport.calls[1]!; expect(retry.input).toEqual(first.input);
   retry.resolve({ revision: 1 }); await tick(); store.flush();
-  expect(JSON.parse(localStorage.getItem(canvasKey("a"))!).pending).toHaveLength(0); store.dispose();
+  expect(store.pending).toBe(false); store.dispose();
 });
 test("legacy import remains intact until canonical confirmation even if another device initialized", async () => {
   const legacy = document(); reduce(legacy, opened); localStorage.setItem(canvasKey("a"), JSON.stringify(legacy));
-  const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); expect(await store.load()).toEqual(legacy);
-  transport.snapshot(); await tick(); store.flush();
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "a");
+  transport.snapshot(); expect(await store.load()).toEqual(document()); await tick(); store.flush();
   expect(transport.calls[0]!.action).toBe("canvas.layout.initialize");
-  expect(JSON.parse(localStorage.getItem(canvasKey("a"))!).migration.document).toEqual(legacy);
+  expect(JSON.parse(localStorage.getItem(canvasKey("a"))!)).toEqual(legacy);
   transport.calls[0]!.resolve({ revision: 1 }); await tick(); store.flush();
-  expect(JSON.parse(localStorage.getItem(canvasKey("a"))!).migration.revision).toBe(1);
+  expect(JSON.parse(localStorage.getItem(canvasKey("a"))!)).toEqual(legacy);
   const confirmed = structuredClone(legacy); confirmed.revision = 1; transport.snapshot(confirmed); store.flush();
-  expect(JSON.parse(localStorage.getItem(canvasKey("a"))!).migration).toBeUndefined(); store.dispose();
+  expect(localStorage.getItem(canvasKey("a"))).toBeNull(); store.dispose();
 });
-test("dispose cancels late cache writes after sign-out", async () => {
+test("dispose cancels late callbacks after sign-out", async () => {
   const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
   const next = document(); reduce(next, opened); await store.save(next); store.dispose(); clearAccountStorage("a");
   transport.calls[0]!.resolve({ revision: 1 }); await tick(); store.flush(); expect(localStorage.getItem(canvasKey("a"))).toBeNull();
@@ -243,66 +202,9 @@ test("closing an unsent shell removes its unresolved birth without blocking surv
   expect(transport.calls).toHaveLength(1);
   const intent = transport.calls[0]!.input.intent as Extract<Intent, { type: "open" }>;
   expect(intent.type).toBe("open"); expect(intent.window.id).toBe("child");
-  store.flush(); expect(JSON.stringify(JSON.parse(localStorage.getItem(canvasKey("a"))!).pending)).not.toContain('"id":"pending"'); store.dispose();
+  store.flush(); expect(JSON.stringify(store.current())).not.toContain('"id":"pending"'); store.dispose();
 });
 
-test("sixty withdrawn layout subscriptions spread their coalesced retry timers", () => {
-  const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
-  const originalRandom = Math.random;
-  const timers = new Map<number, { run: () => void; at: number; delay: number }>();
-  let id = 0, now = 0, randomStep = 0;
-  globalThis.setTimeout = ((run: () => void, delay: number) => {
-    timers.set(++id, { run, at: now + delay, delay }); return id;
-  }) as unknown as typeof setTimeout;
-  globalThis.clearTimeout = ((timer: number) => { timers.delete(timer); }) as unknown as typeof clearTimeout;
-  // A low-discrepancy sequence keeps the virtual retry schedule reproducible across 60 stores.
-  Math.random = () => ((randomStep++ * 0.6180339887498949) % 1);
-  const stores: ServerCanvasStore[] = [], transports: Transport[] = [], firstDelays: number[] = [];
-  // Virtual time counts scheduled requests without making a host-latency claim.
-  const advance = (until: number): void => {
-    while (true) {
-      const next = [...timers].sort((a, b) => a[1].at - b[1].at)[0];
-      if (!next || next[1].at > until) break;
-      now = next[1].at; timers.delete(next[0]); next[1].run();
-    }
-    now = until;
-  };
-  try {
-    for (let n = 0; n < 60; n++) {
-      const transport = new Transport();
-      const subscribe = transport.subscribe.bind(transport);
-      transport.subscribe = (...args) => {
-        const off = subscribe(...args);
-        return Object.assign(off, { resync: () => {
-          transport.resyncs++; transport.open(); transport.event({ type: "error", error: "unavailable" });
-        } });
-      };
-      const store = new ServerCanvasStore(transport, `subscriber-${n}`);
-      stores.push(store); transports.push(transport); transport.snapshot();
-      const before = id;
-      for (let burst = 0; burst < 100; burst++) transport.event({ type: "error", error: "unavailable" });
-      const scheduled = [...timers].filter(([timerId]) => timerId > before);
-      expect(scheduled).toHaveLength(1);
-      firstDelays.push(scheduled[0]![1].delay);
-    }
-    advance(60_000);
-    const firstMinute = transports.reduce((sum, transport) => sum + transport.resyncs, 0);
-    advance(65_000);
-    const followingFiveSeconds = transports.reduce((sum, transport) => sum + transport.resyncs, 0) - firstMinute;
-    console.log(`LAYOUT_RETRY_SCHEDULE subscribers=60 first_minute=${firstMinute} following_5s=${followingFiveSeconds} first_delay_slots=${new Set(firstDelays).size}`);
-    expect(new Set(firstDelays).size).toBe(60);
-    expect(Math.min(...firstDelays)).toBeGreaterThanOrEqual(250);
-    expect(Math.max(...firstDelays)).toBeLessThan(375);
-    expect(firstMinute).toBeLessThan(900);
-    expect(followingFiveSeconds).toBeLessThan(60);
-    for (const transport of transports) transport.snapshot();
-    for (const store of stores) store.flush();
-    expect(timers.size).toBe(0);
-  } finally { for (const store of stores) store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
-});
-test("multi-subscriber retry scheduling restores Math.random", () => {
-  expect(Math.random).toBe(moduleMathRandom);
-});
 test("an acknowledgement after its ordered event does not repaint the same layout", async () => {
   const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
   let paints = 0; store.subscribe(() => { paints++; });
@@ -312,35 +214,15 @@ test("an acknowledgement after its ordered event does not repaint the same layou
   expect(paints).toBe(2); call.resolve({ revision: 1 }); await tick(); expect(paints).toBe(2); store.dispose();
 });
 
-test("review: a missing layout revision is recovered before the cached document is used again", () => {
-  const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
-  const originalRandom = Math.random;
-  const timers = new Map<number, { run: () => void; delay: number }>(); let id = 0;
-  globalThis.setTimeout = ((run: () => void, delay: number) => { timers.set(++id, { run, delay }); return id; }) as unknown as typeof setTimeout;
-  globalThis.clearTimeout = ((timer: number) => { timers.delete(timer); }) as unknown as typeof clearTimeout;
-  Math.random = () => 0;
-  const transport = new Transport(), store = new ServerCanvasStore(transport, "a");
-  try {
-    const baseline = document(); baseline.revision = 1; transport.snapshot(baseline); store.flush();
-    transport.event({ type: "canvas.layout.operation", revision: 3, op_id: "peer-after-gap", noop: false,
-      intent: { type: "view.update", view_id: "console", cell: { x: 7, y: 9 } } });
-    expect(store.current().revision).toBe(1);
-    const timer = [...timers].find(([, timer]) => timer.delay === 250); expect(timer).toBeDefined();
-    timers.delete(timer![0]); timer![1].run(); expect(transport.resyncs).toBe(1);
-    const authoritative = document(); authoritative.revision = 3; authoritative.views[0]!.cell = { x: 7, y: 9 };
-    transport.snapshot(authoritative);
-    expect(store.current().revision).toBe(3); expect(store.current().views[0]!.cell).toEqual({ x: 7, y: 9 });
-  } finally { store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
-});
 
-test("a bootstrap receipt before its canonical snapshot keeps the legacy layout drawable", async () => {
+test("a bootstrap receipt before its canonical snapshot keeps the legacy layout drawable without rewriting its source", async () => {
   const legacy = document(); reduce(legacy, opened); localStorage.setItem(canvasKey("a"), JSON.stringify(legacy));
   const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot(document(), false);
   const call = transport.calls[0]!; call.resolve({ revision: 1 }); await tick();
   expect(store.current().views[0]!.layout).toEqual(legacy.views[0]!.layout);
   store.dispose();
   const restored = new ServerCanvasStore(new Transport(), "a");
-  expect((await restored.load())!.views[0]!.layout).toEqual(legacy.views[0]!.layout); restored.dispose();
+  restored.dispose(); expect(await restored.load()).toBeUndefined(); expect(localStorage.getItem(canvasKey("a"))).not.toBeNull();
 });
 
 test("ready edits share one network round trip with a bounded in-flight window", async () => {
@@ -373,18 +255,6 @@ test("a no-op drawing capture does not trigger another paint", async () => {
   expect(paints).toBe(0); expect(transport.calls).toHaveLength(0); store.dispose();
 });
 
-test("an interrupted first load does not turn a revision-zero cache into an intentional empty layout", async () => {
-  const empty: CanvasDocument = { format: "infraternal.canvas", version: 1, revision: 0, views: [] };
-  localStorage.setItem(canvasKey("a"), JSON.stringify({ cacheVersion: 2, canonical: empty, document: empty, pending: [] }));
-  const first = new ServerCanvasStore(new Transport(), "a"); expect(await first.load()).toBeUndefined(); first.dispose();
-  empty.revision = 2;
-  localStorage.setItem(canvasKey("a"), JSON.stringify({ cacheVersion: 2, canonical: empty, document: empty, pending: [] }));
-  const intentional = new ServerCanvasStore(new Transport(), "a"); expect((await intentional.load())?.views).toEqual([]); intentional.dispose();
-  const transport = new Transport(), live = new ServerCanvasStore(transport, "b");
-  empty.revision = 0; transport.snapshot(empty, false);
-  transport.event({ type: "canvas.layout.operation", revision: 1, op_id: "close", noop: true, intent: { type: "close", window_id: "missing" } });
-  expect((await live.load())?.views).toEqual([]); live.dispose();
-});
 
 // A permanently refused intent must not suppress every subsequent independent edit.
 test("review: a refused structural edit cannot strand later valid edits", async () => {
@@ -398,7 +268,7 @@ test("review: a refused structural edit cannot strand later valid edits", async 
   } finally { store.dispose(); }
 });
 
-test("a definitive refusal paints rollback, persists it and never retries after reconnect", async () => {
+test("a definitive refusal paints rollback in memory and never retries after reconnect", async () => {
   const transport = new Transport(), notices: boolean[] = [];
   const store = new ServerCanvasStore(transport, "a", (definitive) => notices.push(definitive === true)); transport.snapshot();
   try {
@@ -408,8 +278,7 @@ test("a definitive refusal paints rollback, persists it and never retries after 
     expect(painted).toEqual(next);
     transport.calls[0]!.reject(new ActionRefused(undefined, "invalid")); await tick(); store.flush();
     expect(painted).toEqual(baseline); expect(notices).toEqual([true]);
-    const saved = JSON.parse(localStorage.getItem(canvasKey("a"))!);
-    expect(saved.pending).toHaveLength(0); expect(saved.document).toEqual(baseline);
+    expect(store.pending).toBe(false); expect(store.current()).toEqual(baseline);
     transport.open(); transport.snapshot(); await tick();
     expect(transport.calls).toHaveLength(1);
   } finally { store.dispose(); }
@@ -422,7 +291,7 @@ test("a stale refusal cannot discard a new-connection retry", async () => {
     transport.open(); transport.snapshot(); await tick();
     expect(transport.calls).toHaveLength(2);
     transport.calls[0]!.reject(new ActionRefused(undefined, "invalid")); await tick();
-    store.flush(); expect(JSON.parse(localStorage.getItem(canvasKey("a"))!).pending).toHaveLength(1);
+    store.flush(); expect(store.pending).toBe(true);
     expect(transport.calls[1]!.input).toEqual(transport.calls[0]!.input);
   } finally { store.dispose(); }
 });
@@ -436,7 +305,7 @@ test("review r2: refusal drains independent edits waiting behind four in-flight 
     let previous = store.current();
     const birth = structuredClone(previous); reduce(birth, opened); await store.save(birth, undefined, previous); previous = birth;
     for (let n = 0; n < 6; n++) {
-      const next = structuredClone(previous); next.views[0]!.name = `Queued ${n}`;
+      const next = structuredClone(previous); next.views[0]!.name = `Queued ${n}`; if (n % 2) next.views[0]!.cell = { x: n, y: 0 };
       await store.save(next, undefined, previous); previous = next;
     }
     expect(transport.calls).toHaveLength(4);
@@ -453,57 +322,14 @@ test("review r2: refusal drains independent edits waiting behind four in-flight 
     }
     expect(transport.calls).toHaveLength(7); expect(revision).toBe(6);
     store.flush();
-    const saved = JSON.parse(localStorage.getItem(canvasKey("a"))!);
-    expect(saved.pending).toHaveLength(0);
-    expect(saved.canonical.views[0].name).toBe("Queued 5");
-    expect(saved.canonical).toEqual(saved.document);
+    expect(store.pending).toBe(false);
+    expect(store.current().views[0]!.name).toBe("Queued 5");
     const final = store.current(); transport.open(); transport.snapshot(final); await tick();
     expect(transport.calls).toHaveLength(7);
   } finally { store.dispose(); }
 });
 
 // Virtual scheduling covers the combined gap, withdrawal and reconnect state machine without host timing claims.
-test("recovery coalesces gaps and errors, ignores operations until a snapshot, and survives reconnect", () => {
-  const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
-  const originalRandom = Math.random;
-  const timers = new Map<number, { run: () => void; delay: number }>(); let id = 0;
-  globalThis.setTimeout = ((run: () => void, delay: number) => { timers.set(++id, { run, delay }); return id; }) as unknown as typeof setTimeout;
-  globalThis.clearTimeout = ((timer: number) => { timers.delete(timer); }) as unknown as typeof clearTimeout;
-  Math.random = () => 0;
-  const transport = new Transport(), store = new ServerCanvasStore(transport, "interplay");
-  const retries = () => [...timers].filter(([, timer]) => timer.delay >= 250);
-  const fire = (delay: number): void => {
-    const pending = retries(); expect(pending).toHaveLength(1); expect(pending[0]![1].delay).toBe(delay);
-    timers.delete(pending[0]![0]); pending[0]![1].run();
-  };
-  try {
-    const baseline = document(); baseline.revision = 1; transport.snapshot(baseline); store.flush();
-    transport.event({ type: "canvas.layout.operation", revision: 3, op_id: "gap", intent: opened });
-    // An old generation's missing operation arriving late must not release the snapshot wait.
-    transport.event({ type: "canvas.layout.operation", revision: 2, op_id: "late", intent: opened });
-    expect(store.current().revision).toBe(1);
-    for (let n = 0; n < 100; n++) transport.event({ type: "error", error: "subscription no longer current" });
-    fire(250); expect(transport.resyncs).toBe(1);
-    // Errors returned by the replacement cannot strand the wait or start extra timers.
-    for (let n = 0; n < 100; n++) transport.event({ type: "error", error: "canvas unavailable" });
-    fire(500); expect(transport.resyncs).toBe(2);
-    const invalid = document(); invalid.revision = 3;
-    transport.event({ type: "canvas.layout.snapshot", revision: 4, document: invalid, initialized: true });
-    expect(store.current().revision).toBe(1); expect(retries()).toHaveLength(1);
-    // Reconnect already sends Subscribe. Its snapshot cancels the old recovery watchdog.
-    transport.open();
-    const authoritative = document(); authoritative.revision = 3; authoritative.views[0]!.cell = { x: 7, y: 9 };
-    transport.snapshot(authoritative); store.flush();
-    expect(store.current()).toEqual(authoritative); expect(retries()).toHaveLength(0);
-    expect(transport.resyncs).toBe(2);
-    transport.event({ type: "canvas.layout.operation", revision: 4, op_id: "after", intent: { type: "view.update", view_id: "console", name: "Live again" } });
-    expect(store.current().revision).toBe(4); expect(store.current().views[0]!.name).toBe("Live again"); store.flush();
-    transport.event({ type: "error", error: "withdrawn again" }); fire(250);
-    expect(transport.resyncs).toBe(3);
-    transport.snapshot(store.current()); store.flush(); expect(retries()).toHaveLength(0);
-    store.dispose(); expect(timers.size).toBe(0);
-  } finally { store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
-});
 
 // The normal 300 ms fixture RTT must not race the first snapshot watchdog into another Subscribe.
 test("a normal reconnect snapshot arrives before any replacement is requested", () => {
@@ -526,4 +352,51 @@ test("a normal reconnect snapshot arrives before any replacement is requested", 
     expect(transport.resyncs).toBe(0); expect(store.current().revision).toBe(1);
     store.flush(); expect(timers.size).toBe(0);
   } finally { store.dispose(); Object.assign(globalThis, original); Math.random = originalRandom; }
+});
+for (const receiptFirst of [false, true]) test(`legacy import retires only after receipt and canonical coverage, receipt first=${receiptFirst}`, async () => {
+  const key = canvasKey("legacy-order"), legacy = document(); localStorage.setItem(key, JSON.stringify(legacy));
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "legacy-order");
+  try {
+    transport.snapshot({ ...document(), views: [] }, false);
+    const call = transport.calls[0]!; expect(call.action).toBe("canvas.layout.initialize");
+    const canonical = { ...legacy, revision: 2 };
+    if (receiptFirst) { call.resolve({ revision: 2 }); await tick(); expect(localStorage.getItem(key)).not.toBeNull(); transport.snapshot(canonical); }
+    else { transport.snapshot(canonical); expect(localStorage.getItem(key)).not.toBeNull(); call.resolve({ revision: 2 }); await tick(); }
+    expect(localStorage.getItem(key)).toBeNull(); expect(store.pending).toBe(false);
+  } finally { store.dispose(); }
+});
+test("refused import and refused cleanup preserve their legacy source until confirmed removal succeeds", async () => {
+  const key = canvasKey("legacy-refusal"), source = JSON.stringify(document()); localStorage.setItem(key, source);
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "legacy-refusal");
+  try {
+    transport.snapshot({ ...document(), views: [] }, false); transport.snapshot({ ...document(), revision: 2 });
+    transport.calls[0]!.reject(new ActionRefused()); await tick();
+    expect(localStorage.getItem(key)).toBe(source);
+  } finally { store.dispose(); }
+  const next = new Transport(); let cleanupNotices = 0;
+  const imported = new ServerCanvasStore(next, "legacy-refusal", (_definitive, delayed) => { if (delayed) cleanupNotices++; });
+  const remove = localStorage.removeItem.bind(localStorage);
+  try {
+    next.snapshot({ ...document(), views: [] }, false);
+    localStorage.removeItem = () => { throw Error("cleanup refused"); };
+    next.calls[0]!.resolve({ revision: 2 }); await tick(); next.snapshot({ ...document(), revision: 2 });
+    expect(localStorage.getItem(key)).toBe(source); expect(cleanupNotices).toBe(1);
+    localStorage.removeItem = remove; next.snapshot({ ...document(), revision: 2 }); expect(localStorage.getItem(key)).toBeNull();
+  } finally { localStorage.removeItem = remove; imported.dispose(); }
+});
+test("reference completion during failed logout is retained without sending until edits resume", async () => {
+  const { pauseAccountWork } = await import("../../account-lifetime");
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "logout-completion");
+  try {
+    transport.snapshot();
+    const shell = store.current(); reduce(shell, opened); await store.save(shell, undefined, undefined, new Set(["w"]));
+    expect(transport.calls).toHaveLength(0); pauseAccountWork("logout-completion", true);
+    const resolved = store.current(), layout = resolved.views[0]!.layout;
+    if (layout.type !== "tiled") throw Error("expected tiled view");
+    layout.columns[0]!.windows[0]!.target = { type: "settings", section: "account" };
+    await store.save(resolved); expect(transport.calls).toHaveLength(0);
+    pauseAccountWork("logout-completion", false);
+    expect(transport.calls).toHaveLength(1);
+    expect((transport.calls[0]!.input.intent as Extract<Intent, { type: "open" }>).window.target).toEqual({ type: "settings", section: "account" });
+  } finally { store.dispose(); }
 });

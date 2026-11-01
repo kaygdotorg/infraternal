@@ -9,6 +9,7 @@ use infraternal_plugin_api::{
 use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
 use serde::Deserialize;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -72,6 +73,12 @@ pub struct CanvasPlugin(pub Arc<dyn LayoutStore>);
 struct Filter {
     topic: String,
 }
+/// Borrow ordinary lifetime labels; JSON escapes need owned decoding, never a second document tree.
+#[derive(Deserialize)]
+struct SessionBinding<'a> {
+    #[serde(default, borrow)]
+    session_incarnation: Cow<'a, str>,
+}
 #[derive(Clone)]
 struct Subscription {
     id: u32,
@@ -103,6 +110,13 @@ impl Plugin for CanvasPlugin {
                         let Ok(decoded) = decode_muxed_frame(&request) else { break; };
                         match decoded.frame {
                             Frame::Call { call_id,action_id,input_json } => host.authorized(Box::pin(async {
+                                // Admission precedes receipts too: an old session must not learn or replay a result.
+                                if let Some(incarnation) = host.session_incarnation() {
+                                    let binding = serde_json::from_slice::<SessionBinding<'_>>(input_json).ok();
+                                    if binding.as_ref().map(|v| v.session_incarnation.as_ref()) != Some(incarnation) {
+                                        return send(&replies, 0, Frame::Result { call_id, ok: false, json: br#"{"error":"layout session changed","reason":"layout_session_changed"}"# }).await;
+                                    }
+                                }
                                 let result = match action_id {
                                     "canvas.layout.apply" | "canvas.layout.initialize" => store.call(action_id=="canvas.layout.initialize",host.user_id(),input_json).await,
                                     _=>Err(()),
@@ -185,7 +199,7 @@ fn result_json(result: Result<i64, ()>, output: &mut Vec<u8>) -> Result<(bool, &
     }
 }
 
-/// Checks shared action metadata and the compact result wire encoding.
+/// Checks shared metadata, authenticated label parsing and compact result encoding.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +212,28 @@ mod tests {
             serde_json::from_str::<Filter>(r#"{"topic":"canvas.layout","account":"other"}"#)
                 .is_err()
         );
+    }
+    #[test]
+    fn session_binding_accepts_json_string_escapes() {
+        assert!(
+            serde_json::from_slice::<SessionBinding<'_>>(
+                br#"{"session_incarnation":"\u0041AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+            )
+            .is_ok()
+        );
+    }
+    #[test]
+    fn ordinary_session_binding_borrows_and_escaped_binding_decodes_identically() {
+        let plain = serde_json::from_slice::<SessionBinding<'_>>(
+            br#"{"session_incarnation":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+        )
+        .unwrap();
+        let escaped = serde_json::from_slice::<SessionBinding<'_>>(
+            br#"{"session_incarnation":"\u0041AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+        )
+        .unwrap();
+        assert!(matches!(plain.session_incarnation, Cow::Borrowed(_)));
+        assert_eq!(plain.session_incarnation, escaped.session_incarnation);
     }
     #[test]
     fn result_json_preserves_both_wire_shapes() {
