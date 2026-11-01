@@ -1,8 +1,9 @@
-//! Automates only the calling saved shell's host and account; no environment value grants authority (D288/D314).
+//! Saved-shell CLI actions stay within the caller's host and account; no environment value grants authority (D288/D314).
 //!
-//! The existing bounded local action socket carries these calls. Linux peer credentials,
-//! live shim credentials and the caller's kernel ancestry establish authority at dispatch.
-//! A same-UID process outside a saved shell is refused. No server or account boundary is crossed.
+//! The bounded local action socket checks peer credentials, live shim credentials and the
+//! caller's kernel ancestry. That saved-shell check applies to this CLI action path. Raw
+//! shim sockets use the separate OS-user boundary in `contracts/shim.md`: same-UID processes
+//! are trusted, while other UIDs are refused. No server or account boundary is crossed.
 mod metadata;
 mod operations;
 use crate::sessions::{self, Session};
