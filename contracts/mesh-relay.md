@@ -170,8 +170,12 @@ If the active relay connection ends, the node removes that link and switches
 to the lowest-index remaining live link. If no link remains, the active relay
 becomes `None`, packets without a link are counted and dropped, and the node
 requests links again when a relay becomes live. A relay reconnect uses a
-five-second connect deadline and exponential backoff from 250 ms up to five
-seconds. QUIC keep-alive is one second and the idle timeout is three seconds.
+five-second connect deadline. After an established connection drops, the node
+retries immediately. For 60 seconds after a healthy connection ends, reconnect
+attempts use a 750 ms deadline and failed attempts are separated by at most
+250 ms. After that window, the connect deadline returns to five seconds and
+retry backoff can grow to five seconds. A successful connection resets the
+backoff. QUIC keep-alive is one second and the idle timeout is three seconds.
 When another relay remains active, recovery of a previously lost lower-index
 relay does not move the pair back; this slice does not fail back. The next
 relay's readiness does not guarantee packet-level continuity: UDP datagrams

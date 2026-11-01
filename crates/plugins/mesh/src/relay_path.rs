@@ -40,7 +40,7 @@ use std::{
         Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{net::UdpSocket, sync::mpsc, task::JoinHandle};
 
@@ -49,7 +49,11 @@ const PACKET: usize = 1_500;
 /// Reconnect backoff for a lost relay, doubling up to the maximum.
 const BACKOFF: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
+const BACKOFF_RECENT_MAX: Duration = Duration::from_millis(250);
+const RECENT_HEALTH: Duration = Duration::from_secs(60);
 const CONNECT: Duration = Duration::from_secs(5);
+/// Avoid letting a failed handshake wait through QUIC's longer idle timeout during quick recovery.
+const CONNECT_RECENT: Duration = Duration::from_millis(750);
 /// How long a new link may still change before the session start (`settle`).
 const SETTLE: Duration = Duration::from_millis(25);
 /// Probe retransmissions after the first send (#220 design §2: 250/750 ms).
@@ -512,23 +516,39 @@ fn start_handshake(peer: &dataplane::Peer) -> io::Result<()> {
 
 /// Keep one relay connected, apply its notices, and repair pairs when it goes.
 async fn drive(shared: Arc<Shared>, index: usize) {
-    let mut backoff = BACKOFF;
+    let mut failures = 0_u32;
+    let mut last_healthy = None;
     loop {
         let spec = &shared.relays[index];
+        let recently_healthy =
+            last_healthy.is_some_and(|healthy: Instant| healthy.elapsed() < RECENT_HEALTH);
+        let connect_deadline = if recently_healthy {
+            CONNECT_RECENT
+        } else {
+            CONNECT
+        };
         if let Ok((client, notices)) = Client::connect(
             &shared.endpoint,
             shared.config.clone(),
             spec.address,
             &spec.name,
-            CONNECT,
+            connect_deadline,
         )
         .await
         {
-            backoff = BACKOFF;
             serve(&shared, index, client, notices).await;
+            last_healthy = Some(Instant::now());
+            failures = 0;
+            continue;
         }
+        failures = failures.saturating_add(1);
+        let exponent = failures.saturating_sub(1).min(5);
+        let backoff = (BACKOFF * 2_u32.pow(exponent)).min(if recently_healthy {
+            BACKOFF_RECENT_MAX
+        } else {
+            BACKOFF_MAX
+        });
         tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(BACKOFF_MAX);
     }
 }
 

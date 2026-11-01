@@ -438,16 +438,26 @@ def inner(binary):
         results["no_relay"] = {"ping": ping("nodeA", MESH["B"][0], count=5)}
         assert results["no_relay"]["ping"]["loss_pct"] == 100.0
         restarted = time.monotonic()
+        results["no_relay"]["relay1_down_before_restart_ms"] = round(
+            (restarted - killed["at"]) * 1000, 1)
         relays[0] = Fixture("relay1", binary, "relay", {
             "listen": RELAY_ADDRESSES[0], "cert": material["relays"][RELAYS[0]]["cert"],
             "key": material["relays"][RELAYS[0]]["key"], "ca": material["ca"]})
         fixtures.append(relays[0])
-        relays[0].event("ready")
-        a.event("active", peer=HOSTS["B"], relay=0, timeout=30)
-        b.event("active", peer=HOSTS["A"], relay=0, timeout=30)
+        ready = relays[0].event("ready")
+        results["no_relay"]["restart_to_ready_ms"] = round(
+            (ready["rx"] - restarted) * 1000, 1)
+        active_a = a.event("active", peer=HOSTS["B"], relay=0, timeout=30)
+        active_b = b.event("active", peer=HOSTS["A"], relay=0, timeout=30)
+        results["no_relay"]["ready_to_links_ms"] = round(
+            (max(active_a["rx"], active_b["rx"]) - ready["rx"]) * 1000, 1)
         recovered = ping("nodeA", MESH["B"][0], count=10)
         assert recovered["loss_pct"] < 50, recovered
-        results["no_relay"]["recovered_after_restart_ms"] = round((time.monotonic() - restarted) * 1000, 1)
+        results["no_relay"]["recovered_after_restart_ms"] = round(
+            (time.monotonic() - restarted) * 1000, 1)
+        assert (
+            results["no_relay"]["recovered_after_restart_ms"] < 1500.0
+        ), results["no_relay"]
         results["no_relay"]["ping_after"] = recovered
 
         # 7. Rebind: A moves to another uplink (another NAT, another public address).
