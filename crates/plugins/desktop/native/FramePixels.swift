@@ -21,7 +21,8 @@ final class FramePixels {
     private static let maximumScannedDamageHeight = 40
     private static let maximumScannedDamagePixels = 160
     private static let maximumCaretWidth = 9
-    private static let minimumCaretHeight = 8
+    // A focused 1x insertion caret changed only four to six rows in production capture.
+    private static let minimumCaretHeight = 4
     private static let measuredNinePixelCaretAnchorHeight = 17
     // Focused capture measured an 8-pixel-wide caret at one origin, with fade extents from 16 to 19 pixels.
     private static let maximumCaretHeightDelta = 3
