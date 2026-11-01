@@ -57,6 +57,8 @@ export interface ProductCanvasOptions {
   onFirstClient?: (client: TerminalClient) => void;
   isCurrent?: () => boolean;
   onSessionCheck?: () => void;
+  /** Ends the old account screen when its authenticated lifetime changes; true means unconfirmed layout edits were lost. */
+  onSessionRevoked?: (pendingLost: boolean) => void;
   onRecoveryPending?: (readyAt: number | undefined) => void;
 }
 
@@ -137,7 +139,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     if (capacity) core.toast.show({ message: "This tab has too many unsaved layout changes. Connect before making more.", tone: "error", duration: 0 });
     else if (definitive) core.toast.show({ message: "That layout change was not saved. The saved layout is back.", tone: "error", duration: 5000 });
     else if (delayed) core.toast.show({ message: "Your layout is waiting for the server. Keep this tab open.", icon: ICON_INFO, duration: 5000 });
-  });
+  }, options.onSessionRevoked);
   const pendingNotice = mountToast(core.stage, { aboveNotifications: true });
   let pendingShown = false;
   const showPending = (): void => {

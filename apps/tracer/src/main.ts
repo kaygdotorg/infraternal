@@ -451,6 +451,12 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
         predictiveEcho,
         isCurrent: () => generation === sessionGeneration,
         onSessionCheck: () => { void checkForegroundSession(); },
+        onSessionRevoked: (pendingLost) => {
+          if (generation !== sessionGeneration) return;
+          endSession(pendingLost
+            ? "Not saved. Changes waiting to save were lost. Sign in again to continue."
+            : "Your sign-in changed. Sign in again to continue.");
+        },
         ...(__CLUSTERS_PREVIEW__ && productTestMode ? { previewStore: layoutReview?.store ?? new (await import("./canvas/model/store")).LocalCanvasStore(activeUserId ?? "account") } : {}),
         ...(productTestMode ? { onFirstClient: (client: TerminalClient) => {
           window.__tracerProductTestDouble = {

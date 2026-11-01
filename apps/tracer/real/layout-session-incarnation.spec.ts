@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
 import { enrol, request, settled, windows } from "./layout-devices";
-import { cache, watchLayout } from "./layout-observer";
+import { watchLayout } from "./layout-observer";
 import { startRealServer, type RealServer } from "./server";
 import type { CanvasDocument } from "../src/canvas/model/schema";
 
@@ -63,11 +63,11 @@ test("a suspended import cannot survive sign-out and a new session for the same 
     await cdp.send("Page.setWebLifecycleState", { state: "active" });
     await page.evaluate(() => { window.dispatchEvent(new Event("online")); document.dispatchEvent(new Event("visibilitychange")); });
     await expect.poll(async () => (await context.request.post(server.origin + "/auth/session", { data: {}, headers: { Origin: server.origin } })).status()).toBe(200);
-    await expect.poll(async () => (await cache(page)).canonical.revision, { timeout: 30_000 }).toBeGreaterThanOrEqual(Number(before.revision));
-    // Wait for either safe teardown or completion of the old queue before checking server state.
-    await expect(page.getByText("Not saved — keep this tab open", { exact: true })).toBeHidden({ timeout: 30_000 });
+    // A replacement incarnation ends the old screen instead of adopting its canonical snapshot.
+    await expect(page.locator("#login-passkey")).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator("#auth-error")).toHaveText("Not saved. Changes waiting to save were lost. Sign in again to continue.");
     const after = (await request(server, context, "", {}, true)).value;
     expect(after, "replacement account retains its own canonical layout after the old tab resumes").toEqual(before);
-    await expect(windows(page)).toHaveCount(1);
+    await expect(windows(page)).toHaveCount(0);
   } finally { await context.close(); await server.dispose(); }
 });

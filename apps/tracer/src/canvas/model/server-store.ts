@@ -44,7 +44,12 @@ export class ServerCanvasStore implements CanvasStore {
   #incarnation: string | undefined;
   #revoked = false;
 
-  constructor(private readonly transport: LayoutTransport, account: string, private readonly refused: (definitive?: boolean, delayed?: boolean, capacity?: boolean) => void = () => {}) {
+  constructor(
+    private readonly transport: LayoutTransport,
+    account: string,
+    private readonly refused: (definitive?: boolean, delayed?: boolean, capacity?: boolean) => void = () => {},
+    private readonly onSessionRevoked: (pendingLost: boolean) => void = () => {},
+  ) {
     this.#offAccount = registerAccountWork(account, { pause: (value) => { this.#paused = value; if (!value) this.#pump(); }, dispose: () => this.dispose() });
     this.#incarnation = transport.sessionIncarnation;
     this.#legacyKey = canvasKey(account);
@@ -61,7 +66,9 @@ export class ServerCanvasStore implements CanvasStore {
         const lost = this.pending;
         this.#journal.clear(); this.#revoked = true;
         this.#publish(); this.#pendingChanged();
-        if (lost) this.refused(true);
+        // A changed lifetime has no authority to keep drawing: the caller ends the old account screen.
+        this.onSessionRevoked(lost);
+        return;
       } else this.#incarnation = incarnation;
       this.#journal.restart(); this.#resyncing = true; this.#waiting = true;
       clearTimeout(this.#retry); this.#retry = undefined;
@@ -89,7 +96,7 @@ export class ServerCanvasStore implements CanvasStore {
   current(): CanvasDocument { return this.#journal.current(); }
   subscribe(listener: () => void): () => void { if (!this.#disposed) this.#listeners.add(listener); return () => { this.#listeners.delete(listener); }; }
   #event(event: Record<string, unknown>): void {
-    if (this.#disposed) return;
+    if (this.#disposed || this.#revoked) return;
     if (event.type === "error") {
       const outstanding = this.#waiting;
       this.#waiting = false; clearTimeout(this.#watchdog); this.#watchdog = undefined;
