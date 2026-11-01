@@ -47,6 +47,8 @@ fn check(backend: Backend) {
         node: NodeId(1),
         #[cfg(feature = "mesh-dns-spike")]
         name: None,
+        #[cfg(feature = "mesh-dns-spike")]
+        dns_suffix: "internal".to_owned(),
         version: 1,
         addresses: Addresses {
             ipv4: "10.254.0.1".parse().unwrap(),

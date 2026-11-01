@@ -31,6 +31,8 @@ pub fn compile(
         .iter()
         .find(|member| member.node.id == node)
         .map(|member| member.node.host.clone());
+    #[cfg(feature = "mesh-dns-spike")]
+    let dns_suffix = checkpoint.settings.dns_suffix.clone();
     let fallback = if default == DefaultPolicy::Allow {
         TrafficPolicy::All
     } else {
@@ -59,6 +61,11 @@ pub fn compile(
                 .filter(|peer| peer.inbound != TrafficPolicy::None)
                 .map_or_else(|| fallback.clone(), |peer| peer.inbound.clone())
         };
+        #[cfg(feature = "mesh-dns-spike")]
+        if outbound != TrafficPolicy::None {
+            // The same directional policy installed for this receiver decides whether it learns a name.
+            peer_names.insert(other, member.node.host.clone());
+        }
         // Retain keys even for denied pairs: a rule change needs only policy, not a fresh tunnel setup.
         peers.insert(
             other,
@@ -75,8 +82,6 @@ pub fn compile(
                 outbound,
             },
         );
-        #[cfg(feature = "mesh-dns-spike")]
-        peer_names.insert(other, member.node.host.clone());
     }
     Ok(Config {
         local_key: checkpoint
@@ -88,6 +93,8 @@ pub fn compile(
         node,
         #[cfg(feature = "mesh-dns-spike")]
         name,
+        #[cfg(feature = "mesh-dns-spike")]
+        dns_suffix,
         version: checkpoint.generation,
         addresses: local,
         default_policy: default,
@@ -146,6 +153,8 @@ pub fn chunks(
             node: new.node,
             #[cfg(feature = "mesh-dns-spike")]
             name: new.name.clone(),
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_suffix: new.dns_suffix.clone(),
             from_version: old.map(|old| old.version),
             version: new.version,
             index: 0,
@@ -157,6 +166,8 @@ pub fn chunks(
             removed: Vec::new(),
             #[cfg(feature = "mesh-dns-spike")]
             peer_names: BTreeMap::new(),
+            #[cfg(feature = "mesh-dns-spike")]
+            removed_peer_names: Vec::new(),
         },
         output: Vec::new(),
     };
@@ -170,6 +181,14 @@ pub fn chunks(
         if old.and_then(|old| old.peer_names.get(node)) != Some(name) {
             builder.peer_name(*node, name)?;
         }
+    }
+    #[cfg(feature = "mesh-dns-spike")]
+    for node in old
+        .into_iter()
+        .flat_map(|old| old.peer_names.keys())
+        .filter(|node| new.peers.contains_key(node) && !new.peer_names.contains_key(node))
+    {
+        builder.remove_peer_name(*node)?;
     }
     for node in old
         .into_iter()
@@ -209,6 +228,8 @@ impl Chunks {
         self.part.removed.clear();
         #[cfg(feature = "mesh-dns-spike")]
         self.part.peer_names.clear();
+        #[cfg(feature = "mesh-dns-spike")]
+        self.part.removed_peer_names.clear();
         self.output.push(previous);
         Ok(())
     }
@@ -263,6 +284,7 @@ impl Chunks {
             || !self.part.merged.is_empty()
             || !self.part.removed.is_empty()
             || !self.part.peer_names.is_empty()
+            || !self.part.removed_peer_names.is_empty()
         {
             self.flush(self.part.clone())?;
         }
@@ -271,6 +293,28 @@ impl Chunks {
             return Ok(());
         }
         Err("Mesh name exceeds frame resource bound.")
+    }
+    #[cfg(feature = "mesh-dns-spike")]
+    fn remove_peer_name(&mut self, node: NodeId) -> Result<(), &'static str> {
+        let previous = self.part.clone();
+        self.part.removed_peer_names.push(node);
+        if self.fits()? {
+            return Ok(());
+        }
+        self.part = previous;
+        if !self.part.upserted.is_empty()
+            || !self.part.merged.is_empty()
+            || !self.part.removed.is_empty()
+            || !self.part.peer_names.is_empty()
+            || !self.part.removed_peer_names.is_empty()
+        {
+            self.flush(self.part.clone())?;
+        }
+        self.part.removed_peer_names.push(node);
+        if self.fits()? {
+            return Ok(());
+        }
+        Err("Mesh name removal exceeds frame resource bound.")
     }
     fn port(
         &mut self,

@@ -41,6 +41,8 @@ fn public_state(peers: u16) -> State {
         node: NodeId(2),
         #[cfg(feature = "mesh-dns-spike")]
         name: None,
+        #[cfg(feature = "mesh-dns-spike")]
+        dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
         version: 7,
         addresses: Addresses {
             ipv4: "10.254.0.2".parse().unwrap(),

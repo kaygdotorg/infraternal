@@ -1,5 +1,5 @@
 //! Serves the accepted mesh name snapshot on the Linux mesh address [#266].
-use crate::dataplane::Config;
+use crate::{dataplane::Config, policy::model::validate_dns};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use simple_dns::{
     CLASS, Name, OPCODE, Packet, PacketFlag, QCLASS, QTYPE, RCODE, ResourceRecord, TYPE,
@@ -14,7 +14,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-/// The host split-DNS integration sends the `.internal` route to this service's high port.
+/// The host split-DNS integration sends the configured mesh suffix to this service's high port.
 pub const DNS_PORT: u16 = 1053;
 const POSITIVE_TTL: u32 = 30;
 const NEGATIVE_TTL: u32 = 5;
@@ -27,12 +27,28 @@ struct Addresses {
 }
 
 /// A canonical, immutable-by-convention view of names from one accepted revision.
-#[derive(Clone, Default)]
-pub(crate) struct Records(BTreeMap<String, Addresses>);
+#[derive(Clone)]
+pub(crate) struct Records {
+    suffix: String,
+    names: BTreeMap<String, Addresses>,
+}
+
+impl Default for Records {
+    fn default() -> Self {
+        Self {
+            suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
+            names: BTreeMap::new(),
+        }
+    }
+}
 
 impl Records {
     pub(crate) fn from_config(config: &Config) -> io::Result<Self> {
-        let mut records = Self::default();
+        validate_dns(&config.dns_suffix, false).map_err(|_| invalid_config())?;
+        let mut records = Self {
+            suffix: config.dns_suffix.clone(),
+            names: BTreeMap::new(),
+        };
         if let Some(name) = &config.name {
             records.insert(
                 name,
@@ -56,8 +72,11 @@ impl Records {
     }
 
     fn insert(&mut self, label: &str, addresses: Addresses) -> io::Result<()> {
+        if label.len() + self.suffix.len() + 1 > 253 {
+            return Err(invalid_config());
+        }
         let label = canonical_label(label).ok_or_else(invalid_config)?;
-        if self.0.insert(label, addresses).is_some() {
+        if self.names.insert(label, addresses).is_some() {
             return Err(invalid_config());
         }
         Ok(())
@@ -88,10 +107,10 @@ fn canonical_label(label: &str) -> Option<String> {
     }
 }
 
-/// Build one authoritative response, or return `None` for names outside `.internal`.
+/// Build one authoritative response, or return `None` for names outside the configured suffix.
 ///
 /// Names outside this zone are left to the operating system's other DNS routes. The
-/// split-DNS installer must therefore direct only `.internal` queries here.
+/// split-DNS installer must therefore direct only this suffix's queries here.
 /// # Errors
 /// Rejects malformed packets, non-query opcodes, multiple questions and invalid snapshots.
 pub fn response(packet: &[u8], config: &Config) -> io::Result<Option<Vec<u8>>> {
@@ -124,10 +143,17 @@ fn response_for_records(packet: &[u8], records: &Records) -> io::Result<Option<V
         .to_string()
         .trim_end_matches('.')
         .to_ascii_lowercase();
-    let internal = qname == "internal" || qname.ends_with(".internal");
-    if !internal {
-        return Ok(None);
-    }
+    let label = if qname == records.suffix {
+        ""
+    } else {
+        let Some(prefix) = qname.strip_suffix(&records.suffix) else {
+            return Ok(None);
+        };
+        let Some(label) = prefix.strip_suffix('.') else {
+            return Ok(None);
+        };
+        label
+    };
 
     let opt = request.opt().cloned();
     let mut reply = request.into_reply();
@@ -142,15 +168,14 @@ fn response_for_records(packet: &[u8], records: &Records) -> io::Result<Option<V
         return encode(&reply).map(Some);
     }
 
-    let label = qname.strip_suffix(".internal").unwrap_or_default();
     let address = if label.contains('.') {
         None
     } else {
-        records.0.get(label).copied()
+        records.names.get(label).copied()
     };
     let Some(address) = address else {
         *reply.rcode_mut() = RCODE::NameError;
-        reply.name_servers.push(negative_soa());
+        reply.name_servers.push(negative_soa(&records.suffix));
         return encode(&reply).map(Some);
     };
     let rdata = match question.qtype {
@@ -167,7 +192,7 @@ fn response_for_records(packet: &[u8], records: &Records) -> io::Result<Option<V
         ));
     } else {
         // NODATA is negative cache data too; advertise the same bounded TTL as NXDOMAIN.
-        reply.name_servers.push(negative_soa());
+        reply.name_servers.push(negative_soa(&records.suffix));
     }
     encode(&reply).map(Some)
 }
@@ -186,16 +211,16 @@ fn encode(packet: &Packet<'_>) -> io::Result<Vec<u8>> {
         .map_err(|_| invalid_packet())
 }
 
-fn negative_soa() -> ResourceRecord<'static> {
-    // These fixed names are valid ASCII DNS names; using unchecked construction avoids
-    // allocating error paths for constants while all user and coordinator names are checked.
+fn negative_soa(suffix: &str) -> ResourceRecord<'static> {
+    // Records validated the configurable zone before using unchecked name construction.
+    let zone = Name::new_unchecked(suffix).into_owned();
     ResourceRecord::new(
-        Name::new_unchecked("internal"),
+        zone.clone(),
         CLASS::IN,
         NEGATIVE_TTL,
         RData::SOA(SOA {
-            mname: Name::new_unchecked("ns.internal"),
-            rname: Name::new_unchecked("hostmaster.internal"),
+            mname: zone.clone(),
+            rname: zone,
             serial: 1,
             refresh: 30,
             retry: 5,

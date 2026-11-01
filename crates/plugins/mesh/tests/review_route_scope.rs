@@ -25,6 +25,8 @@ fn restart_preserves_operator_gateway_host_route() {
         node: NodeId(1),
         #[cfg(feature = "mesh-dns-spike")]
         name: None,
+        #[cfg(feature = "mesh-dns-spike")]
+        dns_suffix: "internal".to_owned(),
         from_version: None,
         version: 1,
         index: 0,
@@ -39,6 +41,8 @@ fn restart_preserves_operator_gateway_host_route() {
         removed: Vec::new(),
         #[cfg(feature = "mesh-dns-spike")]
         peer_names: std::collections::BTreeMap::new(),
+        #[cfg(feature = "mesh-dns-spike")]
+        removed_peer_names: Vec::new(),
     })
     .unwrap();
     // Peer routes are direct scope-link entries. This operator entry instead

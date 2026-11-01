@@ -73,6 +73,8 @@ fn configure(node: &mut Node) {
             node: NodeId(1),
             #[cfg(feature = "mesh-dns-spike")]
             name: None,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_suffix: "internal".to_owned(),
             from_version: None,
             version: 1,
             index: u32::try_from(index).unwrap(),
@@ -84,6 +86,8 @@ fn configure(node: &mut Node) {
             removed: Vec::new(),
             #[cfg(feature = "mesh-dns-spike")]
             peer_names: std::collections::BTreeMap::new(),
+            #[cfg(feature = "mesh-dns-spike")]
+            removed_peer_names: Vec::new(),
         };
         assert!(serde_json::to_vec(&chunk).unwrap().len() <= 8192);
         node.chunk(chunk).unwrap();

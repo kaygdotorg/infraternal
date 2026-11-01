@@ -165,7 +165,10 @@ pub enum MeshError {
     StaleDiff,
 }
 
-pub(crate) fn validate_dns(value: &str, host: bool) -> Result<(), MeshError> {
+/// Validate a mesh DNS host label or suffix using the coordinator's canonical rules.
+/// # Errors
+/// Rejects empty, oversized, non-ASCII, or noncanonical labels.
+pub fn validate_dns(value: &str, host: bool) -> Result<(), MeshError> {
     if value.is_empty() || value.len() > 253 || (host && value.contains('.')) {
         return Err(MeshError::InvalidName);
     }

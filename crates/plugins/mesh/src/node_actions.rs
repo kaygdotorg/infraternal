@@ -538,6 +538,8 @@ mod tests {
             node: NodeId(1),
             #[cfg(feature = "mesh-dns-spike")]
             name: None,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             from_version: None,
             version: 1,
             index: 0,
@@ -566,6 +568,8 @@ mod tests {
             removed: Vec::new(),
             #[cfg(feature = "mesh-dns-spike")]
             peer_names: std::collections::BTreeMap::new(),
+            #[cfg(feature = "mesh-dns-spike")]
+            removed_peer_names: Vec::new(),
         };
         plugin
             .call(
@@ -675,6 +679,8 @@ mod tests {
             node: NodeId(1),
             #[cfg(feature = "mesh-dns-spike")]
             name: None,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             from_version: None,
             version: 1,
             index: 0,
@@ -689,6 +695,8 @@ mod tests {
             removed: Vec::new(),
             #[cfg(feature = "mesh-dns-spike")]
             peer_names: std::collections::BTreeMap::new(),
+            #[cfg(feature = "mesh-dns-spike")]
+            removed_peer_names: Vec::new(),
         };
         plugin
             .call(
@@ -791,6 +799,8 @@ mod peer_page_tests {
             node: NodeId(1),
             #[cfg(feature = "mesh-dns-spike")]
             name: None,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version: 4,
             addresses: address(1),
             default_policy: DefaultPolicy::Allow,

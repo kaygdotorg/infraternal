@@ -36,6 +36,7 @@ fn config() -> Config {
         server: Some(peer),
         node: NodeId(2),
         name: Some("laptop".to_owned()),
+        dns_suffix: "internal".to_owned(),
         version: 1,
         addresses: Addresses {
             ipv4: Ipv4Addr::new(10, 254, 0, 2),
@@ -152,6 +153,31 @@ fn resolver_does_not_claim_external_names() {
 }
 
 #[test]
+fn configured_custom_suffix_is_authoritative_and_owns_its_negative_soa() {
+    let mut snapshot = config();
+    snapshot.dns_suffix = "mesh.kayg.org".to_owned();
+
+    let answer_wire = dns::response(&query("build-01.mesh.kayg.org", 1), &snapshot)
+        .unwrap()
+        .expect("configured suffix is authoritative");
+    let answer = Packet::parse(&answer_wire).unwrap();
+    assert_eq!(answer.answers.len(), 1);
+    assert_eq!(answer.answers[0].name.to_string(), "build-01.mesh.kayg.org");
+
+    let missing_wire = dns::response(&query("missing.mesh.kayg.org", 1), &snapshot)
+        .unwrap()
+        .expect("unknown names below the configured zone are authoritative");
+    let missing = Packet::parse(&missing_wire).unwrap();
+    assert_eq!(missing.rcode(), RCODE::NameError);
+    assert_eq!(missing.name_servers[0].name.to_string(), "mesh.kayg.org");
+    assert!(
+        dns::response(&query("build-01.internal", 1), &snapshot)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn unsupported_record_types_return_a_five_second_negative_ttl() {
     let srv_wire = response_wire("build-01.internal", 33);
     let srv = Packet::parse(&srv_wire).unwrap();
@@ -188,6 +214,16 @@ fn accepted_snapshot_replacement_retires_renamed_records_together() {
         .unwrap();
     let current = Packet::parse(&current_wire).unwrap();
     assert_eq!(current.answers.len(), 1);
+
+    let mut revoked = old;
+    revoked.peer_names.remove(&NodeId(1));
+    let retired_wire = dns::response(&query("build-01.internal", 1), &revoked)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        Packet::parse(&retired_wire).unwrap().rcode(),
+        RCODE::NameError
+    );
 }
 
 #[test]
@@ -199,6 +235,16 @@ fn conflicting_or_invalid_snapshot_names_are_rejected() {
     let mut invalid = config();
     invalid.name = Some("bad.name".to_owned());
     assert!(dns::response(&query("laptop.internal", 1), &invalid).is_err());
+
+    let mut overlong = config();
+    overlong.dns_suffix = format!(
+        "{}.{}.{}.{}",
+        "a".repeat(63),
+        "b".repeat(63),
+        "c".repeat(63),
+        "d".repeat(60)
+    );
+    assert!(dns::response(&query("laptop.internal", 1), &overlong).is_err());
 }
 
 #[test]

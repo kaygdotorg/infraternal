@@ -472,6 +472,8 @@ impl Node {
                     node: chunk.node,
                     #[cfg(feature = "mesh-dns-spike")]
                     name: chunk.name.clone(),
+                    #[cfg(feature = "mesh-dns-spike")]
+                    dns_suffix: chunk.dns_suffix.clone(),
                     version: chunk.version,
                     addresses: chunk.addresses,
                     default_policy: chunk.default_policy,
@@ -484,6 +486,7 @@ impl Node {
             let config = {
                 let mut config = config;
                 config.name.clone_from(&chunk.name);
+                config.dns_suffix.clone_from(&chunk.dns_suffix);
                 config
             };
             self.pending = Some(Pending {
@@ -498,13 +501,18 @@ impl Node {
         let pending = self.pending.as_mut().ok_or(io::ErrorKind::InvalidData)?;
         #[cfg(feature = "mesh-dns-spike")]
         let name_changed = pending.config.name != chunk.name;
+        #[cfg(feature = "mesh-dns-spike")]
+        let dns_suffix_changed = pending.config.dns_suffix != chunk.dns_suffix;
         #[cfg(not(feature = "mesh-dns-spike"))]
         let name_changed = false;
+        #[cfg(not(feature = "mesh-dns-spike"))]
+        let dns_suffix_changed = false;
         if pending.server != chunk.server
             || pending.next != chunk.index
             || pending.config.local_key != chunk.local_key
             || pending.config.node != chunk.node
             || name_changed
+            || dns_suffix_changed
             || pending.config.addresses != chunk.addresses
             || pending.version != chunk.version
             || pending.from_version != chunk.from_version
@@ -526,6 +534,14 @@ impl Node {
             pending.config.peer_names.remove(&node);
         }
         pending.config.peers.extend(chunk.upserted);
+        #[cfg(feature = "mesh-dns-spike")]
+        for id in chunk.removed_peer_names {
+            if !pending.config.peers.contains_key(&id)
+                || pending.config.peer_names.remove(&id).is_none()
+            {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+        }
         for (id, partial) in chunk.merged {
             let peer = pending
                 .config
@@ -1004,6 +1020,8 @@ mod tests {
             node: NodeId(2),
             #[cfg(feature = "mesh-dns-spike")]
             name: None,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version: 1,
             addresses: Addresses {
                 ipv4: "10.254.0.2".parse().expect("IPv4"),
@@ -1070,6 +1088,8 @@ mod tests {
             node: NodeId(1),
             #[cfg(feature = "mesh-dns-spike")]
             name: None,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version: 1,
             addresses: addresses(1),
             default_policy: DefaultPolicy::Allow,

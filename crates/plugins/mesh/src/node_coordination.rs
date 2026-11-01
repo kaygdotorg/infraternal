@@ -215,8 +215,11 @@ pub async fn run(
                     }
                     #[cfg(feature = "mesh-dns-spike")]
                     if !dns_names {
+                        // Only negotiated resolvers receive host labels or a custom DNS zone.
                         chunk.name = None;
+                        crate::dataplane::DEFAULT_DNS_SUFFIX.clone_into(&mut chunk.dns_suffix);
                         chunk.peer_names.clear();
+                        chunk.removed_peer_names.clear();
                     }
                     let Ok(input) = serde_json::to_vec(&chunk) else {
                         return;

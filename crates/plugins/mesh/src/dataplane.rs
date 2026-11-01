@@ -68,6 +68,13 @@ pub struct Config {
     #[cfg(feature = "mesh-dns-spike")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Mesh DNS zone; default omission preserves receivers that have not negotiated DNS names.
+    #[cfg(feature = "mesh-dns-spike")]
+    #[serde(
+        default = "default_dns_suffix",
+        skip_serializing_if = "is_default_dns_suffix"
+    )]
+    pub dns_suffix: String,
     pub version: u64,
     pub addresses: Addresses,
     pub default_policy: DefaultPolicy,
@@ -99,6 +106,13 @@ pub struct Chunk {
     #[cfg(feature = "mesh-dns-spike")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Repeated on every chunk so a zone change commits with the complete accepted revision.
+    #[cfg(feature = "mesh-dns-spike")]
+    #[serde(
+        default = "default_dns_suffix",
+        skip_serializing_if = "is_default_dns_suffix"
+    )]
+    pub dns_suffix: String,
     pub from_version: Option<u64>,
     pub version: u64,
     pub index: u32,
@@ -114,6 +128,10 @@ pub struct Chunk {
     #[cfg(feature = "mesh-dns-spike")]
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub peer_names: BTreeMap<NodeId, String>,
+    /// Access revocation removes a name without retiring its peer key or policy entry.
+    #[cfg(feature = "mesh-dns-spike")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_peer_names: Vec<NodeId>,
     /// Negotiated, final access-only delta; snapshots retain ordinary peer chunks.
     #[serde(
         default,
@@ -121,6 +139,20 @@ pub struct Chunk {
         deserialize_with = "deserialize_access_updates"
     )]
     pub access_updates: Vec<AccessUpdate>,
+}
+
+#[cfg(feature = "mesh-dns-spike")]
+pub(crate) const DEFAULT_DNS_SUFFIX: &str = "internal";
+
+#[cfg(feature = "mesh-dns-spike")]
+fn default_dns_suffix() -> String {
+    DEFAULT_DNS_SUFFIX.to_owned()
+}
+
+#[cfg(feature = "mesh-dns-spike")]
+#[allow(clippy::ptr_arg)]
+fn is_default_dns_suffix(suffix: &String) -> bool {
+    suffix == DEFAULT_DNS_SUFFIX
 }
 
 /// Ordered existing-node range whose directional rules change without peer identity.

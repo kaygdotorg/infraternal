@@ -23,6 +23,7 @@ fn config() -> Config {
         server: Some(NodeId(1)),
         node: NodeId(1),
         name: Some("mesh-node".to_owned()),
+        dns_suffix: "internal".to_owned(),
         version: 1,
         addresses: Addresses {
             ipv4: Ipv4Addr::new(10, 254, 0, 1),

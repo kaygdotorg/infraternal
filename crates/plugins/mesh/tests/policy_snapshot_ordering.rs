@@ -35,6 +35,8 @@ fn install(fallback: bool) -> (Node, Config) {
         node: NodeId(1),
         #[cfg(feature = "mesh-dns-spike")]
         name: None,
+        #[cfg(feature = "mesh-dns-spike")]
+        dns_suffix: "internal".to_owned(),
         version: 10,
         addresses: Addresses {
             ipv4: "10.254.0.1".parse().unwrap(),

@@ -15,6 +15,8 @@ fn revision(version: u64) -> State {
             node: NodeId(1),
             #[cfg(feature = "mesh-dns-spike")]
             name: None,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version,
             addresses: Addresses {
                 ipv4: "10.254.0.1".parse().expect("IPv4"),

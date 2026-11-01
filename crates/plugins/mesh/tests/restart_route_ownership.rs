@@ -26,6 +26,8 @@ fn orphan_route_retirement_preserves_foreign_routes() {
         node: NodeId(1),
         #[cfg(feature = "mesh-dns-spike")]
         name: None,
+        #[cfg(feature = "mesh-dns-spike")]
+        dns_suffix: "internal".to_owned(),
         from_version: None,
         version: 1,
         index: 0,
@@ -40,6 +42,8 @@ fn orphan_route_retirement_preserves_foreign_routes() {
         removed: Vec::new(),
         #[cfg(feature = "mesh-dns-spike")]
         peer_names: std::collections::BTreeMap::new(),
+        #[cfg(feature = "mesh-dns-spike")]
+        removed_peer_names: Vec::new(),
     })
     .unwrap();
     let (_, key) = Key::generate().unwrap();
