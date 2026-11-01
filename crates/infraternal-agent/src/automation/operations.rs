@@ -237,10 +237,13 @@ async fn capture(session: &mut Session, last: usize) -> io::Result<Reply> {
     // Bound the existing 8 KiB JSON action result even for control-heavy output.
     // Raw retained bytes are returned as text, never interpreted as control requests.
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    // A final newline terminates a line; it does not add a phantom line after it.
+    let boundary = last
+        .saturating_sub(1)
+        .saturating_add(usize::from(text.ends_with('\n')));
     let cut = text
-        .trim_end_matches('\n')
         .rmatch_indices('\n')
-        .nth(last.saturating_sub(1))
+        .nth(boundary)
         .map_or(0, |(i, _)| i + 1);
     text.drain(..cut);
     let mut truncated = start > 0 || snapshot || cut > 0;
