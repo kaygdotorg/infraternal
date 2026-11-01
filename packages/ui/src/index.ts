@@ -47,3 +47,4 @@ export * from "./settings-panels";
 export * from "./entity-palette";
 export * from "./entity-chip";
 export * from "./inbox";
+export * from "./sidebar-card";
