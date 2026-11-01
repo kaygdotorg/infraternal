@@ -10,7 +10,7 @@ import uuid
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from agent_fixture import Binary, cleanup, varint
+from agent_fixture import Binary, cleanup, fixture_state, varint
 
 
 def control(client, number, action, values):
@@ -30,9 +30,9 @@ def main():
     assert os.geteuid() != 0, 'this fixture requires a rootless process'
     os.environ.pop('XDG_RUNTIME_DIR', None)
     os.environ['INFRATERNAL_TEST_RTT'] = '0'
-    # Keep every socket below sun_path while staying inside this review's scratch.
-    state = Path.home() / '.cache/codex-scratch/real-logins-review' / f'r{os.getpid()}'
-    state.mkdir(mode=0o700, parents=True)
+    # Bound the rendezvous socket name even on accounts with long home paths.
+    state = fixture_state('explicit')
+    state.mkdir(mode=0o700, parents=True, exist_ok=True)
     client = None
     try:
         client = Binary(Path(sys.argv[1]).resolve(), state)

@@ -14,14 +14,14 @@ import uuid
 sys.dont_write_bytecode = True
 repo = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo / 'scripts'))
-from agent_fixture import Binary, cleanup, control, detach, select_terminal, terminal_marker
+from agent_fixture import Binary, cleanup, control, detach, fixture_state, select_terminal, terminal_marker
 
 
 
 def main():
     assert os.geteuid() != 0, 'this fixture requires an own-account rootless daemon'
-    root = Path.home() / '.cache/codex-scratch/real-logins-review' / f'v{os.getpid()}'
-    root.mkdir(mode=0o700, parents=True)
+    root = fixture_state('revoke')
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
     # Keep the frozen Unix rendezvous below Linux's 108-byte sun_path limit.
     state = root
     os.environ['INFRATERNAL_TEST_RTT'] = '0'
