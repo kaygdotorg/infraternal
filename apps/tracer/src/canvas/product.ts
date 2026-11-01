@@ -228,7 +228,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   };
   const resolve = (target: DocTarget, windowId: string): Partial<WindowModel> | undefined => {
     if (target.type !== "session") return undefined;
-    const reference = { host: target.host, ...(!store.unresolvedWindow?.(windowId) ? { sessionId: target.id } : {}), ...(target.name ? { session: target.name } : {}) };
+    const reference = { host: target.host, ...(!store.unresolvedWindow?.(windowId) ? { sessionId: target.id } : {}), ...(target.name ? { session: target.name } : {}), ...(target.pinned ? { sessionPinned: true } : {}) };
     if (target.hostId) {
       const identity = { ...(target.user ? { user: target.user } : {}), ...(target.address ? { address: target.address } : {}) };
       sessions.registerHost({ id: target.hostId, name: target.host, ...identity });

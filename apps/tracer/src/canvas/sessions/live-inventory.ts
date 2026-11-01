@@ -63,6 +63,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
       for (const target of targets) {
         const record = records.get(target.id);
         if (record && target.name && target.name !== record.name) { record.name = target.name; changed = true; }
+        if (record && target.name && record.pinned !== (target.pinned === true)) { record.pinned = target.pinned === true; changed = true; }
       }
       if (changed) emit();
     },
@@ -81,6 +82,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
       if (s?.gone) return;
       if (!s) { s = blank(id, hint?.name ?? "shell"); records.set(id, s); awaitingCensus.add(id); }
       else if (hint?.name && !s.pinned) s.name = hint.name;
+      if (hint?.pinned) s.pinned = true;
       if (s.state === "open") { if (hint?.name && s.name !== hint.name && !s.pinned) emit(); return; }
       s.state = shared && !shared.has(id) ? "detached" : "open";
       s.frecency = ++top;
@@ -97,7 +99,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
     rename(host, id, name) {
       const s = only(host, id) ? records.get(id) : undefined;
       const next = name.trim();
-      if (!s || !next || next === s.name) return;
+      if (!s || !next || next === s.name && s.pinned) return;
       s.name = next;
       s.pinned = true;
       save();

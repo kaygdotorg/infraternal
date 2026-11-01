@@ -409,9 +409,12 @@ export function createWindows(cx: Ctx): WindowsModule {
     const s = isTerminal(rec) && rec.model.sessionId ? cx.adapters.inventory?.get(rec.model.host, rec.model.sessionId) : undefined;
     if (!s) return;
     const renamed = rec.model.session !== s.name;
+    const repinned = (rec.model.sessionPinned === true) !== s.pinned;
     // A session without a stored screen (the product's: the renderer is the screen) is re-shown only when asked to.
     const reshown = force || (s.screen.length > 0 && rec.model.lines !== s.screen);
     rec.model.session = s.name;
+    if (s.pinned) rec.model.sessionPinned = true;
+    else delete rec.model.sessionPinned;
     if (s.screen.length) rec.model.lines = s.screen;
     if (renamed) {
       rec.card.setTitle({ host: rec.model.host, ...(rec.model.user ? { user: rec.model.user } : {}), session: s.name });
@@ -431,7 +434,7 @@ export function createWindows(cx: Ctx): WindowsModule {
         cx.sessionUi?.paint(rec);
       }
     }
-    if (renamed || reshown) { cx.tree.render(); cx.store.changed(); }
+    if (renamed || repinned || reshown) { cx.tree.render(); cx.store.changed(); }
   };
 
   const attach = (rec: WinRec, sessionId: string): void => {

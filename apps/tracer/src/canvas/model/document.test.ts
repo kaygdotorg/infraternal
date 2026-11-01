@@ -26,6 +26,19 @@ test("a document holds references and layout, never content", () => {
   expect(ids).toEqual(["w1", "w2"]);
 });
 
+test("manual-name pins survive document serialization while old targets stay unpinned", () => {
+  const view = structuredClone(console_);
+  view.cols[0]!.wins[0]!.sessionPinned = true;
+  const doc = parseDocument(toDocument([view], m, 1))!;
+  const layout = doc.views[0]!.layout;
+  if (layout.type !== "tiled") throw new Error("tiled");
+  expect(layout.columns[0]!.windows[0]!.target).toMatchObject({ name: "zsh", pinned: true });
+  expect(layout.columns[1]!.windows[0]!.target).not.toHaveProperty("pinned");
+  const malformed = JSON.parse(JSON.stringify(doc));
+  malformed.views[0].layout.columns[0].windows[0].target.pinned = "true";
+  expect(parseDocument(malformed)).toBeUndefined();
+});
+
 test("a document survives JSON and rebuilds the same columns", () => {
   const doc = parseDocument(JSON.parse(JSON.stringify(toDocument([console_], m, 1))));
   expect(doc).toBeDefined();
