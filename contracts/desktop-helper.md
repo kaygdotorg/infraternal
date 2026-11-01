@@ -109,9 +109,11 @@ Control acknowledgement adds `control_visible`; acquisition fails unless the
 indicator is visible before injection. Screen Recording and Accessibility
 must be granted by the person using the Mac; refusal produces a fixed error.
 
-The native companions are private control and encoding children with inherited
-stdio, never a second public socket. The pinned wrapper supplies safe owned
-BGRA images through SCScreenshotManager; stream callbacks supply change notices.
+The control and encoding companions are separate signed processes launched
+through LaunchServices. They exchange bounded packets with the helper over
+private per-launch Unix sockets, not inherited stdio or a second public socket.
+The pinned wrapper supplies safe owned BGRA images through SCScreenshotManager;
+stream callbacks supply change notices.
 IOSurface IDs could not be looked up across the private child boundary on the
 measured Mac, and framework byte views require unsafe Rust. Owned images avoid
 both hazards at a measured copy/capture cost (#146). The private pixel packet
@@ -188,11 +190,14 @@ Retirement hides it. Ordinary held-input release/blur preserves the indicator.
 
 Before framework access, the native companion establishes its own macOS
 responsibility using the system `responsibility_spawnattrs_setdisclaim` hook
-and `posix_spawn` with `POSIX_SPAWN_SETEXEC`. The replacement retains the PID,
-process group and inherited stdio, so cancellation and EOF cleanup still address
-the owned companion. The hook is system SPI, not a public SDK guarantee; resolve
-it dynamically and refuse startup when it is unavailable or returns an error.
-The responsibility/PID/pipe fixture is verified on macOS 27.0.1 with SDK 27.0.
+and `posix_spawn` with `POSIX_SPAWN_SETEXEC`. The replacement retains the PID
+and process group. Cancellation uses the private socket, while the helper tracks
+and retires the LaunchServices-launched companion by its private per-launch
+identity; EOF cleanup does not depend on inherited stdio or on the
+LaunchServices waiter remaining alive. The hook is system SPI, not a public SDK
+guarantee; resolve it dynamically and refuse startup when it is unavailable or
+returns an error. The responsibility/PID fixture is verified on macOS 27.0.1
+with SDK 27.0.
 
 `--check-permissions` follows that same native launch path, prints one JSON
 object with boolean `screen_recording` and `device_control` keys from
