@@ -578,3 +578,29 @@ fn review_j68b_nested_suffix_preserves_internal_hostname_alias() {
         assert_eq!(reply.answers.len(), 1);
     }
 }
+
+#[test]
+fn review_j78_ascii_punycode_labels_keep_resolving() {
+    for (name, suffix, qname) in [
+        ("xn--bcher-kva", "internal", "xn--bcher-kva.internal"),
+        (
+            "laptop",
+            "xn--bcher-kva.example",
+            "laptop.xn--bcher-kva.example",
+        ),
+    ] {
+        let mut snapshot = config();
+        snapshot.name = Some(name.to_owned());
+        snapshot.dns_suffix = suffix.to_owned();
+        let wire = dns::response(&query(qname, 1), &snapshot)
+            .unwrap()
+            .expect("a valid ASCII mesh suffix remains authoritative");
+        let reply = Message::from_vec(&wire).unwrap();
+        assert_eq!(
+            reply.metadata.response_code,
+            ResponseCode::NoError,
+            "{qname}"
+        );
+        assert_eq!(reply.answers.len(), 1, "{qname}");
+    }
+}

@@ -171,7 +171,7 @@ fn response_for_source(
 
     let qname = question
         .name()
-        .to_string()
+        .to_ascii()
         .trim_end_matches('.')
         .to_ascii_lowercase();
     let Some((suffix, label)) = matching_zone(&qname, &records.suffixes) else {
