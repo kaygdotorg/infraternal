@@ -25,6 +25,7 @@ mod budgets {
             pending: Vec::new(),
             written: 0,
             exited_sent: false,
+            stopping: false,
             request: None,
         };
         let frame = Frame::Output(13, vec![b'x'; 4096]);

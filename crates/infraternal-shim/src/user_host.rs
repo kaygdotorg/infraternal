@@ -705,6 +705,7 @@ impl Session {
                     pending: Vec::new(),
                     written: 0,
                     exited_sent: false,
+                    stopping: false,
                     request: None,
                 };
                 peer.queue(&Frame::Hello {
@@ -1137,6 +1138,7 @@ mod tests {
             pending: Vec::new(),
             written: 0,
             exited_sent: false,
+            stopping: false,
         });
         Ok(client)
     }
