@@ -2,7 +2,8 @@
  * TEST DOUBLE support: renders `docs/multiplexer.md` into `<dist>/docs/multiplexer.html` so the mockup's ? button
  * (`?mock=1&proto=windows&startup-demo=1`) opens a real page. The public docs site (D44, D223) does not exist in
  * this repository yet; this is only a stand-in with the product's type and colours, never shipped in a release.
- * Usage: `bun test/render-docs-preview.ts` from apps/tracer, after `bun run build` (it writes into `TRACER_DIST`).
+ * The preview build (`INFRATERNAL_CLUSTERS_PREVIEW=1`, build.ts) runs it, so the page is in every dist the browser specs use. To
+ * refresh it alone: `bun test/render-docs-preview.ts` from apps/tracer (it writes into `TRACER_DIST`).
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
