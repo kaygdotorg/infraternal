@@ -30,7 +30,7 @@ final class FramePixels {
     // Helper-managed sizing alternates the same caret between seven and eight changed columns.
     private static let maximumCaretAnchorWidthDelta = 1
     private static let maximumCaretAnchorVariants = 8
-    // Newly observed fade rectangles stay content until they recur across a blink cycle.
+    // Newly seen fade pixels stay content until the same transition recurs at blink cadence.
     private static let maximumCaretFadeVariants = 8
     // Measured 7/8-pixel anchors produce a 10-pixel intermediate fade at the same insertion point.
     private static let maximumFadePositionDelta = 3
@@ -41,43 +41,75 @@ final class FramePixels {
     private static let minimumBlinkInterval = 0.25
     private static let maximumBlinkInterval = 1.5
 
-    /// Bounded anchor variants and their last-seen time establish a recurring caret cadence.
-    private struct CaretCandidate {
-        struct FadeVariant {
-            let bounds: PixelDamageBounds
-            var at: Double
-        }
+    /// Exact pixels make a repeated transition distinguishable from new text with the same bounds.
+    private struct PixelTransition {
+        let before: Data
+        let after: Data
 
+        func matches(_ other: PixelTransition) -> Bool {
+            (before == other.before && after == other.after)
+                || (before == other.after && after == other.before)
+        }
+    }
+
+    private struct DamageVariant {
+        let bounds: PixelDamageBounds
+        let transition: PixelTransition
+        var at: Double
+
+        func matches(_ bounds: PixelDamageBounds, transition: PixelTransition) -> Bool {
+            self.bounds == bounds && self.transition.matches(transition)
+        }
+    }
+
+    /// Bounded pixel-identical anchor variants and their last-seen time establish caret cadence.
+    private struct CaretCandidate {
         var bounds: PixelDamageBounds
         var at: Double
-        var anchorVariants: [PixelDamageBounds]
-        var fadeVariants: [FadeVariant]
+        var anchorVariants: [DamageVariant]
+        var fadeVariants: [DamageVariant]
 
-        init(bounds: PixelDamageBounds, at: Double) {
+        init(bounds: PixelDamageBounds, transition: PixelTransition, at: Double) {
             self.bounds = bounds
             self.at = at
-            anchorVariants = [bounds]
+            anchorVariants = [DamageVariant(bounds: bounds, transition: transition, at: at)]
             anchorVariants.reserveCapacity(FramePixels.maximumCaretAnchorVariants)
             fadeVariants = []
             fadeVariants.reserveCapacity(FramePixels.maximumCaretFadeVariants)
         }
 
-        mutating func remember(_ bounds: PixelDamageBounds) {
-            guard anchorVariants.count < FramePixels.maximumCaretAnchorVariants,
-                  !anchorVariants.contains(bounds) else { return }
-            anchorVariants.append(bounds)
+        func hasAnchor(_ bounds: PixelDamageBounds, transition: PixelTransition) -> Bool {
+            anchorVariants.contains { $0.matches(bounds, transition: transition) }
         }
 
-        mutating func observeFade(_ bounds: PixelDamageBounds, at now: Double) -> PixelDamageKind {
-            guard let index = fadeVariants.firstIndex(where: { $0.bounds == bounds }) else {
+        mutating func observeAnchor(
+            _ bounds: PixelDamageBounds,
+            transition: PixelTransition,
+            at now: Double
+        ) -> Bool {
+            guard let index = anchorVariants.firstIndex(where: { $0.matches(bounds, transition: transition) }) else {
+                guard anchorVariants.count < FramePixels.maximumCaretAnchorVariants else { return false }
+                anchorVariants.append(DamageVariant(bounds: bounds, transition: transition, at: now))
+                return false
+            }
+            let previous = anchorVariants[index].at
+            anchorVariants[index].at = now
+            return now > previous && FramePixels.blinkInterval(now - previous)
+        }
+
+        mutating func observeFade(
+            _ bounds: PixelDamageBounds,
+            transition: PixelTransition,
+            at now: Double
+        ) -> PixelDamageKind {
+            guard let index = fadeVariants.firstIndex(where: { $0.matches(bounds, transition: transition) }) else {
                 guard fadeVariants.count < FramePixels.maximumCaretFadeVariants else { return .content }
-                fadeVariants.append(FadeVariant(bounds: bounds, at: now))
+                fadeVariants.append(DamageVariant(bounds: bounds, transition: transition, at: now))
                 return .content
             }
-            let previous = fadeVariants[index]
+            let previous = fadeVariants[index].at
             fadeVariants[index].at = now
-            guard at > previous.at,
-                  FramePixels.blinkInterval(now - previous.at) else { return .content }
+            guard now > previous, FramePixels.blinkInterval(now - previous) else { return .content }
             return .caret
         }
     }
@@ -123,6 +155,7 @@ final class FramePixels {
         let comparable = valid && width == w && height == h
         var same = comparable
         var minX = w, minY = h, maxX = -1, maxY = -1
+        var transition: PixelTransition?
         if comparable {
             bytes.withUnsafeBytes { old in
                 let previous = old.baseAddress!
@@ -147,6 +180,21 @@ final class FramePixels {
                     }
                     if !damageBoundsComplete { break }
                 }
+                if changedPixels > 0, damageBoundsComplete {
+                    let bounds = PixelDamageBounds(
+                        x: minX,
+                        y: minY,
+                        width: maxX - minX + 1,
+                        height: maxY - minY + 1
+                    )
+                    transition = pixelTransition(
+                        bounds,
+                        previous: previous,
+                        previousStride: rowBytes,
+                        current: base,
+                        currentStride: stride
+                    )
+                }
             }
         }
         prepared = true; alreadyDelivered = same
@@ -155,7 +203,11 @@ final class FramePixels {
             let bounds = PixelDamageBounds(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
             damageBounds = bounds
             recognitionBeforePrepare = caretRecognition
-            damageKind = classifyCaretDamage(bounds, at: now)
+            if let transition {
+                damageKind = classifyCaretDamage(bounds, transition: transition, at: now)
+            } else {
+                caretRecognition = .empty
+            }
         } else {
             recognitionBeforePrepare = caretRecognition
             caretRecognition = .empty
@@ -190,7 +242,34 @@ final class FramePixels {
         caretRecognition = .empty; recognitionBeforePrepare = nil
     }
 
-    private func classifyCaretDamage(_ bounds: PixelDamageBounds, at now: Double) -> PixelDamageKind {
+    private func pixelTransition(
+        _ bounds: PixelDamageBounds,
+        previous: UnsafeRawPointer,
+        previousStride: Int,
+        current: UnsafeRawPointer,
+        currentStride: Int
+    ) -> PixelTransition {
+        let bytesPerRow = bounds.width * 4
+        var before = Data()
+        var after = Data()
+        before.reserveCapacity(bytesPerRow * bounds.height)
+        after.reserveCapacity(bytesPerRow * bounds.height)
+        for row in bounds.y..<(bounds.y + bounds.height) {
+            let previousRow = previous.advanced(by: row * previousStride + bounds.x * 4)
+                .assumingMemoryBound(to: UInt8.self)
+            let currentRow = current.advanced(by: row * currentStride + bounds.x * 4)
+                .assumingMemoryBound(to: UInt8.self)
+            before.append(contentsOf: UnsafeBufferPointer(start: previousRow, count: bytesPerRow))
+            after.append(contentsOf: UnsafeBufferPointer(start: currentRow, count: bytesPerRow))
+        }
+        return PixelTransition(before: before, after: after)
+    }
+
+    private func classifyCaretDamage(
+        _ bounds: PixelDamageBounds,
+        transition: PixelTransition,
+        at now: Double
+    ) -> PixelDamageKind {
         guard damageBoundsComplete, now.isFinite,
               bounds.width <= Self.maximumScannedDamageWidth,
               bounds.height >= Self.minimumCaretHeight, bounds.height <= Self.maximumScannedDamageHeight,
@@ -198,7 +277,7 @@ final class FramePixels {
             caretRecognition = .empty
             return .content
         }
-        let current = CaretCandidate(bounds: bounds, at: now)
+        let current = CaretCandidate(bounds: bounds, transition: transition, at: now)
         guard let previous = caretRecognition.candidate else {
             caretRecognition = isCaretAnchor(bounds)
                 ? CaretRecognition(candidate: current, active: false)
@@ -220,7 +299,7 @@ final class FramePixels {
                 return .content
             }
             var candidate = previous
-            let kind = candidate.observeFade(bounds, at: now)
+            let kind = candidate.observeFade(bounds, transition: transition, at: now)
             caretRecognition.candidate = candidate
             return caretRecognition.active ? kind : .content
         }
@@ -230,26 +309,31 @@ final class FramePixels {
                     caretRecognition = CaretRecognition(candidate: current, active: false)
                     return .content
                 }
-                // A looser positional match alone would suppress a nearby edit.
-                // Continue only with anchor shapes already seen before cadence was proven.
-                guard previous.anchorVariants.contains(bounds) else {
-                    caretRecognition = .empty
-                    return .content
-                }
-                if isBlinkInterval(interval) {
+                // A looser positional match alone would suppress a nearby edit. Require the
+                // exact pixels in this transition to have recurred as well as its shape.
+                guard previous.hasAnchor(bounds, transition: transition) else {
                     var candidate = previous
+                    _ = candidate.observeAnchor(bounds, transition: transition, at: now)
                     candidate.bounds = bounds
                     candidate.at = now
-                    caretRecognition.candidate = candidate
+                    caretRecognition = CaretRecognition(candidate: candidate, active: false)
+                    return .content
                 }
+                var candidate = previous
+                _ = candidate.observeAnchor(bounds, transition: transition, at: now)
+                if isBlinkInterval(interval) {
+                    candidate.bounds = bounds
+                    candidate.at = now
+                }
+                caretRecognition.candidate = candidate
                 return .caret
             }
             var candidate = previous
+            let recurringTransition = candidate.observeAnchor(bounds, transition: transition, at: now)
             candidate.bounds = bounds
             candidate.at = now
-            candidate.remember(bounds)
             caretRecognition.candidate = candidate
-            guard isBlinkInterval(interval) else { return .content }
+            guard recurringTransition, isBlinkInterval(interval) else { return .content }
             caretRecognition.active = true
             return .caret
         }
@@ -259,7 +343,7 @@ final class FramePixels {
                 return .content
             }
             var candidate = previous
-            let kind = candidate.observeFade(bounds, at: now)
+            let kind = candidate.observeFade(bounds, transition: transition, at: now)
             caretRecognition.candidate = candidate
             return caretRecognition.active ? kind : .content
         }
