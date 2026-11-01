@@ -1,6 +1,26 @@
 /** Reproduces stale remembered rows and pins host reconciliation behavior. */
 import { expect, test } from "bun:test";
 import { createLiveInventory } from "./live-inventory";
+import type { CanvasDocument } from "../model/schema";
+
+test("a shared manual name pins an existing record and survives later attach hints", () => {
+  const inventory = createLiveInventory({ accountId: "rename-peer", host: "server" });
+  inventory.reconcile("server", ["shared-session"]);
+  const document: CanvasDocument = { format: "infraternal.canvas", version: 1, revision: 1, views: [{ id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [{ id: "c", weight: 1, windows: [{ id: "w", target: { type: "session", host: "server", id: "shared-session", name: "manual name", pinned: true } }] }] } }] };
+  inventory.setLayout(document);
+  expect(inventory.get("server", "shared-session")?.pinned).toBe(true);
+  inventory.attach("server", "shared-session", { name: "shell" });
+  expect(inventory.get("server", "shared-session")?.name).toBe("manual name");
+  inventory.dispose();
+});
+
+test("choosing the current automatic name still pins it", () => {
+  const inventory = createLiveInventory({ accountId: "rename-current", host: "server" });
+  inventory.reconcile("server", ["session"]);
+  inventory.rename("server", "session", "shell");
+  expect(inventory.get("server", "session")?.pinned).toBe(true);
+  inventory.dispose();
+});
 
 test("a host snapshot replaces in-memory session rows without rewriting legacy storage", () => {
   const prior = Object.getOwnPropertyDescriptor(globalThis, "window");

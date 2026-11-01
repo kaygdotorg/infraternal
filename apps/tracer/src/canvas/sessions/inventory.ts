@@ -67,7 +67,7 @@ export interface SessionInventory {
   get(host: string, id: string): SessionRecord | undefined;
   /** A window shows this session: it is open (an exited one stays exited, read-only) and moves up the frecency order.
    *  A session the inventory has not heard of is registered (a window restored from the canvas document names one). */
-  attach(host: string, id: string, hint?: { name?: string }): void;
+  attach(host: string, id: string, hint?: { name?: string; pinned?: boolean }): void;
   /** The window that showed this session closed: an open session keeps running, detached. */
   detach(host: string, id: string): void;
   /** A new shell on the host (a split, no prompt). Its name follows the folder until it is renamed. */
