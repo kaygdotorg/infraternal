@@ -30,6 +30,7 @@ fn merge_review_replies_cannot_consume_space_reserved_for_deferred_typing() {
             pending: Vec::new(),
             written: 0,
             exited_sent: false,
+            stopping: false,
             request: None,
         };
         (peer, remote)
@@ -396,6 +397,7 @@ fn coalesced_probe_and_input_preserve_the_written_ack_in_both_orders() {
             pending: Vec::new(),
             written: 0,
             exited_sent: false,
+            stopping: false,
             request: None,
         };
         let mut cursors = Inputs::with_geometry(peer.size);
