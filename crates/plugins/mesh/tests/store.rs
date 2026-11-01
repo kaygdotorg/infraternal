@@ -79,6 +79,66 @@ async fn key_replacement_preserves_identity_and_addresses_after_restart() {
     assert_eq!(before.addresses, after.addresses);
     assert!(after.version > before.version);
 }
+
+#[tokio::test]
+#[cfg(feature = "mesh-dns-spike")]
+async fn public_origin_sets_the_default_suffix_and_origin_changes_advance_the_snapshot() {
+    let pool = pool().await;
+    let first = Store::with_public_origin(pool.clone(), "https://ssh.kayg.org");
+    first.attach("server", key(1), None, true).await.unwrap();
+    let (node, _) = first.attach("host", key(2), None, false).await.unwrap();
+    let before = first.config(node).await.unwrap();
+    assert_eq!(before.dns_suffix, "ssh.kayg.org");
+
+    let restarted = Store::with_public_origin(pool, "https://mesh.kayg.org");
+    let after = restarted.config(node).await.unwrap();
+
+    assert_eq!(after.dns_suffix, "mesh.kayg.org");
+    assert!(after.version > before.version);
+}
+
+#[tokio::test]
+#[cfg(feature = "mesh-dns-spike")]
+async fn reachable_placeholder_node_is_not_published_in_mesh_dns() {
+    let pool = pool().await;
+    let store = Store::new(pool.clone());
+    let (server, _) = store.attach("server", key(1), None, true).await.unwrap();
+    let (unnamed, _) = store
+        .attach("unreported-host", key(2), None, false)
+        .await
+        .unwrap();
+    let (name, source): (String, String) =
+        sqlx::query_as("SELECT name,name_source FROM mesh_nodes WHERE id=?")
+            .bind(i64::try_from(unnamed.0).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(name, "unnamed");
+    assert_eq!(source, "placeholder");
+
+    let config = store.config(server).await.unwrap();
+    assert_eq!(
+        config.peers[&unnamed].outbound,
+        infraternal_plugin_mesh::policy::rules::TrafficPolicy::All
+    );
+    assert!(!config.peer_names.contains_key(&unnamed));
+
+    let mut query = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+    query.extend_from_slice(&[7, b'u', b'n', b'n', b'a', b'm', b'e', b'd', 8]);
+    query.extend_from_slice(b"internal");
+    query.extend_from_slice(&[0, 0, 1, 0, 1]);
+    let response = infraternal_plugin_mesh::dns::response(&query, &config)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        hickory_proto::op::Message::from_vec(&response)
+            .unwrap()
+            .metadata
+            .response_code,
+        hickory_proto::op::ResponseCode::NXDomain
+    );
+}
+
 #[tokio::test]
 async fn removed_host_cannot_restore_membership_without_authorized_enrollment() {
     let pool = pool().await;

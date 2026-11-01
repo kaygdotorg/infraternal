@@ -14,6 +14,8 @@ cutoff-measure = ["nix?/time"]
 agent = ["dep:nix", "dep:openssl", "dep:zeroize"]
 # Kernel timestamp precision is used by opt-in transport measurement fixtures only.
 test-support = ["agent"]
+# Default-off resolver prototype until DNS integration is enabled [#266].
+mesh-dns-spike = ["agent", "server", "dep:hickory-proto", "dep:url"]
 
 [dependencies]
 infraternal-plugin-api = { workspace = true, features = ["socket-host"] }
@@ -31,6 +33,8 @@ nix = { workspace = true, optional = true, features = ["net"] }
 openssl = { workspace = true, optional = true }
 zeroize = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
+hickory-proto = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 
 [lints]
 workspace = true

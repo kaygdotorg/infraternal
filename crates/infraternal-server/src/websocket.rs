@@ -194,28 +194,58 @@ impl WebSocketState {
             auth,
             pool,
             agent,
+            None,
             #[cfg(feature = "remote")]
             crate::remote_runtime::RemoteHosts::default(),
         )
         .await
     }
-    #[cfg(feature = "remote")]
+    #[cfg(all(feature = "remote", test))]
     pub(crate) async fn new_with_hosts(
         auth: Auth,
         pool: SqlitePool,
         agent: EmbeddedAgent,
         hosts: crate::remote_runtime::RemoteHosts,
     ) -> Result<Self, crate::plugins::PluginError> {
-        Self::new_inner(auth, pool, agent, hosts).await
+        Self::new_inner(auth, pool, agent, None, hosts).await
+    }
+    #[cfg(feature = "remote")]
+    pub(crate) async fn new_with_hosts_and_public_origin(
+        auth: Auth,
+        pool: SqlitePool,
+        agent: EmbeddedAgent,
+        hosts: crate::remote_runtime::RemoteHosts,
+        public_origin: &str,
+    ) -> Result<Self, crate::plugins::PluginError> {
+        Self::new_inner(auth, pool, agent, Some(public_origin), hosts).await
+    }
+    #[cfg(not(feature = "remote"))]
+    pub(crate) async fn new_with_public_origin(
+        auth: Auth,
+        pool: SqlitePool,
+        agent: EmbeddedAgent,
+        public_origin: &str,
+    ) -> Result<Self, crate::plugins::PluginError> {
+        Self::new_inner(
+            auth,
+            pool,
+            agent,
+            Some(public_origin),
+            #[cfg(feature = "remote")]
+            crate::remote_runtime::RemoteHosts::default(),
+        )
+        .await
     }
     async fn new_inner(
         auth: Auth,
         pool: SqlitePool,
         agent: EmbeddedAgent,
+        public_origin: Option<&str>,
         #[cfg(feature = "remote")] hosts: crate::remote_runtime::RemoteHosts,
     ) -> Result<Self, crate::plugins::PluginError> {
         let plugins = crate::plugins::compiled_with_hosts(
             &pool,
+            public_origin,
             #[cfg(feature = "remote")]
             hosts.clone(),
         )

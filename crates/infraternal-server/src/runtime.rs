@@ -619,10 +619,22 @@ async fn build_router_core(
     .await?;
     let local_node = agent.clone();
     #[cfg(feature = "remote")]
-    let ws_state =
-        WebSocketState::new_with_hosts(auth.clone(), pool.clone(), agent, hosts.clone()).await;
+    let ws_state = WebSocketState::new_with_hosts_and_public_origin(
+        auth.clone(),
+        pool.clone(),
+        agent,
+        hosts.clone(),
+        &config.public_origin,
+    )
+    .await;
     #[cfg(not(feature = "remote"))]
-    let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent).await;
+    let ws_state = WebSocketState::new_with_public_origin(
+        auth.clone(),
+        pool.clone(),
+        agent,
+        &config.public_origin,
+    )
+    .await;
     let ws_state = ws_state
         .map_err(|_| ServerError::InvalidConfiguration)?
         .with_plugin_descriptors(catalog.unwrap_or_else(infraternal_agent::plugins::descriptors));

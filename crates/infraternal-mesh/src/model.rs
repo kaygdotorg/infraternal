@@ -84,6 +84,9 @@ pub struct MeshSettings {
     pub ipv4: Ipv4Range,
     pub ula_global_id: [u8; 5],
     pub dns_suffix: String,
+    /// Distinguishes a user-selected suffix from the legacy `internal` default.
+    #[serde(default)]
+    pub dns_suffix_is_explicit: bool,
     pub rotation_period_secs: u64,
 }
 impl MeshSettings {
@@ -96,6 +99,7 @@ impl MeshSettings {
             },
             ula_global_id,
             dns_suffix: "internal".into(),
+            dns_suffix_is_explicit: false,
             rotation_period_secs: 7 * 24 * 3600,
         }
     }
@@ -165,7 +169,10 @@ pub enum MeshError {
     StaleDiff,
 }
 
-pub(crate) fn validate_dns(value: &str, host: bool) -> Result<(), MeshError> {
+/// Validate a mesh DNS host label or suffix using the coordinator's canonical rules.
+/// # Errors
+/// Rejects empty, oversized, non-ASCII, or noncanonical labels.
+pub fn validate_dns(value: &str, host: bool) -> Result<(), MeshError> {
     if value.is_empty() || value.len() > 253 || (host && value.contains('.')) {
         return Err(MeshError::InvalidName);
     }

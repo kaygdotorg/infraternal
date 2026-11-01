@@ -275,6 +275,10 @@ mod tests {
             local_key: None,
             server: None,
             node: crate::policy::model::NodeId(1),
+            #[cfg(feature = "mesh-dns-spike")]
+            name: None,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version: 7,
             addresses: crate::policy::model::Addresses {
                 ipv4: "10.254.0.1".parse().expect("IPv4"),
@@ -282,6 +286,8 @@ mod tests {
             },
             default_policy: crate::dataplane::DefaultPolicy::Deny,
             peers: std::collections::BTreeMap::new(),
+            #[cfg(feature = "mesh-dns-spike")]
+            peer_names: std::collections::BTreeMap::new(),
         };
         store
             .save(&State {

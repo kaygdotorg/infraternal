@@ -60,6 +60,10 @@ fn refused_endpoint_persistence_preserves_kernel_endpoint() {
         local_key: None,
         server: None,
         node: NodeId(1),
+        #[cfg(feature = "mesh-dns-spike")]
+        name: None,
+        #[cfg(feature = "mesh-dns-spike")]
+        dns_suffix: "internal".to_owned(),
         version: 1,
         addresses: Addresses {
             ipv4: "10.254.0.1".parse().unwrap(),
@@ -81,6 +85,8 @@ fn refused_endpoint_persistence_preserves_kernel_endpoint() {
                 outbound: TrafficPolicy::None,
             },
         )]),
+        #[cfg(feature = "mesh-dns-spike")]
+        peer_names: std::collections::BTreeMap::new(),
     };
     for chunk in configuration::chunks(None, &config).unwrap() {
         node.chunk(chunk).unwrap();

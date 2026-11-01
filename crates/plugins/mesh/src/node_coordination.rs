@@ -29,10 +29,11 @@ async fn update_listener(
 // Probe before advertising an extension. Strict older nodes reject the probe,
 // then answer the ordinary request without enabling a new representation.
 async fn read_identity(channel: &dyn NodeChannel) -> Option<Identity> {
-    let reply = match channel
-        .call("mesh.identity", br#"{"compact_access":true}"#.to_vec())
-        .await
-    {
+    #[cfg(feature = "mesh-dns-spike")]
+    let probe = br#"{"compact_access":true,"dns_names":true}"#.to_vec();
+    #[cfg(not(feature = "mesh-dns-spike"))]
+    let probe = br#"{"compact_access":true}"#.to_vec();
+    let reply = match channel.call("mesh.identity", probe).await {
         Ok(reply) => reply,
         Err(_) => channel.call("mesh.identity", b"{}".to_vec()).await.ok()?,
     };
@@ -69,6 +70,8 @@ pub async fn run(
     let mut installed: Option<Snapshot> = None;
     let mut refresh_identity = true;
     let mut compact_access = false;
+    #[cfg(feature = "mesh-dns-spike")]
+    let mut dns_names = false;
     let mut listener: ServerListener = None;
     let mut transport_port = None;
     let mut peer_route: Option<(
@@ -81,6 +84,10 @@ pub async fn run(
             let identity = read_identity(channel.as_ref()).await;
             if let Some(identity) = identity {
                 compact_access = identity.compact_access;
+                #[cfg(feature = "mesh-dns-spike")]
+                {
+                    dns_names = identity.dns_names;
+                }
                 transport_port = if !channel.is_server() && channel.supports_server_paths() {
                     // Status is extensible; keep the strict identity response
                     // unchanged for older coordinators. The control channel
@@ -162,8 +169,18 @@ pub async fn run(
             // do not change packet policy. Keep the node's acknowledged version
             // as the delta base, avoiding an unchanged snapshot/fsync per node.
             let changed = old.as_ref().is_none_or(|old| {
+                #[cfg(feature = "mesh-dns-spike")]
+                let names_changed = old.name != config.name || old.peer_names != config.peer_names;
+                #[cfg(not(feature = "mesh-dns-spike"))]
+                let names_changed = false;
+                #[cfg(feature = "mesh-dns-spike")]
+                let dns_suffix_changed = old.dns_suffix != config.dns_suffix;
+                #[cfg(not(feature = "mesh-dns-spike"))]
+                let dns_suffix_changed = false;
                 old.server != config.server
                     || old.node != config.node
+                    || names_changed
+                    || dns_suffix_changed
                     || old.addresses != config.addresses
                     || old.default_policy != config.default_policy
                     || old.peers != config.peers
@@ -200,6 +217,14 @@ pub async fn run(
                 for mut chunk in chunks {
                     if !channel.supports_server_paths() {
                         chunk.server = None;
+                    }
+                    #[cfg(feature = "mesh-dns-spike")]
+                    if !dns_names {
+                        // Only negotiated resolvers receive host labels or a custom DNS zone.
+                        chunk.name = None;
+                        crate::dataplane::DEFAULT_DNS_SUFFIX.clone_into(&mut chunk.dns_suffix);
+                        chunk.peer_names.clear();
+                        chunk.removed_peer_names.clear();
                     }
                     let Ok(input) = serde_json::to_vec(&chunk) else {
                         return;
@@ -394,6 +419,8 @@ mod tests {
                     return serde_json::to_vec(&self.enabled.load(Ordering::Acquire).then_some(
                         Identity {
                             compact_access: false,
+                            #[cfg(feature = "mesh-dns-spike")]
+                            dns_names: false,
                             public_key: PublicKey([if self.server { 1 } else { 2 }; 32]),
                             port: 44000,
                         },
@@ -431,6 +458,11 @@ mod tests {
                     );
                 }
                 let chunk: crate::dataplane::Chunk = serde_json::from_slice(&input).unwrap();
+                #[cfg(feature = "mesh-dns-spike")]
+                {
+                    assert!(chunk.name.is_none());
+                    assert!(chunk.peer_names.is_empty());
+                }
                 self.frames
                     .lock()
                     .unwrap()

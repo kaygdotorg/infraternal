@@ -923,6 +923,7 @@ impl SocketPlugins {
 pub async fn compiled(pool: &sqlx::SqlitePool) -> Result<PluginRuntime, PluginError> {
     compiled_with_hosts(
         pool,
+        None,
         #[cfg(feature = "remote")]
         crate::remote_runtime::RemoteHosts::default(),
     )
@@ -930,10 +931,14 @@ pub async fn compiled(pool: &sqlx::SqlitePool) -> Result<PluginRuntime, PluginEr
 }
 pub(crate) async fn compiled_with_hosts(
     pool: &sqlx::SqlitePool,
+    public_origin: Option<&str>,
     #[cfg(feature = "remote")] hosts: crate::remote_runtime::RemoteHosts,
 ) -> Result<PluginRuntime, PluginError> {
     #[cfg(feature = "mesh")]
-    let mesh_plugin = Arc::new(infraternal_plugin_mesh::MeshPlugin::new(pool.clone()));
+    let mesh_plugin = Arc::new(public_origin.map_or_else(
+        || infraternal_plugin_mesh::MeshPlugin::new(pool.clone()),
+        |origin| infraternal_plugin_mesh::MeshPlugin::with_public_origin(pool.clone(), origin),
+    ));
     #[cfg(all(feature = "mesh", feature = "remote"))]
     let mesh_service = mesh_plugin.service();
     let plugins: Vec<Arc<dyn Plugin>> = vec![
