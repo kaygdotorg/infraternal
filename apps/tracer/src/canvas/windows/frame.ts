@@ -21,6 +21,7 @@ import { beginMove } from "./move";
 import { coarse } from "../dom";
 import { scrollerOf } from "../layout/columns";
 import { drawnWidthOf, setColumnWidth } from "../layout/column-els";
+import { maxColumnWidth } from "../window-sizes";
 import { RecentList } from "../recency";
 
 export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
@@ -177,7 +178,7 @@ function resizeHost(cx: Ctx, rec: WinRec): WindowResizeHost {
       const width = (drawnWidthOf(colEl) || colEl.offsetWidth) * cam.z;
       origin = { x: rec.owner.x, w: Math.round(width / cam.z) };
       const top = (parseFloat(rec.card.root.style.marginTop) || 0) * cam.z;
-      const widest = Math.max(480, Math.round(cx.viewport.clientWidth * 0.99));
+      const widest = maxColumnWidth(cx.viewport.clientWidth);
       return { width, height: rec.card.root.offsetHeight * cam.z, top, minWidth: 300 * cam.z, minHeight: 160 * cam.z, maxWidth: widest * cam.z, areaHeight: (scrollerOf(colEl).clientHeight - 28) * cam.z };
     },
     apply(f: ResizeFrame): void {

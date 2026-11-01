@@ -4,7 +4,7 @@
  * view's content rectangle and the viewport size, so the rule can be tested alone.
  */
 import { clamp } from "../camera/camera";
-import { COLUMN_GAP, type Rect } from "./geometry";
+import { COLUMN_GAP, drawnWidth, type Rect } from "./geometry";
 import type { ViewModel } from "../model/types";
 
 export interface Stops {
@@ -23,7 +23,7 @@ export const FREE_GRAPH_NODES = 40;
 const MIN_FREE_ZOOM = 0.1;
 export const isFreeView = (view: ViewModel): boolean => view.layout === "graph" && view.nodes.length > FREE_GRAPH_NODES;
 
-export function stopsFor(view: ViewModel, r: Rect, vw: number, vh: number, centred = false, minW = 0): Stops {
+export function stopsFor(view: ViewModel, r: Rect, vw: number, vh: number, centred = false, minW = 0, maxW = 0): Stops {
   // A big graph has one stop, at the zoom where all of it fits; from there the person zooms into a cluster.
   // (with a margin, so the view's label above it and the top pill over it stay clear of the content)
   // On a narrow screen it does not shrink below where the names of the clusters can still be read: it starts at the
@@ -37,7 +37,7 @@ export function stopsFor(view: ViewModel, r: Rect, vw: number, vh: number, centr
   else {
     const max = Math.round(r.x + r.w - width);
     let x = r.x;
-    const raw = view.layout === "graph" ? view.nodes.map((n) => r.x + n.x - 30) : view.cols.map((col) => { const w = Math.max(col.w, minW); const at = x - Math.max(0, (width - w) / 2); x += w + COLUMN_GAP; return at; });
+    const raw = view.layout === "graph" ? view.nodes.map((n) => r.x + n.x - 30) : view.cols.map((col) => { const w = drawnWidth(col.w, { minW, maxW }); const at = x - Math.max(0, (width - w) / 2); x += w + COLUMN_GAP; return at; });
     // `centred` (a phone's tiled view): every column rests in the middle of the screen, the first and last included, so the
     // slices of the neighbours at the two edges are equal and the strip's ends show empty canvas rather than a wider window.
     lefts = centred && view.layout !== "graph" ? [...new Set(raw.map(Math.round))].sort((p, q) => p - q) : [...new Set(raw.map((v) => Math.round(clamp(v, r.x, max))).concat(max))].sort((p, q) => p - q);

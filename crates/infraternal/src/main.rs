@@ -387,14 +387,11 @@ fn status_result(
         .filter(|plugin| plugin.id != "cli")
         .map(|plugin| plugin.id.clone())
         .collect();
-    let node = infraternal_status::probe(
-        &infraternal_status::Roots::detect(),
-        &ids,
-        &infraternal_status::manager_activity,
-    );
+    let node = infraternal_status::probe_local(&infraternal_status::Roots::detect(), &ids);
     let (activity, message, next) = node.headline();
     let state = match activity {
         Activity::Active => CommandState::Running,
+        Activity::Restarting { .. } => CommandState::Restarting,
         Activity::Inactive => CommandState::Stopped,
         Activity::Failed => CommandState::Failed,
         Activity::Unknown => CommandState::Unknown,
@@ -435,7 +432,8 @@ fn status_result(
     for step in next {
         result = result.with_next_step(step);
     }
-    (result, node.confirmed_down().len())
+    let down = node.confirmed_down_count();
+    (result, down)
 }
 
 fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {

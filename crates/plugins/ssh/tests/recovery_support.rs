@@ -22,6 +22,7 @@ const HOST: &str = "11111111111111111111111111111111";
 const TRANSACTION: &str = "22222222222222222222222222222222";
 
 struct MinimalHost {
+    _scratch: common::ScratchRoot,
     root: PathBuf,
 }
 
@@ -38,7 +39,10 @@ impl MinimalHost {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
-        let fixture = Self { root };
+        let fixture = Self {
+            root,
+            _scratch: scratch,
+        };
         let base = fixture.base();
         fs::create_dir_all(base.parent().unwrap()).unwrap();
         let cache = base.with_file_name("infraternal.bootstrap-cache");

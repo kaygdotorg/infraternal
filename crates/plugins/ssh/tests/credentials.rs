@@ -11,7 +11,8 @@ use std::os::unix::fs::PermissionsExt;
 
 #[tokio::test]
 async fn password_helpers_prepare_a_fresh_private_root_and_remove_only_their_directory() {
-    let root = common::scratch().join(format!(
+    let scratch = common::scratch();
+    let root = scratch.join(format!(
         "c-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     ));
@@ -63,7 +64,8 @@ async fn password_helpers_prepare_a_fresh_private_root_and_remove_only_their_dir
 
 #[tokio::test]
 async fn credential_helper_refuses_host_trust_and_permission_prompts() {
-    let root = common::scratch().join(format!(
+    let scratch = common::scratch();
+    let root = scratch.join(format!(
         "c-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     ));
@@ -99,7 +101,8 @@ async fn credential_helper_refuses_host_trust_and_permission_prompts() {
 #[tokio::test]
 async fn password_socket_refuses_an_unrelated_same_user_process() {
     use tokio::io::AsyncReadExt;
-    let root = common::scratch().join(format!(
+    let scratch = common::scratch();
+    let root = scratch.join(format!(
         "c-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     ));
@@ -139,7 +142,8 @@ async fn password_socket_refuses_an_unrelated_same_user_process() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn kernel_running_helper_is_materialized_in_its_private_scope() {
-    let root = common::scratch().join(format!(
+    let scratch = common::scratch();
+    let root = scratch.join(format!(
         "c-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     ));

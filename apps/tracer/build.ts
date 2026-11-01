@@ -17,8 +17,9 @@ if (!["off", "preview", "1"].includes(recoveryUiMode)) {
 // unless the build asks for it, so it never counts against the transfer budget or ships.
 const clustersPreview = process.env.INFRATERNAL_CLUSTERS_PREVIEW === "1";
 // The commit the bundle was built from, shown (and copied) from Settings, About. A tree
-// without git history reports nothing, and the UI then says "dev".
-const commit = Bun.spawnSync(["git", "rev-parse", "HEAD"], { stderr: "ignore" }).stdout.toString().trim();
+// without git history reports nothing, and the UI then says "dev". Reproducible
+// package builds supply the source revision and timestamp explicitly.
+const commit = process.env.INFRATERNAL_BUILD_COMMIT ?? Bun.spawnSync(["git", "rev-parse", "HEAD"], { stderr: "ignore" }).stdout.toString().trim();
 const build = await Bun.build({
   // The app-window decode worker is an on-demand entry: its file name ends in `.on-demand.ts`, so the transfer gate counts it
   // with the other on-demand code and not with the first screen (chunk-classes.ts).
@@ -29,7 +30,7 @@ const build = await Bun.build({
   minify: process.env.TRACER_NO_MINIFY === undefined && process.env.TRACER_BUILD_READABLE !== "1",
   target: "browser",
   splitting: true, // the terminal chunk loads after sign-in (see src/main.ts)
-  define: { __CLUSTERS_PREVIEW__: JSON.stringify(clustersPreview), __RECOVERY_UI_MODE__: JSON.stringify(recoveryUiMode), __BUILD_DATE__: JSON.stringify(new Date().toISOString()), __BUILD_COMMIT__: JSON.stringify(/^[0-9a-f]{40}$/.test(commit) ? commit : "") },
+  define: { __CLUSTERS_PREVIEW__: JSON.stringify(clustersPreview), __RECOVERY_UI_MODE__: JSON.stringify(recoveryUiMode), __BUILD_DATE__: JSON.stringify(process.env.INFRATERNAL_BUILD_DATE ?? new Date().toISOString()), __BUILD_COMMIT__: JSON.stringify(/^[0-9a-f]{40}$/.test(commit) ? commit : "") },
   metafile: true,
   plugins: clustersPreview ? [browserFileLoader] : [browserFileLoader, {
     // Without the preview flag the mockups resolve to empty modules (their calls are unreachable: the define is false).

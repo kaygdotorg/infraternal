@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject implicit or invalid binary paths before allocating real-binary fixtures."""
+"""Validate binary paths and private socket roots before real-binary fixtures launch."""
 import sys
 sys.dont_write_bytecode = True
 from pathlib import Path
@@ -7,10 +7,13 @@ from contextlib import redirect_stderr
 import io
 import os
 import runpy
+import socket
+import stat
+import tempfile
 import unittest
 from unittest.mock import patch
 
-from agent_fixture import Binary
+from agent_fixture import Binary, cleanup, fixture_state
 
 
 class BinaryPathTests(unittest.TestCase):
@@ -34,6 +37,37 @@ class BinaryPathTests(unittest.TestCase):
         with patch('agent_fixture.socket.socketpair', side_effect=AssertionError('opened socket')):
             with self.assertRaisesRegex(PermissionError, str(binary)):
                 Binary(binary, Path('unused-state'))
+
+
+class FixtureStateTests(unittest.TestCase):
+    def test_deep_roots_use_private_short_sockets_and_release_the_parent(self):
+        with tempfile.TemporaryDirectory(prefix='ift-', dir='/tmp') as scratch:
+            deep = str(Path(scratch) / ('deep-worktree-' * 12))
+            for override in (None, 'INFRATERNAL_TEST_STATE_ROOT',
+                             'INFRATERNAL_AGENT_TEST_STATE_ROOT'):
+                with self.subTest(override=override), patch.dict(os.environ):
+                    for key in ('INFRATERNAL_TEST_STATE_ROOT',
+                                'INFRATERNAL_AGENT_TEST_STATE_ROOT'):
+                        os.environ.pop(key, None)
+                    os.environ.update(HOME=deep, TMPDIR=deep)
+                    if override is not None:
+                        os.environ[override] = deep
+                    state = fixture_state('rr257')
+                    parent = state.parent
+                    try:
+                        self.assertEqual(parent.parent, Path('/tmp'))
+                        self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o700)
+                        self.assertFalse(state.exists())
+                        sessions = state / 'sessions'
+                        sessions.mkdir(parents=True, mode=0o700)
+                        for suffix in ('.sock', '.upstream'):
+                            path = sessions / ('a' * 32 + suffix)
+                            self.assertLess(len(os.fsencode(path)), 108)
+                            with socket.socket(socket.AF_UNIX) as listener:
+                                listener.bind(str(path))
+                    finally:
+                        cleanup(state)
+                    self.assertFalse(parent.exists())
 
 
 if __name__ == '__main__':

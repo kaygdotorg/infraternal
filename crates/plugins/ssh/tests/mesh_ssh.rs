@@ -44,7 +44,8 @@ impl Drop for Fixture {
 #[tokio::test]
 #[ignore = "requires the Go interoperability fixture; run research/ssh-client/mesh-fixture/run"]
 async fn network_identity_connect_check_and_changed_key_refusal() {
-    let root = common::scratch().join(format!(
+    let scratch = common::scratch();
+    let root = scratch.join(format!(
         "m-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     ));

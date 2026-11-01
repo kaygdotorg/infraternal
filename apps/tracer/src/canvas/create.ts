@@ -152,7 +152,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     backdrop?.measure();
     const previous = state.metrics;
     const next = metricsFor(w, h, coarse.matches, sizes);
-    if (next.colW === previous.colW && next.peekW === previous.peekW && next.clh === previous.clh && next.narrow === previous.narrow && next.minW === previous.minW) {
+    if (next.colW === previous.colW && next.peekW === previous.peekW && next.clh === previous.clh && next.narrow === previous.narrow && next.minW === previous.minW && next.maxW === previous.maxW) {
       // Nothing about the windows changed (the area did): keep the framing centred, unless a flight is under way.
       if (performance.now() >= animatingUntil) { if (cx.camera.target && cx.views.size) cx.camera.set(cx.camera.target()); else cx.camera.apply(true); }
       return;

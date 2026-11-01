@@ -1,6 +1,9 @@
 # Repository ignore rules keep local build output and review artifacts out of Git.
 node_modules/
 target/
+# Nix build output links.
+/result
+/result-*
 .svelte-kit/
 build/
 dist/

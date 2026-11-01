@@ -104,7 +104,8 @@ async fn oversized_remote_output_is_bounded_and_active_timeout_is_enforced() {
 
 #[tokio::test]
 async fn group_identity_is_retained_until_inherited_pipes_finish() {
-    let path = common::scratch().join(format!("ssh-pipe-owner-{}", uuid::Uuid::new_v4().simple()));
+    let scratch = common::scratch();
+    let path = scratch.join(format!("ssh-pipe-owner-{}", uuid::Uuid::new_v4().simple()));
     let script = format!(
         "import os, subprocess, time; child=subprocess.Popen(['/bin/sleep','60'],start_new_session=True); open({},'w').write(str(os.getpid())+' '+str(child.pid)); time.sleep(.05); os._exit(0)",
         shell_quote(path.to_str().unwrap())
@@ -358,8 +359,8 @@ async fn declared_selection_mismatch_and_missing_verification_withhold_private_i
         "TRANSFER gzip\nPAYLOAD ready\n",
         "TRANSFER raw\nFAIL upload 1\n",
     ] {
-        let path =
-            common::scratch().join(format!("private-barrier-{}", uuid::Uuid::new_v4().simple()));
+        let scratch = common::scratch();
+        let path = scratch.join(format!("private-barrier-{}", uuid::Uuid::new_v4().simple()));
         let mut command = Command::new("/bin/sh");
         command.args([
             "-c",

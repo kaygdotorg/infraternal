@@ -11,7 +11,8 @@ use std::{os::unix::fs::PermissionsExt, time::Duration};
 
 #[tokio::test]
 async fn unchecked_proxy_hops_are_refused_before_credential_helpers_or_network() {
-    let root = common::scratch().join(format!("proxy-{}", uuid::Uuid::new_v4().simple()));
+    let scratch = common::scratch();
+    let root = scratch.join(format!("proxy-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir(&root).unwrap();
     let config = root.join("config");
     std::fs::write(&config, "# Public config-parser fixture; never connects to a proxy.\nHost *\n  HostName 127.0.0.1\n  ProxyJump bootstrap-unknown.invalid\n").unwrap();

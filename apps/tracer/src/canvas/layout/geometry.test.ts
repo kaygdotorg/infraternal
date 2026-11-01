@@ -134,3 +134,18 @@ test("D309: the content is as wide as the drawn columns, so the camera reaches e
   expect(contentSize(view, phone).w).toBe(2 * MIN_TOUCH_COLUMN + 430 + 2 * COLUMN_GAP);
   expect(contentSize(view, metricsFor(1440, 900, false)).w).toBe(39 + 39 + 430 + 2 * COLUMN_GAP);
 });
+
+test("a desktop column is never drawn wider than the screen; a phone strip has no ceiling and the saved width is untouched", () => {
+  const desktop = metricsFor(1650, 1000, false);
+  expect(desktop.maxW).toBe(1634);
+  expect(drawnWidth(1442, desktop)).toBe(1442);
+  // A saved width of 2163 px (a weight set under a narrower default, read under "Wide") is drawn at the screen width.
+  expect(drawnWidth(2163, desktop)).toBe(1634);
+  expect(drawnWidth(4348, desktop)).toBe(1634);
+  // The ceiling follows the screen: a narrower window lowers it, and never below the 480 px floor of "Full width".
+  expect(drawnWidth(1442, metricsFor(1400, 900, false))).toBe(1386);
+  expect(metricsFor(800, 600, false).maxW).toBe(792);
+  // A phone scrolls sideways through a strip by design, so it keeps every width.
+  expect(metricsFor(393, 852, true).maxW).toBe(0);
+  expect(drawnWidth(900, metricsFor(393, 852, true))).toBe(900);
+});

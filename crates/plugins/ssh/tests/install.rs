@@ -164,6 +164,7 @@ impl SshSession for Local {
 }
 
 struct Fixture {
+    _scratch: common::ScratchRoot,
     root: PathBuf,
     target: Target,
     join: JoinMaterial,
@@ -217,6 +218,7 @@ impl Fixture {
             "#!/bin/sh\ncase \"$1\" in --bootstrap-runtime*) exec runtime-helper \"$@\";; esac\n# Synthetic CLI contract, not an infraternal daemon.\n[ \"$1 $2\" = 'agent --data' ] || exit 1\nstate=$3\n[ \"$4\" = join ] && [ \"$6\" = --enroll-only ] || exit 1\nmkdir -p \"$state\"\nprintf 'public-fixture-state\\n' > \"$state/proof\"\ncat >/dev/null\n",
         );
         Self {
+            _scratch: scratch,
             root,
             target: Target {
                 id: "one".into(),

@@ -143,23 +143,56 @@ Reviews and fixes run at the same time as the next lane's build.
 - `scripts/verify fast` checks the stripped, static release binaries against
   exact measured ceilings, with no growth allowance (D243):
 
-  | Build host | Target | Measured ceiling |
-  | --- | --- | ---: |
-  | `x86_64` | `x86_64-unknown-linux-musl` | 21,444,656 bytes |
-  | `aarch64` | `x86_64-unknown-linux-musl` | 21,445,296 bytes |
-  | `aarch64` | `aarch64-unknown-linux-musl` | 19,604,184 bytes |
+  | Target | Measured ceiling |
+  | --- | ---: |
+  | `x86_64-unknown-linux-musl` | 21,443,824 bytes |
+  | `aarch64-unknown-linux-musl` | 19,629,240 bytes |
 
-  The #146 integration onto requested dev `42ab33035` measures 21,444,656 bytes
-  on native x86_64 and 21,445,296 bytes for the aarch64-hosted x86_64
-  cross-build. Against the 42ab33035 x86_64 baseline of 21,431,472 bytes, the
-  flag-off deltas are +13,184 and +13,824 bytes respectively, both below D243's
-  16 KiB limit. The aarch64-hosted native image measures 19,604,184 bytes.
-  The x86_64 host-target pairs use separate exact ceilings because the
-  measured artifacts differ by 640 bytes; neither ceiling has spare allowance.
-  The desktop backend is
-  optional, production ignores the `?appwin=1` preview flag, and the Settings
-  preference starts off and requires the server capability. Receipts and the
-  final gate are recorded on #146.
+  Crash-loop status reporting and final review fixes (#237, D299/D303) use the
+  pinned `scripts/static-cargo` stripped static recipe on build host
+  infraternal-dev-01-compute01, one target at a time in one build slot:
+
+  | Source | x86_64 bytes | aarch64 bytes |
+  | --- | ---: | ---: |
+  | origin/dev (`105b1a28d`) | 21,431,472 | 19,605,896 |
+  | #237 before completion readiness (`3ee792774`) | 21,445,552 | 19,630,392 |
+  | #237 completion readiness (`b5d823923`) | 21,443,824 | 19,629,240 |
+  | Final delta versus dev | +12,352 | +23,344 |
+
+  Fresh sequential J40 builds on compute01 reproduce both dev sizes; its x86
+  hash also matches the earlier `57491e918` baseline. The subsequent rebase
+  onto `105b1a28d` adds tracer frontend changes without changing Rust, Cargo,
+  scripts or `.cargo` inputs. Exit readiness reduces the prior branch images
+  by 1,728 / 1,152 bytes. Both exact caps ratchet down without allowance (D243).
+  Both measured images are static, with no `PT_INTERP`.
+
+  The aarch64 delta is 6,960 bytes above 16 KiB and below 64 KiB. This whole-branch
+  growth retains monotonic restart/exit diagnostics, configured-role headlines
+  and D303 exits. A mask cannot override observed running state or, alone,
+  establish a down host role. Recovery names the owning manager's unmask command
+  and shares the CLI's three-step budget with diagnostics. Queries use at most
+  four fallible 128 KiB workers, two per scope, with bounded admission and
+  independent per-unit deadlines; resource refusal remains Unknown. Completion
+  waits on the owned child's exit descriptor within the same deadline, retaining
+  the bounded compatibility path when that descriptor is unavailable.
+  Relative to dev, the earlier fix enables the existing nix dependency's `time`
+  feature in the shipping graph for CLOCK_MONOTONIC; dev had it only in
+  development dependencies. Completion readiness adds a Linux-only status-to-shim
+  dependency edge to reuse the audited exit descriptor; the shim already ships
+  in the binary. No library, version, shipping feature or release setting is
+  added. These are whole-branch deltas, without claiming per-helper attribution.
+  Both target receipts, paired perf-VM measurements and the final gate output
+  are recorded on #237.
+
+  Historical #146 flag-off measurements on the earlier dev base `42ab33035`
+  were 21,444,656 bytes on native x86_64, 21,445,296 bytes for an
+  aarch64-hosted x86_64 cross-build, and 19,604,184 bytes on aarch64. Against
+  the then-recorded x86_64 baseline of 21,431,472 bytes, the x86_64 deltas were
+  +13,184 and +13,824 bytes. The two build hosts produced x86_64 artifacts that
+  differed by 640 bytes. These are historical receipts; the refreshed
+  measurements for the current dev base are recorded on #146. The desktop
+  backend is optional, production ignores the `?appwin=1` preview flag, and the
+  Settings preference starts off and requires the server capability.
 
   Replay geometry and stale-note repairs (#257, R257-01/R257-02) measure
   21,431,472 / 19,605,896 bytes (x86_64 / aarch64), using the pinned

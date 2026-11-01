@@ -10,9 +10,10 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 
-const STATES: [&str; 8] = [
+const STATES: [&str; 9] = [
     "ready",
     "running",
+    "restarting",
     "stopped",
     "pending",
     "unavailable",

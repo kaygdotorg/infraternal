@@ -148,6 +148,8 @@ pub enum CommandState {
     Ready,
     /// The requested service or component is currently active.
     Running,
+    /// The service is restarting repeatedly and is unavailable.
+    Restarting,
     /// The requested service or component is stopped.
     Stopped,
     /// The command waits for a step that only a person can take (a passkey, a confirmation).
@@ -169,7 +171,10 @@ pub enum CommandState {
 impl CommandState {
     /// States that describe a command which did not do what was asked.
     const fn is_ok(self) -> bool {
-        !matches!(self, Self::Unavailable | Self::Refused | Self::Failed)
+        !matches!(
+            self,
+            Self::Unavailable | Self::Refused | Self::Failed | Self::Restarting
+        )
     }
 
     /// One mark per state, shown only on a terminal and always beside a word.
@@ -178,7 +183,7 @@ impl CommandState {
             Self::Ready | Self::Running => "●",
             Self::Stopped => "○",
             Self::Pending | Self::Unavailable | Self::Unknown => "!",
-            Self::Refused | Self::Failed => "✕",
+            Self::Refused | Self::Failed | Self::Restarting => "✕",
         }
     }
 
@@ -187,7 +192,7 @@ impl CommandState {
             Self::Ready | Self::Running => "\u{1b}[32m",
             Self::Stopped | Self::Unknown => "\u{1b}[36m",
             Self::Pending | Self::Unavailable => "\u{1b}[33m",
-            Self::Refused | Self::Failed => "\u{1b}[31m",
+            Self::Refused | Self::Failed | Self::Restarting => "\u{1b}[31m",
         }
     }
 }
