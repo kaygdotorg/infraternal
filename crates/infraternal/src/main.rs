@@ -110,6 +110,10 @@ fn run_invocation() -> ExitCode {
         return result;
     }
     #[cfg(feature = "plugin-agent")]
+    if let Some(result) = infraternal_agent::startup_guard::run_if_requested() {
+        return result;
+    }
+    #[cfg(feature = "plugin-agent")]
     if !shim_cli::PAYLOAD_ONLY
         && let Some(result) = embedded_cli::run_if_requested()
     {
@@ -188,15 +192,8 @@ fn dispatch_action(
     json_output: bool,
 ) -> ExitCode {
     match action.cli_handler {
-        CliHandler::NodeComponent => {
-            #[cfg(all(feature = "plugin-agent", target_os = "linux"))]
-            {
-                component_cli::run_action(action, matches, json_output)
-            }
-            #[cfg(not(all(feature = "plugin-agent", target_os = "linux")))]
-            {
-                run_unavailable(action, json_output)
-            }
+        CliHandler::NodeComponent | CliHandler::Sessions => {
+            run_local_action(action, matches, json_output)
         }
         CliHandler::Unavailable => run_unavailable(action, json_output),
         CliHandler::Status => run_status(registry, json_output),
@@ -1198,6 +1195,8 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
                 .try_into()
                 .unwrap_or(600_000),
             readiness: matches.get_flag("readiness"),
+            command_stdin: matches.get_flag("command_stdin"),
+            retain_output: matches.get_flag("retain_output"),
         })
     })();
     let options = match options {
@@ -1800,4 +1799,25 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
     }
     let _ = matches;
     run_unavailable(action, json)
+}
+
+/// Session automation is removable with the host runtime, including in minimal CLI builds.
+fn run_local_action(
+    action: &ActionDefinition,
+    matches: &ArgMatches,
+    json_output: bool,
+) -> ExitCode {
+    #[cfg(all(feature = "plugin-agent", target_os = "linux"))]
+    {
+        if action.cli_handler == CliHandler::Sessions {
+            cli::sessions::run(action, matches, json_output)
+        } else {
+            component_cli::run_action(action, matches, json_output)
+        }
+    }
+    #[cfg(not(all(feature = "plugin-agent", target_os = "linux")))]
+    {
+        let _ = matches;
+        run_unavailable(action, json_output)
+    }
 }

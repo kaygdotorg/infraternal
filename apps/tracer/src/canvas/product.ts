@@ -15,6 +15,7 @@ import { mountToast } from "../../../../packages/ui/src/toast";
 import { ICON_INFO } from "../../../../packages/ui/src/icons";
 import { onDemand } from "../on-demand";
 import { ensureHostMarks, hostPlatformFromOs, type HostPlatform } from "../../../../packages/ui/src/host-icons";
+import { setLinkRoundTrip } from "../../../../packages/ui/src/window-card";
 import { ConnectionPool, MuxConnection } from "../connection";
 import { isCanonicalUuid } from "../identifiers";
 import type { CoreScreen } from "../core-screen";
@@ -38,8 +39,10 @@ import { offerMeshView } from "./mesh/offer";
 import { createLiveSessions, type LiveSessions } from "./sessions/live";
 import { createAppWindowsAdapter } from "./appwin/adapter";
 import { appWindowsWanted } from "./appwin/flag";
+import { createStartupHints } from "./sessions/startup-hints";
 import { createLiveInventory } from "./sessions/live-inventory";
 import { teachOnce } from "../hints";
+import { buildVersion } from "../build-version";
 import type { DetailsSourceLoader } from "./windows/details-source";
 import { BUILTIN_SECTIONS, buildSettingsView } from "./views/settings";
 
@@ -62,6 +65,8 @@ export interface ProductCanvasOptions {
   /** Ends the old account screen when its authenticated lifetime changes; `work` says what happened to queued layout edits. */
   onSessionRevoked?: (work: RevokedWork) => void;
   onRecoveryPending?: (readyAt: number | undefined) => void;
+  /** The signed-in person: the sidebar's person pill opens their card (D283). Absent, the pill keeps its small menu. */
+  person?: { name: string; username: string };
 }
 
 export interface ProductCanvas {
@@ -99,15 +104,17 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   });
   // The details source is loaded on a pill press, so keep the last sample for its first read.
   let roundTrip: number | undefined;
-  const offRoundTrip = connection.onRoundTrip((ms) => { roundTrip = ms; core.setRoundTrip(ms); });
+  const offRoundTrip = connection.onRoundTrip((ms) => { roundTrip = ms; core.setRoundTrip(ms); setLinkRoundTrip(ms); });
   // More windows than one socket takes (the server allows 32 attachments per socket) open on further sockets.
   const pool = new ConnectionPool(connection);
   const inventory = createLiveInventory({ accountId: options.accountId, host: options.host.name });
   let disposed = false, hostsStarted = false, hostsReady = false;
   let startHosts = (): void => {};
   let offHosts: (() => void) | undefined;
+  const startupHints = createStartupHints(connection, core.toast);
   const sessions = createLiveSessions({
     core, connection, pool, host: embedded,
+    onStartupSession: (session, hostId, name) => { void startupHints.inspect(session, hostId, name); },
     ...(options.predictiveEcho ? { predictiveEcho: true } : {}),
     ...(options.firstHooks ? { firstHooks: options.firstHooks } : {}),
     ...(options.onFirstClient ? { onFirstClient: options.onFirstClient } : {}),
@@ -214,7 +221,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   // fetch in createCanvas and does not wait for it.
   if (saved && docHasGroups(saved)) await loadGroups();
   const canvas = createCanvas(core, {
-    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => { warmSetup(); addHost.open(); }, authority, appWindows: createAppWindowsAdapter(connection) },
+    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => { warmSetup(); addHost.open(); }, authority, appWindows: createAppWindowsAdapter(connection), startupHints },
     float: false,
     persisted: (id) => id !== "settings",
   });
@@ -225,7 +232,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   };
   const resolve = (target: DocTarget, windowId: string): Partial<WindowModel> | undefined => {
     if (target.type !== "session") return undefined;
-    const reference = { host: target.host, ...(!store.unresolvedWindow?.(windowId) ? { sessionId: target.id } : {}), ...(target.name ? { session: target.name } : {}) };
+    const reference = { host: target.host, ...(!store.unresolvedWindow?.(windowId) ? { sessionId: target.id } : {}), ...(target.name ? { session: target.name } : {}), ...(target.pinned ? { sessionPinned: true } : {}) };
     if (target.hostId) {
       const identity = { ...(target.user ? { user: target.user } : {}), ...(target.address ? { address: target.address } : {}) };
       sessions.registerHost({ id: target.hostId, name: target.host, ...identity });
@@ -292,20 +299,41 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     }, () => { hostsStarted = false; });
   };
   const offHostWelcome = connection.onWelcome(() => { if (hostsReady) startHosts(); });
+  // The version pill and its panel join the sidebar footer once the canvas is up (#216); the first screen carries none of it (D188).
+  let versionArea: { dispose(): void } | undefined;
+  const build = buildVersion();
+  void onDemand(() => import("./version/mount.on-demand"))
+    .then((m) => m.mountProductVersionArea(core, { version: build.short, commit: build.full, hosts: () => sessions.hosts().map((host) => host.name) }))
+    .then((area) => { if (disposed) area?.dispose(); else versionArea = area; })
+    .catch(() => { /* the pill is news, not a dependency */ });
+  // The person's card (D283) hangs on the sidebar's person pill. Its code is its own chunk, fetched once the canvas is up.
+  let account: { dispose(): void } | undefined;
+  if (options.person) {
+    const person = options.person;
+    void import("./account").then(({ mountAccountCard, identityModel }) => {
+      if (disposed) return;
+      account = mountAccountCard({ core, model: identityModel(person), openSettings: (section) => { window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${section}`, source: "pointer" } })); } });
+    });
+  }
+
   return {
     canvas, sessions, connection,
     dispose() {
+      versionArea?.dispose();
+      account?.dispose();
       canvas.flush();
       offLayout(); offPending?.(); pendingNotice.dispose();
       window.removeEventListener("pointerup", dropped);
       window.removeEventListener("pointercancel", dropped);
       offRoundTrip();
+      setLinkRoundTrip(undefined);
       disposed = true;
       offHosts?.();
       offHostWelcome();
       offSessionInventory();
       offAuthorityWelcome();
       authority.dispose();
+      startupHints.dispose();
       offMeshView();
       addHost.dispose();
       canvas.dispose();

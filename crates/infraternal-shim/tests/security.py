@@ -37,6 +37,9 @@ try:
     while not path.exists():
         assert time.monotonic() < deadline
         time.sleep(.01)
+    assert state.stat().st_mode & 0o777 == 0o700
+    assert (state / "sessions").stat().st_mode & 0o777 == 0o700
+    print("shim session socket directory: 0700")
     peer = socket.socket(socket.AF_UNIX)
     peer.settimeout(5)
     peer.connect(str(path))

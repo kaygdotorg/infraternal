@@ -60,7 +60,7 @@ export async function reconcile(cx: Ctx, read: () => SharedPaint, resolve: (targ
         const sameHost = rec.model.hostId === model.hostId && rec.model.host === model.host;
         const retargeted = rec.model.sessionId !== model.sessionId || rec.model.hostId !== model.hostId;
         if (rec.model !== model) {
-          for (const k of ["sessionId", "session", "hostId", "user", "address", "os", "h", "span", "rows", "row"] as const) delete rec.model[k];
+          for (const k of ["sessionId", "session", "sessionPinned", "hostId", "user", "address", "os", "h", "span", "rows", "row"] as const) delete rec.model[k];
           Object.assign(rec.model, model);
         }
         if (retargeted && (!sameHost || !rec.binding?.retarget?.(rec.model))) { rec.binding?.dispose(); makeBody(cx, rec); rec.binding?.setActive(cx.state.activeWin === rec); }

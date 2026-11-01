@@ -25,6 +25,8 @@ export interface WindowModel {
   address?: string;
   /** The session's readable name (D178); the stable target is `sessionId`. */
   session?: string;
+  /** A manually chosen session name stays pinned across shared layout paints and reloads (#293). */
+  sessionPinned?: boolean;
   /** The session this window shows (a terminal window): stable across renames and reloads (D180). */
   sessionId?: string;
   user?: string;

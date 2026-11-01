@@ -52,7 +52,7 @@ pub fn render_action(action: &ActionDefinition) -> Result<String, serde_json::Er
     }
 
     output.push_str("\n\n## Inputs\n");
-    render_inputs(&mut output, &action.input_schema);
+    render_inputs(&mut output, &action.input_schema, &action.cli_hidden_inputs);
 
     output.push_str("\n\n## Outputs and JSON shape\n\n```json\n");
     output.push_str(&serde_json::to_string_pretty(&action.output_schema)?);
@@ -154,12 +154,17 @@ fn file_stem(command: &[String]) -> String {
         .to_owned()
 }
 
-fn render_inputs(output: &mut String, schema: &JsonSchema) {
-    if schema.properties.is_empty() {
+fn render_inputs(output: &mut String, schema: &JsonSchema, hidden: &[String]) {
+    let mut visible = schema
+        .properties
+        .iter()
+        .filter(|(name, _)| !hidden.iter().any(|hidden| hidden == *name))
+        .peekable();
+    if visible.peek().is_none() {
         output.push_str("\nNo inputs.\n");
         return;
     }
-    for (name, property) in &schema.properties {
+    for (name, property) in visible {
         let required = schema.required.iter().any(|field| field == name);
         let position = if name == "command" && property.schema_type == JsonSchemaType::Array {
             "positional"

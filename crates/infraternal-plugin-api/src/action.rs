@@ -371,6 +371,8 @@ pub enum CliHandler {
     Unavailable,
     /// Dispatch a declared node action over its local same-uid socket.
     NodeComponent,
+    /// Run saved-session automation with caller-session authority.
+    Sessions,
     /// Inspect the local node and registered components.
     Status,
     /// List or render generated command skills.
@@ -539,7 +541,7 @@ impl ActionDefinition {
         self
     }
 
-    /// Keep these inputs out of `--help`; they stay accepted and stay in generated skills.
+    /// Keep these inputs accepted for scripts while hiding them from help and generated skills.
     #[must_use]
     pub fn with_cli_hidden_inputs(
         mut self,

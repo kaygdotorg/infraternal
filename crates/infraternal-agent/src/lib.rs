@@ -32,7 +32,9 @@ pub use infraternal_plugin_remote::remote_renewal;
 #[cfg(feature = "remote")]
 pub use infraternal_plugin_remote::remote_tls;
 #[cfg(target_os = "linux")]
+pub mod automation;
 pub mod sessions;
+pub mod startup_guard;
 pub mod transport;
 #[cfg(any(test, feature = "native-streams"))]
 pub mod wire;

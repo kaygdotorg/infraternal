@@ -80,7 +80,8 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
       id: "app-windows", title: "App windows", label: "Stream app windows", hint: "Open an app window or a whole screen from a Mac on the canvas",
       get: () => cx.appWindows?.pref ?? false, set: (on: boolean) => cx.appWindows?.setWanted(on),
       onChange: (listener: () => void) => cx.appWindows?.onChange(listener) ?? (() => undefined),
-    }] : [])],
+    }] : []),
+    ...(cx.adapters.startupHints?.switches() ?? [])],
     ...(cx.adapters.authority ? { statuses: [authorityPref(cx.adapters.authority)] } : {}),
   });
   const pane = el("div", "ui-settings-pane");

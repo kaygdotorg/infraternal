@@ -5,8 +5,8 @@
  * shell its sections will hang on, not a one-off. A section is `{ id, title, icon, render }`,
  * where `render(container)` fills the pane and may return a disposer.
  *
- * About is the build's facts as a shared key/value list: tap or click a value to copy it with
- * the shared inline tick and "Copied" tooltip (no copy buttons).
+ * About is the build's facts as a shared key/value list: tap or click a value to copy it; the text fades
+ * out and a clipboard icon with "Copied" replaces it in place (no copy buttons, no tooltip).
  *
  * Motion: a pointer open scales in from 0.96 with opacity (200 ms strong ease-out), closing is
  * quicker; keyboard opens and closes are instant. Escape, the close icon and a press outside
@@ -15,7 +15,7 @@
  *   const settings = createSettingsOverlay({ stage, sections: [aboutSection(info)] });
  *   settings.open("about", "pointer");
  */
-import { createKeyValueList } from "./kv-list";
+import type { KeyValueRow } from "./kv-list";
 
 export interface SettingsSection {
   id: string;
@@ -55,23 +55,30 @@ const formatBuilt = (iso: string): string => {
   return Number.isNaN(date.getTime()) ? "" : `${date.toISOString().slice(0, 16).replace("T", " ")} UTC`;
 };
 
-/** The About section: name, version, commit, build date. */
+/**
+ * The About section: name, version, commit, build date. Its list is the shared key/value list, which the first screen does
+ * not need, so it loads when About is opened (`fact-list.on-demand.ts`, a chunk of its own, D188) and is fetched when the
+ * page is idle, so the first open shows its rows at once. The section is empty for the frame or two the chunk takes if it is
+ * not there yet.
+ */
 export function aboutSection(info: AboutInfo): SettingsSection {
+  const short = info.commit.slice(0, 7);
+  const rows: KeyValueRow[] = [
+    { key: "Name", value: info.name },
+    { key: "Version", value: short, copy: info.commit },
+    { key: "Commit", value: info.commit },
+    ...(formatBuilt(info.built) ? [{ key: "Built", value: formatBuilt(info.built), copy: info.built }] : []),
+  ];
+  const idle = (window as unknown as { requestIdleCallback?: (run: () => void) => number }).requestIdleCallback;
+  if (idle) idle(() => { void import("./fact-list.on-demand"); }); else window.setTimeout(() => { void import("./fact-list.on-demand"); }, 1500);
   return {
     id: "about",
     title: "About",
     icon: INFO_ICON,
     render(container) {
-      const list = createKeyValueList("About infraternal");
-      const short = info.commit.slice(0, 7);
-      list.set([
-        { key: "Name", value: info.name },
-        { key: "Version", value: short, copy: info.commit },
-        { key: "Commit", value: info.commit },
-        ...(formatBuilt(info.built) ? [{ key: "Built", value: formatBuilt(info.built), copy: info.built }] : []),
-      ]);
-      container.append(list.root);
-      return () => list.dispose();
+      let stop: (() => void) | undefined, gone = false;
+      void import("./fact-list.on-demand").then((m) => { if (!gone) stop = m.renderFactList(container, "About infraternal", rows); });
+      return () => { gone = true; stop?.(); };
     },
   };
 }

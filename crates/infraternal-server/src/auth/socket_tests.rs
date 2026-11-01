@@ -1,5 +1,7 @@
 //! Real WebSocket regressions for upgrade reservation, revoked idle sockets and clean Close.
 use super::*;
+#[path = "socket_tests/startup_guard.rs"]
+mod startup_guard;
 
 /// Minimal descriptor catalog for the real socket tests of generic host-facts authorization.
 const HOST_FACTS_ACTIONS: &[infraternal_plugin_api::ActionDef] = &[

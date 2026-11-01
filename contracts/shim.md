@@ -48,9 +48,18 @@ because a VT parser changes rarely and does not depend on our protocol.
 
 - Socket: `$STATE/sessions/<session-id>.sock`. `$STATE` is
   `/run/infraternal` (rootful) or `$XDG_RUNTIME_DIR/infraternal` (rootless).
-  The directory mode is 0700. The socket mode is 0600.
+  The state and sessions directories are owner-only (0700); the socket mode is
+  0600. This prevents other OS accounts from traversing to or opening a
+  session socket.
 - On accept, the shim checks the peer with `SO_PEERCRED`. The peer uid must be
-  the agent's uid (or root). Any other uid is refused.
+  the infraternal agent's uid (or root); any other uid is refused before the
+  shim sends `Hello`.
+- All processes running as the session's OS account are trusted to use its
+  socket, including to read output, send input, or close the session. A
+  same-UID process can already ptrace or inject into that account's shim or
+  shell, so the socket is not a security boundary within one UID. The saved
+  shell ancestry check belongs to the CLI action path; it does not restrict
+  direct same-UID peers of a shim socket.
 - The shim accepts **one** agent connection at a time. A new connection
   replaces the old one (this handles an agent that crashes and does not
   close the connection). Fan-out to many viewers happens in the agent.
@@ -134,8 +143,15 @@ Rules:
 
 ## 6. Security
 
-- The shim never parses data from the network. Its only peer is the local
-  agent, after the `SO_PEERCRED` check.
+- The shim never parses data from the network. Its socket is local-only: the
+  owner-only 0700 state directories and `SO_PEERCRED` uid check reject other
+  OS accounts, while same-UID processes are trusted as described in §3. This
+  is not a per-process boundary; no per-session capability is used.
+- The infraternal agent and CLI enforce account and machine boundaries before
+  session lookup. Other accounts cannot operate on a session, and their
+  session names receive the same not-found reply as absent sessions. Remote
+  machine targets are refused before lookup, so these paths do not reveal
+  whether a foreign session exists.
 - `unsafe` is allowed only in the PTY and syscall module of
   `infraternal-shim`. Each block has a `SAFETY:` comment, and a second
   reviewer audits it.
@@ -331,3 +347,13 @@ viewer's typing cursor, select the active writer or change terminal geometry.
 The trusted server arbitrates identity, syntax and expiry before forwarding;
 the shim validates capability and size before queue admission. Replies are
 best effort and never replayed after link replacement.
+
+### Explicit saved-shell close (D314, #251)
+
+Capability bit 6 (`CLOSE_SESSION`, value 64) permits zero-payload `CloseSession`
+(opcode `0x1F`). It is legal only after selecting that capability in Attach.
+It requests SIGHUP of the shim-owned shell process group, including when a
+foreground job has a different group. Existing Signal semantics stay unchanged.
+An already reaped child is a no-op; the shim never signals a recycled PID.
+The request has no acknowledgement: delivery is not proof of process exit.
+Old shims must receive no such frame; callers report an upgrade/recreate fix.

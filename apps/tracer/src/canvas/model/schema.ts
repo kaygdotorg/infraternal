@@ -9,7 +9,7 @@ export const MIN_WINDOW_HEIGHT = 0.05;
 
 /** What a window shows, by stable reference. */
 export type DocTarget =
-  | { type: "session"; id: string; host: string; hostId?: string; user?: string; address?: string; name?: string }
+  | { type: "session"; id: string; host: string; hostId?: string; user?: string; address?: string; name?: string; pinned?: boolean }
   | { type: "settings"; section: string }
   | { type: "containers" | "logs"; host: string };
 
@@ -52,7 +52,7 @@ const finite = (v: unknown, lo: number, hi: number): v is number => typeof v ===
 
 function parseTarget(v: unknown): DocTarget | undefined {
   if (!isObject(v)) return undefined;
-  if (v.type === "session" && text(v.id) && text(v.host) && (v.hostId === undefined || isCanonicalUuid(v.hostId))) return { type: "session", id: v.id, host: v.host, ...(isCanonicalUuid(v.hostId) ? { hostId: v.hostId, ...(text(v.user) ? { user: v.user } : {}), ...(text(v.address) ? { address: v.address } : {}) } : {}), ...(text(v.name) ? { name: v.name } : {}) };
+  if (v.type === "session" && text(v.id) && text(v.host) && (v.hostId === undefined || isCanonicalUuid(v.hostId)) && (v.pinned === undefined || typeof v.pinned === "boolean")) return { type: "session", id: v.id, host: v.host, ...(isCanonicalUuid(v.hostId) ? { hostId: v.hostId, ...(text(v.user) ? { user: v.user } : {}), ...(text(v.address) ? { address: v.address } : {}) } : {}), ...(text(v.name) ? { name: v.name } : {}), ...(v.pinned === true ? { pinned: true } : {}) };
   if (v.type === "settings" && text(v.section)) return { type: "settings", section: v.section };
   if ((v.type === "containers" || v.type === "logs") && text(v.host)) return { type: v.type, host: v.host };
   return undefined;

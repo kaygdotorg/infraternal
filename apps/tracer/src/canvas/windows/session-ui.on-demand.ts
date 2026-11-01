@@ -36,7 +36,7 @@ import { coarse, el, reduced } from "../dom";
 import { byFrecency, type SessionRecord, type SessionState } from "../sessions/inventory";
 import { isTerminal } from "../views/body";
 import { ICON, SESSION_ICON } from "../views/icons";
-import { paintStrip, type StripView } from "../../../../../packages/ui/src/window-strip";
+import { paintLink } from "./link";
 
 /** What the on-demand half does; `session-hooks.ts` calls it once it has loaded. */
 export interface SessionUiPart {
@@ -79,6 +79,15 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     const ours = Math.max(20, Math.floor((rec.card.body.clientWidth - 32) / ((coarse.matches ? 13 : 14) * 0.6)));
     return Math.min(1, Math.max(0.55, ours / theirs));
   };
+  /** What a window's strip says and does; the strip is one component whatever it reports (ended, exited, refused). */
+  interface StripView {
+    signature: string;
+    result: "ok" | "fail" | "ended" | "refused";
+    label: string;
+    text: string;
+    action?: { label: string; icon: string; run: () => void };
+    dismiss: { label: string; run: () => void };
+  }
   /** Why the host would not start a shell in a window, in plain words, for the strip. */
   const refusals = new WeakMap<WinRec, string>();
   /** Windows that asked for a new shell and have not heard back: only they claim a refusal. */
@@ -111,10 +120,38 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     const exited = s?.state === "exited";
     // The new shell has a session now (or the person moved on): a refusal no longer applies.
     if (rec.model.sessionId) refusals.delete(rec);
-    rec.card.setStatus(exited || refusals.has(rec) ? "offline" : rec.binding?.connected === false ? "connecting" : "live");
     const refusal = refusals.get(rec);
+    paintLink(rec, exited, refusals.has(rec) ? (refusal ?? "") : undefined);
+    let strip = body.querySelector<HTMLElement>(".cl-sx-strip");
     const view: StripView | undefined = exited && s ? stripOf(rec, s) : refusal && !s ? refusedStrip(rec, refusal) : undefined;
-    paintStrip(body, view);
+    if (view) {
+      if (!strip) {
+        strip = el("div", "cl-sx-strip ui-pill");
+        strip.setAttribute("role", "group");
+        body.append(strip);
+      }
+      // Rebuilt only when what it says changes, so a refresh never resets a hover or a press on it.
+      if (strip.dataset.signature !== view.signature) {
+        strip.dataset.signature = view.signature;
+        strip.dataset.result = view.result;
+        strip.setAttribute("aria-label", view.label);
+        const mark = el("span", "ui-mark");
+        mark.dataset.mark = view.result === "ended" ? "ended" : view.result === "ok" ? "ok" : "fail";
+        const text = el("span", "cl-sx-strip-text", view.text);
+        const nodes: HTMLElement[] = [mark, text];
+        if (view.action) {
+          const act = el("button", "cl-sx-again");
+          act.type = "button";
+          act.innerHTML = `${icon(view.action.icon)}<span>${view.action.label}</span>`;
+          act.addEventListener("click", view.action.run);
+          nodes.push(act);
+        }
+        const dismiss = button("cl-sx-dismiss", view.dismiss.label, ICON_X);
+        dismiss.dataset.tip = view.dismiss.label;
+        dismiss.addEventListener("click", view.dismiss.run);
+        strip.replaceChildren(...nodes, dismiss);
+      }
+    } else strip?.remove();
     // Another device typed last: shown scaled to fit, with a badge that offers the size back.
     const preview = body.querySelector<HTMLElement>(".cl-preview");
     const badge = body.querySelector<HTMLElement>(".cl-sx-badge");

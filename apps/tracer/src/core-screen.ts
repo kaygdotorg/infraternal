@@ -803,6 +803,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (settings?.isOpen || shortcuts.isOpen) return; // the open overlay takes this Escape itself
       // A control that holds something open (the inbox's expanded line) collapses it first (`data-owns-escape`).
       if (event.target instanceof Element && event.target.closest("[data-owns-escape]")) return;
+      // A card that takes Escape from anywhere on the page (`data-owns-escape="page"`: the version panel, which a click leaves focus outside of in Safari) closes itself first.
+      if (document.querySelector("[data-owns-escape='page']")) return;
       // An open menu or confirmation (the profile pill's menu, a sign-out question) closes first and keeps the sidebar it hangs from.
       if (palette.hidden && document.querySelector(".ui-anchored-popover, .ui-confirm-tip[data-open='true']")) return;
       // The palette owns this Escape: it stops here, so a canvas flow (the add-host wizard listens in the document's

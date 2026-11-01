@@ -2,8 +2,8 @@
 #![forbid(unsafe_code)]
 use crate::{
     frame::{
-        APPROXIMATE_SNAPSHOT, Decoder, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, QUERY_REPLIES,
-        SEQUENCED_INPUT, SESSION_OWNER, SHARED_WRITER,
+        APPROXIMATE_SNAPSHOT, CLOSE_SESSION, Decoder, Frame, FrameRef, MAX_FRAME, MULTI_WRITER,
+        QUERY_REPLIES, SEQUENCED_INPUT, SESSION_OWNER, SHARED_WRITER,
     },
     pty::Pty,
     ring::{DEFAULT_CAPACITY, Ring},
@@ -75,6 +75,10 @@ use inputs::Inputs;
 pub struct Config {
     /// A private fixed non-login readiness command; no caller-supplied shell text.
     pub readiness: bool,
+    /// Literal program arguments; empty selects the account login shell.
+    pub command: Vec<std::ffi::OsString>,
+    /// Automation has no persistent viewer; keep output until the existing one-shot exit deadline.
+    pub retain_output: bool,
     pub session: [u8; 16],
     pub uid: u32,
     pub cols: u16,
@@ -89,6 +93,8 @@ impl Config {
     pub fn new(session: [u8; 16], uid: u32) -> Self {
         Self {
             readiness: false,
+            command: Vec::new(),
+            retain_output: false,
             session,
             uid,
             cols: 80,
@@ -177,7 +183,8 @@ impl Peer {
                 | APPROXIMATE_SNAPSHOT
                 | SESSION_OWNER
                 | SHARED_WRITER
-                | QUERY_REPLIES);
+                | QUERY_REPLIES
+                | CLOSE_SESSION);
         if self.caps & SESSION_OWNER != 0 {
             if self.caps != SESSION_OWNER {
                 return Err(invalid_input());
@@ -360,6 +367,24 @@ fn private_dir(path: &Path) -> io::Result<()> {
     }
     Ok(())
 }
+
+/// Same-UID shim clients are trusted; other UIDs need root privileges to connect.
+fn shim_peer_uid_allowed(peer_uid: u32, agent_uid: u32) -> bool {
+    peer_uid == 0 || peer_uid == agent_uid
+}
+
+#[cfg(test)]
+mod peer_uid_tests {
+    use super::shim_peer_uid_allowed;
+
+    #[test]
+    fn different_uid_shim_socket_peer_is_refused() {
+        assert!(shim_peer_uid_allowed(1500, 1500));
+        assert!(shim_peer_uid_allowed(0, 1500));
+        assert!(!shim_peer_uid_allowed(65534, 1500));
+    }
+}
+
 fn socket(config: &Config) -> io::Result<(UnixListener, SocketPath)> {
     let state = if let Some(path) = &config.state {
         path.clone()
@@ -434,8 +459,13 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
     let signals = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC)
         .map_err(io::Error::from)?;
     let (listener, path) = socket(&config)?;
-    let mut pty =
-        Pty::spawn_with_readiness(config.uid, config.cols, config.rows, config.readiness)?;
+    let mut pty = Pty::spawn_with_command(
+        config.uid,
+        config.cols,
+        config.rows,
+        config.readiness,
+        &config.command,
+    )?;
     let created = u64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -579,6 +609,7 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
             && let Some(status) = exit
             && (expired
                 || (drained
+                    && !config.retain_output
                     && !owned
                     && peers
                         .iter()
@@ -673,7 +704,7 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
                 Ok((stream, _)) => {
                     let credentials =
                         getsockopt(&stream, PeerCredentials).map_err(io::Error::from)?;
-                    if (credentials.uid() == 0 || credentials.uid() == Uid::effective().as_raw())
+                    if shim_peer_uid_allowed(credentials.uid(), Uid::effective().as_raw())
                         && peers.len() < MAX_PEERS
                     {
                         stream.set_nonblocking(true)?;
@@ -702,7 +733,8 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
                                 | APPROXIMATE_SNAPSHOT
                                 | SESSION_OWNER
                                 | SHARED_WRITER
-                                | QUERY_REPLIES,
+                                | QUERY_REPLIES
+                                | CLOSE_SESSION,
                             session: config.session,
                             pid: std::process::id(),
                             cols: config.cols,
@@ -1059,6 +1091,7 @@ fn handle<'a>(
         }
         Frame::SnapshotRequest => p.request = Some(Request::Snapshot),
         Frame::Signal(signal) => pty.signal_unless_exited(signal, exited)?,
+        Frame::CloseSession if p.caps & CLOSE_SESSION != 0 => pty.close_session(exited)?,
         Frame::ExitAck if exited && p.exited_sent && p.pending.is_empty() => return Ok(true),
         Frame::Error(..) => {}
         _ => return Err(invalid()),

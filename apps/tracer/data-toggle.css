@@ -1,0 +1,6 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* The dev-only data toggle of the mockups (mock/data-mode.ts). Loaded in the preview build only; the product has none of it. */
+/* Small, plain chrome at the bottom centre, outside the design under test; the capsule tabs are the shared ones. */
+.cl-data-toggle { position: absolute; z-index: 30; bottom: calc(6px + env(safe-area-inset-bottom)); left: 50%; translate: -50% 0; max-width: calc(100% - 16px); }
+.cl-data-toggle .ui-tabs { --ui-tab-h: 26px; font-size: 11px; background: color-mix(in oklab, var(--overlay-solid, var(--bg)) 92%, transparent); }
+.cl-data-toggle .ui-tab { padding: 0 9px; }

@@ -1971,6 +1971,28 @@ where
         }
         Frame::Call {
             call_id,
+            action_id: "terminal.startup",
+            input_json,
+        } if stream_id == CONTROL_STREAM
+            && input_json.len() <= 8192
+            && pending_plugin_calls.len() < MAX_PENDING_PLUGIN_CALLS =>
+        {
+            let state = state.clone();
+            let user = user_id.to_owned();
+            let token = session_token.to_owned();
+            let input = input_json.to_vec();
+            pending_plugin_calls.spawn(async move {
+                let result = while_authorized_value(&state, &user, &token, false, async {
+                    Ok(startup_call(&state, &user, &input).await)
+                })
+                .await
+                .unwrap_or(Err(AgentError::Unavailable));
+                (call_id, result)
+            });
+            Ok(())
+        }
+        Frame::Call {
+            call_id,
             action_id,
             input_json,
         } if stream_id == CONTROL_STREAM => {
@@ -2731,6 +2753,111 @@ async fn failure_reason(
 #[serde(deny_unknown_fields)]
 struct BrowserTerminalOpen {
     host_id: Option<uuid::Uuid>,
+}
+
+/// Startup-file authority follows the same account-owned session and host as terminal attachment.
+async fn startup_call(
+    state: &WebSocketState,
+    user: &str,
+    input: &[u8],
+) -> Result<Vec<u8>, AgentError> {
+    use crate::terminal_startup::{self, Request};
+    let invalid = || AgentError::Rejected;
+    if input.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
+        return Err(invalid());
+    }
+    let request = Request::parse(input).map_err(|_| invalid())?;
+    let key =
+        |host: Option<uuid::Uuid>| host.map_or_else(|| "local".to_owned(), |id| id.to_string());
+    let (session, op, proposal, confirmed) = match request {
+        Request::Get { host_id } | Request::Set { host_id, .. } => {
+            if let Some(host) = host_id {
+                let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL)")
+                    .bind(host.as_bytes().as_slice()).bind(user).fetch_one(&state.pool).await.map_err(|_| invalid())?;
+                if !owned {
+                    return Err(invalid());
+                }
+            }
+            if let Request::Set {
+                global, enabled, ..
+            } = request
+            {
+                if global && (host_id.is_some() || enabled.is_none()) {
+                    return Err(invalid());
+                }
+                let host_key = key(host_id);
+                terminal_startup::save(
+                    &state.pool,
+                    user,
+                    if global { "*" } else { &host_key },
+                    enabled,
+                )
+                .await
+                .map_err(|()| invalid())?;
+            }
+            let (global, host) = terminal_startup::preferences(&state.pool, user, &key(host_id))
+                .await
+                .map_err(|()| invalid())?;
+            return serde_json::to_vec(&json!({"global_enabled":global,"host_override":host,"enabled":host.unwrap_or(global)})).map_err(|_| invalid());
+        }
+        Request::Inspect { session } => (session, "inspect", None, false),
+        Request::Apply {
+            session,
+            proposal,
+            confirmed,
+        } => (session, "apply", Some(proposal), confirmed),
+        Request::Undo {
+            session,
+            proposal,
+            confirmed,
+        } => (session, "undo", Some(proposal), confirmed),
+    };
+    let host = session_host_id(&state.pool, user, session.as_bytes())
+        .await
+        .map_err(|()| invalid())?
+        .ok_or_else(invalid)?;
+    let host_key = key(host);
+    if op == "inspect" {
+        if !terminal_startup::pending(&state.pool, user, &host_key)
+            .await
+            .map_err(|()| invalid())?
+            || !startup_session_untyped(&state.pool, user, session.as_bytes()).await?
+        {
+            return Ok(b"{}".to_vec());
+        }
+    } else if !confirmed {
+        return Err(invalid());
+    }
+    let agent = terminal_agent(state, user, host)
+        .await
+        .map_err(|()| invalid())?;
+    let input = serde_json::to_vec(
+        &json!({"op":op,"session":session,"proposal":proposal,"confirmed":confirmed}),
+    )
+    .map_err(|_| invalid())?;
+    let output = agent.call("terminal.startup".to_owned(), input).await?;
+    if op == "inspect" {
+        let value: serde_json::Value = serde_json::from_slice(&output).map_err(|_| invalid())?;
+        if value.get("multiplexer").is_none()
+            || !startup_session_untyped(&state.pool, user, session.as_bytes()).await?
+            || !terminal_startup::claim(&state.pool, user, &host_key)
+                .await
+                .map_err(|()| invalid())?
+        {
+            return Ok(b"{}".to_vec());
+        }
+    }
+    Ok(output)
+}
+
+/// A command typed by a person must not be mistaken for an automatic startup.
+async fn startup_session_untyped(
+    pool: &SqlitePool,
+    user: &str,
+    session: &[u8; 16],
+) -> Result<bool, AgentError> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM terminal_sessions WHERE id=? AND user_id=? AND closed_at IS NULL AND created_at>=unixepoch()-10 AND input_acked_u64=X'0000000000000000')")
+        .bind(session.as_slice()).bind(user).fetch_one(pool).await.map_err(|_| AgentError::Unavailable)
 }
 
 #[derive(Deserialize)]

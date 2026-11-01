@@ -21,9 +21,32 @@ use std::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
+// Broad TERM compatibility, true colour and the cooperative startup marker [D315].
+const TERMINAL_ENVIRONMENT: [(&str, &str); 3] = [
+    ("TERM", "xterm-256color"),
+    ("COLORTERM", "truecolor"),
+    ("INFRATERNAL_SESSION", "1"),
+];
+
 pub struct Pty {
     pub master: File,
     pub child: Child,
+}
+
+/// Replacing a startup file must not silently discard ACLs or other security metadata.
+pub(crate) fn file_has_attributes(file: &File) -> io::Result<bool> {
+    // SAFETY: a null buffer and zero size query only the required list length;
+    // the borrowed descriptor remains open and the kernel retains no pointer.
+    let length = unsafe { nix::libc::flistxattr(file.as_raw_fd(), std::ptr::null_mut(), 0) };
+    if length >= 0 {
+        return Ok(length != 0);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(nix::libc::ENOTSUP) {
+        Ok(false)
+    } else {
+        Err(error)
+    }
 }
 fn errno(error: nix::errno::Errno) -> io::Error {
     io::Error::from_raw_os_error(error as i32)
@@ -117,11 +140,21 @@ impl Pty {
     pub fn spawn(uid: u32, cols: u16, rows: u16) -> io::Result<Self> {
         Self::spawn_with_readiness(uid, cols, rows, false)
     }
+    #[cfg(any(test, feature = "process-per-user"))]
     pub fn spawn_with_readiness(
         uid: u32,
         cols: u16,
         rows: u16,
         readiness: bool,
+    ) -> io::Result<Self> {
+        Self::spawn_with_command(uid, cols, rows, readiness, &[])
+    }
+    pub fn spawn_with_command(
+        uid: u32,
+        cols: u16,
+        rows: u16,
+        readiness: bool,
+        program: &[std::ffi::OsString],
     ) -> io::Result<Self> {
         let user = User::from_uid(Uid::from_raw(uid))
             .map_err(errno)?
@@ -179,26 +212,14 @@ impl Pty {
         } else {
             user.shell.as_path()
         };
-        let mut command = Command::new(shell);
-        let login_name = format!(
-            "-{}",
-            shell.file_name().unwrap_or_default().to_string_lossy()
-        );
-        if readiness {
-            // Wait for attachment input without invoking any login rc files.
-            command.args(["-c", "read -r line; printf 'infraternal-ready\\n'"]);
-        } else {
-            command.arg0(login_name);
-        }
+        let mut command = session_command(shell, readiness, program);
         command
             .env_clear()
             .env("HOME", &user.dir)
             .env("USER", &user.name)
             .env("LOGNAME", &user.name)
             .env("SHELL", shell)
-            .env("TERM", "xterm-256color")
-            // Keep TERM broadly compatible while separately advertising 24-bit colour.
-            .env("COLORTERM", "truecolor")
+            .envs(TERMINAL_ENVIRONMENT)
             .env("PATH", "/usr/local/bin:/usr/bin:/bin")
             .stdin(Stdio::from(slave.try_clone()?))
             .stdout(Stdio::from(slave.try_clone()?))
@@ -268,6 +289,17 @@ impl Pty {
         } else {
             self.signal(number)
         }
+    }
+    /// Target the owned shell group even while a job owns the foreground PTY.
+    /// Child caches a reaped status. Check it even before output has drained:
+    /// a live or unreaped child reserves its PID until this loop can reap it.
+    pub(crate) fn close_session(&mut self, exited: bool) -> io::Result<()> {
+        if exited || self.child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        let group =
+            nix::unistd::Pid::from_raw(i32::try_from(self.child.id()).map_err(io::Error::other)?);
+        killpg(group, Signal::SIGHUP).map_err(errno)
     }
     pub fn signal(&self, number: u8) -> io::Result<()> {
         let signal = allowed_signal(number)?;
@@ -782,6 +814,11 @@ mod child_environment_tests {
                 .iter()
                 .any(|(name, value)| name == b"COLORTERM" && value == b"truecolor")
         );
+        assert!(
+            actual
+                .iter()
+                .any(|(name, value)| name == b"INFRATERNAL_SESSION" && !value.is_empty())
+        );
         assert!(actual.iter().all(|(name, _)| {
             name == b"HOME"
                 || name == b"USER"
@@ -789,6 +826,7 @@ mod child_environment_tests {
                 || name == b"SHELL"
                 || name == b"TERM"
                 || name == b"COLORTERM"
+                || name == b"INFRATERNAL_SESSION"
                 || name == b"PATH"
                 || name == b"ZDOTDIR"
                 || name == b"LANG"
@@ -800,3 +838,25 @@ mod child_environment_tests {
 #[cfg(feature = "process-per-user")]
 #[path = "pty_handoff.rs"]
 pub(crate) mod handoff;
+
+/// Literal programs bypass login-shell argument conventions; the shell path is still exported.
+fn session_command(shell: &Path, readiness: bool, program: &[std::ffi::OsString]) -> Command {
+    let mut command = Command::new(
+        program
+            .first()
+            .map_or(shell.as_os_str(), std::ffi::OsString::as_os_str),
+    );
+    let login_name = format!(
+        "-{}",
+        shell.file_name().unwrap_or_default().to_string_lossy()
+    );
+    if readiness {
+        // Wait for attachment input without invoking any login rc files.
+        command.args(["-c", "read -r line; printf 'infraternal-ready\\n'"]);
+    } else if program.is_empty() {
+        command.arg0(login_name);
+    } else {
+        command.args(&program[1..]);
+    }
+    command
+}

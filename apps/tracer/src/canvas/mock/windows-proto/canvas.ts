@@ -494,6 +494,8 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     popover = openDetailsPopover(stage, target.card.pill, {
       windowId: target.id,
       read: () => prototypeFacts(target.host, target.session, target.live ? hostName : target.host.name, icons),
+      // `?removal=1` shows the product's destructive row so its look is reviewable here; the prototype has no host to remove.
+      ...(new URLSearchParams(location.search).has("removal") ? { action: { label: "Remove host", hint: "Remove a host and uninstall its infraternal agent.", run: () => undefined } } : {}),
     }, source, () => { popover = undefined; });
   };
 

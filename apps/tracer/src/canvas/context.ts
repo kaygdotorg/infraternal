@@ -146,6 +146,7 @@ export interface Adapters {
   authority?: import("./addhost/authority-unlock").AuthorityControl;
   /** Streams of app windows and screens from machines (D207, D208); absent in mockups, and the feature is then not offered at all. */
   appWindows?: AppWindowsAdapter;
+  startupHints?: import("./sessions/startup-hints").StartupHints;
 }
 
 export interface Ctx {

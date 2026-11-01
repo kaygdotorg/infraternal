@@ -47,7 +47,6 @@ rust_check_static_binary() {
     local expected_machine
     local elf_header
     local program_headers
-    local build_host
 
     if [[ ! -x "$binary" ]]; then
         printf 'expected executable not found: %s\n' "$binary" >&2
@@ -69,7 +68,6 @@ rust_check_static_binary() {
     fi
 
     # Keep the last merged measurements for per-slice attribution, not approval.
-    build_host="$(uname -m)"
     case "$target" in
         x86_64-unknown-linux-musl)
             baseline_bytes=21443824
@@ -80,8 +78,7 @@ rust_check_static_binary() {
             expected_machine='AArch64'
             ;;
         *)
-            printf 'no static binary size baseline configured for host %s and target %s\n' \
-                "$build_host" "$target" >&2
+            printf 'no static binary size baseline configured for target: %s\n' "$target" >&2
             return 1
             ;;
     esac
@@ -202,7 +199,7 @@ rust_check_static_key_memory() {
         *)
             # Kernel page protection must be checked on the native architecture;
             # an emulator's successful syscall result is not kernel evidence.
-            printf 'key memory: %s runtime not checked (host %s; native execution required)\n' "$target" "$host"
+            printf 'SKIP key memory: %s (host %s; native execution required)\n' "$target" "$host"
             return 0
             ;;
     esac
@@ -217,9 +214,12 @@ rust_static_build_check() {
     local target
     local targets=("x86_64-unknown-linux-musl" "aarch64-unknown-linux-musl")
     local target_dir="${CARGO_TARGET_DIR:-target}"
-    local host="$(uname -m)"
-    local x86_binary="${target_dir}/x86_64-unknown-linux-musl/release/infraternal"
     local native_binary
+    case "$(uname -m)" in
+        x86_64) native_binary="${target_dir}/x86_64-unknown-linux-musl/release/infraternal" ;;
+        aarch64) native_binary="${target_dir}/aarch64-unknown-linux-musl/release/infraternal" ;;
+        *) printf 'unsupported static build host: %s\n' "$(uname -m)" >&2; return 1 ;;
+    esac
     local failed=0
 
     for tool in cargo file readelf stat prlimit python3 bun; do
@@ -238,10 +238,10 @@ rust_static_build_check() {
     for target in "${targets[@]}"; do
         scripts/static-cargo build --locked --release --package infraternal --target "$target" || return $?
         if [[ "$target" == x86_64-unknown-linux-musl ]]; then
-            if [[ "$host" == x86_64 ]]; then
+            if [[ "$(uname -m)" == x86_64 ]]; then
                 CARGO_TARGET_DIR="$target_dir" python3 scripts/test-openssl-avx512-gcm.py || return $?
             else
-                printf 'x86_64 AES-GCM vector runtime check skipped on host %s\n' "$host"
+                printf 'SKIP x86 AES-GCM runtime vector: host %s; native x86_64 execution required\n' "$(uname -m)"
             fi
         fi
         # Keep every artifact defect, but still exercise both shipping providers.
@@ -252,14 +252,6 @@ rust_static_build_check() {
     CARGO_TARGET_DIR="$target_dir" python3 scripts/test-static-size.py || failed=1
     # Inspect both freshly built images; iterate never qualifies stale artifacts.
     CARGO_TARGET_DIR="$target_dir" bun test scripts/release/static-metadata-review.test.ts || failed=1
-    case "$host" in
-        x86_64) native_binary="$x86_binary" ;;
-        aarch64) native_binary="${target_dir}/aarch64-unknown-linux-musl/release/infraternal" ;;
-        *)
-            printf 'native CLI smoke checks have no binary for host architecture: %s\n' "$host" >&2
-            return 1
-            ;;
-    esac
     rust_check_cli_stub "$native_binary" "server" || failed=1
     rust_check_cli_group "$native_binary" "agent" || failed=1
     return "$failed"
@@ -289,14 +281,7 @@ rust_verify_fast() {
     rust_run_gate "cargo-deny" cargo deny check
     rust_run_gate "gate architecture" python3 scripts/test-verify-architecture.py
     if [[ "$mode" == final ]]; then
-        # The x86 build VM checks both shipping targets. This gate also executes
-        # x86 crypto/CLI probes, so cross-compilation alone cannot qualify it on ARM.
-        if [[ "$(uname -m)" == x86_64 ]]; then
-            rust_run_gate "static builds" rust_static_build_check
-        else
-            printf '\nstatic builds: skipped (requires the x86_64 build VM; host %s)\n' "$(uname -m)"
-            RUST_GATE_ROWS+=("static builds|SKIP (x86)")
-        fi
+        rust_run_gate "static builds" rust_static_build_check
     fi
     rust_print_summary
 
