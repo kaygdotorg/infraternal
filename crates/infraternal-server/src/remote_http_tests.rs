@@ -124,8 +124,11 @@ async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() 
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    let joined: JoinInvitation =
+    let published: Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(published["public_origin"], "https://auth.example.test");
+    assert!(published.get("endpoint").is_none());
+    let joined: JoinInvitation = serde_json::from_value(published).unwrap();
     assert_eq!(joined.execution_uid, 1002);
     assert_eq!(
         joined.ca_der,

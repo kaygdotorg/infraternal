@@ -364,6 +364,7 @@ async fn issue_invitation(
         host_id: request.host_id,
         mode: request.mode,
         execution_uid: request.execution_uid,
+        public_origin: api.auth.origin().to_owned(),
         token: token.secret().to_owned(),
         ca_der: B64.encode(
             api.source
@@ -380,7 +381,7 @@ async fn issue_invitation(
             .map(|leaf| leaf.to_der().map(|der| B64.encode(der)))
             .transpose()
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
-        endpoint: api.endpoint.endpoint,
+        endpoint: Some(api.endpoint.endpoint),
         server_name: api.endpoint.server_name,
     };
     transaction

@@ -8,7 +8,7 @@ use openssl::{
     ssl::{SslConnector, SslMethod, SslVerifyMode},
     x509::{X509, store::X509StoreBuilder},
 };
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::{
     io::Write,
     process::{Child, Command, Stdio},
@@ -240,11 +240,15 @@ async fn fixture_at_with_lock(
             .unlock_from(&Administrator(material.clone()))
             .unwrap();
     }
-    let origin = "https://localhost:4701";
+    let origin = if address.port() == 443 {
+        "https://localhost".to_owned()
+    } else {
+        format!("https://localhost:{}", address.port())
+    };
     let config = ServerConfig {
         listen: address,
         data_dir: server_data,
-        public_origin: origin.into(),
+        public_origin: origin,
         web_root: std::env::var_os("INFRATERNAL_REMOTE_BROWSER_PROOF")
             .map(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/tracer/dist")),
         tls: Some(TlsFiles {
@@ -312,7 +316,8 @@ async fn fixture_at_with_lock(
 }
 
 async fn browser(address: SocketAddr, root: &X509, origin: &str, cookie: &str) -> Browser {
-    let mut request = "wss://localhost:4701/v1/ws".into_client_request().unwrap();
+    let websocket_url = format!("wss://localhost:{}/v1/ws", address.port());
+    let mut request = websocket_url.into_client_request().unwrap();
     request
         .headers_mut()
         .insert("origin", origin.parse().unwrap());
@@ -344,6 +349,46 @@ async fn browser(address: SocketAddr, root: &X509, origin: &str, cookie: &str) -
     browser
 }
 
+#[tokio::test]
+#[ignore = "requires exclusive loopback port 4701"]
+async fn agent_websocket_upgrade_uses_the_app_listener_and_starts_key_proof() {
+    let directory = Directory::new();
+    let fixture = fixture(&directory).await;
+    infraternal_agent::remote_websocket::preflight(
+        "https://localhost:4701",
+        Some(&fixture.root),
+        false,
+    )
+    .await
+    .expect("target preflight must complete the app's WebSocket challenge");
+    let request = "wss://localhost:4701/remote/agent"
+        .into_client_request()
+        .unwrap();
+    // This TLS connector has ordinary server trust and no client certificate.
+    // Agent identity must be proved after the application's WebSocket upgrade.
+    let upgraded =
+        tokio_tungstenite::client_async(request, tls(fixture.address, &fixture.root).await).await;
+    assert!(
+        upgraded.is_ok(),
+        "the app listener must upgrade the agent WebSocket: {:?}",
+        upgraded.err()
+    );
+    let (mut socket, _) = upgraded.unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let Message::Text(challenge) = message else {
+        panic!("the app listener did not send its agent key challenge");
+    };
+    let challenge: infraternal_plugin_remote::agent_link::AgentLinkChallenge =
+        serde_json::from_str(&challenge).unwrap();
+    assert_eq!(challenge.message_type, "challenge");
+    assert_eq!(B64.decode(challenge.nonce).unwrap().len(), 32);
+    socket.close(None).await.unwrap();
+}
+
 async fn open_remote(browser: &mut Browser, host: uuid::Uuid, started: Instant) -> uuid::Uuid {
     open_remote_with_budget(browser, host, started, Duration::from_secs(10)).await
 }
@@ -355,9 +400,24 @@ async fn open_remote_with_budget(
     started: Instant,
     budget: Duration,
 ) -> uuid::Uuid {
+    try_open_remote_with_budget(browser, host, started, budget)
+        .await
+        .expect("remote host did not register")
+}
+
+async fn try_open_remote_with_budget(
+    browser: &mut Browser,
+    host: uuid::Uuid,
+    started: Instant,
+    budget: Duration,
+) -> Option<uuid::Uuid> {
     // Retry only host admission, without creating any successful duplicate PTYs.
+    let mut first_refusal = None;
     loop {
-        assert!(started.elapsed() < budget, "remote host did not register");
+        if started.elapsed() >= budget {
+            eprintln!("remote open first refusal: {first_refusal:?}");
+            return None;
+        }
         let input = serde_json::json!({"host_id":host}).to_string();
         send(
             browser,
@@ -370,9 +430,19 @@ async fn open_remote_with_budget(
         )
         .await;
         let wire = next(browser).await;
-        if let Frame::Result { ok: true, json, .. } = decode_muxed_frame(&wire).unwrap().frame {
-            let result: serde_json::Value = serde_json::from_slice(json).unwrap();
-            return uuid::Uuid::parse_str(result["session_id"].as_str().unwrap()).unwrap();
+        match decode_muxed_frame(&wire).unwrap().frame {
+            Frame::Result { ok: true, json, .. } => {
+                let result: serde_json::Value = serde_json::from_slice(json).unwrap();
+                return Some(
+                    uuid::Uuid::parse_str(result["session_id"].as_str().unwrap()).unwrap(),
+                );
+            }
+            Frame::Result {
+                ok: false, json, ..
+            } if first_refusal.is_none() => {
+                first_refusal = Some(String::from_utf8_lossy(json).into_owned());
+            }
+            _ => {}
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -390,6 +460,25 @@ async fn until(browser: &mut Browser, output: &mut Vec<u8>, cursor: &mut u64, ma
             }
         }
     }
+}
+
+/// Wait for the shell's first output without assuming which shell owns the account.
+async fn first_terminal_output(browser: &mut Browser, output: &mut Vec<u8>, cursor: &mut u64) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let wire = next(browser).await;
+            if let Frame::Output { out_seq, bytes } = decode_muxed_frame(&wire).unwrap().frame {
+                assert_eq!(out_seq, *cursor, "lost or duplicated remote output");
+                *cursor += bytes.len() as u64;
+                output.extend_from_slice(bytes);
+                if !bytes.is_empty() {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("terminal shell produced no initial output");
 }
 
 /// A missing socket path is insufficient proof: a failed helper could leave detached shims alive.
@@ -460,7 +549,7 @@ async fn idle_canary(process: &Process) {
 }
 
 /// A registered, connected host still belongs only to its durable owner.
-async fn foreign_owner_cannot_open(fixture: &Fixture, host: uuid::Uuid) {
+async fn foreign_owner_cannot_open(fixture: &Fixture, host: uuid::Uuid, origin: &str) {
     let before: i64 = sqlx::query_scalar("SELECT count(*) FROM terminal_sessions")
         .fetch_one(&fixture.pool)
         .await
@@ -471,13 +560,7 @@ async fn foreign_owner_cannot_open(fixture: &Fixture, host: uuid::Uuid) {
     let now = unix_seconds().unwrap();
     sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,'viewer','fixture',?,?,1)")
         .bind(crate::auth::hash(&cookie)).bind(now+3600).bind(now).execute(&fixture.pool).await.unwrap();
-    let mut client = browser(
-        fixture.address,
-        &fixture.root,
-        "https://localhost:4701",
-        &cookie,
-    )
-    .await;
+    let mut client = browser(fixture.address, &fixture.root, origin, &cookie).await;
     let input = serde_json::json!({"host_id":host}).to_string();
     send(
         &mut client,
@@ -565,7 +648,7 @@ async fn browser_proof(fixture: &Fixture, host: uuid::Uuid, session: uuid::Uuid)
 }
 
 /// Keep join and restart process isolation identical, including the shell fixture profile.
-fn cli(binary: &Path, directory: &Directory, join: bool) -> Process {
+fn cli(binary: &Path, directory: &Directory, join: bool, public_origin: &str) -> Process {
     let mut command = Command::new(binary);
     command
         .args(["agent", "--data"])
@@ -573,7 +656,9 @@ fn cli(binary: &Path, directory: &Directory, join: bool) -> Process {
         .arg("--state")
         .arg(directory.0.join("s"));
     if join {
-        command.args(["join", "https://localhost:4701/remote/join"]);
+        command
+            .arg("join")
+            .arg(format!("{public_origin}/remote/join"));
     } else {
         command.arg("run");
     }
@@ -604,6 +689,8 @@ fn cli(binary: &Path, directory: &Directory, join: bool) -> Process {
 }
 
 /// Restart only the supervising process; preserve its enrolled identity and live shim.
+// The proof passes the live fixture state directly so restart behavior stays visible in one place.
+#[allow(clippy::too_many_arguments)]
 async fn restart_proof(
     directory: &Directory,
     binary: &Path,
@@ -612,6 +699,7 @@ async fn restart_proof(
     output: &mut Vec<u8>,
     cursor: &mut u64,
     in_seq: u64,
+    public_origin: &str,
 ) {
     if std::env::var_os("INFRATERNAL_REMOTE_RESTART_PROOF").is_none() {
         return;
@@ -633,7 +721,7 @@ async fn restart_proof(
     // The shim must produce END while its supervising process is absent.
     tokio::time::sleep(Duration::from_millis(650)).await;
     assert_eq!(remaining_shims(&directory.0.join("s")), 1);
-    *child = cli(binary, directory, false);
+    *child = cli(binary, directory, false, public_origin);
     let restarted = Instant::now();
     until(browser, output, cursor, b"RESTART_END").await;
     println!(
@@ -651,21 +739,59 @@ async fn remote_cli_enrollment_and_browser_terminal_two_processes() {
         std::env::var_os("INFRATERNAL_REMOTE_TEST_BINARY").expect("real CLI binary required"),
     );
     assert!(binary.is_file());
+    remote_cli_enrollment_and_browser_terminal_at(
+        &binary,
+        "127.0.0.1:4701".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "Run via scripts/verify-addhost-https-namespace with TCP/UDP 7443 blackholed and app HTTPS on 443"]
+async fn remote_cli_enrollment_and_browser_terminal_443_without_agent_port() {
+    let binary = PathBuf::from(
+        std::env::var_os("INFRATERNAL_REMOTE_TEST_BINARY").expect("real CLI binary required"),
+    );
+    assert!(binary.is_file());
     assert_ne!(
         nix::unistd::Uid::effective().as_raw(),
         0,
         "rootless fixture required"
     );
+    remote_cli_enrollment_and_browser_terminal_at(
+        &binary,
+        "127.0.0.1:443".parse().unwrap(),
+        "127.0.0.1:7443".parse().unwrap(),
+    )
+    .await;
+}
+
+/// Exercise enrollment and a real PTY through a chosen public app-listener port.
+// Keep the complete cross-process proof together so its ordering remains auditable.
+#[allow(clippy::too_many_lines)]
+async fn remote_cli_enrollment_and_browser_terminal_at(
+    binary: &Path,
+    address: SocketAddr,
+    endpoint: SocketAddr,
+) {
     let directory = Directory::new();
-    let mut fixture = fixture(&directory).await;
+    let mut fixture = fixture_at(&directory, address, endpoint).await;
     let root = fixture.root.clone();
     let cookie = fixture.cookie.clone();
     let address = fixture.address;
-    let origin = "https://localhost:4701";
+    let origin = if address.port() == 443 {
+        "https://localhost".to_owned()
+    } else {
+        format!("https://localhost:{}", address.port())
+    };
     let host = uuid::Uuid::new_v4();
-    let invitation = invitation(address, &root, origin, &cookie, host).await;
+    let owner_marker = directory.0.join(".bootstrap-owner");
+    std::fs::write(&owner_marker, format!("{}\n", host.simple())).unwrap();
+    std::fs::set_permissions(&owner_marker, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let invitation = invitation(address, &root, &origin, &cookie, host).await;
     let started = Instant::now();
-    let mut child = cli(&binary, &directory, true);
+    let mut child = cli(binary, &directory, true, &origin);
     child
         .0
         .stdin
@@ -674,8 +800,23 @@ async fn remote_cli_enrollment_and_browser_terminal_two_processes() {
         .write_all(&invitation)
         .unwrap();
     drop(invitation);
-    let mut browser = browser(address, &root, origin, &cookie).await;
-    let session = open_remote(&mut browser, host, started).await;
+    let mut browser = browser(address, &root, &origin, &cookie).await;
+    let session = try_open_remote_with_budget(
+        &mut browser,
+        host,
+        started,
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap_or_else(|| {
+        let status = child.0.try_wait().ok().flatten();
+        let child_exited = status.is_some();
+        let child_exit_code = status.and_then(|status| status.code());
+        let identity_published = directory.0.join("data/identity.json").is_file();
+        panic!(
+            "remote host did not register; child_exited={child_exited} child_exit_code={child_exit_code:?} identity_published={identity_published}"
+        );
+    });
     let join_us = started.elapsed().as_micros();
     let stored: Vec<u8> =
         sqlx::query_scalar("SELECT remote_host_id FROM terminal_sessions WHERE id=?")
@@ -684,6 +825,11 @@ async fn remote_cli_enrollment_and_browser_terminal_two_processes() {
             .await
             .unwrap();
     assert_eq!(stored, host.as_bytes());
+    let identity: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.0.join("data/identity.json")).unwrap())
+            .unwrap();
+    assert_eq!(identity["public_origin"], origin);
+    assert!(identity["endpoint"].is_null());
     send(
         &mut browser,
         1,
@@ -697,7 +843,7 @@ async fn remote_cli_enrollment_and_browser_terminal_two_processes() {
     send(&mut browser, 1, &Frame::Credit { bytes: 1024 * 1024 }).await;
     let mut output = Vec::new();
     let mut cursor = 0;
-    until(&mut browser, &mut output, &mut cursor, b"shim-test").await;
+    first_terminal_output(&mut browser, &mut output, &mut cursor).await;
     idle_canary(&child).await;
     let entered = b"printf 'REMOTE_%s\\n' OK\n";
     let keystroke = Instant::now();
@@ -716,16 +862,17 @@ async fn remote_cli_enrollment_and_browser_terminal_two_processes() {
         keystroke.elapsed().as_micros(),
         std::fs::read_to_string("/proc/loadavg").unwrap().trim()
     );
-    foreign_owner_cannot_open(&fixture, host).await;
+    foreign_owner_cannot_open(&fixture, host, &origin).await;
     browser_proof(&fixture, host, session).await;
     restart_proof(
         &directory,
-        &binary,
+        binary,
         &mut child,
         &mut browser,
         &mut output,
         &mut cursor,
         entered.len() as u64,
+        &origin,
     )
     .await;
     drop(browser);

@@ -305,7 +305,7 @@ async fn normal_cli_cold_start_keeps_enrolled_remote_terminal_while_signing_lock
         host,
     )
     .await;
-    let mut child = cli(&binary, &directory, true);
+    let mut child = cli(&binary, &directory, true, "https://localhost:4701");
     child
         .0
         .stdin
@@ -408,7 +408,7 @@ async fn release_transition_recovers_enrolled_host_after_long_outage() {
         host,
     )
     .await;
-    let mut child = cli(&enrolled, &directory, true);
+    let mut child = cli(&enrolled, &directory, true, "https://localhost:4701");
     child
         .0
         .stdin

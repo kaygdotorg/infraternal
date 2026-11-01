@@ -111,10 +111,14 @@ fn enrolled(
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let ca = crate::remote_tls::tests::root();
     let identity = crate::remote_client::RemoteIdentity {
+        host_id: uuid::Uuid::new_v4(),
         identity: crate::remote_tls::tests::leaf(&ca, false),
         roots: vec![ca.certificate],
-        endpoint: listener.local_addr().unwrap(),
+        endpoint: Some(listener.local_addr().unwrap()),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_root: None,
+        https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
     };
     tokio::spawn(crate::plugin_control::TEST_FACTORY.scope(

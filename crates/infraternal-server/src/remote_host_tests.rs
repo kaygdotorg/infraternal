@@ -345,7 +345,7 @@ async fn o1_rootless_join_terminal_and_cleanup() {
         // this diagnoses real TCP/mTLS execution, never direct QUIC reachability.
         let mut private: crate::remote_http::JoinInvitation =
             serde_json::from_slice(&invitation).unwrap();
-        private.endpoint = "127.0.0.1:7443".parse().unwrap();
+        private.endpoint = Some("127.0.0.1:7443".parse().unwrap());
         serde_json::to_vec(&private).unwrap()
     } else {
         invitation

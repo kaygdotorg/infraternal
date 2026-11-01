@@ -18,6 +18,8 @@ pub mod remote_client;
 pub mod remote_cursor;
 mod rootless_sessions;
 #[cfg(feature = "remote")]
+pub mod remote_websocket;
+#[cfg(feature = "remote")]
 pub use infraternal_plugin_remote::remote_native;
 #[cfg(feature = "remote")]
 pub use infraternal_plugin_remote::remote_quic;

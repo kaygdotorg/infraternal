@@ -26,8 +26,19 @@ use zeroize::{Zeroize, Zeroizing};
 struct StoredIdentity {
     host_id: uuid::Uuid,
     execution_uid: u32,
-    endpoint: std::net::SocketAddr,
+    /// Legacy direct endpoint; migrated identities use only `public_origin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    endpoint: Option<std::net::SocketAddr>,
     server_name: String,
+    /// Public application origin used for enrollment and the server link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    public_origin: Option<String>,
+    /// Optional independently pinned public HTTPS issuer/leaf.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    https_der: Option<String>,
+    /// Public HTTPS uses operating-system trust roots.
+    #[serde(default)]
+    https_system_roots: bool,
     ca_der: String,
     certificate_der: String,
     key_der: String,
@@ -48,6 +59,10 @@ pub(crate) enum Failure {
     Connect,
     /// The server's certificate did not verify.
     Tls,
+    /// The app listener or its proxy did not complete the expected upgrade.
+    Upgrade,
+    /// The upgraded route did not send a valid app-level challenge.
+    Challenge,
 }
 
 impl std::fmt::Display for Failure {
@@ -55,8 +70,10 @@ impl std::fmt::Display for Failure {
         f.write_str(match self {
             Self::Refused => "remote infraternal agent operation refused",
             Self::Dns(sentence) => sentence,
-            Self::Connect => "Join connection failed.",
-            Self::Tls => "Join TLS verification failed.",
+            Self::Connect => "The infraternal agent on this host cannot reach the server over HTTPS. Allow outbound TCP 443 to the server's public origin, then try again.",
+            Self::Tls => "The infraternal agent on this host could not verify the server's HTTPS certificate. Check the public certificate chain and server name, then try again.",
+            Self::Upgrade => "The infraternal agent on this host reached the server over HTTPS, but the server did not accept its WebSocket. Deploy a server with the /remote/agent route and allow WebSocket upgrades through the proxy, then try again.",
+            Self::Challenge => "The server opened the WebSocket but did not send a valid infraternal agent challenge. Deploy a compatible server build and try again.",
         })
     }
 }
@@ -92,6 +109,10 @@ pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()>
         return Err(refused());
     }
     let invitation: JoinInvitation = serde_json::from_slice(input).map_err(|_| refused())?;
+    let (public_origin, server_name) = invitation_origin(&invitation)?;
+    if !invitation.public_origin.is_empty() && join_origin(url)? != public_origin {
+        return Err(refused());
+    }
     let uid = nix::unistd::Uid::effective().as_raw();
     if uid != invitation.execution_uid || (invitation.mode == Mode::Rootless) == (uid == 0) {
         return Err(refused());
@@ -106,7 +127,7 @@ pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()>
     // real guard is the response check below: the issued certificate must be
     // for this key and chain to the invited root, and the stored identity is
     // replaced only after that.
-    let previous = enrolled_key(data, &invitation, uid)?;
+    let previous = enrolled_key(data, &invitation, uid, &server_name)?;
     let (key, snapshot) = match previous {
         Some((key, snapshot)) => (key, Some(snapshot)),
         None => (PKey::generate_ed25519().map_err(|_| refused())?, None),
@@ -142,6 +163,7 @@ pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()>
     } else {
         Some(https.as_ref().unwrap_or(&root))
     };
+    preflight(&public_origin, https_root, invitation.https_system_roots).await?;
     let response = tokio::time::timeout(Duration::from_secs(10), redeem(url, https_root, &request))
         .await
         .map_err(|_| refused())??;
@@ -166,8 +188,11 @@ pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()>
     let stored = StoredIdentity {
         host_id: invitation.host_id,
         execution_uid: uid,
-        endpoint: invitation.endpoint,
-        server_name: invitation.server_name,
+        endpoint: None,
+        server_name,
+        public_origin: Some(public_origin),
+        https_der: invitation.https_der,
+        https_system_roots: invitation.https_system_roots,
         ca_der: invitation.ca_der,
         certificate_der: response.certificate_der,
         key_der: B64.encode(key.private_key_to_pkcs8().map_err(|_| refused())?),
@@ -177,6 +202,56 @@ pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()>
         Some(snapshot) => replace(data, &bytes, Some(&snapshot)),
         None => publish(data, &bytes),
     }
+}
+
+fn https_origin(value: &str) -> io::Result<(url::Url, String)> {
+    let parsed = url::Url::parse(value).map_err(|_| refused())?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(refused());
+    }
+    Ok((parsed.clone(), parsed.origin().ascii_serialization()))
+}
+
+/// Use the app origin for HTTPS and preserve the invitation's D168 identity name.
+fn invitation_origin(invitation: &JoinInvitation) -> io::Result<(String, String)> {
+    let legacy = invitation.public_origin.is_empty();
+    let value = if legacy {
+        format!("https://{}", invitation.server_name)
+    } else {
+        invitation.public_origin.clone()
+    };
+    let (origin, canonical) = https_origin(&value)?;
+    let server_name = if legacy {
+        origin.host_str().ok_or_else(refused)?.to_owned()
+    } else if invitation.server_name.is_empty() {
+        return Err(refused());
+    } else {
+        invitation.server_name.clone()
+    };
+    Ok((canonical, server_name))
+}
+
+/// Enrollment and the steady-state link must name the same public app origin.
+fn join_origin(value: &str) -> io::Result<String> {
+    let parsed = url::Url::parse(value).map_err(|_| refused())?;
+    if parsed.scheme() != "https"
+        || parsed.path() != "/remote/join"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(refused());
+    }
+    Ok(parsed.origin().ascii_serialization())
 }
 
 /// Verify `certificate` as a client certificate issued under `root` alone.
@@ -212,6 +287,7 @@ fn enrolled_key(
     data: &Path,
     invitation: &JoinInvitation,
     uid: u32,
+    server_name: &str,
 ) -> io::Result<Option<(PKey<openssl::pkey::Private>, Snapshot)>> {
     prepare_directory(data)?;
     match std::fs::symlink_metadata(data.join("identity.json")) {
@@ -222,7 +298,7 @@ fn enrolled_key(
     let (stored, snapshot) = load_snapshot(data)?;
     if stored.host_id != invitation.host_id
         || stored.execution_uid != uid
-        || stored.server_name != invitation.server_name
+        || stored.server_name != server_name
     {
         return Err(refused());
     }
@@ -245,22 +321,39 @@ async fn connect_enrollment(name: &str, port: u16) -> io::Result<tokio::net::Tcp
     let addresses = tokio::net::lookup_host((name, port))
         .await
         .map_err(|error| {
-            // Only these known resolver diagnostics are kept; anything else could carry a name.
-            let message = match error.to_string().as_str() {
-                "failed to lookup address information: Temporary failure in name resolution" => {
-                    "Join DNS lookup failed: Temporary failure in name resolution."
-                }
-                "failed to lookup address information: Name or service not known" => {
-                    "Join DNS lookup failed: Name or service not known."
-                }
-                _ => "Join DNS lookup failed.",
-            };
-            Failure::Dns(message).error(error.kind())
+            Failure::Dns(
+                "The infraternal agent on this host cannot resolve the server's HTTPS origin. Check DNS for the public origin and allow outbound TCP 443.",
+            )
+            .error(error.kind())
         })?
         .collect::<Vec<_>>();
-    tokio::net::TcpStream::connect(addresses.as_slice())
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::net::TcpStream::connect(addresses.as_slice()),
+    )
+    .await
+    .map_err(|_| Failure::Connect.error(io::ErrorKind::TimedOut))?
+    .map_err(|error| Failure::Connect.error(error.kind()))
+}
+
+/// Verify that the target can reach the enrolled public app listener before installation.
+async fn preflight(origin: &str, root: Option<&X509>, system_roots: bool) -> io::Result<()> {
+    use infraternal_agent::remote_websocket::PreflightFailure as WebSocketFailure;
+    infraternal_agent::remote_websocket::preflight(origin, root, system_roots)
         .await
-        .map_err(|error| Failure::Connect.error(error.kind()))
+        .map_err(|failure| match failure {
+            WebSocketFailure::InvalidOrigin => refused(),
+            WebSocketFailure::Dns => Failure::Dns(
+                "The infraternal agent on this host cannot resolve the server's HTTPS origin. Check DNS for the public origin and allow outbound TCP 443.",
+            )
+            .error(io::ErrorKind::AddrNotAvailable),
+            WebSocketFailure::Connect => Failure::Connect.error(io::ErrorKind::NotConnected),
+            WebSocketFailure::Tls => Failure::Tls.error(io::ErrorKind::PermissionDenied),
+            WebSocketFailure::Upgrade => Failure::Upgrade.error(io::ErrorKind::InvalidData),
+            WebSocketFailure::Challenge => {
+                Failure::Challenge.error(io::ErrorKind::InvalidData)
+            }
+        })
 }
 
 /// A failure at the shared outbound HTTPS boundary, before application JSON is decoded.
@@ -443,8 +536,18 @@ fn outbound_tls_connector(root: Option<&X509>) -> Result<SslConnector, ClientFai
 pub(crate) fn public_error(error: &io::Error) -> &'static str {
     match Failure::of(error) {
         Some(Failure::Dns(sentence)) => sentence,
-        Some(Failure::Connect) => "Join connection failed.",
-        Some(Failure::Tls) => "Join TLS verification failed.",
+        Some(Failure::Connect) => {
+            "The infraternal agent on this host cannot reach the server over HTTPS. Allow outbound TCP 443 to the server's public origin, then try again."
+        }
+        Some(Failure::Tls) => {
+            "The infraternal agent on this host could not verify the server's HTTPS certificate. Check the public certificate chain and server name, then try again."
+        }
+        Some(Failure::Upgrade) => {
+            "The infraternal agent on this host reached the server over HTTPS, but the server did not accept its WebSocket. Deploy a server with the /remote/agent route and allow WebSocket upgrades through the proxy, then try again."
+        }
+        Some(Failure::Challenge) => {
+            "The server opened the WebSocket but did not send a valid infraternal agent challenge. Deploy a compatible server build and try again."
+        }
         Some(Failure::Refused) | None => "Remote infraternal agent operation failed",
     }
 }
@@ -553,10 +656,6 @@ struct Snapshot {
     bytes: Vec<u8>,
 }
 
-fn load(data: &Path) -> io::Result<StoredIdentity> {
-    load_snapshot(data).map(|(stored, _)| stored)
-}
-
 fn load_snapshot(data: &Path) -> io::Result<(StoredIdentity, Snapshot)> {
     use std::{
         io::Read,
@@ -588,9 +687,43 @@ fn load_snapshot(data: &Path) -> io::Result<(StoredIdentity, Snapshot)> {
     Ok((stored, snapshot))
 }
 
+/// Move an enrolled identity off its legacy 7443 address before the service retries.
+fn migrate_identity(data: &Path) -> io::Result<StoredIdentity> {
+    let (mut stored, snapshot) = load_snapshot(data)?;
+    let mut changed = false;
+    if stored.public_origin.is_none() {
+        let legacy_origin = format!("https://{}", stored.server_name);
+        let (_, canonical) = https_origin(&legacy_origin)?;
+        stored.public_origin = Some(canonical);
+        stored.https_der = None;
+        stored.https_system_roots = true;
+        changed = true;
+    }
+    if stored.endpoint.take().is_some() {
+        changed = true;
+    }
+    if changed {
+        let bytes = serde_json::to_vec(&stored).map_err(|_| refused())?;
+        replace(data, &bytes, Some(&snapshot))?;
+    }
+    Ok(stored)
+}
+
 pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
-    let stored = load(data)?;
+    let stored = migrate_identity(data)?;
+    let public_origin = stored.public_origin.clone().ok_or_else(refused)?;
+    let https_root = if stored.https_system_roots {
+        None
+    } else if let Some(https) = &stored.https_der {
+        Some(X509::from_der(&B64.decode(https).map_err(|_| refused())?).map_err(|_| refused())?)
+    } else {
+        Some(
+            X509::from_der(&B64.decode(&stored.ca_der).map_err(|_| refused())?)
+                .map_err(|_| refused())?,
+        )
+    };
     let identity = RemoteIdentity {
+        host_id: stored.host_id,
         identity: Identity {
             certificate: X509::from_der(
                 &B64.decode(&stored.certificate_der).map_err(|_| refused())?,
@@ -605,6 +738,9 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
         ],
         endpoint: stored.endpoint,
         server_name: stored.server_name.clone(),
+        public_origin: Some(public_origin),
+        https_root,
+        https_system_roots: stored.https_system_roots,
         execution_uid: stored.execution_uid,
     };
     let installation =

@@ -473,6 +473,10 @@ async fn remote_router(
             service.source,
             service.endpoint,
         )
+        .merge(crate::remote_agent_http::router(
+            hosts.clone(),
+            enrollment_store.clone(),
+        ))
     });
     let removal = crate::remote_removal::Removal::new(
         auth.clone(),

@@ -1878,6 +1878,8 @@ fn harden_startup() -> Result<(), nix::errno::Errno> {
 
 /// Startup reads an invitation once; reconnects use only the private local identity.
 #[cfg(feature = "remote")]
+// Keep enrollment and its ordered status reporting in one CLI lifecycle.
+#[allow(clippy::too_many_lines)]
 fn run_remote_agent(
     action: AgentAction,
     has_fd: bool,
@@ -1982,7 +1984,12 @@ fn run_remote_agent(
                 .map_or(Exit::Failed, |error| match remote::Failure::of(error) {
                     Some(remote::Failure::Tls) => Exit::NotAllowed,
                     Some(remote::Failure::Dns(_) | remote::Failure::Connect) => Exit::Unreachable,
-                    Some(remote::Failure::Refused) | None => Exit::Failed,
+                    Some(
+                        remote::Failure::Refused
+                        | remote::Failure::Upgrade
+                        | remote::Failure::Challenge,
+                    )
+                    | None => Exit::Failed,
                 }),
         )
     }

@@ -118,9 +118,10 @@ async fn uid_and_privilege_mismatch_fails_before_key_generation() {
             execution_uid,
             token: "invalid public fixture".into(),
             ca_der: String::new(),
+            public_origin: String::new(),
             https_der: None,
             https_system_roots: false,
-            endpoint: "127.0.0.1:0".parse().unwrap(),
+            endpoint: Some("127.0.0.1:0".parse().unwrap()),
             server_name: "localhost".into(),
         };
         let input = serde_json::to_vec(&invitation).unwrap();
@@ -143,8 +144,11 @@ fn renewal_publication_replaces_only_certificate_and_preserves_private_metadata(
         certificate_der: "old public certificate".into(),
         key_der: "private fixture sentinel".into(),
         ca_der: "public issuer fixture".into(),
-        endpoint: "127.0.0.1:7443".parse().unwrap(),
+        endpoint: Some("127.0.0.1:7443".parse().unwrap()),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_der: None,
+        https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
     };
     publish(&data, &serde_json::to_vec(&stored).unwrap()).unwrap();
@@ -202,6 +206,122 @@ fn renewal_publication_replaces_only_certificate_and_preserves_private_metadata(
 }
 
 #[test]
+fn legacy_7443_identity_migrates_atomically_to_its_https_origin() {
+    let directory = Directory::new();
+    let data = directory.0.join("data");
+    let key = PKey::generate_ed25519().unwrap();
+    let ca = self_signed(&key);
+    let legacy = StoredIdentity {
+        host_id: uuid::Uuid::new_v4(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+        endpoint: Some("10.69.69.89:7443".parse().unwrap()),
+        server_name: "code.vpn.kayg.org".into(),
+        public_origin: None,
+        https_der: None,
+        https_system_roots: false,
+        ca_der: B64.encode(ca.to_der().unwrap()),
+        certificate_der: B64.encode(ca.to_der().unwrap()),
+        key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+    };
+    let mut old_document = serde_json::to_value(&legacy).unwrap();
+    let old_object = old_document.as_object_mut().unwrap();
+    old_object.remove("public_origin");
+    old_object.remove("https_der");
+    old_object.remove("https_system_roots");
+    publish(&data, &serde_json::to_vec(&old_document).unwrap()).unwrap();
+
+    let migrated = migrate_identity(&data).unwrap();
+    assert_eq!(
+        migrated.public_origin.as_deref(),
+        Some("https://code.vpn.kayg.org")
+    );
+    assert_eq!(migrated.endpoint, None);
+    assert!(migrated.https_system_roots);
+    let stored: StoredIdentity =
+        serde_json::from_slice(&std::fs::read(data.join("identity.json")).unwrap()).unwrap();
+    assert_eq!(stored.public_origin, migrated.public_origin);
+    assert_eq!(stored.endpoint, None);
+    assert_eq!(stored.host_id, migrated.host_id);
+}
+
+#[test]
+fn public_origin_reenrollment_keeps_the_legacy_d168_server_name() {
+    let directory = Directory::new();
+    let data = directory.0.join("data");
+    let host_id = uuid::Uuid::new_v4();
+    let uid = nix::unistd::Uid::effective().as_raw();
+    let key = PKey::generate_ed25519().unwrap();
+    let ca = self_signed(&PKey::generate_ed25519().unwrap());
+    let stored = StoredIdentity {
+        host_id,
+        execution_uid: uid,
+        endpoint: Some("10.69.69.89:7443".parse().unwrap()),
+        server_name: "ssh.internal".into(),
+        public_origin: None,
+        https_der: None,
+        https_system_roots: false,
+        ca_der: B64.encode(ca.to_der().unwrap()),
+        certificate_der: B64.encode(ca.to_der().unwrap()),
+        key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+    };
+    publish(&data, &serde_json::to_vec(&stored).unwrap()).unwrap();
+    let invitation = JoinInvitation {
+        host_id,
+        mode: Mode::Rootless,
+        execution_uid: uid,
+        public_origin: "https://ssh.kayg.org".into(),
+        token: "public fixture token".into(),
+        ca_der: stored.ca_der.clone(),
+        https_der: None,
+        https_system_roots: true,
+        endpoint: None,
+        server_name: "ssh.internal".into(),
+    };
+
+    let (_, new_server_name) = invitation_origin(&invitation).unwrap();
+    assert_eq!(new_server_name, stored.server_name);
+    let enrolled = enrolled_key(&data, &invitation, uid, &new_server_name)
+        .unwrap()
+        .expect("same D168 authority should permit re-enrollment at its HTTPS origin");
+    assert!(enrolled.0.public_eq(&key));
+}
+
+#[test]
+fn public_origin_invitation_preserves_d168_name_without_a_legacy_endpoint() {
+    let invitation = JoinInvitation {
+        host_id: uuid::Uuid::from_u128(1),
+        mode: Mode::Rootless,
+        execution_uid: 1000,
+        public_origin: "https://ssh.kayg.org".into(),
+        token: "fixture-token".into(),
+        ca_der: "fixture-ca".into(),
+        https_der: None,
+        https_system_roots: true,
+        endpoint: Some("10.69.69.89:7443".parse().unwrap()),
+        server_name: "ssh.internal".into(),
+    };
+
+    let wire = serde_json::to_value(invitation).unwrap();
+    assert_eq!(wire["public_origin"], "https://ssh.kayg.org");
+    assert_eq!(wire["server_name"], "ssh.internal");
+    assert!(wire.get("endpoint").is_none());
+}
+
+#[test]
+fn preflight_errors_name_https_and_proxy_upgrade_fixes() {
+    let unreachable = Failure::Connect.error(io::ErrorKind::NotConnected);
+    assert_eq!(
+        public_error(&unreachable),
+        "The infraternal agent on this host cannot reach the server over HTTPS. Allow outbound TCP 443 to the server's public origin, then try again."
+    );
+    let upgrade = Failure::Upgrade.error(io::ErrorKind::InvalidData);
+    assert_eq!(
+        public_error(&upgrade),
+        "The infraternal agent on this host reached the server over HTTPS, but the server did not accept its WebSocket. Deploy a server with the /remote/agent route and allow WebSocket upgrades through the proxy, then try again."
+    );
+}
+
+#[test]
 fn ssh_installation_can_enroll_before_starting_the_service() {
     let parsed = crate::cli::command_tree::build(&crate::cli::actions::registry().unwrap())
         .try_get_matches_from([
@@ -251,7 +371,10 @@ async fn join_dns_failure_reports_resolution_instead_of_generic_refusal() {
     .await
     .unwrap()
     .unwrap_err();
-    assert!(error.to_string().starts_with("Join DNS lookup failed"));
+    assert_eq!(
+        error.to_string(),
+        "The infraternal agent on this host cannot resolve the server's HTTPS origin. Check DNS for the public origin and allow outbound TCP 443."
+    );
 }
 
 fn self_signed(key: &PKey<openssl::pkey::Private>) -> X509 {
@@ -286,8 +409,11 @@ async fn join_re_enrolls_the_same_hosts_identity_and_refuses_another_host() {
     let stored = StoredIdentity {
         host_id,
         execution_uid: uid,
-        endpoint: "127.0.0.1:7443".parse().unwrap(),
+        endpoint: Some("127.0.0.1:7443".parse().unwrap()),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_der: None,
+        https_system_roots: false,
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
         key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
@@ -305,9 +431,10 @@ async fn join_re_enrolls_the_same_hosts_identity_and_refuses_another_host() {
             execution_uid: uid,
             token: "public fixture token".into(),
             ca_der: stored.ca_der.clone(),
+            public_origin: String::new(),
             https_der: None,
             https_system_roots: false,
-            endpoint: "127.0.0.1:7443".parse().unwrap(),
+            endpoint: Some("127.0.0.1:7443".parse().unwrap()),
             server_name: "localhost".into(),
         })
         .unwrap()
@@ -320,9 +447,9 @@ async fn join_re_enrolls_the_same_hosts_identity_and_refuses_another_host() {
     )
     .await
     .unwrap_err();
-    assert!(
-        error.to_string().starts_with("Join DNS lookup failed"),
-        "{error}"
+    assert_eq!(
+        error.to_string(),
+        "The infraternal agent on this host cannot reach the server over HTTPS. Allow outbound TCP 443 to the server's public origin, then try again."
     );
     let error = join(
         "https://infraternal-fixture-no-such-host.invalid/remote/join",
@@ -356,8 +483,11 @@ async fn join_refuses_the_same_host_id_from_another_server() {
     let stored = StoredIdentity {
         host_id,
         execution_uid: uid,
-        endpoint: "127.0.0.1:7443".parse().unwrap(),
+        endpoint: Some("127.0.0.1:7443".parse().unwrap()),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_der: None,
+        https_system_roots: false,
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
         key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
@@ -375,9 +505,10 @@ async fn join_refuses_the_same_host_id_from_another_server() {
         execution_uid: uid,
         token: "public fixture token".into(),
         ca_der: B64.encode(other.to_der().unwrap()),
+        public_origin: String::new(),
         https_der: None,
         https_system_roots: false,
-        endpoint: "127.0.0.2:8443".parse().unwrap(),
+        endpoint: Some("127.0.0.2:8443".parse().unwrap()),
         server_name: "other-server.invalid".into(),
     })
     .unwrap();
@@ -409,8 +540,11 @@ async fn join_re_enrolls_for_a_moved_server_but_not_a_renamed_one() {
     let stored = StoredIdentity {
         host_id,
         execution_uid: uid,
-        endpoint: "127.0.0.1:7443".parse().unwrap(),
+        endpoint: Some("127.0.0.1:7443".parse().unwrap()),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_der: None,
+        https_system_roots: false,
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
         key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
@@ -428,9 +562,10 @@ async fn join_re_enrolls_for_a_moved_server_but_not_a_renamed_one() {
             execution_uid: uid,
             token: "public fixture token".into(),
             ca_der: stored.ca_der.clone(),
+            public_origin: String::new(),
             https_der: None,
             https_system_roots: false,
-            endpoint: "127.0.0.2:8443".parse().unwrap(),
+            endpoint: Some("127.0.0.2:8443".parse().unwrap()),
             server_name: server_name.into(),
         })
         .unwrap()
@@ -439,9 +574,9 @@ async fn join_re_enrolls_for_a_moved_server_but_not_a_renamed_one() {
     let error = join(url, &data, &invitation("localhost"))
         .await
         .unwrap_err();
-    assert!(
-        error.to_string().starts_with("Join DNS lookup failed"),
-        "{error}"
+    assert_eq!(
+        error.to_string(),
+        "The infraternal agent on this host cannot reach the server over HTTPS. Allow outbound TCP 443 to the server's public origin, then try again."
     );
     let error = join(url, &data, &invitation("renamed.invalid"))
         .await
@@ -464,15 +599,18 @@ fn replace_aborts_when_the_identity_changed_since_it_was_read() {
     let mut stored = StoredIdentity {
         host_id: uuid::Uuid::new_v4(),
         execution_uid: nix::unistd::Uid::effective().as_raw(),
-        endpoint: "127.0.0.1:7443".parse().unwrap(),
+        endpoint: Some("127.0.0.1:7443".parse().unwrap()),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_der: None,
+        https_system_roots: false,
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
         key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
     };
     publish(&data, &serde_json::to_vec(&stored).unwrap()).unwrap();
     let (_, snapshot) = load_snapshot(&data).unwrap();
-    stored.endpoint = "127.0.0.3:7443".parse().unwrap();
+    stored.endpoint = Some("127.0.0.3:7443".parse().unwrap());
     let renewed = serde_json::to_vec(&stored).unwrap();
     replace(&data, &renewed, None).unwrap();
     assert_eq!(

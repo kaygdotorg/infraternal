@@ -64,8 +64,11 @@ async fn mesh_namespace_client() {
             key,
         },
         roots: vec![X509::from_pem(bundle.root.as_bytes()).unwrap()],
-        endpoint: bundle.endpoint,
+        endpoint: Some(bundle.endpoint),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_root: None,
+        https_system_roots: false,
         execution_uid: 0,
     };
     let state = infraternal_agent::sessions::state(Some(bundle.state.clone())).unwrap();
