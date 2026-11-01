@@ -71,7 +71,7 @@ const STYLE = `
 .ui-confirm-tip[data-side="top"] .ui-confirm-tip-arrow { bottom: -5px; border-top: 0; border-left: 0; clip-path: polygon(0 100%, 100% 100%, 100% 0); }
 .ui-confirm-tip-text { display: grid; gap: 3px; }
 .ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 var(--text-body, 13px)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
-.ui-confirm-tip-detail { margin: 0; color: var(--fg-2); font: 450 var(--text-secondary, 12px)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
+.ui-confirm-tip-detail { margin: 0; white-space: pre-line; overflow-wrap: anywhere; color: var(--fg-2); font: 450 var(--text-secondary, 12px)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
 .ui-confirm-tip-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .ui-confirm-tip button { display: inline-grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent;
   color: var(--fg-2); cursor: pointer;
@@ -437,9 +437,18 @@ function watch(): void {
   }, 200);
 }
 
-/** Re-reads the label of `el` if its tooltip is open (for live labels like "Copied"). */
-export function refreshTip(el: HTMLElement) {
-  if (shown && current === el) { place(el, false); setLabel(labelOf(el), 0); }
+/**
+ * Re-reads the label of `el` if its tooltip is open (for live labels like "Copied"). With `animate`, a label that
+ * changes while the tooltip stays (a button that turns into another while Option is held) glides: the surface eases to
+ * its new width and the words slide, instead of snapping.
+ */
+export function refreshTip(el: HTMLElement, animate = false) {
+  if (!(shown && current === el)) return;
+  if (!animate || reduced()) { place(el, false); setLabel(labelOf(el), 0); return; }
+  const dir = place(el, true);
+  surface.style.transition = `width ${TRAVEL}ms ${EASE}`;
+  window.setTimeout(() => { surface.style.transition = ""; }, TRAVEL + 40);
+  setLabel(labelOf(el), dir);
 }
 
 /**

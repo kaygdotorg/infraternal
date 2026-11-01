@@ -201,6 +201,11 @@ pub async fn connect(path: PathBuf, id: [u8; 16]) -> io::Result<Session> {
     connect_with(path, id, 0).await
 }
 
+/// Read authenticated process identity without attaching or selecting a terminal writer.
+pub(crate) async fn observe(path: PathBuf, id: [u8; 16]) -> io::Result<Session> {
+    handshake(path, id, None).await
+}
+
 /// Select restart-safe input and approximate recovery when advertised.
 /// # Errors
 /// Returns the same authentication and framing failures as `connect`.

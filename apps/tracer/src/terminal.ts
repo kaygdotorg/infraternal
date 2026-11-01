@@ -1,4 +1,5 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
+import { keysIn } from "./input-keys";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
 import { ICONS } from "../../../packages/ui/src/icons";
 import { bindingLabel } from "../../../packages/ui/src/shortcuts";
@@ -83,6 +84,16 @@ export interface TerminalHooks {
    * state meanwhile; the terminal's own status text is not shown on the canvas.
    */
   onLinkDoubt?: (doubted: boolean) => void;
+  /**
+   * The screen came back rebuilt from the latest state, so some scrollback may be approximate (`terminal.snapshot` with
+   * `approximate`). A product surface shows its connection indicator's "approximate" mark for a moment.
+   */
+  onApproximate?: () => void;
+  /**
+   * How many keys typed while the link could not carry them are being kept to be sent (0 once they were sent). Only the
+   * count is reported, never what was typed: a password typed into a hidden prompt must not be shown anywhere.
+   */
+  onInputHeld?: (keys: number) => void;
   /** Final output has painted; clean exits may close their window. */
   onExited?: (status: number) => void;
   /**
@@ -256,6 +267,8 @@ export class TerminalClient {
   private readonly synchronizedOutput: SynchronizedOutput;
   private synchronizedOutputBatchPending = false;
   private readonly inputQueue = new ByteQueue(INPUT_QUEUE_LIMIT);
+  /** Keys typed since the stream last lost its shim and not yet sent (the connection indicator's kept-keys mark). */
+  private heldKeys = 0;
   /** Uncertain bytes from an old writer stay separate from input typed into the live fresh writer. */
   private retainedInput: Uint8Array | undefined;
   /** A fresh writer cannot deduplicate old input; the saved bytes wait for an explicit choice. */
@@ -797,6 +810,14 @@ export class TerminalClient {
     this.prediction?.refresh();
   }
 
+  /** Writes text onto the screen without the wire (mock pages only): a mockup prints what a shell would show. */
+  async writeTextForTest(text: string): Promise<void> {
+    if (this.closed) throw new Error("terminal is closed");
+    this.wakeTerminal(); // the render loop idles between outputs; a local write must be painted too
+    await new Promise<void>((resolve) => this.terminal.write(text, resolve));
+    this.prediction?.refresh();
+  }
+
   /**
    * Parks the terminal while its window is off screen, in another view or a thumbnail. Output keeps flowing
    * into the terminal state (cheap, and credit keeps returning), but nothing is drawn and the canvas gives its
@@ -1068,6 +1089,7 @@ export class TerminalClient {
             this.config.hooks?.onLinkDoubt?.(false);
           } else if (notice.type === "terminal.snapshot" && notice.approximate === true) {
             this.setStatus("Reconnected. The screen may be slightly out of date.");
+            this.config.hooks?.onApproximate?.();
           } else if (notice.type === "terminal.snapshot_unavailable") {
             this.setStatus("Waiting for the screen to catch up.");
           } else if (notice.type === "terminal.replay_complete") {
@@ -1402,6 +1424,11 @@ export class TerminalClient {
     }
     const firstSequence = this.nextInSeq;
     this.nextInSeq += BigInt(encoded.byteLength);
+    // Typed while the stream cannot carry it: kept in the queue and sent once the shim is confirmed. Only the count is told.
+    if (!this.attachmentConfirmed && this.config.hooks?.onInputHeld) {
+      this.heldKeys += keysIn(data);
+      this.config.hooks.onInputHeld(this.heldKeys);
+    }
     // An Attach request is not a ready shim: per-key frames would fill its
     // bounded handshake queue. Retain them locally until replay confirms it.
     if (this.attachmentConfirmed) {
@@ -1806,6 +1833,7 @@ export class TerminalClient {
         if (this.connectionIsResume) this.staleWatch?.begin(fence, this.receivedOutSeq, staleWaitMs(this.roundTripMs), captured, this.lastSize);
         this.attachmentConfirmed = true;
         this.resendUnacknowledgedInput();
+        if (this.heldKeys > 0) { this.heldKeys = 0; this.config.hooks?.onInputHeld?.(0); }
         if (this.inputNeedsResend) this.showInputResendNotice();
         // Completing replay clears its wait, not an approximation or input-pressure warning.
         if (this.config.status.textContent === "Catching up…") this.setStatus("");

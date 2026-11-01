@@ -13,6 +13,11 @@
  *   typing or pasting counts up smoothly and a quick second change retargets the tween.
  * - Reduced motion: every change is instant.
  *
+ * Alignment (TASTE "Icon and text share one centre line"): the line is a flex row (`.ui-status-line`) and the icon cell is
+ * exactly one line of the text tall (`1lh`) with the glyph centred in it, so the icon sits on the centre line of the
+ * text's FIRST line at every font size and line height, and stays there when a long sentence wraps. Callers never nudge
+ * the icon with margins: that is what drifted (a 3 px nudge tuned for one size was 1.5 px off at another).
+ *
  * The element keeps `data-state` (idle | ok | error) for colour; callers style the rest.
  */
 import { icon, ICON_ALERT, ICON_CIRCLE_CHECK, ICON_INFO } from "./icons";
@@ -21,7 +26,8 @@ export type StatusState = "idle" | "ok" | "error";
 export interface StatusLine { set(state: StatusState, text: string): void }
 
 const STYLE = `
-.ui-status-icons { position: relative; display: inline-grid; flex: none; }
+.ui-status-line { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.ui-status-icons { position: relative; display: inline-grid; flex: none; height: 1lh; align-items: center; }
 .ui-status-icons > .ui-icon { grid-area: 1 / 1; opacity: 0; transform: scale(0.6); filter: blur(2px);
   transition: opacity 140ms ease-out, transform 160ms cubic-bezier(0.23, 1, 0.32, 1), filter 140ms ease-out; }
 [data-state="idle"] > .ui-status-icons > .ui-status-info,
@@ -37,6 +43,7 @@ let styled = false;
 
 export function statusLine(root: HTMLElement): StatusLine {
   if (!styled) { styled = true; const style = document.createElement("style"); style.textContent = STYLE; document.head.append(style); }
+  root.classList.add("ui-status-line");
   root.innerHTML = `<span class="ui-status-icons">${icon(ICON_INFO, "ui-status-info")}${icon(ICON_CIRCLE_CHECK, "ui-status-ok")}${icon(ICON_ALERT, "ui-status-alert")}</span><span class="ui-status-text"><span class="ui-status-num"></span><span class="ui-status-rest"></span></span>`;
   const box = root.querySelector<HTMLElement>(".ui-status-text")!;
   const num = box.querySelector<HTMLElement>(".ui-status-num")!;

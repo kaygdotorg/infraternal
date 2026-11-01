@@ -721,6 +721,14 @@ async fn run_channel<const SESSION_ONLY: bool>(
                                 reply(&control, Message::Result(stream, call_id, false, OpenRefusal::Invalid.json()?))?;
                             }
                         }
+                        Frame::Call {call_id, action_id: "terminal.startup", input_json} if !SESSION_ONLY && plugins.is_some() && stream == 0 => {
+                            if input_json.len() > 8192 || renewals.len() >= 4 {
+                                reply(&control, Message::Result(0, call_id, false, b"{}".to_vec()))?;
+                            } else {
+                                let exe = exe.clone(); let state = state.clone(); let input = input_json.to_vec();
+                                renewals.spawn(async move { (call_id, crate::startup_guard::execute(&exe, &state, &input, execution_uid).await) });
+                            }
+                        }
                         Frame::Call {call_id, action_id, input_json} if !SESSION_ONLY && worker.is_some() && stream == 0 => {
                             let worker = worker.as_ref().ok_or_else(|| sessions::invalid("missing node worker"))?;
                             registry.refresh();

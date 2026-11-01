@@ -32,8 +32,12 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   // session manager are in the canvas row while a terminal is focused, and in ⌘K.
   const header = !coarse.matches;
   if (m.kind === "terminal" && !m.noAccess && !readOnly && header) {
-    actions.push({ id: "split-right", label: "Split right", icon: ICON.splitRight, onSelect: () => { void cx.win.split(rec, "right"); } });
-    actions.push({ id: "split-down", label: "Split down", icon: ICON.splitDown, onSelect: () => { void cx.win.split(rec, "down"); } });
+    // Option (macOS) or Alt (Windows, Linux) held near the buttons turns them into "new window right / below" (#280, D212):
+    // the other pair of the four actions, reached from the same place.
+    actions.push({ id: "split-right", label: "Split right", icon: ICON.splitRight, onSelect: () => { void cx.win.split(rec, "right"); },
+      alt: { label: "New window right", morph: "right", onSelect: () => { void cx.win.newWindow(rec, "right"); } } });
+    actions.push({ id: "split-down", label: "Split down", icon: ICON.splitDown, onSelect: () => { void cx.win.split(rec, "down"); },
+      alt: { label: "New window below", morph: "down", onSelect: () => { void cx.win.newWindow(rec, "below"); } } });
   }
   // The session manager sits beside the splits when the canvas has an inventory (D127); a team layout's windows are read-only.
   if (m.kind === "terminal" && !m.noAccess && cx.adapters.inventory && header) {

@@ -110,6 +110,10 @@ fn run_invocation() -> ExitCode {
         return result;
     }
     #[cfg(feature = "plugin-agent")]
+    if let Some(result) = infraternal_agent::startup_guard::run_if_requested() {
+        return result;
+    }
+    #[cfg(feature = "plugin-agent")]
     if !shim_cli::PAYLOAD_ONLY
         && let Some(result) = embedded_cli::run_if_requested()
     {
