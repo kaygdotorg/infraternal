@@ -325,6 +325,23 @@ mod tests {
     use crate::cli::actions::registry;
 
     #[test]
+    fn sign_in_accepts_a_server_as_its_positional_argument() {
+        let registry = registry().expect("action registry");
+        let matches = build(&registry)
+            .try_get_matches_from(["infraternal", "sign-in", "https://mesh.example.org"])
+            .expect("sign-in server positional");
+        let selected = selected(&matches);
+        assert_eq!(selected.path, ["sign-in"]);
+        assert_eq!(
+            selected
+                .matches
+                .get_one::<String>("server")
+                .map(String::as_str),
+            Some("https://mesh.example.org")
+        );
+    }
+
+    #[test]
     fn every_command_in_the_tree_takes_json() {
         // D299: no command is exempt, hidden internal ones included.
         fn walk(command: &clap::Command, path: &str, missing: &mut Vec<String>) {

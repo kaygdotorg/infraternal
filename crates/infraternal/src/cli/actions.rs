@@ -119,7 +119,12 @@ fn cli_plugin() -> PluginDefinition {
     let plugin = PluginDefinition::new(
         "cli",
         "Run and manage infraternal on this machine.",
-        [status_action(), skill_action(), session_shim_action()],
+        [
+            status_action(),
+            skill_action(),
+            sign_in_action(),
+            session_shim_action(),
+        ],
     );
     let mut plugin = plugin;
     plugin
@@ -140,6 +145,69 @@ fn cli_plugin() -> PluginDefinition {
         .actions
         .extend(infraternal_agent::automation::actions());
     plugin
+}
+
+fn sign_in_action() -> ActionDefinition {
+    let data = JsonSchema::object(
+        [
+            ("server".to_owned(), JsonSchema::string("Server origin.")),
+            (
+                "device".to_owned(),
+                JsonSchema::string("This device's name."),
+            ),
+            (
+                "scopes".to_owned(),
+                JsonSchema::array(JsonSchema::string("Granted scope."), "Granted scopes."),
+            ),
+            (
+                "stored".to_owned(),
+                JsonSchema::boolean("Credential stored securely."),
+            ),
+            (
+                "user_code".to_owned(),
+                JsonSchema::string("Short-lived code for browser approval."),
+            ),
+            (
+                "verification_url".to_owned(),
+                JsonSchema::string("HTTPS link to review the device request."),
+            ),
+            (
+                "expires_in_seconds".to_owned(),
+                JsonSchema::integer("Time remaining for the approval request."),
+            ),
+        ],
+        [],
+    );
+    ActionDefinition::new(
+        ["sign-in"],
+        "Sign this device into a server with a passkey approval.",
+        "Use this command to authorize this CLI device for automation on one server.",
+        [
+            "Start a short-lived device approval on the server.",
+            "Open the printed link and confirm this device and its scopes with your passkey.",
+            "Wait for approval; the resulting credential is saved in your private config folder.",
+        ],
+        JsonSchema::object(
+            [(
+                "server".to_owned(),
+                JsonSchema::string("HTTPS origin of the server."),
+            )],
+            ["server".to_owned()],
+        ),
+        JsonSchema::command_result_with(data),
+        ActionContract::new(
+            ActionTarget::Global,
+            ActionEffect::Write,
+            "cli.sign-in",
+            DryRun::Unsupported,
+        ),
+    )
+    .with_cli_handler(CliHandler::SignIn)
+    .with_cli_positionals(["server"])
+    .with_example(
+        "sign-in https://infra.example.org",
+        "Authorize this CLI device.",
+    )
 }
 
 fn status_action() -> ActionDefinition {
@@ -410,6 +478,31 @@ mod tests {
                     .instructions
                     .iter()
                     .all(|instruction| !instruction.trim().is_empty())
+            );
+        }
+    }
+
+    #[test]
+    fn sign_in_output_schema_covers_pending_and_completed_data() {
+        let schema = &super::sign_in_action().output_schema;
+        let data = schema
+            .properties
+            .get("data")
+            .expect("command result data schema");
+
+        for field in [
+            "server",
+            "device",
+            "scopes",
+            "stored",
+            "user_code",
+            "verification_url",
+            "expires_in_seconds",
+        ] {
+            assert!(data.properties.contains_key(field), "missing {field}");
+            assert!(
+                !data.required.iter().any(|required| required == field),
+                "{field} is state-dependent and must remain optional"
             );
         }
     }

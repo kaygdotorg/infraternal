@@ -377,6 +377,8 @@ pub enum CliHandler {
     Status,
     /// List or render generated command skills.
     Skill,
+    /// Sign this CLI device into a server through fresh passkey approval.
+    SignIn,
     /// Run the configured server in the foreground.
     ServerRun,
     /// Create and start a server service.

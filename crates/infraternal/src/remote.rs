@@ -1,6 +1,7 @@
 //! Implements the operator-only private-stdin join adapter and local identity publication; no capability is accepted in argv [132][133], #78.
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+use hyper::{StatusCode, header};
 use infraternal_agent::{
     remote_client::{self, RemoteIdentity},
     remote_tls::Identity,
@@ -18,6 +19,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -261,6 +263,182 @@ async fn connect_enrollment(name: &str, port: u16) -> io::Result<tokio::net::Tcp
         .map_err(|error| Failure::Connect.error(error.kind()))
 }
 
+/// A failure at the shared outbound HTTPS boundary, before application JSON is decoded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClientFailure {
+    Dns(&'static str, io::ErrorKind),
+    Connect(io::ErrorKind),
+    SocketOption(io::ErrorKind),
+    TlsConfiguration,
+    TlsHandshake,
+    HttpHandshake,
+    Request,
+    ResponseBody,
+}
+
+/// Status and the bounded, zeroizable body returned by the shared JSON client.
+pub(crate) struct ClientResponse {
+    pub(crate) status: StatusCode,
+    pub(crate) retry_after: Option<Duration>,
+    pub(crate) body: Zeroizing<Vec<u8>>,
+}
+
+/// Keeps request bytes zeroizable after Hyper has consumed its reference to the payload.
+struct SecretBytes(bytes::Bytes);
+
+impl SecretBytes {
+    fn clone_for_request(&self) -> bytes::Bytes {
+        self.0.clone()
+    }
+}
+
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        let bytes = std::mem::replace(&mut self.0, bytes::Bytes::new());
+        if let Ok(mut bytes) = bytes.try_into_mut() {
+            bytes.as_mut().zeroize();
+        }
+    }
+}
+
+/// Sends a bounded JSON POST over the same TLS and HTTP path as remote enrollment.
+///
+/// Callers own timeout policy and JSON interpretation. `root` is only for the join
+/// invitation's pinned trust root; ordinary sign-in uses the platform CA store.
+pub(crate) async fn post_json(
+    url: &url::Url,
+    path: &str,
+    body: bytes::Bytes,
+    root: Option<&X509>,
+    max_response_bytes: usize,
+    request_started: &mut bool,
+) -> Result<ClientResponse, ClientFailure> {
+    use http_body_util::BodyExt;
+
+    let name = url.host_str().ok_or(ClientFailure::HttpHandshake)?;
+    let port = url
+        .port_or_known_default()
+        .ok_or(ClientFailure::HttpHandshake)?;
+    let tls = outbound_tls_connector(root)?;
+    let socket =
+        connect_enrollment(name, port)
+            .await
+            .map_err(|error| match Failure::of(&error) {
+                Some(Failure::Dns(message)) => ClientFailure::Dns(message, error.kind()),
+                _ => ClientFailure::Connect(error.kind()),
+            })?;
+    socket
+        .set_nodelay(true)
+        .map_err(|error| ClientFailure::SocketOption(error.kind()))?;
+    let ssl = tls
+        .configure()
+        .map_err(|_| ClientFailure::TlsConfiguration)?
+        .into_ssl(name)
+        .map_err(|_| ClientFailure::TlsConfiguration)?;
+    let mut stream =
+        tokio_openssl::SslStream::new(ssl, socket).map_err(|_| ClientFailure::TlsConfiguration)?;
+    std::pin::Pin::new(&mut stream)
+        .connect()
+        .await
+        .map_err(|_| ClientFailure::TlsHandshake)?;
+
+    let (mut sender, connection) =
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
+            .await
+            .map_err(|_| ClientFailure::HttpHandshake)?;
+    let connection = AbortConnection(tokio::spawn(async move {
+        let _ = connection.await;
+    }));
+    let request_body = SecretBytes(body);
+    let request = hyper::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(
+            header::HOST,
+            url[url::Position::BeforeHost..url::Position::AfterPort].to_owned(),
+        )
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(http_body_util::Full::new(request_body.clone_for_request()))
+        .map_err(|_| ClientFailure::HttpHandshake)?;
+    // Hyper may poll the request body as soon as this send future is polled.
+    *request_started = true;
+    let response = sender
+        .send_request(request)
+        .await
+        .map_err(|_| ClientFailure::Request);
+    drop(request_body);
+    let response = response?;
+    let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs);
+    let body = if status == StatusCode::OK {
+        let bytes = http_body_util::Limited::new(response.into_body(), max_response_bytes)
+            .collect()
+            .await
+            .map_err(|_| ClientFailure::ResponseBody)?
+            .to_bytes();
+        let body = Zeroizing::new(bytes.to_vec());
+        if let Ok(mut bytes) = bytes.try_into_mut() {
+            bytes.as_mut().zeroize();
+        }
+        body
+    } else {
+        // Error bodies are not part of these protocols; status and headers decide the outcome.
+        drop(response.into_body());
+        Zeroizing::new(Vec::new())
+    };
+    drop(connection);
+    Ok(ClientResponse {
+        status,
+        retry_after,
+        body,
+    })
+}
+
+/// Builds the shared TLS connector before a request opens its socket.
+///
+/// Sign-in uses platform trust; join may supply its existing pinned root. Both retain TLS 1.3,
+/// peer verification, and hostname checks so the shared transport cannot weaken either flow.
+fn outbound_tls_connector(root: Option<&X509>) -> Result<SslConnector, ClientFailure> {
+    let mut tls = SslConnector::builder(SslMethod::tls_client())
+        .map_err(|_| ClientFailure::TlsConfiguration)?;
+    tls.set_min_proto_version(Some(SslVersion::TLS1_3))
+        .map_err(|_| ClientFailure::TlsConfiguration)?;
+    tls.set_verify(SslVerifyMode::PEER);
+    if let Some(root) = root {
+        let mut trust = X509StoreBuilder::new().map_err(|_| ClientFailure::TlsConfiguration)?;
+        trust
+            .add_cert(root.clone())
+            .map_err(|_| ClientFailure::TlsConfiguration)?;
+        // A pinned root may issue the HTTPS leaf, but does not bypass hostname or validity checks.
+        trust
+            .set_flags(openssl::x509::verify::X509VerifyFlags::PARTIAL_CHAIN)
+            .map_err(|_| ClientFailure::TlsConfiguration)?;
+        tls.set_cert_store(trust.build());
+    } else {
+        tls.set_default_verify_paths()
+            .map_err(|_| ClientFailure::TlsConfiguration)?;
+        // Vendored OpenSSL may have a build-time prefix absent on this host.
+        // Use the system's public bundle, never an enrollment TOFU pin.
+        for bundle in [
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/ssl/ca-bundle.pem",
+        ] {
+            if Path::new(bundle).is_file() {
+                tls.set_ca_file(bundle)
+                    .map_err(|_| ClientFailure::TlsConfiguration)?;
+                break;
+            }
+        }
+    }
+    Ok(tls.build())
+}
+
 /// CLI output can carry only these authored public sentences, never arbitrary errors.
 pub(crate) fn public_error(error: &io::Error) -> &'static str {
     match Failure::of(error) {
@@ -272,7 +450,6 @@ pub(crate) fn public_error(error: &io::Error) -> &'static str {
 }
 
 async fn redeem(url: &str, root: Option<&X509>, request: &JoinRequest) -> io::Result<JoinResponse> {
-    use http_body_util::BodyExt;
     let url = url::Url::parse(url).map_err(|_| refused())?;
     if url.scheme() != "https"
         || url.path() != "/remote/join"
@@ -283,83 +460,35 @@ async fn redeem(url: &str, root: Option<&X509>, request: &JoinRequest) -> io::Re
     {
         return Err(refused());
     }
-    let name = url.host_str().ok_or_else(refused)?;
-    let port = url.port_or_known_default().ok_or_else(refused)?;
-    let mut tls = SslConnector::builder(SslMethod::tls_client()).map_err(|_| refused())?;
-    tls.set_min_proto_version(Some(SslVersion::TLS1_3))
-        .map_err(|_| refused())?;
-    tls.set_verify(SslVerifyMode::PEER);
-    if let Some(root) = root {
-        let mut trust = X509StoreBuilder::new().map_err(|_| refused())?;
-        trust.add_cert(root.clone()).map_err(|_| refused())?;
-        // The invitation may pin the HTTPS leaf independently of machine trust.
-        // Hostname, validity and proof of the corresponding key remain mandatory.
-        trust
-            .set_flags(openssl::x509::verify::X509VerifyFlags::PARTIAL_CHAIN)
-            .map_err(|_| refused())?;
-        tls.set_cert_store(trust.build());
-    } else {
-        tls.set_default_verify_paths().map_err(|_| refused())?;
-        // Vendored OpenSSL may have a build-time prefix absent on this host.
-        // Reuse the operating system's public bundle, never an enrollment TOFU pin.
-        for bundle in [
-            "/etc/ssl/certs/ca-certificates.crt",
-            "/etc/pki/tls/certs/ca-bundle.crt",
-            "/etc/ssl/ca-bundle.pem",
-        ] {
-            if Path::new(bundle).is_file() {
-                tls.set_ca_file(bundle).map_err(|_| refused())?;
-                break;
-            }
-        }
+    let body = serde_json::to_vec(request).map_err(|_| refused())?;
+    let mut request_started = false;
+    let response = post_json(
+        &url,
+        url.path(),
+        bytes::Bytes::from(body),
+        root,
+        8192,
+        &mut request_started,
+    )
+    .await
+    .map_err(client_failure_to_io)?;
+    if response.status != StatusCode::OK {
+        return Err(refused());
     }
-    let ssl = tls
-        .build()
-        .configure()
-        .map_err(|_| refused())?
-        .into_ssl(name)
-        .map_err(|_| refused())?;
-    let socket = connect_enrollment(name, port).await?;
-    socket.set_nodelay(true)?;
-    let mut stream = tokio_openssl::SslStream::new(ssl, socket).map_err(|_| refused())?;
-    std::pin::Pin::new(&mut stream)
-        .connect()
-        .await
-        .map_err(|_| Failure::Tls.error(io::ErrorKind::PermissionDenied))?;
-    // Hyper is the same HTTP engine used by the server; retain its bounded codec.
-    let (mut sender, connection) =
-        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
-            .await
-            .map_err(|_| refused())?;
-    let task = AbortConnection(tokio::spawn(async move {
-        let _ = connection.await;
-    }));
-    let result = async {
-        let body = serde_json::to_vec(request).map_err(|_| refused())?;
-        let request = hyper::Request::builder()
-            .method("POST")
-            .uri(url.path())
-            .header(
-                "host",
-                url[url::Position::BeforeHost..url::Position::AfterPort].to_owned(),
-            )
-            .header("content-type", "application/json")
-            .body(http_body_util::Full::new(bytes::Bytes::from(body)))
-            .map_err(|_| refused())?;
-        let response = sender.send_request(request).await.map_err(|_| refused())?;
-        if response.status() != hyper::StatusCode::OK {
-            return Err(refused());
-        }
-        let body = http_body_util::Limited::new(response.into_body(), 8192)
-            .collect()
-            .await
-            .map_err(|_| refused())?
-            .to_bytes();
-        serde_json::from_slice(&body).map_err(|_| refused())
+    serde_json::from_slice(&response.body).map_err(|_| refused())
+}
+
+fn client_failure_to_io(failure: ClientFailure) -> io::Error {
+    match failure {
+        ClientFailure::Dns(message, kind) => Failure::Dns(message).error(kind),
+        ClientFailure::Connect(kind) => Failure::Connect.error(kind),
+        ClientFailure::SocketOption(kind) => io::Error::from(kind),
+        ClientFailure::TlsHandshake => Failure::Tls.error(io::ErrorKind::PermissionDenied),
+        ClientFailure::TlsConfiguration
+        | ClientFailure::HttpHandshake
+        | ClientFailure::Request
+        | ClientFailure::ResponseBody => refused(),
     }
-    .await;
-    drop(task);
-    result
 }
 
 struct AbortConnection(tokio::task::JoinHandle<()>);
