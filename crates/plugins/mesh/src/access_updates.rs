@@ -17,6 +17,16 @@ pub fn chunks(old: Option<&Config>, new: &Config) -> Result<Vec<Chunk>, &'static
             && old.local_key == new.local_key
             && old.server == new.server
             && old.addresses == new.addresses
+            && {
+                #[cfg(feature = "mesh-dns-spike")]
+                {
+                    old.name == new.name && old.peer_names == new.peer_names
+                }
+                #[cfg(not(feature = "mesh-dns-spike"))]
+                {
+                    true
+                }
+            }
             && old.peers.len() == new.peers.len()
             && old
                 .peers

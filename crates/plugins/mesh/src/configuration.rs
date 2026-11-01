@@ -9,6 +9,23 @@ use crate::{
 };
 use std::{collections::BTreeMap, net::SocketAddr};
 
+/// Compile one node's Access view into the same directional peer policy `WireGuard` installs.
+///
+/// The server runtime supplies the default suffix. The persisted mesh suffix is used when
+/// explicitly selected; legacy non-`internal` values remain overrides. DNS clients also keep
+/// `.internal` as an alias.
+/// # Errors
+/// Returns unknown membership or invalid persisted address allocation.
+pub fn compile_with_dns_suffix(
+    coordinator: &Coordinator,
+    node: NodeId,
+    default: DefaultPolicy,
+    endpoints: &BTreeMap<NodeId, SocketAddr>,
+    default_dns_suffix: &str,
+) -> Result<Config, MeshError> {
+    compile_inner(coordinator, node, default, endpoints, default_dns_suffix)
+}
+
 /// Compile one node at a time: open defaults need n(n−1) peer entries deployment-wide,
 /// avoiding an additional deployment-wide matrix inside this compiler.
 /// # Errors
@@ -19,18 +36,46 @@ pub fn compile(
     default: DefaultPolicy,
     endpoints: &BTreeMap<NodeId, SocketAddr>,
 ) -> Result<Config, MeshError> {
+    compile_inner(coordinator, node, default, endpoints, "internal")
+}
+
+fn compile_inner(
+    coordinator: &Coordinator,
+    node: NodeId,
+    default: DefaultPolicy,
+    endpoints: &BTreeMap<NodeId, SocketAddr>,
+    default_dns_suffix: &str,
+) -> Result<Config, MeshError> {
+    #[cfg(not(feature = "mesh-dns-spike"))]
+    let _ = default_dns_suffix;
     let checkpoint = coordinator.checkpoint();
     let local = checkpoint
         .allocation
         .get(node)
         .ok_or(MeshError::UnknownNode)?;
     let view = coordinator.view(node).ok_or(MeshError::UnknownNode)?;
+    #[cfg(feature = "mesh-dns-spike")]
+    let name = checkpoint
+        .members
+        .iter()
+        .find(|member| member.node.id == node)
+        .map(|member| member.node.host.clone());
+    #[cfg(feature = "mesh-dns-spike")]
+    let dns_suffix = if checkpoint.settings.dns_suffix_is_explicit
+        || checkpoint.settings.dns_suffix != crate::dataplane::DEFAULT_DNS_SUFFIX
+    {
+        checkpoint.settings.dns_suffix.clone()
+    } else {
+        default_dns_suffix.to_owned()
+    };
     let fallback = if default == DefaultPolicy::Allow {
         TrafficPolicy::All
     } else {
         TrafficPolicy::None
     };
     let mut peers = BTreeMap::new();
+    #[cfg(feature = "mesh-dns-spike")]
+    let mut peer_names = BTreeMap::new();
     for member in &checkpoint.members {
         let other = member.node.id;
         if other == node {
@@ -51,6 +96,11 @@ pub fn compile(
                 .filter(|peer| peer.inbound != TrafficPolicy::None)
                 .map_or_else(|| fallback.clone(), |peer| peer.inbound.clone())
         };
+        #[cfg(feature = "mesh-dns-spike")]
+        if outbound != TrafficPolicy::None {
+            // The same directional policy installed for this receiver decides whether it learns a name.
+            peer_names.insert(other, member.node.host.clone());
+        }
         // Retain keys even for denied pairs: a rule change needs only policy, not a fresh tunnel setup.
         peers.insert(
             other,
@@ -76,11 +126,34 @@ pub fn compile(
             .map(|member| member.keys.current),
         server: Some(checkpoint.server),
         node,
+        #[cfg(feature = "mesh-dns-spike")]
+        name,
+        #[cfg(feature = "mesh-dns-spike")]
+        dns_suffix,
         version: checkpoint.generation,
         addresses: local,
         default_policy: default,
         peers,
+        #[cfg(feature = "mesh-dns-spike")]
+        peer_names,
     })
+}
+
+/// Derive the default mesh zone from the server's configured public origin.
+///
+/// IP origins and localhost do not provide a public DNS suffix, so those retain `.internal`.
+/// This function is deliberately total: malformed or non-public origins fall back to `.internal`.
+#[cfg(feature = "mesh-dns-spike")]
+pub(crate) fn default_dns_suffix_from_origin(public_origin: &str) -> String {
+    let suffix = url::Url::parse(public_origin)
+        .ok()
+        .and_then(|origin| match origin.host()? {
+            url::Host::Domain(domain) => Some(domain.trim_end_matches('.').to_ascii_lowercase()),
+            url::Host::Ipv4(_) | url::Host::Ipv6(_) => None,
+        })
+        .filter(|host| host != "localhost" && !host.ends_with(".localhost"))
+        .filter(|host| crate::policy::model::validate_dns(host, false).is_ok());
+    suffix.unwrap_or_else(|| "internal".to_owned())
 }
 /// List directed pairs that lose ANY new-connection reach. Port narrowing counts as a loss.
 /// # Errors
@@ -130,6 +203,10 @@ pub fn chunks(
             local_key: new.local_key,
             server: new.server,
             node: new.node,
+            #[cfg(feature = "mesh-dns-spike")]
+            name: new.name.clone(),
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_suffix: new.dns_suffix.clone(),
             from_version: old.map(|old| old.version),
             version: new.version,
             index: 0,
@@ -139,6 +216,10 @@ pub fn chunks(
             upserted: BTreeMap::new(),
             merged: BTreeMap::new(),
             removed: Vec::new(),
+            #[cfg(feature = "mesh-dns-spike")]
+            peer_names: BTreeMap::new(),
+            #[cfg(feature = "mesh-dns-spike")]
+            removed_peer_names: Vec::new(),
         },
         output: Vec::new(),
     };
@@ -146,6 +227,20 @@ pub fn chunks(
         if old.and_then(|old| old.peers.get(node)) != Some(peer) {
             builder.peer(*node, peer)?;
         }
+    }
+    #[cfg(feature = "mesh-dns-spike")]
+    for (node, name) in &new.peer_names {
+        if old.and_then(|old| old.peer_names.get(node)) != Some(name) {
+            builder.peer_name(*node, name)?;
+        }
+    }
+    #[cfg(feature = "mesh-dns-spike")]
+    for node in old
+        .into_iter()
+        .flat_map(|old| old.peer_names.keys())
+        .filter(|node| new.peers.contains_key(node) && !new.peer_names.contains_key(node))
+    {
+        builder.remove_peer_name(*node)?;
     }
     for node in old
         .into_iter()
@@ -183,6 +278,10 @@ impl Chunks {
         self.part.upserted.clear();
         self.part.merged.clear();
         self.part.removed.clear();
+        #[cfg(feature = "mesh-dns-spike")]
+        self.part.peer_names.clear();
+        #[cfg(feature = "mesh-dns-spike")]
+        self.part.removed_peer_names.clear();
         self.output.push(previous);
         Ok(())
     }
@@ -224,6 +323,50 @@ impl Chunks {
             }
         }
         Ok(())
+    }
+    #[cfg(feature = "mesh-dns-spike")]
+    fn peer_name(&mut self, node: NodeId, name: &str) -> Result<(), &'static str> {
+        let previous = self.part.clone();
+        self.part.peer_names.insert(node, name.to_owned());
+        if self.fits()? {
+            return Ok(());
+        }
+        self.part = previous;
+        if !self.part.upserted.is_empty()
+            || !self.part.merged.is_empty()
+            || !self.part.removed.is_empty()
+            || !self.part.peer_names.is_empty()
+            || !self.part.removed_peer_names.is_empty()
+        {
+            self.flush(self.part.clone())?;
+        }
+        self.part.peer_names.insert(node, name.to_owned());
+        if self.fits()? {
+            return Ok(());
+        }
+        Err("Mesh name exceeds frame resource bound.")
+    }
+    #[cfg(feature = "mesh-dns-spike")]
+    fn remove_peer_name(&mut self, node: NodeId) -> Result<(), &'static str> {
+        let previous = self.part.clone();
+        self.part.removed_peer_names.push(node);
+        if self.fits()? {
+            return Ok(());
+        }
+        self.part = previous;
+        if !self.part.upserted.is_empty()
+            || !self.part.merged.is_empty()
+            || !self.part.removed.is_empty()
+            || !self.part.peer_names.is_empty()
+            || !self.part.removed_peer_names.is_empty()
+        {
+            self.flush(self.part.clone())?;
+        }
+        self.part.removed_peer_names.push(node);
+        if self.fits()? {
+            return Ok(());
+        }
+        Err("Mesh name removal exceeds frame resource bound.")
     }
     fn port(
         &mut self,

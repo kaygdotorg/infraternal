@@ -52,6 +52,57 @@ fn errno(error: nix::errno::Errno) -> io::Error {
     io::Error::from_raw_os_error(error as i32)
 }
 
+/// Keep sparse shim mappings out of khugepaged while retaining the caller's
+/// policy for the user's shell. This runs during single-threaded shim startup.
+pub(crate) fn disable_shim_thp() -> io::Result<Option<nix::libc::c_int>> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: these prctl operations use scalar arguments only and retain
+        // no pointers. Read first: a launcher may already have disabled THP.
+        let inherited = unsafe { nix::libc::prctl(nix::libc::PR_GET_THP_DISABLE, 0, 0, 0, 0) };
+        if inherited == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        set_thp_disabled(1)?;
+        Ok(Some(inherited))
+    }
+    #[cfg(not(target_os = "linux"))]
+    Ok(None)
+}
+
+#[cfg(target_os = "linux")]
+fn set_thp_disabled(disabled: nix::libc::c_int) -> io::Result<()> {
+    // SAFETY: scalar-only process policy syscall, also safe in the post-fork
+    // child; no allocation, locks or pointers are involved.
+    // GET also reports bit 1 for the kernel's except-advised mode. SET takes
+    // that bit in arg3, so preserve it when restoring an inherited policy.
+    if unsafe {
+        nix::libc::prctl(
+            nix::libc::PR_SET_THP_DISABLE,
+            disabled & 1,
+            disabled & 2,
+            0,
+            0,
+        )
+    } == -1
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// `PR_SET_THP_DISABLE` survives fork/exec. Undo only the shim's opt-out so
+/// shells and their programs retain the launcher's policy after exec.
+fn restore_child_thp(inherited: Option<nix::libc::c_int>) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if let Some(disabled) = inherited {
+        set_thp_disabled(disabled)?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = inherited;
+    Ok(())
+}
+
 /// Establish waitable child ownership for the shared host before its first PTY.
 /// The caller has validated single-threaded startup and blocked SIGCHLD. A
 /// blocked ignored disposition (or `SA_NOCLDWAIT`) still lets the kernel discard
@@ -147,7 +198,7 @@ impl Pty {
         rows: u16,
         readiness: bool,
     ) -> io::Result<Self> {
-        Self::spawn_with_command(uid, cols, rows, readiness, &[])
+        Self::spawn_with_command(uid, cols, rows, readiness, &[], None)
     }
     pub fn spawn_with_command(
         uid: u32,
@@ -155,6 +206,7 @@ impl Pty {
         rows: u16,
         readiness: bool,
         program: &[std::ffi::OsString],
+        child_thp: Option<nix::libc::c_int>,
     ) -> io::Result<Self> {
         let user = User::from_uid(Uid::from_raw(uid))
             .map_err(errno)?
@@ -240,6 +292,7 @@ impl Pty {
         prepare_child(&mut command);
         unsafe {
             command.pre_exec(move || {
+                restore_child_thp(child_thp)?;
                 unistd::setsid().map_err(errno)?;
                 if nix::libc::ioctl(0, nix::libc::TIOCSCTTY, 0) == -1 {
                     return Err(io::Error::last_os_error());

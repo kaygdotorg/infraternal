@@ -50,6 +50,9 @@ pub mod node_state;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod node;
 
+#[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+pub mod dns;
+
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod node_actions;
 #[cfg(all(feature = "agent", target_os = "linux"))]

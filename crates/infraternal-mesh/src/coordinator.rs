@@ -497,6 +497,7 @@ impl Coordinator {
     pub fn set_suffix(&mut self, suffix: String) -> Result<Change, MeshError> {
         let names = self.names.set_suffix(suffix.clone())?;
         self.settings.dns_suffix = suffix;
+        self.settings.dns_suffix_is_explicit = true;
         Ok(Change {
             names,
             ..Change::default()

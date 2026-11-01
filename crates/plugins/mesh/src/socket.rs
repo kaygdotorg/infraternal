@@ -30,14 +30,31 @@ impl MeshPlugin {
     /// Bind to an existing server pool, leaving six authority slots in production.
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
-        let capacity = pool
-            .options()
+        let capacity = Self::mesh_work_capacity(&pool);
+        Self::with_mesh_service(capacity, MeshService::new(pool))
+    }
+
+    /// Bind the coordinator's derived DNS default to the server's configured public origin.
+    #[must_use]
+    pub fn with_public_origin(pool: SqlitePool, public_origin: &str) -> Self {
+        let capacity = Self::mesh_work_capacity(&pool);
+        Self::with_mesh_service(
+            capacity,
+            MeshService::with_public_origin(pool, public_origin),
+        )
+    }
+
+    fn mesh_work_capacity(pool: &SqlitePool) -> usize {
+        pool.options()
             .get_max_connections()
             .saturating_sub(2)
-            .clamp(1, 2);
+            .clamp(1, 2) as usize
+    }
+
+    fn with_mesh_service(capacity: usize, mesh: MeshService) -> Self {
         Self {
-            mesh: MeshService::new(pool),
-            mesh_work: Arc::new(Semaphore::new(capacity as usize)),
+            mesh,
+            mesh_work: Arc::new(Semaphore::new(capacity)),
         }
     }
 

@@ -51,6 +51,7 @@ tower-http = { version = "0.6", features = ["fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 futures-util = "0.3"
+hickory-proto = { version = "=0.26.3", default-features = false, features = ["std"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 webauthn-rs = { version = "=0.5.5", default-features = false, features = ["conditional-ui"] }

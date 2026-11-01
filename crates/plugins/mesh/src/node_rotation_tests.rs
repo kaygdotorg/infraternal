@@ -36,6 +36,10 @@ fn check(backend: Backend) {
         local_key: None,
         server: None,
         node: NodeId(1),
+        #[cfg(feature = "mesh-dns-spike")]
+        name: None,
+        #[cfg(feature = "mesh-dns-spike")]
+        dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
         version: 1,
         addresses: Addresses {
             ipv4: "10.254.0.1".parse().unwrap(),
@@ -43,6 +47,8 @@ fn check(backend: Backend) {
         },
         default_policy: DefaultPolicy::Deny,
         peers: BTreeMap::new(),
+        #[cfg(feature = "mesh-dns-spike")]
+        peer_names: std::collections::BTreeMap::new(),
     };
     // Restore invokes this same boundary with no in-memory accepted config.
     // The kernel can still carry a proposed address from an interrupted apply.
