@@ -221,14 +221,27 @@ fn matching_zone<'zone, 'query>(
     qname: &'query str,
     suffixes: &'zone [String],
 ) -> Option<(&'zone str, &'query str)> {
-    suffixes.iter().find_map(|suffix| {
+    let mut empty_label = None;
+    let mut zone_apex = None;
+    for suffix in suffixes {
         if qname == suffix {
-            return Some((suffix.as_str(), ""));
+            zone_apex.get_or_insert((suffix.as_str(), ""));
+            continue;
         }
-        let prefix = qname.strip_suffix(suffix.as_str())?;
-        let label = prefix.strip_suffix('.')?;
-        Some((suffix.as_str(), label))
-    })
+        let Some(prefix) = qname.strip_suffix(suffix.as_str()) else {
+            continue;
+        };
+        let Some(label) = prefix.strip_suffix('.') else {
+            continue;
+        };
+        if label.is_empty() {
+            empty_label.get_or_insert((suffix.as_str(), label));
+        } else {
+            // A hostname under a shorter alias zone must beat a longer zone's apex.
+            return Some((suffix.as_str(), label));
+        }
+    }
+    empty_label.or(zone_apex)
 }
 
 fn request_had_rd(packet: &[u8]) -> bool {

@@ -528,3 +528,24 @@ fn review_j68_remote_resolver_must_not_disclose_a_name_denied_to_the_asker() {
     assert_eq!(local_reply.rcode(), RCODE::NoError);
     assert_eq!(local_reply.answers.len(), 1);
 }
+
+#[test]
+fn review_j68b_nested_suffix_preserves_internal_hostname_alias() {
+    let mut snapshot = config();
+    snapshot.dns_suffix = "laptop.internal".to_owned();
+    for name in ["laptop.laptop.internal", "laptop.internal"] {
+        let wire = dns::response(&query(name, 1), &snapshot).unwrap().unwrap();
+        let reply = Packet::parse(&wire).unwrap();
+        eprintln!(
+            "{name}: {:?}, {} answers",
+            reply.rcode(),
+            reply.answers.len()
+        );
+        assert_eq!(
+            reply.rcode(),
+            RCODE::NoError,
+            "the configured suffix must preserve every .internal alias"
+        );
+        assert_eq!(reply.answers.len(), 1);
+    }
+}
