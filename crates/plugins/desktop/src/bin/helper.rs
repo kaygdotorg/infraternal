@@ -154,7 +154,7 @@ fn configured_companion() -> std::io::Result<Option<std::path::PathBuf>> {
         .transpose()
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn validate_companion(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::MetadataExt;
     infraternal_plugin_desktop::native::companion_app_bundle(path)?;
@@ -194,7 +194,7 @@ fn main() {
 }
 
 /// Exercises the local executable boundary without invoking platform privacy APIs.
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 #[allow(clippy::unwrap_used)]
 mod companion_tests {
     use super::validate_companion;
