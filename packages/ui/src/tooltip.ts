@@ -437,9 +437,18 @@ function watch(): void {
   }, 200);
 }
 
-/** Re-reads the label of `el` if its tooltip is open (for live labels like "Copied"). */
-export function refreshTip(el: HTMLElement) {
-  if (shown && current === el) { place(el, false); setLabel(labelOf(el), 0); }
+/**
+ * Re-reads the label of `el` if its tooltip is open (for live labels like "Copied"). With `animate`, a label that
+ * changes while the tooltip stays (a button that turns into another while Option is held) glides: the surface eases to
+ * its new width and the words slide, instead of snapping.
+ */
+export function refreshTip(el: HTMLElement, animate = false) {
+  if (!(shown && current === el)) return;
+  if (!animate || reduced()) { place(el, false); setLabel(labelOf(el), 0); return; }
+  const dir = place(el, true);
+  surface.style.transition = `width ${TRAVEL}ms ${EASE}`;
+  window.setTimeout(() => { surface.style.transition = ""; }, TRAVEL + 40);
+  setLabel(labelOf(el), dir);
 }
 
 /**
