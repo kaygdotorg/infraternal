@@ -22,12 +22,13 @@ const SIZES = [
  * one that is measured and captured.
  */
 async function asPhone(page: Page): Promise<void> {
-  const coarse = await page.evaluate(() => {
-    const rules = [...document.styleSheets].flatMap((sheet) => [...sheet.cssRules]).filter((rule): rule is CSSMediaRule => rule instanceof CSSMediaRule && rule.conditionText.includes("pointer: coarse"));
-    return rules.flatMap((rule) => [...rule.cssRules].map((inner) => inner.cssText)).join("\n");
+  const { css, seen } = await page.evaluate(() => {
+    const media = [...document.styleSheets].flatMap((sheet) => [...sheet.cssRules]).filter((rule): rule is CSSMediaRule => rule instanceof CSSMediaRule);
+    const coarse = media.filter((rule) => /pointer:\s*coarse/.test(rule.media.mediaText));
+    return { css: coarse.flatMap((rule) => [...rule.cssRules].map((inner) => inner.cssText)).join("\n"), seen: media.map((rule) => rule.media.mediaText).join(" | ") };
   });
-  expect(coarse).toContain("--text-body: 16px");
-  await page.addStyleTag({ content: coarse });
+  expect(css, `media rules seen: ${seen}`).toContain("--text-body: 16px");
+  await page.addStyleTag({ content: css });
 }
 
 for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
