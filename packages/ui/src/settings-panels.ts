@@ -72,8 +72,9 @@ function fitHints(list: HTMLElement): void {
     const texts = [...list.querySelectorAll<HTMLElement>(".ui-sp-text")];
     const hinted = texts.filter((t) => t.querySelector<HTMLElement>(".ui-sp-hint")!.textContent !== "");
     if (hinted.length === 0) return;
-    // Rounded up so a name never loses a fraction of a pixel to its own column and gets an ellipsis.
-    const column = Math.ceil(Math.max(...texts.map((t) => t.querySelector<HTMLElement>(".ui-sp-label")!.getBoundingClientRect().width)));
+    // Rounded up so a name never loses a fraction of a pixel to its own column and gets an ellipsis. The used width, not a
+    // rect: a rect carries every transform above it (the canvas camera's zoom), and a column measured at 0.8 would clip at 1.
+    const column = Math.ceil(Math.max(...texts.map((t) => Number.parseFloat(getComputedStyle(t.querySelector<HTMLElement>(".ui-sp-label")!).width) || 0)));
     list.style.setProperty("--ui-sp-label-w", `${column}px`);
     const stack = hinted.some((t) => column + 10 + t.querySelector<HTMLElement>(".ui-sp-hint")!.scrollWidth > t.clientWidth);
     if (stack) list.dataset.stacked = "";
