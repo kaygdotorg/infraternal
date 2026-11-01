@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Verify an inherited-account terminal reaps completed adopted jobs while its shell remains open [D18,D240]."""
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -16,10 +15,7 @@ import uuid
 sys.dont_write_bytecode = True
 repo = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo / 'scripts'))
-from agent_fixture import Binary, cleanup
-spec = importlib.util.spec_from_file_location('login_controller', repo / 'scripts/login-bench/round3/controller.py')
-controller = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(controller)
+from agent_fixture import Binary, cleanup, control, detach, marker, select_terminal
 
 
 def main():
@@ -33,8 +29,8 @@ def main():
     try:
         client = Binary(Path(sys.argv[1]).resolve(), root)
         values = dict(person=str(person), account=pwd.getpwuid(os.geteuid()).pw_name, uid=os.geteuid(), cols=80, rows=24)
-        session = controller.control(client, 1, 'terminal.open', values)['session_id']
-        controller.select_terminal(client, session)
+        session = control(client, 1, 'terminal.open', values)['session_id']
+        select_terminal(client, session)
         # Each short child outlives its immediate parent, so the terminal's
         # subreaper adopts it. Pin fixture processes before their controlled exit.
         for index in range(4):
@@ -43,7 +39,7 @@ def main():
             command = f'printf "%s\\n" "$$" > {shlex.quote(str(path))}; read x < {shlex.quote(str(release))}'
             os.mkfifo(release, 0o600)
             client.input(f"sh -c {shlex.quote('sh -c ' + shlex.quote(command) + ' </dev/null >/dev/null 2>&1 &')}\n".encode())
-            controller.marker(client, f'review-job{index}-started')
+            marker(client, f'review-job{index}-started')
             deadline = time.monotonic() + 5
             while not path.exists() and time.monotonic() < deadline:
                 time.sleep(.01)
@@ -62,7 +58,7 @@ def main():
         assert all(select.select([fd], [], [], 5)[0] for _, fd in pins), 'fixture jobs did not end'
         # Further input gives the shim another normal poll iteration after
         # every SIGCHLD. No idle timing or performance measurement is asserted.
-        controller.marker(client, 'review-jobs-ended')
+        marker(client, 'review-jobs-ended')
         zombies = []
         for pid, _ in pins:
             try:
@@ -78,7 +74,7 @@ def main():
             # A cleanup retry is part of fixture teardown, never an account-wide
             # scan. It reaps precisely the descendants of this terminal.
             try:
-                controller.control(client, 2, 'terminal.login.revoke', dict(person=str(person)))
+                control(client, 2, 'terminal.login.revoke', dict(person=str(person)))
             except (OSError, EOFError, RuntimeError):
                 pass
             client.kill()

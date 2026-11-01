@@ -665,3 +665,44 @@ def cleanup(state):
     private = _private_state_roots.pop(state, None)
     if private is not None:
         private.cleanup()
+
+
+def control(client, number, action, values, expected=True):
+    """Send one bounded control action and reject a mismatched reply identity."""
+    encoded = action.encode()
+    client.send(0, 0x30, struct.pack('<I', number) + varint(len(encoded)) + encoded + json.dumps(values).encode())
+    while True:
+        frame = client.read()
+        if frame[:2] == (0, 0x31):
+            body = frame[2]
+            if struct.unpack('<I', body[:4])[0] != number:
+                raise RuntimeError('control reply identity differs')
+            result = json.loads(body[5:])
+            if (body[4] == 1) != expected:
+                raise RuntimeError('control action result differs: ' + str(result.get('reason', 'unspecified')))
+            return result
+        client.process(frame=frame)
+
+
+def select_terminal(client, session):
+    """Attach one fixture client to a returned session id with fresh cursors."""
+    client.id = uuid.UUID(session)
+    client.out = client.entered = client.acked = 0
+    client.credit_pending = client.credit_available = 0
+    client.data.clear()
+    client.attach()
+
+
+def detach(client):
+    """Finish a fixture terminal writer through its normal acknowledged close."""
+    client.send(1, 0x0f, struct.pack('<H', 0) + varint(4) + b'done')
+    client.fence()
+
+
+def marker(client, text):
+    """Write and observe a fixture-owned shell marker without retaining output."""
+    prefix, suffix = text.split('-', 1)
+    client.input(f"printf '{prefix}-%s\\n' '{suffix}'\n".encode())
+    client.until(text.encode())
+    client.wait_ack()
+    client.data.clear()

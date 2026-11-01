@@ -36,8 +36,11 @@ def main():
     client = None
     try:
         client = Binary(Path(sys.argv[1]).resolve(), state)
-        readiness, _ = control(client, 1, 'terminal.open',
-                               dict(uid=os.geteuid(), cols=80, rows=24, readiness=True))
+        readiness, readiness_result = control(
+            client, 1, 'terminal.open',
+            dict(uid=os.geteuid(), cols=80, rows=24, readiness=True),
+        )
+        assert readiness, f'explicit-state fixed readiness was refused: {readiness_result}'
         prepared, result = control(client, 2, 'terminal.login.prepare',
                                    dict(uid=os.geteuid(), cols=80, rows=24,
                                         person=str(uuid.uuid4()), account=pwd.getpwuid(os.geteuid()).pw_name))
@@ -45,7 +48,6 @@ def main():
         if client is not None:
             client.kill()
         cleanup(state)
-    assert readiness, 'explicit-state fixed readiness was refused'
     assert prepared, f'explicit-state own-account preparation was refused: {result}'
 
 

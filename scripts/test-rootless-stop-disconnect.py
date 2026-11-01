@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Verify a complete lifecycle request survives sender disconnect before shim readiness [D18,D240,D247]."""
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -17,10 +16,7 @@ import uuid
 sys.dont_write_bytecode = True
 repo = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo / 'scripts'))
-from agent_fixture import Binary, cleanup, shim_socket_count
-spec = importlib.util.spec_from_file_location('login_controller', repo / 'scripts/login-bench/round3/controller.py')
-controller = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(controller)
+from agent_fixture import Binary, cleanup, shim_socket_count, control, detach, marker, select_terminal
 
 
 def main():
@@ -36,18 +32,18 @@ def main():
         person = uuid.uuid4()
         values = dict(person=str(person), account=pwd.getpwuid(os.geteuid()).pw_name,
                       uid=os.geteuid(), cols=80, rows=24)
-        session = controller.control(client, 1, 'terminal.open', values)['session_id']
-        controller.select_terminal(client, session)
+        session = control(client, 1, 'terminal.open', values)['session_id']
+        select_terminal(client, session)
         pid_path = root / 'shell.pid'
         client.input(f'printf "%s\\n" "$$" > {shlex.quote(str(pid_path))}\n'.encode())
-        controller.marker(client, 'review-shell-started')
+        marker(client, 'review-shell-started')
         shell_pid = int(pid_path.read_text().strip())
         shell_pin = os.pidfd_open(shell_pid)
         # The local shell is a direct child of its shim. Pinned descriptors
         # limit every fixture signal to these exact owned processes.
         shim_pid = int(Path(f'/proc/{shell_pid}/stat').read_text().rsplit(') ', 1)[1].split()[1])
         shim_pin = os.pidfd_open(shim_pid)
-        controller.detach(client)
+        detach(client)
         endpoint = root / 'sessions' / (uuid.UUID(session).hex + '.stop')
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
             peer.connect(str(endpoint))
@@ -70,7 +66,7 @@ def main():
                               owned_shell_stopped=stopped)), flush=True)
         # Always retire the fixture through the normal production controller,
         # including on the pre-fix path, before checking the lost-request result.
-        controller.control(client, 2, 'terminal.login.revoke', dict(person=str(person)))
+        control(client, 2, 'terminal.login.revoke', dict(person=str(person)))
         assert stopped, 'a complete disconnected lifecycle request retained its owned shell'
     finally:
         if paused and shim_pin is not None:

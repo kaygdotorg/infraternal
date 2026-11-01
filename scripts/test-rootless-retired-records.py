@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Verify retired own-account terminals release their durable cleanup attribution [D18,D240,D247]."""
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -13,10 +12,7 @@ import uuid
 sys.dont_write_bytecode = True
 repo = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo / 'scripts'))
-from agent_fixture import Binary, cleanup
-spec = importlib.util.spec_from_file_location('login_controller', repo / 'scripts/login-bench/round3/controller.py')
-controller = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(controller)
+from agent_fixture import Binary, cleanup, control, detach, marker, select_terminal
 
 
 def main():
@@ -32,13 +28,13 @@ def main():
         values = dict(person=str(person), account=pwd.getpwuid(os.geteuid()).pw_name,
                       uid=os.geteuid(), cols=80, rows=24)
         for index in range(8):
-            session = controller.control(client, index + 1, 'terminal.open', values)['session_id']
-            controller.select_terminal(client, session)
+            session = control(client, index + 1, 'terminal.open', values)['session_id']
+            select_terminal(client, session)
             client.events.clear()
             client.input(b'exit 0\n')
             event = client.wait_event('terminal.exited')
             assert event['session_id'] == session and event['status'] == 0
-            controller.detach(client)
+            detach(client)
             path = root / 'sessions' / (uuid.UUID(session).hex + '.sock')
             deadline = time.monotonic() + 5
             while path.exists():
@@ -56,7 +52,7 @@ def main():
     finally:
         if client is not None:
             try:
-                controller.control(client, 20, 'terminal.login.revoke', dict(person=str(person)))
+                control(client, 20, 'terminal.login.revoke', dict(person=str(person)))
             except (OSError, EOFError, RuntimeError):
                 pass
             client.kill()

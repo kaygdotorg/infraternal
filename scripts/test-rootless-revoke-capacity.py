@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Verify inherited-account cleanup admission with a full set of live owner links [D18,D240]."""
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -16,10 +15,7 @@ import uuid
 sys.dont_write_bytecode = True
 repo = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo / 'scripts'))
-from agent_fixture import Binary, cleanup, exact
-spec = importlib.util.spec_from_file_location('login_controller', repo / 'scripts/login-bench/round3/controller.py')
-controller = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(controller)
+from agent_fixture import Binary, cleanup, exact, control, detach, marker, select_terminal
 
 
 def frame(kind, body=b''):
@@ -42,13 +38,13 @@ def main():
     try:
         client = Binary(Path(sys.argv[1]).resolve(), root)
         values = dict(person=str(person), account=pwd.getpwuid(os.geteuid()).pw_name, uid=os.geteuid(), cols=80, rows=24)
-        session = controller.control(client, 1, 'terminal.open', values)['session_id']
-        controller.select_terminal(client, session)
+        session = control(client, 1, 'terminal.open', values)['session_id']
+        select_terminal(client, session)
         pid_path = root / 'shell.pid'
         client.input(f'printf "%s\\n" "$$" > {shlex.quote(str(pid_path))}\n'.encode())
-        controller.marker(client, 'review-capacity-ready')
+        marker(client, 'review-capacity-ready')
         pin = os.pidfd_open(int(pid_path.read_text().strip()))
-        controller.detach(client)
+        detach(client)
         path = root / 'sessions' / (uuid.UUID(session).hex + '.sock')
         # Each completed ownership barrier proves this peer occupies an admitted
         # slot. These links never select writers or request terminal output.
@@ -84,7 +80,7 @@ def main():
             peer.close()
         if client is not None:
             try:
-                controller.control(client, 3, 'terminal.login.revoke', dict(person=str(person)))
+                control(client, 3, 'terminal.login.revoke', dict(person=str(person)))
             except (OSError, EOFError, RuntimeError):
                 pass
             client.kill()
