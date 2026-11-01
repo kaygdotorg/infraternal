@@ -165,7 +165,8 @@ fn run_namespace_case() {
             public: false,
             certificate: CertificateName::Wildcard("*.node.example.org".to_owned()),
         }])
-        .expect("publish one granted mesh service");
+        .expect("publish one granted mesh service")
+        .expect("published listener ports");
 
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut response = None;

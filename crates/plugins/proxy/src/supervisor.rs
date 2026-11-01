@@ -1,6 +1,6 @@
 //! Owns the single Traefik child, drains it after the final exposure, and redacts its log stream [#281].
 
-use crate::config::{PublishedService, StaticConfig};
+use crate::config::{ListenerPorts, PublishedService, StaticConfig};
 use nix::fcntl::{Flock, FlockArg};
 use std::{
     fs::{self, File, OpenOptions},
@@ -373,7 +373,7 @@ impl TraefikChild {
             }
             validate_private_file(path, PRIVATE_FILE_MODE)?;
             let mut secret = Zeroizing::new(String::new());
-            let mut file = OpenOptions::new()
+            let file = OpenOptions::new()
                 .read(true)
                 .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
                 .open(path)?;
@@ -584,7 +584,10 @@ pub struct SupervisorSettings {
 }
 
 enum SupervisorCommand {
-    Replace(Vec<PublishedService>, mpsc::Sender<io::Result<()>>),
+    Replace(
+        Vec<PublishedService>,
+        mpsc::Sender<io::Result<Option<ListenerPorts>>>,
+    ),
     IsRunning(mpsc::Sender<bool>),
     Shutdown(mpsc::Sender<()>),
 }
@@ -627,7 +630,7 @@ impl TraefikSupervisor {
     ///
     /// # Errors
     /// Returns an error when config rendering/writing, process startup, or health readiness fails.
-    pub fn replace(&self, services: Vec<PublishedService>) -> io::Result<()> {
+    pub fn replace(&self, services: Vec<PublishedService>) -> io::Result<Option<ListenerPorts>> {
         let (reply, received) = mpsc::channel();
         self.sender
             .send(SupervisorCommand::Replace(services, reply))
@@ -683,31 +686,42 @@ fn run_supervisor(
     let mut services = Vec::new();
     let mut child: Option<TraefikChild> = None;
     let mut listener_is_public = false;
+    let mut listener_ports = None;
     loop {
         match receive_command(&receiver, lifecycle.phase()) {
             Inbox::Command(SupervisorCommand::Replace(next, reply)) => {
                 services = next;
                 let action = lifecycle.update(services.len(), Instant::now());
-                let result = match action {
+                let result: io::Result<Option<ListenerPorts>> = match action {
                     LifecycleAction::Start => {
-                        start_managed_child(&settings, &services, Arc::clone(&log)).map(
-                            |(started, public)| {
+                        match start_managed_child(&settings, &services, Arc::clone(&log)) {
+                            Ok((started, public, ports)) => {
                                 child = Some(started);
                                 listener_is_public = public;
+                                listener_ports = Some(ports);
                                 let _ = lifecycle.child_started(services.len(), Instant::now());
-                            },
-                        )
+                                Ok(listener_ports)
+                            }
+                            Err(error) => Err(error),
+                        }
                     }
                     LifecycleAction::BeginDrain => {
-                        write_dynamic_snapshot(&settings, &[]).or_else(|error| {
-                            stop_child(&mut child)?;
-                            let _ = lifecycle.child_exited(0, Instant::now());
-                            Err(error)
-                        })
+                        match write_dynamic_snapshot(&settings, &[]) {
+                            Ok(()) => Ok(listener_ports),
+                            Err(error) => {
+                                let stop_result = stop_child(&mut child);
+                                listener_ports = None;
+                                let _ = lifecycle.child_exited(0, Instant::now());
+                                match stop_result {
+                                    Ok(()) => Err(error),
+                                    Err(stop_error) => Err(stop_error),
+                                }
+                            }
+                        }
                     }
                     LifecycleAction::Apply | LifecycleAction::Keep => {
                         if services.is_empty() {
-                            Ok(())
+                            Ok(listener_ports)
                         } else if child.is_some()
                             && listener_is_public != services.iter().any(|service| service.public)
                         {
@@ -719,15 +733,30 @@ fn run_supervisor(
                                 &mut child,
                                 &mut listener_is_public,
                             )
-                        } else {
-                            write_dynamic_snapshot(&settings, &services).or_else(|error| {
-                                stop_child(&mut child)?;
-                                let _ = lifecycle.child_exited(services.len(), Instant::now());
-                                Err(error)
+                            .map(|ports| {
+                                listener_ports = Some(ports);
+                                listener_ports
                             })
+                        } else {
+                            match write_dynamic_snapshot(&settings, &services) {
+                                Ok(()) => Ok(listener_ports),
+                                Err(error) => {
+                                    let stop_result = stop_child(&mut child);
+                                    listener_ports = None;
+                                    let _ = lifecycle.child_exited(services.len(), Instant::now());
+                                    match stop_result {
+                                        Ok(()) => Err(error),
+                                        Err(stop_error) => Err(stop_error),
+                                    }
+                                }
+                            }
                         }
                     }
-                    LifecycleAction::Stop | LifecycleAction::RetryAfter(_) => Ok(()),
+                    LifecycleAction::Stop => {
+                        listener_ports = None;
+                        Ok(None)
+                    }
+                    LifecycleAction::RetryAfter(_) => Ok(listener_ports),
                 };
                 if result.is_err() && matches!(lifecycle.phase(), LifecyclePhase::Starting) {
                     let _ = lifecycle.child_exited(services.len(), Instant::now());
@@ -762,12 +791,14 @@ fn run_supervisor(
                 match lifecycle.tick(services.len(), Instant::now()) {
                     LifecycleAction::Stop => {
                         let _ = stop_child(&mut child);
+                        listener_ports = None;
                     }
                     LifecycleAction::Start => {
                         match start_managed_child(&settings, &services, Arc::clone(&log)) {
-                            Ok((started, public)) => {
+                            Ok((started, public, ports)) => {
                                 child = Some(started);
                                 listener_is_public = public;
+                                listener_ports = Some(ports);
                                 let _ = lifecycle.child_started(services.len(), Instant::now());
                             }
                             Err(_) => {
@@ -814,7 +845,7 @@ fn start_managed_child(
     settings: &SupervisorSettings,
     services: &[PublishedService],
     log: Arc<ProxyLog>,
-) -> io::Result<(TraefikChild, bool)> {
+) -> io::Result<(TraefikChild, bool, ListenerPorts)> {
     let mut config = settings.static_config.clone();
     config.public = services.iter().any(|service| service.public);
     config.ports = crate::config::detect_listener_ports(
@@ -857,7 +888,7 @@ fn start_managed_child(
         )
         .is_ok()
         {
-            return Ok((child, config.public));
+            return Ok((child, config.public, config.ports));
         }
         thread::sleep(remaining.min(Duration::from_millis(100)));
     }
@@ -870,11 +901,14 @@ fn restart_for_listener_scope(
     lifecycle: &mut Lifecycle,
     child: &mut Option<TraefikChild>,
     listener_is_public: &mut bool,
-) -> io::Result<()> {
+) -> io::Result<ListenerPorts> {
     let stopped = stop_child(child);
     let delay = match lifecycle.child_exited(services.len(), Instant::now()) {
         LifecycleAction::RetryAfter(delay) => delay,
-        _ => return stopped,
+        _ => {
+            stopped?;
+            return Err(io::Error::other("proxy listener restart was not scheduled"));
+        }
     };
     stopped?;
     thread::sleep(delay);
@@ -882,11 +916,11 @@ fn restart_for_listener_scope(
         return Err(io::Error::other("proxy listener restart was not scheduled"));
     }
     match start_managed_child(settings, services, log) {
-        Ok((started, public)) => {
+        Ok((started, public, ports)) => {
             *child = Some(started);
             *listener_is_public = public;
             let _ = lifecycle.child_started(services.len(), Instant::now());
-            Ok(())
+            Ok(ports)
         }
         Err(error) => {
             let _ = lifecycle.child_exited(services.len(), Instant::now());

@@ -222,9 +222,17 @@ fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state(
         public: false,
         certificate: CertificateName::Wildcard("*.n1.example.test".to_owned()),
     };
-    supervisor
+    let listener_ports = supervisor
         .replace(vec![service.clone()])
-        .expect("start one process for the first route");
+        .expect("start one process for the first route")
+        .expect("started listener ports");
+    assert_eq!(
+        listener_ports,
+        ListenerPorts {
+            http: 10_080,
+            https: 10_443,
+        }
+    );
     assert!(supervisor.is_running().expect("process after first route"));
     let dynamic_path = state.join("dynamic.json");
     let dynamic = std::fs::read_to_string(&dynamic_path).expect("read published route");
@@ -232,14 +240,16 @@ fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state(
 
     supervisor
         .replace(Vec::new())
-        .expect("remove final route and begin drain");
+        .expect("remove final route and begin drain")
+        .expect("draining listener ports");
     assert!(supervisor.is_running().expect("process during drain"));
     let empty = std::fs::read_to_string(&dynamic_path).expect("read empty route snapshot");
     assert!(!empty.contains("docs.n1.example.test"));
 
     supervisor
         .replace(vec![service])
-        .expect("new exposure cancels drain");
+        .expect("new exposure cancels drain")
+        .expect("resumed listener ports");
     assert!(supervisor.is_running().expect("process after drain cancel"));
     health_server.join().expect("join private health fixture");
     drop(supervisor);

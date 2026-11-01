@@ -11,12 +11,12 @@ use crate::{
     supervisor::{ProxyLog, SupervisorSettings, TraefikSupervisor},
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{
     collections::BTreeMap,
     env, fs, io,
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -103,15 +103,16 @@ struct ControllerState {
     mesh: Option<AcceptedMeshContext>,
     exposures: BTreeMap<u16, Exposure>,
     supervisor: Option<Box<dyn RouteSupervisor>>,
+    listener_ports: ListenerPorts,
 }
 
 /// Small replace-only boundary between desired publications and the process owner.
 pub trait RouteSupervisor: Send {
-    /// Atomically replace the complete active route snapshot.
+    /// Atomically replace the complete active route snapshot and report its listener ports.
     ///
     /// # Errors
     /// Returns an error when config rendering, child startup, or health readiness fails.
-    fn replace(&self, services: Vec<PublishedService>) -> io::Result<()>;
+    fn replace(&self, services: Vec<PublishedService>) -> io::Result<Option<ListenerPorts>>;
 
     /// Report whether Traefik currently answers its private health probe.
     ///
@@ -121,7 +122,7 @@ pub trait RouteSupervisor: Send {
 }
 
 impl RouteSupervisor for TraefikSupervisor {
-    fn replace(&self, services: Vec<PublishedService>) -> io::Result<()> {
+    fn replace(&self, services: Vec<PublishedService>) -> io::Result<Option<ListenerPorts>> {
         TraefikSupervisor::replace(self, services)
     }
 
@@ -154,6 +155,10 @@ impl Default for ProxyController {
                 mesh: None,
                 exposures: BTreeMap::new(),
                 supervisor: None,
+                listener_ports: ListenerPorts {
+                    http: 10_080,
+                    https: 10_443,
+                },
             })),
             factory: None,
         }
@@ -371,8 +376,8 @@ impl ProxyController {
             || format!("Stopped publishing local port {port}."),
             |route| {
                 format!(
-                    "Stopped new connections to https://{}; existing connections may drain for up to 10 seconds.",
-                    route.hostname
+                    "Stopped new connections to {}; existing connections may drain for up to 10 seconds.",
+                    https_url(&route.hostname, state.listener_ports.https)
                 )
             },
         );
@@ -386,7 +391,10 @@ impl ProxyController {
     fn reconcile(&self, state: &mut ControllerState) -> io::Result<()> {
         let services = refresh_routes(state)?;
         if let Some(supervisor) = &state.supervisor {
-            return supervisor.replace(services);
+            if let Some(ports) = supervisor.replace(services)? {
+                state.listener_ports = ports;
+            }
+            return Ok(());
         }
         if services.is_empty() {
             return Ok(());
@@ -404,7 +412,10 @@ impl ProxyController {
             )
         })?;
         let supervisor = factory.start(context)?;
-        supervisor.replace(services)?;
+        let listener_ports = supervisor.replace(services)?;
+        if let Some(ports) = listener_ports {
+            state.listener_ports = ports;
+        }
         state.supervisor = Some(supervisor);
         Ok(())
     }
@@ -647,7 +658,7 @@ fn publication_list(
             Some(json!({
                 "port": exposure.spec.port,
                 "hostname": route.hostname,
-                "url": format!("https://{}", route.hostname),
+                "url": https_url(&route.hostname, state.listener_ports.https),
                 "public": exposure.spec.public,
                 "reachable": reachable,
                 "access": if reachable && exposure.spec.public {"internet"} else if reachable {"mesh grant"} else if !state.enabled {"proxy is off"} else if exposure.spec.public {"proxy is starting"} else {"blocked by Mesh grants"},
@@ -706,34 +717,52 @@ fn error_reply(code: &str, message: &str) -> Result<Vec<u8>, infraternal_plugin_
         .map_err(|_| infraternal_plugin_api::PluginError::Rejected)
 }
 
+fn https_url(hostname: &str, port: u16) -> String {
+    if port == 443 {
+        format!("https://{hostname}")
+    } else {
+        format!("https://{hostname}:{port}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::net::{IpAddr, Ipv4Addr};
 
     #[derive(Clone)]
-    struct FakeFactory(Arc<Mutex<Vec<Vec<PublishedService>>>>);
+    struct FakeFactory {
+        snapshots: Arc<Mutex<Vec<Vec<PublishedService>>>>,
+        listener_ports: ListenerPorts,
+    }
 
-    struct FakeSupervisor(Arc<Mutex<Vec<Vec<PublishedService>>>>);
+    struct FakeSupervisor {
+        snapshots: Arc<Mutex<Vec<Vec<PublishedService>>>>,
+        listener_ports: ListenerPorts,
+    }
 
     impl SupervisorFactory for FakeFactory {
         fn start(&self, _context: &AcceptedMeshContext) -> io::Result<Box<dyn RouteSupervisor>> {
-            Ok(Box::new(FakeSupervisor(Arc::clone(&self.0))))
+            Ok(Box::new(FakeSupervisor {
+                snapshots: Arc::clone(&self.snapshots),
+                listener_ports: self.listener_ports,
+            }))
         }
     }
 
     impl RouteSupervisor for FakeSupervisor {
-        fn replace(&self, services: Vec<PublishedService>) -> io::Result<()> {
-            self.0
+        fn replace(&self, services: Vec<PublishedService>) -> io::Result<Option<ListenerPorts>> {
+            self.snapshots
                 .lock()
                 .map_err(|_| io::Error::other("fixture snapshot is unavailable"))?
                 .push(services);
-            Ok(())
+            Ok(Some(self.listener_ports))
         }
 
         fn is_running(&self) -> io::Result<bool> {
             Ok(self
-                .0
+                .snapshots
                 .lock()
                 .map_err(|_| io::Error::other("fixture snapshot is unavailable"))?
                 .last()
@@ -755,8 +784,20 @@ mod tests {
     }
 
     fn controller() -> (ProxyController, Arc<Mutex<Vec<Vec<PublishedService>>>>) {
+        controller_with_ports(ListenerPorts {
+            http: 10_080,
+            https: 10_443,
+        })
+    }
+
+    fn controller_with_ports(
+        listener_ports: ListenerPorts,
+    ) -> (ProxyController, Arc<Mutex<Vec<Vec<PublishedService>>>>) {
         let snapshots = Arc::new(Mutex::new(Vec::new()));
-        let factory = Arc::new(FakeFactory(Arc::clone(&snapshots)));
+        let factory = Arc::new(FakeFactory {
+            snapshots: Arc::clone(&snapshots),
+            listener_ports,
+        });
         (ProxyController::with_factory(factory), snapshots)
     }
 
@@ -775,6 +816,27 @@ mod tests {
         assert_eq!(
             value["services"][0]["url"],
             "https://port-3000.web01.ssh.kayg.org:10443"
+        );
+    }
+
+    #[test]
+    fn published_url_omits_the_default_https_port() {
+        let (controller, _) = controller_with_ports(ListenerPorts {
+            http: 80,
+            https: 443,
+        });
+        controller
+            .set_mesh_context(Some(context(&[(3000, Ipv4Addr::new(10, 254, 0, 3))])))
+            .expect("apply accepted context");
+
+        let output = controller
+            .call("proxy.publish", br#"{"port":3000}"#)
+            .expect("publish authorized port");
+        let value: Value = serde_json::from_slice(&output).expect("publication result JSON");
+
+        assert_eq!(
+            value["services"][0]["url"],
+            "https://port-3000.web01.ssh.kayg.org"
         );
     }
 
