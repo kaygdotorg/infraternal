@@ -8,6 +8,14 @@ export interface ToastAction {
   onSelect(event?: MouseEvent): void;
 }
 
+/** A compact icon button beside the message (TASTE: icons with warm tooltips). `label` is both its tooltip and its accessible name. */
+export interface ToastIconAction extends ToastAction {
+  /** Inner SVG markup on the 24 px grid (the shared icons). */
+  icon: string;
+  /** Keep the notice up after the action runs: for help that opens elsewhere while the question still waits. */
+  keepOpen?: boolean;
+}
+
 export interface ToastMessage {
   message: string;
   /** The message with entity chips in it (`entityText`); it replaces `message` on screen, which stays the plain text. */
@@ -15,6 +23,8 @@ export interface ToastMessage {
   action?: ToastAction;
   /** A second action beside the primary action, for a clear alternative such as Discard. */
   secondaryAction?: ToastAction;
+  /** Icon buttons after the message, in order (a question answered by ✓ or ✗, with ? for help). Shown on one line, never stacked. */
+  iconActions?: readonly ToastIconAction[];
   /** Accessible name for action choices that have a keyboard focus handoff. */
   actionGroupLabel?: string;
   /** ARIA shortcut value that focuses the action group, such as `Control+Shift+Space`. */
@@ -104,8 +114,14 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
   close.dataset.tip = "Dismiss";
   close.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>`;
 
+  // Icon actions are rebuilt per message: a handful of buttons, only while the question is on screen.
+  const icons = document.createElement("div");
+  icons.className = "ui-toast-icons";
+  icons.setAttribute("role", "group");
+  icons.hidden = true;
+
   actions.append(action, secondaryAction);
-  host.append(marker, glyph, label, actions, close);
+  host.append(marker, glyph, label, actions, icons, close);
   parent.append(host);
 
   let hideTimer = 0;
@@ -113,12 +129,15 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
   let selectAction: ToastAction["onSelect"] | undefined;
   let selectSecondaryAction: ToastAction["onSelect"] | undefined;
   let closeHandler: (() => void) | undefined;
+  let iconRuns: readonly ToastIconAction[] = [];
   const finish = (): void => { const run = closeHandler; closeHandler = undefined; run?.(); };
   const dismiss = (): void => {
     window.clearTimeout(hideTimer);
     hideTimer = 0;
     selectAction = undefined;
     selectSecondaryAction = undefined;
+    // A second click on a leaving notice must not run an answer twice.
+    iconRuns = [];
     host.dataset.open = "false";
     window.clearTimeout(closeTimer);
     closeTimer = window.setTimeout(() => {
@@ -137,6 +156,27 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
   };
   const primaryClick = (event: MouseEvent): void => onAction(selectAction, event);
   const secondaryClick = (event: MouseEvent): void => onAction(selectSecondaryAction, event);
+  const iconClick = (event: MouseEvent): void => {
+    const entry = iconRuns[Number((event.currentTarget as HTMLElement).dataset.index)];
+    if (!entry) return;
+    if (entry.keepOpen) entry.onSelect(event); else onAction(entry.onSelect, event);
+  };
+  const setIconActions = (list: readonly ToastIconAction[] = []): void => {
+    iconRuns = list;
+    icons.replaceChildren(...list.map((entry, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ui-toast-icon ui-button";
+      button.dataset.index = String(index);
+      button.setAttribute("aria-label", entry.label);
+      button.dataset.tip = entry.label;
+      button.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">${entry.icon}</svg>`;
+      button.addEventListener("click", iconClick);
+      return button;
+    }));
+    icons.hidden = list.length === 0;
+    if (list.length) icons.setAttribute("aria-label", "Notification choices"); else icons.removeAttribute("aria-label");
+  };
   action.addEventListener("click", primaryClick);
   secondaryAction.addEventListener("click", secondaryClick);
   close.addEventListener("click", dismiss);
@@ -162,6 +202,8 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
       action.hidden = !value.action;
       secondaryAction.textContent = value.secondaryAction?.label ?? "";
       secondaryAction.hidden = !value.secondaryAction;
+      setIconActions(value.iconActions);
+      host.dataset.choices = String(Boolean(value.iconActions?.length));
       actions.hidden = !value.action && !value.secondaryAction;
       if (actions.hidden) {
         actions.removeAttribute("aria-label");
@@ -181,7 +223,7 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
     },
     focusAction(index = 0) {
       if (!Number.isInteger(index) || index < 0) return false;
-      const available = [action, secondaryAction].filter((button) => !button.hidden);
+      const available = [action, secondaryAction, ...icons.querySelectorAll<HTMLElement>("button")].filter((button) => !button.hidden);
       const target = available[index];
       if (!target || host.hidden) return false;
       target.focus({ preventScroll: true });

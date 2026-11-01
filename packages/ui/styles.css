@@ -179,6 +179,22 @@
 .ui-toast-actions[hidden] { display: none !important; }
 .ui-toast-action { min-height: 32px; flex: none; padding: 0 8px; border-radius: 8px; color: var(--accent) !important; font-size: var(--text-body); font-weight: var(--fw-label); white-space: nowrap; }
 .ui-toast-action[hidden] { display: none !important; }
+/* Icon choices after the message: the same 28 px desktop / 44 px touch size as the confirmation popover's icon buttons, flat and quiet. */
+/* A question with choices gets room for its sentence beside them; on a phone it wraps inside the screen width. */
+.ui-toast[data-choices="true"] { max-width: min(640px, calc(100% - 24px)); }
+/* On a phone the 44 px buttons would squeeze the sentence into a narrow column: the choices take a row of their own under it. */
+@media (max-width: 520px) {
+  .ui-toast[data-choices="true"] { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; column-gap: 10px; row-gap: 0; }
+  .ui-toast[data-choices="true"] .ui-toast-glyph, .ui-toast[data-choices="true"] .ui-toast-marker { grid-column: 1; grid-row: 1; margin-top: 4px; }
+  .ui-toast[data-choices="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 5px; }
+  .ui-toast[data-choices="true"] .ui-toast-icons { grid-column: 1 / -1; grid-row: 2; justify-self: end; }
+}
+.ui-toast-icons { display: flex; flex: none; align-items: center; gap: 2px; }
+.ui-toast-icons[hidden] { display: none !important; }
+.ui-toast-icon { display: grid; width: 28px; min-height: 28px; flex: none; place-items: center; padding: 0; border-radius: 8px; color: var(--fg-2); }
+.ui-toast-icon svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.ui-toast-icon:first-child { color: var(--accent); }
+@media (hover: hover) and (pointer: fine) { .ui-toast-icon:hover { background: var(--hover); color: var(--fg); } }
 .ui-toast-marker .tick { width: 18px; height: 18px; }
 /* A glyph in place of the tick (toast icon): neutral, so a waiting state never reads as success. */
 .ui-toast-glyph { display: grid; width: 22px; height: 22px; flex: none; place-items: center; color: var(--fg-2); }
@@ -193,6 +209,7 @@
 @media (hover: hover) and (pointer: fine) { .ui-toast-close:hover { background: var(--hover); color: var(--fg); } }
 @media (pointer: coarse) {
   .ui-toast-close { width: 44px; min-height: 44px; }
+  .ui-toast-icon { width: 44px; min-height: 44px; }
   .ui-toast { min-height: 54px; gap: 12px; padding: 7px 9px 7px 12px; border-radius: 15px; }
   .ui-toast-action { min-height: 44px; padding: 0 10px; }
   .ui-toast-marker .tick { width: 20px; height: 20px; }
