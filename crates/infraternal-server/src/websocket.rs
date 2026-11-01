@@ -299,6 +299,7 @@ impl WebSocketState {
                 state: Arc::clone(self),
                 user: user.to_owned(),
                 hash: crate::auth::hash(token),
+                incarnation: crate::auth::session_incarnation(token),
                 token: token.to_owned(),
             });
         #[cfg(not(any(test, feature = "native-streams")))]
