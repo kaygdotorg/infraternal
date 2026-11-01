@@ -62,6 +62,8 @@ export interface ProductCanvasOptions {
   /** Ends the old account screen when its authenticated lifetime changes; `work` says what happened to queued layout edits. */
   onSessionRevoked?: (work: RevokedWork) => void;
   onRecoveryPending?: (readyAt: number | undefined) => void;
+  /** The signed-in person: the sidebar's person pill opens their card (D283). Absent, the pill keeps its small menu. */
+  person?: { name: string; username: string };
 }
 
 export interface ProductCanvas {
@@ -297,10 +299,21 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     .then((m) => m.mountProductVersionArea(core, { version: build.short, commit: build.full, hosts: () => sessions.hosts().map((host) => host.name) }))
     .then((area) => { if (disposed) area?.dispose(); else versionArea = area; })
     .catch(() => { /* the pill is news, not a dependency */ });
+  // The person's card (D283) hangs on the sidebar's person pill. Its code is its own chunk, fetched once the canvas is up.
+  let account: { dispose(): void } | undefined;
+  if (options.person) {
+    const person = options.person;
+    void import("./account").then(({ mountAccountCard, identityModel }) => {
+      if (disposed) return;
+      account = mountAccountCard({ core, model: identityModel(person), openSettings: (section) => { window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${section}`, source: "pointer" } })); } });
+    });
+  }
+
   return {
     canvas, sessions, connection,
     dispose() {
       versionArea?.dispose();
+      account?.dispose();
       canvas.flush();
       offLayout(); offPending?.(); pendingNotice.dispose();
       window.removeEventListener("pointerup", dropped);

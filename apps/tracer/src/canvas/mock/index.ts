@@ -44,6 +44,9 @@ import { createMockWorld } from "./world";
 import { connectionStates } from "./connection-states";
 import type { VersionMock } from "./version";
 import { mountTransparencyCompare } from "./transparency";
+import { createDataMode, mountDataToggle } from "./data-mode";
+import { DATA_IDS, type DataId } from "./data-ids";
+import type { AccountMock } from "./account";
 
 const CLOSE = '<path d="m7 7 10 10M17 7 7 17"/>';
 
@@ -209,8 +212,20 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   // `?version=1`: the product's version pill and panel on a scripted source (#216); each state has a palette row.
   let version: VersionMock | undefined;
   if (query.get("version") === "1") void onDemand(() => import("./version")).then((m) => { version = m.createVersionMock(core); });
+  // `?account=1`: the person's card on a double that knows everything, with the dev-only data toggle (D283, #224).
+  let account: AccountMock | undefined;
+  let stopToggle: (() => void) | undefined;
+  let toggleStyle: HTMLLinkElement | undefined;
+  if (query.get("account") === "1") {
+    toggleStyle = Object.assign(document.createElement("link"), { rel: "stylesheet", href: "./data-toggle.css" });
+    document.head.append(toggleStyle);
+    const wanted = query.get("data") ?? "";
+    const dataMode = createDataMode((DATA_IDS as string[]).includes(wanted) ? (wanted as DataId) : "demo");
+    stopToggle = mountDataToggle(stage, dataMode);
+    void onDemand(() => import("./account")).then((m) => { if (!signal.aborted) account = m.createAccountMock(core, dataMode); });
+  }
   const removeProvider = core.addPaletteProvider(() => {
-    const out: PaletteEntry[] = [...sessionScenes.entries(), ...connection.entries(), ...(version?.entries() ?? [])];
+    const out: PaletteEntry[] = [...sessionScenes.entries(), ...connection.entries(), ...(version?.entries() ?? []), ...(account?.entries() ?? [])];
     scenes.forEach((sc, i) => out.push({ group: "Mockup", glyph: "◇", label: `Mockup: scene ${i + 1} – ${sc.name.toLowerCase()}`, hint: "scenes", action: `proto:scene:${i + 1}` }));
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: transparency", hint: "all card and window levels side by side", action: "proto:transparency" });
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: simulate device switch", hint: "continue from another device", action: "proto:devicechip" });
@@ -227,6 +242,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     if (kind === "sessions-scene" && value) { void sessionScenes.run(Number(value)); return; }
     if (kind === "ver" && value) { version?.run(value); return; }
     if (kind === "conn" && value) { connection.run(value); return; }
+    if (kind === "acct" && value) { account?.run(action.split(":").slice(2).join(":")); return; }
     if (kind === "transparency") mountTransparencyCompare(core);
     else if (kind === "devicechip") showContinueChip();
     else if (kind === "scene" && value) goScene(Number(value) - 1);
@@ -339,6 +355,9 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       window.clearInterval(seedTimer);
       removeProvider();
       version?.dispose();
+      account?.dispose();
+      stopToggle?.();
+      toggleStyle?.remove();
       sessionScenes.dispose();
       inventory.dispose();
       mockupTag.remove();

@@ -460,6 +460,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
               ? "Your sign-in changed. Your last changes may not have saved. Sign in again to check."
               : "Your sign-in changed. Sign in again to continue.");
         },
+        ...(identity?.username ? { person: { name: identity.display_name ?? "", username: identity.username } } : {}),
         ...(__CLUSTERS_PREVIEW__ && productTestMode ? { previewStore: layoutReview?.store ?? new (await import("./canvas/model/store")).LocalCanvasStore(activeUserId ?? "account") } : {}),
         ...(productTestMode ? { onFirstClient: (client: TerminalClient) => {
           window.__tracerProductTestDouble = {

@@ -18,9 +18,17 @@
  *        state lives here (`data-locked`, a stronger hairline); the consumer decides what it means
  *   card.lock            → the lock toggle, for nudges
  *   card.dispose()
+ *
+ * An action may carry an `alt` (#280): the same button when Option (macOS) or Alt (Windows, Linux) is held with the
+ * pointer near the header's actions, or with keyboard focus on one of them. Its icon morphs into the alternative's
+ * (icon-morph.ts), the warm tooltip and the accessible name change with it, and a click runs the alternative. The
+ * listeners that watch for the key exist only while the pointer is over the window or focus is in the actions, so an
+ * idle canvas has none running.
  */
 import { createLockToggle, trackLockReveal, type LockSource, type LockToggle } from "./lock-toggle";
 import { createConnectionIndicator, type ConnectionIndicator, type ConnectionIndicatorState } from "./connection-indicator";
+import { createIconMorph, type IconMorph, type MorphSpec } from "./icon-morph";
+import { refreshTip } from "./tooltip";
 import type { AnchoredPopover } from "./anchored-popover";
 import type { WindowMenuItem } from "./window-menu.on-demand";
 
@@ -38,6 +46,8 @@ export interface WindowAction {
   label: string;
   icon: string; // inner SVG markup on a 24×24 grid, stroked
   onSelect(event: MouseEvent): void;
+  /** What the button does while Option (Alt) is held: its icon morphs into this one (the base icon is the morph's start). */
+  alt?: { label: string; morph: MorphSpec; onSelect(event: MouseEvent): void };
 }
 
 export interface WindowCardOptions {
@@ -118,6 +128,7 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
   const actions = document.createElement("div");
   actions.className = "ui-window-actions";
   const handlers: Array<[HTMLButtonElement, (event: MouseEvent) => void]> = [];
+  const alts: Array<{ button: HTMLButtonElement; action: WindowAction & { alt: NonNullable<WindowAction["alt"]> }; morph: IconMorph }> = [];
   for (const action of options.actions ?? []) {
     const button = document.createElement("button");
     button.type = "button";
@@ -126,7 +137,11 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
     button.setAttribute("aria-label", action.label);
     button.dataset.tip = action.label; // the warm tooltip names the control
     button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${action.icon}</svg>`;
-    const handler = (event: MouseEvent): void => action.onSelect(event);
+    const alt = action.alt;
+    if (alt) alts.push({ button, action: action as (typeof alts)[number]["action"], morph: createIconMorph(button.querySelector("svg")!, alt.morph) });
+    // The key decides at the click itself, whatever the icon shows: a click that lands as Option is released still means what was pressed.
+    // Ctrl or Meta with Alt is a different chord (AltGr on Windows reports it; Ctrl-click is a context click on a Mac).
+    const handler = (event: MouseEvent): void => { if (alt && event.altKey && !event.ctrlKey && !event.metaKey) alt.onSelect(event); else action.onSelect(event); };
     button.addEventListener("click", handler);
     handlers.push([button, handler]);
     actions.append(button);
@@ -158,6 +173,85 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
     more.addEventListener("click", openMenu);
   }
   header.append(pill, actions);
+
+  // ---- Option (Alt) turns the header's split buttons into "new window" (#280) ---------------------------------------
+  // The modifier is Option on a Mac and Alt on Windows and Linux; the browser reports both as `key === "Alt"` and
+  // `altKey`, so one code path serves every platform (AltGr reports "AltGraph" and never counts). The pointer being near
+  // the actions pill, or keyboard focus being on one of its buttons, is what counts: the key alone, far away, changes
+  // nothing. The card listens for the key only while the pointer is over the window or focus is in its actions, so an
+  // idle canvas has no listener running.
+  const NEAR = 28;
+  let altOn = false;
+  let pointer = { x: -1, y: -1 };
+  let pointerIn = false;
+  let focusIn = false;
+  let listening = false;
+  const nearActions = (): boolean => {
+    // Keyboard focus (shown by the focus ring) on a button counts as "near": Tab to the button, hold Alt, press Enter.
+    if (focusIn && actions.querySelector(":focus-visible")) return true;
+    if (!pointerIn) return false;
+    const r = actions.getBoundingClientRect();
+    return pointer.x >= r.left - NEAR && pointer.x <= r.right + NEAR && pointer.y >= r.top - NEAR && pointer.y <= r.bottom + NEAR;
+  };
+  const setAlt = (next: boolean): void => {
+    if (next === altOn) return;
+    altOn = next;
+    for (const { button, action, morph } of alts) {
+      const label = next ? action.alt.label : action.label;
+      morph.set(next);
+      button.dataset.tip = label;
+      button.setAttribute("aria-label", label);
+      if (next) button.dataset.alt = ""; else delete button.dataset.alt;
+      refreshTip(button, true);
+    }
+  };
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.key !== "Alt") return;
+    const near = nearActions();
+    setAlt(event.altKey && near);
+    // On Windows and Linux a bare Alt press that is released alone moves focus to the browser's menu. Near the buttons the
+    // key means something else, so it is ours; any other time (and every Alt+key chord) it goes on as before.
+    if (near) event.preventDefault();
+  };
+  const onBlur = (): void => setAlt(false);
+  /** Key listeners exist exactly while the pointer is over the window or focus is in the actions. */
+  const listen = (): void => {
+    const want = pointerIn || focusIn;
+    if (want === listening) return;
+    listening = want;
+    const toggle = want ? window.addEventListener.bind(window) : window.removeEventListener.bind(window);
+    toggle("keydown", onKey as EventListener);
+    toggle("keyup", onKey as EventListener);
+    toggle("blur", onBlur);
+    if (!want) setAlt(false);
+  };
+  const onEnter = (event: PointerEvent): void => {
+    if (event.pointerType !== "mouse" && event.pointerType !== "pen") return;
+    pointer = { x: event.clientX, y: event.clientY };
+    pointerIn = true;
+    listen();
+    setAlt(event.altKey && nearActions());
+  };
+  const onMove = (event: PointerEvent): void => {
+    pointer = { x: event.clientX, y: event.clientY };
+    if (event.altKey || altOn) setAlt(event.altKey && nearActions());
+  };
+  // Leaving the window or the focus turns the buttons back, unless the other of the two still holds them.
+  const onLeave = (): void => { pointerIn = false; if (altOn && !nearActions()) setAlt(false); listen(); };
+  const onFocusIn = (): void => { focusIn = true; listen(); };
+  const onFocusOut = (event: FocusEvent): void => {
+    if (event.relatedTarget instanceof Node && actions.contains(event.relatedTarget)) return;
+    focusIn = false;
+    if (altOn && !nearActions()) setAlt(false);
+    listen();
+  };
+  if (alts.length) {
+    root.addEventListener("pointerenter", onEnter);
+    root.addEventListener("pointermove", onMove, { passive: true });
+    root.addEventListener("pointerleave", onLeave);
+    actions.addEventListener("focusin", onFocusIn);
+    actions.addEventListener("focusout", onFocusOut);
+  }
 
   const body = document.createElement("div");
   body.className = "ui-window-body";
@@ -234,6 +328,18 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
       stopReveal();
       lock.dispose();
       menu?.close("keyboard");
+      if (alts.length) {
+        root.removeEventListener("pointerenter", onEnter);
+        root.removeEventListener("pointermove", onMove);
+        root.removeEventListener("pointerleave", onLeave);
+        actions.removeEventListener("focusin", onFocusIn);
+        actions.removeEventListener("focusout", onFocusOut);
+        pointerIn = false;
+        focusIn = false;
+        listen();
+        setAlt(false);
+        for (const { morph } of alts) morph.dispose();
+      }
       more.removeEventListener("click", openMenu);
       for (const [button, handler] of handlers) button.removeEventListener("click", handler);
       root.remove();
