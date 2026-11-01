@@ -15,6 +15,7 @@ members = [
     "crates/infraternal-status",
     "crates/plugins/ssh",
     "crates/plugins/relay",
+    "crates/plugins/proxy",
     "crates/plugins/backup",
     "crates/plugins/canvas",
     "crates/plugins/host-facts",
