@@ -161,7 +161,7 @@ mod tests {
             r#"{"op":"apply","session":"00000000-0000-0000-0000-000000000001","proposal":{},"confirmed":null}"#,
             r#"{"op":"undo","session":"00000000-0000-0000-0000-000000000001","confirmed":true}"#,
             r#"{"op":"unknown"}"#,
-            r#"[]"#,
+            "[]",
         ] {
             assert!(Request::parse(input.as_bytes()).is_err(), "{input}");
         }
