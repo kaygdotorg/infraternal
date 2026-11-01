@@ -854,7 +854,7 @@ Ordinary legacy Input remains available. No session is automatically ended.
 
 ### Layout session incarnation (#250, D312)
 
-Hello capability bit 4 (`16`) requests an additive Welcome suffix: a length-prefixed
+Hello capability bit 5 (`32`) requests an additive Welcome suffix: a length-prefixed
 43-byte base64url `session_incarnation`. The label is opaque and non-secret; it is
 stable only for the authenticated browser session, including reconnects and server
 restarts. Authenticated HTTP session responses include the same label so the tab

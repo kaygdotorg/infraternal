@@ -13,6 +13,8 @@ mod tests;
 
 /// Maximum length of a frame's type byte and body, as specified by wire §2.
 pub const MAX_FRAME_LEN: usize = 4 * 1024 * 1024;
+/// Browser Hello bit 5 requests the layout-session incarnation in Welcome (wire §9, D312).
+pub const LAYOUT_SESSION_INCARNATION_CAPABILITY: u64 = 1 << 5;
 
 /// `Close` code on a terminal stream meaning the session no longer exists on
 /// its host: its shim is gone, or the account never had it. The answer is
@@ -47,7 +49,7 @@ pub enum Frame<'a> {
         resume_token: &'a [u8; 32],
         /// Resume window in seconds.
         resume_window_seconds: u32,
-        /// Public authenticated-session incarnation, negotiated with Hello bit 4.
+        /// Public authenticated-session incarnation, negotiated with Hello bit 5.
         session_incarnation: Option<&'a str>,
     },
     /// Client request to resume an existing connection.

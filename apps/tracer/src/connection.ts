@@ -76,8 +76,8 @@ const LINK_DOUBT_NOTICES = 2n;
 const VIEWER_VISIBILITY = 4n;
 /** Hello caps bit 3 advertises reply-marked terminal Input support [D307]. */
 const TERMINAL_QUERY_REPLIES = 8n;
-/** Hello caps bit 4: request the layout session-incarnation Welcome suffix (contracts/wire.md, D312). */
-export const LAYOUT_SESSION_INCARNATION = 1n << 4n;
+/** Hello caps bit 5: request the layout session-incarnation Welcome suffix (contracts/wire.md, D312). */
+export const LAYOUT_SESSION_INCARNATION = 1n << 5n;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RECOVERY_SUBSCRIPTION = 45;

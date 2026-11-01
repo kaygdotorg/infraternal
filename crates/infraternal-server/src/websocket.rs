@@ -1587,7 +1587,7 @@ where
                 caps & RESUME_NEXT != 0,
                 caps & LINK_DOUBT_NOTICES != 0,
                 caps & VIEWER_VISIBILITY != 0,
-                caps & 16 != 0,
+                caps & infraternal_protocol::LAYOUT_SESSION_INCARNATION_CAPABILITY != 0,
             ),
             _ => return Err(()),
         };
