@@ -170,11 +170,30 @@ fn configured_custom_suffix_is_authoritative_and_owns_its_negative_soa() {
     let missing = Packet::parse(&missing_wire).unwrap();
     assert_eq!(missing.rcode(), RCODE::NameError);
     assert_eq!(missing.name_servers[0].name.to_string(), "mesh.kayg.org");
-    assert!(
-        dns::response(&query("build-01.internal", 1), &snapshot)
-            .unwrap()
-            .is_none()
+    let internal_alias = dns::response(&query("build-01.internal", 1), &snapshot)
+        .unwrap()
+        .expect(".internal remains an authoritative alias");
+    let internal_alias = Packet::parse(&internal_alias).unwrap();
+    assert_eq!(internal_alias.answers.len(), 1);
+    assert_eq!(
+        internal_alias.answers[0].name.to_string(),
+        "build-01.internal"
     );
+}
+
+#[test]
+fn origin_derived_suffix_and_internal_alias_both_resolve() {
+    let mut snapshot = config();
+    snapshot.dns_suffix = "ssh.kayg.org".to_owned();
+
+    for name in ["build-01.ssh.kayg.org", "build-01.internal"] {
+        let wire = dns::response(&query(name, 1), &snapshot)
+            .unwrap()
+            .expect("both configured and internal mesh suffixes are authoritative");
+        let response = Packet::parse(&wire).unwrap();
+        assert_eq!(response.answers.len(), 1, "{name}");
+        assert_eq!(response.answers[0].name.to_string(), name);
+    }
 }
 
 #[test]

@@ -29,14 +29,14 @@ struct Addresses {
 /// A canonical, immutable-by-convention view of names from one accepted revision.
 #[derive(Clone)]
 pub(crate) struct Records {
-    suffix: String,
+    suffixes: Vec<String>,
     names: BTreeMap<String, Addresses>,
 }
 
 impl Default for Records {
     fn default() -> Self {
         Self {
-            suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
+            suffixes: vec![crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned()],
             names: BTreeMap::new(),
         }
     }
@@ -45,8 +45,13 @@ impl Default for Records {
 impl Records {
     pub(crate) fn from_config(config: &Config) -> io::Result<Self> {
         validate_dns(&config.dns_suffix, false).map_err(|_| invalid_config())?;
+        let mut suffixes = vec![config.dns_suffix.clone()];
+        if config.dns_suffix != crate::dataplane::DEFAULT_DNS_SUFFIX {
+            suffixes.push(crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned());
+        }
+        suffixes.sort_unstable_by_key(|suffix| std::cmp::Reverse(suffix.len()));
         let mut records = Self {
-            suffix: config.dns_suffix.clone(),
+            suffixes,
             names: BTreeMap::new(),
         };
         if let Some(name) = &config.name {
@@ -72,7 +77,11 @@ impl Records {
     }
 
     fn insert(&mut self, label: &str, addresses: Addresses) -> io::Result<()> {
-        if label.len() + self.suffix.len() + 1 > 253 {
+        if self
+            .suffixes
+            .iter()
+            .any(|suffix| label.len() + suffix.len() + 1 > 253)
+        {
             return Err(invalid_config());
         }
         let label = canonical_label(label).ok_or_else(invalid_config)?;
@@ -143,16 +152,8 @@ fn response_for_records(packet: &[u8], records: &Records) -> io::Result<Option<V
         .to_string()
         .trim_end_matches('.')
         .to_ascii_lowercase();
-    let label = if qname == records.suffix {
-        ""
-    } else {
-        let Some(prefix) = qname.strip_suffix(&records.suffix) else {
-            return Ok(None);
-        };
-        let Some(label) = prefix.strip_suffix('.') else {
-            return Ok(None);
-        };
-        label
+    let Some((suffix, label)) = matching_zone(&qname, &records.suffixes) else {
+        return Ok(None);
     };
 
     let opt = request.opt().cloned();
@@ -175,7 +176,7 @@ fn response_for_records(packet: &[u8], records: &Records) -> io::Result<Option<V
     };
     let Some(address) = address else {
         *reply.rcode_mut() = RCODE::NameError;
-        reply.name_servers.push(negative_soa(&records.suffix));
+        reply.name_servers.push(negative_soa(suffix));
         return encode(&reply).map(Some);
     };
     let rdata = match question.qtype {
@@ -192,9 +193,23 @@ fn response_for_records(packet: &[u8], records: &Records) -> io::Result<Option<V
         ));
     } else {
         // NODATA is negative cache data too; advertise the same bounded TTL as NXDOMAIN.
-        reply.name_servers.push(negative_soa(&records.suffix));
+        reply.name_servers.push(negative_soa(suffix));
     }
     encode(&reply).map(Some)
+}
+
+fn matching_zone<'zone, 'query>(
+    qname: &'query str,
+    suffixes: &'zone [String],
+) -> Option<(&'zone str, &'query str)> {
+    suffixes.iter().find_map(|suffix| {
+        if qname == suffix {
+            return Some((suffix.as_str(), ""));
+        }
+        let prefix = qname.strip_suffix(suffix.as_str())?;
+        let label = prefix.strip_suffix('.')?;
+        Some((suffix.as_str(), label))
+    })
 }
 
 fn request_had_rd(packet: &[u8]) -> bool {

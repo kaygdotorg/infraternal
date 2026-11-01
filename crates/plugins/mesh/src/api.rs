@@ -530,9 +530,22 @@ impl MeshService {
     /// Bind the API to the server's migrated SQLite pool.
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
+        Self::with_store(pool.clone(), crate::store::Store::new(pool))
+    }
+
+    /// Bind the API and coordinator snapshots to the server's configured public origin.
+    #[must_use]
+    pub fn with_public_origin(pool: SqlitePool, public_origin: &str) -> Self {
+        Self::with_store(
+            pool.clone(),
+            crate::store::Store::with_public_origin(pool, public_origin),
+        )
+    }
+
+    fn with_store(pool: SqlitePool, store: crate::store::Store) -> Self {
         let (updates, _) = broadcast::channel(CHANGE_BUFFER);
         Self {
-            store: crate::store::Store::new(pool.clone()),
+            store,
             pool,
             updates,
             presence: std::sync::Arc::default(),

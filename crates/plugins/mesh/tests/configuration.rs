@@ -22,6 +22,30 @@ fn coordinator() -> Coordinator {
     coord.join(node(3)).unwrap();
     coord
 }
+
+#[test]
+#[cfg(feature = "mesh-dns-spike")]
+fn explicit_mesh_suffix_overrides_the_public_origin_default() {
+    let node = |id| Node {
+        id: NodeId(id),
+        public_key: PublicKey([u8::try_from(id).unwrap(); 32]),
+        host: format!("host-{id}"),
+        tags: BTreeSet::new(),
+    };
+    let mut settings = MeshSettings::new([1, 2, 3, 4, 5]);
+    settings.dns_suffix = "mesh.kayg.org".to_owned();
+    let coord = Coordinator::new(settings, &[], node(1)).unwrap();
+    let config = configuration::compile_with_dns_suffix(
+        &coord,
+        NodeId(1),
+        DefaultPolicy::Deny,
+        &BTreeMap::new(),
+        "ssh.kayg.org",
+    )
+    .unwrap();
+
+    assert_eq!(config.dns_suffix, "mesh.kayg.org");
+}
 #[test]
 fn edition_default_is_explicit_and_build_selected() {
     assert_eq!(

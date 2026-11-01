@@ -9,6 +9,22 @@ use crate::{
 };
 use std::{collections::BTreeMap, net::SocketAddr};
 
+/// Compile one node's Access view into the same directional peer policy `WireGuard` installs.
+///
+/// The public origin suffix is supplied by the server runtime; the persisted mesh suffix
+/// remains the explicit user override. DNS clients additionally keep `.internal` as an alias.
+/// # Errors
+/// Returns unknown membership or invalid persisted address allocation.
+pub fn compile_with_dns_suffix(
+    coordinator: &Coordinator,
+    node: NodeId,
+    default: DefaultPolicy,
+    endpoints: &BTreeMap<NodeId, SocketAddr>,
+    default_dns_suffix: &str,
+) -> Result<Config, MeshError> {
+    compile_inner(coordinator, node, default, endpoints, default_dns_suffix)
+}
+
 /// Compile one node at a time: open defaults need n(n−1) peer entries deployment-wide,
 /// avoiding an additional deployment-wide matrix inside this compiler.
 /// # Errors
@@ -19,6 +35,18 @@ pub fn compile(
     default: DefaultPolicy,
     endpoints: &BTreeMap<NodeId, SocketAddr>,
 ) -> Result<Config, MeshError> {
+    compile_inner(coordinator, node, default, endpoints, "internal")
+}
+
+fn compile_inner(
+    coordinator: &Coordinator,
+    node: NodeId,
+    default: DefaultPolicy,
+    endpoints: &BTreeMap<NodeId, SocketAddr>,
+    default_dns_suffix: &str,
+) -> Result<Config, MeshError> {
+    #[cfg(not(feature = "mesh-dns-spike"))]
+    let _ = default_dns_suffix;
     let checkpoint = coordinator.checkpoint();
     let local = checkpoint
         .allocation
@@ -32,7 +60,11 @@ pub fn compile(
         .find(|member| member.node.id == node)
         .map(|member| member.node.host.clone());
     #[cfg(feature = "mesh-dns-spike")]
-    let dns_suffix = checkpoint.settings.dns_suffix.clone();
+    let dns_suffix = if checkpoint.settings.dns_suffix == crate::dataplane::DEFAULT_DNS_SUFFIX {
+        default_dns_suffix.to_owned()
+    } else {
+        checkpoint.settings.dns_suffix.clone()
+    };
     let fallback = if default == DefaultPolicy::Allow {
         TrafficPolicy::All
     } else {
@@ -102,6 +134,23 @@ pub fn compile(
         #[cfg(feature = "mesh-dns-spike")]
         peer_names,
     })
+}
+
+/// Derive the default mesh zone from the server's configured public origin.
+///
+/// IP origins and localhost do not provide a public DNS suffix, so those retain `.internal`.
+/// This function is deliberately total: malformed or non-public origins fall back to `.internal`.
+#[cfg(feature = "mesh-dns-spike")]
+pub(crate) fn default_dns_suffix_from_origin(public_origin: &str) -> String {
+    let suffix = url::Url::parse(public_origin)
+        .ok()
+        .and_then(|origin| match origin.host()? {
+            url::Host::Domain(domain) => Some(domain.trim_end_matches('.').to_ascii_lowercase()),
+            url::Host::Ipv4(_) | url::Host::Ipv6(_) => None,
+        })
+        .filter(|host| host != "localhost" && !host.ends_with(".localhost"))
+        .filter(|host| crate::policy::model::validate_dns(host, false).is_ok());
+    suffix.unwrap_or_else(|| "internal".to_owned())
 }
 /// List directed pairs that lose ANY new-connection reach. Port narrowing counts as a loss.
 /// # Errors

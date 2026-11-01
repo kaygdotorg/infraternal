@@ -79,6 +79,23 @@ async fn key_replacement_preserves_identity_and_addresses_after_restart() {
     assert_eq!(before.addresses, after.addresses);
     assert!(after.version > before.version);
 }
+
+#[tokio::test]
+#[cfg(feature = "mesh-dns-spike")]
+async fn public_origin_sets_the_default_suffix_and_origin_changes_advance_the_snapshot() {
+    let pool = pool().await;
+    let first = Store::with_public_origin(pool.clone(), "https://ssh.kayg.org");
+    first.attach("server", key(1), None, true).await.unwrap();
+    let (node, _) = first.attach("host", key(2), None, false).await.unwrap();
+    let before = first.config(node).await.unwrap();
+    assert_eq!(before.dns_suffix, "ssh.kayg.org");
+
+    let restarted = Store::with_public_origin(pool, "https://mesh.kayg.org");
+    let after = restarted.config(node).await.unwrap();
+
+    assert_eq!(after.dns_suffix, "mesh.kayg.org");
+    assert!(after.version > before.version);
+}
 #[tokio::test]
 async fn removed_host_cannot_restore_membership_without_authorized_enrollment() {
     let pool = pool().await;

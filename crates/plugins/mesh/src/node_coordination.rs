@@ -173,9 +173,14 @@ pub async fn run(
                 let names_changed = old.name != config.name || old.peer_names != config.peer_names;
                 #[cfg(not(feature = "mesh-dns-spike"))]
                 let names_changed = false;
+                #[cfg(feature = "mesh-dns-spike")]
+                let dns_suffix_changed = old.dns_suffix != config.dns_suffix;
+                #[cfg(not(feature = "mesh-dns-spike"))]
+                let dns_suffix_changed = false;
                 old.server != config.server
                     || old.node != config.node
                     || names_changed
+                    || dns_suffix_changed
                     || old.addresses != config.addresses
                     || old.default_policy != config.default_policy
                     || old.peers != config.peers

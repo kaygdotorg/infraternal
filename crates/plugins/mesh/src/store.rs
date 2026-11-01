@@ -23,6 +23,10 @@ struct State {
     allocation: AddressAllocator,
     server: NodeId,
     members: BTreeSet<NodeId>,
+    /// Last derived origin zone lets a changed public hostname advance the existing config revision.
+    #[cfg(feature = "mesh-dns-spike")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin_dns_suffix: Option<String>,
 }
 /// One DB stores inventory, stable non-recycled addresses and policy defaults; no private keys.
 type Loaded = (
@@ -35,20 +39,31 @@ type Loaded = (
 /// its node view preserves exact deltas while idle memory stays proportional to
 /// shared inventory and policy, rather than the number of delivered peer maps.
 #[derive(Clone)]
-pub(crate) struct Snapshot(Loaded);
+pub(crate) struct Snapshot {
+    loaded: Loaded,
+    #[cfg(feature = "mesh-dns-spike")]
+    default_dns_suffix: String,
+}
 impl Snapshot {
     pub(crate) fn config(&self, node: NodeId) -> Result<Config, crate::api::MeshApiError> {
         use crate::{api::MeshApiError, policy::model::MeshError};
-        let (coordinator, endpoints, default, revision) = &self.0;
+        let (coordinator, endpoints, default, revision) = &self.loaded;
         #[cfg(feature = "cutoff-measure")]
         let _compile = crate::cutoff_measure::Stage::new(node, *revision, "compile");
-        let mut config =
-            configuration::compile(coordinator, node, *default, endpoints).map_err(|error| {
-                match error {
-                    MeshError::UnknownNode => MeshApiError::NotFound,
-                    _ => storage_error("configuration compilation failed"),
-                }
-            })?;
+        #[cfg(feature = "mesh-dns-spike")]
+        let compiled = configuration::compile_with_dns_suffix(
+            coordinator,
+            node,
+            *default,
+            endpoints,
+            &self.default_dns_suffix,
+        );
+        #[cfg(not(feature = "mesh-dns-spike"))]
+        let compiled = configuration::compile(coordinator, node, *default, endpoints);
+        let mut config = compiled.map_err(|error| match error {
+            MeshError::UnknownNode => MeshApiError::NotFound,
+            _ => storage_error("configuration compilation failed"),
+        })?;
         config.version = *revision;
         Ok(config)
     }
@@ -393,16 +408,33 @@ pub struct Store {
     load_diagnostics: StorageDiagnostics,
     config_diagnostics: StorageDiagnostics,
     preview_diagnostics: StorageDiagnostics,
+    #[cfg(feature = "mesh-dns-spike")]
+    default_dns_suffix: String,
 }
 impl Store {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
+        Self::with_public_origin(pool, "")
+    }
+
+    /// Use the configured server origin to derive the default mesh DNS zone.
+    ///
+    /// An explicit suffix persisted in Mesh settings still takes precedence; callers without an origin
+    /// retain `.internal` as the default. The resolver always serves `.internal` as an alias.
+    #[must_use]
+    pub fn with_public_origin(pool: SqlitePool, public_origin: &str) -> Self {
+        #[cfg(feature = "mesh-dns-spike")]
+        let default_dns_suffix = configuration::default_dns_suffix_from_origin(public_origin);
+        #[cfg(not(feature = "mesh-dns-spike"))]
+        let _ = public_origin;
         Self {
             pool,
             cache: std::sync::Arc::default(),
             load_diagnostics: StorageDiagnostics::new("mesh.coordinator.load"),
             config_diagnostics: StorageDiagnostics::new("mesh.coordinator.config"),
             preview_diagnostics: StorageDiagnostics::new("mesh.default.preview"),
+            #[cfg(feature = "mesh-dns-spike")]
+            default_dns_suffix,
         }
     }
     /// Attach an authenticated host using its approved inventory binding, never a public key as authority.
@@ -601,7 +633,11 @@ impl Store {
     }
     /// Retain one shared immutable inventory/policy snapshot, rather than a peer map per node.
     pub(crate) async fn snapshot(&self) -> Result<Snapshot, crate::api::MeshApiError> {
-        self.load().await.map(Snapshot)
+        self.load().await.map(|loaded| Snapshot {
+            loaded,
+            #[cfg(feature = "mesh-dns-spike")]
+            default_dns_suffix: self.default_dns_suffix.clone(),
+        })
     }
     /// Page directed reach losses at one revision without allocating the pair matrix.
     /// # Errors
@@ -810,7 +846,20 @@ impl Store {
                 allocation,
                 server,
                 members: BTreeSet::new(),
+                #[cfg(feature = "mesh-dns-spike")]
+                origin_dns_suffix: Some(self.default_dns_suffix.clone()),
             }
+        };
+        #[cfg(feature = "mesh-dns-spike")]
+        let origin_dns_suffix_changed = {
+            let previous = state
+                .origin_dns_suffix
+                .as_deref()
+                .unwrap_or(crate::dataplane::DEFAULT_DNS_SUFFIX);
+            let changed = state.settings.dns_suffix == crate::dataplane::DEFAULT_DNS_SUFFIX
+                && previous != self.default_dns_suffix;
+            state.origin_dns_suffix = Some(self.default_dns_suffix.clone());
+            changed
         };
         if state.server != server {
             return Err(storage_error("Mesh server identity changed."));
@@ -910,6 +959,19 @@ impl Store {
         // Freeze the edition fallback on first use. A later edition build must
         // not silently change an already-running mesh without the Access preview.
         sqlx::query("INSERT INTO mesh_dataplane(singleton,allocation_json,default_policy) VALUES(1,?,?) ON CONFLICT(singleton) DO UPDATE SET allocation_json=excluded.allocation_json,default_policy=COALESCE(mesh_dataplane.default_policy,excluded.default_policy)").bind(serde_json::to_string(&state).map_err(|_| storage_error("Mesh allocation invalid."))?).bind(if default==DefaultPolicy::Allow {"allow"} else {"deny"}).execute(&mut *tx).await.map_err(|error| storage_sql_error(error))?;
+        #[cfg(feature = "mesh-dns-spike")]
+        let revision: i64 = if origin_dns_suffix_changed {
+            sqlx::query_scalar("UPDATE mesh_state SET revision=revision+1 WHERE singleton=1 AND revision<9223372036854775807 RETURNING revision")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| storage_sql_error(error))?
+        } else {
+            sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| storage_sql_error(error))?
+        };
+        #[cfg(not(feature = "mesh-dns-spike"))]
         let revision: i64 = sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
             .fetch_one(&mut *tx)
             .await
