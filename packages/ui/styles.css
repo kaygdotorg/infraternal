@@ -1082,6 +1082,6 @@
    step quieter than the name but still readable (--fg-2 clears 4.5:1 on the tint). */
 .ui-kv-part { display: inline-flex; max-width: 100%; margin: 1px 0; padding: 0 7px; border-radius: 999px; background: color-mix(in oklab, var(--fg) 9%, transparent); font-size: var(--text-secondary, 12px); line-height: 20px; vertical-align: top; }
 .ui-kv-part-name { min-width: 4ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ui-kv-part-note { flex: none; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.ui-kv-part-note { flex: none; margin-left: 0.4em; color: var(--fg-2); font-variant-numeric: tabular-nums; }
 /* A pressable value with a chevron (kv-decorate.ts `chevron`): the room for the chevron is the value's own padding. */
 .ui-kv-value.ui-kv-has-chevron { position: relative; padding-right: 20px; }
