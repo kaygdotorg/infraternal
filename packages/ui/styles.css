@@ -344,7 +344,11 @@
   --ui-type-name: 600 14px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   --ui-type-body: 450 14px/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   --ui-type-label: 450 13px/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
-  --ui-type-button: 500 13.5px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  /* Line height `normal`, never a number: next to an icon, a label's line box must be the font's own height. With a smaller
+     line height (it was 1) Blink rounds the half-leading asymmetrically and the glyphs sit up to 0.75 px above the centre the
+     icon is centred on (TASTE "Icon and text share one centre line", #282; icon-text-centre.spec.ts measures it). Every control
+     that uses this token has a fixed height or min-height and centres its content, so only the text's offset changes. */
+  --ui-type-button: 500 13.5px/normal var(--font-ui, "Geist Mono", ui-monospace, monospace);
   --ui-type-eyebrow: 500 12px/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   --ui-tracking: -0.01em;
   /* Secondary text matches the sign-in card's secondary (rgb 161 161 170 on ink) and
@@ -860,7 +864,7 @@
 .ui-ts-item[data-dragging] .ui-ts-grip { cursor: grabbing; }
 .ui-ts-icon { display: grid; flex: none; color: var(--fg-2); }
 .ui-ts-icon svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.ui-ts-label { flex: 1; min-width: 0; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.ui-ts-label { flex: 1; min-width: 0; color: var(--fg); font: var(--ui-type-label); line-height: normal; letter-spacing: var(--ui-tracking); } /* the label's line box is the font's own height, so it shares the icon's centre line (#282) */
 .ui-ts-reset { justify-self: start; min-height: var(--ui-control-h, 30px); padding: 0 12px; border: 1px solid var(--overlay-line); border-radius: 999px; background: none; color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
 .ui-ts-reset:active { transform: scale(var(--ui-press-scale, 0.97)); }
 @media (hover: hover) and (pointer: fine) { .ui-ts-reset:hover, .ui-ts-grip:hover { background: var(--hover); } }
