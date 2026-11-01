@@ -52,10 +52,12 @@ function heading(text: string): HTMLElement {
 export interface ChoiceItem { id: string; label: string; hint?: string; swatch?: { bg: string; accent: string } }
 
 /**
- * Decides once per list, and again only when its width changes (a ResizeObserver callback, never per frame), whether hints
- * sit beside the names or under them. Measured in the inline layout, where the hint is `nowrap` and so reports its natural
- * width: the list stacks when any row's name + gap + hint is wider than the room it has. One decision per list keeps every
- * row's hint in the same place, and a stacked list does not jump when the selection changes.
+ * Decides once per list, and again only when its width changes (a ResizeObserver callback, never per frame), how hints
+ * sit with their names. Beside: every name takes the width of the list's widest name (`--ui-sp-label-w`), so all hints
+ * start at one x, a column, however long each name is. Under: when the widest name + gap + the longest hint is wider than the
+ * room the list has, every row puts its hint under its name instead. Measured in the inline layout, where names and hints
+ * are `nowrap` and report their natural widths. One decision per list keeps every row's hint in the same place, and a
+ * stacked list does not jump when the selection changes.
  */
 function fitHints(list: HTMLElement): void {
   let width = -1;
@@ -63,10 +65,14 @@ function fitHints(list: HTMLElement): void {
     if (!list.isConnected) { observer.disconnect(); return; }
     if (list.clientWidth === 0) return;
     list.removeAttribute("data-stacked");
-    const stack = [...list.querySelectorAll<HTMLElement>(".ui-sp-text")].some((t) => {
-      const hint = t.querySelector<HTMLElement>(".ui-sp-hint")!;
-      return hint.textContent !== "" && t.querySelector<HTMLElement>(".ui-sp-label")!.offsetWidth + 10 + hint.scrollWidth > t.clientWidth;
-    });
+    list.style.removeProperty("--ui-sp-label-w");
+    const texts = [...list.querySelectorAll<HTMLElement>(".ui-sp-text")];
+    const hinted = texts.filter((t) => t.querySelector<HTMLElement>(".ui-sp-hint")!.textContent !== "");
+    if (hinted.length === 0) return;
+    // Rounded up so a name never loses a fraction of a pixel to its own column and gets an ellipsis.
+    const column = Math.ceil(Math.max(...texts.map((t) => t.querySelector<HTMLElement>(".ui-sp-label")!.getBoundingClientRect().width)));
+    list.style.setProperty("--ui-sp-label-w", `${column}px`);
+    const stack = hinted.some((t) => column + 10 + t.querySelector<HTMLElement>(".ui-sp-hint")!.scrollWidth > t.clientWidth);
     if (stack) list.dataset.stacked = "";
   };
   const observer = new ResizeObserver(() => {

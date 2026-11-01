@@ -867,7 +867,10 @@
    widest row does not fit (decided per list in fitHints) the list is `data-stacked` and every hint sits under its name,
    left-aligned, balanced and allowed two lines. The tick stays centred on the row. */
 .ui-sp-text { display: flex; flex: 1; align-items: baseline; column-gap: 10px; min-width: 0; padding: 5px 0; }
-.ui-sp-text .ui-sp-label { flex: none; max-width: 100%; margin-right: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Beside its name, a hint starts where the list's widest name ends (fitHints sets --ui-sp-label-w), so a list's hints
+   share one left edge instead of following each name's length. */
+.ui-sp-text .ui-sp-label { flex: none; width: var(--ui-sp-label-w, auto); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+[data-stacked] > .ui-sp-row .ui-sp-label { width: auto; }
 .ui-sp-text .ui-sp-hint { flex: none; white-space: nowrap; color: var(--ui-text-secondary); }
 .ui-sp-text .ui-sp-hint:empty { display: none; }
 [data-stacked] > .ui-sp-row .ui-sp-text { flex-direction: column; align-items: flex-start; row-gap: 1px; }

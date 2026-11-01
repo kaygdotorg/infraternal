@@ -4,6 +4,8 @@
  * desktop, in the ink and paper themes. A list reads as one: when any row's hint does not fit beside its name, every row of
  * that list puts the hint under the name, left-aligned with it; otherwise every hint is beside its name. Each section's own
  * list must be on screen before anything is measured, so the spec cannot pass on the wrong view.
+ * Alignment (owner, 2026-11-01): hints never follow the length of their own name. Beside their names, every hint of a
+ * list starts at one x; under their names, at the name's own x; both within 0.5 px.
  * Review screenshots land in the external job evidence directory.
  */
 import { tracerEvidencePath } from "./evidence-path";
@@ -78,7 +80,14 @@ for (const theme of ["ink", "paper"]) for (const { w, h, touch } of SIZES) test(
         expect(r.clipped, `${section.name}/${r.name}: name is clipped`).toBe(false);
         expect(r.labelH, `${section.name}/${r.name}: name is one line`).toBeLessThan(r.line * 1.6);
         if (r.hasHint) expect(r.hintRight, `${section.name}/${r.name}: hint stays inside the row`).toBeLessThanOrEqual(r.rowRight + 0.5);
-        if (r.stacked) expect(Math.abs(r.hintLeft - r.labelLeft), `${section.name}/${r.name}: stacked hint aligns with the name`).toBeLessThan(1.5);
+        if (r.stacked) expect(Math.abs(r.hintLeft - r.labelLeft), `${section.name}/${r.name}: stacked hint aligns with the name`).toBeLessThanOrEqual(0.5);
+      }
+      // Beside their names: one column per list, whatever the length of each name.
+      for (const name of new Set(list.map((r) => r.list))) {
+        const beside = list.filter((r) => r.list === name && r.hasHint && !r.stacked).map((r) => r.hintLeft);
+        if (beside.length > 1) expect(Math.max(...beside) - Math.min(...beside), `${section.name}/${name}: hints share one left edge`).toBeLessThanOrEqual(0.5);
+        const names = list.filter((r) => r.list === name).map((r) => r.labelLeft);
+        expect(Math.max(...names) - Math.min(...names), `${section.name}/${name}: names share one left edge`).toBeLessThanOrEqual(0.5);
       }
       await page.screenshot({ path: resolve(captures, `${section.name.replace(/ /g, "-").toLowerCase()}-${theme}-${w}x${h}.png`) });
     }
