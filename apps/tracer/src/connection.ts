@@ -74,6 +74,8 @@ const RESUME_NEXT = 1n;
 const LINK_DOUBT_NOTICES = 2n;
 /** Hello bit 2: control Event 0 reports page visibility (#244). */
 const VIEWER_VISIBILITY = 4n;
+/** Hello caps bit 4: request the layout session-incarnation Welcome suffix (contracts/wire.md, D312). */
+export const LAYOUT_SESSION_INCARNATION = 1n << 4n;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RECOVERY_SUBSCRIPTION = 45;
@@ -476,7 +478,7 @@ export class MuxConnection {
       const resumable = sessionsToResume && credentials !== undefined && Date.now() < credentials.deadline;
       this.resumeSent = resumable;
       // RESUME_NEXT tells the server to wait for the adjacent Resume before issuing Welcome.
-      const hello: WireFrame = { type: "Hello", version: VERSION, caps: (resumable ? RESUME_NEXT : 0n) | LINK_DOUBT_NOTICES | VIEWER_VISIBILITY | 16n, clientInfo: "infraternal-tracer/0.1" };
+      const hello: WireFrame = { type: "Hello", version: VERSION, caps: (resumable ? RESUME_NEXT : 0n) | LINK_DOUBT_NOTICES | VIEWER_VISIBILITY | LAYOUT_SESSION_INCARNATION, clientInfo: "infraternal-tracer/0.1" };
       let length = encodeMuxedFrameInto(CONTROL_STREAM, hello, this.sendScratch);
       if (resumable && credentials) {
         length += encodeMuxedFrameInto(CONTROL_STREAM, { type: "Resume", connectionId: credentials.connectionId, resumeToken: credentials.resumeToken }, this.sendScratch, length);

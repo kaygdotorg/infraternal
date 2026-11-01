@@ -6,6 +6,7 @@ import { devices, expect, test, type Page, type BrowserContext, type Browser } f
 import { WebSocket } from "ws";
 import { isMacPlatform } from "../../../packages/ui/src/platform";
 import { encodeMuxedFrame, WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
+import { LAYOUT_SESSION_INCARNATION } from "../src/connection";
 import { startRealServer, type RealServer } from "./server";
 import { tracerEvidencePath } from "../test/evidence-path";
 import type { CanvasDocument } from "../src/canvas/model/schema";
@@ -51,7 +52,7 @@ async function request(server: RealServer, context: BrowserContext, action: stri
       const timer = setTimeout(() => reject(Error("review protocol response absent")), 15_000);
       socket.on("error", () => { clearTimeout(timer); reject(Error("review protocol connection failed")); });
       socket.on("message", (bytes) => decoder.feed(new Uint8Array(Buffer.from(bytes as Buffer)), (_stream, frame) => {
-        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: 16n, clientInfo: "layout-review" });
+        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: LAYOUT_SESSION_INCARNATION, clientInfo: "layout-review" });
         if (frame.type === "Ping") send({ ...frame, type: "Pong" });
         if (frame.type === "Welcome") {
           if (snapshot) send({ type: "Subscribe", subId: 1, filterJson: Buffer.from('{"topic":"canvas.layout"}') });
@@ -293,7 +294,7 @@ test("layout event latency reaches two protocol subscribers at scale", async ({ 
       const waiting = new Set<{ revision: number; resolve(): void }>();
       const send = (frame: Parameters<typeof encodeMuxedFrame>[1]): void => { socket.send(encodeMuxedFrame(0, frame)); };
       socket.on("message", (bytes) => decoder.feed(new Uint8Array(Buffer.from(bytes as Buffer)), (_stream, frame) => {
-        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: 16n, clientInfo: "layout-event-measurement" });
+        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: LAYOUT_SESSION_INCARNATION, clientInfo: "layout-event-measurement" });
         else if (frame.type === "Ping") send({ ...frame, type: "Pong" });
         else if (frame.type === "Welcome") { incarnation = frame.sessionIncarnation; send({ type: "Subscribe", subId: 1, filterJson: Buffer.from('{"topic":"canvas.layout"}') }); }
         else if (frame.type === "Event") {

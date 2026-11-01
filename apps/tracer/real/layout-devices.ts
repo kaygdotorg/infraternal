@@ -8,6 +8,7 @@ import { watchLayout } from "./layout-observer";
 import { devices, expect, type Page, type BrowserContext, type Browser } from "playwright/test";
 import { WebSocket } from "ws";
 import { encodeMuxedFrame, WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
+import { LAYOUT_SESSION_INCARNATION } from "../src/connection";
 import { startRealServer, type RealServer } from "./server";
 import type { CanvasDocument } from "../src/canvas/model/schema";
 
@@ -51,7 +52,7 @@ export async function request(server: RealServer, context: BrowserContext, actio
       const timer = setTimeout(() => reject(Error("review protocol response absent")), 15_000);
       socket.on("error", () => { clearTimeout(timer); reject(Error("review protocol connection failed")); });
       socket.on("message", (bytes) => decoder.feed(new Uint8Array(Buffer.from(bytes as Buffer)), (_stream, frame) => {
-        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: 16n, clientInfo: "layout-review" });
+        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: LAYOUT_SESSION_INCARNATION, clientInfo: "layout-review" });
         if (frame.type === "Ping") send({ ...frame, type: "Pong" });
         if (frame.type === "Welcome") {
           if (snapshot) send({ type: "Subscribe", subId: 1, filterJson: Buffer.from('{"topic":"canvas.layout"}') });
