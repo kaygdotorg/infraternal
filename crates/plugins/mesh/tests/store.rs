@@ -4,7 +4,7 @@
 use infraternal_plugin_mesh::{
     api::{MeshApiError, MeshCursor, MeshService},
     dataplane::DefaultPolicy,
-    policy::{model::PublicKey, rules::TrafficPolicy},
+    policy::model::PublicKey,
     store::Store,
 };
 use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
@@ -117,7 +117,10 @@ async fn reachable_placeholder_node_is_not_published_in_mesh_dns() {
     assert_eq!(source, "placeholder");
 
     let config = store.config(server).await.unwrap();
-    assert_eq!(config.peers[&unnamed].outbound, TrafficPolicy::All);
+    assert_eq!(
+        config.peers[&unnamed].outbound,
+        infraternal_plugin_mesh::policy::rules::TrafficPolicy::All
+    );
     assert!(!config.peer_names.contains_key(&unnamed));
 
     let mut query = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
