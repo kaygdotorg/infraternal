@@ -42,7 +42,8 @@ copyable guard without claiming it can rewrite unknown shell syntax.
 An edit revalidates the original invocation and the whole-file SHA-256 fingerprint.
 Only owned, single-link regular files without extended attributes are replaced;
 symlinks at every path component are refused. Refusing extended attributes avoids
-discarding ACLs or security labels. Replacement keeps the mode, group and line
+discarding ACLs or security labels. Replacement also refuses attributes inherited by its temporary file, so a
+directory default ACL cannot grant new access. It keeps the mode, group and line
 ending, uses a temporary file in the open directory, syncs it, verifies the current
 path still names the original content/inode, then renames and syncs the directory.
 An independent editor can still race the final pathname check and rename; like

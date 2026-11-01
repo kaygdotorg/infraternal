@@ -266,6 +266,11 @@ fn change(home: &Path, proposal: &Proposal, undo: bool) -> io::Result<()> {
         Mode::from_bits_truncate(0o600),
     )?);
     let result = (|| {
+        // A directory's default ACL can grant new readers on the replacement
+        // even when the original file has no ACL. Never install that file.
+        if infraternal_shim::startup_file_has_attributes(&output)? {
+            return Err(refused());
+        }
         output.write_all(replacement.as_bytes())?;
         nix::unistd::fchown(
             &output,
@@ -422,6 +427,45 @@ mod tests {
         ] {
             assert!(invocation(line).is_none(), "unsafe rewrite: {line}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_acl_is_refused_without_changing_the_original() {
+        let home = Home::new();
+        home.write(".bashrc", "exec tmux\n");
+        fs::set_permissions(home.0.join(".bashrc"), fs::Permissions::from_mode(0o640)).unwrap();
+        let proposal = propose(&home.0, ".bashrc", "tmux").unwrap().unwrap();
+        // Encode a Linux default ACL using the existing test toolchain; keep
+        // raw xattr operations outside the Rust shim's audited unsafe boundary.
+        let status = std::process::Command::new("python3")
+            .args([
+                "-c",
+                r"import errno,os,struct,sys
+entries = [(1,7,0xffffffff),(2,4,65534),(4,0,0xffffffff),(16,4,0xffffffff),(32,0,0xffffffff)]
+acl = struct.pack('<I',2) + b''.join(struct.pack('<HHI',*entry) for entry in entries)
+try:
+    os.setxattr(sys.argv[1], 'system.posix_acl_default', acl)
+except OSError as error:
+    if error.errno in (errno.ENOTSUP, errno.EOPNOTSUPP):
+        sys.exit(77)
+    raise
+",
+            ])
+            .arg(&home.0)
+            .status()
+            .unwrap();
+        if status.code() == Some(77) {
+            eprintln!("D315 ACL fixture unsupported: filesystem has no default ACLs");
+            return;
+        }
+        assert!(status.success());
+        assert!(change(&home.0, &proposal, false).is_err());
+        assert_eq!(
+            fs::read_to_string(home.0.join(".bashrc")).unwrap(),
+            "exec tmux\n"
+        );
+        assert_eq!(fs::read_dir(&home.0).unwrap().count(), 1);
     }
 
     #[test]
