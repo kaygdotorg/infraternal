@@ -27,6 +27,10 @@ def inside(binary, state):
     cli(binary, state, 'new', 'other-machine', '--name', 'denied', code=3)
     made = cli(binary, state, 'new', 'local', '--name', 'build')
     assert made['data']['session']['name'] == 'build', made
+    missing_last = subprocess.run(
+        [binary, '--json', 'sessions', '--state', str(state), 'read', 'local:build'],
+        capture_output=True, text=True, timeout=15, check=False)
+    missing_last_reply = json.loads(missing_last.stdout)
     cli(binary, state, 'new', 'local', '--name', 'build', code=2)
     rows = cli(binary, state)['data']['sessions']
     assert any(row['name'] == 'build' for row in rows), rows
@@ -84,8 +88,47 @@ def inside(binary, state):
     ended = cli(binary, state, 'read', 'local:ended', '--last', '2')
     assert 'RETAINED_DONE' in ended['data']['text'], ended
     cli(binary, state, 'close', 'local:ended')
+    direct = cli(binary, state, 'new', 'local', '--name', 'direct-socket', '--',
+                 '/bin/sh', '-c', 'exec sleep 120')
     return {'operations': ['list', 'new', 'send', 'read', 'close', 'new-command'],
-            'authority': 'real saved-shell descendants; cross-machine denied'}
+            'authority': 'real saved-shell descendants; cross-machine denied',
+            'missing_last_exit': missing_last.returncode,
+            'missing_last_message': missing_last_reply.get('message'),
+            'direct_socket_id': direct['data']['session']['id']}
+
+
+def process_state(pid):
+    try:
+        record = Path(f'/proc/{pid}/stat').read_text()
+    except FileNotFoundError:
+        return None
+    return record.rsplit(')', 1)[1].split()[0]
+
+
+def outside_shell_can_close(state, session_id):
+    path = state / 'sessions' / f"{session_id.replace('-', '')}.sock"
+    with socket.socket(socket.AF_UNIX) as peer:
+        peer.settimeout(2)
+        peer.connect(str(path))
+        hello = exact(peer, struct.unpack('<I', exact(peer, 4))[0])
+        assert hello[0] == 1
+        assert hello[11:27] == bytes.fromhex(session_id.replace('-', ''))
+        assert struct.unpack('<Q', hello[3:11])[0] & 64, 'close capability missing'
+        shim_pid = struct.unpack('<I', hello[27:31])[0]
+        children = Path(f'/proc/{shim_pid}/task/{shim_pid}/children')
+        deadline = time.monotonic() + 2
+        while not children.read_text().split():
+            assert time.monotonic() < deadline, 'session shell did not start'
+            time.sleep(0.01)
+        child_pid = int(children.read_text().split()[0])
+        peer.sendall(struct.pack('<I', 9) + b'\x02' + struct.pack('<Q', 64))
+        peer.sendall(struct.pack('<I', 1) + b'\x1f')
+    deadline = time.monotonic() + 2
+    while process_state(child_pid) not in (None, 'Z', 'X', 'x'):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+    return True
 
 
 def main(binary):
@@ -114,6 +157,15 @@ def main(binary):
             time.sleep(0.05)
         reply = json.loads(receipt.read_text())
         assert reply['ok'], reply
+        failures = []
+        if reply['missing_last_exit'] != 2:
+            failures.append(
+                f"sessions read without --last exited {reply['missing_last_exit']} "
+                f"({reply['missing_last_message']!r}), expected usage code 2")
+        if outside_shell_can_close(state, reply['direct_socket_id']):
+            failures.append(
+                'same-UID process outside the saved shell closed a session over its local shim socket')
+        assert not failures, '\n'.join(failures)
         print(json.dumps(reply))
     finally:
         if fixture:
