@@ -10,6 +10,10 @@
  *
  * The choice is a device-local preference like the theme and the font, and applies live. A window the person resized by
  * hand keeps its own width; only windows still at the default follow the setting.
+ *
+ * The UI size (#283) is a factor on every desktop default: a window is as many times wider as the UI is bigger, so the type
+ * inside it has the room it had (owner, 2026-11-01: windows grow with the UI size). The ceiling below (99% of the canvas)
+ * stays the ceiling at every size.
  */
 import { readLocal, writeLocal } from "../../../../packages/ui/src/local-pref";
 
@@ -49,9 +53,13 @@ export const maxColumnWidth = (width: number): number => Math.max(480, Math.roun
 /**
  * The default column (window) width for a canvas area `width` px wide: the canvas viewport's client width, which is the
  * space between the screen margins on a phone set to "Comfortable" and the screen between the safe areas otherwise (see
- * `edgeToEdge`). Pure, so it can be tested alone.
+ * `edgeToEdge`). `scale` is the UI size's factor (1 at the standard size; the base and the slider together). Pure, so it can be
+ * tested alone.
+ *
+ * On a desktop the width of the chosen option is multiplied by `scale` and still never passes the ceiling. A phone's window is
+ * the screen's width, so it has no factor: its type grows inside the same window.
  */
-export function columnWidth(width: number, narrow: boolean, sizes: WindowSizes): number {
+export function columnWidth(width: number, narrow: boolean, sizes: WindowSizes, scale = 1): number {
   if (narrow) {
     if (sizes.phone === "comfortable") return Math.max(260, Math.min(520, Math.round(width - 28)));
     // A lone window is the whole area between the safe areas in both settings (TASTE: a lone window keeps the full
@@ -59,8 +67,8 @@ export function columnWidth(width: number, narrow: boolean, sizes: WindowSizes):
     return Math.round(width);
   }
   if (sizes.desktop === "full") return maxColumnWidth(width);
-  if (sizes.desktop === "wide") return Math.max(480, Math.min(960, Math.round((width - 24) / 2)));
-  return Math.max(400, Math.min(640, Math.round((width - 24) / 3)));
+  const option = sizes.desktop === "wide" ? Math.max(480, Math.min(960, Math.round((width - 24) / 2))) : Math.max(400, Math.min(640, Math.round((width - 24) / 3)));
+  return Math.min(maxColumnWidth(width), Math.round(option * scale));
 }
 
 /**

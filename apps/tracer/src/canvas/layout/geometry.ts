@@ -31,6 +31,11 @@ export interface Metrics {
    */
   maxW: number;
   clh: number; narrow: boolean; nodeW: number; nodeH: number;
+  /**
+   * The UI size's factor these metrics were made with (1 at the standard size). A change of it, and nothing else, rescales every
+   * column, a hand-resized one too, by the same ratio, so a window the person widened stays that much wider than the default.
+   */
+  scale: number;
 }
 
 /**
@@ -47,16 +52,16 @@ export const MIN_TOUCH_COLUMN = 355;
  * strip of several is that width minus a sliver for each neighbour to peek in (`peekW`); on a desktop three columns fill the width; a column is always as tall
  * as the viewport (D119: windows tile the pane).
  */
-export const metricsFor = (width: number, height: number, coarse: boolean, sizes: WindowSizes = DEFAULT_SIZES): Metrics => {
+export const metricsFor = (width: number, height: number, coarse: boolean, sizes: WindowSizes = DEFAULT_SIZES, scale = 1): Metrics => {
   const narrow = coarse || width < 720;
-  const colW = columnWidth(width, narrow, sizes);
+  const colW = columnWidth(width, narrow, sizes, scale);
   // A view is as tall as the canvas area. It may get short (the on-screen keyboard is up): only the height changes,
   // never the width or a column count, so nothing rewraps and the camera does not scale the window down (D191).
   const clh = Math.max(120, Math.round(height));
   const peekW = peekWidth(width, narrow, colW, COLUMN_GAP, sizes);
   // The floor is never wider than a column of a default strip (`peekW`): a small phone's screen cannot show 40 cells with
   // a neighbour's slice beside them, and the floor must not change how a default layout looks there.
-  return { colW, peekW, minW: coarse ? Math.min(MIN_TOUCH_COLUMN, peekW) : 0, maxW: narrow ? 0 : maxColumnWidth(width), clh, narrow, nodeW: narrow ? 200 : 208, nodeH: 104 };
+  return { colW, peekW, minW: coarse ? Math.min(MIN_TOUCH_COLUMN, peekW) : 0, maxW: narrow ? 0 : maxColumnWidth(width), clh, narrow, nodeW: Math.round((narrow ? 200 : 208) * scale), nodeH: Math.round(104 * scale), scale };
 };
 
 /**

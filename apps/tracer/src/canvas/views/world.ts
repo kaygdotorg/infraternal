@@ -288,11 +288,14 @@ export function createViews(cx: Ctx): ViewsModule {
     if (c.view.layout !== "tiled") return;
     const cols = columnEls(c.colsEl);
     const target = defaultWidth(state.metrics, cols.length);
+    // The UI size changed (and nothing else decides this): a column the person widened keeps its proportion to the default, so it
+    // is as many times wider as the default became. Any other change of metrics leaves such a column at the width it has.
+    const k = state.metrics.scale / (was.scale || 1);
     for (const colEl of cols) {
       // A column the person resized keeps its width (`user`), and so does one whose width is none of the defaults.
       if (!colEl.dataset.user && isDefaultWidth(Number(colEl.dataset.w), was) && !colEl.dataset.half) { setColumnWidth(colEl, target, state.metrics); continue; }
       // The floor can change with the screen (rotation, a keyboard) while the saved width stays: redraw at the new floor.
-      if (Number(colEl.dataset.w)) setColumnWidth(colEl, Number(colEl.dataset.w), state.metrics);
+      if (Number(colEl.dataset.w)) setColumnWidth(colEl, k === 1 ? Number(colEl.dataset.w) : Math.round(Number(colEl.dataset.w) * k), state.metrics);
     }
   }
 
