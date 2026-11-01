@@ -1,7 +1,7 @@
 /**
  * App windows and screens on the product canvas (D200, D207, D208), against the app-window double: a Mac that lists windows
- * and streams H.264. Run with `TRACER_DOUBLE_APPWIN=1 bun x playwright test test/appwin.spec.ts`; without the variable the double
- * does not advertise the capability and every test here is skipped.
+ * and streams H.264. Run with `TRACER_DOUBLE_APPWIN=1 bun x playwright test test/appwin.spec.ts`; set
+ * `TRACER_APPWIN_BROWSER=chrome` to select a browser channel that can decode the fixture. Without the double, every test here is skipped.
  *
  * What it proves: the flag gate (off by default, the preview door, the Settings switch), the picker (live, searchable, grouped),
  * a window that goes live through the worker and follows its box (A2), control that takes the first press only after the window
@@ -12,9 +12,12 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { expect, test, type Page } from "playwright/test";
+import { requireFixtureH264 } from "./appwin/codec-support";
 
 const enabled = process.env.TRACER_DOUBLE_APPWIN === "1";
 const fixtures = process.env.APPWIN_FIXTURE_DIR ?? join(homedir(), ".cache/codex-scratch/ui-app-windows/fixtures");
+const paletteShortcut = process.platform === "darwin" ? "Meta+K" : "Control+Shift+K";
+const selectAllShortcut = process.platform === "darwin" ? "Meta+A" : "Control+A";
 test.skip(!enabled, "needs TRACER_DOUBLE_APPWIN=1 (the app-window double)");
 test.beforeAll(() => {
   if (!existsSync(join(fixtures, "editor-tall.h264"))) {
@@ -38,10 +41,9 @@ async function openCanvas(page: Page, query = "&appwin=1", before: Record<string
 
 /** The admitted hosts arrive after the first terminal settles: the palette lists them as shells. */
 async function hostsLoaded(page: Page): Promise<void> {
-  await expect(async () => {
-    await page.keyboard.press("Control+Shift+K");
-    await expect(page.getByRole("option", { name: /Open shell on build-01/ })).toBeVisible({ timeout: 1500 });
-  }).toPass({ timeout: 25_000 });
+  // One shortcut opens the palette; retrying the toggle can close it while host inventory is still arriving.
+  await page.keyboard.press(paletteShortcut);
+  await expect(page.getByRole("option", { name: /Open shell on build-01/ })).toBeVisible({ timeout: 25_000 });
   await page.keyboard.press("Escape");
 }
 
@@ -49,6 +51,7 @@ const plus = (page: Page) => page.getByRole("button", { name: "New window", exac
 const appWindow = (page: Page) => page.locator(".ui-window[data-kind='app']");
 
 async function openEditor(page: Page): Promise<void> {
+  await requireFixtureH264(page);
   await plus(page).click();
   await page.getByRole("option", { name: /Editor, stream\.ts/ }).click();
   await expect(appWindow(page).locator(".aw-stage")).toHaveAttribute("data-picture", "live", { timeout: 20_000 });
@@ -68,10 +71,10 @@ test("off by default: a production-style load has no picker and no desktop capab
 test("the Settings switch is offered because the server reports the capability, and it remembers the choice", async ({ page }) => {
   await openCanvas(page, "", {}, false);
   // Off: the palette lists the machine's shell but none of its windows.
-  await page.keyboard.press("Control+Shift+K");
+  await page.keyboard.press(paletteShortcut);
   await page.keyboard.type("open editor");
   await expect(page.getByRole("option", { name: /Open Editor on studio-mac/ })).toHaveCount(0);
-  await page.keyboard.press("Control+A");
+  await page.keyboard.press(selectAllShortcut);
   await page.keyboard.type("hosts");
   await page.getByRole("option", { name: /Settings: Hosts/ }).click();
   const toggle = page.getByRole("switch", { name: /Stream app windows/ });
@@ -96,10 +99,10 @@ test("the picker lists every machine's shell, screen and windows, narrows with o
   const all = await rows.count();
   await page.keyboard.type("note");
   await expect(rows).toHaveCount(2);
-  await page.keyboard.press("Control+A");
+  await page.keyboard.press(selectAllShortcut);
   await page.keyboard.type("build-01");
   await expect(rows).toHaveCount(1);
-  await page.keyboard.press("Control+A");
+  await page.keyboard.press(selectAllShortcut);
   await page.keyboard.press("Backspace");
   await expect(rows).toHaveCount(all);
   // A window opens on the machine while the picker is open: its row appears without a reload.
@@ -201,6 +204,7 @@ test("the machine's local-input pause shows for as long as it lasts, then contro
 test("every state is honest: closed, permission missing, connecting, reconnecting, unsupported", async ({ page, browser }) => {
   test.setTimeout(120_000);
   await openCanvas(page, "&appwin=1", { startDelayMs: 1500 });
+  await requireFixtureH264(page);
   await plus(page).click();
   await page.getByRole("option", { name: /Editor, stream\.ts/ }).click();
   await expect(appWindow(page).locator(".aw-card")).toContainText("Opening Editor");
@@ -240,7 +244,8 @@ test("every state is honest: closed, permission missing, connecting, reconnectin
 
 test("the palette lists \"Open <app> on <machine>\" and opens it", async ({ page }) => {
   await openCanvas(page);
-  await page.keyboard.press("Control+Shift+K");
+  await requireFixtureH264(page);
+  await page.keyboard.press(paletteShortcut);
   await page.keyboard.type("open editor");
   await page.getByRole("option", { name: /Open Editor on studio-mac/ }).click();
   await expect(appWindow(page).locator(".aw-stage")).toHaveAttribute("data-picture", "live", { timeout: 20_000 });

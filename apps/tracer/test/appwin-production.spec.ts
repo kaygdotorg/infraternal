@@ -1,23 +1,24 @@
 /** Production-build flag and settings checks with real H264 decoding; screenshots are external review receipts [D160,D208,D262]. */
 import { expect, test, type Page } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
+import { requireFixtureH264 } from "./appwin/codec-support";
 
 test.skip(process.env.TRACER_DOUBLE_APPWIN !== "1", "needs the desktop source double and rendered H264 fixtures");
+const paletteShortcut = process.platform === "darwin" ? "Meta+K" : "Control+Shift+K";
 async function open(page: Page) {
   await page.request.post("/__mock/reset");
   await page.request.post("/__mock/appwin/config", { data: { reset: true, controlContract: true } });
   expect((await (await page.request.get("/__mock/appwin/state")).json()).sessions).toHaveLength(0);
   // The server double establishes the test account; the bundle takes its normal signed-in product path.
-  await page.goto("/?proto=product&fresh=1&appwin=1&bg=none");
+  await page.goto("/?proto=product&fresh=1&bg=none");
   await expect(page.locator(".ui-window").first()).toBeVisible();
-  await expect(async () => {
-    await page.keyboard.press("Control+Shift+K");
-    await expect(page.getByRole("option", { name: /Settings: Hosts/ })).toBeVisible({ timeout: 1500 });
-  }).toPass({ timeout: 25_000 });
+  await page.keyboard.press(paletteShortcut);
+  await expect(page.getByRole("option", { name: /Settings: Hosts/ })).toBeVisible({ timeout: 25_000 });
   await page.keyboard.press("Escape");
 }
 async function enable(page: Page) {
-  await page.keyboard.press("Control+Shift+K");
+  await requireFixtureH264(page);
+  await page.keyboard.press(paletteShortcut);
   await page.getByRole("option", { name: /Settings: Hosts/ }).click();
   const toggle = page.getByRole("switch", { name: /Stream app windows/ });
   await expect(toggle).not.toBeChecked();
@@ -29,7 +30,7 @@ async function enable(page: Page) {
   await expect(page.locator(".aw-stage")).toHaveAttribute("data-picture", "live", { timeout: 20_000 });
 }
 
-test("production ignores the preview URL and keeps New window opening shells", async ({ page }) => {
+test("the default setting keeps New window opening shells", async ({ page }) => {
   await open(page);
   expect(await page.evaluate(() => localStorage.getItem("infraternal.app-windows"))).not.toBe("1");
   await page.getByRole("button", { name: "New window", exact: true }).click();
@@ -91,7 +92,7 @@ test("turning the production setting off retires existing windows and source ses
   test.setTimeout(60_000);
   await open(page);
   await enable(page);
-  await page.keyboard.press("Control+Shift+K");
+  await page.keyboard.press(paletteShortcut);
   await page.getByRole("option", { name: /Settings: Hosts/ }).click();
   await page.getByRole("switch", { name: /Stream app windows/ }).click();
   expect(await page.evaluate(() => localStorage.getItem("infraternal.app-windows"))).toBe("0");

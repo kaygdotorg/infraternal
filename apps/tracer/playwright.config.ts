@@ -10,6 +10,10 @@ const deviceScaleFactor = Number(process.env.TRACER_TEST_DPR ?? "1");
 if (![1, 2, 3].includes(deviceScaleFactor)) {
   throw new Error("TRACER_TEST_DPR must be 1, 2, or 3");
 }
+const appWindowBrowser = process.env.TRACER_APPWIN_BROWSER;
+if (appWindowBrowser !== undefined && appWindowBrowser !== "chrome") {
+  throw new Error("TRACER_APPWIN_BROWSER must be unset or chrome");
+}
 // Browser reports and frame incidents stay outside the checkout.
 const perfDir = process.env.INFRATERNAL_PERF_DIR ?? tracerEvidencePath("perf");
 const origin = `http://localhost:${port}`;
@@ -30,6 +34,7 @@ export default defineConfig({
     baseURL: origin,
     launchOptions: {
       // Keep a headless visible-surface probe on the renderer's foreground frame cadence.
+      ...(appWindowBrowser === "chrome" ? { channel: "chrome" } : {}),
       args: process.env.TRACER_CHROMIUM_FLAGS === undefined
         ? ["--disable-renderer-backgrounding"]
         : process.env.TRACER_CHROMIUM_FLAGS.split(/\s+/).filter(Boolean),
