@@ -110,6 +110,15 @@ impl OwnedChild {
         }
     }
 
+    /// A numeric process id is safe to signal only for a locally owned child.
+    pub(crate) fn local_pid(&self) -> Option<u32> {
+        match self {
+            Self::Local(child) => Some(child.id()),
+            #[cfg(feature = "host-login")]
+            Self::Login { .. } => None,
+        }
+    }
+
     // The peer remains owned after status is consumed, retaining the login
     // through output retention/ExitAck. Only its readiness is then disabled.
     #[cfg(feature = "host-login")]
@@ -184,6 +193,7 @@ mod tests {
     fn canceling_one_lease_does_not_shutdown_another_terminal() {
         let (mut first, mut first_source) = pair();
         let (mut second, mut second_source) = pair();
+        assert_eq!(first.local_pid(), None);
         first.kill().unwrap();
         assert_eq!(first_source.read(&mut [0]).unwrap(), 0);
         second_source.write_all(&0_i32.to_le_bytes()).unwrap();

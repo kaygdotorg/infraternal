@@ -4,7 +4,7 @@ use std::{path::PathBuf, process::Command};
 
 #[cfg(feature = "plugin-agent")]
 #[test]
-fn real_binary_defers_backend_detection_until_first_terminal() {
+fn real_binary_keeps_background_backend_probe_off_the_control_path() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = Command::new("python3")
         .current_dir(root)

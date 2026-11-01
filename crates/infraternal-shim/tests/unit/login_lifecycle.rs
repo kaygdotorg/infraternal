@@ -603,6 +603,11 @@ fn fallback_proxy_refuses_a_different_kernel_parent_before_terminal_transfer() {
 
 #[test]
 fn prepared_terminal_starts_before_owner_exec_and_cancels_only_its_lease() {
+    let account = User::from_uid(Uid::effective()).unwrap().unwrap();
+    if account.shell.file_name().and_then(|name| name.to_str()) != Some("zsh") {
+        eprintln!("skipping zsh startup marker fixture for non-zsh account shell");
+        return;
+    }
     let uid = Uid::effective().as_raw();
     let worker = Worker::new(uid);
     let pin = PathBuf::from(format!("/proc/{}", worker.child.id()));

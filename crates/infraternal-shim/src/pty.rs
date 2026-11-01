@@ -645,8 +645,12 @@ impl Pty {
         if exited || self.child.try_wait()?.is_some() {
             return Ok(());
         }
-        let group =
-            nix::unistd::Pid::from_raw(i32::try_from(self.child.id()).map_err(io::Error::other)?);
+        let Some(pid) = self.child.local_pid() else {
+            // A login worker owns the shell PID; closing its authenticated
+            // terminal lease asks that owner to stop and reap the shell.
+            return self.child.kill();
+        };
+        let group = nix::unistd::Pid::from_raw(i32::try_from(pid).map_err(io::Error::other)?);
         killpg(group, Signal::SIGHUP).map_err(errno)
     }
     pub fn signal(&self, number: u8) -> io::Result<()> {
@@ -1149,6 +1153,7 @@ fn shell_command(user: &User, inherited: bool, readiness: bool) -> io::Result<Co
         .env("LOGNAME", &user.name)
         .env("SHELL", &shell)
         .env("TERM", "xterm-256color")
+        .env("COLORTERM", "truecolor")
         .env("PATH", "/usr/local/bin:/usr/bin:/bin");
     // Legacy terminals preserve only host locale variables; real login shells
     // retain the locale selected by the host PAM session.
@@ -1555,7 +1560,6 @@ mod inherited_login_process_tests {
                 .env(FIXTURE, "1").status().unwrap().success());
             return;
         }
-        let process = File::open("/proc/self").unwrap();
         let (parent, ready) = std::os::unix::net::UnixStream::pair().unwrap();
         let parent_copy = parent.try_clone().unwrap();
         let ready_copy = ready.try_clone().unwrap();
@@ -1566,6 +1570,9 @@ mod inherited_login_process_tests {
         // slot to reproduce callback ordering with a small descriptor table.
         assert_ne!(unsafe { nix::libc::dup2(ready_copy.as_raw_fd(), 5) }, -1);
         let ready = unsafe { File::from_raw_fd(5) };
+        // Open the process pin after reserving fd 5 so the fixture cannot
+        // overwrite an owned File when it installs the readiness descriptor.
+        let process = File::open("/proc/self").unwrap();
         let mut child = Command::new("/bin/sh");
         let pin = inherit_login_process(&mut child, &process).unwrap();
         child.args(["-c", "test -d \"$1\" && printf r >&4", "pin-ready"]);
