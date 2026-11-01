@@ -42,6 +42,21 @@ async fn client(ca: &mut Authority, relay: SocketAddr, id: HostId) -> (Client, N
         .unwrap()
 }
 
+async fn stalled_client(
+    ca: &mut Authority,
+    relay: SocketAddr,
+    id: HostId,
+) -> Option<(quinn::Endpoint, quinn::Connection)> {
+    let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    let config = tls::client_config(ca.issue(Purpose::Host(id))).unwrap();
+    let connection = endpoint
+        .connect_with(config, relay, NAME)
+        .ok()?
+        .await
+        .ok()?;
+    Some((endpoint, connection))
+}
+
 async fn notice(notices: &mut Notices) -> Notice {
     tokio::time::timeout(WAIT, notices.next())
         .await
@@ -131,6 +146,32 @@ async fn linked_hosts_exchange_unchanged_datagrams_and_others_cannot_inject() {
     assert_eq!((stats.hosts, stats.links), (3, 1));
     assert_eq!(stats.forwarded, 9);
     assert!(stats.dropped >= 3, "{stats:?}");
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn relay_bounds_stalled_handshakes_from_one_source_ip() {
+    let mut ca = Authority::new();
+    let relay = relay(&mut ca, everyone());
+    let address = relay.local_addr().unwrap();
+    let mut stalled = Vec::new();
+
+    for index in 1..=9 {
+        match stalled_client(&mut ca, address, host(index)).await {
+            Some(connection) => stalled.push(connection),
+            None => break,
+        }
+    }
+
+    assert_eq!(
+        stalled.len(),
+        8,
+        "the ninth pre-hello handshake was admitted"
+    );
+    assert_eq!(relay.stats().hosts, 0, "stalled clients were registered");
+    for (_, connection) in stalled {
+        connection.close(quinn::VarInt::from_u32(0), b"test finished");
+    }
     relay.close().await;
 }
 

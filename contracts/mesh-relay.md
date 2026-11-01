@@ -30,6 +30,13 @@ packets use QUIC DATAGRAM frames on the same connection. A reconnect replaces
 the previous connection for that host and ends its links; both peers must
 request their links again.
 
+Before that authenticated control hello completes, the relay admits at most
+256 in-flight handshakes globally and eight per source IP by default. IPv4
+mapped IPv6 addresses count as their IPv4 source. New incoming connections are
+refused at either limit before a serving task is spawned. Each TLS handshake
+and control-hello wait has a five-second deadline; the source and global slots
+are released when the host is admitted or the attempt ends.
+
 ## Wire formats
 
 Control messages have no separate length prefix. The first byte selects one

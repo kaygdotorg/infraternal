@@ -6,9 +6,9 @@
 //! the same id and forwards each frame unchanged to the other end, so
 //! forwarding is one table read and one `send_datagram` with no copy.
 //!
-//! Everything is bounded: hosts, requests per host, the control writer queue,
-//! per-connection QUIC buffers (see `tls`) and shared DATAGRAM forwarding
-//! budgets. A host that reconnects replaces its
+//! Everything is bounded: pre-authentication handshakes, hosts, requests per
+//! host, the control writer queue, per-connection QUIC buffers (see `tls`) and
+//! shared DATAGRAM forwarding budgets. A host that reconnects replaces its
 //! previous connection; its links end and form again from the new requests.
 //! The same UDP port answers authenticated address probes (`probe`), which are
 //! taken out in front of quinn so a relay needs one port.
@@ -22,10 +22,10 @@ use quinn::{AsyncUdpSocket, UdpPoller, udp};
 use std::{
     collections::{HashMap, HashSet},
     fmt, io,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{
-        Arc, RwLock, Weak,
+        Arc, Mutex, RwLock, Weak,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     task::{Context, Poll, ready},
@@ -39,6 +39,8 @@ const GLOBAL_FORWARD_QUEUE_BYTES: usize = 64 * 1024 * 1024;
 const PAIR_FORWARD_QUEUE_BYTES: usize = 256 * 1024;
 const GLOBAL_FORWARD_QUEUE_UNITS: usize = GLOBAL_FORWARD_QUEUE_BYTES / QUEUE_ACCOUNTING_UNIT_BYTES;
 const PAIR_FORWARD_QUEUE_UNITS: usize = PAIR_FORWARD_QUEUE_BYTES / QUEUE_ACCOUNTING_UNIT_BYTES;
+const MAX_HANDSHAKES: usize = 256;
+const MAX_HANDSHAKES_PER_IP: usize = 8;
 
 /// Resource bounds; every table and queue in the relay has one.
 #[derive(Clone, Copy, Debug)]
@@ -47,6 +49,10 @@ pub struct Limits {
     pub hosts: usize,
     /// Outstanding link requests per host.
     pub requests_per_host: usize,
+    /// In-flight QUIC handshakes and control hellos across the relay.
+    pub handshakes: usize,
+    /// In-flight QUIC handshakes and control hellos from one source IP.
+    pub handshakes_per_ip: usize,
     /// Time allowed for the QUIC handshake and the control hello.
     pub handshake: Duration,
 }
@@ -56,6 +62,8 @@ impl Default for Limits {
         Self {
             hosts: 4_096,
             requests_per_host: 1_024,
+            handshakes: MAX_HANDSHAKES,
+            handshakes_per_ip: MAX_HANDSHAKES_PER_IP,
             handshake: Duration::from_secs(5),
         }
     }
@@ -81,6 +89,82 @@ struct Counters {
     dropped: AtomicU64,
     probes_answered: AtomicU64,
     probes_refused: AtomicU64,
+}
+
+#[derive(Default)]
+struct PreAuthCounts {
+    total: usize,
+    by_ip: HashMap<IpAddr, usize>,
+}
+
+/// Caps tasks that have not completed the authenticated control hello.
+struct PreAuthLimiter {
+    max_total: usize,
+    max_per_ip: usize,
+    counts: Mutex<PreAuthCounts>,
+}
+
+impl PreAuthLimiter {
+    fn new(max_total: usize, max_per_ip: usize) -> Arc<Self> {
+        Arc::new(Self {
+            max_total,
+            max_per_ip,
+            counts: Mutex::new(PreAuthCounts::default()),
+        })
+    }
+
+    fn try_acquire(self: &Arc<Self>, ip: IpAddr) -> Option<PreAuthPermit> {
+        let ip = canonical_ip(ip);
+        let mut counts = self
+            .counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let source_count = counts.by_ip.get(&ip).copied().unwrap_or_default();
+        if counts.total >= self.max_total || source_count >= self.max_per_ip {
+            return None;
+        }
+        counts.total += 1;
+        *counts.by_ip.entry(ip).or_default() += 1;
+        Some(PreAuthPermit {
+            limiter: self.clone(),
+            ip,
+        })
+    }
+}
+
+/// Releases one global and one source-IP handshake slot when dropped.
+struct PreAuthPermit {
+    limiter: Arc<PreAuthLimiter>,
+    ip: IpAddr,
+}
+
+impl Drop for PreAuthPermit {
+    fn drop(&mut self) {
+        let mut counts = self
+            .limiter
+            .counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        debug_assert!(counts.total > 0, "pre-auth handshake count underflow");
+        counts.total = counts.total.saturating_sub(1);
+        let remove_source = if let Some(source_count) = counts.by_ip.get_mut(&self.ip) {
+            debug_assert!(*source_count > 0, "source-IP handshake count underflow");
+            *source_count = source_count.saturating_sub(1);
+            *source_count == 0
+        } else {
+            false
+        };
+        if remove_source {
+            counts.by_ip.remove(&self.ip);
+        }
+    }
+}
+
+fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
+        IpAddr::V4(_) => ip,
+    }
 }
 
 struct Host {
@@ -302,6 +386,7 @@ struct Shared {
     probes: RwLock<HashMap<u64, ProbeKey>>,
     counters: Counters,
     datagrams: Arc<QueueBudget>,
+    pre_auth: Arc<PreAuthLimiter>,
     limits: Limits,
     admission: Admission,
 }
@@ -519,6 +604,7 @@ impl Relay {
             probes: RwLock::new(HashMap::new()),
             counters: Counters::default(),
             datagrams: Arc::new(QueueBudget::new(GLOBAL_FORWARD_QUEUE_UNITS)),
+            pre_auth: PreAuthLimiter::new(limits.handshakes, limits.handshakes_per_ip),
             limits,
             admission,
         });
@@ -582,11 +668,15 @@ impl Drop for Relay {
 
 async fn accept(endpoint: quinn::Endpoint, shared: Arc<Shared>) {
     while let Some(incoming) = endpoint.accept().await {
-        tokio::spawn(serve(incoming, shared.clone()));
+        let Some(permit) = shared.pre_auth.try_acquire(incoming.remote_address().ip()) else {
+            incoming.refuse();
+            continue;
+        };
+        tokio::spawn(serve(incoming, shared.clone(), permit));
     }
 }
 
-async fn serve(incoming: quinn::Incoming, shared: Arc<Shared>) {
+async fn serve(incoming: quinn::Incoming, shared: Arc<Shared>, pre_auth: PreAuthPermit) {
     let limit = shared.limits.handshake;
     let Ok(Ok(connection)) = tokio::time::timeout(limit, incoming).await else {
         return;
@@ -615,6 +705,7 @@ async fn serve(incoming: quinn::Incoming, shared: Arc<Shared>) {
         connection.close(quinn::VarInt::from_u32(4), b"relay full");
         return;
     }
+    drop(pre_auth);
     let session = key.session();
     // A colliding 64-bit session only leaves the newer connection without probes.
     let owns_session = match shared
@@ -750,5 +841,36 @@ mod datagram_budget_tests {
 
         drop(held);
         assert_eq!(relinked.queued_units.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod pre_auth_limit_tests {
+    use super::*;
+
+    #[test]
+    fn pending_handshakes_are_bounded_globally_and_per_source_ip() {
+        let limiter = PreAuthLimiter::new(2, 1);
+        let first_ip = "192.0.2.1".parse().unwrap();
+        let mapped_first_ip = "::ffff:192.0.2.1".parse().unwrap();
+        let second_ip = "192.0.2.2".parse().unwrap();
+        let third_ip = "192.0.2.3".parse().unwrap();
+
+        let first = limiter
+            .try_acquire(first_ip)
+            .expect("first source is below both caps");
+        assert!(limiter.try_acquire(first_ip).is_none());
+        assert!(limiter.try_acquire(mapped_first_ip).is_none());
+        let second = limiter
+            .try_acquire(second_ip)
+            .expect("another source may use the global capacity");
+        assert!(limiter.try_acquire(third_ip).is_none());
+
+        drop(first);
+        let replacement = limiter
+            .try_acquire(first_ip)
+            .expect("dropping a permit releases its source and global slots");
+        drop((second, replacement));
     }
 }

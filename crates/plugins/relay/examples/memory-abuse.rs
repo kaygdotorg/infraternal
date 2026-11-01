@@ -1,13 +1,15 @@
-//! Measure relay-only RSS while many linked pairs flood QUIC DATAGRAMs.
+//! Measure relay-only RSS under a QUIC pre-hello connection or DATAGRAM flood.
 //!
-//! Run this release binary on the perf VM inside a disposable network namespace
-//! and a shaped loopback link. The child process owns only the relay; the parent
+//! Run this release binary on the perf VM inside a disposable network namespace.
+//! The child process owns only the relay; the parent
 //! owns the load generator and samples the child's `/proc` RSS high-water mark.
+//! `--handshake-flood` opens concurrent connections from 128 loopback source IPs
+//! and withholds the authenticated control hello.
 
 use bytes::{BufMut, Bytes, BytesMut};
 use infraternal_plugin_relay::{
     client::Client,
-    quinn,
+    quinn::{self, AsyncUdpSocket, UdpPoller, udp},
     relay::{Limits, Relay},
     testing::{self, Authority, Purpose},
     tls,
@@ -16,10 +18,12 @@ use infraternal_plugin_relay::{
 use std::{
     error::Error,
     fs, io,
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
+    pin::Pin,
     process::{Child, Command, Stdio},
     sync::Arc,
+    task::{Context, Poll},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -29,13 +33,24 @@ const DATAGRAMS_PER_HOST: usize = 256;
 const PACKET_BYTES: usize = 1_400;
 const CONNECT_DEADLINE: Duration = Duration::from_secs(10);
 const LINK_DEADLINE: Duration = Duration::from_secs(10);
+const HANDSHAKE_FLOOD_SOURCE_IPS: u8 = 128;
+const HANDSHAKES_PER_SOURCE_IP: usize = 8;
+const HANDSHAKE_FLOOD_SAMPLE_AFTER: Duration = Duration::from_secs(2);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args_os().skip(1);
-    if args.next().is_some_and(|arg| arg == "--server") {
+    let mode = args.next();
+    if mode.as_deref().is_some_and(|arg| arg == "--server") {
         let directory = args.next().ok_or("server mode needs a private directory")?;
         run_server(Path::new(&directory)).await?;
+        return Ok(());
+    }
+    if mode
+        .as_deref()
+        .is_some_and(|arg| arg == "--handshake-flood")
+    {
+        run_handshake_flood().await?;
         return Ok(());
     }
 
@@ -163,6 +178,135 @@ async fn run_driver() -> Result<(), Box<dyn Error>> {
         peak_kib.saturating_sub(idle_hwm_kib)
     );
     Ok(())
+}
+
+async fn run_handshake_flood() -> Result<(), Box<dyn Error>> {
+    let directory = Scratch::create()?;
+    let mut authority = Authority::new();
+    let (certificate, key) = authority.issue_pem(Purpose::Relay(NAME));
+    fs::write(directory.path.join("relay.pem"), certificate)?;
+    fs::write(directory.path.join("relay-key.pem"), key)?;
+    fs::write(directory.path.join("root.pem"), authority.pem())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&directory.path, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(
+            directory.path.join("relay-key.pem"),
+            fs::Permissions::from_mode(0o600),
+        )?;
+    }
+
+    let server = ServerProcess::start(&directory.path)?;
+    let address = server.address;
+    let config = tls::client_config(authority.issue(Purpose::Host(host_id(1))))?;
+    let runtime: Arc<dyn quinn::Runtime> = Arc::new(quinn::TokioRuntime);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let idle_kib = rss_kib(server.pid)?;
+    let idle_hwm_kib = hwm_kib(server.pid)?;
+    let mut connects = tokio::task::JoinSet::new();
+    let started = Instant::now();
+    for source in 1..=HANDSHAKE_FLOOD_SOURCE_IPS {
+        let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, source)), 0);
+        let socket = runtime.wrap_udp_socket(std::net::UdpSocket::bind(local)?)?;
+        let endpoint = quinn::Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            None,
+            Arc::new(BlackholeSocket { inner: socket }),
+            runtime.clone(),
+        )?;
+        for _ in 0..HANDSHAKES_PER_SOURCE_IP {
+            let endpoint = endpoint.clone();
+            let config = config.clone();
+            connects.spawn(async move {
+                let Ok(connecting) = endpoint.connect_with(config, address, NAME) else {
+                    return;
+                };
+                tokio::select! {
+                    () = tokio::time::sleep(HANDSHAKE_FLOOD_SAMPLE_AFTER + Duration::from_secs(1)) => {}
+                    _ = connecting => {}
+                }
+            });
+        }
+    }
+
+    let attempted = usize::from(HANDSHAKE_FLOOD_SOURCE_IPS) * HANDSHAKES_PER_SOURCE_IP;
+    tokio::time::sleep(HANDSHAKE_FLOOD_SAMPLE_AFTER).await;
+    let elapsed = started.elapsed();
+
+    let flood_kib = rss_kib(server.pid)?;
+    let flood_hwm_kib = hwm_kib(server.pid)?;
+    println!("METRIC name=handshake_flood_source_ips value={HANDSHAKE_FLOOD_SOURCE_IPS}");
+    println!("METRIC name=handshake_flood_per_source value={HANDSHAKES_PER_SOURCE_IP}");
+    println!("METRIC name=handshake_flood_attempted value={attempted}");
+    println!(
+        "METRIC name=handshake_flood_elapsed_ms value={}",
+        elapsed.as_millis()
+    );
+    println!("METRIC name=relay_idle_rss_kib value={idle_kib}");
+    println!("METRIC name=relay_idle_hwm_kib value={idle_hwm_kib}");
+    println!("METRIC name=relay_handshake_flood_rss_kib value={flood_kib}");
+    println!("METRIC name=relay_handshake_flood_peak_rss_kib value={flood_hwm_kib}");
+
+    // Keep the successful handshakes open, without an IFR1 hello, through sampling.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let peak_hwm_kib = hwm_kib(server.pid)?;
+    println!(
+        "METRIC name=relay_handshake_flood_peak_over_idle_kib value={}",
+        peak_hwm_kib.saturating_sub(idle_hwm_kib)
+    );
+    connects.abort_all();
+    while connects.join_next().await.is_some() {}
+    Ok(())
+}
+
+/// Lets outbound Initials reach the relay while discarding every server packet.
+#[derive(Debug)]
+struct BlackholeSocket {
+    inner: Arc<dyn AsyncUdpSocket>,
+}
+
+impl AsyncUdpSocket for BlackholeSocket {
+    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+        self.inner.clone().create_io_poller()
+    }
+
+    fn try_send(&self, transmit: &udp::Transmit<'_>) -> io::Result<()> {
+        self.inner.try_send(transmit)
+    }
+
+    fn poll_recv(
+        &self,
+        cx: &mut Context<'_>,
+        bufs: &mut [io::IoSliceMut<'_>],
+        meta: &mut [udp::RecvMeta],
+    ) -> Poll<io::Result<usize>> {
+        let count = match self.inner.poll_recv(cx, bufs, meta) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(count)) => count,
+        };
+        for item in meta.iter_mut().take(count) {
+            item.len = 0;
+        }
+        Poll::Ready(Ok(count))
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+
+    fn max_transmit_segments(&self) -> usize {
+        self.inner.max_transmit_segments()
+    }
+
+    fn max_receive_segments(&self) -> usize {
+        self.inner.max_receive_segments()
+    }
+
+    fn may_fragment(&self) -> bool {
+        self.inner.may_fragment()
+    }
 }
 
 async fn flood(connection: &quinn::Connection, packet: Bytes, count: usize) -> (u64, u64) {
