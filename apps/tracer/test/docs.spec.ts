@@ -18,16 +18,13 @@ const SIZES = [
 
 /**
  * Headless Chromium reports a fine pointer even with touch emulation, so on a phone size the page's own `pointer: coarse`
- * rule is lifted out of its stylesheet and applied unconditionally, as a phone would. The rule must exist: it is the real
+ * rule is read from its served stylesheet and applied unconditionally, as a phone would. The rule must exist: it is the real
  * one that is measured and captured.
  */
 async function asPhone(page: Page): Promise<void> {
-  const { css, seen } = await page.evaluate(() => {
-    const media = [...document.styleSheets].flatMap((sheet) => [...sheet.cssRules]).filter((rule): rule is CSSMediaRule => rule instanceof CSSMediaRule);
-    const coarse = media.filter((rule) => /pointer:\s*coarse/.test(rule.media.mediaText));
-    return { css: coarse.flatMap((rule) => [...rule.cssRules].map((inner) => inner.cssText)).join("\n"), seen: media.map((rule) => rule.media.mediaText).join(" | ") };
-  });
-  expect(css, `media rules seen: ${seen}`).toContain("--text-body: 16px");
+  const source = await (await page.request.get("/docs/docs.css")).text();
+  const css = /@media \(pointer: coarse\)\s*\{\s*(:root\s*\{[^}]*\})\s*\}/.exec(source)?.[1] ?? "";
+  expect(css, "docs.css has a pointer: coarse rule").toContain("--text-body: 16px");
   await page.addStyleTag({ content: css });
 }
 
