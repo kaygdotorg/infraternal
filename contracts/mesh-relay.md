@@ -117,9 +117,14 @@ budgets (#220, D313 Q1).
 ## Slice-1 path and failover rules
 
 The caller requests relay service for a peer after its direct WireGuard
-handshake grace period. In this slice, `direct_failed` means that no handshake
-completed since the direct endpoint was installed. Hole punching, ICE checks,
-the D197 selector, and a relay-to-direct upgrade are not implemented here.
+handshake grace period. In this slice, `direct_failed` compares the kernel's
+last handshake time (seconds and nanoseconds) with the endpoint-install time
+captured after the endpoint update. A handshake equal to or earlier than that
+instant is stale and allows relay fallback; a later handshake in the same
+second still proves the direct path. This preserves ordering without
+mistaking a fresh same-second handshake for a failed path. Hole punching, ICE
+checks, the D197 selector, and a relay-to-direct upgrade are not implemented
+here.
 
 Each node receives the same ordered relay list and opens one connection to
 each configured relay. While a peer has no active link, the node requests the

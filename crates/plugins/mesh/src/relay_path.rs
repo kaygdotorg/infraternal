@@ -40,7 +40,7 @@ use std::{
         Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{net::UdpSocket, sync::mpsc, task::JoinHandle};
 
@@ -59,15 +59,30 @@ const PROBE_WAITS: [Duration; 3] = [
     Duration::from_millis(1_000),
 ];
 
-/// Whether a pair cannot go direct, in this slice: the kernel completed no
-/// handshake with the peer since its direct endpoint was installed at
-/// `since_unix_secs`, after the caller waited its grace period (one
-/// `WireGuard` handshake attempt is 5 s). Hole punching (slice 3) and the
-/// #201 selector (slice 4) replace this with proven candidates and measured
-/// paths; until then a pair that never handshakes directly is relayed.
+/// Whether a pair cannot go direct after its endpoint-install grace period.
+/// The kernel and caller timestamps share wall-clock time, so compare both
+/// seconds and nanoseconds: an equal or older handshake cannot prove freshness,
+/// while a later handshake (including one in the same second) proves the
+/// direct path. One `WireGuard` handshake attempt is 5 s.
+/// Hole punching (slice 3) and the #201 selector (slice 4) replace this with
+/// proven candidates and measured paths; until then an unproven pair is
+/// relayed.
 #[must_use]
-pub fn direct_failed(counters: Option<&wireguard::Counters>, since_unix_secs: u64) -> bool {
-    counters.is_none_or(|counters| counters.handshake_secs < since_unix_secs)
+pub fn direct_failed(
+    counters: Option<&wireguard::Counters>,
+    endpoint_installed_at: SystemTime,
+) -> bool {
+    counters
+        .and_then(|counters| {
+            (counters.handshake_secs != 0).then(|| {
+                UNIX_EPOCH.checked_add(Duration::new(
+                    counters.handshake_secs,
+                    counters.handshake_nanos,
+                ))
+            })
+        })
+        .flatten()
+        .is_none_or(|handshake| handshake <= endpoint_installed_at)
 }
 
 /// One relay in the shared, ordered list.
@@ -662,27 +677,81 @@ mod tests {
     //! The slice-1 relay trigger; the data path itself runs in the namespace proof.
     use super::direct_failed;
     use crate::wireguard::Counters;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn timestamp(seconds: u64, nanoseconds: u32) -> SystemTime {
+        UNIX_EPOCH + Duration::new(seconds, nanoseconds)
+    }
 
     #[test]
     fn a_pair_is_relayed_only_without_a_handshake_since_its_endpoint() {
         let since = 1_800_000_000;
-        assert!(direct_failed(None, since), "unknown peer");
+        let installed_at = timestamp(since, 500_000_000);
+        assert!(direct_failed(None, installed_at), "unknown peer");
         let never = Counters::default();
-        assert!(direct_failed(Some(&never), since));
+        assert!(direct_failed(Some(&never), installed_at));
         let stale = Counters {
             handshake_secs: since - 1,
             ..Counters::default()
         };
         assert!(
-            direct_failed(Some(&stale), since),
+            direct_failed(Some(&stale), installed_at),
             "a handshake before the endpoint"
         );
-        for fresh in [since, since + 3] {
+        for fresh in [since + 1, since + 3] {
             let counters = Counters {
                 handshake_secs: fresh,
                 ..Counters::default()
             };
-            assert!(!direct_failed(Some(&counters), since));
+            assert!(!direct_failed(Some(&counters), installed_at));
         }
+    }
+
+    #[test]
+    fn a_same_second_handshake_cannot_prove_it_followed_the_endpoint_update() {
+        let since = 1_800_000_000;
+        // The endpoint can be installed later in the same second than the
+        // previous handshake. Compare the kernel's nanoseconds to the precise
+        // install time rather than treating every equal second as ambiguous.
+        let before_endpoint_in_same_second = Counters {
+            handshake_secs: since,
+            handshake_nanos: 100_000_000,
+            ..Counters::default()
+        };
+        assert!(
+            direct_failed(
+                Some(&before_endpoint_in_same_second),
+                timestamp(since, 500_000_000),
+            ),
+            "an ambiguous same-second handshake must not suppress relay fallback"
+        );
+    }
+
+    #[test]
+    fn a_fresh_same_second_handshake_keeps_the_direct_path() {
+        let since = 1_800_000_000;
+        let after_endpoint_install = Counters {
+            handshake_secs: since,
+            handshake_nanos: 800_000_000,
+            ..Counters::default()
+        };
+        assert!(
+            !direct_failed(Some(&after_endpoint_install), timestamp(since, 200_000_000),),
+            "a handshake later in the install second proves the direct path"
+        );
+    }
+
+    #[test]
+    fn a_handshake_equal_to_the_endpoint_install_time_is_not_fresh() {
+        let installed_at = timestamp(1_800_000_000, 500_000_000);
+        let counters = Counters {
+            handshake_secs: 1_800_000_000,
+            handshake_nanos: 500_000_000,
+            ..Counters::default()
+        };
+        assert!(
+            direct_failed(Some(&counters), installed_at),
+            "equal timestamps do not establish ordering"
+        );
     }
 }

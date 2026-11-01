@@ -37,8 +37,8 @@ pub struct Counters {
     #[serde(default)]
     pub persistent_keepalive_secs: u16,
     pub handshake_secs: u64,
-    /// Measurement-only precision; neither the shipping layout nor JSON changes.
-    #[cfg(feature = "test-support")]
+    /// Subsecond precision used to order handshakes against endpoint updates.
+    #[cfg(feature = "relay")]
     #[serde(skip)]
     pub handshake_nanos: u32,
     pub received_bytes: u64,
@@ -478,7 +478,7 @@ impl Device {
                     let mut key = None;
                     let mut keepalive = None;
                     let mut handshake = None;
-                    #[cfg(feature = "test-support")]
+                    #[cfg(feature = "relay")]
                     let mut nanos = None;
                     let mut received = None;
                     let mut sent = None;
@@ -490,12 +490,14 @@ impl Device {
                                     field.payload.try_into().map_err(io::Error::other)?,
                                 ));
                             }
+                            #[cfg(feature = "relay")]
                             6 => {
                                 handshake = Some(scalar64(field.payload)?);
-                                #[cfg(feature = "test-support")]
-                                {
-                                    nanos = Some(handshake_nanos(field.payload)?);
-                                }
+                                nanos = Some(handshake_nanos(field.payload)?);
+                            }
+                            #[cfg(not(feature = "relay"))]
+                            6 => {
+                                handshake = Some(scalar64(field.payload)?);
                             }
                             5 => {
                                 keepalive = Some(u16::from_ne_bytes(
@@ -519,7 +521,7 @@ impl Device {
                         if let Some(value) = handshake {
                             stats.handshake_secs = value;
                         }
-                        #[cfg(feature = "test-support")]
+                        #[cfg(feature = "relay")]
                         if let Some(value) = nanos {
                             stats.handshake_nanos = value;
                         }
@@ -586,9 +588,8 @@ fn scalar64(payload: &[u8]) -> io::Result<u64> {
     ))
 }
 
-/// Kernel timespec64 has two native-endian 64-bit fields. Precision belongs to
-/// the opt-in measurement build, so collecting it cannot enlarge shipped nodes.
-#[cfg(feature = "test-support")]
+/// Kernel timespec64 has two native-endian 64-bit fields.
+#[cfg(feature = "relay")]
 fn handshake_nanos(payload: &[u8]) -> io::Result<u32> {
     if payload.len() != 16 {
         return Err(io::ErrorKind::InvalidData.into());
@@ -600,9 +601,9 @@ fn handshake_nanos(payload: &[u8]) -> io::Result<u32> {
     Ok(nanos)
 }
 
-#[cfg(all(test, feature = "test-support"))]
+#[cfg(all(test, feature = "relay"))]
 mod timestamp_tests {
-    //! Checks kernel handshake timestamp precision without accepting truncated or invalid timespecs.
+    //! Checks kernel handshake precision without accepting truncated or invalid timespecs.
     use super::*;
 
     #[test]
