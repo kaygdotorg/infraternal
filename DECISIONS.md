@@ -1380,6 +1380,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      the person takes an action (the add-host wizard, the share studio,
      Settings windows) has its own budget instead of counting as
      after-first-paint code.
+     **Critical budget raised to 320 KiB gzip / 267 KiB brotli (owner,
+     2026-11-01):** dev measured gzip 306,074 B (300 KiB cap) and the approved
+     #259 rename work alone reached 307,714 B; the owner chose a moderate
+     raise that keeps the gate (growth stays visible) over removing it or
+     loading rename on demand. Big features still load on demand.
 189. **Card and window transparency (owner, 2026-10-08):** four levels for each,
      "Glass" renamed **Frosted**. Dark/light tint and blur:
      - **Solid:** cards 1.00/1.00, 0 px; windows 1.00/1.00, 0 px.

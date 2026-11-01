@@ -17,7 +17,7 @@ import { brotliCompressSync, gzipSync } from "node:zlib";
 const dist = process.env.TRACER_DIST ?? "dist";
 const KIB = 1024;
 const limits = {
-  critical: { gzip: 300 * KIB, brotli: 250 * KIB },
+  critical: { gzip: 320 * KIB, brotli: 267 * KIB },
   // Release-6 shared layout and offline drawing measured 56,712 B gzip / 50,322 B brotli. D188 sets each cap to
   // the measured size rounded up to a whole KiB plus a 4 KiB margin: 60 KiB gzip / 54 KiB brotli.
   deferred: { gzip: 60 * KIB, brotli: 54 * KIB },
