@@ -200,7 +200,7 @@ impl WebSocketState {
         )
         .await
     }
-    #[cfg(feature = "remote")]
+    #[cfg(all(feature = "remote", test))]
     pub(crate) async fn new_with_hosts(
         auth: Auth,
         pool: SqlitePool,
@@ -219,7 +219,7 @@ impl WebSocketState {
     ) -> Result<Self, crate::plugins::PluginError> {
         Self::new_inner(auth, pool, agent, Some(public_origin), hosts).await
     }
-    #[cfg(any(not(feature = "remote"), test))]
+    #[cfg(not(feature = "remote"))]
     pub(crate) async fn new_with_public_origin(
         auth: Auth,
         pool: SqlitePool,
