@@ -9,9 +9,20 @@ import type { BranchSection } from "../../../../../packages/ui/src/branched";
 import type { Ctx } from "../context";
 import { byFrecency, type SessionRecord } from "../sessions/inventory";
 
+declare const __CLUSTERS_PREVIEW__: boolean;
+/**
+ * Review flag `?marks=words` (preview builds only, compiled out of the product): an exited row says "finished" or
+ * "failed, code 1" in words in place of the bare exit code, for the owner to compare with the ✓ 0 / ✗ 1 of today.
+ */
+const WORDS = typeof __CLUSTERS_PREVIEW__ !== "undefined" && __CLUSTERS_PREVIEW__ && new URLSearchParams(location.search).get("marks") === "words";
+
 const leaf = (host: string, s: SessionRecord): BranchSection["leaves"][number] => {
-  const mark = s.state === "exited" ? ((s.exit?.code ?? 0) !== 0 ? "fail" : "ok") : s.activity;
-  return { id: `s:${host}/${s.id}`, label: s.name, state: s.state, ...(mark ? { mark } : {}), ...(s.state === "exited" ? { meta: String(s.exit?.code ?? 0) } : {}) };
+  const code = s.exit?.code ?? 0;
+  const mark = s.state === "exited" ? (code !== 0 ? "fail" : "ok") : s.activity;
+  // The tick or cross on an exited row is the exit code in a picture; its tooltip says so in words.
+  const markTip = s.state === "exited" ? (code !== 0 ? `Failed, exit code ${code}` : "Finished successfully, exit code 0") : undefined;
+  const meta = s.state === "exited" ? (WORDS ? (code !== 0 ? `failed · ${code}` : "finished") : String(code)) : undefined;
+  return { id: `s:${host}/${s.id}`, label: s.name, state: s.state, ...(mark ? { mark } : {}), ...(markTip ? { markTip } : {}), ...(meta ? { meta } : {}) };
 };
 
 export const consoleLeaves = (cx: Ctx): BranchSection["leaves"] => {
