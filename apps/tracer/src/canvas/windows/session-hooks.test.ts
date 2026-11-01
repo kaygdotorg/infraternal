@@ -1,9 +1,14 @@
 /** The idle warm-up of the on-demand session UI is silent when it fails; a load the person asked for is not (#249). */
-import { beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 
 let idle: (() => void) | undefined;
 let importFails = true;
 const created: unknown[] = [];
+const originalOnDemand = await import("../../on-demand");
+const originalOnDemandExports = {
+  onDemand: originalOnDemand.onDemand,
+  whenIdle: originalOnDemand.whenIdle,
+};
 mock.module("../../on-demand", () => ({
   whenIdle: (run: () => void) => { idle = run; },
   onDemand: <T>(load: () => Promise<T>) => (importFails ? Promise.reject(new Error("chunk")) : load()),
@@ -15,6 +20,11 @@ const previousMatchMedia = globalThis.matchMedia;
 globalThis.matchMedia = (() => ({ matches: false })) as unknown as typeof matchMedia;
 const { createSessionHooks } = await import("./session-hooks");
 if (previousMatchMedia) globalThis.matchMedia = previousMatchMedia;
+
+afterAll(() => {
+  // Bun retains module mocks on this worker; restore the helper's saved exports for later files.
+  mock.module("../../on-demand", () => originalOnDemandExports);
+});
 
 const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 5));
 const toasts: string[] = [];
