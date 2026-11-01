@@ -55,6 +55,8 @@
   place-items: safe center;
   overflow-y: auto;
   overscroll-behavior: contain;
+  /* Tab scrolls a field just into view; without this its ring would sit flush against the screen edge, cut off. */
+  scroll-padding: var(--focus-ring-room);
   padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
   color: var(--fg);
   background: transparent;
@@ -76,6 +78,9 @@
   min-width: 0;
   width: min(440px, 100%);
   --auth-pad: 36px;
+  /* How far the actions row (.auth-actions) sits outside the pane's content so its icon lines up with the edge;
+     the pane viewport leaves the focus ring room beyond it. */
+  --auth-overhang: 8px;
   padding: var(--auth-pad) 32px var(--auth-pad);
   border-radius: 22px;
   animation: auth-card-in 240ms var(--ease) both;
@@ -171,7 +176,13 @@
 .auth-steps .tick { width: 24px; height: 24px; border-radius: 50%; box-shadow: none; }
 .auth-steps .tick-fill { background: var(--fg); }
 
-.auth-viewport { position: relative; overflow: hidden; margin: 0 -6px; padding: 0 6px; transition: height 240ms var(--ease); }
+/* The viewport clips the sliding panes and the height glide, so it must leave the focus ring room on all four
+   sides (--focus-ring-room, packages/ui). The negative margin cancels the padding: the content does not move.
+   Its `height` is the pane's height, set from the pane in script, so the box must be content-box: under the
+   page-wide border-box the padding would eat 2 x room of that height and clip the pane's last lines.
+   Sibling margins collapse with the negative one (steps 30 - 6, footer 26 - 6), which keeps the distances to
+   the steps and the footer unchanged. */
+.auth-viewport { box-sizing: content-box; position: relative; overflow: hidden; margin: calc(-1 * var(--focus-ring-room)) calc(-1 * (var(--focus-ring-room) + var(--auth-overhang))); padding: var(--focus-ring-room) calc(var(--focus-ring-room) + var(--auth-overhang)); transition: height 240ms var(--ease); }
 .auth-pane { min-width: 0; transition: opacity 240ms var(--ease), transform 240ms var(--ease); }
 .auth-pane[data-direction="forward"] { animation: auth-pane-forward 240ms var(--ease) both; }
 .auth-pane[data-direction="back"] { animation: auth-pane-back 240ms var(--ease) both; }
@@ -246,7 +257,7 @@
 .auth-words { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; margin: 4px 0 0; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: rgb(255 255 255 / 0.03); counter-reset: recovery; list-style: none; }
 .auth-words li { display: flex; min-width: 0; align-items: baseline; gap: 5px; color: var(--fg); font: var(--fw-body) 13px/1.9 var(--font-face); }
 .auth-word-number { width: 19px; flex: none; color: var(--fg-3); font-size: 10.5px; text-align: right; }
-.auth-actions { display: flex; justify-content: flex-end; gap: 4px; margin: 10px -8px -4px 0; }
+.auth-actions { display: flex; justify-content: flex-end; gap: 4px; margin: 10px calc(-1 * var(--auth-overhang)) -4px 0; }
 .icon-action { display: inline-grid; width: 40px; height: 40px; place-items: center; padding: 0; border: 0; border-radius: 10px; background: transparent; color: var(--fg-2); cursor: pointer; }
 .icon-action:hover { background: var(--hover); color: var(--fg); }
 .auth-recovery-message { min-height: 1em; margin: 2px 0 0; color: var(--fg-3); font-size: 11px; }

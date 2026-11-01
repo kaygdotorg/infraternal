@@ -65,7 +65,7 @@ export function mountRecovery(host: HTMLElement, back: () => void,
     const animate = changed && renderedStep >= 0 && !instant;
     viewport.style.transition = animate ? "" : "none";
     if (animate) {
-      viewport.style.height = `${viewport.getBoundingClientRect().height}px`;
+      viewport.style.height = getComputedStyle(viewport).height; // the content height now, mid-glide included (not the padded box)
       void viewport.offsetHeight; // Capture an interrupted glide before retargeting it.
     }
     const steps = card.querySelector<HTMLOListElement>(".auth-steps")!;

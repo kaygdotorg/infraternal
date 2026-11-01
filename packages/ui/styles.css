@@ -9,6 +9,11 @@
 /* Focus rings appear only while the person navigates with the keyboard (focus-ring.ts sets
    data-focus-ring="on"); clicks, taps and shortcuts that move focus in script draw none. */
 :focus-visible { outline: none; }
+/* The ring is drawn outside its element and reaches 4 px past it (2 px line + 2 px offset). A container that
+   clips its overflow (overflow hidden, a height glide) must leave --focus-ring-room on every side of the
+   fields it holds, or the ring is cut off where a field touches the container's edge. 6 px is the reach plus
+   2 px for anti-aliasing. focus-ring-clip.spec.ts measures every ring against every clipping ancestor. */
+:root { --focus-ring-room: 6px; }
 [data-focus-ring="on"] :focus-visible { outline: 2px solid var(--focus-ring, var(--accent, #7a9cff)); outline-offset: 2px; }
 .countup { font-variant-numeric: tabular-nums; }
 .busy-count { font: var(--fw-label, 500) 13px/1 var(--font-face, "Maple Mono NF", ui-monospace, monospace); color: rgb(0 0 0 / 0.6); }
