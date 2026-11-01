@@ -125,6 +125,22 @@ fn dynamic_routes_match_one_host_and_apply_the_same_mesh_peer_grant() {
 }
 
 #[test]
+fn https_router_uses_the_exposure_id_and_http_redirect_uses_a_disjoint_key() {
+    let source = "100.64.0.5".parse().expect("mesh source");
+    let bytes = render_dynamic_config(&[mesh_service(vec![source])]).expect("dynamic config");
+    let config: Value = serde_json::from_slice(&bytes).expect("dynamic JSON");
+
+    assert_eq!(
+        config["http"]["routers"]["docs"]["entryPoints"][0],
+        "https"
+    );
+    assert_eq!(
+        config["http"]["routers"]["http.docs"]["entryPoints"][0],
+        "http"
+    );
+}
+
+#[test]
 fn a_mesh_route_without_an_accepted_grant_fails_closed() {
     let error = render_dynamic_config(&[mesh_service(Vec::new())])
         .expect_err("denied route must not be rendered");

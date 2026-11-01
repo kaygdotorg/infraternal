@@ -133,6 +133,44 @@ pub(crate) fn registry_at(
     Ok(registry)
 }
 
+#[cfg(all(test, feature = "proxy"))]
+mod proxy_registry_tests {
+    //! Keep the publication command connected to the real node-side plugin registry [#281].
+    use super::{ExecutionMode, registry_at};
+    use infraternal_plugin_api::PluginError;
+
+    #[test]
+    fn proxy_publish_is_registered_as_a_node_action() {
+        let mut registry = registry_at(ExecutionMode::Embedded, None, None)
+            .expect("build plugin registry");
+        let result = registry.call_public("proxy.publish", br#"{"port":null}"#);
+        assert!(
+            !matches!(result, Err(PluginError::UnknownAction)),
+            "proxy.publish must be present in the compiled node registry"
+        );
+    }
+
+    #[test]
+    fn publishing_without_an_accepted_mesh_context_fails_closed() {
+        let mut registry = registry_at(ExecutionMode::Embedded, None, None)
+            .expect("build plugin registry");
+        assert!(matches!(
+            registry.call_public("proxy.publish", br#"{"port":3000}"#),
+            Err(PluginError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn proxy_internal_context_update_is_not_a_public_action() {
+        let mut registry = registry_at(ExecutionMode::Embedded, None, None)
+            .expect("build plugin registry");
+        assert!(matches!(
+            registry.call_public("proxy.mesh-context", b"{}"),
+            Err(PluginError::UnknownAction)
+        ));
+    }
+}
+
 /// Kernel objects an installation leaves outside its files, for host uninstall (D273, #235).
 ///
 /// The mesh interface and its packet filter belong to the kernel, not to the

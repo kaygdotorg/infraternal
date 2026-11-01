@@ -98,3 +98,14 @@ fn provider_values_are_redacted_before_a_log_line_is_emitted() {
     assert!(!redacted.contains("secret-value-123"));
     assert!(redacted.contains("[REDACTED]"));
 }
+
+#[test]
+fn authorization_cookie_and_query_credentials_are_redacted_without_known_values() {
+    let line = "request failed Authorization: Bearer header-secret Cookie: session=cookie-secret url=https://dns.invalid/?api_key=query-secret";
+    let redacted = redact_log_line(line, &[]);
+
+    for secret in ["header-secret", "cookie-secret", "query-secret"] {
+        assert!(!redacted.contains(secret), "credential leaked: {secret}");
+    }
+    assert!(redacted.contains("[REDACTED]"));
+}
