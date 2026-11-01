@@ -74,6 +74,8 @@ const RESUME_NEXT = 1n;
 const LINK_DOUBT_NOTICES = 2n;
 /** Hello bit 2: control Event 0 reports page visibility (#244). */
 const VIEWER_VISIBILITY = 4n;
+/** Hello caps bit 4: request the layout session-incarnation Welcome suffix (contracts/wire.md, D312). */
+export const LAYOUT_SESSION_INCARNATION = 1n << 4n;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RECOVERY_SUBSCRIPTION = 45;
@@ -111,6 +113,8 @@ export interface StreamHandler {
 }
 
 export interface ConnectionConfig {
+  /** Original authenticated lifetime, supplied before the first WebSocket handshake. */
+  sessionIncarnation?: string;
   /** Asks the server to trace frames (mock server only). */
   traceMockServer?: boolean;
   /** The account's recovery notice changed (`undefined`: none pending). */
@@ -190,6 +194,7 @@ export class MuxConnection {
   private readonly onVisibility = (): void => this.pageVisibilityChanged();
 
   constructor(private readonly config: ConnectionConfig = {}) {
+    this.sessionIncarnation = config.sessionIncarnation;
     if (typeof document !== "undefined" && typeof document.addEventListener === "function") document.addEventListener("visibilitychange", this.onVisibility);
   }
 
@@ -473,7 +478,7 @@ export class MuxConnection {
       const resumable = sessionsToResume && credentials !== undefined && Date.now() < credentials.deadline;
       this.resumeSent = resumable;
       // RESUME_NEXT tells the server to wait for the adjacent Resume before issuing Welcome.
-      const hello: WireFrame = { type: "Hello", version: VERSION, caps: (resumable ? RESUME_NEXT : 0n) | LINK_DOUBT_NOTICES | VIEWER_VISIBILITY, clientInfo: "infraternal-tracer/0.1" };
+      const hello: WireFrame = { type: "Hello", version: VERSION, caps: (resumable ? RESUME_NEXT : 0n) | LINK_DOUBT_NOTICES | VIEWER_VISIBILITY | LAYOUT_SESSION_INCARNATION, clientInfo: "infraternal-tracer/0.1" };
       let length = encodeMuxedFrameInto(CONTROL_STREAM, hello, this.sendScratch);
       if (resumable && credentials) {
         length += encodeMuxedFrameInto(CONTROL_STREAM, { type: "Resume", connectionId: credentials.connectionId, resumeToken: credentials.resumeToken }, this.sendScratch, length);
@@ -697,6 +702,8 @@ export class MuxConnection {
   }
 
   /** Whether this server accepts reply-marked Input [307]. */
+  /** Non-secret authenticated lifetime, kept only in RAM and never logged. */
+  sessionIncarnation: string | undefined;
   terminalQueryReplies = false;
 
   private control(frame: WireFrame): void {
@@ -707,6 +714,7 @@ export class MuxConnection {
         if (frame.version !== VERSION) this.fail("server uses an unsupported wire version");
         return;
       case "Welcome":
+        this.sessionIncarnation = frame.sessionIncarnation;
         this.stopRetryHintListeners();
         this.send(CONTROL_STREAM, { type: "Subscribe", subId: RECOVERY_SUBSCRIPTION, filterJson: encoder.encode(JSON.stringify({ topic: "auth.recovery" })) });
         this.credentials?.connectionId.fill(0);

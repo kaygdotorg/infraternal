@@ -1,6 +1,6 @@
 /** Account cache isolation and sign-out cleanup, including offline drawing labels (D245). */
 import { beforeEach, expect, test } from "bun:test";
-import { canvasKey, clearAccountStorage, createStoredJsonCache, drawingIdentityKey, inventoryKey, lastAccountKey, tabSessionKey } from "./account-storage";
+import { canvasKey, clearAccountStorage, createAccountNotifications, drawingIdentityKey, inventoryKey, lastAccountKey, tabSessionKey } from "./account-storage";
 
 class FakeStorage {
   private map = new Map<string, string>();
@@ -45,13 +45,24 @@ test("an unknown account clears every account's data and keeps preferences", () 
   expect(g.sessionStorage.keys()).toEqual([]);
 });
 
-test("coalesced account writes stop permanently before sign-out clears storage", () => {
-  const key = canvasKey("a"); let value = 1, reads = 0;
-  const cache = createStoredJsonCache(key, () => { reads++; return { value }; });
-  cache.schedule(); cache.schedule(); expect(g.localStorage.getItem(key)).toBeNull();
-  value = 2; cache.flush(); expect(reads).toBe(1); expect(JSON.parse(g.localStorage.getItem(key)!)).toEqual({ value: 2 });
-  let notified = 0; cache.subscribe(() => { notified++; }); cache.notify();
-  cache.dispose(); clearAccountStorage("a"); value = 3; cache.schedule(); cache.flush(); cache.notify();
-  expect(notified).toBe(1);
-  expect(g.localStorage.getItem(key)).toBeNull(); expect(reads).toBe(1);
+test("account notifications cannot write before or after disposal", () => {
+  const cache = createAccountNotifications(); let notified = 0;
+  cache.subscribe(() => { notified++; }); cache.notify(); cache.dispose(); cache.notify();
+  expect(notified).toBe(1); expect(g.localStorage.keys()).toEqual([]);
+});
+test("legacy generation sweep is account scoped and reports refused erasure", () => {
+  g.localStorage.setItem("infraternal.canvas-journal.a.page.1", "old");
+  g.localStorage.setItem("infraternal.canvas-journal.b.page.1", "other");
+  expect(clearAccountStorage("a")).toBe(true);
+  expect(g.localStorage.keys()).toEqual(["infraternal.canvas-journal.b.page.1"]);
+  g.localStorage.removeItem = () => { throw Error("blocked"); };
+  expect(clearAccountStorage("b")).toBe(false);
+});
+test("R2: 21 legacy generations survive refused cleanup and disappear only after a successful retry", () => {
+  for (let n = 0; n < 21; n++) g.localStorage.setItem(`infraternal.canvas-journal.a.generation.${n}`, "old");
+  const remove = g.localStorage.removeItem.bind(g.localStorage);
+  g.localStorage.removeItem = () => { throw Error("blocked"); };
+  expect(clearAccountStorage("a")).toBe(false); expect(g.localStorage.keys()).toHaveLength(21);
+  g.localStorage.removeItem = remove;
+  expect(clearAccountStorage("a")).toBe(true); expect(g.localStorage.keys()).toEqual([]);
 });

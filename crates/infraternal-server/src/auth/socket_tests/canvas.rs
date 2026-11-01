@@ -43,7 +43,28 @@ async fn canvas_real_socket_commits_and_runtime_disable_preserve_control() {
     )
     .await;
     read_welcome(&mut socket).await;
-    let input=serde_json::to_vec(&json!({"op_id":"init","document":{"format":"infraternal.canvas","version":1,"revision":0,"views":[]}})).unwrap();
+    // Refuse before admission, including absent labels and a different authenticated lifetime.
+    for label in [
+        None,
+        Some(crate::auth::session_incarnation(
+            "replacement-fixture-session",
+        )),
+    ] {
+        let mut input = json!({"op_id":"refused", "document":{"format":"infraternal.canvas","version":1,"revision":0,"views":[]}});
+        if let Some(label) = label {
+            input["session_incarnation"] = label.into();
+        }
+        let (ok, result) = plugin_lifecycle::exchange(
+            &mut socket,
+            100,
+            "canvas.layout.initialize",
+            &serde_json::to_vec(&input).unwrap(),
+        )
+        .await;
+        assert!(!ok);
+        assert_eq!(result["reason"], "layout_session_changed");
+    }
+    let input=serde_json::to_vec(&json!({"session_incarnation": crate::auth::session_incarnation(&f.session),"op_id":"init","document":{"format":"infraternal.canvas","version":1,"revision":0,"views":[]}})).unwrap();
     let (ok, result) =
         plugin_lifecycle::exchange(&mut socket, 1, "canvas.layout.initialize", &input).await;
     assert!(ok);
@@ -70,7 +91,7 @@ async fn canvas_real_socket_commits_and_runtime_disable_preserve_control() {
     assert_eq!(event["initialized"], true);
     let intent = json!({"type":"view.add","view":{"id":"console","kind":"console","name":"Console","cell":{"x":0,"y":0},"layout":{"type":"tiled","columns":[]}}});
     let apply =
-        serde_json::to_vec(&json!({"op_id":"view","base_revision":0,"intent":intent})).unwrap();
+        serde_json::to_vec(&json!({"session_incarnation": crate::auth::session_incarnation(&f.session),"op_id":"view","base_revision":0,"intent":intent})).unwrap();
     client_ws_send(
         &mut socket,
         0,

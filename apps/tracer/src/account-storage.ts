@@ -25,11 +25,7 @@ export const drawingIdentityKey = (account: string): string => DRAWING_IDENTITY 
 export const inventoryKey = (account: string): string => INVENTORY + account;
 /** sessionStorage: the public id of the terminal this tab last had open for one account. */
 export const tabSessionKey = (account: string): string => TAB_SESSION + account;
-/**
- * localStorage: how often one account has signed in on this device and which explanatory hints it was already
- * shown (`hints.ts`). It is deliberately not swept by `clearAccountStorage`: a sign-out followed by a sign-in is
- * the next sign-in, not a fresh start, and the hint rule counts sign-ins. It holds two small numbers per hint.
- */
+/** Legacy account-scoped hint key, read only for sign-out cleanup. */
 export const hintsKey = (account: string): string => HINTS + account;
 /** localStorage: the public id of the account that last signed in on this device. */
 export const lastAccountKey = LAST_ACCOUNT;
@@ -37,41 +33,36 @@ export const lastAccountKey = LAST_ACCOUNT;
 function sweep(area: Storage, prefix: string, account: string | undefined): void {
   const keys: string[] = [];
   for (let i = 0; i < area.length; i++) { const key = area.key(i); if (key?.startsWith(prefix)) keys.push(key); }
-  for (const key of keys) if (account === undefined || key === prefix + account) area.removeItem(key);
+  for (const key of keys) if (account === undefined || key === prefix + account || key.startsWith(prefix + account + ".")) area.removeItem(key);
 }
 
 /** Removes everything the browser holds for `account` (or for every account when it is unknown). */
-export function clearAccountStorage(account: string | undefined): void {
+export function clearAccountStorage(account: string | undefined): boolean {
   try {
     sweep(localStorage, CANVAS, account);
+    sweep(localStorage, "infraternal.canvas-journal.", account);
+    sweep(localStorage, "infraternal.canvas-lifetime.", account);
     sweep(localStorage, DRAWING_IDENTITY, account);
     sweep(localStorage, INVENTORY, account);
+    sweep(localStorage, HINTS, account);
     sweep(sessionStorage, TAB_SESSION, account);
     // The last-account pointer names a person; it goes unless another account has since replaced it.
     if (account === undefined || localStorage.getItem(LAST_ACCOUNT) === account) localStorage.removeItem(LAST_ACCOUNT);
-  } catch { /* storage is blocked: nothing was written either */ }
+    return true;
+  } catch { return false; /* Legacy erasure must never claim success when access was refused. */ }
 }
 
 /** Read an account drawing cache without making storage availability part of the interaction path. */
 export function readStoredJson(key: string, storage?: () => Pick<Storage, "getItem">): unknown {
   try { return JSON.parse((storage ? storage() : localStorage).getItem(key) ?? "null") as unknown; } catch { return undefined; }
 }
-/** Account cache writes are best effort; unavailable storage never blocks server-owned work. */
-export function writeStoredJson(key: string, value: unknown, storage?: () => Pick<Storage, "setItem">): void {
-  try { (storage ? storage() : localStorage).setItem(key, JSON.stringify(value)); } catch { /* private mode or quota: retain the in-memory drawing */ }
-}
-
-/** Cache notifications and coalesced writes share one disposal boundary, preventing late sign-out writes (D245). */
-export function createStoredJsonCache(key: string, value: () => unknown, storage?: () => Pick<Storage, "setItem">) {
-  let timer: ReturnType<typeof setTimeout> | undefined, disposed = false;
+/** In-memory account notifications share a disposal boundary; there is no storage writer (D312). */
+export function createAccountNotifications() {
+  let disposed = false;
   const listeners = new Set<() => void>();
-  const flush = (): void => { clearTimeout(timer); timer = undefined; if (!disposed) writeStoredJson(key, value(), storage); };
-  const schedule = (): void => { if (!disposed && timer === undefined) timer = setTimeout(flush, 300); };
-  const notify = (): void => { for (const listener of listeners) listener(); };
   return {
-    schedule, flush, notify,
-    changed() { schedule(); notify(); },
+    notify() { if (!disposed) for (const listener of listeners) listener(); },
     subscribe(listener: () => void) { if (!disposed) listeners.add(listener); return () => { listeners.delete(listener); }; },
-    dispose() { if (timer !== undefined) flush(); disposed = true; listeners.clear(); },
+    dispose() { disposed = true; listeners.clear(); },
   };
 }

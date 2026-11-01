@@ -107,6 +107,10 @@ pub trait SocketHost: Send + Sync {
         false
     }
     fn token_hash(&self) -> &str;
+    /// Public authenticated lifetime for binding pending layout requests. Test hosts may omit it.
+    fn session_incarnation(&self) -> Option<&str> {
+        None
+    }
     /// # Errors
     /// Refuses when socket authority ends or the supplied operation fails.
     fn authorized<'a>(

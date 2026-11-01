@@ -1,4 +1,5 @@
 /** Checks incoming settlement away from the current view and removal of every shared view (#243, D178, D248). */
+import { watchLayout } from "./layout-observer";
 import { devices, expect, test } from "playwright/test";
 import { writeFile } from "node:fs/promises";
 import { cache, enrol, request, settled } from "./layout-devices";
@@ -13,7 +14,7 @@ for (const profile of [
   const context = await browser.newContext({ ...profile.options, ignoreHTTPSErrors: true });
   const errors: string[] = [];
   try {
-    const page = await context.newPage(); page.on("pageerror", (error) => errors.push(error.message)); await enrol(page, server);
+    const page = watchLayout(await context.newPage()); page.on("pageerror", (error) => errors.push(error.message)); await enrol(page, server);
     await expect.poll(async () => (await cache(page)).canonical.views.some((v) => v.id === "mesh")).toBe(true);
     await settled(page);
     await page.locator("#capsule").click();
@@ -152,7 +153,7 @@ test("removing every shared view leaves generated Settings and allows a later sh
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
   const errors: string[] = [];
   try {
-    const page = await context.newPage(); page.on("pageerror", (error) => errors.push(error.message));
+    const page = watchLayout(await context.newPage()); page.on("pageerror", (error) => errors.push(error.message));
     await enrol(page, server);
     // Enrollment can finish before the asynchronous Mesh offer has entered the shared layout.
     await expect.poll(async () => (await cache(page)).canonical.views.some((v) => v.id === "mesh")).toBe(true);

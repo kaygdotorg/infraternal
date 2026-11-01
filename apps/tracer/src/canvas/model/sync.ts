@@ -1,7 +1,7 @@
 /**
  * Keeps the store in step with the canvas: `changed()` is called after every structural change (a window opened,
  * closed, split, moved or resized; a view moved), edits are captured after the current task, and the document carries
- * a revision that grows with every save. The server store journals semantic edits; only its drawing cache serialization is delayed.
+ * a revision that grows with every save. The server store journals semantic edits; no private drawing is persisted in the browser (D312).
  */
 import type { Ctx } from "../context";
 import type { LayoutEdit } from "./operations";

@@ -21,8 +21,13 @@ fn fields(frame: &Frame<'_>) -> Value {
             connection_id,
             resume_token,
             resume_window_seconds,
+            session_incarnation,
         } => {
-            json!({ "type": "Welcome", "connectionId": connection_id, "resumeToken": resume_token, "resumeWindowSeconds": resume_window_seconds })
+            let mut value = json!({ "type": "Welcome", "connectionId": connection_id, "resumeToken": resume_token, "resumeWindowSeconds": resume_window_seconds });
+            if let Some(incarnation) = session_incarnation {
+                value["sessionIncarnation"] = json!(incarnation);
+            }
+            value
         }
         Frame::Resume {
             connection_id,
