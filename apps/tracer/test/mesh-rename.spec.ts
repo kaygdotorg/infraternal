@@ -259,8 +259,13 @@ type Box = { x: number; y: number; w: number; h: number };
 const collide = (a: Box, b: Box): boolean => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 const boxOf = (locator: ReturnType<Page["locator"]>): Promise<Box> =>
   locator.evaluate((el) => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; });
-/** What the card's pill draws around the name: the machine's mark, the status dot, the session name and the header actions. */
-const CARD_NEIGHBOURS = [".ui-window-mark", ".ui-window-dot", ".ui-window-session", ".ui-window-actions .ui-window-action"];
+/**
+ * What the card's header draws around the name: the machine's mark, the status dot, the session name, the header
+ * actions, and the round → pill (`.cl-port`, the access connector) beside the name pill. The → pill is its own button,
+ * not part of the header actions (those are empty on a Mesh card): the owner's screenshot showed the field's tinted box
+ * running under it, which a check of the header actions cannot see.
+ */
+const CARD_NEIGHBOURS = [".ui-window-mark", ".ui-window-dot", ".ui-window-session", ".ui-window-actions .ui-window-action", ".cl-port"];
 
 /** The field is open on this host's card: it stays inside the pill and clear of each neighbour that is drawn; its text is whole. */
 async function expectFieldClearOnCard(page: Page, host: string, what: string): Promise<void> {
@@ -272,6 +277,15 @@ async function expectFieldClearOnCard(page: Page, host: string, what: string): P
   expect(f.x + f.w, `${what}: field ends inside the pill`).toBeLessThanOrEqual(pill.x + pill.w + 0.5);
   const dot = await boxOf(card(page, host).locator(".ui-window-dot"));
   expect(dot.w, `${what}: the status dot is drawn (the check is meaningful)`).toBeGreaterThan(1);
+  // The name pill may widen while the field is open (a short name gets room to type in), but its neighbour, the → pill,
+  // must move aside with it: the two pills never share area, and both stay inside the card.
+  const actions = await boxOf(card(page, host).locator(".cl-port"));
+  expect(actions.w, `${what}: the → pill is drawn (the check is meaningful)`).toBeGreaterThan(1);
+  expect(collide(pill, actions), `${what}: the widened name pill (${JSON.stringify(pill)}) overlaps the → pill (${JSON.stringify(actions)})`).toBe(false);
+  expect(pill.x + pill.w, `${what}: the name pill ends before the → pill starts`).toBeLessThanOrEqual(actions.x + 0.5);
+  const frame = await boxOf(card(page, host));
+  expect(actions.x + actions.w, `${what}: the → pill stays inside the card`).toBeLessThanOrEqual(frame.x + frame.w + 0.5);
+  expect(f.x + f.w, `${what}: the field ends before the → pill starts`).toBeLessThanOrEqual(actions.x + 0.5);
   for (const selector of CARD_NEIGHBOURS) {
     for (const el of await card(page, host).locator(selector).all()) {
       const b = await boxOf(el);
