@@ -277,6 +277,35 @@ test("the sidebar is the inventory: markers, detached notes and exit codes, in f
   } finally { await context.close(); }
 });
 
+test("the tick, the cross and the dot beside a session say what they mean in a tooltip", async ({ browser }) => {
+  const { context, page } = await open(browser, DESKTOP, 2);
+  try {
+    const leaf = (id: string) => page.locator(`#tree .bm-leaf[data-id='s:${id}']`);
+    const tipOf = async (id: string): Promise<string> => {
+      await leaf(id).locator(".ui-mark").hover();
+      await expect(page.locator(".tip")).toBeVisible();
+      const text = (await page.locator(".tip").textContent()) ?? "";
+      await page.mouse.move(700, 450);
+      await expect(page.locator(".tip")).toBeHidden();
+      return text;
+    };
+    expect(await tipOf("build-01/release")).toBe("Finished successfully"); // detached, a command finished well
+    expect(await tipOf("build-01/journal")).toBe("New output");
+    expect(await tipOf("build-01/bench")).toBe("Finished successfully, exit code 0"); // exited: the tick is the exit code in a picture
+    expect(await tipOf("build-01/migrate")).toBe("Failed, exit code 1");
+  } finally { await context.close(); }
+});
+
+test("review flag ?marks=words: exited rows say finished or failed in words", async ({ browser }) => {
+  const context = await browser.newContext({ viewport: DESKTOP });
+  const page = await context.newPage();
+  try {
+    await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=none&sessions=2&marks=words");
+    await expect(page.locator("#tree .bm-leaf[data-id='s:build-01/bench'] .bm-meta")).toHaveText("finished", { timeout: 20_000 });
+    await expect(page.locator("#tree .bm-leaf[data-id='s:build-01/migrate'] .bm-meta")).toHaveText("failed · 1");
+  } finally { await context.close(); }
+});
+
 test("tapping a detached session opens it in a new window and flies the canvas there", async ({ browser }) => {
   for (const viewport of [DESKTOP, PHONE]) {
     const { context, page } = await open(browser, viewport, 2);
