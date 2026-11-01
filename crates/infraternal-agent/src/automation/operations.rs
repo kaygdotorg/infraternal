@@ -418,4 +418,32 @@ mod tests {
         }
         assert_eq!(seen.len(), 500);
     }
+
+    #[tokio::test]
+    async fn read_last_line_keeps_a_trailing_blank_line() {
+        let output = b"first\n\n";
+        let (peer, mut shim) = tokio::net::UnixStream::pair().unwrap();
+        let mut session = Session {
+            id: [0; 16],
+            path: Path::new("/unused").to_path_buf(),
+            peer,
+            head: u64::try_from(output.len()).unwrap(),
+            size: (80, 24),
+            pid: 0,
+            caps: 0,
+            supports_owner: false,
+        };
+        let shim_task = tokio::spawn(async move {
+            let mut reader = Reader::default();
+            assert!(matches!(reader.read(&mut shim).await, Ok(Frame::ReadFrom(0))));
+            send(&mut shim, &Frame::Output(0, output.to_vec()))
+                .await
+                .unwrap();
+        });
+
+        let reply = capture(&mut session, 1).await.unwrap();
+        shim_task.await.unwrap();
+        assert!(!reply.data["text"].as_str().unwrap().contains("first"));
+        assert!(reply.data["truncated"].as_bool().unwrap());
+    }
 }
