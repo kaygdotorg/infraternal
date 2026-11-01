@@ -158,7 +158,131 @@ pub fn redact_log_line(line: &str, secrets: &[&str]) -> String {
         .filter(|secret| !secret.is_empty())
         .collect();
     secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
-    secrets.into_iter().fold(line.to_owned(), |line, secret| {
+    let line = secrets.into_iter().fold(line.to_owned(), |line, secret| {
         line.replace(secret, "[REDACTED]")
-    })
+    });
+    redact_named_credentials(&line)
+}
+
+#[derive(Clone, Copy)]
+enum CredentialKind {
+    Authorization,
+    Header,
+    Query,
+}
+
+const CREDENTIAL_KEYS: &[(&str, CredentialKind)] = &[
+    ("proxy-authorization", CredentialKind::Authorization),
+    ("authorization", CredentialKind::Authorization),
+    ("set-cookie", CredentialKind::Header),
+    ("cookie", CredentialKind::Header),
+    ("client_secret", CredentialKind::Query),
+    ("refresh_token", CredentialKind::Query),
+    ("access_token", CredentialKind::Query),
+    ("dns_api_token", CredentialKind::Query),
+    ("api_key", CredentialKind::Query),
+    ("apikey", CredentialKind::Query),
+    ("credential", CredentialKind::Query),
+    ("password", CredentialKind::Query),
+    ("secret", CredentialKind::Query),
+    ("token", CredentialKind::Query),
+];
+
+fn redact_named_credentials(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut output = String::with_capacity(line.len());
+    let mut copied_until = 0;
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        let Some((kind, value_start)) = CREDENTIAL_KEYS.iter().find_map(|(key, kind)| {
+            let end = cursor.checked_add(key.len())?;
+            bytes
+                .get(cursor..end)?
+                .eq_ignore_ascii_case(key.as_bytes())
+                .then(|| credential_value_start(bytes, end).map(|value_start| (*kind, value_start)))
+                .flatten()
+        }) else {
+            cursor += 1;
+            continue;
+        };
+
+        let (prefix_end, value_end) = credential_span(bytes, value_start, kind);
+        if value_end <= value_start {
+            cursor += 1;
+            continue;
+        }
+        output.push_str(&line[copied_until..prefix_end]);
+        output.push_str("[REDACTED]");
+        copied_until = value_end;
+        cursor = value_end;
+    }
+    output.push_str(&line[copied_until..]);
+    output
+}
+
+fn credential_value_start(bytes: &[u8], key_end: usize) -> Option<usize> {
+    let mut separator = key_end;
+    while bytes.get(separator).is_some_and(|byte| {
+        byte.is_ascii_whitespace() || matches!(byte, b'\'' | b'"')
+    }) {
+        separator += 1;
+    }
+    if !matches!(bytes.get(separator), Some(b':' | b'=')) {
+        return None;
+    }
+    let mut value_start = separator + 1;
+    while bytes
+        .get(value_start)
+        .is_some_and(u8::is_ascii_whitespace)
+    {
+        value_start += 1;
+    }
+    Some(value_start)
+}
+
+fn credential_span(bytes: &[u8], value_start: usize, kind: CredentialKind) -> (usize, usize) {
+    let quote = match bytes.get(value_start) {
+        Some(b'\'' | b'"') => bytes.get(value_start).copied(),
+        _ => None,
+    };
+    let mut content_start = value_start + usize::from(quote.is_some());
+    let prefix_end;
+    if matches!(kind, CredentialKind::Authorization) {
+        let scheme_end = token_end(bytes, content_start, false);
+        let scheme = bytes.get(content_start..scheme_end).unwrap_or_default();
+        if (scheme.eq_ignore_ascii_case(b"bearer") || scheme.eq_ignore_ascii_case(b"basic"))
+            && bytes
+                .get(scheme_end)
+                .is_some_and(u8::is_ascii_whitespace)
+        {
+            content_start = scheme_end + 1;
+            while bytes
+                .get(content_start)
+                .is_some_and(u8::is_ascii_whitespace)
+            {
+                content_start += 1;
+            }
+            prefix_end = content_start;
+        } else {
+            prefix_end = value_start + usize::from(quote.is_some());
+        }
+    } else {
+        prefix_end = value_start + usize::from(quote.is_some());
+    }
+    let end = token_end(bytes, content_start, matches!(kind, CredentialKind::Query));
+    (prefix_end, end)
+}
+
+fn token_end(bytes: &[u8], start: usize, query: bool) -> usize {
+    let mut end = start;
+    while let Some(byte) = bytes.get(end) {
+        let delimiter = byte.is_ascii_whitespace()
+            || matches!(byte, b',' | b'"' | b'\'')
+            || (query && matches!(byte, b'&' | b'#'));
+        if delimiter {
+            break;
+        }
+        end += 1;
+    }
+    end
 }
