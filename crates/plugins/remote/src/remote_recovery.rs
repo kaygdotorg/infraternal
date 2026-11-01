@@ -275,7 +275,11 @@ async fn write_request<C: Channel + ?Sized>(
     write_frame(channel, &payload).await
 }
 
-async fn read_response<C: Channel + ?Sized>(channel: &C) -> io::Result<RecoveryResponse> {
+/// Read one bounded recovery response frame.
+///
+/// # Errors
+/// Refuses malformed length prefixes, oversized frames and transport errors.
+pub async fn read_response<C: Channel + ?Sized>(channel: &C) -> io::Result<RecoveryResponse> {
     let payload = read_frame(channel).await?;
     serde_json::from_slice(&payload).map_err(|_| denied())
 }

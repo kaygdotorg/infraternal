@@ -84,7 +84,7 @@ fn identities_for_name(server_dns: &str) -> (Identity, Identity, X509, crate::ca
         .unwrap();
     issuer.sign(&key, MessageDigest::null()).unwrap();
     let root = issuer.build();
-    // Chromium's TLS signature negotiation does not accept an Ed25519 leaf.
+    // This TLS test profile rejects Ed25519 leaves during signature negotiation.
     // Browser-facing TLS remains independently configured by the server owner;
     // this fixture uses its existing P-256 support, with the Ed25519 CA/host unchanged.
     let group = openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1).unwrap();
@@ -173,7 +173,7 @@ async fn expired_host_leaf_is_rejected_by_mtls_and_recovers_with_registered_key_
     signer.unlock_from(&RecoveryUnlock(material.clone())).unwrap();
     let source: Arc<dyn crate::ca::CaKeySource> = signer;
     let source_for_hosts = source.clone();
-    let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+    let (_store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
     let now = now().unwrap();
     let key = PKey::generate_ed25519().unwrap();
     let mut request = X509Req::builder().unwrap();

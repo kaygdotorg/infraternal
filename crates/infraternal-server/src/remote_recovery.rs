@@ -236,7 +236,7 @@ impl Service {
         .bind(predecessor.as_slice())
         .bind(host.as_bytes().as_slice())
         .bind(now)
-        .fetch_optional(&mut **transaction)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(|_| Denied)?;
         let (stored_public_key, stored_not_after) = identity.ok_or(Denied)?;
@@ -258,11 +258,11 @@ impl Service {
              FROM remote_certificate_recovery WHERE predecessor_fingerprint=?",
         )
         .bind(predecessor.as_slice())
-        .fetch_optional(&mut **transaction)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(|_| Denied)?;
         if let Some((stored_request, stored_digest, stored_nonce, stored_issuer, generation, stored_not_after, expires, certificate, certificate_fingerprint)) = existing {
-            if let Some(certificate_der) = certificate {
+            if certificate.is_some() {
                 if stored_request.as_slice() == request.as_slice()
                     && stored_digest.as_slice() == digest.as_slice()
                     && stored_not_after == not_after
@@ -274,14 +274,29 @@ impl Service {
                     )
                     .bind(fingerprint)
                     .bind(host.as_bytes().as_slice())
-                    .fetch_one(&mut **transaction)
+                    .fetch_one(&mut *transaction)
                     .await
                     .map_err(|_| Denied)?;
                     if !available {
                         return Err(Denied);
                     }
-                    return Ok(RecoveryResponse::Certificate {
-                        certificate_der,
+                    // A start frame never discloses a cached leaf. The enrolled
+                    // host must repeat the proof over the durable transcript.
+                    let challenge: [u8; 32] = stored_nonce
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| Denied)?;
+                    let issuer_fingerprint: [u8; 32] = stored_issuer
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| Denied)?;
+                    let issuer_generation = u64::try_from(generation).map_err(|_| Denied)?;
+                    return Ok(RecoveryResponse::Challenge {
+                        challenge,
+                        public_key_fingerprint,
+                        issuer_fingerprint,
+                        issuer_generation,
+                        not_after,
                     });
                 }
                 return Err(Denied);
@@ -292,7 +307,7 @@ impl Service {
                 && expires > now
                 && stored_issuer.as_slice() == issuer.fingerprint.as_slice()
                 && stored_not_after == not_after
-                && generation == issuer.generation
+                && u64::try_from(generation).ok() == Some(issuer.generation)
             {
                 let challenge: [u8; 32] = stored_nonce.try_into().map_err(|_| Denied)?;
                 return Ok(RecoveryResponse::Challenge {
@@ -310,7 +325,7 @@ impl Service {
                  AND certificate_der IS NULL",
             )
             .bind(predecessor.as_slice())
-            .execute(&mut **transaction)
+            .execute(&mut *transaction)
             .await
             .map_err(|_| Denied)?;
         }
@@ -335,7 +350,7 @@ impl Service {
         .bind(i64::try_from(issuer.generation).map_err(|_| Denied)?)
         .bind(not_after)
         .bind(expires_at)
-        .execute(&mut **transaction)
+        .execute(&mut *transaction)
         .await
         .map_err(|_| Denied)?;
         transaction.commit().await.map_err(|_| Denied)?;
@@ -515,7 +530,7 @@ impl Service {
         .bind(host.as_bytes().as_slice())
         .bind(predecessor.as_slice())
         .bind(request.as_slice())
-        .fetch_optional(&mut **transaction)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(|_| Denied)?;
         let Some((digest, stored_challenge, expires_at, certificate, certificate_fingerprint)) = operation else {
@@ -538,7 +553,7 @@ impl Service {
             .bind(host.as_bytes().as_slice())
             .bind(predecessor.as_slice())
             .bind(fingerprint)
-            .fetch_one(&mut **transaction)
+            .fetch_one(&mut *transaction)
             .await
             .map_err(|_| Denied)?;
             if !available {
@@ -558,7 +573,7 @@ impl Service {
         .bind(predecessor.as_slice())
         .bind(host.as_bytes().as_slice())
         .bind(now)
-        .fetch_optional(&mut **transaction)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(|_| Denied)?;
         let (old_key, not_after) = old.ok_or(Denied)?;
@@ -584,7 +599,7 @@ impl Service {
         .bind(request.as_slice())
         .bind(host.as_bytes().as_slice())
         .bind(predecessor.as_slice())
-        .execute(&mut **transaction)
+        .execute(&mut *transaction)
         .await
         .map_err(|_| Denied)?
         .rows_affected();
@@ -603,7 +618,7 @@ impl Service {
         .bind(signed.record.not_after)
         .bind(host.as_bytes().as_slice())
         .bind(predecessor.as_slice())
-        .execute(&mut **transaction)
+        .execute(&mut *transaction)
         .await
         .map_err(|_| Denied)?
         .rows_affected();
