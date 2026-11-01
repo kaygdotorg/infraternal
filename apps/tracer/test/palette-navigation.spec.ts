@@ -39,6 +39,8 @@ async function paletteState(page: Page): Promise<PaletteState> {
     const options = [...results.querySelectorAll<HTMLElement>(".result")];
     const selected = options.find((option) => option.getAttribute("aria-selected") === "true");
     if (!selected) throw new Error("Palette has no selected option");
+    // Rows are 28 x the UI size's factor tall (30.8 px at the default), and a scroll lands on a whole pixel: an edge may sit up to a pixel off.
+    const EDGE = 1;
     const port = results.getBoundingClientRect();
     const top = port.top + results.clientTop;
     const bottom = top + results.clientHeight;
@@ -48,7 +50,7 @@ async function paletteState(page: Page): Promise<PaletteState> {
     const headingRect = heading?.getBoundingClientRect();
     const visibleOptions = options.filter((option) => {
       const rect = option.getBoundingClientRect();
-      return rect.top >= top && rect.bottom <= bottom;
+      return rect.top >= top - EDGE && rect.bottom <= bottom + EDGE;
     }).length;
     return {
       count: options.length,
@@ -56,9 +58,9 @@ async function paletteState(page: Page): Promise<PaletteState> {
       selectedId: selected.id,
       activeDescendant: input.getAttribute("aria-activedescendant"),
       selectedCount: options.filter((option) => option.getAttribute("aria-selected") === "true").length,
-      rowVisible: selectedRect.top >= top && selectedRect.bottom <= bottom,
+      rowVisible: selectedRect.top >= top - EDGE && selectedRect.bottom <= bottom + EDGE,
       firstInGroup: heading !== undefined,
-      headingVisible: Boolean(headingRect && headingRect.top >= top && headingRect.bottom <= bottom),
+      headingVisible: Boolean(headingRect && headingRect.top >= top - EDGE && headingRect.bottom <= bottom + EDGE),
       visibleOptions,
     };
   });

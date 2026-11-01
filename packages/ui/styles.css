@@ -3,7 +3,11 @@
 /* One type scale per platform (TASTE.md section 2). Desktop follows the macOS sizes, touch the iOS
    sizes. Every product surface (top bar, sidebar, palette, tooltip, toast, windows) uses these
    tokens rather than its own pixel values. --row is the list row height (macOS sidebar 28 px, iOS 44 px). --text-input stays 16 px on touch so iOS never zooms. */
-:root { font-size: calc(16px * var(--ui-scale, 1)); --ui-press-scale: 0.97; --ui-press-scale-small: 0.94; --ui-press-scale-soft: 0.98; --text-body: 0.8125rem; --text-secondary: 0.75rem; --text-caption: 0.6875rem; --text-input: 0.8125rem; --row: 1.75rem; }
+:root { --ui-base: 1.1; font-size: calc(16px * var(--ui-base) * var(--ui-scale, 1)); --ui-press-scale: 0.97; --ui-press-scale-small: 0.94; --ui-press-scale-soft: 0.98; --text-body: 0.8125rem; --text-secondary: 0.75rem; --text-caption: 0.6875rem; --text-input: 0.8125rem; --row: 1.75rem; }
+/* The UI's base size (owner, 2026-11-01: "110% should be the new 100%"): a desktop's UI is drawn at 1.1 times the 16 px root and
+   the UI size slider (--ui-scale, 50-150 %) is relative to it. A touch screen keeps 1: it already has its own larger sizes below
+   (16 px text, 44 px rows) and its width is the screen's. Phones taking the 1.1 as well is this one number. */
+@media (pointer: coarse) { :root { --ui-base: 1; } }
 @media (pointer: coarse) { :root { --text-body: 1rem; --text-secondary: 0.9375rem; --text-caption: 0.8125rem; --text-input: 1rem; --row: 2.75rem; } }
 
 /* Focus rings appear only while the person navigates with the keyboard (focus-ring.ts sets
