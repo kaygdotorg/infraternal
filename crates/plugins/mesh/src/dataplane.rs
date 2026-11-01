@@ -52,6 +52,16 @@ pub struct PeerPolicy {
     pub inbound: TrafficPolicy,
     pub outbound: TrafficPolicy,
 }
+
+/// Coordinator-owned DNS identity used by mesh-only listeners and names [#266, #281].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExposureIdentity {
+    /// Stable machine label assigned by the coordinator.
+    pub machine_name: String,
+    /// Coordinator-selected DNS suffix; `.internal` is the compatibility default.
+    pub dns_suffix: String,
+}
 /// All fields are public. Private key material has no representation on this boundary.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -78,6 +88,9 @@ pub struct Config {
     pub version: u64,
     pub addresses: Addresses,
     pub default_policy: DefaultPolicy,
+    /// Optional so nodes without proxy support retain the legacy wire shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exposure: Option<ExposureIdentity>,
     pub peers: BTreeMap<NodeId, PeerPolicy>,
     /// Names for peers in the same policy snapshot, keyed by their stable node identity.
     #[cfg(feature = "mesh-dns-spike")]
@@ -119,6 +132,9 @@ pub struct Chunk {
     pub last: bool,
     pub addresses: crate::policy::model::Addresses,
     pub default_policy: crate::dataplane::DefaultPolicy,
+    /// Repeated in every chunk so name/address and grants commit atomically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exposure: Option<ExposureIdentity>,
     pub upserted: BTreeMap<NodeId, PeerPolicy>,
     /// Continuations union port grants into a staged peer; they never apply a partial policy.
     #[serde(default)]

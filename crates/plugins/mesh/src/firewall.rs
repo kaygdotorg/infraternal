@@ -540,6 +540,7 @@ mod tests {
             version: 1,
             addresses: address(1),
             default_policy: DefaultPolicy::Allow,
+            exposure: None,
             peers: (2..=1001)
                 .map(|id| {
                     (

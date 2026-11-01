@@ -182,6 +182,7 @@ pub async fn run(
                     || names_changed
                     || dns_suffix_changed
                     || old.addresses != config.addresses
+                    || old.exposure != config.exposure
                     || old.default_policy != config.default_policy
                     || old.peers != config.peers
             });

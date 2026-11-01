@@ -2,7 +2,8 @@
 
 use crate::{
     cli::command_tree::{build, selected},
-    component_cli::add_cli_values,
+    cli::output::Exit,
+    component_cli::{add_cli_values, component_error_exit, component_error_result},
 };
 use infraternal_plugin_api::{
     ActionContract, ActionDefinition, ActionEffect, ActionRegistry, ActionTarget,
@@ -10,8 +11,8 @@ use infraternal_plugin_api::{
 };
 use serde_json::{Value, json};
 
-fn publish_registry() -> ActionRegistry {
-    let action = ActionDefinition::new(
+fn proxy_registry() -> ActionRegistry {
+    let publish = ActionDefinition::new(
         ["publish"],
         "Publish or list services.",
         "Publish a local service or list current publications.",
@@ -43,22 +44,45 @@ fn publish_registry() -> ActionRegistry {
         ),
     )
     .with_cli_positionals(["port"]);
+    let unpublish = ActionDefinition::new(
+        ["unpublish"],
+        "Remove a published service.",
+        "Stop publishing a local TCP port or named service.",
+        ["Give the port or exact published name to remove."],
+        JsonSchema::object(
+            [(
+                "target".to_owned(),
+                JsonSchema::string("Port or published name."),
+            )],
+            ["target".to_owned()],
+        ),
+        JsonSchema::command_result(),
+        ActionContract::new(
+            ActionTarget::Host,
+            ActionEffect::Write,
+            "proxy.unpublish",
+            DryRun::Unsupported,
+        ),
+    )
+    .with_cli_positionals(["target"]);
     ActionRegistry::new(vec![PluginDefinition::new(
         "proxy",
-        "Publish local services.",
-        [action],
+        "Publish and unpublish local services.",
+        [publish, unpublish],
     )])
-    .expect("valid publish registry")
+    .expect("valid proxy registry")
 }
 
-fn action_input(arguments: &[&str]) -> Value {
-    let registry = publish_registry();
+fn action_input(command_name: &str, arguments: &[&str]) -> Value {
+    let registry = proxy_registry();
     let command = build(&registry);
     let matches = command
         .try_get_matches_from(arguments.iter().copied())
-        .expect("publish command arguments");
+        .expect("proxy command arguments");
     let selected = selected(&matches);
-    let action = registry.find(&["publish"]).expect("publish action");
+    let action = registry
+        .find(&[command_name])
+        .expect("proxy command action");
     let mut input = json!({});
     add_cli_values(action.action, selected.matches, &mut input).expect("action inputs");
     input
@@ -67,14 +91,17 @@ fn action_input(arguments: &[&str]) -> Value {
 #[test]
 fn publish_positional_port_and_scope_flags_reach_the_agent_action() {
     assert_eq!(
-        action_input(&[
-            "infraternal",
+        action_input(
             "publish",
-            "3000",
-            "--public",
-            "--flat-name",
-            "--confirm-public",
-        ]),
+            &[
+                "infraternal",
+                "publish",
+                "3000",
+                "--public",
+                "--flat-name",
+                "--confirm-public",
+            ]
+        ),
         json!({
             "port": 3000,
             "public": true,
@@ -86,5 +113,46 @@ fn publish_positional_port_and_scope_flags_reach_the_agent_action() {
 
 #[test]
 fn bare_publish_sends_an_empty_list_request() {
-    assert_eq!(action_input(&["infraternal", "publish"]), json!({}));
+    assert_eq!(
+        action_input("publish", &["infraternal", "publish"]),
+        json!({})
+    );
+}
+
+#[test]
+fn unpublish_accepts_a_port_or_exact_published_name() {
+    assert_eq!(
+        action_input("unpublish", &["infraternal", "unpublish", "3000"]),
+        json!({"target": "3000"})
+    );
+    assert_eq!(
+        action_input(
+            "unpublish",
+            &["infraternal", "unpublish", "port-3000.host-2.internal"]
+        ),
+        json!({"target": "port-3000.host-2.internal"})
+    );
+}
+
+#[test]
+fn missing_component_action_results_use_the_d303_not_found_exit() {
+    assert_eq!(component_error_exit("missing").map(Exit::code), Some(4));
+    assert_eq!(component_error_exit("invalid"), None);
+}
+
+#[test]
+fn missing_component_action_results_keep_the_code_and_one_line_message() {
+    let (result, exit) = component_error_result(
+        "unpublish",
+        &json!({
+            "error": {"code": "missing"},
+            "message": "No publication matches 3000."
+        }),
+    )
+    .expect("typed component error");
+
+    assert_eq!(exit.code(), 4);
+    assert!(!result.ok);
+    assert_eq!(result.message, "No publication matches 3000.");
+    assert_eq!(result.error.expect("D303 error").code, "missing");
 }

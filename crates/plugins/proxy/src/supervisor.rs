@@ -1,6 +1,7 @@
 //! Owns the single Traefik child, drains it after the final exposure, and redacts its log stream [#281].
 
 use crate::config::{PublishedService, StaticConfig};
+use nix::fcntl::{Flock, FlockArg};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Read, Write},
@@ -15,7 +16,6 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use nix::fcntl::{Flock, FlockArg};
 use zeroize::Zeroizing;
 
 /// Time allowed for existing connections to drain after the final exposure is removed.

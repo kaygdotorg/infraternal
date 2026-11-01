@@ -1,6 +1,6 @@
 //! Compiles coordinator identity, directional Access grants and discovered endpoints into node configurations [164–166,216].
 use crate::{
-    dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
+    dataplane::{Config, DefaultPolicy, ExposureIdentity, Peer, PeerPolicy},
     policy::{
         coordinator::Coordinator,
         model::{MeshError, NodeId},
@@ -46,8 +46,6 @@ fn compile_inner(
     endpoints: &BTreeMap<NodeId, SocketAddr>,
     default_dns_suffix: &str,
 ) -> Result<Config, MeshError> {
-    #[cfg(not(feature = "mesh-dns-spike"))]
-    let _ = default_dns_suffix;
     let checkpoint = coordinator.checkpoint();
     let local = checkpoint
         .allocation
@@ -68,6 +66,10 @@ fn compile_inner(
     } else {
         default_dns_suffix.to_owned()
     };
+    #[cfg(feature = "mesh-dns-spike")]
+    let exposure_dns_suffix = dns_suffix.clone();
+    #[cfg(not(feature = "mesh-dns-spike"))]
+    let exposure_dns_suffix = default_dns_suffix.to_owned();
     let fallback = if default == DefaultPolicy::Allow {
         TrafficPolicy::All
     } else {
@@ -76,6 +78,12 @@ fn compile_inner(
     let mut peers = BTreeMap::new();
     #[cfg(feature = "mesh-dns-spike")]
     let mut peer_names = BTreeMap::new();
+    let machine_name = checkpoint
+        .members
+        .iter()
+        .find(|member| member.node.id == node)
+        .map(|member| member.node.host.clone())
+        .ok_or(MeshError::UnknownNode)?;
     for member in &checkpoint.members {
         let other = member.node.id;
         if other == node {
@@ -133,6 +141,10 @@ fn compile_inner(
         version: checkpoint.generation,
         addresses: local,
         default_policy: default,
+        exposure: Some(ExposureIdentity {
+            machine_name,
+            dns_suffix: exposure_dns_suffix,
+        }),
         peers,
         #[cfg(feature = "mesh-dns-spike")]
         peer_names,
@@ -213,6 +225,7 @@ pub fn chunks(
             last: false,
             addresses: new.addresses,
             default_policy: new.default_policy,
+            exposure: new.exposure.clone(),
             upserted: BTreeMap::new(),
             merged: BTreeMap::new(),
             removed: Vec::new(),

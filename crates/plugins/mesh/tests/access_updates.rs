@@ -29,6 +29,7 @@ fn config() -> Config {
             ipv6: Ipv6Addr::from(0xfd02_u128 << 112 | 2),
         },
         default_policy: DefaultPolicy::Allow,
+        exposure: None,
         peers: (3_u32..=1002)
             .map(|id| {
                 (

@@ -14,10 +14,27 @@ pub const PUBLISH_ACTION: infraternal_plugin_api::ActionDef = infraternal_plugin
     instructions: &[
         "With no port, list the services published on this node and their URLs.",
         "With a port, publish that local TCP port to mesh peers permitted by its grant.",
+        "Use --public to expose it to the internet; the first public publication needs --confirm-public.",
         "The default name uses a wildcard kept on this node; --flat-name uses an exact service certificate whose name appears in public CT logs.",
-        "Use --public to add internet access. The first public publication on this node requires --confirm-public.",
     ],
     input: SchemaRef("ProxyPublish"),
+    output: SchemaRef("ProxyPublishResult"),
+    effect: Effect::Write,
+    permission: Permission::One("proxy.publish"),
+    target: Target::Node,
+    dry_run: infraternal_plugin_api::DryRun::Unsupported,
+    opens: None,
+};
+
+/// Remove one publication by local port or exact DNS name.
+pub const UNPUBLISH_ACTION: infraternal_plugin_api::ActionDef = infraternal_plugin_api::ActionDef {
+    id: "proxy.unpublish",
+    summary: "Stop publishing a local service.",
+    instructions: &[
+        "Give the local TCP port or exact published name to remove.",
+        "A missing publication returns D303 missing and exit code 4.",
+    ],
+    input: SchemaRef("ProxyUnpublish"),
     output: SchemaRef("ProxyPublishResult"),
     effect: Effect::Write,
     permission: Permission::One("proxy.publish"),
@@ -32,7 +49,7 @@ pub fn plugin() -> PluginDefinition {
     let mut publish = ActionDefinition::new(
         ["publish"],
         "Publish a local service through the node proxy.",
-        "Use this to list publications or expose a local TCP port through the mesh.",
+        "Use this to list publications or expose a local TCP port through the mesh, with optional public access.",
         PUBLISH_ACTION.instructions.iter().copied(),
         JsonSchema::object(
             [
@@ -80,9 +97,42 @@ pub fn plugin() -> PluginDefinition {
         ],
     });
     publish.hosted = Some(PUBLISH_ACTION);
+    let mut unpublish = ActionDefinition::new(
+        ["unpublish"],
+        "Remove a published local service.",
+        "Stop publishing a local TCP port or one exact published name.",
+        UNPUBLISH_ACTION.instructions.iter().copied(),
+        JsonSchema::object(
+            [(
+                "target".to_owned(),
+                JsonSchema::string("Local port or exact published name."),
+            )],
+            ["target".to_owned()],
+        ),
+        JsonSchema::command_result(),
+        ActionContract::new(
+            ActionTarget::Host,
+            ActionEffect::Write,
+            "proxy.unpublish",
+            DryRun::Unsupported,
+        ),
+    )
+    .with_cli_handler(CliHandler::NodeComponent)
+    .with_cli_positionals(["target"])
+    .with_example("unpublish 3000", "Stop publishing local TCP port 3000.")
+    .with_example(
+        "unpublish port-3000.web01.example.org",
+        "Stop publishing the exact named service.",
+    )
+    .with_safety(SafetyNotes {
+        destructive: true,
+        dry_run_first: false,
+        notes: vec!["A missing publication is reported with exit code 4.".to_owned()],
+    });
+    unpublish.hosted = Some(UNPUBLISH_ACTION);
     PluginDefinition::new(
         ID,
-        "Publish local services through the mesh-aware proxy.",
-        [publish],
+        "Publish and unpublish local services through the node proxy.",
+        [publish, unpublish],
     )
 }

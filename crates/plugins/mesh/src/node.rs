@@ -463,7 +463,7 @@ impl Node {
             {
                 return Err(io::ErrorKind::InvalidData.into());
             }
-            let config = if chunk.from_version.is_some() {
+            let mut config = if chunk.from_version.is_some() {
                 self.config.clone().ok_or(io::ErrorKind::InvalidData)?
             } else {
                 Config {
@@ -477,18 +477,18 @@ impl Node {
                     version: chunk.version,
                     addresses: chunk.addresses,
                     default_policy: chunk.default_policy,
+                    exposure: chunk.exposure.clone(),
                     peers: BTreeMap::new(),
                     #[cfg(feature = "mesh-dns-spike")]
                     peer_names: BTreeMap::new(),
                 }
             };
             #[cfg(feature = "mesh-dns-spike")]
-            let config = {
-                let mut config = config;
+            {
                 config.name.clone_from(&chunk.name);
                 config.dns_suffix.clone_from(&chunk.dns_suffix);
-                config
-            };
+            }
+            config.exposure = chunk.exposure.clone();
             self.pending = Some(Pending {
                 server: chunk.server,
                 next: 0,
@@ -517,6 +517,7 @@ impl Node {
             || pending.version != chunk.version
             || pending.from_version != chunk.from_version
             || pending.default_policy != chunk.default_policy
+            || pending.config.exposure != chunk.exposure
         {
             return Err(io::ErrorKind::InvalidData.into());
         }
@@ -527,6 +528,7 @@ impl Node {
         pending.config.version = chunk.version;
         pending.config.default_policy = chunk.default_policy;
         pending.config.server = chunk.server;
+        pending.config.exposure = chunk.exposure.clone();
         crate::access_updates::apply(&mut pending.config, &chunk.access_updates)?;
         for node in chunk.removed {
             pending.config.peers.remove(&node);
@@ -1028,6 +1030,7 @@ mod tests {
                 ipv6: "fd01::2".parse().expect("IPv6"),
             },
             default_policy: crate::dataplane::DefaultPolicy::default(),
+            exposure: None,
             peers: BTreeMap::new(),
             #[cfg(feature = "mesh-dns-spike")]
             peer_names: std::collections::BTreeMap::new(),
@@ -1093,6 +1096,7 @@ mod tests {
             version: 1,
             addresses: addresses(1),
             default_policy: DefaultPolicy::Allow,
+            exposure: None,
             peers: (2..=1001)
                 .map(|id| {
                     let (_, key) = Key::generate().expect("public peer fixture");

@@ -285,6 +285,7 @@ mod tests {
                 ipv6: "fd01::1".parse().expect("IPv6"),
             },
             default_policy: crate::dataplane::DefaultPolicy::Deny,
+            exposure: None,
             peers: std::collections::BTreeMap::new(),
             #[cfg(feature = "mesh-dns-spike")]
             peer_names: std::collections::BTreeMap::new(),

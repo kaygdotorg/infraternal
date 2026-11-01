@@ -1,5 +1,8 @@
 //! Declares and dispatches the Mesh node's authenticated actions; all adapters share these instructions [16,198,202].
-use crate::{dataplane::Chunk, node::Node};
+use crate::{
+    dataplane::{Chunk, Config},
+    node::Node,
+};
 use infraternal_plugin_api::{
     ActionDef, AgentPlugin, DefaultValue, Dependency, DryRun, Effect, Permission, PluginDescriptor,
     PluginError, RoleDef, SchemaRef, SettingDefault, Target,
@@ -154,6 +157,8 @@ pub struct MeshNodePlugin {
     owner: Arc<Mutex<Owner>>,
     changed: AtomicBool,
     server_link: infraternal_plugin_api::server_path::ServerLink,
+    configuration_observer:
+        Option<Arc<dyn Fn(Option<Config>) -> std::io::Result<()> + Send + Sync>>,
     // The kernel dump behind the first `mesh.peers` page, reused by the pages that follow it (see `peer_page`).
     dump: Option<(std::time::Instant, Counters)>,
 }
@@ -220,8 +225,21 @@ impl MeshNodePlugin {
             })),
             changed: AtomicBool::new(false),
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
+            configuration_observer: None,
             dump: None,
         }
+    }
+
+    /// Notify a sibling component only after Mesh has accepted a complete configuration.
+    ///
+    /// The observer receives the retained configuration, never an incoming partial chunk.
+    #[must_use]
+    pub fn with_configuration_observer(
+        mut self,
+        observer: Arc<dyn Fn(Option<Config>) -> std::io::Result<()> + Send + Sync>,
+    ) -> Self {
+        self.configuration_observer = Some(observer);
+        self
     }
 }
 impl Default for MeshNodePlugin {
@@ -233,6 +251,7 @@ impl Default for MeshNodePlugin {
             })),
             changed: AtomicBool::new(false),
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
+            configuration_observer: None,
             dump: None,
         }
     }
@@ -456,6 +475,13 @@ impl AgentPlugin for MeshNodePlugin {
         if matches!(action, "mesh.up" | "mesh.down") {
             self.changed.store(true, Ordering::Release);
         }
+        if matches!(
+            action,
+            "mesh.identity" | "mesh.up" | "mesh.down" | "mesh.status" | "mesh.configure"
+        ) && let Some(observer) = &self.configuration_observer
+        {
+            observer(node.config().cloned()).map_err(|_| PluginError::Rejected)?;
+        }
         serde_json::to_vec(&result).map_err(|_| PluginError::Rejected)
     }
 }
@@ -498,6 +524,10 @@ impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
                 node.up().map_err(|_| "Mesh start failed.")?;
             } else {
                 node.down().map_err(|_| "Mesh stop failed.")?;
+            }
+            if let Some(observer) = &self.configuration_observer {
+                observer(node.config().cloned())
+                    .map_err(|_| "Mesh publication routes could not be updated.")?;
             }
             self.changed.store(true, Ordering::Release);
             Ok(())
@@ -549,6 +579,7 @@ mod tests {
                 ipv6: "fd01::1".parse().expect("IPv6"),
             },
             default_policy: DefaultPolicy::Allow,
+            exposure: None,
             upserted: std::collections::BTreeMap::from([(
                 NodeId(2),
                 PeerPolicy {
@@ -690,6 +721,7 @@ mod tests {
                 ipv6: "fd01::1".parse().expect("IPv6"),
             },
             default_policy: DefaultPolicy::Allow,
+            exposure: None,
             upserted: std::collections::BTreeMap::new(),
             merged: std::collections::BTreeMap::new(),
             removed: Vec::new(),
@@ -804,6 +836,7 @@ mod peer_page_tests {
             version: 4,
             addresses: address(1),
             default_policy: DefaultPolicy::Allow,
+            exposure: None,
             peers: (2..=peers + 1)
                 .map(|id| {
                     let byte = u8::try_from(id % 251).expect("fixture key");

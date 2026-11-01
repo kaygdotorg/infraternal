@@ -99,9 +99,39 @@ pub(crate) fn run_action(
         )
     })();
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(exit) => ExitCode::from(exit.code()),
         Err(error) => refuse(json_output, &command, &error),
     }
+}
+
+/// Map stable D303 component errors to their process exit behavior.
+#[must_use]
+pub(crate) fn component_error_exit(code: &str) -> Option<Exit> {
+    match code {
+        "failed" => Some(Exit::Failed),
+        "usage" => Some(Exit::Usage),
+        "not_allowed" => Some(Exit::NotAllowed),
+        "missing" => Some(Exit::NotFound),
+        "not_found" => Some(Exit::NotFound),
+        "unreachable" | "component_down" => Some(Exit::Unreachable),
+        "partial" => Some(Exit::Partial),
+        _ => None,
+    }
+}
+
+fn component_error_result(command: &str, value: &Value) -> Option<(CommandResult<Value>, Exit)> {
+    let code = value.get("error")?.get("code")?.as_str()?;
+    let exit = component_error_exit(code).unwrap_or(Exit::Failed);
+    let message = value
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or("The component action could not be completed.");
+    let data = value.get("data").cloned().unwrap_or_else(|| json!({}));
+    Some((
+        CommandResult::new(command, CommandState::Failed, message, data).with_error_code(code),
+        exit,
+    ))
 }
 
 #[cfg(test)]
@@ -185,7 +215,7 @@ async fn execute(
     action: &str,
     mut input: Value,
     json_output: bool,
-) -> io::Result<()> {
+) -> io::Result<Exit> {
     let mut pages = None;
     loop {
         let output = call(state, action, &input).await?;
@@ -210,6 +240,10 @@ async fn execute(
     }
 
     let value = pages.ok_or(io::ErrorKind::InvalidData)?;
+    if let Some((result, exit)) = component_error_result(command, &value) {
+        emit(result, json_output, exit);
+        return Ok(exit);
+    }
     // Present and write only after every page succeeds, so the envelope describes the whole list.
     let output = serde_json::to_vec(&value).map_err(io::Error::other)?;
     // A write may show the current status of what it changed.
@@ -236,7 +270,7 @@ async fn execute(
         result = result.with_next_step(next.clone());
     }
     print(&result, json_output, false);
-    Ok(())
+    Ok(Exit::Ok)
 }
 
 /// Combine the array records from successive pages and retain the final page's metadata.
