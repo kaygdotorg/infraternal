@@ -7,9 +7,9 @@
  * guard line `[ -n "$INFRATERNAL_SESSION" ] || <command>` to the startup file; the copy never says "guard".
  * The server shows the offer once per host, so ✗ needs no write of its own; the switches live in Settings.
  */
-import type { ToastController, ToastMessage } from "../../../../../packages/ui/src/toast";
+import type { ToastController } from "../../../../../packages/ui/src/toast";
 import { mountConfirmTip } from "../../../../../packages/ui/src/tooltip";
-import { ICON_CHECK, ICON_HELP, ICON_X, ICONS } from "../../../../../packages/ui/src/icons";
+import { onDemand } from "../../on-demand";
 import type { SwitchPref } from "../../../../../packages/ui/src/settings-panels";
 
 interface Connection {
@@ -72,42 +72,11 @@ export function createStartupHints(connection: Connection, toast: ToastControlle
         const result = await call({ op: "inspect", session });
         if (disposed || !["tmux", "zellij"].includes(String(result.multiplexer))) return;
         const proposal = result.proposal as { file: string; guard: string } | undefined;
-        const other = multiplexerName(String(result.multiplexer));
-        const line = proposal?.guard ?? `[ -n "$INFRATERNAL_SESSION" ] || ${result.multiplexer}`;
-        const change = async (op: "apply" | "undo"): Promise<void> => {
-          try {
-            await call({ op, session, proposal, confirmed: true });
-            if (!disposed) toast.show(op === "apply"
-              ? { message: `Switched. ${other} no longer starts in Infraternal terminals (changed ${proposal?.file}).`,
-                  action: { label: `Restore ${proposal?.file}`, onSelect: () => { void change("undo"); } }, duration: 0, dismissible: true }
-              : { message: `${proposal?.file} restored. ${other} starts automatically again.` });
-          } catch { failure(); }
-        };
-        // ✓: with a recognised startup line the file is edited after a confirmation; otherwise the person gets the line to place themselves.
-        const switchChoice = (event?: MouseEvent): void => {
-          if (!proposal) {
-            void navigator.clipboard.writeText(line).then(() => { if (!disposed) toast.show({ message: `Copied the line that switches. Add it before ${other} starts in your startup file.` }); }, failure);
-            return;
-          }
-          const anchor = event?.currentTarget as HTMLElement | undefined;
-          if (disposed || !anchor) return;
-          const sentence = `${other} will stop starting in Infraternal terminals. This terminal keeps running, and you can undo it.`;
-          tip = confirm(anchor, { label: "Switch to the Infraternal Multiplexer", title: `Switch to the Infraternal Multiplexer in ${proposal.file}?`,
-            // The line sits on its own row: the confirmation keeps a line break in its effect text.
-            effect: `${proposal.guard}\n${sentence}`,
-            confirmLabel: "Switch", cancelLabel: "Keep as is", onConfirm: () => { void change("apply"); },
-            onCancel: () => { if (!disposed) toast.show(notice); },
-          });
-        };
-        const notice: ToastMessage = { message: `${other} started automatically. Would you like to switch to the Infraternal Multiplexer instead?`,
-          icon: ICONS.terminal, duration: 0, actionGroupLabel: "Switch to the Infraternal Multiplexer?",
-          iconActions: [
-            { label: proposal ? "Switch to the Infraternal Multiplexer" : "Copy the line that switches", icon: ICON_CHECK, onSelect: switchChoice },
-            { label: `Keep ${other}, don't ask again on this host`, icon: ICON_X, onSelect() {} },
-            { label: "About the Infraternal Multiplexer", icon: ICON_HELP, keepOpen: true, onSelect: () => { openDocs(docsUrl); } },
-          ],
-        };
-        toast.show(notice);
+        // The wording, icons and confirmation load only now, when a multiplexer really was found (startup-notice.on-demand.ts).
+        const { showStartupNotice } = await onDemand(() => import("./startup-notice.on-demand"));
+        if (disposed) return;
+        showStartupNotice({ toast, confirm, call, session, multiplexer: String(result.multiplexer), other: multiplexerName(String(result.multiplexer)), proposal, docsUrl, openDocs,
+          disposed: () => disposed, failure, setTip: (next) => { tip = next; } });
       } catch { /* Detection fails open: shell startup is always the person's own startup. */ }
     },
     set,
