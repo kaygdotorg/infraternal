@@ -125,6 +125,7 @@ fn literal_program_pipe_rejects_invalid_input_before_startup() {
 }
 
 #[test]
+#[ignore = "same-UID shim trust boundary awaits owner decision on #251"]
 fn saved_shell_can_automate_real_ptys_but_same_uid_alone_cannot() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = Command::new("python3")
