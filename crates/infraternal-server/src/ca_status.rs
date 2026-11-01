@@ -3,12 +3,13 @@
 use crate::{ca::CaKeySource, clock_health::ClockHealth};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use openssl::{asn1::Asn1Time, hash::MessageDigest, x509::X509};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const DAY: i64 = 86_400;
+const MAX_TRUST_ROOTS: usize = 2;
 
 /// Public certificate metadata. It contains no signing material or host-specific data.
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct RootStatus {
     /// Root generation used by the trust bundle.
     pub generation: u64,
@@ -21,11 +22,11 @@ pub struct RootStatus {
     /// Remaining server-clock lifetime, unavailable while time is uncertain.
     pub remaining_seconds: Option<i64>,
     /// The nearest configured warning threshold, or `unknown` without a healthy clock.
-    pub warning_level: &'static str,
+    pub warning_level: String,
 }
 
 /// Public CA state shared by browser status and the same-UID local status path.
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct CaStatus {
     /// Whether the server supplied a status source.
     pub available: bool,
@@ -53,7 +54,7 @@ impl CaStatus {
     }
 }
 
-/// Read only the public issuer and lock watch; a missing watch remains unknown.
+/// Read only public roots and the lock watch; a missing watch remains unknown.
 pub fn from_source(
     source: Option<&dyn CaKeySource>,
     clock: Option<&ClockHealth>,
@@ -62,21 +63,46 @@ pub fn from_source(
         return Ok(CaStatus::unavailable());
     };
     let locked = source.subscribe_locked().map(|state| *state.borrow());
-    from_issuer(source.public_issuer(), locked, clock)
+    from_roots(&source.public_roots(), locked, clock)
 }
 
-/// Build an authenticated status response from a known lock state and public issuer.
+/// Build an authenticated status response from one legacy public issuer.
 pub fn from_issuer(
     issuer: Option<X509>,
     locked: Option<bool>,
     clock: Option<&ClockHealth>,
 ) -> Result<CaStatus, crate::ca::CaError> {
+    let roots = issuer.map(|issuer| vec![(1, issuer)]).unwrap_or_default();
+    from_roots(&roots, locked, clock)
+}
+
+/// Build public-only status for the current and optional next root.
+///
+/// # Errors
+/// Refuses an oversized or ambiguous root set and malformed certificate metadata.
+pub fn from_roots(
+    roots: &[(u64, X509)],
+    locked: Option<bool>,
+    clock: Option<&ClockHealth>,
+) -> Result<CaStatus, crate::ca::CaError> {
+    if roots.len() > MAX_TRUST_ROOTS
+        || roots.iter().any(|(generation, _)| *generation == 0)
+        || roots
+            .iter()
+            .enumerate()
+            .any(|(index, (generation, _))| {
+                roots[..index]
+                    .iter()
+                    .any(|(earlier, _)| earlier == generation)
+            })
+    {
+        return Err(crate::ca::CaError);
+    }
     let now = clock.and_then(ClockHealth::current_epoch);
-    let roots = issuer
-        .map(|issuer| root_status(&issuer, now))
-        .transpose()?
-        .into_iter()
-        .collect();
+    let roots: Vec<RootStatus> = roots
+        .iter()
+        .map(|(generation, issuer)| root_status(issuer, *generation, now))
+        .collect::<Result<_, _>>()?;
     Ok(CaStatus {
         available: true,
         initialized: !roots.is_empty(),
@@ -86,7 +112,11 @@ pub fn from_issuer(
     })
 }
 
-fn root_status(issuer: &X509, now: Option<i64>) -> Result<RootStatus, crate::ca::CaError> {
+fn root_status(
+    issuer: &X509,
+    generation: u64,
+    now: Option<i64>,
+) -> Result<RootStatus, crate::ca::CaError> {
     let der = issuer.to_der().map_err(|_| crate::ca::CaError)?;
     let digest = issuer
         .digest(MessageDigest::sha256())
@@ -99,12 +129,12 @@ fn root_status(issuer: &X509, now: Option<i64>) -> Result<RootStatus, crate::ca:
     let remaining_seconds = now.and_then(|now| not_after.checked_sub(now));
     let warning_level = remaining_seconds.map_or("unknown", warning_level);
     Ok(RootStatus {
-        generation: 1,
+        generation,
         fingerprint: format!("sha256:{fingerprint}"),
         certificate_der: B64.encode(der),
         not_after,
         remaining_seconds,
-        warning_level,
+        warning_level: warning_level.to_owned(),
     })
 }
 
@@ -139,6 +169,32 @@ fn warning_level(remaining: i64) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openssl::{
+        asn1::Asn1Time,
+        hash::MessageDigest,
+        pkey::PKey,
+        x509::{X509, X509NameBuilder},
+    };
+
+    fn root(not_after: i64) -> X509 {
+        let key = PKey::generate_ed25519().unwrap();
+        let mut name = X509NameBuilder::new().unwrap();
+        name.append_entry_by_text("CN", "public status test root").unwrap();
+        let name = name.build();
+        let mut certificate = X509::builder().unwrap();
+        certificate.set_version(2).unwrap();
+        certificate.set_subject_name(&name).unwrap();
+        certificate.set_issuer_name(&name).unwrap();
+        certificate.set_pubkey(&key).unwrap();
+        certificate
+            .set_not_before(&Asn1Time::from_unix(0).unwrap())
+            .unwrap();
+        certificate
+            .set_not_after(&Asn1Time::from_unix(not_after).unwrap())
+            .unwrap();
+        certificate.sign(&key, MessageDigest::null()).unwrap();
+        certificate.build()
+    }
 
     #[test]
     fn warning_thresholds_are_inclusive_and_clock_failure_stays_unknown() {
@@ -157,5 +213,37 @@ mod tests {
         assert!(!status.initialized);
         assert_eq!(status.locked, None);
         assert!(status.roots.is_empty());
+    }
+
+    #[test]
+    fn public_status_retains_both_ordered_roots_without_a_healthy_clock() {
+        let current = root(1_900_000_000);
+        let next = root(2_000_000_000);
+        let roots = vec![(4, current), (5, next)];
+        let status = from_roots(&roots, Some(true), None).unwrap();
+
+        assert!(status.available);
+        assert!(status.initialized);
+        assert_eq!(status.locked, Some(true));
+        assert!(!status.clock_healthy);
+        assert_eq!(status.roots.len(), 2);
+        assert_eq!(status.roots[0].generation, 4);
+        assert_eq!(status.roots[1].generation, 5);
+        assert_eq!(status.roots[0].warning_level, "unknown");
+        assert_eq!(status.roots[0].remaining_seconds, None);
+        assert!(!status.roots[0].certificate_der.is_empty());
+    }
+
+    #[test]
+    fn public_status_rejects_ambiguous_or_oversized_root_sets() {
+        let current = root(1_900_000_000);
+        let duplicate = vec![(4, current.clone()), (4, root(2_000_000_000))];
+        assert!(from_roots(&duplicate, Some(false), None).is_err());
+        let oversized = vec![
+            (1, current.clone()),
+            (2, root(2_000_000_000)),
+            (3, root(2_100_000_000)),
+        ];
+        assert!(from_roots(&oversized, Some(false), None).is_err());
     }
 }

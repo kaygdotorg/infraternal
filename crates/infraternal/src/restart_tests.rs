@@ -199,6 +199,38 @@ async fn private_control_endpoint_cannot_be_stolen_or_created_by_a_client() {
 }
 
 #[tokio::test]
+async fn same_uid_local_status_reads_ca_lock_and_distinguishes_unavailable_socket() {
+    let directory = Directory::new();
+    assert!(query_ca_status(directory.state()).is_err());
+
+    let mut control = Control::start(directory.state()).unwrap();
+    let source = std::sync::Arc::new(
+        infraternal_server::ca_memory::MemoryCaSource::unprovisioned(None),
+    );
+    let server = tokio::spawn(async move { control.requested(Some(source.as_ref())).await });
+    let state = directory.state().to_owned();
+    let status = tokio::task::spawn_blocking(move || query_ca_status(&state))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.available);
+    assert!(!status.initialized);
+    assert_eq!(status.locked, Some(true));
+    assert!(!status.clock_healthy);
+    assert!(status.roots.is_empty());
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn private_control_endpoint_accepts_a_read_only_status_request_frame() {
+    let (mut client, mut server) = tokio::net::UnixStream::pair().unwrap();
+    client.write_u16(0).await.unwrap();
+    client.write_u8(1).await.unwrap();
+    assert!(read_request(&mut server).await.is_ok());
+}
+
+#[tokio::test]
 async fn restart_requests_use_the_servers_binary_and_reject_untrusted_paths() {
     let directory = Directory::new();
     let mut control = Control::start(directory.state()).unwrap();

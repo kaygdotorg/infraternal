@@ -647,7 +647,13 @@ fn status_result(
         .filter(|plugin| plugin.id != "cli")
         .map(|plugin| plugin.id.clone())
         .collect();
-    let node = infraternal_status::probe_local(&infraternal_status::Roots::detect(), &ids);
+    let roots = infraternal_status::Roots::detect();
+    let node = infraternal_status::probe_local(&roots, &ids);
+    #[cfg(feature = "remote")]
+    let ca_status = infraternal_status::server_data_directory(&roots).map(|data| {
+        crate::restart::query_ca_status(&data)
+            .unwrap_or_else(|_| infraternal_server::ca_status::CaStatus::unavailable())
+    });
     let (activity, message, next) = node.headline();
     let state = match activity {
         Activity::Active => CommandState::Running,
@@ -657,7 +663,7 @@ fn status_result(
         Activity::Unknown => CommandState::Unknown,
     };
     // A component without a runtime yet is not something this machine has.
-    let components: Vec<_> = node
+    let mut components: Vec<_> = node
         .components
         .iter()
         .filter(|c| c.state != "Not available yet")
@@ -665,12 +671,18 @@ fn status_result(
         .collect();
     // People get the components table; the role id is a scripting detail.
     let options = cli::output::RenderOptions::detect(io::stdout().is_terminal());
-    let rows: Vec<Vec<String>> = node
+    let mut rows: Vec<Vec<String>> = node
         .components
         .iter()
         .filter(|c| c.state != "Not available yet")
         .map(|c| vec![c.name.clone(), c.state.clone(), c.detail.clone()])
         .collect();
+    #[cfg(feature = "remote")]
+    if let Some(status) = ca_status {
+        let (state, detail) = ca_status_display(&status);
+        components.push(json!({"name":"CA", "state":state, "state_detail":detail}));
+        rows.push(vec!["CA".to_owned(), state, detail]);
+    }
     let tint = |column: usize, text: &str| {
         (options.color && column == 1)
             .then(|| cli::output::state_tint(text))
@@ -694,6 +706,131 @@ fn status_result(
     }
     let down = node.confirmed_down_count();
     (result, down)
+}
+
+#[cfg(feature = "remote")]
+fn ca_status_display(
+    status: &infraternal_server::ca_status::CaStatus,
+) -> (String, String) {
+    if !status.available {
+        return (
+            "Unavailable".to_owned(),
+            "Running server CA status is unavailable.".to_owned(),
+        );
+    }
+    if !status.initialized {
+        return (
+            "Not initialized".to_owned(),
+            "No public CA root is retained.".to_owned(),
+        );
+    }
+    let Some(root) = status
+        .roots
+        .iter()
+        .min_by_key(|root| root.remaining_seconds)
+    else {
+        return (
+            "Unknown".to_owned(),
+            "The CA root expiry is unavailable.".to_owned(),
+        );
+    };
+    let Some(remaining) = root.remaining_seconds else {
+        let lock = match status.locked {
+            Some(true) => "CA signing is locked; ",
+            Some(false) => "CA signing is available; ",
+            None => "CA lock state is unavailable; ",
+        };
+        return (
+            if status.locked == Some(true) {
+                "Locked".to_owned()
+            } else {
+                "Unknown".to_owned()
+            },
+            format!(
+                "{lock}root generation {}; expiry and warning are unknown because the server clock is uncertain.",
+                root.generation
+            ),
+        );
+    };
+    let expiry = if remaining <= 0 {
+        "the public root has expired".to_owned()
+    } else {
+        let days = remaining.saturating_add(86_399) / 86_400;
+        format!("the public root expires in {days} days")
+    };
+    let warning = root.warning_level.as_str();
+    let lock = match status.locked {
+        Some(true) => "CA signing is locked; ",
+        Some(false) => "CA signing is available; ",
+        None => "CA lock state is unavailable; ",
+    };
+    let state = if status.locked == Some(true) {
+        "Locked"
+    } else if status.locked.is_none() {
+        "Unknown"
+    } else {
+        match warning {
+        "expired" => "Expired",
+        "7d" => "Expires within 7 days",
+        "30d" => "Expires within 30 days",
+        "90d" => "Expires within 90 days",
+        "365d" => "Expires within 365 days",
+        "none" => "Ready",
+        _ => "Unknown",
+        }
+    };
+    (
+        state.to_owned(),
+        format!(
+            "{lock}root generation {}; {expiry}; expiry warning {warning}.",
+            root.generation
+        ),
+    )
+}
+
+#[cfg(all(test, feature = "remote"))]
+mod ca_status_tests {
+    use super::ca_status_display;
+    use infraternal_server::ca_status::{CaStatus, RootStatus};
+
+    fn status(locked: Option<bool>, remaining_seconds: Option<i64>, warning: &str) -> CaStatus {
+        CaStatus {
+            available: true,
+            initialized: true,
+            locked,
+            clock_healthy: remaining_seconds.is_some(),
+            roots: vec![RootStatus {
+                generation: 4,
+                fingerprint: "sha256:test".into(),
+                certificate_der: String::new(),
+                not_after: 2_000_000_000,
+                remaining_seconds,
+                warning_level: warning.into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn status_reports_root_generation_expiry_warning_and_lock_state() {
+        let (state, detail) = ca_status_display(&status(Some(false), Some(90 * 86_400), "90d"));
+        assert_eq!(state, "Expires within 90 days");
+        assert!(detail.contains("root generation 4"));
+        assert!(detail.contains("expires in 90 days"));
+        assert!(detail.contains("expiry warning 90d"));
+
+        let (state, detail) = ca_status_display(&status(Some(true), Some(0), "expired"));
+        assert_eq!(state, "Locked");
+        assert!(detail.contains("CA signing is locked"));
+        assert!(detail.contains("expiry warning expired"));
+    }
+
+    #[test]
+    fn unknown_server_clock_does_not_render_a_false_expiry_countdown() {
+        let (state, detail) = ca_status_display(&status(None, None, "unknown"));
+        assert_eq!(state, "Unknown");
+        assert!(detail.contains("root generation 4"));
+        assert!(detail.contains("expiry and warning are unknown"));
+    }
 }
 
 fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {

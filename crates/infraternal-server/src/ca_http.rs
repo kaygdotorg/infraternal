@@ -312,7 +312,10 @@ async fn finish_request(
     .await
     .map_err(|_| StatusCode::REQUEST_TIMEOUT)?
 }
-async fn status(State(api): State<Api>, headers: HeaderMap) -> Result<Json<Value>, StatusCode> {
+async fn status(
+    State(api): State<Api>,
+    headers: HeaderMap,
+) -> Result<Json<crate::ca_status::CaStatus>, StatusCode> {
     let (token, now) = request(&api, &headers)?;
     api.administration
         .status(token, now)

@@ -77,7 +77,11 @@ pub(crate) async fn serve(
         let source = remote
             .as_ref()
             .map(|remote| remote.enrollment.source.clone());
-        let control = crate::restart::Control::start(&config.data_dir);
+        let clock_health = remote.as_ref().map_or_else(
+            || std::sync::Arc::new(infraternal_server::clock_health::ClockHealth::default()),
+            |remote| remote.clock_health.clone(),
+        );
+        let control = crate::restart::Control::start_with_clock(&config.data_dir, clock_health);
         let serving = async move {
             if let Some(remote) = remote {
                 infraternal_server::serve_with_remote(config, remote).await
