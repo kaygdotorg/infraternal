@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise shipping artifacts at the exact static size ceiling and one byte over (#198)."""
+"""Check report-only size deltas and reject defective shipping artifacts (D243, #284)."""
 import argparse
 import os
 from pathlib import Path
@@ -19,35 +19,51 @@ def main():
     with tempfile.TemporaryDirectory(prefix="size-boundary-", dir=scratch) as directory:
         fixture = Path(directory)
         environment = dict(os.environ, CARGO_TARGET_DIR=str(fixture))
-        def check(target):
+        def check(target, overrides=""):
+            """Run the real artifact checker, optionally replacing one inspection tool."""
             return subprocess.run(["bash", "-c",
-                'source "$1"; rust_check_static_binary "$2"', "static-size-test",
-                str(args.gate.resolve()), target], env=environment, capture_output=True, text=True)
+                'source "$1"; eval "$3"; rust_check_static_binary "$2"', "static-size-test",
+                str(args.gate.resolve()), target, overrides], env=environment, capture_output=True, text=True)
         for target in ("x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"):
             binary = fixture / target / "release/infraternal"
             binary.parent.mkdir(parents=True)
             shutil.copy2(source / target / "release/infraternal", binary)
             result = check(target)
             assert result.returncode == 0, f"shipping {target} rejected:\n{result.stdout}{result.stderr}"
-            cap_match = re.search(r"cap: (\d+) bytes", result.stdout)
-            assert cap_match, result.stdout + result.stderr
-            cap = int(cap_match[1])
+            baseline_match = re.search(r"baseline (\d+);", result.stdout)
+            assert baseline_match, result.stdout + result.stderr
+            baseline = int(baseline_match[1])
+            original_size = binary.stat().st_size
+            size = original_size + 102400
             with binary.open("ab") as image:
-                image.truncate(cap)
+                image.truncate(size)
             result = check(target)
             assert result.returncode == 0, result.stdout + result.stderr
-            with binary.open("ab") as image:
-                image.write(b"\0")
+            assert f"size: {size} bytes; baseline {baseline}; delta {size - baseline:+d} bytes" in result.stdout
+            assert "report only, D243 amended 2026-11-01" in result.stdout
+            # Preserve the ELF while testing exact and negative reported deltas.
+            for size in (baseline, baseline - 1):
+                result = check(target, f'stat() {{ printf "%s\\n" {size}; }}')
+                assert result.returncode == 0, result.stdout + result.stderr
+                assert f"delta {size - baseline:+d} bytes" in result.stdout
+            result = check(target, 'readelf() { if [[ "$1" == -l ]]; then echo INTERP; else command readelf "$@"; fi; }')
+            assert result.returncode != 0 and "unexpected PT_INTERP" in result.stderr
+            result = check(target, 'readelf() { return 1; }')
+            assert result.returncode != 0, "failed ELF inspection accepted"
+            binary.chmod(0o644)
             result = check(target)
-            assert result.returncode != 0 and "exceeds" in result.stderr, result.stdout + result.stderr
-            # Override only the reported byte count for the shrink case; keep
-            # the ELF fixture intact while exercising the downward-ratchet rule.
-            result = subprocess.run(["bash", "-c",
-                'source "$1"; test_size=$3; stat() { printf "%s\\n" "$test_size"; }; rust_check_static_binary "$2"',
-                "static-size-shrink-test", str(args.gate.resolve()), target, str(cap - 1)],
-                env=environment, capture_output=True, text=True)
-            assert result.returncode != 0 and "ratchet" in result.stderr, result.stdout + result.stderr
-            print(f"{target}: exact {cap}-byte cap PASS; {cap + 1} bytes rejected PASS; smaller artifact requires ratchet PASS")
+            assert result.returncode != 0 and "expected executable not found" in result.stderr
+            binary.unlink()
+            result = check(target)
+            assert result.returncode != 0 and "expected executable not found" in result.stderr
+            foreign = "aarch64-unknown-linux-musl" if target.startswith("x86_64") else "x86_64-unknown-linux-musl"
+            shutil.copy2(source / foreign / "release/infraternal", binary)
+            result = check(target)
+            assert result.returncode != 0 and "wrong ELF target" in result.stderr
+            shutil.copy2("/bin/true", binary)
+            result = check(target)
+            assert result.returncode != 0 and "static executable" in result.stderr
+            print(f"{target}: +102400 bytes accepted with delta; zero/negative deltas reported; missing/wrong/dynamic/PT_INTERP/inspection defects rejected PASS")
         target = "unsupported-unknown-linux-musl"
         binary = fixture / target / "release/infraternal"
         binary.parent.mkdir(parents=True)
