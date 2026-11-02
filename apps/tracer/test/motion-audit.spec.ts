@@ -640,8 +640,7 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   }, backdropStartAt);
   expect(keyboardBackdrop.events.filter((event) => event.selector === "div.backdrop")).toEqual([]);
   expect(backdropTiming.longTasks).toEqual([]);
-  // The mesh is drawn by a worker at the screen's size; at 4x CPU on a shared host that takes longer than the default 5 s poll.
-  await expect.poll(() => page.evaluate(() => getComputedStyle(document.querySelector(".backdrop")!).getPropertyValue("--mesh-image")), { timeout: 30_000 }).toContain("blob:");
+  await expect.poll(() => page.evaluate(() => getComputedStyle(document.querySelector(".backdrop")!).getPropertyValue("--mesh-image"))).toContain("blob:");
   expect(requestedWorkers).toHaveLength(1);
   const meshPath = testInfo.outputPath("motion-audit-mesh.png");
   await page.screenshot({ path: meshPath });
