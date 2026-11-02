@@ -91,7 +91,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         target: infraternal_plugin_api::Target::Global,
-        dry_run: infraternal_plugin_api::DryRun::Unsupported,
+        dry_run: infraternal_plugin_api::DryRun::Required,
         opens: None,
         id: "mesh.rotation.interval.set",
         summary: "Change Mesh key rotation interval",
@@ -461,8 +461,11 @@ mod rotation_action_tests {
 
     #[test]
     fn changing_rotation_interval_requires_fresh_confirmation() {
-        assert!(ACTIONS.iter().any(|action| {
-            action.id == "mesh.rotation.interval.set" && action.effect == Effect::Destructive
-        }));
+        let action = ACTIONS
+            .iter()
+            .find(|action| action.id == "mesh.rotation.interval.set")
+            .expect("rotation interval action is registered");
+        assert_eq!(action.effect, Effect::Destructive);
+        assert_eq!(action.dry_run, infraternal_plugin_api::DryRun::Required);
     }
 }
