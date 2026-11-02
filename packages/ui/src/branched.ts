@@ -20,8 +20,10 @@ export interface BranchLeaf {
   mark?: "output" | "ok" | "fail";
   /** What the warm tooltip of the mark says, when the default ("Finished successfully", "Failed", "New output") is not enough. */
   markTip?: string;
-  /** The label is a name the person may change by double click or double tap (the tree's `rename` option saves it). */
+  /** The label is a name the person may change by double click, double tap, F2 or the row menu (the tree's `rename` option saves it). */
   renamable?: boolean;
+  /** The rename field's accessible name ("Session name"). Default "Host name". */
+  renameLabel?: string;
 }
 
 export interface BranchSection {
@@ -51,6 +53,8 @@ export interface BranchedOptions {
 export interface BranchedMenu {
   /** `notify` is false only when synchronizing a model update back into the tree. */
   select(id: string, instant?: boolean, notify?: boolean): void;
+  /** Opens the rename field on the renamable row with this id (F2 and the row menu; a double click does the same). False when there is none. */
+  rename(id: string): boolean;
   dispose(): void;
 }
 
@@ -122,10 +126,19 @@ function makeSection(section: BranchSection): HTMLElement {
   for (const leaf of section.leaves) {
     if (leaf.heading) {
       const caption = el("li", "bm-row bm-subhead");
-      caption.textContent = leaf.label;
       // A caption that names a thing (a host) is a row of its own for the row menu (D309): focusable, so the menu key reaches it.
-      if (leaf.id) { caption.dataset.id = leaf.id; caption.setAttribute("role", "treeitem"); caption.tabIndex = 0; }
-      else caption.setAttribute("role", "presentation");
+      if (leaf.id) {
+        const name = el("span", "bm-label");
+        name.textContent = leaf.label;
+        caption.append(name);
+        caption.dataset.id = leaf.id;
+        caption.setAttribute("role", "treeitem");
+        caption.tabIndex = 0;
+        if (leaf.renamable) { caption.dataset.renamable = ""; if (leaf.renameLabel) caption.dataset.renameLabel = leaf.renameLabel; }
+      } else {
+        caption.textContent = leaf.label;
+        caption.setAttribute("role", "presentation");
+      }
       list.append(caption);
       continue;
     }
@@ -134,7 +147,7 @@ function makeSection(section: BranchSection): HTMLElement {
     const button = el("button", "bm-leaf");
     button.type = "button";
     button.dataset.id = leaf.id;
-    if (leaf.renamable) button.dataset.renamable = "";
+    if (leaf.renamable) { button.dataset.renamable = ""; if (leaf.renameLabel) button.dataset.renameLabel = leaf.renameLabel; }
     button.disabled = Boolean(leaf.disabled);
     const spoken = [leaf.label, leaf.state, leaf.mark ? MARK_NAME[leaf.mark] : "", leaf.meta].filter(Boolean);
     button.setAttribute("aria-label", spoken.join(", "));
@@ -283,36 +296,40 @@ export function branchedMenu(
   };
   host.addEventListener("click", onClick);
 
-  // Renaming in place: a double click or double tap on a renamable leaf's name. The click that comes first still
-  // selects the leaf (a single click keeps its meaning); the field is placed over the name, never inside the button.
+  // Renaming in place: a double click or double tap on a renamable row's name, F2 or the row menu on the focused row. The
+  // click that comes first still selects the leaf (a single click keeps its meaning); the field is placed over the name,
+  // never inside the button. A row is a leaf (its button) or a caption that names a host.
   let renaming: InlineRename | undefined;
-  const leafOf = (event: Event): HTMLElement | undefined => (event.target instanceof Element ? event.target.closest<HTMLElement>(".bm-leaf[data-renamable]") ?? undefined : undefined);
+  const renamableOf = (from: Element | null): HTMLElement | undefined => from?.closest<HTMLElement>("[data-renamable][data-id]") ?? undefined;
+  const leafOf = (event: Event): HTMLElement | undefined => (event.target instanceof Element ? renamableOf(event.target) : undefined);
   const abort = new AbortController();
+  const beginRename = (row: HTMLElement): boolean => {
+    const label = row.querySelector<HTMLElement>(".bm-label");
+    const id = row.dataset.id;
+    if (!opts.rename || !label || !id || renaming) return false;
+    const container = row.matches(".bm-leaf") ? row.parentElement! : row;
+    const was = label.textContent ?? "";
+    let restore = (): void => undefined;
+    opts.onRenaming?.(true);
+    renaming = beginInlineRename({
+      value: was,
+      label: row.dataset.renameLabel ?? "Host name",
+      place: (input) => { restore = placeOverName(label, container, input); },
+      commit: (value) => {
+        const next = value.trim();
+        if (!next || next === was) return;
+        label.textContent = next;
+        row.dataset.pending = "";
+        row.setAttribute("aria-busy", "true");
+        const settle = (): void => { delete row.dataset.pending; row.removeAttribute("aria-busy"); };
+        opts.rename!(id, next).then(settle, () => { label.textContent = was; settle(); });
+      },
+      close: () => { restore(); renaming = undefined; opts.onRenaming?.(false); },
+    });
+    return true;
+  };
   if (opts.rename) {
-    onDoubleActivate(host, (event) => {
-      const leaf = leafOf(event);
-      const label = leaf?.querySelector<HTMLElement>(".bm-label");
-      const id = leaf?.dataset.id;
-      if (!leaf || !label || !id || renaming) return;
-      const was = label.textContent ?? "";
-      let restore = (): void => undefined;
-      opts.onRenaming?.(true);
-      renaming = beginInlineRename({
-        value: was,
-        label: "Host name",
-        place: (input) => { restore = placeOverName(label, leaf.parentElement!, input); },
-        commit: (value) => {
-          const next = value.trim();
-          if (!next || next === was) return;
-          label.textContent = next;
-          leaf.dataset.pending = "";
-          leaf.setAttribute("aria-busy", "true");
-          const settle = (): void => { delete leaf.dataset.pending; leaf.removeAttribute("aria-busy"); };
-          opts.rename!(id, next).then(settle, () => { label.textContent = was; settle(); });
-        },
-        close: () => { restore(); renaming = undefined; opts.onRenaming?.(false); },
-      });
-    }, abort.signal, (event) => leafOf(event)?.dataset.id); // by id: the tree is rebuilt between the two taps, its buttons are new
+    onDoubleActivate(host, (event) => { const row = leafOf(event); if (row) beginRename(row); }, abort.signal, (event) => leafOf(event)?.dataset.id); // by id: the tree is rebuilt between the two taps, its buttons are new
   }
 
   // Observe folds as well as the host so branch geometry stays aligned after a fold toggles.
@@ -325,6 +342,10 @@ export function branchedMenu(
       active = id;
       layout(!instant);
       if (notify) opts.onSelect?.(id);
+    },
+    rename(id) {
+      const row = [...host.querySelectorAll<HTMLElement>("[data-renamable][data-id]")].find((n) => n.dataset.id === id);
+      return row ? beginRename(row) : false;
     },
     dispose() {
       disposed = true;

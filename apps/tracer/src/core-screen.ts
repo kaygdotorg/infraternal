@@ -809,8 +809,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (event.target instanceof Element && event.target.closest("[data-owns-escape]")) return;
       // A card that takes Escape from anywhere on the page (`data-owns-escape="page"`: the version panel, which a click leaves focus outside of in Safari) closes itself first.
       if (document.querySelector("[data-owns-escape='page']")) return;
-      // An open menu or confirmation (the profile pill's menu, a sign-out question) closes first and keeps the sidebar it hangs from.
-      if (palette.hidden && document.querySelector(".ui-anchored-popover, .ui-confirm-tip[data-open='true']")) return;
+      // An open menu or confirmation (the profile pill's menu, a sign-out question, a row's in-row question) or a revealed row
+      // (row-menu.ts closes it) closes first and keeps the sidebar it hangs from.
+      if (palette.hidden && document.querySelector(".ui-anchored-popover, .ui-confirm-tip[data-open='true'], .ui-row-ask, [data-swiped]")) return;
       // The palette owns this Escape: it stops here, so a canvas flow (the add-host wizard listens in the document's
       // capture phase, after this window listener) stays open. The capture order is what makes stopping necessary.
       if (!palette.hidden) { setPalette(false, "keyboard"); event.preventDefault(); event.stopPropagation(); }
