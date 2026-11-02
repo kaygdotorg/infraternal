@@ -74,7 +74,7 @@ impl std::fmt::Display for Failure {
             Self::Dns(sentence) => sentence,
             Self::Connect => "The infraternal agent on this host cannot reach the server over HTTPS. Allow outbound TCP 443 to the server's public origin, then try again.",
             Self::Tls => "The infraternal agent on this host could not verify the server's HTTPS certificate. Check the public certificate chain and server name, then try again.",
-            Self::Upgrade => "The infraternal agent on this host reached the server over HTTPS, but the server did not accept its WebSocket. Deploy a server with the /remote/agent route and allow WebSocket upgrades through the proxy, then try again.",
+            Self::Upgrade => "The infraternal agent on this host reached the server over HTTPS, but the server or proxy did not accept the HTTP/1.1 WebSocket upgrade at /remote/agent. Check that the TLS proxy forwards WebSocket upgrades on this path, then try again.",
             Self::Challenge => "The server opened the WebSocket but did not send a valid infraternal agent challenge. Deploy a compatible server build and try again.",
         })
     }
@@ -605,6 +605,9 @@ fn outbound_tls_connector(root: Option<&X509>) -> Result<SslConnector, ClientFai
         .map_err(|_| ClientFailure::TlsConfiguration)?;
     tls.set_min_proto_version(Some(SslVersion::TLS1_3))
         .map_err(|_| ClientFailure::TlsConfiguration)?;
+    // The enrollment and other requests on this connector use Hyper's HTTP/1 client.
+    tls.set_alpn_protos(b"\x08http/1.1")
+        .map_err(|_| ClientFailure::TlsConfiguration)?;
     tls.set_verify(SslVerifyMode::PEER);
     if let Some(root) = root {
         let mut trust = X509StoreBuilder::new().map_err(|_| ClientFailure::TlsConfiguration)?;
@@ -647,7 +650,7 @@ pub(crate) fn public_error(error: &io::Error) -> &'static str {
             "The infraternal agent on this host could not verify the server's HTTPS certificate. Check the public certificate chain and server name, then try again."
         }
         Some(Failure::Upgrade) => {
-            "The infraternal agent on this host reached the server over HTTPS, but the server did not accept its WebSocket. Deploy a server with the /remote/agent route and allow WebSocket upgrades through the proxy, then try again."
+            "The infraternal agent on this host reached the server over HTTPS, but the server or proxy did not accept the HTTP/1.1 WebSocket upgrade at /remote/agent. Check that the TLS proxy forwards WebSocket upgrades on this path, then try again."
         }
         Some(Failure::Challenge) => {
             "The server opened the WebSocket but did not send a valid infraternal agent challenge. Deploy a compatible server build and try again."
