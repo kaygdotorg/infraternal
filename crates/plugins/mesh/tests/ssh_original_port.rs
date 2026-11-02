@@ -87,6 +87,8 @@ fn configuration() -> Config {
             PeerPolicy {
                 peer: Peer {
                     key: PublicKey([3; 32]),
+                    previous_key: None,
+                    previous_active: false,
                     addresses: Addresses {
                         ipv4: "10.254.3.3".parse().unwrap(),
                         ipv6: "fd00:3::3".parse().unwrap(),
