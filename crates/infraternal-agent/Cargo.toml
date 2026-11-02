@@ -34,7 +34,6 @@ sha2.workspace = true
 
 openssl = { workspace = true, optional = true }
 tokio-openssl = { workspace = true, optional = true }
-bytes = { workspace = true }
 quinn = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
