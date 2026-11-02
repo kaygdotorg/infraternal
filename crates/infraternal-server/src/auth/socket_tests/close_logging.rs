@@ -168,6 +168,7 @@ async fn agent_stream_loss_logs_its_safe_close_reason_and_reaches_the_browser() 
     let address = listener.local_addr().unwrap();
     let app = crate::websocket::router(state);
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (close_observed, browser_observed_close) = tokio::sync::oneshot::channel();
     let agent = tokio::spawn(async move {
         let mut encoded = Vec::new();
         encode_muxed_frame_into(
@@ -201,6 +202,10 @@ async fn agent_stream_loss_logs_its_safe_close_reason_and_reaches_the_browser() 
                     )
                     .unwrap();
                     host.write_all(&encoded).await.unwrap();
+                    // Keep the host connection until this stream Close reaches
+                    // the browser. Transport EOF may instead start reconnecting
+                    // before an unread stream Close has been dispatched.
+                    let _ = browser_observed_close.await;
                     return;
                 }
                 buffer.drain(..wire_len);
@@ -265,7 +270,8 @@ async fn agent_stream_loss_logs_its_safe_close_reason_and_reaches_the_browser() 
     );
     assert_eq!(fields["agent_close_code"], 1013);
     assert_eq!(fields["agent_close_reason"], "remote stream unavailable");
-    agent.abort();
+    close_observed.send(()).unwrap();
+    agent.await.unwrap();
     server.abort();
 }
 

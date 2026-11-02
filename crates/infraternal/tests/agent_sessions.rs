@@ -7,7 +7,6 @@ use std::{
     fs,
     io::Write,
     os::unix::ffi::OsStrExt,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -52,6 +51,26 @@ impl Drop for CleanupMany {
 // Share the native fixture owner so fallback directories are also removed on panic.
 #[path = "../../infraternal-shim/tests/unit/fixture_state.rs"]
 mod fixture_state;
+
+fn write_wrapper(path: &Path, script: &str) {
+    // Concurrent shim launches can inherit a writable descriptor until exec.
+    // Exit a private writer process before executing this fixture, so a sibling
+    // test cannot keep the script writable and make exec fail with ETXTBSY.
+    let output = std::process::Command::new("python3")
+        .args([
+            "-c",
+            "import pathlib, sys; p = pathlib.Path(sys.argv[1]); p.write_text(sys.argv[2]); p.chmod(0o700)",
+        ])
+        .arg(path)
+        .arg(script)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "fixture wrapper write failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 async fn until(peer: &mut UnixStream, cursor: &mut u64, marker: &[u8]) {
     let mut reader = Reader::default();
@@ -111,8 +130,7 @@ async fn detached_shim_is_discovered_and_replays_from_the_last_observed_offset()
         quote(&profile),
         quote(Path::new(env!("CARGO_BIN_EXE_infraternal")))
     );
-    fs::write(&wrapper, script).unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+    write_wrapper(&wrapper, &script);
     let mut session = launch(
         &wrapper,
         &directory,
@@ -210,8 +228,7 @@ async fn restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill() 
         quote(&profile),
         quote(Path::new(env!("CARGO_BIN_EXE_infraternal")))
     );
-    fs::write(&wrapper, script).unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+    write_wrapper(&wrapper, &script);
 
     let mut old_agent_sessions = Vec::with_capacity(16);
     let mut live_ids = Vec::with_capacity(16);

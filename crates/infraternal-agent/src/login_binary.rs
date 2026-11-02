@@ -415,8 +415,25 @@ mod tests {
         }
         fn source(&self) -> PathBuf {
             let source = self.0.join("source");
-            fs::copy(std::env::current_exe().unwrap(), &source).unwrap();
-            fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+            // Another test can fork while a copy is writable and retain that
+            // descriptor until exec, even after this thread closes its copy.
+            // Create executable fixtures in a private process descriptor table.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "login_binary::tests::running_image_fixture",
+                    "--ignored",
+                ])
+                .env("INFRATERNAL_IMAGE_FIXTURE", "1")
+                .env("INFRATERNAL_IMAGE_COPY_TO", &source)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "fixture image copy failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             source
         }
     }
@@ -658,6 +675,11 @@ mod tests {
             std::env::var("INFRATERNAL_IMAGE_FIXTURE").as_deref(),
             Ok("1")
         );
+        if let Some(source) = std::env::var_os("INFRATERNAL_IMAGE_COPY_TO") {
+            fs::copy(std::env::current_exe().unwrap(), &source).unwrap();
+            fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
         #[cfg(target_os = "linux")]
         if let Some(root) = std::env::var_os("INFRATERNAL_IMAGE_PUBLISH_ROOT") {
             fs::remove_file(std::env::current_exe().unwrap()).unwrap();
