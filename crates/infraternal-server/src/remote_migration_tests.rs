@@ -118,7 +118,7 @@ async fn remote_identity_and_sessions_upgrade_dev_v11_and_remain_idempotent() {
 }
 
 #[tokio::test]
-async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_order() {
+async fn release_migration_history_is_complete_for_production_and_fresh_schemas() {
     let migrations = sqlx::migrate!("./migrations");
     let expected = release_history(&migrations);
 
