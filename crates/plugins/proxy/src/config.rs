@@ -110,20 +110,16 @@ pub const fn select_listener_ports(
     plain_http_port_available: bool,
     tls_port_available: bool,
 ) -> ListenerPorts {
-    if rootful && plain_http_port_available && tls_port_available {
-        ListenerPorts {
-            http: 80,
-            https: 443,
-            mesh_http: None,
-            mesh_https: None,
-        }
+    let pair = if rootful && plain_http_port_available && tls_port_available {
+        infraternal_mesh::proxy_ports::CONVENTIONAL_LISTENER_PAIR
     } else {
-        ListenerPorts {
-            http: 10080,
-            https: 10443,
-            mesh_http: None,
-            mesh_https: None,
-        }
+        infraternal_mesh::proxy_ports::UNPRIVILEGED_LISTENER_PAIR
+    };
+    ListenerPorts {
+        http: pair.http,
+        https: pair.https,
+        mesh_http: None,
+        mesh_https: None,
     }
 }
 
@@ -152,13 +148,12 @@ pub fn detect_mixed_listener_ports(
 ) -> io::Result<ListenerPorts> {
     let mut ports = detect_listener_ports(rootful, mesh_address, true);
     let available = |port| TcpListener::bind(SocketAddr::new(mesh_address, port)).is_ok();
-    for offset in 0..=255_u16 {
-        let Some(http) = 10_080_u16.checked_add(offset) else {
-            break;
-        };
-        let Some(https) = 10_443_u16.checked_add(offset) else {
-            break;
-        };
+    for pair in infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS
+        .iter()
+        .copied()
+    {
+        let http = pair.http;
+        let https = pair.https;
         if [ports.http, ports.https].contains(&http)
             || [ports.http, ports.https].contains(&https)
             || !available(http)

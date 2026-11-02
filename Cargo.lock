@@ -2124,6 +2124,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "flate2",
+ "infraternal-mesh",
  "infraternal-plugin-api",
  "infraternal-shim",
  "nix 0.30.1",

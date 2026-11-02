@@ -198,6 +198,28 @@ fn mixed_listener_selection_keeps_public_and_mesh_ports_disjoint() {
 }
 
 #[test]
+fn every_mixed_listener_port_is_allowed_by_the_mesh_firewall_backends() {
+    let allowed_ranges = &infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES;
+    let pairs = std::iter::once(infraternal_mesh::proxy_ports::CONVENTIONAL_LISTENER_PAIR)
+        .chain(std::iter::once(
+            infraternal_mesh::proxy_ports::UNPRIVILEGED_LISTENER_PAIR,
+        ))
+        .chain(
+            infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS
+                .iter()
+                .copied(),
+        );
+    for pair in pairs {
+        for port in [pair.http, pair.https] {
+            assert!(
+                allowed_ranges.iter().any(|range| range.contains(port)),
+                "mesh ingress firewall must allow proxy port {port}"
+            );
+        }
+    }
+}
+
+#[test]
 fn explicit_dns_resolver_is_rendered_for_staging_acme_validation() {
     let mut config = static_config(false);
     config.dns_challenge.resolvers = vec!["127.0.0.1:8053".parse().expect("Pebble DNS resolver")];

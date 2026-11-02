@@ -18,7 +18,6 @@ const GUARD: &str = "IFM_GUARD";
 const DELIVERY: &str = "IFM_DELIVERY";
 // Only peers with an inbound TCP grant can reach an entry point. Traefik's exact-host
 // middleware then checks the source against that route's original backend-port grant.
-const PROXY_INGRESS_PORTS: [u16; 4] = [80, 443, 10_080, 10_443];
 /// Restore is atomic per table, so adoption records interrupted tables separately.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Ownership {
@@ -331,6 +330,7 @@ fn render_with_aliases(
     // Compact contiguous equal grants. An open 1,000-node allocation becomes
     // one range match per direction/family, without granting a gap in membership.
     let mut groups = Groups::new();
+    let mut proxy_sources = std::collections::BTreeSet::new();
     for peer in connections.peers.values() {
         let address = if ipv6 {
             u128::from(peer.peer.addresses.ipv6)
@@ -350,23 +350,7 @@ fn render_with_aliases(
                             .insert(address);
                     }
                     if direction == 0 && ports.iter().any(|port| port.protocol == Protocol::Tcp) {
-                        for proxy_port in PROXY_INGRESS_PORTS {
-                            let already_granted = ports.iter().any(|port| {
-                                port.protocol == Protocol::Tcp && port.number == proxy_port
-                            });
-                            if !already_granted {
-                                groups
-                                    .entry((
-                                        direction,
-                                        Some(crate::policy::rules::Port {
-                                            protocol: Protocol::Tcp,
-                                            number: proxy_port,
-                                        }),
-                                    ))
-                                    .or_default()
-                                    .insert(address);
-                            }
-                        }
+                        proxy_sources.insert(address);
                     }
                 }
                 TrafficPolicy::None => {}
@@ -436,6 +420,26 @@ fn render_with_aliases(
                     }
                 });
                 let _ = writeln!(script, "-A {chain} {selector}{service} -j ACCEPT");
+            }
+        }
+        for (start, end) in address_ranges(proxy_sources) {
+            let display = |address| display_address(address, ipv6);
+            let selector = if start == end {
+                format!("-s {}", display(start))
+            } else {
+                format!("-m iprange --src-range {}-{}", display(start), display(end))
+            };
+            for range in infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES {
+                let destination_ports = if range.start == range.end {
+                    range.start.to_string()
+                } else {
+                    format!("{}:{}", range.start, range.end)
+                };
+                let _ = writeln!(
+                    script,
+                    "-A {} {selector} -p tcp -m conntrack --ctorigdstport {destination_ports} -j ACCEPT",
+                    CHAINS[0]
+                );
             }
         }
     }
@@ -656,12 +660,17 @@ mod tests {
             ]));
 
         let rules = render(&config, false, Ownership::default());
-        for port in [80, 443, 10_080, 10_443] {
+        for range in infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES {
+            let expected_port = if range.start == range.end {
+                range.start.to_string()
+            } else {
+                format!("{}:{}", range.start, range.end)
+            };
             assert!(rules.contains(&format!(
-                "-A IFM_IN -s 10.254.0.2 -p tcp -m conntrack --ctorigdstport {port} -j ACCEPT"
+                "-A IFM_IN -s 10.254.0.2 -p tcp -m conntrack --ctorigdstport {expected_port} -j ACCEPT"
             )));
             assert!(!rules.contains(&format!(
-                "-A IFM_IN -s 10.254.0.3 -p tcp -m conntrack --ctorigdstport {port} -j ACCEPT"
+                "-A IFM_IN -s 10.254.0.3 -p tcp -m conntrack --ctorigdstport {expected_port} -j ACCEPT"
             )));
         }
     }

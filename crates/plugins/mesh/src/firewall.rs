@@ -13,7 +13,6 @@ const NFT: &str = "/usr/sbin/nft";
 const TABLE: &str = "infraternal_mesh";
 // Only peers with an inbound TCP grant can reach an entry point. Traefik's exact-host
 // middleware then checks the source against that route's original backend-port grant.
-const PROXY_INGRESS_PORTS: [u16; 4] = [80, 443, 10_080, 10_443];
 
 // These plans only remove previously validated permissions. Changed identity,
 // routes, bindings or concrete rules require the ordinary two-family preflight.
@@ -327,6 +326,21 @@ fn render_with_aliases(
         script,
         "table inet {TABLE} {{\n comment \"infraternal.mesh.v1\";"
     );
+    let proxy_ingress_port_ranges = infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
+        .iter()
+        .map(|range| {
+            if range.start == range.end {
+                range.start.to_string()
+            } else {
+                format!("{}-{}", range.start, range.end)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(
+        script,
+        " set proxy_ingress_ports {{ type inet_service; flags interval; elements = {{ {proxy_ingress_port_ranges} }}; }}"
+    );
     for (direction, inbound) in [("incoming", true), ("outgoing", false)] {
         for (family, ipv6) in [("ipv4_addr", false), ("ipv6_addr", true)] {
             let suffix = if ipv6 { "6" } else { "4" };
@@ -355,18 +369,6 @@ fn render_with_aliases(
                                     entries.push(format!("{address} . {}", port.number));
                                 }
                             }
-                            if inbound
-                                && protocol == Some(Protocol::Tcp)
-                                && ports.iter().any(|port| port.protocol == Protocol::Tcp)
-                            {
-                                for proxy_port in PROXY_INGRESS_PORTS {
-                                    if !ports.iter().any(|port| {
-                                        port.protocol == Protocol::Tcp && port.number == proxy_port
-                                    }) {
-                                        entries.push(format!("{address} . {proxy_port}"));
-                                    }
-                                }
-                            }
                         }
                         _ => {}
                     }
@@ -384,6 +386,32 @@ fn render_with_aliases(
                 let _ = writeln!(
                     script,
                     " set {direction}{suffix}_{name} {{ type {ty};{elements} }}"
+                );
+            }
+            if inbound {
+                let mut proxy_sources = Vec::new();
+                for peer in connections.peers.values() {
+                    if matches!(
+                        &peer.inbound,
+                        TrafficPolicy::Ports(ports)
+                            if ports.iter().any(|port| port.protocol == Protocol::Tcp)
+                    ) {
+                        let address = if ipv6 {
+                            peer.peer.addresses.ipv6.to_string()
+                        } else {
+                            peer.peer.addresses.ipv4.to_string()
+                        };
+                        proxy_sources.push(address);
+                    }
+                }
+                let elements = if proxy_sources.is_empty() {
+                    String::new()
+                } else {
+                    format!(" elements = {{ {} }};", proxy_sources.join(", "))
+                };
+                let _ = writeln!(
+                    script,
+                    " set incoming{suffix}_proxy_sources {{ type {family};{elements} }}"
                 );
             }
         }
@@ -404,6 +432,12 @@ fn render_with_aliases(
             let field = if inbound { "saddr" } else { "daddr" };
             for (family, suffix) in [("ip", "4"), ("ip6", "6")] {
                 let _ = writeln!(script, "  {family} {field} @{direction}{suffix}_all accept");
+                if inbound {
+                    let _ = writeln!(
+                        script,
+                        "  ct original protocol tcp ct original {family} saddr @incoming{suffix}_proxy_sources ct original proto-dst @proxy_ingress_ports accept"
+                    );
+                }
                 for protocol in ["tcp", "udp"] {
                     // Input filtering runs after destination NAT. Keep the mesh
                     // grant tied to the service the peer addressed, not a
@@ -580,7 +614,11 @@ mod tests {
     fn rule_count_is_independent_of_membership_and_policy_data_is_in_sets() {
         let mut config = config();
         let rules = render(&config, false);
-        assert_eq!(rules.matches(" accept").count(), 40);
+        assert_eq!(
+            rules.matches(" accept").count(),
+            42,
+            "the fixed rule set includes proxy listener accepts for IPv4 and IPv6"
+        );
         assert_eq!(rules.matches(" drop").count(), 14);
         assert_eq!(
             rules
@@ -645,11 +683,13 @@ mod tests {
             ]));
 
         let rules = render(&config, false);
-        for port in [80, 443, 10_080, 10_443] {
-            assert!(rules.contains(&format!("10.254.0.2 . {port}")));
-            assert!(!rules.contains(&format!("10.254.0.3 . {port}")));
-        }
-        assert!(rules.contains("ct original protocol tcp ct original ip saddr . ct original proto-dst @incoming4_tcp accept"));
+        assert!(rules.contains(
+            "set proxy_ingress_ports { type inet_service; flags interval; elements = { 80, 443, 10080-10335, 10443-10698 }; }"
+        ));
+        assert!(rules.contains(
+            "set incoming4_proxy_sources { type ipv4_addr; elements = { 10.254.0.2 }; }"
+        ));
+        assert!(rules.contains("ct original protocol tcp ct original ip saddr @incoming4_proxy_sources ct original proto-dst @proxy_ingress_ports accept"));
     }
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
