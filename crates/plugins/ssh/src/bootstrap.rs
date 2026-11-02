@@ -103,6 +103,10 @@ pub trait Backend: Send + Sync {
         target: &'a Target,
         credential: Option<&'a str>,
     ) -> Operation<'a, Resolved>;
+    /// Public origin used for target-side HTTPS preflight before enrollment.
+    fn enrollment_origin(&self) -> Option<String> {
+        None
+    }
     fn invitation<'a>(
         &'a self,
         authority: &'a Authority,
@@ -149,6 +153,19 @@ pub trait Backend: Send + Sync {
             register(join.host)?;
             Ok(join)
         })
+    }
+    /// Issue an invitation only after the host key was prepared over this SSH session.
+    fn invitation_registered_with_key<'a>(
+        &'a self,
+        _authority: &'a Authority,
+        _target: &'a Target,
+        _check: &'a Check,
+        _lookup: Option<String>,
+        _host: uuid::Uuid,
+        _key_digest: [u8; 32],
+        _register: &'a mut (dyn FnMut(uuid::Uuid) -> Result<(), Failure> + Send),
+    ) -> Operation<'a, JoinMaterial> {
+        Box::pin(async { Err(Failure::install("SSH host-key proof is unavailable.")) })
     }
     fn connected_facts<'a>(
         &'a self,
@@ -987,6 +1004,8 @@ impl Bootstrap {
                 .open(resolved.destination, resolved.credentials, resolved.mesh)
                 .await
                 .map_err(|error| error.at(InstallStep::Connect))?;
+            let server_origin = self.backend.enrollment_origin();
+            let early_candidate = self.backend.early_terminal() && server_origin.is_none();
             let owns_cleanup = lock(&batch.states)
                 .get(&target.id)
                 .is_some_and(|state| state.cleanup.is_some());
@@ -1005,7 +1024,7 @@ impl Bootstrap {
             let mut refreshed = false;
             let link_started = Instant::now();
             let (output, checked) = loop {
-                let result = if self.backend.early_terminal() {
+                let result = if early_candidate {
                     session.check_stream(&script).await
                 } else {
                     session
@@ -1033,7 +1052,7 @@ impl Bootstrap {
             let link_round_trip = link_started.elapsed();
             // Automatic sign-in selects its authenticated adapter during the
             // read-only check; query bridge support after that selection.
-            let early = self.backend.early_terminal() && session.session_bridge();
+            let early = early_candidate && session.session_bridge();
             // Preserve method evidence even if the authenticated host is unsupported.
             // Public metadata only; no provider or private material enters replay state.
             if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
@@ -1080,33 +1099,79 @@ impl Bootstrap {
                 )
                 .await?;
             }
-            // A cold-locked CA or unsupported #78 runtime must fail here, before upload.
+            // Public HTTPS must be reachable and the host key prepared before the
+            // backend creates the one-use invitation. The staged transaction remains
+            // rollback-owned if preflight or invitation issuance fails.
+            let mut staged_payload = None;
+            let key_binding = if let Some(origin) = server_origin.as_deref() {
+                let (session_binary, full_binary) = self
+                    .payload(batch, target, attempt, started, check.architecture, false)
+                    .await?;
+                let binary = full_binary
+                    .clone()
+                    .unwrap_or_else(|| session_binary.clone());
+                let host = uuid::Uuid::new_v4();
+                resources.installation = Some(Installation::new_pending(
+                    session.clone(),
+                    target,
+                    host,
+                )?);
+                let transaction = resources
+                    .installation
+                    .as_ref()
+                    .ok_or_else(|| Failure::install("The installation transaction is unavailable."))?;
+                let digest = transaction.prepare_join_key(&binary, origin).await?;
+                staged_payload = Some((session_binary, full_binary));
+                Some((host, digest))
+            } else {
+                None
+            };
             // Durable publication can outlive a cancelled acknowledgement. Bind
             // cleanup ownership before the backend can enqueue its commit.
             let mut register = |host| {
                 resources.host = Some(host);
                 Ok(())
             };
-            let join = self
-                .backend
-                .invitation_registered(
-                    &batch.authority,
-                    target,
-                    &check,
-                    session.trust_lookup(),
-                    &mut register,
-                )
-                .await?;
+            let join = if let Some((host, digest)) = key_binding {
+                self.backend
+                    .invitation_registered_with_key(
+                        &batch.authority,
+                        target,
+                        &check,
+                        session.trust_lookup(),
+                        host,
+                        digest,
+                        &mut register,
+                    )
+                    .await?
+            } else {
+                self.backend
+                    .invitation_registered(
+                        &batch.authority,
+                        target,
+                        &check,
+                        session.trust_lookup(),
+                        &mut register,
+                    )
+                    .await?
+            };
+            let key_prepared = server_origin.is_some();
             resources.host = Some(join.host);
             self.backend
                 .observe_link(&batch.authority, join.host, link_round_trip);
             if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
                 metadata.host_id = Some(join.host);
             }
-            let (session_binary, mut full_binary) = self
-                .payload(batch, target, attempt, started, check.architecture, early)
-                .await?;
-            resources.installation = Some(Installation::new(session.clone(), target, &join)?);
+            let (session_binary, mut full_binary) = match staged_payload {
+                Some(payload) => payload,
+                None => {
+                    self.payload(batch, target, attempt, started, check.architecture, early)
+                        .await?
+                }
+            };
+            if resources.installation.is_none() {
+                resources.installation = Some(Installation::new(session.clone(), target, &join)?);
+            }
             let transaction = resources
                 .installation
                 .as_ref()
@@ -1195,6 +1260,8 @@ impl Bootstrap {
                             }
                         } => result,
                     }
+                } else if key_prepared {
+                    transaction.setup(&join).await
                 } else {
                     transaction.stage_and_setup(&session_binary, &join).await
                 }

@@ -28,8 +28,9 @@ pub(super) async fn enrolled_at_half_life(
         .sign_host(host, &csr, now - 302_401)
         .unwrap();
     let store = crate::enrollment::EnrollmentStore::new(fixture.pool.clone());
+    let key_digest = openssl::sha::sha256(&key.raw_public_key().unwrap());
     let token = store
-        .issue("owner", host, crate::enrollment::Mode::Rootless, now)
+        .issue("owner", host, crate::enrollment::Mode::Rootless, now, &key_digest)
         .await
         .unwrap();
     store

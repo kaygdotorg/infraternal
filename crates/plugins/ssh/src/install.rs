@@ -378,16 +378,73 @@ impl Installation {
         })
     }
 
+    /// Create the journal owner before the host has a server-issued invitation.
+    /// # Errors
+    /// Refuses invalid targets or privilege consent before any remote write.
+    pub fn new_pending(
+        session: Arc<dyn SshSession>,
+        target: &Target,
+        host: uuid::Uuid,
+    ) -> Result<Self, Failure> {
+        target.validate()?;
+        Ok(Self {
+            session,
+            host,
+            transaction: uuid::Uuid::new_v4(),
+            mode: target.mode,
+            images: Arc::default(),
+        })
+    }
+
     /// Upload with a per-attempt lock; the caller retains this handle even on failure.
     /// # Errors
     /// Reports binary, ownership, concurrent install or upload failure.
     pub async fn stage(&self, binary: &Path) -> Result<(), Failure> {
-        let payload = self.prepare_payload(binary).await?;
+        let payload = self.prepare_payload(binary, true).await?;
         self.session
             .run(&self.script(&payload.body), payload.input())
             .await
             .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
         Ok(())
+    }
+
+    /// Run the staged infraternal agent's HTTPS preflight and prepare its private key.
+    /// The returned digest is safe to bind to the invitation issued after this SSH proof.
+    /// # Errors
+    /// Names DNS, TCP, TLS and proxy-upgrade failures without returning private key material.
+    pub async fn prepare_join_key(
+        &self,
+        binary: &Path,
+        origin: &str,
+    ) -> Result<[u8; 32], Failure> {
+        let payload = self.prepare_payload(binary, false).await?;
+        self.session
+            .run(&self.script(&payload.body), payload.input())
+            .await
+            .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
+        let body = format!(
+            r#"stage="$base/.bootstrap-lock"
+[ -f "$stage/kind" ] && [ ! -L "$stage" ] || exit 71
+[ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
+retire_setup_lease
+if [ -e "$base/state" ] || [ -L "$base/state" ]; then
+    [ -d "$base/state" ] && [ ! -L "$base/state" ] && [ -O "$base/state" ] && [ "$(stat -c '%a' "$base/state")" = 700 ] || exit 71
+    cp -a "$base/state" "$stage/state"
+else
+    mkdir -m 700 "$stage/state"
+fi
+[ -d "$stage/state" ] && [ ! -L "$stage/state" ] && [ -O "$stage/state" ] && [ "$(stat -c '%a' "$stage/state")" = 700 ] || exit 71
+"$stage/payload" agent --data "$stage/state" prepare-join-key {}
+start_setup_lease
+"#,
+            shell_quote(origin)
+        );
+        let output = self
+            .session
+            .run(&self.script(&body), Input::Empty)
+            .await
+            .map_err(|error| error.at(InstallStep::Connect).in_mode(self.mode))?;
+        parse_join_key_receipt(&output.stdout).map_err(|error| error.in_mode(self.mode))
     }
 
     /// Frame a public upload before the private invitation in one setup channel.
@@ -689,7 +746,11 @@ impl Installation {
             .ok_or_else(|| invalid_setup().at(InstallStep::Upload))
     }
 
-    async fn prepare_payload(&self, binary: &Path) -> Result<PreparedPayload, Failure> {
+    async fn prepare_payload(
+        &self,
+        binary: &Path,
+        runtime_handoff: bool,
+    ) -> Result<PreparedPayload, Failure> {
         let digest = crate::payload::digest(binary)
             .await
             .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
@@ -732,8 +793,9 @@ impl Installation {
             "cat > \"$stage/payload\""
         };
         let publish = if reuse { "" } else { PUBLISH_PAYLOAD_CACHE };
+        let runtime_handoff = if runtime_handoff { RUNTIME_HANDOFF } else { "" };
         let body = format!(
-            "{PAYLOAD_CACHE}\n{STAGE_TRANSACTION}\n{transfer}\nprintf '%s  %s\\n' {} \"$stage/payload\" | sha256sum -c - >/dev/null\nchmod 700 \"$stage/payload\"\n{publish}\n{RUNTIME_HANDOFF}",
+            "{PAYLOAD_CACHE}\n{STAGE_TRANSACTION}\n{transfer}\nprintf '%s  %s\\n' {} \"$stage/payload\" | sha256sum -c - >/dev/null\nchmod 700 \"$stage/payload\"\n{publish}\n{runtime_handoff}",
             shell_quote(&digest)
         );
         Ok(PreparedPayload {
@@ -1602,6 +1664,42 @@ pub fn parse_setup(bytes: &[u8]) -> Result<bool, Failure> {
 /// Rejects noncanonical output and preserves the exact named failure/status.
 pub fn parse_transfer_setup(bytes: &[u8]) -> Result<bool, Failure> {
     parse_steps(bytes, true)
+}
+
+fn parse_join_key_receipt(bytes: &[u8]) -> Result<[u8; 32], Failure> {
+    let text = std::str::from_utf8(bytes).map_err(|_| invalid_setup())?;
+    if let Some(digest) = text
+        .strip_prefix("KEY-DIGEST ")
+        .and_then(|value| value.strip_suffix('\n'))
+        && digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        let mut decoded = [0u8; 32];
+        for (index, pair) in digest.as_bytes().chunks_exact(2).enumerate() {
+            decoded[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+        }
+        return Ok(decoded);
+    }
+    let message = match text {
+        "PREPARE-REFUSED DNS\n" => "The infraternal agent on this host cannot resolve the server's HTTPS origin. Check DNS and allow outbound TCP 443.",
+        "PREPARE-REFUSED CONNECT\n" => "The infraternal agent on this host cannot reach the server over HTTPS. Allow outbound TCP 443 to the server's public origin.",
+        "PREPARE-REFUSED TLS\n" => "The infraternal agent on this host cannot verify the server's public HTTPS certificate. Check the public certificate chain and server name.",
+        "PREPARE-REFUSED UPGRADE\n" => "The infraternal agent on this host reached the server over HTTPS, but the WebSocket upgrade failed. Allow WebSocket upgrades through the HTTPS proxy.",
+        "PREPARE-REFUSED CHALLENGE\n" => "The infraternal agent reached the server over HTTPS, but the server did not return a valid challenge. Deploy a compatible server build.",
+        "PREPARE-REFUSED REFUSED\n" => "The infraternal agent could not prepare its host key. Check its private state directory and try again.",
+        _ => return Err(invalid_setup()),
+    };
+    Err(Failure::install(message).at(InstallStep::Connect))
+}
+
+fn hex_nibble(byte: u8) -> Result<u8, Failure> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        _ => Err(invalid_setup()),
+    }
 }
 
 fn parse_steps(bytes: &[u8], upload: bool) -> Result<bool, Failure> {

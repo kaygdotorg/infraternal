@@ -113,7 +113,18 @@ async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() 
         server_name: "localhost".into(),
     };
     let app = router(auth, pool.clone(), source.clone(), endpoint);
-    let invitation = json!({"host_id":host,"mode":"rootless","execution_uid":1002});
+    let key = PKey::generate_ed25519().unwrap();
+    let key_digest = openssl::sha::sha256(&key.raw_public_key().unwrap());
+    let unbound = request(
+        &app,
+        "/remote/invitations",
+        json!({"host_id":host,"mode":"rootless","execution_uid":1002}),
+        Some(&token),
+        "https://auth.example.test",
+    )
+    .await;
+    assert_eq!(unbound.status(), StatusCode::BAD_REQUEST);
+    let invitation = json!({"host_id":host,"mode":"rootless","execution_uid":1002,"expected_key_digest":key_digest});
     assert_invitation_admission(&app, &invitation, &token).await;
     let response = request(
         &app,
@@ -146,7 +157,6 @@ async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() 
         .status(),
         StatusCode::FORBIDDEN
     );
-    let key = PKey::generate_ed25519().unwrap();
     let join = json!({"host_id":host,"mode":"rootless","token":joined.token,"csr_der":B64.encode(csr(&key))});
     assert_eq!(
         request(&app, "/remote/join", join.clone(), None, "")
@@ -220,7 +230,7 @@ async fn invitation_publication_rechecks_session_after_host_creation() {
     let response = request(
         &app,
         "/remote/invitations",
-        json!({"host_id":host,"mode":"rootless","execution_uid":1002}),
+        json!({"host_id":host,"mode":"rootless","execution_uid":1002,"expected_key_digest":vec![7u8;32]}),
         Some(&token),
         "https://auth.example.test",
     )

@@ -5,10 +5,11 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use futures_util::{SinkExt, StreamExt};
 use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
 use openssl::{
+    pkey::PKey,
     ssl::{SslConnector, SslMethod, SslVerifyMode},
     x509::{X509, store::X509StoreBuilder},
 };
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::{
     io::Write,
     process::{Child, Command, Stdio},
@@ -104,6 +105,7 @@ async fn invitation(
     origin: &str,
     cookie: &str,
     host: uuid::Uuid,
+    expected_key_digest: [u8; 32],
 ) -> Vec<u8> {
     invitation_for_uid(
         address,
@@ -112,6 +114,7 @@ async fn invitation(
         cookie,
         host,
         nix::unistd::Uid::effective().as_raw(),
+        expected_key_digest,
     )
     .await
 }
@@ -123,6 +126,7 @@ async fn invitation_for_uid(
     cookie: &str,
     host: uuid::Uuid,
     uid: u32,
+    expected_key_digest: [u8; 32],
 ) -> Vec<u8> {
     use http_body_util::BodyExt;
     let stream = tls(address, root).await;
@@ -132,7 +136,7 @@ async fn invitation_for_uid(
             .unwrap();
     let task = tokio::spawn(connection);
     let body = serde_json::to_vec(
-        &serde_json::json!({"host_id":host,"mode":"rootless","execution_uid":uid}),
+        &serde_json::json!({"host_id":host,"mode":"rootless","execution_uid":uid,"expected_key_digest":expected_key_digest}),
     )
     .unwrap();
     let request = hyper::Request::builder()
@@ -154,6 +158,28 @@ async fn invitation_for_uid(
         .to_vec();
     task.abort();
     bytes
+}
+
+/// Model the verified-SSH key preparation before issuing the integration invitation.
+fn prepare_pending_join_key(data: &Path) -> [u8; 32] {
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(data)
+        .unwrap();
+    let key = PKey::generate_ed25519().unwrap();
+    let mut private = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(data.join("join-key.pk8"))
+        .unwrap();
+    private
+        .write_all(&key.private_key_to_pkcs8().unwrap())
+        .unwrap();
+    private.sync_all().unwrap();
+    std::fs::File::open(data).unwrap().sync_all().unwrap();
+    let public = key.raw_public_key().unwrap();
+    openssl::sha::sha256(&public)
 }
 
 async fn send(browser: &mut Browser, stream: u32, frame: &Frame<'_>) {
@@ -777,6 +803,29 @@ async fn remote_cli_enrollment_and_browser_terminal_at(
 ) {
     let directory = Directory::new();
     let mut fixture = fixture_at(&directory, address, endpoint).await;
+    // Current terminal authorization resolves the account UUID and preferred OS
+    // username. Keep the acceptance fixture shaped like a real passkey user.
+    let owner = uuid::Uuid::new_v4().to_string();
+    let account = nix::unistd::User::from_uid(nix::unistd::Uid::effective())
+        .unwrap()
+        .unwrap()
+        .name;
+    sqlx::query("UPDATE users SET owner=0 WHERE id='owner'")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?,'owner',1,'unused',?,'Owner')")
+        .bind(&owner)
+        .bind(account)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sessions SET user_id=? WHERE token_hash=?")
+        .bind(owner)
+        .bind(crate::auth::hash(&fixture.cookie))
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
     let root = fixture.root.clone();
     let cookie = fixture.cookie.clone();
     let address = fixture.address;
@@ -789,7 +838,17 @@ async fn remote_cli_enrollment_and_browser_terminal_at(
     let owner_marker = directory.0.join(".bootstrap-owner");
     std::fs::write(&owner_marker, format!("{}\n", host.simple())).unwrap();
     std::fs::set_permissions(&owner_marker, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let invitation = invitation(address, &root, &origin, &cookie, host).await;
+    let data = directory.0.join("data");
+    let expected_key_digest = prepare_pending_join_key(&data);
+    let invitation = invitation(
+        address,
+        &root,
+        &origin,
+        &cookie,
+        host,
+        expected_key_digest,
+    )
+    .await;
     let started = Instant::now();
     let mut child = cli(binary, &directory, true, &origin);
     child

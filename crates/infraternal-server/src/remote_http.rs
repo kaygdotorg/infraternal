@@ -64,6 +64,8 @@ pub(crate) struct InvitationRequest {
     pub(crate) host_id: Uuid,
     pub(crate) mode: Mode,
     pub(crate) execution_uid: u32,
+    #[serde(default)]
+    pub(crate) expected_key_digest: Option<[u8; 32]>,
 }
 
 /// SSH and HTTPS share the exact authority checks and transport revocation scope.
@@ -286,6 +288,9 @@ async fn issue_invitation(
     request: InvitationRequest,
     destination: Option<(&str, Option<&str>)>,
 ) -> Result<JoinInvitation, StatusCode> {
+    if request.expected_key_digest.is_none() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let now = now()?;
     let session_hash = crate::auth::hash(cookie);
     let session = api
@@ -329,6 +334,7 @@ async fn issue_invitation(
             request.mode,
             now,
             Some(&session_hash),
+            request.expected_key_digest.as_ref(),
             &mut transaction,
         )
         .await

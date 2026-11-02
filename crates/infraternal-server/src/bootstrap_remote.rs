@@ -210,6 +210,8 @@ impl RemoteBackend {
         target: &'a Target,
         check: &'a Check,
         lookup: Option<String>,
+        host: Uuid,
+        expected_key_digest: [u8; 32],
         register: Option<&'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send)>,
     ) -> Operation<'a, JoinMaterial> {
         Box::pin(async move {
@@ -225,7 +227,6 @@ impl RemoteBackend {
                     "Set up or unlock host connections with an administrator passkey before adding a host.",
                 ));
             }
-            let host = Uuid::new_v4();
             let (mode, uid) = match target.mode {
                 InstallMode::Rootless => (Mode::Rootless, check.uid),
                 InstallMode::Root => (Mode::Rootful, 0),
@@ -297,6 +298,7 @@ impl RemoteBackend {
                         host_id: host,
                         mode,
                         execution_uid: uid,
+                        expected_key_digest: Some(expected_key_digest),
                     },
                     address,
                     lookup.as_deref(),
@@ -356,6 +358,15 @@ impl Backend for RemoteBackend {
         Box::pin(async move {
             self.authorize(authority).await?;
             let uid = self.uid(authority, host)?;
+            let expected_key_digest = self
+                .issuer
+                .store()
+                .host_key_digest(host)
+                .await
+                .map_err(|_| unavailable())?
+                .ok_or_else(|| {
+                    Failure::install("The host's SSH-proved key is unavailable; retry add-host.")
+                })?;
             let mut invitation = self
                 .issuer
                 .reissue(
@@ -368,6 +379,7 @@ impl Backend for RemoteBackend {
                             Mode::Rootless
                         },
                         execution_uid: uid,
+                        expected_key_digest: Some(expected_key_digest),
                     },
                 )
                 .await
@@ -478,6 +490,9 @@ impl Backend for RemoteBackend {
             self.base.resolve(authority, target, credential).await
         })
     }
+    fn enrollment_origin(&self) -> Option<String> {
+        Some(self.issuer.origin().to_owned())
+    }
     fn invitation<'a>(
         &'a self,
         authority: &'a Authority,
@@ -493,7 +508,12 @@ impl Backend for RemoteBackend {
         check: &'a Check,
         lookup: Option<String>,
     ) -> Operation<'a, JoinMaterial> {
-        self.issue_attempt(authority, target, check, lookup, None)
+        let _ = (authority, target, check, lookup);
+        Box::pin(async {
+            Err(Failure::install(
+                "Prepare the infraternal agent's key over SSH before issuing its invitation.",
+            ))
+        })
     }
     fn invitation_registered<'a>(
         &'a self,
@@ -503,7 +523,32 @@ impl Backend for RemoteBackend {
         lookup: Option<String>,
         register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
     ) -> Operation<'a, JoinMaterial> {
-        self.issue_attempt(authority, target, check, lookup, Some(register))
+        let _ = (authority, target, check, lookup, register);
+        Box::pin(async {
+            Err(Failure::install(
+                "Prepare the infraternal agent's key over SSH before issuing its invitation.",
+            ))
+        })
+    }
+    fn invitation_registered_with_key<'a>(
+        &'a self,
+        authority: &'a Authority,
+        target: &'a Target,
+        check: &'a Check,
+        lookup: Option<String>,
+        host: Uuid,
+        key_digest: [u8; 32],
+        register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
+    ) -> Operation<'a, JoinMaterial> {
+        self.issue_attempt(
+            authority,
+            target,
+            check,
+            lookup,
+            host,
+            key_digest,
+            Some(register),
+        )
     }
     fn connected_facts<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, ()> {
         Box::pin(async move {
@@ -1715,6 +1760,9 @@ mod tests {
         }
     }
     impl Backend for PausedInvitation {
+        fn enrollment_origin(&self) -> Option<String> {
+            self.inner.enrollment_origin()
+        }
         fn resolve<'a>(
             &'a self,
             a: &'a Authority,
@@ -1755,6 +1803,33 @@ mod tests {
                 self.pause(
                     self.inner
                         .invitation_registered(a, t, c, lookup, register)
+                        .await?,
+                )
+                .await
+            })
+        }
+        fn invitation_registered_with_key<'a>(
+            &'a self,
+            a: &'a Authority,
+            t: &'a Target,
+            c: &'a Check,
+            lookup: Option<String>,
+            host: Uuid,
+            key_digest: [u8; 32],
+            register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
+        ) -> Operation<'a, JoinMaterial> {
+            Box::pin(async move {
+                self.pause(
+                    self.inner
+                        .invitation_registered_with_key(
+                            a,
+                            t,
+                            c,
+                            lookup,
+                            host,
+                            key_digest,
+                            register,
+                        )
                         .await?,
                 )
                 .await

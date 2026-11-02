@@ -44,6 +44,8 @@ struct StoredIdentity {
     key_der: String,
 }
 
+const PENDING_JOIN_KEY: &str = "join-key.pk8";
+
 /// Why a join step failed, in the classes a caller acts on.
 ///
 /// The class travels inside the `io::Error` as its source, so the command can pick the exit
@@ -130,7 +132,7 @@ pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()>
     let previous = enrolled_key(data, &invitation, uid, &server_name)?;
     let (key, snapshot) = match previous {
         Some((key, snapshot)) => (key, Some(snapshot)),
-        None => (PKey::generate_ed25519().map_err(|_| refused())?, None),
+        None => (prepared_key(data)?, None),
     };
     let mut csr = X509Req::builder().map_err(|_| refused())?;
     csr.set_subject_name(&X509NameBuilder::new().map_err(|_| refused())?.build())
@@ -199,8 +201,109 @@ pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()>
     };
     let bytes = serde_json::to_vec(&stored).map_err(|_| refused())?;
     match snapshot {
-        Some(snapshot) => replace(data, &bytes, Some(&snapshot)),
-        None => publish(data, &bytes),
+        Some(snapshot) => replace(data, &bytes, Some(&snapshot))?,
+        None => publish(data, &bytes)?,
+    }
+    retire_pending_key(data)
+}
+
+/// Verify the public route before creating the private key the SSH setup session will bind.
+pub(crate) async fn prepare_join_key(origin: &str, data: &Path) -> io::Result<[u8; 32]> {
+    preflight(origin, None, true).await?;
+    prepared_key_digest(data)
+}
+
+fn prepared_key_digest(data: &Path) -> io::Result<[u8; 32]> {
+    let key = prepared_key(data)?;
+    let public = key.raw_public_key().map_err(|_| refused())?;
+    Ok(openssl::sha::sha256(&public))
+}
+
+/// Reuse a previously enrolled key or persist one private key for the later CSR.
+fn prepared_key(data: &Path) -> io::Result<PKey<openssl::pkey::Private>> {
+    prepare_directory(data)?;
+    match std::fs::symlink_metadata(data.join("identity.json")) {
+        Ok(_) => {
+            let (stored, _) = load_snapshot(data)?;
+            return PKey::private_key_from_pkcs8(
+                &B64.decode(&stored.key_der).map_err(|_| refused())?,
+            )
+            .map_err(|_| refused());
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(refused()),
+    }
+    if let Some(key) = read_pending_key(data)? {
+        return Ok(key);
+    }
+    let key = PKey::generate_ed25519().map_err(|_| refused())?;
+    if write_pending_key(data, &key)? {
+        Ok(key)
+    } else {
+        read_pending_key(data)?.ok_or_else(refused)
+    }
+}
+
+fn read_pending_key(data: &Path) -> io::Result<Option<PKey<openssl::pkey::Private>>> {
+    use std::{
+        io::Read,
+        os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    };
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(data.join(PENDING_JOIN_KEY))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(refused()),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.len() == 0
+        || metadata.len() > 4096
+    {
+        return Err(refused());
+    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
+    file.take(4097).read_to_end(&mut bytes)?;
+    if bytes.is_empty() || bytes.len() > 4096 {
+        return Err(refused());
+    }
+    PKey::private_key_from_pkcs8(&bytes)
+        .map(Some)
+        .map_err(|_| refused())
+}
+
+fn write_pending_key(data: &Path, key: &PKey<openssl::pkey::Private>) -> io::Result<bool> {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    let bytes = Zeroizing::new(key.private_key_to_pkcs8().map_err(|_| refused())?);
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(data.join(PENDING_JOIN_KEY))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            return Ok(false);
+        }
+        Err(_) => return Err(refused()),
+    };
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    std::fs::File::open(data)?.sync_all()?;
+    Ok(true)
+}
+
+fn retire_pending_key(data: &Path) -> io::Result<()> {
+    match std::fs::remove_file(data.join(PENDING_JOIN_KEY)) {
+        Ok(()) => std::fs::File::open(data)?.sync_all(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(refused()),
     }
 }
 

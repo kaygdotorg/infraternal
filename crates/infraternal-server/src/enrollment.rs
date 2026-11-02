@@ -97,6 +97,42 @@ impl EnrollmentStore {
         host: Uuid,
         mode: Mode,
         now: i64,
+    ) -> Result<Option<[u8; 32]>, EnrollmentError> {
+        if secret.len() != 43 || now < 0 {
+            return Err(EnrollmentError::Denied);
+        }
+        let decoded = URL_SAFE_NO_PAD
+            .decode(secret)
+            .map_err(|_| EnrollmentError::Denied)?;
+        if decoded.len() != 32 || URL_SAFE_NO_PAD.encode(&decoded) != secret {
+            return Err(EnrollmentError::Denied);
+        }
+        let expected: Option<Option<Vec<u8>>> = sqlx::query_scalar(
+            "SELECT t.expected_key_digest FROM remote_join_tokens t JOIN remote_hosts h ON h.id=t.host_id \
+             WHERE t.host_id=? AND t.mode=? AND h.mode=t.mode AND t.digest=? \
+             AND t.consumed_at IS NULL AND t.issued_at<=? AND t.expires_at>? AND h.revoked_at IS NULL",
+        ).bind(host.as_bytes().as_slice()).bind(mode.as_str())
+            .bind(Sha256::digest(secret.as_bytes()).as_slice()).bind(now).bind(now)
+            .fetch_optional(&self.0).await?;
+        match expected {
+            None => Err(EnrollmentError::Denied),
+            Some(None) => Ok(None),
+            Some(Some(bytes)) => bytes
+                .try_into()
+                .map(Some)
+                .map_err(|_| EnrollmentError::Denied),
+        }
+    }
+
+    /// Spend a valid invitation after a definitive refusal without publishing authority.
+    /// # Errors
+    /// Refuses malformed, stale, consumed, replaced or revoked capabilities.
+    pub(crate) async fn consume_refused(
+        &self,
+        secret: &str,
+        host: Uuid,
+        mode: Mode,
+        now: i64,
     ) -> Result<(), EnrollmentError> {
         if secret.len() != 43 || now < 0 {
             return Err(EnrollmentError::Denied);
@@ -107,14 +143,23 @@ impl EnrollmentStore {
         if decoded.len() != 32 || URL_SAFE_NO_PAD.encode(&decoded) != secret {
             return Err(EnrollmentError::Denied);
         }
-        let valid: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM remote_join_tokens t JOIN remote_hosts h ON h.id=t.host_id \
-             WHERE t.host_id=? AND t.mode=? AND h.mode=t.mode AND t.digest=? \
-             AND t.consumed_at IS NULL AND t.issued_at<=? AND t.expires_at>? AND h.revoked_at IS NULL)",
-        ).bind(host.as_bytes().as_slice()).bind(mode.as_str())
-            .bind(Sha256::digest(secret.as_bytes()).as_slice()).bind(now).bind(now)
-            .fetch_one(&self.0).await?;
-        if !valid {
+        let changed = sqlx::query(
+            "UPDATE remote_join_tokens SET consumed_at=? \
+             WHERE host_id=? AND mode=? AND digest=? AND consumed_at IS NULL \
+             AND issued_at<=? AND expires_at>? \
+             AND EXISTS (SELECT 1 FROM remote_hosts h WHERE h.id=remote_join_tokens.host_id \
+             AND h.mode=remote_join_tokens.mode AND h.revoked_at IS NULL)",
+        )
+        .bind(now)
+        .bind(host.as_bytes().as_slice())
+        .bind(mode.as_str())
+        .bind(Sha256::digest(secret.as_bytes()).as_slice())
+        .bind(now)
+        .bind(now)
+        .execute(&self.0)
+        .await?
+        .rows_affected();
+        if changed != 1 {
             return Err(EnrollmentError::Denied);
         }
         Ok(())
@@ -131,8 +176,49 @@ impl EnrollmentStore {
         host: Uuid,
         mode: Mode,
         now: i64,
+        expected_key_digest: &[u8; 32],
     ) -> Result<JoinToken, EnrollmentError> {
-        self.issue_authorized(owner, host, mode, now, None).await
+        self.issue_authorized(
+            owner,
+            host,
+            mode,
+            now,
+            None,
+            Some(expected_key_digest),
+        )
+        .await
+    }
+
+    /// Return the invitation's bound key, falling back to a legacy certificate key.
+    /// A missing value covers pending and pre-upgrade invitations, both of which must fail closed.
+    pub(crate) async fn host_key_digest(
+        &self,
+        host: Uuid,
+    ) -> Result<Option<[u8; 32]>, EnrollmentError> {
+        let stored: Option<Option<Vec<u8>>> = sqlx::query_scalar(
+            "SELECT expected_key_digest FROM remote_join_tokens WHERE host_id=?",
+        )
+        .bind(host.as_bytes().as_slice())
+        .fetch_optional(&self.0)
+        .await?;
+        match stored {
+            Some(Some(bytes)) => bytes
+                .try_into()
+                .map(Some)
+                .map_err(|_| EnrollmentError::Denied),
+            None | Some(None) => {
+                let public_key: Option<Vec<u8>> = sqlx::query_scalar(
+                    "SELECT public_key FROM remote_certificates WHERE host_id=? ORDER BY not_after DESC LIMIT 1",
+                )
+                .bind(host.as_bytes().as_slice())
+                .fetch_optional(&self.0)
+                .await?;
+                public_key
+                    .map(|key| <[u8; 32]>::try_from(key).map_err(|_| EnrollmentError::Denied))
+                    .transpose()
+                    .map(|key| key.map(|public| Sha256::digest(public).into()))
+            }
+        }
     }
 
     async fn issue_authorized(
@@ -142,10 +228,19 @@ impl EnrollmentStore {
         mode: Mode,
         now: i64,
         session_hash: Option<&str>,
+        expected_key_digest: Option<&[u8; 32]>,
     ) -> Result<JoinToken, EnrollmentError> {
         let mut connection = self.0.acquire().await?;
-        self.issue_authorized_in(owner, host, mode, now, session_hash, &mut connection)
-            .await
+        self.issue_authorized_in(
+            owner,
+            host,
+            mode,
+            now,
+            session_hash,
+            expected_key_digest,
+            &mut connection,
+        )
+        .await
     }
 
     /// Issue on the caller's transaction so host metadata and its invitation
@@ -157,6 +252,7 @@ impl EnrollmentStore {
         mode: Mode,
         now: i64,
         session_hash: Option<&str>,
+        expected_key_digest: Option<&[u8; 32]>,
         connection: &mut sqlx::SqliteConnection,
     ) -> Result<JoinToken, EnrollmentError> {
         let expires = now
@@ -168,18 +264,20 @@ impl EnrollmentStore {
         // INSERT SELECT checks authority in the same write statement as replacement;
         // a concurrent revocation cannot race a separate read/check.
         let changed = sqlx::query(
-            "INSERT INTO remote_join_tokens (host_id, mode, digest, issued_at, expires_at) \
-             SELECT id, mode, ?, ?, ? FROM remote_hosts \
+            "INSERT INTO remote_join_tokens (host_id, mode, digest, issued_at, expires_at, expected_key_digest) \
+             SELECT id, mode, ?, ?, ?, ? FROM remote_hosts \
              WHERE id = ? AND owner_id = ? AND mode = ? AND revoked_at IS NULL \
              AND (? IS NULL OR EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
              WHERE s.token_hash=? AND s.user_id=remote_hosts.owner_id AND s.unlocked=1 \
              AND s.expires>unixepoch() AND u.owner=1)) \
              ON CONFLICT(host_id) DO UPDATE SET digest=excluded.digest, \
-             issued_at=excluded.issued_at, expires_at=excluded.expires_at, consumed_at=NULL",
+             issued_at=excluded.issued_at, expires_at=excluded.expires_at, consumed_at=NULL, \
+             expected_key_digest=excluded.expected_key_digest",
         )
         .bind(digest.as_slice())
         .bind(now)
         .bind(expires)
+        .bind(expected_key_digest.map(|value| value.as_slice()))
         .bind(host.as_bytes().as_slice())
         .bind(owner)
         .bind(mode.as_str())
@@ -233,7 +331,8 @@ impl EnrollmentStore {
         // redeem transactions cannot both validate an unconsumed invitation.
         let changed = sqlx::query(
             "UPDATE remote_join_tokens SET consumed_at = ? \
-             WHERE host_id = ? AND mode = ? AND digest = ? AND consumed_at IS NULL \
+             WHERE host_id = ? AND mode = ? AND digest = ? AND expected_key_digest = ? \
+             AND consumed_at IS NULL \
              AND issued_at <= ? AND expires_at > ? \
              AND EXISTS (SELECT 1 FROM remote_hosts h WHERE h.id = host_id \
              AND h.mode = remote_join_tokens.mode AND h.revoked_at IS NULL)",
@@ -242,6 +341,7 @@ impl EnrollmentStore {
         .bind(host.as_bytes().as_slice())
         .bind(mode.as_str())
         .bind(digest.as_slice())
+        .bind(Sha256::digest(certificate.public_key).as_slice())
         .bind(now)
         .bind(now)
         .execute(&mut *transaction)

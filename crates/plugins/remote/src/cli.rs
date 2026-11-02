@@ -112,6 +112,26 @@ pub fn agent_actions() -> Vec<ActionDefinition> {
             JsonSchema::empty_object(),
             CliHandler::RemoteAgent,
         ),
+        ActionDefinition::new(
+            ["agent", "prepare-join-key"],
+            "Prepare a private host key for authenticated setup.",
+            "Internal command used by the server during verified SSH setup.",
+            ["Check the HTTPS origin before creating or returning the host key digest."],
+            JsonSchema::object(
+                [("origin".to_owned(), JsonSchema::string("Public HTTPS origin."))],
+                ["origin".to_owned()],
+            ),
+            JsonSchema::command_result(),
+            ActionContract::new(
+                ActionTarget::Global,
+                ActionEffect::Write,
+                "agent.prepare-join-key",
+                DryRun::Unsupported,
+            ),
+        )
+        .with_cli_handler(CliHandler::RemoteAgent)
+        .with_cli_positionals(["origin"])
+        .hidden(),
     ]
 }
 

@@ -5,6 +5,8 @@ use crate::{
     csr::ValidatedCsr,
     enrollment::{EnrollmentStore, Mode},
 };
+use openssl::memcmp;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -42,11 +44,27 @@ impl<S: CaKeySource + ?Sized + 'static> RemoteEnrollment<S> {
         csr_der: &[u8],
         now: i64,
     ) -> Result<SignedCertificate, RemoteEnrollmentError> {
-        self.store
+        let expected_key_digest = self
+            .store
             .preflight(token, host, mode, now)
             .await
             .map_err(|_| RemoteEnrollmentError)?;
         let csr = ValidatedCsr::parse(csr_der).map_err(|_| RemoteEnrollmentError)?;
+        let public_key = csr
+            .key()
+            .raw_public_key()
+            .map_err(|_| RemoteEnrollmentError)?;
+        let actual_key_digest = Sha256::digest(public_key);
+        let matches = expected_key_digest
+            .as_ref()
+            .is_some_and(|expected| memcmp::eq(expected, actual_key_digest.as_slice()));
+        if !matches {
+            let _ = self
+                .store
+                .consume_refused(token, host, mode, now)
+                .await;
+            return Err(RemoteEnrollmentError);
+        }
         #[cfg(test)]
         let certificate_started = std::time::Instant::now();
         #[cfg(test)]
@@ -126,12 +144,17 @@ mod tests {
     use super::*;
     use openssl::{
         hash::MessageDigest,
-        pkey::PKey,
+        pkey::{PKey, Private},
         x509::{X509NameBuilder, X509Req},
     };
+    use sha2::{Digest, Sha256};
 
     fn csr() -> Vec<u8> {
         let key = PKey::generate_ed25519().unwrap();
+        csr_for(&key)
+    }
+
+    fn csr_for(key: &PKey<Private>) -> Vec<u8> {
         let mut builder = X509Req::builder().unwrap();
         builder.set_pubkey(&key).unwrap();
         builder
@@ -139,6 +162,179 @@ mod tests {
             .unwrap();
         builder.sign(&key, MessageDigest::null()).unwrap();
         builder.build().to_der().unwrap()
+    }
+
+    async fn issue_bound_key(
+        store: &EnrollmentStore,
+        host: Uuid,
+        key: &PKey<Private>,
+        now: i64,
+    ) -> crate::enrollment::JoinToken {
+        let digest: [u8; 32] = Sha256::digest(key.raw_public_key().unwrap()).into();
+        store
+            .issue("owner", host, Mode::Rootless, now, &digest)
+            .await
+            .unwrap()
+    }
+
+    struct CountingCaSource {
+        source: Arc<dyn CaKeySource>,
+        loads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl CaKeySource for CountingCaSource {
+        fn load(&self) -> Result<crate::ca::CaMaterial, crate::ca::CaError> {
+            self.loads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.source.load()
+        }
+    }
+
+    #[tokio::test]
+    async fn substituted_csr_is_refused_before_signing_or_commit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        let now = 1_800_000_000;
+        let expected_key = PKey::generate_ed25519().unwrap();
+        let replacement_key = PKey::generate_ed25519().unwrap();
+        let token = issue_bound_key(&store, host, &expected_key, now).await;
+
+        let loads = Arc::new(AtomicUsize::new(0));
+        let source = Arc::new(CountingCaSource {
+            source: Arc::new(crate::ca::tests::source(true)),
+            loads: loads.clone(),
+        });
+        let service = RemoteEnrollment::new(source, store.clone());
+        let result = service
+            .join(
+                host,
+                Mode::Rootless,
+                token.secret(),
+                &csr_for(&replacement_key),
+                now,
+            )
+            .await;
+        let committed: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_certificates")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let consumed: bool = sqlx::query_scalar(
+            "SELECT consumed_at IS NOT NULL FROM remote_join_tokens WHERE host_id=?",
+        )
+        .bind(host.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.err().map(|error| error.to_string()).as_deref(),
+            Some("remote enrollment refused"),
+            "a substituted key must receive the content-free refusal",
+        );
+        assert_eq!(committed, 1, "refusal must not commit a certificate");
+        assert_eq!(loads.load(Ordering::Relaxed), 0, "refusal precedes signing");
+        assert!(consumed, "a definitive key mismatch consumes its capability");
+    }
+
+    #[tokio::test]
+    async fn matching_csr_succeeds_with_bound_invitation() {
+        let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        let now = 1_800_000_000;
+        let key = PKey::generate_ed25519().unwrap();
+        let token = issue_bound_key(&store, host, &key, now).await;
+        let service = RemoteEnrollment::new(
+            Arc::new(crate::ca::tests::source(true)),
+            store.clone(),
+        );
+
+        let signed = service
+            .join(host, Mode::Rootless, token.secret(), &csr_for(&key), now)
+            .await
+            .unwrap();
+        let admitted = store.admit(&signed.record.fingerprint, now).await.unwrap();
+        let committed: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_certificates")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(admitted.host, host);
+        assert_eq!(committed, 2, "the matching CSR commits exactly one certificate");
+    }
+
+    #[tokio::test]
+    async fn replayed_matching_csr_is_refused() {
+        let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        let now = 1_800_000_000;
+        let key = PKey::generate_ed25519().unwrap();
+        let token = issue_bound_key(&store, host, &key, now).await;
+        let service = RemoteEnrollment::new(
+            Arc::new(crate::ca::tests::source(true)),
+            store.clone(),
+        );
+        let request = csr_for(&key);
+
+        service
+            .join(host, Mode::Rootless, token.secret(), &request, now)
+            .await
+            .unwrap();
+        assert!(
+            service
+                .join(host, Mode::Rootless, token.secret(), &request, now)
+                .await
+                .is_err()
+        );
+        let committed: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_certificates")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(committed, 2, "replay cannot add another certificate");
+    }
+
+    #[tokio::test]
+    async fn legacy_unbound_invitation_is_refused_and_consumed_before_signing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Counted(AtomicUsize);
+        impl CaKeySource for Counted {
+            fn load(&self) -> Result<crate::ca::CaMaterial, crate::ca::CaError> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Err(crate::ca::CaError)
+            }
+        }
+
+        let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        let now = 1_800_000_000;
+        let key = PKey::generate_ed25519().unwrap();
+        let token = issue_bound_key(&store, host, &key, now).await;
+        sqlx::query("UPDATE remote_join_tokens SET expected_key_digest=NULL WHERE host_id=?")
+            .bind(host.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let source = Arc::new(Counted(AtomicUsize::new(0)));
+        let service = RemoteEnrollment::new(source.clone(), store.clone());
+
+        let error = service
+            .join(host, Mode::Rootless, token.secret(), &csr_for(&key), now)
+            .await
+            .err()
+            .expect("an invitation without a key binding is refused");
+        let committed: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_certificates")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let consumed: bool = sqlx::query_scalar(
+            "SELECT consumed_at IS NOT NULL FROM remote_join_tokens WHERE host_id=?",
+        )
+        .bind(host.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(error.to_string(), "remote enrollment refused");
+        assert_eq!(source.0.load(Ordering::Relaxed), 0);
+        assert_eq!(committed, 1);
+        assert!(consumed);
     }
 
     #[tokio::test]
@@ -155,11 +351,9 @@ mod tests {
         let source = Arc::new(Counted(AtomicUsize::new(0)));
         let service = RemoteEnrollment::new(source.clone(), store.clone());
         let now = 1_800_000_000;
-        let token = store
-            .issue("owner", host, Mode::Rootless, now)
-            .await
-            .unwrap();
-        let request = csr();
+        let key = PKey::generate_ed25519().unwrap();
+        let token = issue_bound_key(&store, host, &key, now).await;
+        let request = csr_for(&key);
         let unknown = "A".repeat(43);
         for (identity, mode, secret, instant) in [
             (host, Mode::Rootless, "bad", now),
@@ -189,10 +383,8 @@ mod tests {
     #[tokio::test]
     async fn invalid_csr_does_not_burn_token_and_join_returns_only_committed_authority() {
         let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
-        let token = store
-            .issue("owner", host, Mode::Rootless, 1_800_000_000)
-            .await
-            .unwrap();
+        let key = PKey::generate_ed25519().unwrap();
+        let token = issue_bound_key(&store, host, &key, 1_800_000_000).await;
         let service =
             RemoteEnrollment::new(Arc::new(crate::ca::tests::source(true)), store.clone());
         assert!(
@@ -207,7 +399,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        let request = csr();
+        let request = csr_for(&key);
         let signed = service
             .join(
                 host,
@@ -287,11 +479,9 @@ mod tests {
         let source = Arc::new(MemoryCaSource::cold_start(material.issuer().clone()));
         let service = RemoteEnrollment::new(source.clone(), store.clone());
         let now = 1_800_000_000;
-        let token = store
-            .issue("owner", host, Mode::Rootless, now)
-            .await
-            .unwrap();
-        let request = csr();
+        let key = PKey::generate_ed25519().unwrap();
+        let token = issue_bound_key(&store, host, &key, now).await;
+        let request = csr_for(&key);
         assert!(
             service
                 .join(host, Mode::Rootless, token.secret(), &request, now)

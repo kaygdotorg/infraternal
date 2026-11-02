@@ -1896,6 +1896,7 @@ fn run_remote_agent(
     );
     let operation = match &action {
         AgentAction::Join { .. } => infraternal_plugin_remote::JOIN.id,
+        AgentAction::PrepareJoinKey { .. } => "agent.prepare-join-key",
         AgentAction::Run => infraternal_plugin_remote::RUN.id,
     };
     // Remote actions use the enrolled identity; only the hidden parent action consumes this fd.
@@ -1917,6 +1918,31 @@ fn run_remote_agent(
             Exit::Failed,
         );
     };
+    if let AgentAction::PrepareJoinKey { origin } = &action {
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| io::Error::other("runtime unavailable"))
+            .and_then(|runtime| runtime.block_on(remote::prepare_join_key(origin, &data)));
+        match result {
+            Ok(digest) => {
+                let encoded: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+                println!("KEY-DIGEST {encoded}");
+            }
+            Err(error) => {
+                let class = match remote::Failure::of(&error) {
+                    Some(remote::Failure::Dns(_)) => "DNS",
+                    Some(remote::Failure::Connect) => "CONNECT",
+                    Some(remote::Failure::Tls) => "TLS",
+                    Some(remote::Failure::Upgrade) => "UPGRADE",
+                    Some(remote::Failure::Challenge) => "CHALLENGE",
+                    Some(remote::Failure::Refused) | None => "REFUSED",
+                };
+                println!("PREPARE-REFUSED {class}");
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
     output::report(
         json,
         operation,
@@ -1999,6 +2025,7 @@ fn run_remote_agent(
 #[cfg(feature = "remote")]
 enum AgentAction {
     Join { url: String, enroll_only: bool },
+    PrepareJoinKey { origin: String },
     Run,
 }
 
@@ -2022,16 +2049,21 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
                 .ok()
                 .flatten()
                 .map(PathBuf::from);
-            let mode = if action.command.last().is_some_and(|part| part == "join") {
-                AgentAction::Join {
+            let mode = match action.command.last().map(String::as_str) {
+                Some("join") => AgentAction::Join {
                     url: matches
                         .get_one::<String>("url")
                         .cloned()
                         .unwrap_or_default(),
                     enroll_only: matches.get_flag("enroll_only"),
-                }
-            } else {
-                AgentAction::Run
+                },
+                Some("prepare-join-key") => AgentAction::PrepareJoinKey {
+                    origin: matches
+                        .get_one::<String>("origin")
+                        .cloned()
+                        .unwrap_or_default(),
+                },
+                _ => AgentAction::Run,
             };
             return run_remote_agent(mode, has_fd, state, data, json);
         }

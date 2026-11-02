@@ -23,17 +23,19 @@ async fn locked_join(fixture: &Fixture) {
         x509::{X509NameBuilder, X509Req},
     };
     let host = uuid::Uuid::new_v4();
+    let key = PKey::generate_ed25519().unwrap();
+    let expected_key_digest = openssl::sha::sha256(&key.raw_public_key().unwrap());
     let invitation = invitation(
         fixture.address,
         &fixture.root,
         "https://localhost:4701",
         &fixture.cookie,
         host,
+        expected_key_digest,
     )
     .await;
     let invitation: crate::remote_http::JoinInvitation =
         serde_json::from_slice(&invitation).unwrap();
-    let key = PKey::generate_ed25519().unwrap();
     let mut csr = X509Req::builder().unwrap();
     csr.set_subject_name(&X509NameBuilder::new().unwrap().build())
         .unwrap();
@@ -297,12 +299,14 @@ async fn normal_cli_cold_start_keeps_enrolled_remote_terminal_while_signing_lock
     let mut fixture = fixture_at(&directory, "127.0.0.1:4701".parse().unwrap(), endpoint).await;
     let ca = retained_trust(&directory, &fixture);
     let host = uuid::Uuid::new_v4();
+    let expected_key_digest = prepare_pending_join_key(&directory.0.join("data"));
     let invitation = invitation(
         fixture.address,
         &fixture.root,
         "https://localhost:4701",
         &fixture.cookie,
         host,
+        expected_key_digest,
     )
     .await;
     let mut child = cli(&binary, &directory, true, "https://localhost:4701");
@@ -400,12 +404,14 @@ async fn release_transition_recovers_enrolled_host_after_long_outage() {
     let mut fixture = fixture_at(&directory, "127.0.0.1:4701".parse().unwrap(), endpoint).await;
     let ca = retained_trust(&directory, &fixture);
     let host = uuid::Uuid::new_v4();
+    let expected_key_digest = prepare_pending_join_key(&directory.0.join("data"));
     let invitation = invitation(
         fixture.address,
         &fixture.root,
         "https://localhost:4701",
         &fixture.cookie,
         host,
+        expected_key_digest,
     )
     .await;
     let mut child = cli(&enrolled, &directory, true, "https://localhost:4701");

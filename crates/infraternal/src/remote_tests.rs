@@ -245,6 +245,27 @@ fn legacy_7443_identity_migrates_atomically_to_its_https_origin() {
 }
 
 #[test]
+fn prepared_join_key_digest_is_stable_across_bootstrap_steps() {
+    let directory = Directory::new();
+    let data = directory.0.join("data");
+
+    let first = prepared_key_digest(&data).unwrap();
+    let second = prepared_key_digest(&data).unwrap();
+
+    assert_eq!(first, second, "the CSR must use the SSH-proved key");
+    assert!(data.join("join-key.pk8").exists());
+}
+
+#[tokio::test]
+async fn public_origin_preflight_fails_before_preparing_a_host_key() {
+    let directory = Directory::new();
+    let data = directory.0.join("data");
+
+    assert!(prepare_join_key("https://127.0.0.1:1", &data).await.is_err());
+    assert!(!data.exists(), "unreachable origins must fail before key creation");
+}
+
+#[test]
 fn public_origin_reenrollment_keeps_the_legacy_d168_server_name() {
     let directory = Directory::new();
     let data = directory.0.join("data");
