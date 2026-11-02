@@ -8,7 +8,8 @@
  * host. Every URL inside a page starts with `/docs/`, so the tree works wherever it is mounted at that path.
  *
  * The server needs nothing for it: a page is `docs/<slug>/index.html`, which the web root serves for the
- * directory (and for `/docs/<slug>`, by redirect), with the `.br`/`.gz` encodings `precompress` writes next to it.
+ * directory (and for `/docs/<slug>`, by redirect), with the `.br`/`.gz` encodings `precompress` writes next to it. A slug is
+ * `<section>/<page>` (D317), so the address of a heading is `/docs/<section>/<page>/#<heading>`.
  * Markdown is rendered by the bundler's built-in renderer, so no dependency is added. The pages are plain HTML
  * and CSS. The one script is `doc.js` (doc-page.ts, deferred): it marks the section being read in the contents and lets a code
  * block be copied. It is a separate file from the app's bundle, so it is never part of the app's JavaScript budget
@@ -16,10 +17,14 @@
  *
  * The reading aids (callouts, reasoning blocks, quick facts, citations, quotes, copyable code) are in docs-extras.ts.
  *
- * There is no list of pages. Every `*.md` file in `docs/user/` is a page: the folder is the one place where a
+ * There is no list of pages. Every `*.md` file under `docs/user/` is a page: the folder is the one place where a
  * page for the people who use Infraternal belongs, and internal planning and engineering notes stay outside it.
- * `index.md` is the front page (the build adds the list of pages under it). The other files are ordered by file
- * name, and a leading `NN-` only orders a page (`20-keys.md` is `/docs/keys/`).
+ * `index.md` is the front page (the build adds the list of sections under it). A folder is a section and its `index.md`
+ * is the section's overview (the build adds the list of its pages); the folder's other files are its pages. Folders
+ * nest one level only. Entries are ordered by file name, and a leading `NN-` only orders (`20-terminal/10-multiplexer.md`
+ * is `/docs/terminal/multiplexer/`). A page that used to live at another address says so on one comment line,
+ * `<!-- Former slugs: multiplexer, old/place -->`, and the build writes a redirect page at each former address, so a
+ * link that has already shipped keeps working (`docs-anchors.ts` keeps anything we ship from relying on one).
  *
  * What the build reads out of a page, so nobody has to write it twice:
  * - the title is the one level-1 heading;
@@ -27,10 +32,12 @@
  * - the table of contents is made from the level-2 and level-3 headings (`tocFor`);
  * - everything after the last horizontal rule is the footer, where the decision numbers live.
  * A page whose headings skip a level, or that has no summary, fails the build (`checkOutline`, `splitPage`): the
- * structure a reader relies on cannot rot silently.
+ * structure a reader relies on cannot rot silently. So does a "?" in the app, or a link between pages, that points at a page
+ * or a heading that does not exist (`docs-anchors.ts`).
  */
 import { cp, mkdir, readdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { checkReferences, referencesInPage, referencesInTree } from "./docs-anchors";
 import { citations, factsOf, readingAids, sourcesOf, type Facts } from "./docs-extras";
 import { figures, type FigureManifest, type FigureOptions } from "./docs-figure";
 
@@ -40,6 +47,10 @@ const root = resolve(import.meta.dirname, "../..");
 export const USER_DOCS_DIR = resolve(root, "docs/user");
 /** Slug of the front page: it is written to `/docs/` and is also a page of the palette and the Docs view. */
 export const INDEX_SLUG = "index";
+/** Where the app names docs addresses: the build checks that each one lands on a page and heading that exist. */
+export const APP_SOURCES = [resolve(root, "apps/tracer/src"), resolve(root, "packages/ui/src")];
+/** Top-level names the build writes into the docs tree itself, so no page or section may take them. */
+const RESERVED = new Set(["fonts", "figures"]);
 
 const escapeHtml = (text: string): string => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
@@ -49,10 +60,11 @@ const escapeHtml = (text: string): string => text.replace(/&/g, "&amp;").replace
  */
 export interface DocsHeading { id: string; text: string; facts?: string }
 /**
- * One page of `index.json`, which the app reads (titles, headings and quick facts, never body text). `facts` is the page's own
- * excerpt (a `[!FACTS]` block under the title); a page without one is previewed by its `summary`.
+ * One page of `index.json`, which the app reads (titles, headings and quick facts, never body text). `slug` is the page's address
+ * under `/docs/` (`terminal/multiplexer`). `section` marks the overview of a section; `parent` is the slug of the section a page
+ * belongs to. `facts` is the page's own excerpt (a `[!FACTS]` block under the title); a page without one is previewed by its `summary`.
  */
-export interface DocsIndexPage { slug: string; title: string; summary: string; facts?: string; headings: DocsHeading[] }
+export interface DocsIndexPage { slug: string; title: string; summary: string; section?: true; parent?: string; facts?: string; headings: DocsHeading[] }
 /** A heading with its level, which the table of contents needs and the index does not. */
 export interface OutlineHeading extends DocsHeading { level: 2 | 3 }
 
@@ -205,20 +217,75 @@ ${body}${notes}
   return { slug, title: parts.title, summary: parts.summary, headings, facts, html, figureFiles: pictured.files };
 }
 
-/** Reads the pages of a folder: `index.md` is the front page, every other `*.md` is a page, ordered by file name. */
-export async function readUserDocs(dir: string): Promise<{ index: string | undefined; pages: { slug: string; text: string }[] }> {
-  const files = (await readdir(dir)).filter((name) => name.endsWith(".md")).sort();
+/**
+ * A page as it is read from disk. `kind` is `section` for a folder's `index.md` (the section's overview); `parent` is the slug of the
+ * section a page sits in; `former` lists the addresses the page used to have (the comment line `Former slugs:`).
+ */
+export interface SourcePage { slug: string; text: string; kind: "page" | "section"; parent?: string; former: string[] }
+
+const NAME = /^[a-z0-9][a-z0-9-]*$/;
+const FORMER_SLUGS = /<!--\s*Former slugs:\s*([^>]*?)\s*-->/i;
+
+/** The addresses a page used to have, from its `<!-- Former slugs: a, b/c -->` line. They are paths under `/docs/`, one or two names deep. */
+export function formerSlugsOf(markdown: string): string[] {
+  const line = FORMER_SLUGS.exec(markdown)?.[1];
+  return line ? line.split(",").map((slug) => slug.trim()).filter(Boolean) : [];
+}
+
+/** A file or folder name without its ordering prefix (`20-terminal` is `terminal`), refused when it cannot be part of a web address. */
+function slugName(name: string): string {
+  const slug = name.replace(/\.md$/, "").replace(/^\d+-/, "");
+  if (!NAME.test(slug)) throw new Error(`docs entry "${name}": a name is lower-case letters, digits and hyphens`);
+  return slug;
+}
+
+/**
+ * Reads the pages under a folder, in the order of their names. `index.md` is the front page. Every other `*.md` is a page; a folder
+ * is a section, which needs an `index.md` of its own (the overview) and holds pages, and nothing deeper (D317: two levels at most).
+ * A former address may not be a live one, or be given twice, or the redirect would hide a page.
+ */
+export async function readUserDocs(dir: string): Promise<{ index: string | undefined; pages: SourcePage[] }> {
   let index: string | undefined;
-  const pages: { slug: string; text: string }[] = [];
+  const pages: SourcePage[] = [];
   const seen = new Set<string>();
-  for (const name of files) {
-    const text = await Bun.file(resolve(dir, name)).text();
-    const slug = name.replace(/\.md$/, "").replace(/^\d+-/, "");
-    if (slug === INDEX_SLUG) { index = text; continue; }
-    if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) throw new Error(`docs file "${name}": a page name is lower-case letters, digits and hyphens`);
-    if (slug === "fonts" || seen.has(slug)) throw new Error(`docs file "${name}": the page name "${slug}" is already taken`);
+  const take = (slug: string, name: string): void => {
+    if (RESERVED.has(slug.split("/")[0]!) || seen.has(slug)) throw new Error(`docs entry "${name}": the name "${slug}" is already taken`);
     seen.add(slug);
-    pages.push({ slug, text });
+  };
+  const entries = (await readdir(dir, { withFileTypes: true })).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name.endsWith(".md")) {
+      const text = await Bun.file(resolve(dir, entry.name)).text();
+      const slug = slugName(entry.name);
+      if (slug === INDEX_SLUG) { index = text; continue; }
+      take(slug, entry.name);
+      pages.push({ slug, text, kind: "page", former: formerSlugsOf(text) });
+    } else if (entry.isDirectory() && !RESERVED.has(entry.name)) {
+      const section = slugName(entry.name);
+      take(section, entry.name);
+      const files = (await readdir(resolve(dir, entry.name), { withFileTypes: true })).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      const deeper = files.find((file) => file.isDirectory());
+      if (deeper) throw new Error(`docs folder "${entry.name}/${deeper.name}": sections nest one level only, so a section holds pages and no folders`);
+      const overview = files.find((file) => file.isFile() && file.name.endsWith(".md") && slugName(file.name) === INDEX_SLUG);
+      if (!overview) throw new Error(`docs folder "${entry.name}": a section needs an index.md, its overview`);
+      const overviewText = await Bun.file(resolve(dir, entry.name, overview.name)).text();
+      pages.push({ slug: section, text: overviewText, kind: "section", former: formerSlugsOf(overviewText) });
+      for (const file of files) {
+        if (!file.isFile() || !file.name.endsWith(".md") || file === overview) continue;
+        const text = await Bun.file(resolve(dir, entry.name, file.name)).text();
+        const slug = `${section}/${slugName(file.name)}`;
+        take(slug, `${entry.name}/${file.name}`);
+        pages.push({ slug, text, kind: "page", parent: section, former: formerSlugsOf(text) });
+      }
+    }
+  }
+  const formerSeen = new Set<string>();
+  for (const page of pages) {
+    for (const former of page.former) {
+      if (!/^[a-z0-9][a-z0-9-]*(\/[a-z0-9][a-z0-9-]*)?$/.test(former) || RESERVED.has(former.split("/")[0]!)) throw new Error(`docs page "${page.slug}": the former slug "${former}" is not a path of lower-case names under /docs/`);
+      if (seen.has(former) || former === INDEX_SLUG || formerSeen.has(former)) throw new Error(`docs page "${page.slug}": the former slug "${former}" is a live address or is claimed twice`);
+      formerSeen.add(former);
+    }
   }
   return { index, pages };
 }
@@ -242,10 +309,25 @@ ${body}</main>
 `;
 }
 
-/** The list of pages under the front page's text: the title over its one-line summary. */
-function pageList(pages: readonly { slug: string; title: string; summary: string }[]): string {
+/** A list of pages under a heading: the title over its one-line summary. Empty when there is nothing to list. */
+function pageList(heading: string, pages: readonly { slug: string; title: string; summary: string }[]): string {
+  if (pages.length === 0) return "";
   const rows = pages.map((entry) => `<li><a href="/docs/${entry.slug}/"><strong>${escapeHtml(entry.title)}</strong><span>${escapeHtml(entry.summary)}</span></a></li>`).join("\n");
-  return `<h2>All pages</h2>\n<ul class="pages">\n${rows}\n</ul>`;
+  return `<h2>${heading}</h2>\n<ul class="pages">\n${rows}\n</ul>`;
+}
+
+/** The page that stands at a former address: it sends the reader on, keeping the `#heading` the old link had (a refresh alone would drop it). */
+function redirectPage(to: string, title: string): string {
+  const target = `/docs/${to}/`;
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>${escapeHtml(title)} · Infraternal docs</title>
+<meta name="robots" content="noindex">
+<link rel="canonical" href="${target}">
+<meta http-equiv="refresh" content="0; url=${target}">
+<script>location.replace(${JSON.stringify(target)}+location.hash)</script>
+</head><body><p>This page moved to <a href="${target}">${escapeHtml(title)}</a>.</p></body></html>
+`;
 }
 
 /** The figures of the pages in `source`: the capture's manifest and folder (docs-figure.ts). A tree with none has none, and its figures are pending. */
@@ -255,8 +337,11 @@ export async function figureOptionsFor(source: string = USER_DOCS_DIR): Promise<
   return { manifest: (await manifestFile.exists() ? await manifestFile.json() : {}) as FigureManifest, directory };
 }
 
-/** Writes the docs tree into `out` (for the app build, `<dist>/docs`), reading the pages of `source`. */
-export async function buildDocs(out: string, source: string = USER_DOCS_DIR): Promise<DocsIndexPage[]> {
+/**
+ * Writes the docs tree into `out` (for the app build, `<dist>/docs`), reading the pages of `source`. `scan` lists the source folders
+ * whose docs addresses are checked against the pages (docs-anchors.ts); the real tree checks the app, a fixture tree none.
+ */
+export async function buildDocs(out: string, source: string = USER_DOCS_DIR, scan: readonly string[] = source === USER_DOCS_DIR ? APP_SOURCES : []): Promise<DocsIndexPage[]> {
   await mkdir(resolve(out, "fonts"), { recursive: true });
   await Promise.all([
     cp(resolve(import.meta.dirname, "docs.css"), resolve(out, "docs.css")),
@@ -272,11 +357,34 @@ export async function buildDocs(out: string, source: string = USER_DOCS_DIR): Pr
   // The figures the capture made (docs-figure.ts). A tree with no figures folder simply has none.
   const figureOptions = await figureOptionsFor(source);
   const figureDirectory = figureOptions.directory;
-  const rendered = pages.map(({ slug, text }) => renderDoc(slug, text, undefined, figureOptions));
-  const entries = rendered.map(({ slug, title, summary }) => ({ slug, title, summary }));
-  // The front page's text is optional: without one the list stands alone under a generic title.
-  const front = renderDoc(INDEX_SLUG, frontText ?? "# Documentation\n\nGuides for using Infraternal.\n", () => pageList(entries), figureOptions);
+  // Pages first, so a section's overview can list them and the front page can list the sections.
+  const made = new Map<string, RenderedDoc>();
+  for (const { slug, text, kind } of pages) if (kind === "page") made.set(slug, renderDoc(slug, text, undefined, figureOptions));
+  const brief = ({ slug, title, summary }: RenderedDoc) => ({ slug, title, summary });
+  for (const { slug, text, kind } of pages) {
+    if (kind !== "section") continue;
+    const members = pages.filter((member) => member.parent === slug).map((member) => brief(made.get(member.slug)!));
+    made.set(slug, renderDoc(slug, text, () => pageList("Pages in this section", members), figureOptions));
+  }
+  const rendered = pages.map(({ slug }) => made.get(slug)!);
+  // The front page lists the sections and the pages that stand outside one. Its text is optional: without it the list stands alone.
+  const top = pages.filter((entry) => entry.parent === undefined).map((entry) => brief(made.get(entry.slug)!));
+  const listTitle = pages.some((entry) => entry.kind === "section") ? "Sections" : "All pages";
+  const front = renderDoc(INDEX_SLUG, frontText ?? "# Documentation\n\nGuides for using Infraternal.\n", () => pageList(listTitle, top), figureOptions);
   const all = [front, ...rendered];
+  // Titles and headings only, so the file stays a few hundred bytes per page; the app fetches it when it is idle.
+  const index: DocsIndexPage[] = all.map(({ slug, title, summary, headings, facts }) => {
+    const from = pages.find((entry) => entry.slug === slug);
+    return {
+      slug, title, summary, ...(from?.kind === "section" ? { section: true as const } : {}), ...(from?.parent ? { parent: from.parent } : {}),
+      ...(facts.page ? { facts: facts.page } : {}),
+      headings: headings.map(({ id, text }) => ({ id, text, ...(facts.headings[id] ? { facts: facts.headings[id] } : {}) })),
+    };
+  });
+  // Every "?" in the app and every link between pages must land on a page and heading that exist, or the build stops here.
+  const moved = new Map(pages.flatMap((entry) => entry.former.map((former): [string, string] => [former, entry.slug])));
+  const problems = checkReferences([...all.flatMap((doc) => referencesInPage(doc.slug, doc.html)), ...await referencesInTree(scan, root)], index, moved);
+  if (problems.length > 0) throw new Error(`docs addresses that lead nowhere:\n${problems.join("\n")}`);
   // Only the pictures a page uses are copied, so a retired figure never ships.
   const used = [...new Set(all.flatMap((doc) => doc.figureFiles))];
   if (used.length > 0) {
@@ -291,11 +399,11 @@ export async function buildDocs(out: string, source: string = USER_DOCS_DIR): Pr
     if (doc !== front) await writeFile(resolve(directory, "index.html"), page(`${doc.title} · Infraternal docs`, doc.html));
   }
   await writeFile(resolve(out, "index.html"), page("Infraternal docs", front.html));
-  // Titles and headings only, so the file stays a few hundred bytes per page; the app fetches it when it is idle.
-  const index: DocsIndexPage[] = all.map(({ slug, title, summary, headings, facts }) => ({
-    slug, title, summary, ...(facts.page ? { facts: facts.page } : {}),
-    headings: headings.map(({ id, text }) => ({ id, text, ...(facts.headings[id] ? { facts: facts.headings[id] } : {}) })),
-  }));
+  // A page that moved leaves a page at each former address; it is not in the index, so the app never lists it.
+  for (const [former, slug] of moved) {
+    await mkdir(resolve(out, former), { recursive: true });
+    await writeFile(resolve(out, former, "index.html"), redirectPage(slug, made.get(slug)!.title));
+  }
   await writeFile(resolve(out, "index.json"), JSON.stringify({ pages: index }));
   return index;
 }

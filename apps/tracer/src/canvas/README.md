@@ -41,7 +41,7 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 | `product.ts` | the product canvas: Console on real sessions + Settings with the sections that exist; a lazy chunk loaded after sign-in | `mountProductCanvas` |
 | `status.ts` | a terminal's status text to the one shared toast | `createStatusRelay` |
 | `addhost/` | the add-host wizard: detect-first sign-in (D183), progress from provisioning events, host key and credential pages | `createAddHost`, adapter `ProvisioningService`, hook `AddHostSink`, `FlowHost` (window kind `flow`, `cx.win.openFlow`) |
-| `docs/`, `views/docs.ts` | the Docs view: a window of kind `docs` per page of `docs/user/`, offered once `/docs/index.json` loads (never saved), and the ⌘K rows for pages and headings; the reader loads on demand | `installDocsSource` |
+| `docs/`, `views/docs.ts` | the Docs view: a window of kind `docs` per page of `docs/user/` (sections, then their pages), offered once `/docs/index.json` loads (never saved), and the ⌘K rows for sections, pages and headings; the reader loads on demand | `installDocsSource` |
 | `backdrop.ts` | the dotted canvas behind the views | `createBackdrop` |
 | `mock/` | everything fake: scenes, roles, fake hosts, a fake Mesh server (`mesh-server.ts`: large meshes, slow, refusing, lossy), devices, probe | `mountMockup` |
 

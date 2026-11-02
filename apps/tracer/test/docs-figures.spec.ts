@@ -20,7 +20,7 @@ import { tracerEvidencePath } from "./evidence-path";
 const OUT = tracerEvidencePath("docs-figures");
 /** The figures have been captured into the folder this build reads. */
 const CAPTURED = existsSync(resolve(import.meta.dirname, "../../../docs/user/figures/manifest.json"));
-const PAGES = ["multiplexer", "keys"] as const;
+const PAGES = ["terminal/multiplexer", "reference/keys"] as const;
 const SIZES = [
   { name: "desktop", width: 1440, height: 900, scale: 2, touch: false },
   { name: "phone", width: 393, height: 852, scale: 3, touch: true },
@@ -100,7 +100,7 @@ test("a clip lies exactly over its still, plays while on screen, pauses when it 
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2, colorScheme: "dark" });
   const page = await context.newPage();
   try {
-    await page.goto("/docs/multiplexer/");
+    await page.goto("/docs/terminal/multiplexer/");
     await page.evaluate(() => document.fonts.ready);
     const clip = page.locator(".figure[data-clip]").first();
     const name = await clip.getAttribute("data-figure");
@@ -138,7 +138,7 @@ test("under reduced motion a clip never starts: the still is the figure", async 
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "dark", reducedMotion: "reduce" });
   const page = await context.newPage();
   try {
-    await page.goto("/docs/multiplexer/");
+    await page.goto("/docs/terminal/multiplexer/");
     const clip = page.locator(".figure[data-clip]").first();
     await clip.scrollIntoViewIfNeeded();
     await page.waitForTimeout(1500);
@@ -157,7 +157,7 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
     const requests: string[] = [];
     page.on("request", (request) => requests.push(new URL(request.url()).pathname));
     try {
-      for (const [slug, expected] of [["multiplexer", ["sessions-windows", "multiplexer-switch"]], ["keys", ["account-card", "add-machine"]]] as const) {
+      for (const [slug, expected] of [["terminal/multiplexer", ["sessions-windows", "multiplexer-switch"]], ["reference/keys", ["account-card", "add-machine"]]] as const) {
         await page.goto(`/docs/${slug}/`);
         await page.evaluate(() => document.fonts.ready);
         const names = await page.locator(".figure").evaluateAll((figures) => figures.map((f) => (f as HTMLElement).dataset.figure!));
