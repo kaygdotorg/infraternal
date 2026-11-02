@@ -3,15 +3,25 @@ import { renderDevices, renderFacts } from "../../../../../packages/ui/src/setti
 import type { SettingsSource } from "../views/settings-body.on-demand";
 import type { ViewId } from "../model/types";
 import type { MockWorld } from "./world";
+import { renderGroup, revealSetting } from "./settings-map/body";
+import { entriesOf, locate, rowsOf, spotBySection, valueOf, visibleMap } from "./settings-map/model";
 
-export function createMockSettings(world: MockWorld): SettingsSource {
+/**
+ * `rows` is `?settings=sections` (issue #304): Settings as rows of windows, one row per component and one window per group,
+ * read from the table in `settings-map/catalog.ts`. Without it the panels below are the whole of Settings, as before.
+ */
+export function createMockSettings(world: MockWorld, rows = false): SettingsSource {
+  const map = () => visibleMap(world.role === "operator");
   return {
     sections: ["devices", "users", "grants", "discovery"],
+    ...(rows ? { outline: { rows: () => rowsOf(map()), entries: () => entriesOf(map(), valueOf), locate: (target: string) => locate(map(), target), reveal: revealSetting } } : {}),
     accountFacts: () => [
       { title: "Passkeys", rows: [{ key: "iPhone 15", value: "added 2 weeks ago" }, { key: "MacBook Pro", value: "added 3 months ago" }] },
       { title: "Recovery key", rows: [{ key: "Status", value: "saved" }, { key: "Last checked", value: "6 days ago" }] },
     ],
     render(section, pane, cx) {
+      const spot = rows ? spotBySection(map(), section) : undefined;
+      if (spot) return renderGroup(cx, pane, `s-${section}`, spot);
       switch (section) {
         case "devices": return renderDevices(pane, {
           get devices() { return world.devices; },

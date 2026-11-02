@@ -29,6 +29,11 @@ export interface SettingsSource {
   accountStatuses?(): StatusActionPref[];
   accountRefresh?(): void;
   accountFacts?(): Array<{ title: string; rows: Array<{ key: string; value: string }> }>;
+  /**
+   * Settings as rows of windows (issue #304): when present, the sidebar, the top breadcrumb and ⌘K show Settings › Component ›
+   * Group from it. Absent (the product today): nothing of this is offered anywhere.
+   */
+  outline?: import("./settings-outline").SettingsOutline;
 }
 
 /** The host-connection lock as a Settings group: plain words for the state, and the button only for an administrator while it is locked. */

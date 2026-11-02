@@ -377,3 +377,37 @@
 
 /* The summary card is a card of its own (counts and labels), so it takes no halo from the overlay material. */
 .cl-summary, .cl-summary * { text-shadow: none; }
+
+/* ---- Settings as rows of windows (#304) ---------------------------------------------------------------------------------
+   The breadcrumb Settings › Mesh › Keys sits in the capsule's own grid track, so it is centred on the screen exactly where the
+   capsule is; the capsule is only hidden while a window of Settings is focused (toolbar/crumbs.ts). */
+.top[data-crumbs] > .capsule { display: none; }
+.top > .cl-crumbs { grid-column: 2; display: flex; align-items: center; justify-self: center; gap: 0.25rem; min-width: 0; max-width: 100%; }
+.top > .cl-crumbs[hidden] { display: none; }
+.cl-crumb { flex: 0 1 auto; gap: 0.375rem; min-width: 0; padding: 0 0.75rem; color: var(--fg-2); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; cursor: pointer; }
+.cl-crumb:last-of-type { color: var(--fg); }
+.cl-crumb[data-level="view"] { flex: none; padding-left: 0.625rem; }
+.cl-crumb-icon { display: grid; flex: none; place-items: center; width: var(--ui-icon, 1rem); height: var(--ui-icon, 1rem); }
+.cl-crumb-icon svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.cl-crumb-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cl-crumb-sep { display: grid; flex: none; place-items: center; width: 0.875rem; color: var(--fg-3); }
+.cl-crumb-sep svg { width: 0.875rem; height: 0.875rem; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+/* On a phone the first pill is its icon (it has its tooltip and its label); the names get the room. */
+@media (max-width: 720px) {
+  .top > .cl-crumbs { width: 100%; }
+  .cl-crumb[data-level="view"] { width: var(--pill-h); padding: 0; }
+  .cl-crumb[data-level="view"] .cl-crumb-name { display: none; }
+  .cl-crumb[data-level="row"], .cl-crumb[data-level="group"] { flex: 0 1 auto; }
+  .cl-crumb[data-level="row"] { padding: 0 0.625rem; }
+}
+.cl-crumb-menu { position: absolute; z-index: 8; display: grid; align-content: start; gap: 2px; padding: 0.375rem; border-radius: 0.875rem; overflow: auto; max-width: min(22rem, calc(100% - 1rem)); }
+.cl-crumb-item { white-space: nowrap; }
+.cl-crumb-item .ui-sp-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* A panel that already existed, reused in a window: it brings its own pane, which must not pad and scroll a second time. */
+.cl-settings-nest > .ui-settings-pane { padding: 0; overflow: visible; }
+.cl-settings-later { margin: 0; padding: 0.5rem 0; color: var(--ui-text-secondary); font-size: var(--text-secondary, 0.75rem); line-height: 1.4; }
+
+/* A Settings window has no input lock, so its title pill does not leave room for one: it may use the whole header (the product's
+   cap is half of it, for the lock). Five windows to a row are a fifth of the screen each, and the cap cut "Profile" to "Pr…". */
+.cl[data-view="settings"] .ui-window-pill { max-width: 100%; }
+.cl-keys .ui-sp-sub { white-space: pre-line; }
