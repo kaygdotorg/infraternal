@@ -10,7 +10,7 @@ use crate::{
 };
 use infraternal_protocol::encode_frame_into;
 use openssl::x509::X509;
-use std::{io, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{future::Future, io, net::SocketAddr, path::PathBuf, pin::Pin, time::Duration};
 use tokio::sync::Mutex;
 
 /// Local enrolled host credentials; no private material leaves the host.
@@ -48,7 +48,7 @@ fn trace_attempt<T>(phase: &'static str, result: io::Result<T>) -> io::Result<T>
 /// # Errors
 /// Refuses local uid mismatch or invalid credentials before contacting the server.
 pub async fn run(identity: &RemoteIdentity, state: Option<PathBuf>) -> io::Result<()> {
-    run_inner(
+    Box::pin(run_inner(
         identity,
         state,
         None,
@@ -57,7 +57,7 @@ pub async fn run(identity: &RemoteIdentity, state: Option<PathBuf>) -> io::Resul
         None,
         #[cfg(any(test, feature = "native-streams"))]
         None,
-    )
+    ))
     .await
 }
 
@@ -97,31 +97,36 @@ pub async fn run_with_identity_rotation(
     run_with_publishers(identity, state, publisher, Some(rotation), installation).await
 }
 
-async fn run_with_publishers(
-    identity: &RemoteIdentity,
+type ClientFuture<'a> = Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
+
+/// Keep public callers' stack futures small; this owns the long-lived reconnect state machine.
+fn run_with_publishers<'a>(
+    identity: &'a RemoteIdentity,
     state: Option<PathBuf>,
     publisher: std::sync::Arc<dyn crate::remote_renewal::CertificatePublisher>,
     rotation: Option<
         std::sync::Arc<dyn infraternal_plugin_remote::identity_rotation::RotationPublisher>,
     >,
-    installation: Option<&infraternal_plugin_remote::uninstall::Context>,
-) -> io::Result<()> {
-    let mut renewal =
-        crate::remote_renewal::RenewalIdentity::new(&identity.identity, &identity.roots, publisher);
-    if let Some(rotation) = rotation {
-        renewal.enable_identity_rotation(rotation)?;
-    }
-    run_inner(
-        identity,
-        state,
-        Some(&renewal),
-        installation,
-        #[cfg(any(test, feature = "native-streams"))]
-        None,
-        #[cfg(any(test, feature = "native-streams"))]
-        None,
-    )
-    .await
+    installation: Option<&'a infraternal_plugin_remote::uninstall::Context>,
+) -> ClientFuture<'a> {
+    Box::pin(async move {
+        let mut renewal =
+            crate::remote_renewal::RenewalIdentity::new(&identity.identity, &identity.roots, publisher);
+        if let Some(rotation) = rotation {
+            renewal.enable_identity_rotation(rotation)?;
+        }
+        run_inner(
+            identity,
+            state,
+            Some(&renewal),
+            installation,
+            #[cfg(any(test, feature = "native-streams"))]
+            None,
+            #[cfg(any(test, feature = "native-streams"))]
+            None,
+        )
+        .await
+    })
 }
 
 /// Run with trusted compiled node providers, retaining prepared identities across reconnect.
