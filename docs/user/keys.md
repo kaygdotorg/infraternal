@@ -67,8 +67,13 @@ The 24 recovery words are your way back in when you lose your passkeys.[^bip39] 
 
 Starting a recovery from a device that is not signed in waits 24 hours, so that a stranger with stolen words cannot take over before you notice. Any signed-in device can cancel it, and a device already signed in to the same account skips the wait. After the wait you have until 48 hours after the start to finish.
 
+Re-entering your words while a recovery is pending resumes that request, with the same wait and expiry. Once it expires or is cancelled, starting again creates a new request with a fresh 24-hour wait and 48-hour expiry (unless you are already signed in). Each new request notifies your signed-in devices.
+
+> [!WHY] Why the wait counts server uptime, not the clock
+> The wait and expiry count elapsed server uptime, so a clock correction cannot skip or lengthen the wait. A restart keeps the progress already recorded; the server saves it every 60 seconds and on normal shutdown, so an abrupt restart loses at most about a minute plus the downtime. Storage failures keep recovery waiting rather than crediting time that was not measured. The displayed date is an estimate and can move after a clock correction. The recovery page asks the server every minute, when its countdown reaches zero and when you return to it, and shows "Ready now" only after the server confirms. An upgrade from the older clock-based recovery ends existing requests: re-enter your words to start a fresh wait.
+
 > [!IMPORTANT] A recovery changes everything
-> A finished recovery signs out every session, removes every passkey and API key, and gives you new words. So each set of words works once.
+> A finished recovery tells signed-in devices "Recovery completed" as their connections close, signs out every session, removes every passkey and API key, and gives you new words. So each set of words works once.
 
 ### First-owner setup code
 

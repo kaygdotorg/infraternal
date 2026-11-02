@@ -321,6 +321,10 @@ async fn execute(
             .await?;
             json!({"ok":true})
         }
+        "recovery-status" => {
+            let b: Token = body(value)?;
+            auth.recovery_status(&b.token, now).await?
+        }
         "recovery-ready" => {
             let b: Token = body(value)?;
             auth.recovery_ready(&b.token, now).await?

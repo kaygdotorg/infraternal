@@ -283,7 +283,7 @@ async fn serve_inner(
     configure_logging(false);
     #[cfg(feature = "remote")]
     crate::ca_memory::initialize_private_key_memory()?;
-    let (app, setup_token, _listeners, warmup) = build_router_core(
+    let (app, setup_token, _listeners, warmup, auth) = build_router_core(
         config.clone(),
         None,
         enrollment,
@@ -303,40 +303,68 @@ async fn serve_inner(
         "infraternal server started"
     );
 
-    if let Some(tls) = config.tls {
-        let tls_config = OpenSSLConfig::from_pem_file(tls.certificate, tls.private_key)
-            .map_err(|_| ServerError::TlsConfiguration)?;
-        let listener = std::net::TcpListener::bind(config.listen).map_err(ServerError::Listener)?;
-        listener
-            .set_nonblocking(true)
-            .map_err(ServerError::Listener)?;
-        warm_payloads(warmup);
-        axum_server::from_tcp(listener)
-            .map_err(ServerError::Listener)?
-            .acceptor(crate::server_tls::acceptor(tls_config))
-            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+    // Flush measured recovery progress on either normal shutdown signal or a
+    // listener exit. Never infer elapsed credit from wall time or downtime.
+    let server = async {
+        if let Some(tls) = config.tls {
+            let tls_config = OpenSSLConfig::from_pem_file(tls.certificate, tls.private_key)
+                .map_err(|_| ServerError::TlsConfiguration)?;
+            let listener =
+                std::net::TcpListener::bind(config.listen).map_err(ServerError::Listener)?;
+            listener
+                .set_nonblocking(true)
+                .map_err(ServerError::Listener)?;
+            warm_payloads(warmup);
+            axum_server::from_tcp(listener)
+                .map_err(ServerError::Listener)?
+                .acceptor(crate::server_tls::acceptor(tls_config))
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+                .map_err(ServerError::Listener)
+        } else {
+            let listener = TcpListener::bind(config.listen)
+                .await
+                .map_err(ServerError::Listener)?
+                .tap_io(|socket| {
+                    // Match the TLS acceptor: Ack and PTY Output are separate small
+                    // writes. Nagle otherwise couples echo to a delayed TCP Ack,
+                    // adding tens of milliseconds on the proxy leg [5][41].
+                    if socket.set_nodelay(true).is_err() {
+                        tracing::warn!("could not set TCP_NODELAY on accepted server socket");
+                    }
+                });
+            warm_payloads(warmup);
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
             .await
             .map_err(ServerError::Listener)
-    } else {
-        let listener = TcpListener::bind(config.listen)
-            .await
-            .map_err(ServerError::Listener)?
-            .tap_io(|socket| {
-                // Match the TLS acceptor: Ack and PTY Output are separate small
-                // writes. Nagle otherwise couples echo to a delayed TCP Ack,
-                // adding tens of milliseconds on the proxy leg [5][41].
-                if socket.set_nodelay(true).is_err() {
-                    tracing::warn!("could not set TCP_NODELAY on accepted server socket");
-                }
-            });
-        warm_payloads(warmup);
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
+        }
+    };
+    let result = tokio::select! {
+        result = server => result,
+        signal = shutdown_signal() => signal.map_err(ServerError::Listener),
+    };
+    auth.checkpoint_recovery_clock()
         .await
-        .map_err(ServerError::Listener)
+        .map_err(ServerError::Auth)?;
+    result
+}
+
+// Both service-manager termination and interactive shutdown flush before exit.
+async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
     }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
 }
 
 // Binding the public listener precedes optional codec work. Tests composing a
@@ -375,7 +403,7 @@ async fn build_router_with_enrollment(
     supplied_agent: Option<EmbeddedAgent>,
     enrollment: Option<EnrollmentService>,
 ) -> Result<(Router, Option<String>), ServerError> {
-    let (app, setup, _, _) =
+    let (app, setup, _, _, _) =
         build_router_core(config, supplied_agent, enrollment, None, None, None, None).await?;
     Ok((app, setup))
 }
@@ -504,7 +532,7 @@ async fn build_router_with_key_setup(
     factory: Option<BootstrapFactory>,
     key_setup: Option<KeyInitialization>,
 ) -> Result<(Router, Option<String>), ServerError> {
-    let (app, setup, _, _) =
+    let (app, setup, _, _, _) =
         build_router_core(config, supplied_agent, None, None, factory, key_setup, None).await?;
     Ok((app, setup))
 }
@@ -526,6 +554,7 @@ async fn build_router_core(
         Option<String>,
         Option<RemoteListeners>,
         Option<PayloadWarmup>,
+        Auth,
     ),
     ServerError,
 > {
@@ -688,7 +717,9 @@ async fn build_router_core(
     let warmup = None;
     #[cfg(feature = "ssh")]
     let app = app.merge(crate::bootstrap_api::router_with_ssh_key(
-        auth, bootstrap, ssh_key,
+        auth.clone(),
+        bootstrap,
+        ssh_key,
     ));
     let app = if let Some(web_root) = config.web_root {
         app.fallback_service(crate::web_assets::router(web_root))
@@ -705,6 +736,7 @@ async fn build_router_core(
         setup_token,
         listeners,
         warmup,
+        auth,
     ))
 }
 

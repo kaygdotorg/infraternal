@@ -194,6 +194,7 @@ impl Auth {
             }
             Authority::Recovery(token) => {
                 super::recovery::complete(
+                    self,
                     &mut tx,
                     &registration.user,
                     token,

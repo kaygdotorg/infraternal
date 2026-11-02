@@ -96,6 +96,7 @@ Argon2 work at two simultaneous calls; exhausted capacity fails closed.
 | wraps | `{}` + session | `[{kind,key_id,wrap}]` for the session user |
 | recovery-start | `{username|user_id,verifier}` | `{token,delay_seconds,ready_at}` |
 | recovery-ready | `{token}` | replacement enrollment and old_recovery_wrap |
+| recovery-status | `{token}` | `{ready, delay_seconds, ready_at}` from the server elapsed clock |
 | recovery-rotate | `{recovery_wrap,recovery_verifier}` + fresh unlocked session | `{ok:true}` |
 | recovery-cancel | `{}` + any live session | `{ok:true}` |
 | device-start | `{device,scopes}` | `{poll_token,user_code,expires_in:600}` |
@@ -192,6 +193,12 @@ Username lookup is internal; unknown accounts and wrong verifiers return the sam
 only, shows the server's actual ready time, and asks for the words again after
 a reload. It never fabricates progress or persists recovery secrets. The server
 remains authoritative at `recovery-ready` even if the local clock is wrong.
+The waiting page reads `recovery-status` on visibility change, every 60 seconds
+while waiting and when its countdown reaches zero. Only a server-confirmed
+`ready:true` displays "Ready now" and enables continuation. Refresh errors clear
+readiness. Status uses the existing bearer without rotating it, creating a
+request, releasing an envelope or issuing a ceremony. Cancelled or expired
+bearers return 401.
 Replacement unwraps the original recovery envelope before creating the new
 passkey, wraps that same DEK and requires acknowledgement of the rotated words
 before finish. No existing cryptographic envelope or proof format changes.
@@ -339,12 +346,32 @@ private CLI socket; runtime logs do not disclose it. Enrollment consumes it once
 
 Additive `recovery-resume` accepts the same identity and authentication fields
 as recovery-start. It verifies the key on every call and takes the writer lock
-before inspecting pending state. Without a pending row it creates recovery with
-the D113 delay. With a row it reissues a capability and retains **exactly** its
-stored ready time, even after the previous capability expires. Reissuing extends
-only the capability lifetime (48 hours from this verification), never the wait.
+before inspecting pending state. While a request is unexpired, it reissues a
+capability and retains **exactly** its stored elapsed ready time and expiry. It neither
+resets the wait nor extends the lifetime. At the exclusive expiry, the request
+is finished; starting or resuming creates a new attempt with ready time 24 hours
+and expiry 48 hours from the new server time (D113's live same-account session
+exemption still applies). A cancelled request is also finished permanently.
+Recovery authority uses a persisted logical clock advanced only by elapsed monotonic
+process uptime, under the database writer lock. Start, resume, readiness, completion
+and signed-in status all use that clock. Wall-clock steps in either direction credit
+no elapsed time and add no waiting time. On process restart, only committed progress
+survives: unrecorded uptime and downtime are not credited. While a request is
+active, the server checkpoints measured progress every 60 seconds; normal shutdown
+(SIGINT or SIGTERM) flushes before exit, including before the first minute.
+With successful checkpointing, each abrupt restart discards at most about a
+minute of uptime, plus downtime. Scheduler or storage failures can delay a save;
+failures remain fail-closed and never earn unmeasured credit. With no active
+request, the worker waits for a request notification without an idle timer.
+On upgrade from wall-based recovery, existing requests end because prior elapsed
+time and continued validity cannot be proven. Re-entering the words starts a fresh
+request with a full elapsed wait and lifetime; old bearers remain invalid. Unix dates in replies are
+estimates projected from the remaining elapsed duration onto current server wall
+time; they may move after a clock correction. Only the elapsed clock grants authority
+(#309). Session exemption and five-minute ceremony expiry retain their own policies.
 The previous capability and any replacement ceremony bound to it become invalid.
-Cancellation and successful replacement delete the row. Verifier start/resume both preserve existing deadlines.
+Cancellation and successful replacement delete the row. Verifier start/resume
+both preserve pending deadlines and replace expired ones.
 
 The result is `{token,ready_at,delay_seconds}` with delay_seconds equal to the
 nonnegative remaining time measured by the server. A browser may discard all
@@ -354,8 +381,10 @@ server authority. No key or capability is persisted by the browser.
 
 ## Signed-in recovery visibility and audit (#45, D25)
 
-Authenticated `session` adds `recovery_pending: {ready_at} | null`. It includes
-pending state even after capability expiry because resumption keeps that deadline.
+Authenticated `session` adds `recovery_pending: {ready_at} | null`. The deadline is
+an estimate from the same elapsed clock as recovery authority. It includes
+the last stored ready time until cancellation or replacement, including an expired
+row. This notice grants no recovery authority; a new attempt replaces that deadline.
 No words, verifier, capability or requesting-device identity are disclosed.
 
 Browsers subscribe on control stream 0 with the existing Subscribe frame:
@@ -368,8 +397,9 @@ state notifications, not an audit stream. No polling timer runs on idle devices.
 A signed-in browser shows a toast once per new deadline and a persistent notice
 with a Cancel recovery control. Session reads on foreground return repair state.
 
-Start (not resume), cancel (when a row existed), and complete audit rows commit in
-the same SQLite transaction as their state changes. Rows contain only account ID,
+Audit rows for each new attempt (including a resume after expiry), cancellation
+(when a row existed), and completion commit in the same SQLite transaction as
+their state changes. Rows contain only account ID,
 event and Unix time. Invalid requests, reissues and repeat cancellation cannot
 invent completion or duplicate start evidence. Notification is after commit.
 
@@ -391,6 +421,16 @@ affected account; none requires a server-wide authority event. Test-only all-acc
 notifications may model database changes whose account scope is unknown. Server
 shutdown and component disable retain their separate lifecycle signals. Ordinary
 account changes must never wake another account's sockets or pending operations.
+
+On recovery completion, signed-in WebSockets carry a content-free close frame
+(code 1008, reason `recovery completed`). The browser displays "Recovery completed.
+This device has been signed out." while clearing its account state, including
+when no terminal window is open. Session/key replacement remains atomic. A per-account completion
+generation survives coalesced logout hints, so whichever authority guard tears down
+the socket can carry the notice; new subscribers do not inherit an old completion.
+Teardown waits for any in-flight completion commit to publish its marker before
+choosing its close reason, covering the gap between SQLite commit and publication.
+No recovery snapshot or account data is sent after session revocation (#309).
 
 ## Browser-only recovery derivation v2 (#45, D151 owner task)
 
@@ -459,8 +499,10 @@ The client exposes a callable function for that future screen.
 
 ### Remaining wait bounds (R3, #45)
 
-Resumption reports the stored deadline's actual remaining seconds, even above
-24 hours after a clock rollback. The client accepts nonnegative safe integer
+Resumption reports the stored deadline's remaining seconds against the persisted
+monotonic elapsed clock described above, rounded up. Wall-clock corrections do
+not advance or extend the remaining wait; restarts retain only recorded progress.
+The client continues to accept nonnegative safe integer
 waits through the recovery capability policy maximum of 48 hours (172800 seconds)
 and rejects larger or malformed durations; it does not change the deadline.
 Its monotonic countdown never grants server authority.
