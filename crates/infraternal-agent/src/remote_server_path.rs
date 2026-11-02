@@ -228,10 +228,14 @@ async fn connect_with_predecessor_fallback(
                 return Err(candidate_error);
             };
             let predecessor_identity = RemoteIdentity {
+                host_id: identity.host_id,
                 identity: predecessor,
                 roots: identity.roots.clone(),
                 endpoint: identity.endpoint,
                 server_name: identity.server_name.clone(),
+                public_origin: identity.public_origin.clone(),
+                https_root: identity.https_root.clone(),
+                https_system_roots: identity.https_system_roots,
                 execution_uid: identity.execution_uid,
             };
             connect(&predecessor_identity, None, address, kind, prove).await

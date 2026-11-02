@@ -47,7 +47,7 @@ struct Operation {
     sequence: i64,
     last_completed_at: i64,
     phase: String,
-    operation_id: Option<Vec<u8>>,
+    id: Option<Vec<u8>>,
     challenge: Option<Vec<u8>>,
     predecessor_fingerprint: Option<Vec<u8>>,
     predecessor_public_key: Option<Vec<u8>>,
@@ -58,6 +58,36 @@ struct Operation {
     candidate_fingerprint: Option<Vec<u8>>,
     candidate_certificate: Option<Vec<u8>>,
     candidate_attempted_at: Option<i64>,
+}
+
+/// Candidate proof material kept outside the database transaction while CPU-bound signing runs.
+struct CandidateProof {
+    source: Arc<dyn CaKeySource>,
+    csr_der: Vec<u8>,
+    old_signature: Vec<u8>,
+    challenge: Challenge,
+    predecessor: [u8; 32],
+    host: Uuid,
+    now: i64,
+}
+
+/// The verified key and certificate returned by the bounded signing worker.
+struct VerifiedCandidate {
+    public_key: [u8; 32],
+    signed: crate::ca::SignedCertificate,
+}
+
+/// All values that bind an issued certificate to one durable rotation transition.
+struct IssuedCertificate<'a> {
+    host: Uuid,
+    current_fingerprint: &'a [u8; 32],
+    predecessor: &'a [u8; 32],
+    challenge: &'a Challenge,
+    csr_digest: [u8; 32],
+    public_key: [u8; 32],
+    der: &'a [u8],
+    record: &'a crate::enrollment::CertificateRecord,
+    now: i64,
 }
 
 impl Service {
@@ -179,7 +209,7 @@ impl Service {
         )
         .bind(now)
         .bind(operation.host.as_bytes().as_slice())
-        .bind(operation.operation_id.as_deref().ok_or_else(denied)?)
+        .bind(operation.id.as_deref().ok_or_else(denied)?)
         .bind(operation.sequence)
         .bind(retry_before)
         .execute(&self.store.0)
@@ -232,77 +262,38 @@ impl Service {
         } else if operation.phase != "challenged" {
             return Err(denied());
         }
-        let source = self.source.clone();
-        let csr_der = proof.csr_der.clone();
-        let signature = proof.old_signature.clone();
-        let challenge_for_proof = challenge.clone();
-        let expected_issuer = challenge.issuer_fingerprint;
-        let expected_generation = challenge.issuer_generation;
-        let host_copy = host;
-        let signed = tokio::task::spawn_blocking(move || {
-            let csr = ValidatedCsr::parse(&csr_der).map_err(|_| denied())?;
-            let candidate: [u8; 32] = csr
-                .key()
-                .raw_public_key()
-                .map_err(|_| denied())?
-                .try_into()
-                .map_err(|_| denied())?;
-            if candidate == predecessor {
-                return Err(denied());
-            }
-            let old =
-                PKey::public_key_from_raw_bytes(&predecessor, Id::ED25519).map_err(|_| denied())?;
-            let transcript = infraternal_plugin_remote::identity_rotation::transcript(
-                &challenge_for_proof,
-                &csr_der,
-            )?;
-            let mut verifier = Verifier::new_without_digest(&old).map_err(|_| denied())?;
-            if !verifier
-                .verify_oneshot(&signature, &transcript)
-                .map_err(|_| denied())?
-            {
-                return Err(denied());
-            }
-            let material = source.load().map_err(|_| denied())?;
-            let issuer_fingerprint: [u8; 32] = material
-                .issuer()
-                .digest(MessageDigest::sha256())
-                .map_err(|_| denied())?
-                .as_ref()
-                .try_into()
-                .map_err(|_| denied())?;
-            if issuer_fingerprint != expected_issuer
-                || source.issuer_generation() != expected_generation
-            {
-                return Err(denied());
-            }
-            drop(material);
-            let certificate = CertificateAuthority::from_source(source.as_ref())
-                .map_err(|_| denied())?
-                .sign_host(host_copy, &csr, now)
-                .map_err(|_| denied())?;
-            Ok((candidate, certificate))
-        })
-        .await
-        .map_err(|_| denied())??;
-        let (candidate_public_key, signed) = signed;
-        if signed.record.issuer_fingerprint != expected_issuer
+        let candidate_proof = CandidateProof {
+            source: self.source.clone(),
+            csr_der: proof.csr_der,
+            old_signature: proof.old_signature,
+            challenge: challenge.clone(),
+            predecessor,
+            host,
+            now,
+        };
+        let signed =
+            tokio::task::spawn_blocking(move || verify_and_sign_candidate(candidate_proof))
+                .await
+                .map_err(|_| denied())??;
+        let candidate_public_key = signed.public_key;
+        let signed = signed.signed;
+        if signed.record.issuer_fingerprint != challenge.issuer_fingerprint
             || signed.record.public_key != candidate_public_key
             || signed.der.len() > MAX_CANDIDATE_CERTIFICATE_DER
         {
             return Err(denied());
         }
-        self.persist_issued(
+        self.persist_issued(IssuedCertificate {
             host,
-            &current_fingerprint,
-            &predecessor,
-            &challenge,
-            digest,
-            candidate_public_key,
-            &signed.der,
-            &signed.record,
+            current_fingerprint: &current_fingerprint,
+            predecessor: &predecessor,
+            challenge: &challenge,
+            csr_digest: digest,
+            public_key: candidate_public_key,
+            der: &signed.der,
+            record: &signed.record,
             now,
-        )
+        })
         .await
     }
 
@@ -369,9 +360,8 @@ impl Service {
         now: i64,
         operation: &Operation,
     ) -> io::Result<Option<Challenge>> {
-        let material = match self.source.load() {
-            Ok(material) => material,
-            Err(_) => return Ok(None),
+        let Ok(material) = self.source.load() else {
+            return Ok(None);
         };
         let issuer_fingerprint: [u8; 32] = material
             .issuer()
@@ -434,18 +424,20 @@ impl Service {
         Ok(Some(challenge))
     }
 
-    async fn persist_issued(
-        &self,
-        host: Uuid,
-        current_fingerprint: &[u8; 32],
-        predecessor: &[u8; 32],
-        challenge: &Challenge,
-        csr_digest: [u8; 32],
-        candidate: [u8; 32],
-        der: &[u8],
-        record: &crate::enrollment::CertificateRecord,
-        now: i64,
-    ) -> io::Result<Vec<u8>> {
+    // These writes form one idempotent authority transition and must commit together.
+    #[allow(clippy::too_many_lines)]
+    async fn persist_issued(&self, issued: IssuedCertificate<'_>) -> io::Result<Vec<u8>> {
+        let IssuedCertificate {
+            host,
+            current_fingerprint,
+            predecessor,
+            challenge,
+            csr_digest,
+            public_key: candidate,
+            der,
+            record,
+            now,
+        } = issued;
         let mut tx = self.store.0.begin().await.map_err(|_| denied())?;
         let operation = self
             .read_operation_in(&mut tx, host)
@@ -605,7 +597,7 @@ impl Service {
              AND EXISTS(SELECT 1 FROM remote_hosts h WHERE h.id=remote_identity_rotation.host_id AND h.revoked_at IS NULL)",
         )
         .bind(host.as_bytes().as_slice())
-        .bind(operation.operation_id.as_deref().ok_or_else(denied)?)
+        .bind(operation.id.as_deref().ok_or_else(denied)?)
         .bind(operation.sequence)
         .bind(candidate.as_slice())
         .execute(&mut *tx)
@@ -693,7 +685,7 @@ impl Service {
         .fetch_optional(&self.store.0)
         .await
         .map_err(|_| denied())?;
-        row.map(|row| operation_from_row(row, host)).transpose()
+        row.map(|row| operation_from_row(&row, host)).transpose()
     }
 
     async fn read_operation_in(
@@ -711,14 +703,57 @@ impl Service {
         .fetch_optional(&mut **tx)
         .await
         .map_err(|_| denied())?;
-        row.map(|row| operation_from_row(row, host)).transpose()
+        row.map(|row| operation_from_row(&row, host)).transpose()
     }
+}
+
+fn verify_and_sign_candidate(proof: CandidateProof) -> io::Result<VerifiedCandidate> {
+    let csr = ValidatedCsr::parse(&proof.csr_der).map_err(|_| denied())?;
+    let public_key: [u8; 32] = csr
+        .key()
+        .raw_public_key()
+        .map_err(|_| denied())?
+        .try_into()
+        .map_err(|_| denied())?;
+    if public_key == proof.predecessor {
+        return Err(denied());
+    }
+    let predecessor =
+        PKey::public_key_from_raw_bytes(&proof.predecessor, Id::ED25519).map_err(|_| denied())?;
+    let transcript =
+        infraternal_plugin_remote::identity_rotation::transcript(&proof.challenge, &proof.csr_der)?;
+    let mut verifier = Verifier::new_without_digest(&predecessor).map_err(|_| denied())?;
+    if !verifier
+        .verify_oneshot(&proof.old_signature, &transcript)
+        .map_err(|_| denied())?
+    {
+        return Err(denied());
+    }
+    let material = proof.source.load().map_err(|_| denied())?;
+    let issuer_fingerprint: [u8; 32] = material
+        .issuer()
+        .digest(MessageDigest::sha256())
+        .map_err(|_| denied())?
+        .as_ref()
+        .try_into()
+        .map_err(|_| denied())?;
+    if issuer_fingerprint != proof.challenge.issuer_fingerprint
+        || proof.source.issuer_generation() != proof.challenge.issuer_generation
+    {
+        return Err(denied());
+    }
+    drop(material);
+    let signed = CertificateAuthority::from_source(proof.source.as_ref())
+        .map_err(|_| denied())?
+        .sign_host(proof.host, &csr, proof.now)
+        .map_err(|_| denied())?;
+    Ok(VerifiedCandidate { public_key, signed })
 }
 
 impl Operation {
     fn challenge(&self) -> io::Result<Challenge> {
-        let operation_id = Uuid::from_slice(self.operation_id.as_deref().ok_or_else(denied)?)
-            .map_err(|_| denied())?;
+        let operation_id =
+            Uuid::from_slice(self.id.as_deref().ok_or_else(denied)?).map_err(|_| denied())?;
         let challenge: [u8; 32] = self
             .challenge
             .as_deref()
@@ -749,7 +784,7 @@ impl Operation {
 
     fn candidate_certificate(&self) -> io::Result<CandidateCertificate> {
         Ok(CandidateCertificate {
-            operation_id: Uuid::from_slice(self.operation_id.as_deref().ok_or_else(denied)?)
+            operation_id: Uuid::from_slice(self.id.as_deref().ok_or_else(denied)?)
                 .map_err(|_| denied())?,
             sequence: u64::try_from(self.sequence).map_err(|_| denied())?,
             certificate_der: self
@@ -762,20 +797,20 @@ impl Operation {
 
     fn acknowledgment(&self) -> io::Result<Acknowledgment> {
         Ok(Acknowledgment {
-            operation_id: Uuid::from_slice(self.operation_id.as_deref().ok_or_else(denied)?)
+            operation_id: Uuid::from_slice(self.id.as_deref().ok_or_else(denied)?)
                 .map_err(|_| denied())?,
             sequence: u64::try_from(self.sequence).map_err(|_| denied())?,
         })
     }
 }
 
-fn operation_from_row(row: sqlx::sqlite::SqliteRow, host: Uuid) -> io::Result<Operation> {
+fn operation_from_row(row: &sqlx::sqlite::SqliteRow, host: Uuid) -> io::Result<Operation> {
     Ok(Operation {
         host,
         sequence: row.try_get("sequence").map_err(|_| denied())?,
         last_completed_at: row.try_get("last_completed_at").map_err(|_| denied())?,
         phase: row.try_get("phase").map_err(|_| denied())?,
-        operation_id: row.try_get("operation_id").map_err(|_| denied())?,
+        id: row.try_get("operation_id").map_err(|_| denied())?,
         challenge: row.try_get("challenge").map_err(|_| denied())?,
         predecessor_fingerprint: row
             .try_get("predecessor_fingerprint")
@@ -811,6 +846,8 @@ mod tests {
         x509::{X509NameBuilder, X509Req},
     };
 
+    // One flow checks restart, throttled redelivery, and exact-certificate idempotency together.
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn candidate_delivery_is_throttled_after_predecessor_reconnect() {
         let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
@@ -856,17 +893,17 @@ mod tests {
         let authority = CertificateAuthority::from_source(source.as_ref()).unwrap();
         let first = authority.sign_host(host, &csr, now).unwrap();
         service
-            .persist_issued(
+            .persist_issued(IssuedCertificate {
                 host,
-                &old_fingerprint,
-                &old_public_key,
-                &challenge,
-                Sha256::digest(&csr_der).into(),
-                candidate_public_key,
-                &first.der,
-                &first.record,
+                current_fingerprint: &old_fingerprint,
+                predecessor: &old_public_key,
+                challenge: &challenge,
+                csr_digest: Sha256::digest(&csr_der).into(),
+                public_key: candidate_public_key,
+                der: &first.der,
+                record: &first.record,
                 now,
-            )
+            })
             .await
             .unwrap();
 
@@ -908,17 +945,17 @@ mod tests {
             "the fixture must make distinct leaf bytes"
         );
         service
-            .persist_issued(
+            .persist_issued(IssuedCertificate {
                 host,
-                &old_fingerprint,
-                &old_public_key,
-                &challenge,
-                Sha256::digest(&csr_der).into(),
-                candidate_public_key,
-                &retry.der,
-                &retry.record,
+                current_fingerprint: &old_fingerprint,
+                predecessor: &old_public_key,
+                challenge: &challenge,
+                csr_digest: Sha256::digest(&csr_der).into(),
+                public_key: candidate_public_key,
+                der: &retry.der,
+                record: &retry.record,
                 now,
-            )
+            })
             .await
             .unwrap();
 

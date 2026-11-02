@@ -72,13 +72,13 @@ pub(crate) async fn run(
         tokio::select! {
             biased;
             () = authority.cancelled() => return,
-            _ = async {
+            () = async {
                 if let Some(rotation) = &rotation {
                     let delay = rotation
                         .next_delay(host)
                         .await
                         .unwrap_or(Duration::from_secs(3600))
-                        .min(Duration::from_secs(31_536_000));
+                        .min(Duration::from_hours(8_760));
                     let due = tokio::time::Instant::now() + delay;
                     tokio::time::sleep_until(due.max(rotation_retry)).await;
                 } else {

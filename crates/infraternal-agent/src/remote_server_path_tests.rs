@@ -646,10 +646,14 @@ async fn candidate_mtls_refusal_retries_the_pending_predecessor() {
         candidate_ca.certificate.clone(),
     ];
     let identity = RemoteIdentity {
+        host_id: host,
         identity: predecessor,
         roots,
-        endpoint: "127.0.0.1:0".parse().unwrap(),
+        endpoint: Some("127.0.0.1:0".parse().unwrap()),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_root: None,
+        https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
     };
     let mut renewal = crate::remote_renewal::RenewalIdentity::new(
@@ -682,7 +686,7 @@ async fn candidate_mtls_refusal_retries_the_pending_predecessor() {
     let enrolled = server.endpoint.local_addr().unwrap();
     let mesh = server.lease("127.0.0.2");
     let identity = RemoteIdentity {
-        endpoint: enrolled,
+        endpoint: Some(enrolled),
         ..identity
     };
     let registry = registry();
