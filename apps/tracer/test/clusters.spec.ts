@@ -711,9 +711,11 @@ test("motion rule: the work of a view jump, a window step and a column step fini
     await new Promise((r) => setTimeout(r, 600));
     out.canvasLockToggle = time(() => document.querySelector<HTMLElement>('[data-cv="canvas-lock"]')!.click());
     await new Promise((r) => setTimeout(r, 1400));
-    // A keyboard view jump uses the short flight: it has landed well inside 400 ms.
+    // A keyboard view jump uses the short flight: it has landed well inside 400 ms. The view chord is a physical digit key (D222):
+    // ⌘3 on a Mac, Ctrl+Shift+3 elsewhere.
     const before = api.camera().cx;
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "3", ctrlKey: true, bubbles: true, cancelable: true }));
+    const mac = /mac|iphone|ipad/i.test(navigator.platform);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "3", code: "Digit3", metaKey: mac, ctrlKey: !mac, shiftKey: !mac, bubbles: true, cancelable: true }));
     await new Promise((r) => setTimeout(r, 450));
     out.keyJumpMoved = Math.abs(api.camera().cx - before);
     return out;
