@@ -380,6 +380,10 @@ test("sidebar footer: the person and settings pills line up, press, and open Set
   await page.mouse.down();
   await expect.poll(() => user.evaluate((node) => getComputedStyle(node).transform)).not.toBe("none");
   await page.mouse.up();
+  // The person's pill is their account menu (#171, TASTE "You can always sign yourself out"): Settings and Sign out. Its Settings row opens Settings.
+  const accountMenu = page.locator(".ui-anchored-popover[aria-label='Account']");
+  await expect(accountMenu.getByRole("menuitem")).toHaveText(["Settings", "Sign out"]);
+  await accountMenu.getByRole("menuitem", { name: "Settings" }).click();
   await expect(page.locator(".ui-settings")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.locator(".ui-settings")).toHaveCount(0);
