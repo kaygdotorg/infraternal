@@ -166,6 +166,10 @@ test.describe("phone 393×852", () => {
       return { inside: card.left >= pop.left && card.right <= pop.right, minTarget: Math.min(...heights) };
     });
     expect(m.inside).toBe(true);
+    await page.waitForTimeout(500);
+    // The pane opened below the fold of the popover and was scrolled into view: its whole box is inside the popover's.
+    const seen = await pane(page).evaluate((root) => { const card = root.querySelector(".cl-pv-card")!.getBoundingClientRect(), pop = document.querySelector(".canvas-popover")!.getBoundingClientRect(); return card.top >= pop.top && card.bottom <= pop.bottom + 0.5; });
+    expect(seen, "the consent is fully in view").toBe(true);
     expect(m.minTarget).toBeGreaterThanOrEqual(43.5);
   });
 });

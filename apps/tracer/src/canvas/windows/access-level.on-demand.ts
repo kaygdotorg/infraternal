@@ -218,8 +218,11 @@ export function createPrivilegeCard(host: string, env: PrivilegeCardEnv): Privil
     viewport.replaceChildren();
     stepper = new PaneStepper(viewport);
     consent(0);
-    // The pane is full height inside its (still closed) clip, so it can be brought into view at once, before the clip has grown.
-    requestAnimationFrame(() => { if (open) card.scrollIntoView({ block: "nearest" }); });
+    // The popover can only scroll as far as its content is tall, and the pane grows into its clip over the next 240 ms: keep it in
+    // view, frame by frame, until it has.
+    const from = performance.now();
+    const track = (): void => { if (!open) return; card.scrollIntoView({ block: "nearest" }); if (performance.now() - from < 300) requestAnimationFrame(track); };
+    requestAnimationFrame(track);
     // An offline machine is said at once, before the person types a password it could not take.
     void service.probe(host).then((probe) => { if (open && !busy && !probe.reachable) unreachable("offline", 0); });
     root.setAttribute("data-open", "");
