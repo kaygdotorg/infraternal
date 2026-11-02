@@ -1,14 +1,16 @@
 /**
  * A damped spring for one number (DECISIONS 70: physical, interruptible motion).
- * Configured by visual duration and bounce. Retargeting
- * mid-flight keeps velocity, so rapid toggles reverse smoothly. It only runs while
- * moving and stops at rest: zero idle work (DECISIONS 81).
+ * Configured by visual duration; the spring is critically damped, so a value never passes its target (TASTE §3,
+ * "No overshoot, ever"). Retargeting mid-flight keeps velocity, so rapid toggles reverse smoothly. It only runs
+ * while moving and stops at rest: zero idle work (DECISIONS 81).
+ *
+ * There is no bounce setting: a config is `{ visualDuration }`. The type keeps `bounce?: 0` only so an old call site that
+ * passes 0 still compiles; any other value does not, and the code below ignores it anyway.
+ * Raw `{ stiffness, damping }` is the only way to build an under-damped spring. It is rejected everywhere outside
+ * the allow-list in `no-overshoot.test.ts` (the droplet split, which the owner asked to wobble, TASTE §3 "Splits are playful physics").
  */
-/** Either visual duration and bounce or raw stiffness and damping. */
-export type SpringConfig = { visualDuration: number; bounce: number } | { stiffness: number; damping: number };
-
-/** Bounce as an overshoot ratio (0.2 = 20%) → damping ratio ζ. */
-export const zetaOf = (bounce: number) => (bounce <= 0 ? 1 : -Math.log(bounce) / Math.sqrt(Math.PI ** 2 + Math.log(bounce) ** 2));
+/** Either a visual duration (critically damped) or raw stiffness and damping. */
+export type SpringConfig = { visualDuration: number; bounce?: 0 } | { stiffness: number; damping: number };
 
 export class Spring {
   value: number;
@@ -18,10 +20,12 @@ export class Spring {
   private last = 0;
   private stiffness = 0;
   private damping = 0;
+  /** Angular frequency of a duration-based (critically damped) spring; 0 for a raw stiffness/damping spring. */
+  private omega = 0;
   /** Rest thresholds scale with the distance travelled, so a count from 0 to 10 000 settles too. */
   restDelta = 0.001;
   restVelocity = 0.002;
-  constructor(initial: number, private readonly onUpdate: (v: number) => void, cfg: SpringConfig = { visualDuration: 0.2, bounce: 0.2 }) {
+  constructor(initial: number, private readonly onUpdate: (v: number) => void, cfg: SpringConfig = { visualDuration: 0.2 }) {
     this.configure(cfg);
     this.value = this.target = initial;
     onUpdate(initial);
@@ -31,20 +35,34 @@ export class Spring {
     if ("stiffness" in cfg) {
       this.stiffness = cfg.stiffness;
       this.damping = cfg.damping;
+      this.omega = 0;
     } else {
-      // Visual duration maps to angular frequency; bounce fixes the damping ratio.
+      // Visual duration maps to angular frequency; damping ratio 1 is the fastest settle with no overshoot.
       const omega = (2 * Math.PI) / (cfg.visualDuration * 1.2);
       this.stiffness = omega * omega;
-      this.damping = 2 * zetaOf(cfg.bounce) * omega;
+      this.damping = 2 * omega;
+      this.omega = omega;
     }
   }
   /** Moves toward `to`; `instant` (keyboard input, reduced motion) jumps there. */
   set(to: number, instant = false) {
     this.target = to;
+    this.capVelocity();
     if (instant || matchMedia("(prefers-reduced-motion: reduce)").matches) {
       cancelAnimationFrame(this.raf); this.raf = 0; this.velocity = 0; this.value = to; this.onUpdate(to); return;
     }
     if (!this.raf) { this.last = performance.now(); this.raf = requestAnimationFrame(this.step); }
+  }
+  /**
+   * Retargeting keeps the velocity (interruptible motion), but a critically damped spring that is already moving toward
+   * its new target faster than omega x distance would run past it and come back: x(t) = (x0 + (v0 + omega x0) t) e^(-omega t)
+   * changes sign exactly when v0 > omega |x0|. So the speed toward the target is capped at that bound; speed away from it
+   * is kept. From then on the motion cannot cross the target (no overshoot, TASTE section 3). Raw springs are left alone.
+   */
+  private capVelocity(): void {
+    if (!this.omega) return;
+    const d = this.target - this.value, bound = this.omega * d;
+    this.velocity = d >= 0 ? Math.min(this.velocity, bound) : Math.max(this.velocity, bound);
   }
   private readonly step = (now: number) => {
     const dt = Math.max(0, (now - this.last) / 1000);

@@ -106,7 +106,7 @@ export function createWindows(cx: Ctx): WindowsModule {
       root.style.transform = `scale(${1 - 0.06 * p})`;
       root.style.opacity = opaque ? "" : String(clamp(1 - p * 1.4, 0, 1));
       cx.invalidate();
-    }, { visualDuration: 0.5, bounce: 0.28 });
+    }, { visualDuration: 0.5 });
     // p scales the window by 6 % and fades it: it rests when the scale is within 0.0005 (p about 0.008).
     restAt(spring, SCALE_REST / 0.06);
     spring.set(0);
@@ -215,7 +215,7 @@ export function createWindows(cx: Ctx): WindowsModule {
       cx.view.settle(c.view.id);
       // Neighbours close the gap without overshoot (a critically damped spring): no value passes its final place. A keyboard
       // close moves nothing on screen with a motion: the layout is simply the new one.
-      if (!instant) flip.play(before, true, { visualDuration: 0.38, bounce: 0 });
+      if (!instant) flip.play(before, true, { visualDuration: 0.38 });
       for (const w of c.wins.values()) w.binding?.refit();
       cx.tree.render();
       // The view's stops changed: the camera re-snaps (canvas lock) to the nearest one that still exists.
@@ -228,7 +228,7 @@ export function createWindows(cx: Ctx): WindowsModule {
       root.style.transform = `scale(${1 - 0.04 * p})`;
       root.style.opacity = String(1 - p);
       if (p >= 1) finish();
-    }, { visualDuration: 0.22, bounce: 0 });
+    }, { visualDuration: 0.22 });
     restAt(spring, SCALE_REST);
     spring.set(1);
   };

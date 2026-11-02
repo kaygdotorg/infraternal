@@ -80,7 +80,7 @@ export function createPillMorph(options: PillMorphOptions): PillMorph {
     for (const node of content) node.style.opacity = show;
     pill.style.opacity = String(1 - smooth(0, 0.35, k));
   };
-  const spring = new Spring(0, apply, { visualDuration: 0.4, bounce: 0.1 });
+  const spring = new Spring(0, apply, { visualDuration: 0.4 });
 
   const finishClose = (): void => {
     panel.remove();

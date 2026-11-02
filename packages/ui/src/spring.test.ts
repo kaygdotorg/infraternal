@@ -12,7 +12,7 @@ test("a missed frame does not stretch a settled spring", () => {
   globalThis.cancelAnimationFrame = () => { pending = false; };
   globalThis.matchMedia = (() => ({ matches: false })) as typeof matchMedia;
   try {
-    const spring = new Spring(0, () => {}, { visualDuration: 0.15, bounce: 0.2 });
+    const spring = new Spring(0, () => {}, { visualDuration: 0.15, bounce: 0 });
     spring.set(1);
     pending = false;
     callback!(performance.now() + 1200);

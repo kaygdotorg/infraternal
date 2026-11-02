@@ -193,7 +193,7 @@ export function createFloat(cx: Ctx): FloatModule {
       panel.style.opacity = String(1 - fade);
       root.style.opacity = String(fade);
       if (v === 1) done();
-    }, { visualDuration: 0.85, bounce: 0.05 });
+    }, { visualDuration: 0.85 });
     restAt(progress, SCALE_REST);
     progress.set(1);
   };

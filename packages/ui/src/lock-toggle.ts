@@ -8,7 +8,7 @@
  * - At rest it is invisible. A mouse within 64 px of the window's top edge fades it in at
  *   35 % opacity (touch has no frame lock; the toolbar and the palette lock there). Locked, it stays
  *   at full strength with an accent tint, and the window's hairline gets stronger (styles.css).
- * - The shackle is one spring value `t` (0 open, 1 shut) with a tiny overshoot, about 260 ms:
+ * - The shackle is one spring value `t` (0 open, 1 shut) critically damped, about 260 ms:
  *   it starts lifted and tilted, drops and snaps shut. Unlocking plays it in reverse from
  *   wherever it is (interruptible, velocity kept). Reduced motion: no shackle travel, a short
  *   crossfade of the whole icon instead.
@@ -62,10 +62,10 @@ export function createLockToggle(options: LockToggleOptions): LockToggle {
 
   let locked = false;
   const draw = (t: number): void => {
-    // t 0 = open (lifted, tilted), 1 = shut. The overshoot past 1 presses the shackle in a hair.
+    // t 0 = open (lifted, tilted), 1 = shut. t never passes 1, so the shackle stops exactly shut.
     shackle.style.transform = `translateY(${-LIFT * (1 - t)}px) rotate(${-TILT * (1 - t)}deg)`;
   };
-  const spring = new Spring(0, draw, { visualDuration: 0.26, bounce: 0.12 });
+  const spring = new Spring(0, draw, { visualDuration: 0.26 });
   shackle.style.transformOrigin = `${PIVOT_X}px ${PIVOT_Y}px`;
 
   const label = (): void => {

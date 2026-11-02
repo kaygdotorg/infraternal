@@ -8,8 +8,8 @@
  *
  * - One spring per icon; it runs only while it moves (zero idle work, D81), retargets mid-flight with its velocity, so a
  *   key pressed and released quickly reverses from where the icon is. Reduced motion swaps at once.
- * - A touch of overshoot (`bounce`) gives the icon a little life, as the other header controls have; the geometry stays
- *   valid past 1 (opacity is clamped, sizes only grow by a pixel).
+ * - The spring is critically damped (TASTE §3: no overshoot, ever), so the geometry never leaves the range between
+ *   the two icons.
  * - The endpoints are the shared icons exactly: `icon-morph.test.ts` parses ICONS and compares them with `geometryAt(spec, 0)`
  *   and `geometryAt(spec, 1)`, so editing an icon without its morph fails a test.
  */
@@ -87,7 +87,7 @@ export function createIconMorph(svg: SVGSVGElement, spec: MorphSpec): IconMorph 
     b.setAttribute("d", line(g.b));
     b.setAttribute("opacity", n(Math.min(1, Math.max(0, g.bOpacity))));
   };
-  const spring = new Spring(0, paint, { visualDuration: 0.26, bounce: 0.12 });
+  const spring = new Spring(0, paint, { visualDuration: 0.26 });
   let alt = false;
   return {
     set(next, instant = false) {
