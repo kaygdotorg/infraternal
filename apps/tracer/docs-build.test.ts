@@ -93,6 +93,22 @@ test("a Markdown file placed in the folder is built, indexed and given its conte
   }
 });
 
+test("quick facts reach index.json, per page and per heading, for the \"?\" preview (#304)", async () => {
+  const f = await fixture({
+    "facts.md": page("Facts", "A page with facts.", "> [!FACTS]\n> The page in one line.\n\n## With\n\n> [!FACTS]\n> This section in one line.\n\ntext\n\n## Without\n\ntext\n"),
+  });
+  try {
+    await buildDocs(f.out, f.dir);
+    const json = JSON.parse(await readFile(join(f.out, "index.json"), "utf8")) as { pages: DocsIndexPage[] };
+    expect(json.pages.find((entry) => entry.slug === "facts")).toEqual({
+      slug: "facts", title: "Facts", summary: "A page with facts.", facts: "The page in one line.",
+      headings: [{ id: "with", text: "With", facts: "This section in one line." }, { id: "without", text: "Without" }],
+    });
+  } finally {
+    await f.done();
+  }
+});
+
 test("a file name that cannot be a web address, or that repeats another page, is refused", async () => {
   const f = await fixture({ "Bad Name.md": page("A", "B.", "## C\n\ntext\n") });
   try {
