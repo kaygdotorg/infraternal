@@ -26,6 +26,7 @@ import { createAuthorityControl } from "./addhost/authority-unlock";
 import { createOverlayFlowHost } from "./addhost/flow-host";
 import type { ProvisioningService } from "./addhost/service";
 import { createWindowFlowHost } from "./addhost/window-host";
+import { installDocsSource } from "./docs/docs-source";
 import { createCanvas, type CanvasController } from "./create";
 import { CELL, boxOf } from "./layout/geometry";
 import { columnsFromDocument, viewFromDocument, docHasGroups, type DocTarget } from "./model/document";
@@ -188,6 +189,8 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     }, openHost(hostId) { canvas.cx.win.open(hostId); }, hasHost: (hostId) => sessions.hosts().some((host) => host.id === hostId) },
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
   });
+  // The docs, searchable in the palette and read in a window beside the others (#302).
+  const docs = installDocsSource(core, createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)));
   const authority = createAuthorityControl(core, { service: loadProvisioning });
   let welcomedOnce = false;
   const offAuthorityWelcome = connection.onWelcome(() => {
@@ -207,7 +210,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   })).then((adapter) => { readyRemoval = adapter; });
   const saved = await store.load();
   if (options.isCurrent?.() === false) {
-    disposed = true; offPending?.(); pendingNotice.dispose(); store.dispose?.(); offRoundTrip(); offSessionInventory(); offAuthorityWelcome(); authority.dispose(); addHost.dispose(); inventory.dispose(); sessions.dispose(); pool.dispose(); connection.dispose();
+    disposed = true; offPending?.(); pendingNotice.dispose(); store.dispose?.(); offRoundTrip(); offSessionInventory(); offAuthorityWelcome(); authority.dispose(); addHost.dispose(); docs.dispose(); inventory.dispose(); sessions.dispose(); pool.dispose(); connection.dispose();
     throw Error("The signed-in screen changed while layout was loading.");
   }
   // Positions the person pinned in the Mesh graph come back from the canvas document (D180).
@@ -345,7 +348,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       authority.dispose();
       startupHints.dispose();
       offMeshView();
-      addHost.dispose();
+      addHost.dispose(); docs.dispose();
       canvas.dispose();
       mesh.dispose();
       inventory.dispose();

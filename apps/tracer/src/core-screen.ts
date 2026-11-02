@@ -248,6 +248,10 @@ export interface PaletteEntry {
   swatch?: Theme;
   /** Set on font rows: hovering or arrowing onto the row shows that font until the palette closes. */
   previewFont?: MonoFont;
+  /** The row is listed only once something is typed: a long family of rows (the headings of the docs) must not fill the list at rest. */
+  queryOnly?: boolean;
+  /** What is searched in place of the hint, when the hint is for reading only (a docs row's hint names its page and must not match every heading). */
+  search?: string;
 }
 
 /** The name of a modifier key on this platform: Option is the Mac key, Alt the PC one (Control is the same word everywhere). */
@@ -513,7 +517,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const indexEntry = (entry: PaletteEntry, index: number): void => {
     // A row without a title throws in preview builds; in production the repaired title is what is searched and shown.
     const { label } = titled(entry, STRICT_ROWS);
-    paletteSearchText.set(entry, `${entry.group} ${label} ${entry.hint}`.toLocaleLowerCase());
+    paletteSearchText.set(entry, `${entry.group} ${label} ${entry.search ?? entry.hint}`.toLocaleLowerCase());
     // Normalize IDs once so typing never sanitizes every matching result.
     paletteOptionIds.set(entry, `palette-option-${entry.action?.replaceAll(/[^a-z0-9_-]/gi, "-") ?? `entry-${index}`}`);
     if (!paletteGroupIds.has(entry.group)) paletteGroupIds.set(entry.group, `palette-group-${entry.group.toLocaleLowerCase().replaceAll(" ", "-")}`);
@@ -599,7 +603,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
   const renderPalette = (query = "", preserveAction?: string): void => {
     const needle = query.trim().toLocaleLowerCase();
-    visibleEntries = (scopedEntries ?? entries).filter((entry) => paletteSearchText.get(entry)?.includes(needle) ?? false);
+    visibleEntries = (scopedEntries ?? entries).filter((entry) => (needle !== "" || !entry.queryOnly) && (paletteSearchText.get(entry)?.includes(needle) ?? false));
     selected = preserveAction === undefined ? Math.min(selected, Math.max(0, visibleEntries.length - 1)) : Math.max(0, visibleEntries.findIndex((entry) => entry.action === preserveAction));
     visibleOptions = [];
     // Clearing the list resets its viewport, avoiding a separate scrollTop read/write.
