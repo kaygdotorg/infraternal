@@ -167,6 +167,11 @@ test("the real tree builds from the real folder", async () => {
     // The front page has its own text and the list of pages, so it has contents like every other page.
     expect(index.find((entry) => entry.slug === INDEX_SLUG)!.headings.map((heading) => heading.id)).toEqual(["finding-your-way", "all-pages"]);
     expect(await readFile(resolve(out, "docs", "index.html"), "utf8")).toContain('<nav class="toc"');
+    // The page script is a file of its own: small, and referenced (deferred) by every standalone page.
+    const script = await readFile(resolve(out, "docs", "doc.js"), "utf8");
+    expect(script.length, "doc.js stays small").toBeLessThan(12_000);
+    expect(await readFile(resolve(out, "docs", "keys", "index.html"), "utf8")).toContain('<script src="/docs/doc.js" defer></script>');
+    expect(await readFile(resolve(out, "docs", "keys", "fragment.html"), "utf8"), "the canvas fragment carries no script of its own").not.toContain("<script");
   } finally {
     await rm(out, { recursive: true, force: true });
   }

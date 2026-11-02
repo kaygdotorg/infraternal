@@ -124,7 +124,8 @@ for (const size of SIZES) for (const theme of ["ink", "paper"] as const) {
       for (const [name, x] of Object.entries(edges)) expect(Math.abs(x - edges.title), `${name} shares the title's left edge`).toBeLessThanOrEqual(0.5);
       // The table is read down the page in a window this narrow: its cells line up with the title and nothing scrolls sideways.
       expect(await page.evaluate(() => { const t = document.querySelector<HTMLElement>('.ui-window[data-window-id="d-keys"] .dr-page .table')!; return t.scrollWidth - t.clientWidth; })).toBeLessThanOrEqual(0);
-      expect(Math.abs(await page.evaluate(() => document.querySelector('.ui-window[data-window-id="d-keys"] .dr-page td:first-child')!.getBoundingClientRect().left) - edges.title), "table cell shares the title's left edge").toBeLessThanOrEqual(0.5);
+      // A stacked row is a small card whose box starts at the title's edge; its text is one 0.75rem inset inside it.
+      expect(Math.abs(await page.evaluate(() => document.querySelector('.ui-window[data-window-id="d-keys"] .dr-page td:first-child')!.getBoundingClientRect().left) - edges.title - 12), "table cell text is inset 12 px in its card").toBeLessThanOrEqual(0.5);
       // The page is fully inside its window: nothing runs sideways, and the type is the product's scale (13 px, 16 px on touch).
       expect(await page.evaluate(() => { const s = document.querySelector<HTMLElement>('.ui-window[data-window-id="d-keys"] .dr-scroll')!; return s.scrollWidth - s.clientWidth; })).toBeLessThanOrEqual(0);
       expect(await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.ui-window[data-window-id="d-keys"] .doc-body p')!).fontSize) / (parseFloat(getComputedStyle(document.documentElement).fontSize) / 16))).toBe(size.touch ? 16 : 13);
