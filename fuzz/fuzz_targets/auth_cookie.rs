@@ -27,4 +27,17 @@ fuzz_target!(|input: &[u8]| {
             assert!(cookies::capability(&duplicated, prefix).is_none());
         }
     }
+    // Keep the session selector and retirement-name scan in this fuzz corpus too.
+    if let Some(session) = cookies::session(&headers) {
+        assert_eq!(session.token.len(), 43);
+        assert!(session.login_sequence >= 0);
+        assert!(session.expires >= 0);
+        assert!(
+            session.name == "__Host-infraternal"
+                || session.name.starts_with("__Host-infraternal-session-")
+        );
+    }
+    for name in cookies::observed_session_names(&headers) {
+        assert!(name == "__Host-infraternal" || name.starts_with("__Host-infraternal-session-"));
+    }
 });
