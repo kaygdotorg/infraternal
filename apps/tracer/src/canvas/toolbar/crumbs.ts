@@ -7,8 +7,14 @@
  *   Mesh      the components: choosing one flies to the first window of its row
  *   Keys      the groups of this component: choosing one flies to its window
  *
- * The three pills are centred on the screen's centre line, exactly where the capsule is (they sit in the capsule's grid track
- * and the capsule is only hidden), so nothing else in the top bar moves. A source without an `outline` never creates this.
+ * The three pills are centred on the screen's centre line, exactly where the capsule is (they sit in the capsule's grid track),
+ * so nothing else in the top bar moves. A source without an `outline` never creates this.
+ *
+ * The capsule is not taken away while the breadcrumb shows: it stays in the layout as an invisible ghost with the breadcrumb's own
+ * rectangle (`--crumbs-w`), and what the morph writes on it (its fade, its pointer-events, the palette's "covered" mark) is mirrored
+ * onto the breadcrumb. So everything that grows out of the top pill (the view list, the `?` shortcuts panel, the floating terminal, the
+ * palette) starts from where the breadcrumb is and fades it, in place, with no code of its own for Settings. A capsule that is
+ * `display: none` has an empty rectangle, and a morph made from it opens at the top left of the screen.
  *
  * A name that changes crossfades (a short rise and fade, no fill left behind, so text is crisp at rest); changes that come
  * faster than the animation (arrowing through windows) do not animate (TASTE: repeated keyboard actions don't animate).
@@ -48,6 +54,21 @@ export function createCrumbs(cx: Ctx): Crumbs {
   for (const p of [rowPill, groupPill]) { p.querySelector(".cl-crumb-icon")!.remove(); p.setAttribute("aria-haspopup", "true"); p.setAttribute("aria-expanded", "false"); }
   root.append(viewPill, sep(), rowPill, sep(), groupPill);
   capsule.after(root);
+  groupPill.setAttribute("aria-current", "page");
+
+  // The ghost capsule is as wide as the breadcrumb, whatever the names say.
+  const fit = (): void => { capsule.style.setProperty("--crumbs-w", `${root.offsetWidth}px`); };
+  const sizeWatch = new ResizeObserver(fit);
+  sizeWatch.observe(root);
+  // What a morph or the palette writes on the capsule is what the person sees happen to the breadcrumb.
+  const mirror = (): void => {
+    root.style.opacity = capsule.style.opacity;
+    root.style.pointerEvents = capsule.style.pointerEvents;
+    root.toggleAttribute("data-palette-covered", capsule.hasAttribute("data-palette-covered"));
+    root.toggleAttribute("data-expanded", capsule.getAttribute("aria-expanded") === "true");
+  };
+  const mirrorWatch = new MutationObserver(mirror);
+  mirrorWatch.observe(capsule, { attributes: true, attributeFilter: ["style", "data-palette-covered", "aria-expanded"] });
 
   let lastMotion = 0;
   const setName = (pillEl: HTMLElement, text: string): void => {
@@ -136,6 +157,7 @@ export function createCrumbs(cx: Ctx): Crumbs {
     if (!at) { closeMenu(true); return; }
     setName(rowPill, at.row.title);
     setName(groupPill, at.group.title);
+    fit();
   };
-  return { paint, dispose() { closeMenu(true); root.remove(); top.removeAttribute("data-crumbs"); } };
+  return { paint, dispose() { closeMenu(true); sizeWatch.disconnect(); mirrorWatch.disconnect(); capsule.style.removeProperty("--crumbs-w"); root.remove(); top.removeAttribute("data-crumbs"); } };
 }
