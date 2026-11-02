@@ -596,7 +596,7 @@ fn supervise(
     let control = registry.clone();
     let state = directory.0.clone();
     (
-        tokio::spawn(async move { run(&identity, state, None, control).await }),
+        tokio::spawn(async move { Box::pin(run(&identity, state, None, control)).await }),
         directory,
     )
 }
@@ -1801,10 +1801,10 @@ async fn unavailable_credentials_do_not_end_server_link() {
     };
     let directory = Directory::new();
     assert!(
-        tokio::time::timeout(
+        Box::pin(tokio::time::timeout(
             Duration::from_millis(250),
             run(&identity, directory.0.clone(), None, registry()),
-        )
+        ))
         .await
         .is_err(),
         "a recoverable credential error ended the server link"

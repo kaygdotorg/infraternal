@@ -221,6 +221,8 @@ fn legacy_7443_identity_migrates_atomically_to_its_https_origin() {
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
         key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        identity_rotation: None,
+        completed_identity_rotation: None,
     };
     let mut old_document = serde_json::to_value(&legacy).unwrap();
     let old_object = old_document.as_object_mut().unwrap();
@@ -294,6 +296,8 @@ fn public_origin_reenrollment_keeps_the_legacy_d168_server_name() {
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
         key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        identity_rotation: None,
+        completed_identity_rotation: None,
     };
     publish(&data, &serde_json::to_vec(&stored).unwrap()).unwrap();
     let invitation = JoinInvitation {
