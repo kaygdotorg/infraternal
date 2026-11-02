@@ -352,7 +352,7 @@ fn extract_allowlisted_executable<R: Read>(
     Ok(())
 }
 
-fn validate_traefik_license<R: Read>(mut entry: tar::Entry<'_, R>) -> io::Result<()> {
+fn validate_traefik_license<R: Read>(entry: tar::Entry<'_, R>) -> io::Result<()> {
     let declared_size = entry.size();
     if declared_size == 0 || declared_size > MAX_LICENSE_BYTES {
         return Err(invalid_data("Traefik license file exceeds its byte limit"));

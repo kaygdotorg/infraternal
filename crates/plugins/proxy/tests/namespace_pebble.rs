@@ -1,6 +1,10 @@
 //! Proves mesh-source filtering, exact routing, and DNS-01 issuance in an isolated namespace [#281].
 
 #![cfg(target_os = "linux")]
+#![allow(
+    clippy::expect_used,
+    reason = "Integration fixture failures should identify the exact operation that failed."
+)]
 
 use infraternal_plugin_proxy::{
     config::{DnsChallenge, ListenerPorts, PublishedService, StaticConfig},
@@ -52,6 +56,10 @@ fn namespace_serves_a_granted_mesh_backend_with_pebble_dns01() {
     );
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "The e2e scenario keeps namespace, ACME, route, and TLS lifetimes visible together."
+)]
 fn run_namespace_case() {
     run("ip", &["link", "set", "lo", "up"]);
     let links = Command::new("ip")

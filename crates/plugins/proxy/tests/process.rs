@@ -1,5 +1,10 @@
 //! Checks the owned Traefik child boundary and its file-only provider environment [#281, #289].
 
+#![allow(
+    clippy::expect_used,
+    reason = "Integration fixture failures should identify the exact operation that failed."
+)]
+
 use infraternal_plugin_proxy::supervisor::TraefikChild;
 use std::{
     fs,

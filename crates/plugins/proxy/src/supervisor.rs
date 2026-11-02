@@ -830,7 +830,6 @@ fn handle_supervisor_timeout(
                 .lifecycle
                 .child_exited(runtime.services.len(), Instant::now());
         }
-        LifecycleAction::Start => {}
         _ => {}
     }
 }

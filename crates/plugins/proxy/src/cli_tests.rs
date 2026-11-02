@@ -21,7 +21,7 @@ fn publish_and_unpublish_are_separate_root_commands() {
             .properties
             .contains_key("confirm_public")
     );
-    assert!(publish.input_schema.required.is_empty());
+    assert_eq!(publish.input_schema.required, Vec::<String>::new());
     let unpublish = definition
         .actions
         .iter()

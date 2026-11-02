@@ -86,7 +86,10 @@ fn final_exposure_starts_one_ten_second_drain_then_stops_once() {
         }
     );
     assert_eq!(
-        lifecycle.tick(0, start + DRAIN_TIMEOUT - Duration::from_millis(1)),
+        lifecycle.tick(
+            0,
+            start + DRAIN_TIMEOUT.saturating_sub(Duration::from_millis(1)),
+        ),
         LifecycleAction::Keep
     );
     assert_eq!(
@@ -133,7 +136,10 @@ fn unexpected_exits_back_off_and_never_restart_without_exposures() {
         LifecycleAction::RetryAfter(first_delay)
     );
     assert_eq!(
-        lifecycle.tick(1, start + first_delay - Duration::from_millis(1)),
+        lifecycle.tick(
+            1,
+            start + first_delay.saturating_sub(Duration::from_millis(1)),
+        ),
         LifecycleAction::Keep
     );
     assert_eq!(
