@@ -1,7 +1,6 @@
 /**
- * The canvas side of app windows (D207, D208): the few lines that live on the canvas's own path. Everything heavy is
- * in `appwin.on-demand.ts` and loads only when the feature is available (wanted here, supported by the server), so a
- * canvas without the feature pays for this file and nothing else (D188).
+ * The canvas-side app-window bridge (D207, D208). This shared module keeps only the availability checks and a lazy
+ * call-through; the lifecycle and picker load with the app-window feature after it is wanted and supported (D188).
  *
  * `installAppWindows` is called once by the composition root. With no adapter (mockups, an old server's canvas) it
  * returns nothing and the canvas never offers an app window: no picker row, no palette row, no switch.
@@ -17,7 +16,6 @@ import type { PopoverSource } from "../../../../../packages/ui/src/anchored-popo
 import type { PaletteEntry } from "../../core-screen";
 import type { Ctx, WinRec } from "../context";
 import type { SessionBinding } from "../sessions/adapter";
-import type { AppWindowsPart } from "./appwin.on-demand";
 
 export interface AppWindowsHook {
   /** The feature is available now. */
@@ -43,19 +41,20 @@ export interface AppWindowsHook {
 export function installAppWindows(cx: Ctx): AppWindowsHook | undefined {
   const adapter = cx.adapters.appWindows;
   if (!adapter) return undefined;
-  let part: AppWindowsPart | undefined;
-  let loading: Promise<AppWindowsPart | undefined> | undefined;
+  let runtime: AppWindowsHook | undefined;
+  let loading: Promise<AppWindowsHook | undefined> | undefined;
   let generation = 0;
   let disposed = false;
-  const load = (): Promise<AppWindowsPart | undefined> => {
+  const load = (): Promise<AppWindowsHook | undefined> => {
     if (disposed || cx.signal.aborted || !adapter.available()) return Promise.resolve(undefined);
+    if (runtime) return Promise.resolve(runtime);
     if (!loading) {
       const epoch = generation;
-      loading = onDemand(() => import("./appwin.on-demand")).then((m) => {
+      loading = onDemand(() => import("./hook.on-demand")).then((m) => {
         // A queued import must not restart inventory work after preference-off,
         // capability withdrawal, or a newer enable generation.
         if (epoch !== generation || disposed || cx.signal.aborted || !adapter.available()) return undefined;
-        return (part = m.createAppWindowsPart(cx, adapter));
+        return (runtime = m.installAppWindowsRuntime(cx, adapter));
       }).catch(() => {
         if (epoch === generation && !disposed && adapter.available()) {
           loading = undefined;
@@ -66,25 +65,17 @@ export function installAppWindows(cx: Ctx): AppWindowsHook | undefined {
     }
     return loading;
   };
-  const warm = (): void => { if (adapter.available()) whenIdle(() => { void load(); }); };
+  const warm = (): void => {
+    if (!adapter.available()) return;
+    if (runtime) { runtime.warm(); return; }
+    whenIdle(() => { void load(); });
+  };
   warm();
-  const off = adapter.onChange(() => {
+  const offAvailable = adapter.onChange(() => {
     if (disposed || cx.signal.aborted) return;
     if (adapter.available()) warm();
-    else {
-      generation++;
-      loading = undefined;
-      part?.dispose();
-      part = undefined;
-      // Dispose through the existing window lifecycle while the socket can still
-      // deliver Stop. Immediate removal also prevents a rapid re-enable from
-      // finding a closing, already-disposed window as the existing target.
-      const windows = [...cx.views.values()].flatMap(view => [...view.wins.values()]);
-      for (const rec of windows) if (rec.model.kind === "app" || rec.model.kind === "screen") cx.win.close(rec, true);
-    }
-    cx.core.refreshPalette();
+    else if (!runtime) { generation++; loading = undefined; }
   });
-  const removeProvider = cx.core.addPaletteProvider(() => (adapter.available() ? part?.paletteEntries() ?? [] : []));
   return {
     get active() { return adapter.available(); },
     get serverCan() { return adapter.serverCan(); },
@@ -93,13 +84,13 @@ export function installAppWindows(cx: Ctx): AppWindowsHook | undefined {
     onChange: (listener) => adapter.onChange(listener),
     togglePicker(anchor, source, query) {
       if (!adapter.available()) return;
-      if (part) { part.togglePicker(anchor, source, query); return; }
-      void load().then((p) => { if (p && p === part && adapter.available() && anchor.isConnected) p.togglePicker(anchor, source, query); });
+      if (runtime) { runtime.togglePicker(anchor, source, query); return; }
+      void load().then((loaded) => { if (loaded && loaded === runtime && adapter.available() && anchor.isConnected) loaded.togglePicker(anchor, source, query); });
     },
-    paletteEntries: () => (adapter.available() ? part?.paletteEntries() ?? [] : []),
-    openFromPalette(value) { void load().then((p) => { if (p && p === part && adapter.available()) p.openFromPalette(value); }); },
-    bindingFor: (rec) => part?.bindingFor(rec),
+    paletteEntries: () => (adapter.available() ? runtime?.paletteEntries() ?? [] : []),
+    openFromPalette(value) { void load().then((loaded) => { if (loaded && loaded === runtime && adapter.available()) loaded.openFromPalette(value); }); },
+    bindingFor: (rec) => runtime?.bindingFor(rec),
     warm,
-    dispose() { disposed = true; generation++; off(); removeProvider(); part?.dispose(); part = undefined; loading = undefined; },
+    dispose() { disposed = true; generation++; offAvailable(); runtime?.dispose(); runtime = undefined; loading = undefined; },
   };
 }
