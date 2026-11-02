@@ -18,7 +18,7 @@
  *
  * A name that changes crossfades (a short rise and fade, no fill left behind, so text is crisp at rest); changes that come
  * faster than the animation (arrowing through windows) do not animate (TASTE: repeated keyboard actions don't animate).
- * A menu opens under its pill in the shared overlay material, grows from the pill, and closes on a press outside, on Escape
+ * A menu opens under its pill, centred on it, in the shared overlay material, grows from the pill, and closes on a press outside, on Escape
  * and on choosing; the choice is ticked.
  */
 import type { Ctx } from "../context";
@@ -116,9 +116,11 @@ export function createCrumbs(cx: Ctx): Crumbs {
     }
     stage.append(node);
     const screen = stage.getBoundingClientRect(), box = anchor.getBoundingClientRect();
-    const width = Math.min(Math.max(node.offsetWidth, box.width), screen.width - 16);
     node.style.minWidth = `${Math.round(box.width)}px`;
-    node.style.left = `${Math.round(Math.max(8, Math.min(box.left - screen.left, screen.width - 8 - width)))}px`;
+    const width = Math.min(Math.max(node.offsetWidth, box.width), screen.width - 16);
+    // Centred on the pill it came from, shifted only as far as the screen's inset needs (TASTE: a menu opened from a pill is centred on that pill).
+    const centre = box.left + box.width / 2 - screen.left;
+    node.style.left = `${Math.round(Math.max(8, Math.min(centre - width / 2, screen.width - 8 - width)))}px`;
     node.style.top = `${Math.round(box.bottom - screen.top + 8)}px`;
     node.style.maxHeight = `${Math.max(120, Math.floor(screen.bottom - box.bottom - 16))}px`;
     node.style.transformOrigin = `${Math.round(box.left + box.width / 2 - screen.left - parseFloat(node.style.left))}px 0`;
@@ -133,7 +135,12 @@ export function createCrumbs(cx: Ctx): Crumbs {
     cx.nav.focusWindow(rec);
   };
   const sourceOf = (e: MouseEvent): "pointer" | "keyboard" => (e.detail === 0 ? "keyboard" : "pointer");
-  viewPill.addEventListener("click", () => { closeMenu(true); cx.viewList.toggle(); }, { signal });
+  // The views list grows from, and is centred on, the Settings pill (TASTE: a menu opened from a pill is centred on that pill); the morph fades that
+  // pill, and the rest of the breadcrumb fades with it, so the list does not open over half a breadcrumb.
+  const rest = [...root.children].filter((n): n is HTMLElement => n !== viewPill);
+  const fadeWatch = new MutationObserver(() => { for (const n of rest) n.style.opacity = viewPill.style.opacity; });
+  fadeWatch.observe(viewPill, { attributes: true, attributeFilter: ["style"] });
+  viewPill.addEventListener("click", () => { closeMenu(true); cx.viewList.toggle(viewPill); }, { signal });
   rowPill.addEventListener("click", (e) => {
     if (menu?.anchor === rowPill) { closeMenu(); return; }
     const at = here();
@@ -159,5 +166,5 @@ export function createCrumbs(cx: Ctx): Crumbs {
     setName(groupPill, at.group.title);
     fit();
   };
-  return { paint, dispose() { closeMenu(true); sizeWatch.disconnect(); mirrorWatch.disconnect(); capsule.style.removeProperty("--crumbs-w"); root.remove(); top.removeAttribute("data-crumbs"); } };
+  return { paint, dispose() { closeMenu(true); sizeWatch.disconnect(); mirrorWatch.disconnect(); fadeWatch.disconnect(); capsule.style.removeProperty("--crumbs-w"); root.remove(); top.removeAttribute("data-crumbs"); } };
 }
