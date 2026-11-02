@@ -1,0 +1,6 @@
+#!/bin/sh
+# Immutable inactive service-manager reply for isolated CLI exit-code tests (#299).
+# Keeping this executable in the checkout avoids inherited writable fixture fds.
+test "$1" = --user || exit 1
+test "$2" = show || exit 1
+printf '%s\n' ActiveState=inactive SubState=dead

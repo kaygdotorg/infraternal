@@ -17,6 +17,69 @@ use std::{
 };
 use tokio::process::Command;
 
+async fn helper_output(command: &mut Command) -> std::io::Result<std::process::Output> {
+    // Another test's fork can briefly inherit a helper's writer before exec
+    // closes it, even with CLOEXEC. Only ETXTBSY proves no child started: retry
+    // that spawn, never a failed authentication or a running helper's outcome.
+    command.kill_on_drop(true);
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            match command.output().await {
+                Err(error) if error.raw_os_error() == Some(nix::libc::ETXTBSY) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                output => return output,
+            }
+        }
+    })
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "helper writer did not close"))?
+}
+
+#[tokio::test]
+async fn helper_exec_preserves_unrelated_spawn_errors() {
+    let scratch = common::scratch();
+    let error = helper_output(&mut Command::new(
+        scratch.join(format!("missing-{}", uuid::Uuid::new_v4())),
+    ))
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+}
+
+#[tokio::test]
+async fn helper_exec_waits_for_an_inherited_writer_to_close() {
+    let scratch = common::scratch();
+    let directory = scratch.join(format!("exec-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    let path = directory.join("helper");
+    let fixture = AskpassImage {
+        _scratch: scratch,
+        directory,
+        path,
+    };
+    std::fs::write(&fixture.path, b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&fixture.path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // A sibling fork can retain a writer even after the parent closes its fd.
+    // Hold that kernel condition until the first exec attempt has been polled.
+    let writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&fixture.path)
+        .unwrap();
+    let mut command = Command::new(&fixture.path);
+    let mut output = Box::pin(helper_output(&mut command));
+    std::future::poll_fn(|context| {
+        assert!(
+            std::future::Future::poll(output.as_mut(), context).is_pending(),
+            "exec must wait for the transient writer instead of returning ETXTBSY"
+        );
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(writer);
+    assert!(output.await.unwrap().status.success());
+}
+
 /// Shares a private stripped copy of the real CLI across this test binary.
 ///
 /// The peer-image digest runs before a prompt reply. The unstripped debug CLI
@@ -96,17 +159,18 @@ async fn real_cli_askpass_refuses_unregistered_parent_and_cleans_helper() {
         .unwrap()
         .unwrap()
         .path();
-    let output = Command::new(directory.join("askpass"))
-        .arg("fixture-user@fixture-host's password: ")
-        .env(
-            "INFRATERNAL_SSH_ASKPASS_SOCKET",
-            directory.join("askpass.sock"),
-        )
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .await
-        .expect("run real askpass CLI");
+    let output = helper_output(
+        Command::new(directory.join("askpass"))
+            .arg("fixture-user@fixture-host's password: ")
+            .env(
+                "INFRATERNAL_SSH_ASKPASS_SOCKET",
+                directory.join("askpass.sock"),
+            )
+            .stdin(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .await
+    .expect("run real askpass CLI");
     // Knowing the private path is insufficient: this invocation has no owned
     // SSH/ssh-add parent. The encrypted-key test exercises an authorized helper.
     assert!(!output.status.success());

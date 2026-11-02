@@ -487,6 +487,30 @@ fn reload_reopens_install_path_when_the_running_inode_was_replaced() {
 
 #[tokio::test]
 async fn default_restart_opens_the_receiver_target_exactly_once() {
+    const NAME: &str = "restart::tests::default_restart_opens_the_receiver_target_exactly_once";
+    if std::env::var_os("INFRATERNAL_DEFAULT_RESTART_TEST").is_none() {
+        // Admission retains both target and recovery images. Debug information
+        // makes those snapshots hundreds of MiB each without testing another
+        // invariant; use the same stripped executable as the other exec tests.
+        let source = stripped_test_image(&std::env::current_exe().unwrap());
+        let child = std::process::Command::new(source)
+            .args(["--exact", NAME, "--nocapture"])
+            .env("INFRATERNAL_DEFAULT_RESTART_TEST", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let output = bounded_output(child, HANG_BOUND, NAME);
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let directory = Directory::new();
     let mut control = Control::start(directory.state()).unwrap();
     crate::restart_binary::reset_test_opens();
