@@ -1,0 +1,162 @@
+#!/bin/sh
+# Prove the System Keychain creator ACL survives a signed daemon rebuild. Run as
+# root in an authorized macOS test slot with two separately built test binaries.
+set -eu
+
+if [ "$#" -ne 2 ]; then
+    printf 'usage: %s <older-signed-test-binary> <newer-signed-test-binary>\n' "$0" >&2
+    exit 2
+fi
+if [ "$(/usr/bin/id -u)" -ne 0 ]; then
+    printf 'run this test through the authorized root LaunchDaemon path\n' >&2
+    exit 77
+fi
+
+old_source=$1
+new_source=$2
+test_label=org.infraternal.mesh.keychain-upgrade-test
+test_name=macos_keychain::tests::signed_launch_daemon_reads_the_same_key_across_rebuilds
+plist=/Library/LaunchDaemons/org.infraternal.mesh.keychain-upgrade-test.plist
+
+if [ ! -f "$old_source" ] || [ -L "$old_source" ] || [ ! -f "$new_source" ] || [ -L "$new_source" ]; then
+    printf 'both test binaries must be regular files\n' >&2
+    exit 2
+fi
+if [ -e "$plist" ] || /bin/launchctl print "system/$test_label" >/dev/null 2>&1; then
+    printf 'the disposable keychain-upgrade LaunchDaemon already exists\n' >&2
+    exit 1
+fi
+
+old_details=$(/usr/bin/codesign -dv --verbose=4 "$old_source" 2>&1)
+new_details=$(/usr/bin/codesign -dv --verbose=4 "$new_source" 2>&1)
+field() {
+    printf '%s\n' "$1" | /usr/bin/sed -n "s/^$2=//p" | /usr/bin/head -n 1
+}
+old_identifier=$(field "$old_details" Identifier)
+new_identifier=$(field "$new_details" Identifier)
+old_team=$(field "$old_details" TeamIdentifier)
+new_team=$(field "$new_details" TeamIdentifier)
+old_cdhash=$(field "$old_details" CDHash)
+new_cdhash=$(field "$new_details" CDHash)
+
+if [ -z "$old_identifier" ] || [ "$new_identifier" != "$old_identifier" ] ||
+    [ -z "$old_team" ] || [ "$old_team" = 'not set' ] || [ "$new_team" != "$old_team" ] ||
+    [ -z "$old_cdhash" ] || [ "$new_cdhash" = "$old_cdhash" ]; then
+    printf 'test binaries must have identifier org.infraternal.mesh, the same Team ID, and different CDHashes\n' >&2
+    exit 1
+fi
+
+old_requirement=$(/usr/bin/codesign -dr - "$old_source" 2>&1)
+new_requirement=$(/usr/bin/codesign -dr - "$new_source" 2>&1)
+old_designated=$(printf '%s\n' "$old_requirement" | /usr/bin/sed -n 's/^designated => //p')
+new_designated=$(printf '%s\n' "$new_requirement" | /usr/bin/sed -n 's/^designated => //p')
+if [ -z "$old_designated" ] || [ "$new_designated" != "$old_designated" ] ||
+    printf '%s\n' "$old_designated" | /usr/bin/grep -qi cdhash; then
+    printf 'test binaries must share one stable designated requirement without a CDHash\n' >&2
+    exit 1
+fi
+printf '%s\n' "$old_requirement" | /usr/bin/grep -F "identifier \"$old_identifier\"" >/dev/null
+printf '%s\n' "$old_requirement" | /usr/bin/grep -F 'certificate leaf[subject.OU]' >/dev/null
+printf '%s\n' "$old_requirement" | /usr/bin/grep -F "$old_team" >/dev/null
+printf '%s\n' "$new_requirement" | /usr/bin/grep -F "identifier \"$new_identifier\"" >/dev/null
+printf '%s\n' "$new_requirement" | /usr/bin/grep -F 'certificate leaf[subject.OU]' >/dev/null
+printf '%s\n' "$new_requirement" | /usr/bin/grep -F "$new_team" >/dev/null
+
+umask 077
+work=$(/usr/bin/mktemp -d /private/tmp/j80-keychain-upgrade.XXXXXX)
+bootstrapped=no
+cleanup() {
+    if [ "$bootstrapped" = yes ]; then
+        /bin/launchctl bootout system "$plist" >/dev/null 2>&1 || true
+    fi
+    /bin/rm -f "$plist"
+    /bin/rm -rf "$work"
+}
+trap cleanup EXIT HUP INT TERM
+
+/bin/mkdir -p "$work/bin"
+/usr/sbin/chown -R root:wheel "$work"
+/bin/chmod 700 "$work"
+/usr/bin/install -o root -g wheel -m 755 "$old_source" "$work/bin/old"
+/usr/bin/install -o root -g wheel -m 755 "$new_source" "$work/bin/new"
+
+write_plist() {
+    binary=$1
+    log=$2
+    mode=$3
+    expected=$4
+    if [ "$mode" = rotate ]; then
+        environment='<key>J80_ROTATE_TEST_KEY</key><string>1</string>'
+    else
+        environment="<key>J80_EXPECT_PUBLIC_KEY</key><string>$expected</string>"
+    fi
+    cat >"$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>$test_label</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$binary</string>
+        <string>--ignored</string>
+        <string>--exact</string>
+        <string>$test_name</string>
+        <string>--nocapture</string>
+    </array>
+    <key>EnvironmentVariables</key><dict>$environment</dict>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><false/>
+    <key>StandardOutPath</key><string>$log</string>
+    <key>StandardErrorPath</key><string>$log</string>
+</dict>
+</plist>
+EOF
+    /usr/sbin/chown root:wheel "$plist"
+    /bin/chmod 644 "$plist"
+    /usr/bin/touch "$log"
+    /usr/sbin/chown root:wheel "$log"
+    /bin/chmod 600 "$log"
+}
+
+run_probe() {
+    log=$1
+    /bin/launchctl bootstrap system "$plist"
+    bootstrapped=yes
+    attempt=0
+    while [ "$attempt" -lt 60 ]; do
+        if /usr/bin/grep -q '^J80_PUBLIC_KEY=' "$log"; then
+            break
+        fi
+        if /usr/bin/grep -q 'test result: FAILED' "$log"; then
+            /bin/cat "$log" >&2
+            return 1
+        fi
+        /bin/sleep 1
+        attempt=$((attempt + 1))
+    done
+    if ! /usr/bin/grep -q '^J80_PUBLIC_KEY=' "$log"; then
+        /bin/cat "$log" >&2
+        printf 'LaunchDaemon keychain probe did not finish\n' >&2
+        return 1
+    fi
+    public_key=$(/usr/bin/sed -n 's/^J80_PUBLIC_KEY=//p' "$log" | /usr/bin/tail -n 1)
+    /bin/launchctl bootout system "$plist"
+    bootstrapped=no
+    printf '%s\n' "$public_key"
+}
+
+old_log=$work/old.log
+write_plist "$work/bin/old" "$old_log" rotate ''
+old_public=$(run_probe "$old_log")
+
+new_log=$work/new.log
+write_plist "$work/bin/new" "$new_log" verify "$old_public"
+new_public=$(run_probe "$new_log")
+
+if [ "$new_public" != "$old_public" ]; then
+    printf 'the rebuilt signed daemon changed its Mesh public identity\n' >&2
+    exit 1
+fi
+printf 'PASS: same designated requirement read the existing System Keychain item across different CDHashes\n'
+printf 'PUBLIC_IDENTITY=%s\n' "$new_public"
