@@ -328,6 +328,7 @@ impl Service {
         .bind(input.digest.as_slice())
         .bind(nonce.as_slice())
         .bind(identity.fingerprint.as_slice())
+        .bind(issuer.fingerprint.as_slice())
         .bind(i64::try_from(issuer.generation).map_err(|_| Denied)?)
         .bind(identity.not_after)
         .bind(expires_at)
