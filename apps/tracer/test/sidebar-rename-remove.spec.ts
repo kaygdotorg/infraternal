@@ -91,7 +91,7 @@ test.describe("desktop 1440×900", () => {
   test("double-click renames in place at the label's x; Enter saves, Escape cancels and keeps the sidebar, no row moves", async ({ page }) => {
     const before = await boxes(page);
     const label = await textBox(page, '#tree .bm-leaf[data-id="s:build-01/bench"] .bm-label');
-    await leaf(page, "bench").dblclick();
+    await leaf(page, "bench").locator(".bm-label").dblclick(); // the name is what a person double-clicks; the row's middle can be under the pill
     await expect(field(page)).toBeVisible();
     await expect(field(page)).toBeFocused();
     await expect(field(page)).toHaveValue("bench");
@@ -105,7 +105,7 @@ test.describe("desktop 1440×900", () => {
     await expect(field(page)).toHaveCount(0);
     expect(await page.locator("#sidebar").evaluate((e) => (e as HTMLElement).hidden)).toBe(false);
     await expect(leaf(page, "bench").locator(".bm-label")).toHaveText("bench");
-    await leaf(page, "bench").dblclick();
+    await leaf(page, "bench").locator(".bm-label").dblclick(); // the name is what a person double-clicks; the row's middle can be under the pill
     await page.keyboard.type("bench-all");
     await page.keyboard.press("Enter");
     await expect(leaf(page, "bench").locator(".bm-label")).toHaveText("bench-all");
