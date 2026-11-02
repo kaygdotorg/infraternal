@@ -440,7 +440,6 @@ async fn open_requested(
     })
 }
 
-
 async fn emit(tx: &mpsc::Sender<Message>, message: Message) -> io::Result<()> {
     tx.send(message)
         .await

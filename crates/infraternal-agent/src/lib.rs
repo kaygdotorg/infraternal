@@ -11,12 +11,12 @@ pub mod control;
 mod daemon_writer;
 #[cfg(target_os = "linux")]
 mod lifecycle;
-#[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
-mod native_dispatch;
 mod login_auth;
 mod login_binary;
 mod login_records;
 pub mod logins;
+#[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+mod native_dispatch;
 pub mod plugin_control;
 pub mod plugins;
 // Shim census exists only on the local terminal platform; portable control has no PTYs.
