@@ -108,13 +108,13 @@
 
 /* ---- Tables ------------------------------------------------------------------------------------------------------------------
    A table is a box with a header band and hairlines between rows; its first column names the row. The box scrolls by itself when
-   a table is wider than the text. In a narrow canvas window each row stacks into a card instead (docs-reader.css). */
+   a table is wider than the text (cells wrap, so only a table with long unbreakable words does). In a narrow canvas window each row stacks into a card instead (docs-reader.css). */
 .doc .table { overflow-x: auto; margin: 0 0 1rem; border: 1px solid rgb(from var(--fg) r g b / 0.1); border-radius: 0.75rem; }
 .doc table { width: 100%; margin: 0; border-collapse: collapse; }
 .doc th, .doc td { padding: 0.5rem 0.75rem; border-bottom: 1px solid rgb(from var(--fg) r g b / 0.1); text-align: left; vertical-align: top; }
 .doc th { background: rgb(from var(--fg) r g b / 0.04); color: var(--fg-2); font-weight: var(--fw-label); white-space: nowrap; }
 .doc tbody tr:last-child td { border-bottom: 0; }
-.doc td:first-child { font-weight: var(--fw-label); white-space: nowrap; }
+.doc td:first-child { font-weight: var(--fw-label); }
 @media (hover: hover) { .doc tbody tr:hover td { background: rgb(from var(--fg) r g b / 0.03); } }
 
 /* The footer: where a page names the decisions behind it. Quiet, set apart by a hairline, and never part of the contents. */

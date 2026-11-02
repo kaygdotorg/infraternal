@@ -16,6 +16,8 @@ Every terminal you open in Infraternal is a **session**. A session keeps your sh
 - **The same session on every device.** Start a build on the laptop, look at it from the phone.
 - **Windows, not prefix keys.** You arrange sessions as windows on the canvas. There is no prefix key to learn, and no status bar drawn inside the terminal.
 
+![Three terminals on the canvas, each its own window: a backup on the home server, a photo index on the media server, and updates on a Raspberry Pi.](figure:sessions-windows "Every session is a window on the canvas, so you move between them with the canvas, not with a prefix key.")
+
 ## Why you may want to switch
 
 If your shell starts tmux[^tmux] or Zellij[^zellij] by itself (a line in `~/.zshrc`, `~/.bashrc` or your fish config), every Infraternal terminal ends up as a multiplexer inside a session. That means two scrollbacks, two sets of keys and two things that can hold on to a screen.
@@ -30,6 +32,8 @@ If your shell starts tmux[^tmux] or Zellij[^zellij] by itself (a line in `~/.zsh
 When Infraternal sees tmux or Zellij start automatically in a new terminal, it asks once for that host:
 
 > tmux started automatically. Would you like to switch to the Infraternal Multiplexer instead?
+
+![The question over a terminal on the home server, with a tick, a cross and a question mark. The tick is pressed, the exact change is shown, it is confirmed, and Restore puts the original line back.](figure:multiplexer-switch+clip "Answering the question: the tick shows the exact change first, and Restore puts the original line back.")
 
 | Button | What it does |
 |---|---|

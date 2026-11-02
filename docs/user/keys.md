@@ -59,6 +59,8 @@ A passkey is a key pair on your device.[^webauthn] The private half never leaves
 
 A passkey does not expire, and you can have two. It stops working when you remove it, or when a recovery replaces it. Signing in needs the server, so a passkey cannot be used while the server is offline.
 
+![Maya Patel's account card, showing two passkeys, a recovery key that is set up, and four devices.](figure:account-card "Your account card counts your passkeys and says whether your recovery words are set up.")
+
 ### Recovery words
 
 The 24 recovery words are your way back in when you lose your passkeys.[^bip39] They are shown once, when you create your account, and only you hold them: the server keeps a check value, not the words. They do not expire.
@@ -103,6 +105,8 @@ These keys let a host join, and let the server and the host trust each other.
 Adding a host by SSH gives the host a join token. It lasts 15 minutes and works once. A host that sends a faulty request does not use it up.
 
 Adding the same host again replaces the token. If the 15 minutes pass, add the host again.
+
+![Adding a Raspberry Pi: pick it from the list, continue, choose a user install, and watch the steps finish.](figure:add-machine+clip "Adding a machine. The join token it uses lasts 15 minutes and works once.")
 
 ### `up` join code
 

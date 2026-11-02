@@ -9,7 +9,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildDocs, checkOutline, INDEX_SLUG, readUserDocs, renderDoc, splitPage, tocFor, USER_DOCS_DIR, type DocsIndexPage } from "./docs-build";
+import { buildDocs, checkOutline, figureOptionsFor, INDEX_SLUG, readUserDocs, renderDoc, splitPage, tocFor, USER_DOCS_DIR, type DocsIndexPage } from "./docs-build";
 
 const page = (title: string, summary: string, body: string, footer = ""): string => `# ${title}\n\n${summary}\n\n${body}${footer ? `\n---\n\n${footer}\n` : ""}`;
 
@@ -126,7 +126,8 @@ test("a file name that cannot be a web address, or that repeats another page, is
 
 const shipped = async () => {
   const { index, pages } = await readUserDocs(USER_DOCS_DIR);
-  return [{ slug: INDEX_SLUG, text: index ?? "" }, ...pages].map(({ slug, text }) => ({ slug, doc: renderDoc(slug, text) }));
+  const figures = await figureOptionsFor(USER_DOCS_DIR);
+  return [{ slug: INDEX_SLUG, text: index ?? "" }, ...pages].map(({ slug, text }) => ({ slug, doc: renderDoc(slug, text, undefined, figures) }));
 };
 
 test("every shipped page has a one-sentence summary, a table of contents and a hierarchy that does not skip", async () => {
