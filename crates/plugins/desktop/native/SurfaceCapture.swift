@@ -167,7 +167,11 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 if retired { break }
                 if pressure { _ = bitrate.feedback(at:ProcessInfo.processInfo.systemUptime, congested:true) }
                 let dequeued = measure ? nanos(mach_absolute_time()) : 0
-                if let frame, pixels.prepare(frame.0) {
+                let deferHistoryUntilAfterPaint = !pixels.hasDeliveredHistory
+                if deferHistoryUntilAfterPaint, current != nil {
+                    // The initial picture is full content; keep its full BGRA history copy after keyframe output.
+                    damageState.changed(at: ProcessInfo.processInfo.systemUptime, caret: false)
+                } else if let frame, pixels.prepare(frame.0) {
                     if measure {
                         let bounds = pixels.damageBounds.map { "\($0.x),\($0.y),\($0.width),\($0.height)" } ?? "none"
                         FileHandle.standardError.write(Data("METRIC pixel_damage capture_ns=\(nanos(frame.1)) kind=\(pixels.damageKind) bounds=\(bounds) pixels=\(pixels.changedPixels) complete=\(pixels.damageBoundsComplete)\n".utf8))
@@ -179,7 +183,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
                 if repair { damageState.repair() }
                 guard let current, let decision = damageState.next(at: ProcessInfo.processInfo.systemUptime) else { break }
-                if frame == nil { _ = pixels.prepare(current.0) }
+                if frame == nil, !deferHistoryUntilAfterPaint { _ = pixels.prepare(current.0) }
                 let prepared = measure ? nanos(mach_absolute_time()) : 0
                 let budget = decision == .refresh ? min(bitrate.maximum * 4, bitrate.current * 4) : bitrate.current
                 guard let body = try encoder.encodeSurface(current.0, ticks: current.1, force: decision.keyframe, bitrate: budget) else {
@@ -196,7 +200,11 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                     let sent = nanos(mach_absolute_time())
                     FileHandle.standardError.write(Data("METRIC surface_delivery pid=\(getpid()) capture_ns=\(nanos(current.1)) callback_ns=\(current.2) dequeued_ns=\(dequeued) prepared_ns=\(prepared) output_begin_ns=\(outputBegan) output_end_ns=\(sent) fresh=\(frame != nil)\n".utf8))
                 }
-                pixels.delivered()
+                if deferHistoryUntilAfterPaint {
+                    pixels.seedAfterFirstPaint(current.0)
+                } else {
+                    pixels.delivered()
+                }
                 damageState.completed(delivered: true)
                 _ = bitrate.feedback(at: ProcessInfo.processInfo.systemUptime, congested: ProcessInfo.processInfo.systemUptime - began > 0.1)
             }

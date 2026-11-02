@@ -56,8 +56,9 @@ import Foundation
 
         let measuredBlink = FramePixels(), measuredSurface = pixel(96, 48)
         fill(measuredSurface, 47)
-        expect(measuredBlink.prepare(measuredSurface, at: 0), "first measured blink picture")
-        measuredBlink.delivered()
+        expect(!measuredBlink.hasDeliveredHistory, "initial picture has no delivered history")
+        measuredBlink.seedAfterFirstPaint(measuredSurface)
+        expect(measuredBlink.hasDeliveredHistory, "first painted picture seeds delivered history")
         paint(measuredSurface, x: 35, y: 15, width: 8, height: 18, byte: 199)
         expect(measuredBlink.prepare(measuredSurface, at: 0.1), "first measured caret change")
         expect(measuredBlink.damageKind == .content, "first measured caret change keeps a sharp refresh")

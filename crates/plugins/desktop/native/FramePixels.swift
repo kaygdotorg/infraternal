@@ -135,6 +135,9 @@ final class FramePixels {
     private var caretRecognition = CaretRecognition.empty
     private var recognitionBeforePrepare: CaretRecognition?
 
+    /// True only after a picture has been successfully delivered to the stream.
+    var hasDeliveredHistory: Bool { valid }
+
     /// Prepare one encoder input. Only visible row bytes count; row padding is
     /// neither a picture nor safe history. Unknown storage stays conservative.
     /// The single owned buffer is bounded to 16 MiB and reused across inputs.
@@ -223,6 +226,12 @@ final class FramePixels {
             }
         }
         return true
+    }
+
+    /// Seed exact-pixel history only after the first picture has reached the stream.
+    func seedAfterFirstPaint(_ pixel: CVPixelBuffer) {
+        _ = prepare(pixel)
+        delivered()
     }
 
     func delivered() {
