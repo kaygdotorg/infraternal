@@ -345,112 +345,130 @@ fn run_mesh_service(
         let result =
             infraternal_plugin_mesh::macos_service::control(operation, system_service, &executable);
         if system_service {
-            return match result {
-                Ok(None) => ExitCode::SUCCESS,
-                Ok(Some(_)) => report_failure_as(
-                    &command,
-                    "The internal Mesh service request was invalid.",
-                    "The privileged request did not complete the fixed service operation."
-                        .to_owned(),
-                    json_output,
-                    Exit::Failed,
-                ),
-                Err(error) => report_failure_as(
-                    &command,
-                    "The Mesh system service operation failed.",
-                    format!("The service operation was refused ({:?}).", error.kind()),
-                    json_output,
-                    if error.kind() == io::ErrorKind::PermissionDenied {
-                        Exit::NotAllowed
-                    } else {
-                        Exit::Failed
-                    },
-                ),
-            };
+            return report_mesh_service_system_result(&command, result, json_output);
         }
-        match result {
-            Ok(Some(status)) => {
-                let (state, message, exit) = match operation {
-                    "status" if status.running => (
-                        CommandState::Running,
-                        "The Mesh system service is running.",
-                        Exit::Ok,
-                    ),
-                    "status" if status.loaded => (
-                        CommandState::Restarting,
-                        "The Mesh system service is loaded but not running.",
-                        Exit::Failed,
-                    ),
-                    "status" => (
-                        CommandState::Stopped,
-                        "The Mesh system service is stopped.",
-                        Exit::Ok,
-                    ),
-                    "up" if status.running => (
-                        CommandState::Running,
-                        "The Mesh system service is running.",
-                        Exit::Ok,
-                    ),
-                    "up" => (
-                        CommandState::Restarting,
-                        "The Mesh system service was installed but has not started.",
-                        Exit::Failed,
-                    ),
-                    "down" if status.loaded => (
-                        CommandState::Failed,
-                        "The Mesh system service is still loaded.",
-                        Exit::Failed,
-                    ),
-                    "down" => (
-                        CommandState::Stopped,
-                        "The Mesh system service is stopped.",
-                        Exit::Ok,
-                    ),
-                    _ => (
-                        CommandState::Failed,
-                        "The Mesh system service action is not supported.",
-                        Exit::Usage,
-                    ),
-                };
-                emit(
-                    CommandResult::new(
-                        command,
-                        state,
-                        message,
-                        json!({
-                            "loaded": status.loaded,
-                            "running": status.running,
-                            "pid": status.pid,
-                        }),
-                    ),
-                    json_output,
-                    exit,
-                )
-            }
-            Ok(None) => report_failure_as(
-                &command,
-                "The Mesh system service did not report its state.",
-                "The fixed service control operation returned no status.".to_owned(),
-                json_output,
-                Exit::Failed,
-            ),
-            Err(error) => report_failure_as(
-                &command,
-                "The Mesh system service operation failed.",
-                format!("The service operation failed ({:?}).", error.kind()),
-                json_output,
-                if error.kind() == io::ErrorKind::PermissionDenied {
-                    Exit::NotAllowed
-                } else {
-                    Exit::Failed
-                },
-            ),
-        }
+        report_mesh_service_status_result(command, operation, result, json_output)
     }
     #[cfg(not(all(feature = "plugin-mesh", target_os = "macos")))]
     {
         let _ = matches;
         run_unavailable(action, json_output)
+    }
+}
+
+#[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+fn report_mesh_service_system_result(
+    command: &str,
+    result: io::Result<Option<infraternal_plugin_mesh::macos_service::Status>>,
+    json_output: bool,
+) -> ExitCode {
+    match result {
+        Ok(None) => ExitCode::SUCCESS,
+        Ok(Some(_)) => report_failure_as(
+            command,
+            "The internal Mesh service request was invalid.",
+            "The privileged request did not complete the fixed service operation.".to_owned(),
+            json_output,
+            Exit::Failed,
+        ),
+        Err(error) => report_failure_as(
+            command,
+            "The Mesh system service operation failed.",
+            format!("The service operation was refused ({:?}).", error.kind()),
+            json_output,
+            if error.kind() == io::ErrorKind::PermissionDenied {
+                Exit::NotAllowed
+            } else {
+                Exit::Failed
+            },
+        ),
+    }
+}
+
+#[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+fn report_mesh_service_status_result(
+    command: String,
+    operation: &str,
+    result: io::Result<Option<infraternal_plugin_mesh::macos_service::Status>>,
+    json_output: bool,
+) -> ExitCode {
+    match result {
+        Ok(Some(status)) => {
+            let (state, message, exit) =
+                mesh_status_result(operation, status.loaded, status.running);
+            emit(
+                CommandResult::new(
+                    command,
+                    state,
+                    message,
+                    json!({
+                        "loaded": status.loaded,
+                        "running": status.running,
+                        "pid": status.pid,
+                    }),
+                ),
+                json_output,
+                exit,
+            )
+        }
+        Ok(None) => report_failure_as(
+            &command,
+            "The Mesh system service did not report its state.",
+            "The fixed service control operation returned no status.".to_owned(),
+            json_output,
+            Exit::Failed,
+        ),
+        Err(error) => report_failure_as(
+            &command,
+            "The Mesh system service operation failed.",
+            format!("The service operation failed ({:?}).", error.kind()),
+            json_output,
+            if error.kind() == io::ErrorKind::PermissionDenied {
+                Exit::NotAllowed
+            } else {
+                Exit::Failed
+            },
+        ),
+    }
+}
+
+#[cfg(all(feature = "plugin-mesh", any(target_os = "macos", test)))]
+fn mesh_status_result(
+    operation: &str,
+    loaded: bool,
+    running: bool,
+) -> (CommandState, &'static str, Exit) {
+    match operation {
+        "status" | "up" if running => (
+            CommandState::Running,
+            "The Mesh system service is running.",
+            Exit::Ok,
+        ),
+        "status" if loaded => (
+            CommandState::Restarting,
+            "The Mesh system service is loaded but not running.",
+            Exit::Failed,
+        ),
+        "status" | "down" if !loaded => (
+            CommandState::Stopped,
+            "The Mesh system service is stopped.",
+            Exit::Ok,
+        ),
+        "up" => (
+            CommandState::Restarting,
+            "The Mesh system service was installed but has not started.",
+            Exit::Failed,
+        ),
+        "down" if loaded => (
+            CommandState::Failed,
+            "The Mesh system service is still loaded.",
+            Exit::Failed,
+        ),
+        _ => (
+            CommandState::Failed,
+            "The Mesh system service action is not supported.",
+            Exit::Usage,
+        ),
     }
 }
 
@@ -2041,7 +2059,11 @@ fn run_shim(
 mod dispatch_tests {
     //! Ensures internal CLI actions resolve and execute through their registered handler.
 
+    #[cfg(feature = "plugin-mesh")]
+    use super::mesh_status_result;
     use super::{ExitCode, dispatch_selected_action};
+    #[cfg(feature = "plugin-mesh")]
+    use crate::cli::output::{CommandState, Exit};
     use crate::cli::{actions, command_tree};
 
     #[test]
@@ -2062,6 +2084,75 @@ mod dispatch_tests {
         assert_eq!(
             dispatch_selected_action(&registry, &selected, false),
             ExitCode::from(1)
+        );
+    }
+
+    #[cfg(feature = "plugin-mesh")]
+    #[test]
+    fn mesh_service_status_maps_launchd_state_to_cli_result() {
+        assert_eq!(
+            mesh_status_result("status", true, true),
+            (
+                CommandState::Running,
+                "The Mesh system service is running.",
+                Exit::Ok,
+            )
+        );
+        assert_eq!(
+            mesh_status_result("up", true, true),
+            (
+                CommandState::Running,
+                "The Mesh system service is running.",
+                Exit::Ok,
+            )
+        );
+        assert_eq!(
+            mesh_status_result("status", true, false),
+            (
+                CommandState::Restarting,
+                "The Mesh system service is loaded but not running.",
+                Exit::Failed,
+            )
+        );
+        assert_eq!(
+            mesh_status_result("status", false, false),
+            (
+                CommandState::Stopped,
+                "The Mesh system service is stopped.",
+                Exit::Ok,
+            )
+        );
+        assert_eq!(
+            mesh_status_result("up", true, false),
+            (
+                CommandState::Restarting,
+                "The Mesh system service was installed but has not started.",
+                Exit::Failed,
+            )
+        );
+        assert_eq!(
+            mesh_status_result("down", true, false),
+            (
+                CommandState::Failed,
+                "The Mesh system service is still loaded.",
+                Exit::Failed,
+            )
+        );
+        assert_eq!(
+            mesh_status_result("down", false, false),
+            (
+                CommandState::Stopped,
+                "The Mesh system service is stopped.",
+                Exit::Ok,
+            )
+        );
+        assert_eq!(
+            mesh_status_result("unknown", false, false),
+            (
+                CommandState::Failed,
+                "The Mesh system service action is not supported.",
+                Exit::Usage,
+            )
         );
     }
 }
