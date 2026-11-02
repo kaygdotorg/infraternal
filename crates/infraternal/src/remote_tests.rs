@@ -150,7 +150,10 @@ fn renewal_publication_replaces_only_certificate_and_preserves_private_metadata(
         https_der: None,
         https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
+        identity_rotation: None,
+        completed_identity_rotation: None,
     };
+    let mut expected = serde_json::to_value(&stored).unwrap();
     publish(&data, &serde_json::to_vec(&stored).unwrap()).unwrap();
     let key = PKey::generate_ed25519().unwrap();
     let mut certificate = X509::builder().unwrap();
@@ -175,15 +178,11 @@ fn renewal_publication_replaces_only_certificate_and_preserves_private_metadata(
         .unwrap();
     certificate.sign(&key, MessageDigest::null()).unwrap();
     let certificate = certificate.build();
-    let publisher = IdentityPublisher {
-        data: data.clone(),
-        stored,
-    };
+    let publisher = IdentityPublisher { data: data.clone() };
     publisher.publish(&certificate).unwrap();
     let path = data.join("identity.json");
     let current: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    let mut expected = serde_json::to_value(&publisher.stored).unwrap();
     expected["certificate_der"] = B64.encode(certificate.to_der().unwrap()).into();
     assert!(
         current == expected,
@@ -449,6 +448,8 @@ async fn join_re_enrolls_the_same_hosts_identity_and_refuses_another_host() {
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
         key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        identity_rotation: None,
+        completed_identity_rotation: None,
     };
     let bytes = serde_json::to_vec(&stored).unwrap();
     publish(&data, &bytes).unwrap();
@@ -523,6 +524,8 @@ async fn join_refuses_the_same_host_id_from_another_server() {
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
         key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        identity_rotation: None,
+        completed_identity_rotation: None,
     };
     let bytes = serde_json::to_vec(&stored).unwrap();
     publish(&data, &bytes).unwrap();
@@ -580,6 +583,8 @@ async fn join_re_enrolls_for_a_moved_server_but_not_a_renamed_one() {
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
         key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        identity_rotation: None,
+        completed_identity_rotation: None,
     };
     let bytes = serde_json::to_vec(&stored).unwrap();
     publish(&data, &bytes).unwrap();
@@ -639,6 +644,8 @@ fn replace_aborts_when_the_identity_changed_since_it_was_read() {
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
         key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        identity_rotation: None,
+        completed_identity_rotation: None,
     };
     publish(&data, &serde_json::to_vec(&stored).unwrap()).unwrap();
     let (_, snapshot) = load_snapshot(&data).unwrap();

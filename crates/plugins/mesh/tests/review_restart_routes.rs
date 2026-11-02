@@ -50,6 +50,8 @@ fn restart_retires_orphan_peer_host_routes() {
     let (_, key) = Key::generate().unwrap();
     let orphan = Peer {
         key,
+        previous_key: None,
+        previous_active: false,
         addresses: Addresses {
             ipv4: "10.254.0.2".parse().unwrap(),
             ipv6: "fd01::2".parse().unwrap(),

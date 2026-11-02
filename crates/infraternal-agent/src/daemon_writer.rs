@@ -13,7 +13,7 @@ use tokio::sync::oneshot;
 
 /// The pre-sent QUIC greeting and daemon greeting must serialize identically:
 /// the control adapter consumes the daemon's greeting only after exact comparison.
-pub(crate) fn hello_capabilities(native: bool, renewal: bool) -> u64 {
+pub(crate) fn hello_capabilities(native: bool, renewal: bool, identity_rotation: bool) -> u64 {
     infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
         | if native {
             infraternal_plugin_api::channel::REMOTE_WRITER_BINDING
@@ -25,6 +25,11 @@ pub(crate) fn hello_capabilities(native: bool, renewal: bool) -> u64 {
         }
         | if renewal {
             infraternal_plugin_api::channel::LIVE_RENEWAL
+        } else {
+            0
+        }
+        | if identity_rotation {
+            infraternal_plugin_api::channel::LIVE_IDENTITY_ROTATION
         } else {
             0
         }
@@ -84,6 +89,7 @@ pub(crate) async fn writer(
     mut control: Option<mpsc::Receiver<Message>>,
     greeting: bool,
     renewal: bool,
+    identity_rotation: bool,
     wire_caps: u64,
 ) -> io::Result<()> {
     let mut tx = Transmit::default();
@@ -96,6 +102,7 @@ pub(crate) async fn writer(
                 caps: crate::daemon::hello_capabilities(
                     socket.native_stream_id().is_some(),
                     renewal,
+                    identity_rotation,
                 ) & !infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
                     | if socket.native_stream_id().is_some() {
                         wire_caps

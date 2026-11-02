@@ -94,6 +94,11 @@ impl CaMaterial {
 
 /// The owner-selected restart/unlock adapter supplies private material, never SQLite.
 pub trait CaKeySource: Send + Sync {
+    /// Monotonic public issuer epoch bound into host identity transitions.
+    /// The current single-root deployment begins at generation one.
+    fn issuer_generation(&self) -> u64 {
+        1
+    }
     /// Configured reverse proxy enrollment verifies against system HTTPS roots.
     fn uses_system_https(&self) -> bool {
         false

@@ -29,6 +29,29 @@ impl Key {
             .map_err(|_| io::ErrorKind::Other)?;
         Ok((Self(private), PublicKey(public)))
     }
+
+    /// Rebuild an ephemeral wrapper from a local root-only state record.
+    /// The private bytes are copied into zeroizing memory and never formatted.
+    /// # Errors
+    /// Refuses a non-X25519 or malformed private key.
+    pub(crate) fn from_private(bytes: &[u8]) -> io::Result<(Self, PublicKey)> {
+        if bytes.len() != 32 {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let key = PKey::private_key_from_raw_bytes(bytes, openssl::pkey::Id::X25519)
+            .map_err(|_| io::ErrorKind::InvalidData)?;
+        let public: [u8; 32] = key
+            .raw_public_key()
+            .map_err(|_| io::ErrorKind::InvalidData)?
+            .try_into()
+            .map_err(|_| io::ErrorKind::InvalidData)?;
+        Ok((Self(Zeroizing::new(bytes.to_vec())), PublicKey(public)))
+    }
+
+    /// Copy the private key only into a caller's immediately zeroized local buffer.
+    pub(crate) fn private_bytes(&self) -> &[u8] {
+        &self.0
+    }
 }
 pub use crate::dataplane::Peer;
 /// Public kernel peer status, available even while the coordinator is unreachable.
@@ -314,37 +337,61 @@ impl Device {
         }
         Ok(())
     }
-    /// Recover public host prefixes from retained peers before removing orphan keys.
+    /// Read the unique public-prefix owner for every retained peer route.
     /// # Errors
-    /// Refuses malformed `AllowedIPs`. All dump buffers, including unparsed secret
-    /// fields in later replies, are zeroized together even on an early error.
-    pub fn peer_routes() -> io::Result<BTreeSet<IpAddr>> {
+    /// Refuses malformed or multiply-owned `AllowedIPs`. All dump buffers,
+    /// including unparsed secret fields in later replies, are zeroized together.
+    pub fn peer_route_owners() -> io::Result<BTreeMap<IpAddr, PublicKey>> {
         let mut socket = Socket::open(SockProtocol::NetlinkGeneric)?;
         let family = socket.family("wireguard")?;
         let mut payload = header();
         payload[0] = 0;
         let replies = Zeroizing::new(socket.request(family, 0x300, &payload)?);
-        let mut routes = BTreeSet::new();
+        let mut routes = BTreeMap::new();
         for reply in replies.iter() {
             for device in netlink::attributes(reply.get(4..).ok_or(io::ErrorKind::InvalidData)?)? {
                 if device.kind != 8 {
                     continue;
                 }
                 for peer in netlink::attributes(device.payload)? {
+                    let mut key = None;
+                    let mut prefixes = Vec::new();
                     for field in netlink::attributes(peer.payload)? {
-                        if field.kind != 9 {
-                            continue;
-                        }
-                        for prefix in netlink::attributes(field.payload)? {
-                            if let Some(address) = netlink::host_address(prefix.payload)? {
-                                routes.insert(address);
+                        match field.kind {
+                            1 => {
+                                key = Some(PublicKey(
+                                    field
+                                        .payload
+                                        .try_into()
+                                        .map_err(|_| io::ErrorKind::InvalidData)?,
+                                ));
                             }
+                            9 => {
+                                for prefix in netlink::attributes(field.payload)? {
+                                    if let Some(address) = netlink::host_address(prefix.payload)? {
+                                        prefixes.push(address);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let key = key.ok_or(io::ErrorKind::InvalidData)?;
+                    for address in prefixes {
+                        if routes.insert(address, key).is_some() {
+                            return Err(io::ErrorKind::InvalidData.into());
                         }
                     }
                 }
             }
         }
         Ok(routes)
+    }
+    /// Recover public host prefixes from retained peers before removing orphan keys.
+    /// # Errors
+    /// Refuses malformed or multiply-owned `AllowedIPs`.
+    pub fn peer_routes() -> io::Result<BTreeSet<IpAddr>> {
+        Ok(Self::peer_route_owners()?.into_keys().collect())
     }
     /// Retire orphan static host routes after adopting durable peer state [206,228].
     /// # Errors
@@ -456,6 +503,30 @@ impl Device {
             key.ok_or(io::ErrorKind::InvalidData)?,
             port.ok_or(io::ErrorKind::InvalidData)?,
         ))
+    }
+    /// Copy the owned interface's local private key into zeroizing process memory.
+    /// This is used only to persist a pending rotation before changing the device key.
+    /// # Errors
+    /// Refuses unavailable or malformed device keys; netlink dump buffers are zeroized.
+    pub(crate) fn private_key() -> io::Result<Key> {
+        let mut socket = Socket::open(SockProtocol::NetlinkGeneric)?;
+        let family = socket.family("wireguard")?;
+        let mut payload = header();
+        payload[0] = 0;
+        let replies = Zeroizing::new(socket.request(family, 0x300, &payload)?);
+        let mut private = Zeroizing::new(Vec::new());
+        for reply in replies.iter() {
+            for field in netlink::attributes(reply.get(4..).ok_or(io::ErrorKind::InvalidData)?)? {
+                if field.kind == 3 {
+                    if !private.is_empty() || field.payload.len() != 32 {
+                        return Err(io::ErrorKind::InvalidData.into());
+                    }
+                    private.extend_from_slice(field.payload);
+                }
+            }
+        }
+        let (key, _) = Key::from_private(&private)?;
+        Ok(key)
     }
     /// Read public peer counters only. Private fields in the kernel dump are zeroized.
     /// # Errors
@@ -723,7 +794,14 @@ impl Client {
         for (key, peer) in removed
             .iter()
             .map(|k| (k, None))
-            .chain(upserted.iter().map(|p| (&p.key, Some(p))))
+            .chain(upserted.iter().flat_map(|peer| {
+                peer.previous_key
+                    .as_ref()
+                    .filter(|previous| **previous != peer.key)
+                    .map(|previous| (previous, Some((peer, false))))
+                    .into_iter()
+                    .chain(std::iter::once((&peer.key, Some((peer, true)))))
+            }))
         {
             let mut encoded = Vec::new();
             attribute(&mut encoded, 1, &key.0)?;
@@ -732,25 +810,33 @@ impl Client {
                 3,
                 &if peer.is_some() { 2_u32 } else { 1_u32 }.to_ne_bytes(),
             )?;
-            if let Some(peer) = peer {
+            if let Some((peer, current)) = peer {
+                // Until the local candidate key is active, keep the route on
+                // the old peer identity. The inactive key is still installed
+                // so the key switch never precedes its peer configuration.
+                let active = current != peer.previous_active;
                 // Both ends send, preserving stateful firewall mappings even
                 // when only one side currently has application traffic [228].
-                attribute(&mut encoded, 5, &25_u16.to_ne_bytes())?;
-                if let Some(endpoint) = peer.endpoint {
-                    attribute(&mut encoded, 4, &sockaddr(endpoint))?;
+                if active {
+                    attribute(&mut encoded, 5, &25_u16.to_ne_bytes())?;
+                    if let Some(endpoint) = peer.endpoint {
+                        attribute(&mut encoded, 4, &sockaddr(endpoint))?;
+                    }
                 }
-                let mut allowed = Vec::new();
-                for (family, prefix, address) in [
-                    (2_u16, 32, peer.addresses.ipv4.octets().to_vec()),
-                    (10, 128, peer.addresses.ipv6.octets().to_vec()),
-                ] {
-                    let mut ip = Vec::new();
-                    attribute(&mut ip, 1, &family.to_ne_bytes())?;
-                    attribute(&mut ip, 2, &address)?;
-                    attribute(&mut ip, 3, &[prefix])?;
-                    attribute(&mut allowed, 1 | NESTED, &ip)?;
+                if active {
+                    let mut allowed = Vec::new();
+                    for (family, prefix, address) in [
+                        (2_u16, 32, peer.addresses.ipv4.octets().to_vec()),
+                        (10, 128, peer.addresses.ipv6.octets().to_vec()),
+                    ] {
+                        let mut ip = Vec::new();
+                        attribute(&mut ip, 1, &family.to_ne_bytes())?;
+                        attribute(&mut ip, 2, &address)?;
+                        attribute(&mut ip, 3, &[prefix])?;
+                        attribute(&mut allowed, 1 | NESTED, &ip)?;
+                    }
+                    attribute(&mut encoded, 9 | NESTED, &allowed)?;
                 }
-                attribute(&mut encoded, 9 | NESTED, &allowed)?;
             }
             if peers.len() + encoded.len() + 80 > netlink::DATAGRAM_BYTES {
                 flush(&mut self.socket, self.family, &peers)?;

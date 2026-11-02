@@ -7,15 +7,26 @@ use crate::{
     remote_guard::AuthorityGuard,
 };
 use infraternal_agent::remote_renewal::{CertificateUpdate, decode_proof};
+use infraternal_plugin_remote::identity_rotation::{CandidateCertificate, Proof};
 use std::{
     io,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use uuid::Uuid;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Ack {}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RotationAck {}
+
+enum RotationResult {
+    Complete,
+    Reconnect,
+}
 
 /// Only one exchange per admitted host; global admission bounds concurrent signer work.
 static SIGNING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
@@ -24,11 +35,56 @@ pub(crate) async fn run(
     authority: &AuthorityGuard,
     actor: &EmbeddedAgent,
     source: Arc<dyn CaKeySource>,
+    identity_rotation: bool,
 ) {
     let mut deadline = authority.renewal_deadline();
     let mut locked = source.subscribe_locked();
+    let host = authority.host_id();
+    let rotation = identity_rotation
+        .then(|| crate::identity_rotation::Service::new(authority.store(), source.clone()));
+    let mut rotation_retry = tokio::time::Instant::now();
     loop {
+        if !authority.permits() {
+            return;
+        }
+        if let Some(rotation) = &rotation
+            && rotation_retry <= tokio::time::Instant::now()
+        {
+            match rotation.next_action(host, authority.predecessor()).await {
+                Ok(Some(action)) => {
+                    match exchange_rotation(authority, actor, rotation, action).await {
+                        Ok(RotationResult::Complete) => {
+                            rotation_retry = tokio::time::Instant::now();
+                        }
+                        Ok(RotationResult::Reconnect) => {
+                            let _ = actor.retire_connection().await;
+                            return;
+                        }
+                        Err(_) => rotation_retry = retry_deadline(),
+                    }
+                }
+                Ok(None) => {
+                    rotation_retry = tokio::time::Instant::now() + Duration::from_secs(3600);
+                }
+                Err(_) => rotation_retry = retry_deadline(),
+            }
+        }
         tokio::select! {
+            biased;
+            () = authority.cancelled() => return,
+            _ = async {
+                if let Some(rotation) = &rotation {
+                    let delay = rotation
+                        .next_delay(host)
+                        .await
+                        .unwrap_or(Duration::from_secs(3600))
+                        .min(Duration::from_secs(31_536_000));
+                    let due = tokio::time::Instant::now() + delay;
+                    tokio::time::sleep_until(due.max(rotation_retry)).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {},
             () = tokio::time::sleep_until(deadline) => {},
             changed = async { match &mut locked {
                 Some(receiver) => receiver.changed().await,
@@ -37,12 +93,10 @@ pub(crate) async fn run(
                 if changed.is_err() { locked = None; }
                 else if locked.as_mut().is_some_and(|receiver| !*receiver.borrow_and_update()) {
                     deadline = authority.renewal_deadline().max(tokio::time::Instant::now());
+                    rotation_retry = tokio::time::Instant::now();
                 }
                 continue;
             },
-        }
-        if !authority.permits() {
-            return;
         }
         if source.load().is_err() {
             deadline = tokio::time::Instant::now() + Duration::from_secs(3600);
@@ -64,6 +118,68 @@ pub(crate) async fn run(
                 let jitter = u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 60;
                 deadline = tokio::time::Instant::now() + Duration::from_secs(5 + jitter);
             }
+        }
+    }
+}
+
+fn retry_deadline() -> tokio::time::Instant {
+    let jitter = u64::from(Uuid::new_v4().as_bytes()[0]) % 60;
+    tokio::time::Instant::now() + Duration::from_secs(5 + jitter)
+}
+
+async fn exchange_rotation(
+    authority: &AuthorityGuard,
+    actor: &EmbeddedAgent,
+    service: &crate::identity_rotation::Service,
+    action: crate::identity_rotation::Action,
+) -> io::Result<RotationResult> {
+    match action {
+        crate::identity_rotation::Action::Challenge(challenge) => {
+            let request = serde_json::to_vec(&challenge).map_err(|_| denied())?;
+            let proof = actor
+                .control_call("transport.csr.rotate", request)
+                .await
+                .map_err(control_error)?;
+            if proof.len() > infraternal_plugin_api::channel::MAX_CONTROL_JSON {
+                return Err(denied());
+            }
+            let proof: Proof = serde_json::from_slice(&proof).map_err(|_| denied())?;
+            let der = service
+                .accept_proof(authority.host_id(), authority.predecessor(), proof)
+                .await?;
+            let update = serde_json::to_vec(&CandidateCertificate {
+                operation_id: challenge.operation_id,
+                sequence: challenge.sequence,
+                certificate_der: der,
+            })
+            .map_err(|_| denied())?;
+            let acknowledgment = actor
+                .control_call("transport.identity.rotate.certificate", update)
+                .await
+                .map_err(control_error)?;
+            serde_json::from_slice::<RotationAck>(&acknowledgment).map_err(|_| denied())?;
+            Ok(RotationResult::Reconnect)
+        }
+        crate::identity_rotation::Action::Certificate(update) => {
+            let request = serde_json::to_vec(&update).map_err(|_| denied())?;
+            let acknowledgment = actor
+                .control_call("transport.identity.rotate.certificate", request)
+                .await
+                .map_err(control_error)?;
+            serde_json::from_slice::<RotationAck>(&acknowledgment).map_err(|_| denied())?;
+            Ok(RotationResult::Reconnect)
+        }
+        crate::identity_rotation::Action::Acknowledgment(acknowledgment) => {
+            let request = serde_json::to_vec(&acknowledgment).map_err(|_| denied())?;
+            let response = actor
+                .control_call("transport.identity.rotate.ack", request)
+                .await
+                .map_err(control_error)?;
+            serde_json::from_slice::<RotationAck>(&response).map_err(|_| denied())?;
+            service
+                .acknowledge(authority.host_id(), authority.predecessor(), acknowledgment)
+                .await?;
+            Ok(RotationResult::Complete)
         }
     }
 }

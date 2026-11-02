@@ -90,4 +90,7 @@ pub mod settings;
 pub mod node_coordination;
 
 #[cfg(feature = "server")]
+mod rotation;
+
+#[cfg(feature = "server")]
 pub mod presence;

@@ -76,6 +76,8 @@ fn refused_endpoint_persistence_preserves_kernel_endpoint() {
             PeerPolicy {
                 peer: Peer {
                     key,
+                    previous_key: None,
+                    previous_active: false,
                     addresses: Addresses {
                         ipv4: "10.254.0.2".parse().unwrap(),
                         ipv6: "fd01::2".parse().unwrap(),

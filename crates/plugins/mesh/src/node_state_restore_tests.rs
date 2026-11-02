@@ -63,6 +63,8 @@ fn public_state(peers: u16) -> State {
             PeerPolicy {
                 peer: Peer {
                     key: PublicKey(key),
+                    previous_key: None,
+                    previous_active: false,
                     addresses: Addresses {
                         ipv4: [10, 254, a, b].into(),
                         ipv6: std::net::Ipv6Addr::new(0xfd01, 0, 0, 0, 0, 0, 0, index),

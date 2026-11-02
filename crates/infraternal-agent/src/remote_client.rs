@@ -81,8 +81,36 @@ pub async fn run_with_installation(
     publisher: std::sync::Arc<dyn crate::remote_renewal::CertificatePublisher>,
     installation: Option<&crate::plugins::Installation>,
 ) -> io::Result<()> {
-    let renewal =
+    run_with_publishers(identity, state, publisher, None, installation).await
+}
+
+/// Run with durable support for overlapping Ed25519 identity-key rotation.
+/// # Errors
+/// Refuses unsafe local identity, invalid rotation state or failed transport configuration.
+pub async fn run_with_identity_rotation(
+    identity: &RemoteIdentity,
+    state: Option<PathBuf>,
+    publisher: std::sync::Arc<dyn crate::remote_renewal::CertificatePublisher>,
+    rotation: std::sync::Arc<dyn infraternal_plugin_remote::identity_rotation::RotationPublisher>,
+    installation: Option<&infraternal_plugin_remote::uninstall::Context>,
+) -> io::Result<()> {
+    run_with_publishers(identity, state, publisher, Some(rotation), installation).await
+}
+
+async fn run_with_publishers(
+    identity: &RemoteIdentity,
+    state: Option<PathBuf>,
+    publisher: std::sync::Arc<dyn crate::remote_renewal::CertificatePublisher>,
+    rotation: Option<
+        std::sync::Arc<dyn infraternal_plugin_remote::identity_rotation::RotationPublisher>,
+    >,
+    installation: Option<&infraternal_plugin_remote::uninstall::Context>,
+) -> io::Result<()> {
+    let mut renewal =
         crate::remote_renewal::RenewalIdentity::new(&identity.identity, &identity.roots, publisher);
+    if let Some(rotation) = rotation {
+        renewal.enable_identity_rotation(rotation)?;
+    }
     run_inner(
         identity,
         state,
@@ -421,10 +449,10 @@ async fn quic_connect(
     .map_err(io::Error::other)
 }
 
-fn client_greeting(renewal: bool) -> infraternal_protocol::Frame<'static> {
+fn client_greeting(renewal: bool, identity_rotation: bool) -> infraternal_protocol::Frame<'static> {
     infraternal_protocol::Frame::Hello {
         version: 1,
-        caps: daemon::hello_capabilities(true, renewal),
+        caps: daemon::hello_capabilities(true, renewal, identity_rotation),
         client_info: "infraternal agent",
     }
 }
@@ -463,7 +491,10 @@ async fn quic_session_on(
         // Opening a QUIC stream emits no packet until there is data. Send the
         // greeting once, then let common dispatch consume the server's greeting.
         let mut tx = crate::transport::Transmit::default();
-        let mut greeting = client_greeting(renewal.is_some());
+        let mut greeting = client_greeting(
+            renewal.is_some(),
+            renewal.is_some_and(crate::remote_renewal::RenewalIdentity::supports_identity_rotation),
+        );
         #[cfg(not(any(test, feature = "native-streams")))]
         let native_caps = 0;
         #[cfg(any(test, feature = "native-streams"))]

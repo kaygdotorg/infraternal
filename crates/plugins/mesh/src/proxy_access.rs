@@ -83,6 +83,8 @@ mod tests {
         PeerPolicy {
             peer: Peer {
                 key: PublicKey([1; 32]),
+                previous_key: None,
+                previous_active: false,
                 addresses: Addresses {
                     ipv4: "10.254.0.3".parse().expect("IPv4"),
                     ipv6: "fd01::3".parse().expect("IPv6"),

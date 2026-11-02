@@ -361,8 +361,13 @@ impl RemoteHosts {
             host.peer = peer;
             host.generation = generation;
             host.caps = caps;
-            host.retirement =
-                self.retirement(id, generation, authority.clone(), host.actor.clone());
+            host.retirement = self.retirement(
+                id,
+                generation,
+                authority.clone(),
+                host.actor.clone(),
+                caps & infraternal_plugin_api::channel::LIVE_IDENTITY_ROTATION != 0,
+            );
             #[cfg(any(test, feature = "native-streams"))]
             {
                 *host
@@ -385,7 +390,13 @@ impl RemoteHosts {
             accepts
                 .try_send(link.authorize(authority.clone()))
                 .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))?;
-            let retirement = self.retirement(id, generation, authority.clone(), actor.clone());
+            let retirement = self.retirement(
+                id,
+                generation,
+                authority.clone(),
+                actor.clone(),
+                caps & infraternal_plugin_api::channel::LIVE_IDENTITY_ROTATION != 0,
+            );
             hosts.insert(
                 id,
                 Host {
@@ -467,7 +478,13 @@ impl RemoteHosts {
         host.peer = peer;
         host.generation = generation;
         host.caps = caps;
-        host.retirement = self.retirement(id, generation, authority.clone(), actor);
+        host.retirement = self.retirement(
+            id,
+            generation,
+            authority.clone(),
+            actor,
+            caps & infraternal_plugin_api::channel::LIVE_IDENTITY_ROTATION != 0,
+        );
         // Retained NodeHost handles follow the promoted certificate and its
         // subsequent renewals, rather than the retired connection's expiry.
         #[cfg(any(test, feature = "native-streams"))]
@@ -493,6 +510,7 @@ impl RemoteHosts {
         generation: Uuid,
         authority: AuthorityGuard,
         actor: EmbeddedAgent,
+        identity_rotation: bool,
     ) -> Retirement {
         let registry = Arc::downgrade(&self.0);
         let source = self.1.clone();
@@ -504,7 +522,7 @@ impl RemoteHosts {
                 tokio::select! {
                     biased;
                     () = authority.cancelled() => {},
-                    () = crate::remote_renewal::run(&authority, &actor, source) => {},
+                    () = crate::remote_renewal::run(&authority, &actor, source, identity_rotation) => {},
                 }
             } else {
                 authority.cancelled().await;

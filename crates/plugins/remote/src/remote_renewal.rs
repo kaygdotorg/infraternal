@@ -70,6 +70,7 @@ pub struct RenewalIdentity {
     identity: Arc<RwLock<Identity>>,
     roots: Vec<X509>,
     publisher: Arc<dyn CertificatePublisher>,
+    rotation: Option<crate::identity_rotation::IdentityRotation>,
 }
 impl RenewalIdentity {
     /// Retain the host key, public pins and the installation publication adapter.
@@ -86,7 +87,39 @@ impl RenewalIdentity {
             })),
             roots: roots.to_vec(),
             publisher,
+            rotation: None,
         }
+    }
+    /// Enable rotation only when the installation supplies durable private-state publication.
+    /// # Errors
+    /// Refuses malformed or inconsistent pending rotation state.
+    pub fn enable_identity_rotation(
+        &mut self,
+        publisher: Arc<dyn crate::identity_rotation::RotationPublisher>,
+    ) -> io::Result<()> {
+        let predecessor = self.current()?;
+        let (rotation, current) =
+            crate::identity_rotation::IdentityRotation::new(&predecessor, &self.roots, publisher)?;
+        *self.identity.write().map_err(|_| denied())? = current;
+        self.rotation = Some(rotation);
+        Ok(())
+    }
+
+    /// Whether the installed host can durably stage and acknowledge a candidate key.
+    #[must_use]
+    pub fn supports_identity_rotation(&self) -> bool {
+        self.rotation
+            .as_ref()
+            .is_some_and(crate::identity_rotation::IdentityRotation::supports_rotation)
+    }
+    /// Return the retained predecessor only while an unacknowledged candidate is active.
+    /// # Errors
+    /// Refuses poisoned or concurrently publishing identity state.
+    pub fn predecessor_for(&self) -> io::Result<Option<Identity>> {
+        let Some(rotation) = &self.rotation else {
+            return Ok(None);
+        };
+        rotation.predecessor_for(&self.current()?)
     }
     /// Snapshot the current acknowledged leaf without exposing the key to the peer.
     /// # Errors
@@ -111,13 +144,25 @@ impl RenewalIdentity {
         if input.len() > MAX_RENEWAL_JSON {
             return Err(denied());
         }
+        if matches!(
+            action,
+            "transport.csr.rotate"
+                | "transport.identity.rotate.certificate"
+                | "transport.identity.rotate.ack"
+        ) {
+            return self.rotation.as_ref().ok_or_else(denied)?.action(
+                &self.identity,
+                action,
+                input,
+            );
+        }
         match action {
             "transport.csr" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
                 struct Empty {}
                 serde_json::from_slice::<Empty>(input).map_err(|_| denied())?;
-                let identity = self.identity.read().map_err(|_| denied())?;
+                let identity = self.current()?;
                 let mut request = X509Req::builder().map_err(|_| denied())?;
                 request
                     .set_subject_name(&X509NameBuilder::new().map_err(|_| denied())?.build())
@@ -143,6 +188,9 @@ impl RenewalIdentity {
                 // A failed fsync/rename leaves process authority unchanged.
                 self.publisher.publish(&certificate)?;
                 identity.certificate = certificate;
+                if let Some(rotation) = &self.rotation {
+                    rotation.renewed_certificate(&identity.certificate)?;
+                }
                 Ok(b"{}".to_vec())
             }
             _ => Err(denied()),

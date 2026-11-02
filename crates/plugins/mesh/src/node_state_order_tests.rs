@@ -134,6 +134,8 @@ fn accepted_snapshot_persistence_at_1000_peers() {
                 PeerPolicy {
                     peer: Peer {
                         key: PublicKey(key),
+                        previous_key: None,
+                        previous_active: false,
                         addresses: Addresses {
                             ipv4: std::net::Ipv4Addr::from(0x0afe_0000 + id),
                             ipv6: std::net::Ipv6Addr::from((0xfd01_u128 << 112) + u128::from(id)),

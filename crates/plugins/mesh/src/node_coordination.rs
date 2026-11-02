@@ -30,9 +30,9 @@ async fn update_listener(
 // then answer the ordinary request without enabling a new representation.
 async fn read_identity(channel: &dyn NodeChannel) -> Option<Identity> {
     #[cfg(feature = "mesh-dns-spike")]
-    let probe = br#"{"compact_access":true,"dns_names":true}"#.to_vec();
+    let probe = br#"{"compact_access":true,"dns_names":true,"key_rotation":true}"#.to_vec();
     #[cfg(not(feature = "mesh-dns-spike"))]
-    let probe = br#"{"compact_access":true}"#.to_vec();
+    let probe = br#"{"compact_access":true,"key_rotation":true}"#.to_vec();
     let reply = match channel.call("mesh.identity", probe).await {
         Ok(reply) => reply,
         Err(_) => channel.call("mesh.identity", b"{}".to_vec()).await.ok()?,
@@ -69,9 +69,13 @@ pub async fn run(
     let mut binding = None;
     let mut installed: Option<Snapshot> = None;
     let mut refresh_identity = true;
+    let mut current_identity: Option<Identity> = None;
     let mut compact_access = false;
     #[cfg(feature = "mesh-dns-spike")]
     let mut dns_names = false;
+    let mut ack_retry: Option<(infraternal_mesh::model::NodeId, u64)> = None;
+    let mut presence_updates = service.subscribe_presence();
+    let mut rotation_updates = service.subscribe_rotation_progress();
     let mut listener: ServerListener = None;
     let mut transport_port = None;
     let mut peer_route: Option<(
@@ -88,6 +92,7 @@ pub async fn run(
                 {
                     dns_names = identity.dns_names;
                 }
+                current_identity = Some(identity.clone());
                 transport_port = if !channel.is_server() && channel.supports_server_paths() {
                     // Status is extensible; keep the strict identity response
                     // unchanged for older coordinators. The control channel
@@ -112,12 +117,13 @@ pub async fn run(
                         return;
                     };
                     store
-                        .attach_named(
+                        .attach_named_with_capability(
                             channel.id(),
                             identity.public_key,
                             endpoint,
                             channel.is_server(),
                             reported.as_deref(),
+                            identity.key_rotation,
                         )
                         .await
                 };
@@ -132,19 +138,26 @@ pub async fn run(
                 } else {
                     binding = None;
                     installed = None;
+                    current_identity = None;
                 }
             } else {
                 binding = None;
                 installed = None;
+                current_identity = None;
             }
         }
+        let local_identity = current_identity
+            .as_ref()
+            .map(|identity| identity.public_key);
         let config = if let Some(node) = binding {
             match work.acquire().await {
-                Ok(_permit) => match store
-                    .snapshot()
-                    .await
-                    .and_then(|snapshot| snapshot.config(node).map(|config| (config, snapshot)))
-                {
+                Ok(_permit) => match store.snapshot().await.and_then(|snapshot| {
+                    local_identity.map_or(Err(MeshApiError::NotFound), |identity| {
+                        snapshot
+                            .config_for_identity(node, identity)
+                            .map(|config| (config, snapshot))
+                    })
+                }) {
                     Ok(config) => Some(config),
                     Err(MeshApiError::NotFound) => {
                         // A deleted binding can be re-enrolled before this worker
@@ -181,6 +194,7 @@ pub async fn run(
                     || old.node != config.node
                     || names_changed
                     || dns_suffix_changed
+                    || old.local_key != config.local_key
                     || old.addresses != config.addresses
                     || old.exposure != config.exposure
                     || old.default_policy != config.default_policy
@@ -247,12 +261,35 @@ pub async fn run(
                         break;
                     }
                 }
+                if !failed && snapshot.acknowledgments_required() {
+                    if store
+                        .acknowledge_applied(config.node, config.version)
+                        .await
+                        .is_err()
+                    {
+                        ack_retry = Some((config.node, config.version));
+                    } else {
+                        ack_retry = None;
+                        service.rotation_applied();
+                    }
+                }
                 installed = if failed { None } else { Some(snapshot) };
                 // A refused delta needs a snapshot now, not a future unrelated
                 // edit. A failed snapshot waits for a source change rather than spinning.
                 if failed && was_delta {
                     continue;
                 }
+            } else if snapshot.acknowledgments_required()
+                && installed.is_some()
+                && store
+                    .acknowledge_applied(config.node, config.version)
+                    .await
+                    .is_ok()
+            {
+                // The kernel already holds an identical peer view; a metadata-only revision
+                // can acknowledge that applied view without an unchanged netlink rewrite.
+                ack_retry = None;
+                service.rotation_applied();
             }
         }
         if binding.is_none() {
@@ -267,12 +304,51 @@ pub async fn run(
             let address = std::net::IpAddr::V4(config.addresses.ipv4);
             update_listener(channel.as_ref(), address, &mut listener).await;
         }
+        let rotation_wait =
+            if let (Some(node), Some(identity)) = (binding, current_identity.as_ref()) {
+                let live = presence_updates.borrow().keys().copied().collect();
+                match work.acquire().await {
+                    Ok(_permit) => {
+                        crate::rotation::drive(
+                            &store,
+                            &service,
+                            channel.as_ref(),
+                            node,
+                            identity,
+                            &live,
+                        )
+                        .await
+                    }
+                    Err(_) => return,
+                }
+            } else {
+                None
+            };
         // No retry timer or heartbeat. Reconnect, local up/down, or committed
         // policy change is the only wakeup. Closed sources retire the worker.
         tokio::select! {
             result=notices.changed()=> {if result.is_err() {return;}refresh_identity=true;installed=None;},
             result=revisions.recv()=>if matches!(result,Err(tokio::sync::broadcast::error::RecvError::Closed)) {return;},
+            result=presence_updates.changed()=>if result.is_err() {return;},
+            result=rotation_updates.changed()=>if result.is_err() {return;},
+            () = tokio::time::sleep(std::time::Duration::from_secs(5)), if ack_retry.is_some() => {
+                if let Some((node, revision)) = ack_retry
+                    && store.acknowledge_applied(node, revision).await.is_ok()
+                {
+                    ack_retry = None;
+                    service.rotation_applied();
+                }
+            },
+            () = sleep_optional(rotation_wait) => {}
         }
+    }
+}
+
+async fn sleep_optional(delay: Option<std::time::Duration>) {
+    if let Some(delay) = delay {
+        tokio::time::sleep(delay).await;
+    } else {
+        std::future::pending::<()>().await;
     }
 }
 
@@ -282,6 +358,7 @@ mod tests {
     use super::*;
     use crate::policy::model::PublicKey;
     use infraternal_plugin_api::PluginOperation;
+    use sqlx::Row;
     use std::sync::{
         Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -309,6 +386,8 @@ mod tests {
     struct Channel {
         server: bool,
         legacy_host_facts: bool,
+        identity_key: PublicKey,
+        key_rotation: bool,
         path_capable: AtomicBool,
         leases: Arc<AtomicUsize>,
         refuse_listener: AtomicBool,
@@ -333,6 +412,8 @@ mod tests {
             Arc::new(Self {
                 server,
                 legacy_host_facts: false,
+                identity_key: PublicKey([2; 32]),
+                key_rotation: false,
                 path_capable: AtomicBool::new(server),
                 leases: Arc::default(),
                 refuse_listener: AtomicBool::new(false),
@@ -345,6 +426,13 @@ mod tests {
                 frames: Mutex::new(Vec::new()),
                 hostname,
             })
+        }
+        fn candidate() -> Arc<Self> {
+            let mut channel = Self::named(false, None);
+            let candidate = Arc::get_mut(&mut channel).expect("new test channel is uniquely owned");
+            candidate.identity_key = PublicKey([3; 32]);
+            candidate.key_rotation = true;
+            channel
         }
         fn legacy() -> Arc<Self> {
             let mut channel = Self::named(false, None);
@@ -436,7 +524,12 @@ mod tests {
                             compact_access: false,
                             #[cfg(feature = "mesh-dns-spike")]
                             dns_names: false,
-                            public_key: PublicKey([if self.server { 1 } else { 2 }; 32]),
+                            key_rotation: self.key_rotation,
+                            public_key: if self.server {
+                                PublicKey([1; 32])
+                            } else {
+                                self.identity_key
+                            },
                             port: 44000,
                         },
                     ))
@@ -943,5 +1036,260 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn coordinator_restart_restores_the_previous_key_during_overlap() {
+        let service = service().await;
+        let store = service.dataplane();
+        let (node, _) = store
+            .attach(
+                "00000000-0000-4000-8000-000000000001",
+                PublicKey([2; 32]),
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+            )
+            .await
+            .unwrap();
+        let server = store.node_for_host("server").await.unwrap();
+        let pool = service.pool_for_tests();
+        let operation_id = "00000000-0000-4000-8000-000000000001";
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1 WHERE id=?")
+            .bind(i64::try_from(node.0).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id=?,sequence=1 WHERE node_id=?",
+        )
+            .bind(operation_id)
+            .bind(i64::try_from(node.0).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        store
+            .start_rotation_overlap(
+                node,
+                operation_id,
+                PublicKey([3; 32]),
+                100,
+                "test-boot",
+                1_000,
+            )
+            .await
+            .unwrap();
+
+        let restarted = crate::store::Store::new(pool);
+        let config = restarted.config(server).await.unwrap();
+        let peer = &config.peers[&node].peer;
+        assert_eq!(peer.key, PublicKey([2; 32]));
+        assert_eq!(
+            peer.previous_key,
+            Some(PublicKey([3; 32])),
+            "a server restart must not forget the old public key before overlap retirement"
+        );
+        assert!(
+            !peer.previous_active,
+            "the previous key remains the route owner until the local candidate switch"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_with_predecessor_preserves_candidate_during_overlap() {
+        let service = service().await;
+        let store = service.dataplane();
+        let host = "00000000-0000-4000-8000-000000000001";
+        let predecessor = PublicKey([2; 32]);
+        let candidate = PublicKey([3; 32]);
+        let endpoint = Some("192.0.2.1:44000".parse().unwrap());
+        let (node, _) = store
+            .attach(host, predecessor, endpoint, false)
+            .await
+            .unwrap();
+        let pool = service.pool_for_tests();
+        let operation_id = "00000000-0000-4000-8000-000000000004";
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1 WHERE id=?")
+            .bind(i64::try_from(node.0).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id=?,sequence=1 WHERE node_id=?",
+        )
+        .bind(operation_id)
+        .bind(i64::try_from(node.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        store
+            .start_rotation_overlap(node, operation_id, candidate, 100, "test-boot", 1_000)
+            .await
+            .unwrap();
+
+        let (reattached, _) = store
+            .attach_named_with_capability(host, predecessor, endpoint, false, None, true)
+            .await
+            .unwrap();
+
+        assert_eq!(reattached, node);
+        let schedule = store
+            .rotation_schedule(node, 100, "test-boot", 0, 1_000)
+            .await;
+        assert!(
+            schedule.is_ok(),
+            "a predecessor reconnect must preserve the persisted candidate rotation"
+        );
+        let current: Vec<u8> = sqlx::query_scalar("SELECT public_key FROM mesh_nodes WHERE id=?")
+            .bind(i64::try_from(node.0).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(current, candidate.0);
+    }
+
+    #[tokio::test]
+    async fn candidate_identity_reconnects_before_server_marks_rotation_retiring() {
+        let service = service().await;
+        let store = service.dataplane();
+        let (node, _) = store
+            .attach(
+                "00000000-0000-4000-8000-000000000001",
+                PublicKey([2; 32]),
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+            )
+            .await
+            .unwrap();
+        let operation_id = "00000000-0000-4000-8000-000000000003";
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1 WHERE id=?")
+            .bind(i64::try_from(node.0).unwrap())
+            .execute(&service.pool_for_tests())
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id=?,sequence=1 WHERE node_id=?",
+        )
+        .bind(operation_id)
+        .bind(i64::try_from(node.0).unwrap())
+        .execute(&service.pool_for_tests())
+        .await
+        .unwrap();
+        store
+            .start_rotation_overlap(
+                node,
+                operation_id,
+                PublicKey([3; 32]),
+                1_800_000_000,
+                "test-boot",
+                1_000,
+            )
+            .await
+            .unwrap();
+
+        let snapshot = store.snapshot().await.unwrap();
+        let predecessor = snapshot
+            .config_for_identity(node, PublicKey([2; 32]))
+            .unwrap();
+        assert_eq!(predecessor.local_key, Some(PublicKey([2; 32])));
+        let candidate = snapshot
+            .config_for_identity(node, PublicKey([3; 32]))
+            .unwrap();
+        assert_eq!(
+            candidate.local_key,
+            Some(PublicKey([3; 32])),
+            "a host restored after local key commit must bind its full config to the candidate"
+        );
+        assert!(
+            snapshot
+                .config_for_identity(node, PublicKey([4; 32]))
+                .is_err()
+        );
+
+        let server = store.node_for_host("server").await.unwrap();
+        let peer = snapshot.config(server).unwrap().peers[&node].peer.clone();
+        assert_eq!(peer.key, PublicKey([2; 32]));
+        assert_eq!(peer.previous_key, Some(PublicKey([3; 32])));
+        assert!(!peer.previous_active);
+    }
+
+    #[tokio::test]
+    async fn successful_peer_configuration_is_durably_acknowledged_until_restart() {
+        let service = service().await;
+        let store = service.dataplane();
+        let host_id = "00000000-0000-4000-8000-000000000001";
+        let (node, _) = store
+            .attach(
+                host_id,
+                PublicKey([2; 32]),
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+            )
+            .await
+            .unwrap();
+        let pool = service.pool_for_tests();
+        let operation_id = "00000000-0000-4000-8000-000000000002";
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1 WHERE id=?")
+            .bind(i64::try_from(node.0).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id=?,sequence=1 WHERE node_id=?",
+        )
+        .bind(operation_id)
+        .bind(i64::try_from(node.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        store
+            .start_rotation_overlap(
+                node,
+                operation_id,
+                PublicKey([3; 32]),
+                1_800_000_000,
+                "test-boot",
+                1_000,
+            )
+            .await
+            .unwrap();
+        let rotation_revision = store.commit_rotation(node, operation_id).await.unwrap();
+        let channel = Channel::candidate();
+        let mut progress = service.subscribe_rotation_progress();
+        let worker = tokio::spawn(run(
+            store.clone(),
+            service.clone(),
+            channel.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        channel.wait().await;
+        progress.changed().await.unwrap();
+        let applied =
+            sqlx::query("SELECT revision,server_instance FROM mesh_node_applied WHERE node_id=?")
+                .bind(i64::try_from(node.0).unwrap())
+                .fetch_optional(&pool)
+                .await
+                .unwrap()
+                .expect("successful configuration must survive worker and coordinator restart");
+        assert!(applied.get::<i64, _>("revision") >= i64::try_from(rotation_revision).unwrap());
+        assert_eq!(
+            applied.get::<String, _>("server_instance"),
+            store.server_instance()
+        );
+        assert!(
+            store
+                .rotation_acks_ready(rotation_revision, &[node].into_iter().collect())
+                .await
+                .unwrap()
+        );
+        let restarted = crate::store::Store::new(pool);
+        assert!(
+            !restarted
+                .rotation_acks_ready(rotation_revision, &[node].into_iter().collect())
+                .await
+                .unwrap(),
+            "a new coordinator instance must reapply views before trusting old receipts"
+        );
+        worker.abort();
+        let _ = worker.await;
     }
 }

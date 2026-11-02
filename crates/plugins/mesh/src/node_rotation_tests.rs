@@ -140,6 +140,76 @@ fn check(backend: Backend) {
         "retained replacement address accepted underlay traffic during restart fence"
     );
 }
+
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn rotated_interface_remains_owned_after_process_restart() {
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        path::PathBuf,
+        time::{Instant, SystemTime, UNIX_EPOCH},
+    };
+
+    struct StateDirectory(PathBuf);
+    impl Drop for StateDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "infraternal-mesh-rotation-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    let _cleanup = StateDirectory(path.clone());
+
+    let operation = "00000000-0000-4000-8000-000000000002";
+    let mut node = Node::restore(&path).unwrap();
+    let previous = node.up().unwrap();
+    let candidate = node.prepare_rotation(operation, 1).unwrap();
+    assert_ne!(previous.public_key, candidate);
+    assert!(
+        Node::plan_retirement(&path).unwrap().interface,
+        "the previous key remains owned before local activation"
+    );
+
+    // Recreate the crash boundary after the durable commit intent and kernel
+    // key update, but before the ownership marker can be replaced.
+    let (store, _) = crate::node_state::Store::open(&path).unwrap();
+    let mut rotation = store.rotation_secret().unwrap().unwrap();
+    rotation.commit_requested = true;
+    store.save_rotation_secret(&rotation).unwrap();
+    let (candidate_key, candidate_public) = Key::from_private(&rotation.candidate).unwrap();
+    assert_eq!(candidate_public, candidate);
+    Device::configure(&candidate_key, previous.port).unwrap();
+    assert!(
+        Node::plan_retirement(&path).unwrap().interface,
+        "the candidate key is owned after kernel acceptance even before the marker update"
+    );
+    drop(rotation);
+    drop(store);
+    drop(node);
+
+    let started = Instant::now();
+    let mut restored = Node::restore(&path).unwrap();
+    let identity = restored.up().unwrap();
+    let recovery_us = started.elapsed().as_micros();
+    assert_eq!(identity.public_key, candidate);
+    assert!(
+        Node::plan_retirement(&path).unwrap().interface,
+        "the rotated kernel interface must remain provably owned after restart"
+    );
+    println!("METRIC mesh_rotation_restart_recovery_us={recovery_us}");
+    restored.down().unwrap();
+}
+
 #[test]
 #[ignore = "Run in a disposable user/network namespace, #173."]
 fn nft_restart_fences_retained_replacement_address() {

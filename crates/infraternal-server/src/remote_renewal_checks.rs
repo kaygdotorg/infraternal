@@ -176,3 +176,29 @@ fn renewal_refuses_same_issuer_wrong_key_purpose_or_lifetime_before_publication(
     );
     assert_eq!(publisher.0.load(Ordering::Relaxed), 1);
 }
+
+#[test]
+fn replacement_csr_is_bound_to_the_old_identity_and_a_new_ed25519_key() {
+    let (_, retained, root, _) = identities();
+    let rotation = RenewalIdentity::new(
+        &retained,
+        std::slice::from_ref(&root),
+        Arc::new(Published(AtomicUsize::new(0), true)),
+    );
+    let challenge = [0x5a; 32];
+    let input = serde_json::to_vec(&serde_json::json!({"challenge":challenge})).unwrap();
+    let proof: serde_json::Value =
+        serde_json::from_slice(&rotation.action("transport.csr.rotate", &input).unwrap()).unwrap();
+    let csr_der: Vec<u8> = serde_json::from_value(proof["csr_der"].clone()).unwrap();
+    let old_signature: Vec<u8> = serde_json::from_value(proof["old_signature"].clone()).unwrap();
+    let request = openssl::x509::X509Req::from_der(&csr_der).unwrap();
+    let replacement = request.public_key().unwrap();
+
+    assert_eq!(replacement.id(), openssl::pkey::Id::ED25519);
+    assert!(!replacement.public_eq(&retained.key));
+    let mut message = b"infraternal/1 host-key-rotation\0".to_vec();
+    message.extend_from_slice(&challenge);
+    message.extend_from_slice(&csr_der);
+    let mut verifier = openssl::sign::Verifier::new_without_digest(&retained.key).unwrap();
+    assert!(verifier.verify_oneshot(&old_signature, &message).unwrap());
+}

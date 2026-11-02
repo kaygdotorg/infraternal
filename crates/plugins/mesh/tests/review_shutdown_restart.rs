@@ -55,6 +55,8 @@ fn configure(node: &mut Node) {
                 PeerPolicy {
                     peer: Peer {
                         key: Key::generate().unwrap().1,
+                        previous_key: None,
+                        previous_active: false,
                         addresses: addresses(id),
                         endpoint: None,
                     },

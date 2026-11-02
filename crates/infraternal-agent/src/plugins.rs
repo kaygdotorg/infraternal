@@ -322,6 +322,8 @@ mod proxy_mesh_context_tests {
         PeerPolicy {
             peer: Peer {
                 key: PublicKey([id; 32]),
+                previous_key: None,
+                previous_active: false,
                 addresses: Addresses {
                     ipv4,
                     ipv6: format!("fd00::{id:x}").parse().expect("IPv6 mesh address"),

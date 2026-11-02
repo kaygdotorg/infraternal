@@ -31,6 +31,8 @@ uses `Result { ok: true }` with the listed JSON value. A failure uses
 | `mesh.grant.rename` | `{"name":string,"new_name":string}` | `{"revision":u64}` | `mesh.manage_grants`, covering both existing endpoints |
 | `mesh.role.define` | `MeshRoleDefinition` | `{"revision":u64}` | Global `mesh.manage_roles` |
 | `mesh.role.assign` | `{"user_id":string,"role":string}` | `{"revision":u64}` | Global `mesh.manage_roles` |
+| `mesh.rotation.get` | `{}` | `MeshRotationSettings` | Server owner (`server.configure`) |
+| `mesh.rotation.interval.set` | `{"rotation_period_secs":u64,"expected_revision":u64}` | `{"rotation_period_secs":u64,"revision":u64}` | Server owner (`server.configure`) with fresh passkey confirmation |
 
 `MeshFilter` is `{"tag"?:string,"cursor"?:{"revision":u64,"offset":usize}}`. IDs are positive integers no
 greater than SQLite's signed 64-bit maximum. A node public key is exactly 32
@@ -85,6 +87,16 @@ microseconds.
 `MeshSnapshot` is `{"revision":u64,"nodes":MeshNode[],"tags":MeshTag[],"grants":MeshGrant[],"next_cursor"?:{"revision":u64,"offset":usize}}`.
 The snapshot is permission-filtered and read from one consistent database
 transaction.
+
+`MeshRotationSettings` is `{"revision":u64,"rotation_period_secs":u64,"hosts":MeshRotationHost[]}`.
+Each `MeshRotationHost` is `{"node_id":u64,"name":string,"last_rotation":string,"next_rotation":string,"pending":boolean,"deferred_reason":("local_unsupported"|"peer_unsupported")|null}`;
+the two timestamps are decimal Unix-second strings so clients can format them
+without a platform date parser in the server. The default WireGuard period is
+604800 seconds. Setting it requires a positive signed-64-bit value and the
+current mesh revision; stale revisions conflict. The setting changes only the
+WireGuard schedule. A node that has not negotiated dual-key rotation, or a mesh
+with any such peer, reports a deferral and does not begin a rotation. Identity-key
+rotation follows its separately specified seven-day schedule.
 
 ## 3. Names, roles and authorization
 

@@ -71,6 +71,8 @@ fn peer(id: u8, inbound: TrafficPolicy) -> (NodeId, PeerPolicy) {
         PeerPolicy {
             peer: Peer {
                 key: PublicKey([id; 32]),
+                previous_key: None,
+                previous_active: false,
                 addresses: Addresses {
                     ipv4: format!("10.254.0.{id}").parse().unwrap(),
                     ipv6: format!("fd01::{id}").parse().unwrap(),

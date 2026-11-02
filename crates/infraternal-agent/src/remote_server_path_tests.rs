@@ -12,6 +12,38 @@ use infraternal_plugin_remote::remote_bindings::{Bindings, LeasedBinding};
 use infraternal_protocol::Frame;
 use std::net::IpAddr;
 
+#[test]
+fn identity_admission_refusal_only_matches_tls_crypto_errors() {
+    let closed_with = |error_code| {
+        io::Error::other(quinn::ConnectionError::ConnectionClosed(
+            quinn::ConnectionClose {
+                error_code,
+                frame_type: None,
+                reason: Default::default(),
+            },
+        ))
+    };
+    let crypto_close = quinn::ConnectionError::ConnectionClosed(quinn::ConnectionClose {
+        error_code: quinn::TransportErrorCode::crypto(0x33),
+        frame_type: None,
+        reason: Default::default(),
+    });
+    assert!(identity_admission_refused(&io::Error::other(
+        quinn::ReadError::ConnectionLost(crypto_close.clone())
+    )));
+    assert!(identity_admission_refused(&io::Error::other(
+        quinn::WriteError::ConnectionLost(crypto_close)
+    )));
+    assert!(!identity_admission_refused(&closed_with(
+        quinn::TransportErrorCode::PROTOCOL_VIOLATION
+    )));
+    assert!(!identity_admission_refused(&io::ErrorKind::TimedOut.into()));
+    assert!(identity_admission_refused(&io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "identity refused",
+    )));
+}
+
 /// Exercise the shipping retry owner around a fixture registry and real transport.
 async fn run(
     identity: &RemoteIdentity,
@@ -445,6 +477,117 @@ fn identity(ca: &remote_tls::Identity, endpoint: SocketAddr) -> RemoteIdentity {
         execution_uid: nix::unistd::Uid::effective().as_raw(),
     }
 }
+
+fn host_identity(
+    ca: &remote_tls::Identity,
+    host: uuid::Uuid,
+    key: openssl::pkey::PKey<openssl::pkey::Private>,
+    serial: u32,
+) -> remote_tls::Identity {
+    use openssl::{
+        asn1::Asn1Time,
+        bn::BigNum,
+        hash::MessageDigest,
+        x509::{
+            X509, X509NameBuilder,
+            extension::{BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName},
+        },
+    };
+
+    let mut name = X509NameBuilder::new().unwrap();
+    name.append_entry_by_text("CN", "test host").unwrap();
+    let mut builder = X509::builder().unwrap();
+    builder.set_version(2).unwrap();
+    builder
+        .set_serial_number(&BigNum::from_u32(serial).unwrap().to_asn1_integer().unwrap())
+        .unwrap();
+    builder.set_subject_name(&name.build()).unwrap();
+    builder
+        .set_issuer_name(ca.certificate.subject_name())
+        .unwrap();
+    builder.set_pubkey(&key).unwrap();
+    builder
+        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    builder
+        .set_not_after(&Asn1Time::days_from_now(7).unwrap())
+        .unwrap();
+    builder
+        .append_extension(BasicConstraints::new().critical().build().unwrap())
+        .unwrap();
+    builder
+        .append_extension(
+            KeyUsage::new()
+                .critical()
+                .digital_signature()
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    builder
+        .append_extension(ExtendedKeyUsage::new().client_auth().build().unwrap())
+        .unwrap();
+    let san = {
+        let context = builder.x509v3_context(Some(&ca.certificate), None);
+        SubjectAlternativeName::new()
+            .uri(&format!("urn:infraternal:host:{host}"))
+            .build(&context)
+            .unwrap()
+    };
+    builder.append_extension(san).unwrap();
+    builder.sign(&ca.key, MessageDigest::null()).unwrap();
+    remote_tls::Identity {
+        certificate: builder.build(),
+        key,
+    }
+}
+
+struct PendingRotationPublisher(
+    std::sync::Mutex<Option<infraternal_plugin_remote::identity_rotation::RotationStorage>>,
+);
+impl infraternal_plugin_remote::identity_rotation::RotationPublisher for PendingRotationPublisher {
+    fn load(&self) -> io::Result<infraternal_plugin_remote::identity_rotation::RotationStorage> {
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("fixture lock poisoned"))?
+            .take()
+            .ok_or_else(|| io::Error::other("fixture state already loaded"))
+    }
+    fn store_candidate(
+        &self,
+        _: &infraternal_plugin_remote::identity_rotation::Challenge,
+        _: &[u8],
+    ) -> io::Result<()> {
+        Ok(())
+    }
+    fn store_certificate(&self, _: uuid::Uuid, _: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+    fn promote(
+        &self,
+        _: &infraternal_plugin_remote::identity_rotation::CompletedRotation,
+    ) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct TestCertificatePublisher;
+impl crate::remote_renewal::CertificatePublisher for TestCertificatePublisher {
+    fn publish(&self, _: &openssl::x509::X509) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn certificate_fingerprint(certificate: &openssl::x509::X509) -> [u8; 32] {
+    use openssl::hash::MessageDigest;
+    certificate
+        .digest(MessageDigest::sha256())
+        .unwrap()
+        .as_ref()
+        .try_into()
+        .unwrap()
+}
+
 fn supervise(
     identity: RemoteIdentity,
     registry: &crate::plugin_control::Registry,
@@ -456,6 +599,132 @@ fn supervise(
         tokio::spawn(async move { run(&identity, state, None, control).await }),
         directory,
     )
+}
+
+#[tokio::test]
+async fn candidate_mtls_refusal_retries_the_pending_predecessor() {
+    use infraternal_plugin_remote::identity_rotation::{
+        Challenge, PendingRotation, RotationStorage,
+    };
+    use openssl::pkey::PKey;
+
+    let predecessor_ca = root();
+    let candidate_ca = root();
+    let host = uuid::Uuid::from_u128(285);
+    let predecessor = host_identity(&predecessor_ca, host, PKey::generate_ed25519().unwrap(), 10);
+    let candidate_key = PKey::generate_ed25519().unwrap();
+    let candidate = host_identity(&candidate_ca, host, candidate_key.clone(), 11);
+    let predecessor_issuer = predecessor_ca.certificate.public_key().unwrap();
+    let candidate_issuer = candidate_ca.certificate.public_key().unwrap();
+    assert_ne!(
+        certificate_fingerprint(&predecessor_ca.certificate),
+        certificate_fingerprint(&candidate_ca.certificate)
+    );
+    assert!(candidate.certificate.verify(&candidate_issuer).unwrap());
+    assert!(!candidate.certificate.verify(&predecessor_issuer).unwrap());
+    let challenge = Challenge {
+        host_id: host,
+        operation_id: uuid::Uuid::from_u128(286),
+        sequence: 1,
+        challenge: [7; 32],
+        predecessor_fingerprint: certificate_fingerprint(&predecessor.certificate),
+        issuer_fingerprint: certificate_fingerprint(&candidate_ca.certificate),
+        issuer_generation: 1,
+    };
+    let stored = RotationStorage {
+        pending: Some(PendingRotation {
+            challenge,
+            candidate_key_pkcs8: candidate_key.private_key_to_pkcs8().unwrap(),
+            candidate_certificate_der: Some(candidate.certificate.to_der().unwrap()),
+        }),
+        completed: None,
+    };
+    let roots = vec![
+        predecessor_ca.certificate.clone(),
+        candidate_ca.certificate.clone(),
+    ];
+    let identity = RemoteIdentity {
+        identity: predecessor,
+        roots,
+        endpoint: "127.0.0.1:0".parse().unwrap(),
+        server_name: "localhost".into(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+    };
+    let mut renewal = crate::remote_renewal::RenewalIdentity::new(
+        &identity.identity,
+        &identity.roots,
+        Arc::new(TestCertificatePublisher),
+    );
+    renewal
+        .enable_identity_rotation(Arc::new(PendingRotationPublisher(std::sync::Mutex::new(
+            Some(stored),
+        ))))
+        .unwrap();
+    let active_fingerprint = certificate_fingerprint(&renewal.current().unwrap().certificate);
+    assert_eq!(
+        active_fingerprint,
+        certificate_fingerprint(&candidate.certificate),
+        "restored active credentials must be the candidate being refused"
+    );
+    assert_ne!(
+        active_fingerprint,
+        certificate_fingerprint(&identity.identity.certificate)
+    );
+    let renewal = Arc::new(renewal);
+
+    let mut server = Server::new(
+        &leaf(&predecessor_ca, true),
+        std::slice::from_ref(&predecessor_ca.certificate),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    let enrolled = server.endpoint.local_addr().unwrap();
+    let mesh = server.lease("127.0.0.2");
+    let identity = RemoteIdentity {
+        endpoint: enrolled,
+        ..identity
+    };
+    let registry = registry();
+    // The fixture trusts only the predecessor issuer, so the admitted connection
+    // proves the candidate refusal selected the retained predecessor.
+    let mut link = connect_with_predecessor_fallback(
+        &identity,
+        Some(&renewal),
+        mesh,
+        ServerLinkKind::Mesh,
+        true,
+    )
+    .await
+    .expect("refused candidate must retry with the predecessor");
+    assert_eq!(link.current().0, ServerLinkKind::Mesh);
+    let session_identity = identity;
+    let session_renewal = renewal.clone();
+    let session_registry = registry.clone();
+    let session_task = tokio::spawn(async move {
+        let proof = link.proof.take();
+        let directory = Directory::new();
+        session(
+            &link,
+            &session_identity,
+            directory.0.clone(),
+            Some(session_renewal.as_ref()),
+            session_registry,
+            proof,
+        )
+        .await
+    });
+    let _accepted = server.admitted_channel().await;
+    assert_eq!(
+        server.connections(),
+        1,
+        "only predecessor mTLS may be admitted"
+    );
+    assert_eq!(
+        certificate_fingerprint(&renewal.current().unwrap().certificate),
+        active_fingerprint,
+        "fallback must not demote the persisted candidate"
+    );
+    session_task.abort();
+    let _ = session_task.await;
 }
 
 #[tokio::test]
@@ -877,7 +1146,7 @@ async fn backup_published_during_candidate_proof_keeps_enrolled_control_live() {
     let (send, receive) = connection.open_bi().await.unwrap();
     let control = NativeChannel::control(send, receive).unwrap();
     Transmit::default()
-        .send(&control, 0, &super::super::client_greeting(false))
+        .send(&control, 0, &super::super::client_greeting(false, false))
         .await
         .unwrap();
     assert!(matches!(
@@ -979,7 +1248,7 @@ async fn invalid_mesh_hint_cannot_complete_fresh_path_proof() {
     let (send, receive) = connection.open_bi().await.unwrap();
     let control = NativeChannel::control(send, receive).unwrap();
     Transmit::default()
-        .send(&control, 0, &super::super::client_greeting(false))
+        .send(&control, 0, &super::super::client_greeting(false, false))
         .await
         .unwrap();
     assert!(matches!(
@@ -1595,7 +1864,7 @@ async fn backed_candidate_fixture() -> (
     let (send, receive) = connection.open_bi().await.unwrap();
     let control = NativeChannel::control(send, receive).unwrap();
     Transmit::default()
-        .send(&control, 0, &super::super::client_greeting(false))
+        .send(&control, 0, &super::super::client_greeting(false, false))
         .await
         .unwrap();
     assert!(matches!(

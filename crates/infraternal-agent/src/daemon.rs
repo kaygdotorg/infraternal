@@ -57,6 +57,16 @@ use crate::remote_renewal::RenewalIdentity;
 // The private local-only dispatcher always supplies None in core builds.
 #[cfg(not(feature = "remote"))]
 type RenewalIdentity = ();
+#[cfg(feature = "remote")]
+pub(crate) fn supports_identity_rotation(renewal: Option<&RenewalIdentity>) -> bool {
+    renewal.is_some_and(RenewalIdentity::supports_identity_rotation)
+}
+
+#[cfg(not(feature = "remote"))]
+pub(crate) const fn supports_identity_rotation(_: Option<&RenewalIdentity>) -> bool {
+    false
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Open {
@@ -919,7 +929,7 @@ async fn run_channel<const SESSION_ONLY: bool>(
                             if let Some(observer) = &control_observer { observer.replied(); }
                         },
                         #[cfg(feature = "remote")]
-                        Frame::Call {call_id, action_id, input_json} if stream == 0 && matches!(action_id, "transport.csr" | "transport.certificate") && renewal.is_some() => {
+                        Frame::Call {call_id, action_id, input_json} if stream == 0 && matches!(action_id, "transport.csr" | "transport.certificate" | "transport.csr.rotate" | "transport.identity.rotate.certificate" | "transport.identity.rotate.ack") && renewal.is_some() => {
                             if !renewals.is_empty() || input_json.len() > infraternal_plugin_api::channel::MAX_CONTROL_JSON {
                                 reply(&control, Message::Result(0, call_id, false, b"{}".to_vec()))?;
                             } else {
@@ -1055,7 +1065,15 @@ async fn run_channel<const SESSION_ONLY: bool>(
     };
     let result = tokio::select! {
         result = dispatch => result,
-        result = writer(socket, rx, Some(control_rx), true, renewal.is_some(), wire_caps) => result,
+        result = writer(
+            socket,
+            rx,
+            Some(control_rx),
+            true,
+            renewal.is_some(),
+            supports_identity_rotation(renewal),
+            wire_caps,
+        ) => result,
     };
     for revocation in revocations {
         let _ = revocation.await;
@@ -1202,7 +1220,7 @@ async fn run_bound_terminal_mode(
             }
         }
     };
-    let writer = writer(channel, rx, None, false, false, 0);
+    let writer = writer(channel, rx, None, false, false, false, 0);
     tokio::pin!(writer);
     tokio::select! {
         result = dispatch => result,

@@ -282,6 +282,8 @@ mod tests {
         let granted = |numbers: &[u16]| PeerPolicy {
             peer: crate::dataplane::Peer {
                 key: crate::policy::model::PublicKey([1; 32]),
+                previous_key: None,
+                previous_active: false,
                 addresses: crate::policy::model::Addresses {
                     ipv4: "10.254.0.3".parse().expect("IPv4"),
                     ipv6: "fd01::3".parse().expect("IPv6"),
@@ -340,6 +342,8 @@ mod tests {
                 PeerPolicy {
                     peer: crate::dataplane::Peer {
                         key: crate::policy::model::PublicKey([1; 32]),
+                        previous_key: None,
+                        previous_active: false,
                         addresses: crate::policy::model::Addresses {
                             ipv4: "10.254.0.3".parse().expect("IPv4"),
                             ipv6: "fd01::3".parse().expect("IPv6"),

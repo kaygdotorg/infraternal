@@ -656,6 +656,8 @@ mod tests {
                         PeerPolicy {
                             peer: Peer {
                                 key: PublicKey([1; 32]),
+                                previous_key: None,
+                                previous_active: false,
                                 addresses: address(*id),
                                 endpoint: None,
                             },

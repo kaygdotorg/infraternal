@@ -142,6 +142,7 @@ impl Node {
                 compact_access: true,
                 #[cfg(feature = "mesh-dns-spike")]
                 dns_names: cfg!(target_os = "linux"),
+                key_rotation: true,
             });
             node.client = Some(Client::new()?);
             if !node.enabled {
@@ -173,10 +174,12 @@ impl Node {
     /// infraternal agent on the machine, so neither proves the object is this
     /// installation's: the server's embedded infraternal agent and `mesh up`
     /// make the same marked `infraternal0`. Only an interface whose `WireGuard`
-    /// key is the one this state recorded (or, for state written before that
-    /// record existed, the key the coordinator bound) is ours. Its packet
-    /// filter is ours when the state recorded a frontend and no other node's
-    /// interface is live.
+    /// key is the one this state recorded, the key the coordinator bound for
+    /// older state, or a key in an interrupted local rotation is ours. A
+    /// pending candidate is accepted only after durable commit intent, when
+    /// the kernel update may have landed before its ownership marker. Its
+    /// packet filter is ours when the state recorded a frontend and no other
+    /// node's interface is live.
     ///
     /// Every object is decided before any is deleted (#235). An object with our
     /// name that is not ours is never an error: uninstall leaves it and names it,
@@ -184,35 +187,47 @@ impl Node {
     /// # Errors
     /// Reports unsafe state or a failed kernel or packet-filter query.
     pub fn plan_retirement(path: &std::path::Path) -> io::Result<Retirement> {
-        let (recorded, backend) = match crate::node_state::Store::open(path) {
-            Ok((store, state)) => (
-                store
-                    .recorded_interface()?
-                    .or_else(|| state.config.and_then(|config| config.local_key)),
-                state.backend,
-            ),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (None, None),
+        let (owned_keys, backend) = match crate::node_state::Store::open(path) {
+            Ok((store, state)) => {
+                let mut owned_keys = store.recorded_interface()?.into_iter().collect::<Vec<_>>();
+                if let Some(key) = state.config.and_then(|config| config.local_key)
+                    && !owned_keys.contains(&key)
+                {
+                    owned_keys.push(key);
+                }
+                if let Some(rotation) = store.rotation_secret()? {
+                    let (_, candidate) = Key::from_private(&rotation.candidate)?;
+                    if rotation.commit_requested || rotation.completed {
+                        owned_keys.push(candidate);
+                    }
+                    if !rotation.completed {
+                        let (_, previous) = Key::from_private(&rotation.previous)?;
+                        if !owned_keys.contains(&previous) {
+                            owned_keys.push(previous);
+                        }
+                    }
+                }
+                (owned_keys, state.backend)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (Vec::new(), None),
             Err(error) => return Err(error),
         };
         let mut left = Vec::new();
         // None: no interface with our name. Some(ours?) otherwise.
-        let interface =
-            match Device::owned() {
-                Ok(false) => None,
-                // A marked link without a readable WireGuard key is not provably ours.
-                Ok(true) => Some(recorded.is_some_and(|recorded| {
-                    Device::identity().is_ok_and(|(key, _)| key == recorded)
-                })),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Some(false),
-                Err(error) => return Err(error),
-            };
+        let interface = match Device::owned() {
+            Ok(false) => None,
+            // A marked link without a readable key in durable local state is not ours.
+            Ok(true) => Some(Device::identity().is_ok_and(|(key, _)| owned_keys.contains(&key))),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Some(false),
+            Err(error) => return Err(error),
+        };
         if interface == Some(false) {
             left.push(crate::wireguard::INTERFACE);
         }
         let mut firewall = backend.map_or_else(Firewall::default, Firewall::for_backend);
         let filter = match firewall.adopt() {
             Ok(()) if !firewall.installed() => None,
-            Ok(()) if backend.is_some() && recorded.is_some() && interface != Some(false) => {
+            Ok(()) if backend.is_some() && !owned_keys.is_empty() && interface != Some(false) => {
                 Some(firewall)
             }
             Ok(()) => {
@@ -332,7 +347,22 @@ impl Node {
             return Ok(identity.clone());
         }
         self.firewall.adopt()?;
-        let (key, public_key) = Key::generate()?;
+        let retained_rotation = self
+            .store
+            .as_ref()
+            .map(crate::node_state::Store::rotation_secret)
+            .transpose()?
+            .flatten();
+        let (key, public_key) = if let Some(rotation) = retained_rotation {
+            let private = if rotation.commit_requested || rotation.completed {
+                rotation.candidate
+            } else {
+                rotation.previous
+            };
+            Key::from_private(&private)?
+        } else {
+            Key::generate()?
+        };
         // Name the interface in this installation's state before it exists:
         // host uninstall removes only an interface whose key matches (#235).
         if let Some(store) = &self.store {
@@ -361,6 +391,7 @@ impl Node {
                     compact_access: true,
                     #[cfg(feature = "mesh-dns-spike")]
                     dns_names: cfg!(target_os = "linux"),
+                    key_rotation: true,
                 },
                 client,
             ))
@@ -378,6 +409,141 @@ impl Node {
                 Err(error)
             }
         }
+    }
+
+    /// Prepare a new local `WireGuard` identity without changing the live interface.
+    /// The old and candidate secrets reach the root-only journal before the public key returns.
+    /// # Errors
+    /// Refuses an inactive node, unsafe state, a conflicting pending operation or a kernel failure.
+    pub(crate) fn prepare_rotation(
+        &mut self,
+        operation_id: &str,
+        sequence: u64,
+    ) -> io::Result<crate::policy::model::PublicKey> {
+        let identity = self.identity.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        if sequence == 0
+            || operation_id.len() != 36
+            || !operation_id.bytes().enumerate().all(|(index, byte)| {
+                if matches!(index, 8 | 13 | 18 | 23) {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_hexdigit()
+                }
+            })
+        {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        if let Some(existing) = store.rotation_secret()? {
+            let (_, existing_public) = Key::from_private(&existing.candidate)?;
+            if existing.completed {
+                let current = Device::identity()?.0;
+                if current != existing_public
+                    || identity.public_key != existing_public
+                    || existing.operation_id == operation_id
+                    || sequence <= existing.sequence
+                {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+            } else if existing.operation_id == operation_id && existing.sequence == sequence {
+                return Ok(existing_public);
+            } else {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+        }
+        let (previous, previous_public) = (Device::private_key()?, Device::identity()?.0);
+        if previous_public != identity.public_key {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let (candidate, candidate_public) = Key::generate()?;
+        let state = crate::node_state::RotationSecret {
+            operation_id: operation_id.to_owned(),
+            sequence,
+            previous: previous
+                .private_bytes()
+                .try_into()
+                .map_err(|_| io::ErrorKind::InvalidData)?,
+            candidate: candidate
+                .private_bytes()
+                .try_into()
+                .map_err(|_| io::ErrorKind::InvalidData)?,
+            commit_requested: false,
+            completed: false,
+        };
+        store.save_rotation_secret(&state)?;
+        Ok(candidate_public)
+    }
+
+    /// Switch the local interface to a prepared candidate; retry is safe after an abrupt stop.
+    /// # Errors
+    /// Refuses a stale operation, an altered local key or a failed durable/kernel update.
+    pub(crate) fn commit_rotation(
+        &mut self,
+        operation_id: &str,
+        sequence: u64,
+    ) -> io::Result<Identity> {
+        let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        let mut state = store.rotation_secret()?.ok_or(io::ErrorKind::NotFound)?;
+        if state.operation_id != operation_id || state.sequence != sequence {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let (candidate, candidate_public) = Key::from_private(&state.candidate)?;
+        let current_public = Device::identity()?.0;
+        if state.completed {
+            let identity = self.identity.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+            if current_public != candidate_public || identity.public_key != candidate_public {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            store.record_interface(&candidate_public)?;
+            return Ok(identity.clone());
+        }
+        if current_public == Key::from_private(&state.previous)?.1 {
+            // Mark the operation before kernel mutation. After a stop here, restore
+            // selects this candidate and the authenticated server can reconcile it.
+            state.commit_requested = true;
+            store.save_rotation_secret(&state)?;
+            let port = self
+                .identity
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .port;
+            Device::configure(&candidate, port)?;
+        } else if current_public != candidate_public {
+            return Err(io::ErrorKind::InvalidData.into());
+        } else if !state.commit_requested {
+            state.commit_requested = true;
+            store.save_rotation_secret(&state)?;
+        }
+        // Keep uninstall ownership aligned with the live link only after the
+        // kernel has accepted the candidate key above.
+        store.record_interface(&candidate_public)?;
+        let identity = self.identity.as_mut().ok_or(io::ErrorKind::NotConnected)?;
+        identity.public_key = candidate_public;
+        Ok(identity.clone())
+    }
+
+    /// Drop retained predecessor material after the server retires the overlap.
+    /// # Errors
+    /// Refuses a stale or not-yet-committed operation.
+    pub(crate) fn finish_rotation(&mut self, operation_id: &str, sequence: u64) -> io::Result<()> {
+        let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        let state = store.rotation_secret()?.ok_or(io::ErrorKind::NotFound)?;
+        if state.operation_id != operation_id || state.sequence != sequence {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let candidate = Key::from_private(&state.candidate)?.1;
+        if Device::identity()?.0 != candidate
+            || self
+                .identity
+                .as_ref()
+                .is_none_or(|identity| identity.public_key != candidate)
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        if !state.completed && !state.commit_requested {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        store.complete_rotation_secret(operation_id, sequence)
     }
     /// Remove all owned kernel work before reporting off. A failed cleanup remains visible.
     /// # Errors
@@ -702,6 +868,19 @@ impl Node {
             {
                 return Err(io::ErrorKind::InvalidData.into());
             }
+            if let Some(previous) = peer.peer.previous_key
+                && (previous == peer.peer.key
+                    || !keys.insert(previous)
+                    || self
+                        .identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.public_key == previous))
+            {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            if peer.peer.previous_active && peer.peer.previous_key.is_none() {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
         }
         #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
         if self.config.is_some() {
@@ -720,6 +899,8 @@ impl Node {
                             && old.outbound == peer.outbound
                             && old.peer.key == peer.peer.key
                             && old.peer.addresses == peer.peer.addresses
+                            && old.peer.previous_key == peer.peer.previous_key
+                            && old.peer.previous_active == peer.peer.previous_active
                     })
                 });
             if endpoints_only {
@@ -783,8 +964,12 @@ impl Node {
             .collect();
         // Kernel state can be newer than the saved public snapshot after a crash.
         // Retire orphan keys as well as keys removed from the retained configuration.
-        let desired: std::collections::BTreeSet<_> =
-            config.peers.values().map(|peer| peer.peer.key).collect();
+        let desired: std::collections::BTreeSet<_> = config
+            .peers
+            .values()
+            .flat_map(|peer| [Some(peer.peer.key), peer.peer.previous_key])
+            .flatten()
+            .collect();
         let retired_keys: Vec<_> = Device::counters()?
             .keys()
             .filter(|key| !desired.contains(key))
@@ -1037,6 +1222,7 @@ mod tests {
                 compact_access: true,
                 #[cfg(feature = "mesh-dns-spike")]
                 dns_names: cfg!(target_os = "linux"),
+                key_rotation: true,
                 public_key: PublicKey([1; 32]),
                 port: 44000,
             }),
@@ -1131,6 +1317,8 @@ mod tests {
                         PeerPolicy {
                             peer: Peer {
                                 key,
+                                previous_key: None,
+                                previous_active: false,
                                 addresses: addresses(id),
                                 endpoint: Some("192.0.2.1:44000".parse().expect("public endpoint")),
                             },

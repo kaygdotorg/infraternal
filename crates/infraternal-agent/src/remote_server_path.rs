@@ -175,6 +175,71 @@ async fn connect(
     Ok(link)
 }
 
+fn identity_admission_refused(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::PermissionDenied {
+        return true;
+    }
+    let Some(source) = error.get_ref() else {
+        return false;
+    };
+    if let Some(connection) = source.downcast_ref::<quinn::ConnectionError>() {
+        return connection_refused_by_tls(connection);
+    }
+    if let Some(read) = source.downcast_ref::<quinn::ReadError>() {
+        return matches!(read, quinn::ReadError::ConnectionLost(error) if connection_refused_by_tls(error));
+    }
+    if let Some(write) = source.downcast_ref::<quinn::WriteError>() {
+        return matches!(write, quinn::WriteError::ConnectionLost(error) if connection_refused_by_tls(error));
+    }
+    source
+        .downcast_ref::<io::Error>()
+        .is_some_and(identity_admission_refused)
+}
+
+fn connection_refused_by_tls(error: &quinn::ConnectionError) -> bool {
+    match error {
+        quinn::ConnectionError::TransportError(error) => is_tls_crypto_error(error.code),
+        quinn::ConnectionError::ConnectionClosed(error) => is_tls_crypto_error(error.error_code),
+        _ => false,
+    }
+}
+
+/// QUIC reserves 0x100–0x1ff for TLS alert codes; other close codes can be
+/// network, application, or protocol failures and must not trigger identity fallback.
+fn is_tls_crypto_error(code: quinn::TransportErrorCode) -> bool {
+    (0x100..0x200).contains(&u64::from(code))
+}
+
+/// Retry a refused candidate once with its durable predecessor, without demoting it.
+async fn connect_with_predecessor_fallback(
+    identity: &RemoteIdentity,
+    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+    address: SocketAddr,
+    kind: ServerLinkKind,
+    prove: bool,
+) -> io::Result<Link> {
+    match connect(identity, renewal, address, kind, prove).await {
+        Ok(link) => Ok(link),
+        Err(candidate_error) if identity_admission_refused(&candidate_error) => {
+            let Some(renewal) = renewal else {
+                return Err(candidate_error);
+            };
+            let Some(predecessor) = renewal.predecessor_for()? else {
+                return Err(candidate_error);
+            };
+            let predecessor_identity = RemoteIdentity {
+                identity: predecessor,
+                roots: identity.roots.clone(),
+                endpoint: identity.endpoint,
+                server_name: identity.server_name.clone(),
+                execution_uid: identity.execution_uid,
+            };
+            connect(&predecessor_identity, None, address, kind, prove).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
 async fn prove_channel<C: Channel>(
     channel: &C,
     receive: &mut crate::transport::Receive,
@@ -687,7 +752,7 @@ async fn available(
     let mut paths = registry.server_paths();
     let proposed = *paths.borrow_and_update();
     let Some(ip) = proposed.filter(|_| !force_fallback) else {
-        return connect(
+        return connect_with_predecessor_fallback(
             identity,
             renewal,
             enrolled_address,
@@ -696,7 +761,7 @@ async fn available(
         )
         .await;
     };
-    let mesh = connect(
+    let mesh = connect_with_predecessor_fallback(
         identity,
         renewal,
         SocketAddr::new(ip, enrolled_address.port()),
@@ -705,7 +770,7 @@ async fn available(
     );
     let fallback = async {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        connect(
+        connect_with_predecessor_fallback(
             identity,
             renewal,
             enrolled_address,
