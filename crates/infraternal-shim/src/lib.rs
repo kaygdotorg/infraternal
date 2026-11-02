@@ -109,6 +109,22 @@ pub fn prepare_parent_bound_child(command: &mut std::process::Command) {
     pty::prepare_parent_bound_child(command);
 }
 
+/// Prepare a proxy child with descriptor-only access and a dedicated rootful identity.
+///
+/// Descriptors are duplicated to reserved child slots before credentials are dropped. The
+/// working directory is entered while the parent still has permission to traverse its path.
+/// # Errors
+/// Rejects invalid descriptor mappings; operating-system setup errors are returned by spawn.
+#[cfg(unix)]
+pub fn prepare_proxy_child(
+    command: &mut std::process::Command,
+    working_directory: &std::fs::File,
+    descriptors: &[(std::os::fd::RawFd, std::os::fd::RawFd)],
+    identity: Option<(u32, u32)>,
+) -> std::io::Result<()> {
+    pty::prepare_proxy_child(command, working_directory, descriptors, identity)
+}
+
 /// Apply the same default child signal policy to a POSIX spawn launcher.
 /// # Errors
 /// Returns errors while configuring the spawn attributes, before spawning.

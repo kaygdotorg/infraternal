@@ -5,6 +5,7 @@ use crate::{
     custody::{DnsTokenCustody, FileDnsTokenCustody},
     download::{ComponentDownloader, CurlTransport},
     installer::ComponentInstaller,
+    identity,
     manifest::OpenSshManifestVerifier,
     mesh_context::AcceptedMeshContext,
     names::{CertificateName, NameShape, exposure_names},
@@ -16,7 +17,7 @@ use std::{
     collections::BTreeMap,
     env, fs, io,
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -564,9 +565,9 @@ impl SupervisorFactory for DownloadedTraefikFactory {
         )?;
 
         let proxy_state = self.state_dir.join("proxy");
-        ensure_private_directory(&proxy_state)?;
+        ensure_proxy_directory(&proxy_state)?;
         let dynamic_directory = proxy_state.join("dynamic");
-        ensure_private_directory(&dynamic_directory)?;
+        ensure_proxy_directory(&dynamic_directory)?;
         let acme_storage = proxy_state.join("acme.json");
         ensure_private_file(&acme_storage)?;
         let private_ping_port = loopback_port()?;
@@ -579,11 +580,11 @@ impl SupervisorFactory for DownloadedTraefikFactory {
                 mesh_https: None,
             },
             private_ping_port,
-            dynamic_directory: dynamic_directory.clone(),
+            dynamic_directory: PathBuf::from("dynamic"),
             dns_challenge: DnsChallenge {
                 provider: profile.provider.clone(),
                 email: profile.email.clone(),
-                storage_path: acme_storage,
+                storage_path: PathBuf::from("acme.json"),
                 ca_server: None,
                 resolvers: Vec::new(),
                 disable_authoritative_ns_checks: false,
@@ -665,6 +666,61 @@ fn ensure_private_directory(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn ensure_proxy_directory(path: &Path) -> io::Result<()> {
+    if !identity::rootful() {
+        return ensure_private_directory(path);
+    }
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o750);
+            match builder.create(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    let directory = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = directory.metadata()?;
+    let child_gid = identity::TRAEFIK_GID;
+    if !metadata.file_type().is_dir() || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "proxy state directory has unsafe ownership or type",
+        ));
+    }
+    if metadata.gid() == nix::unistd::Gid::effective().as_raw()
+        && metadata.mode() & 0o7777 == PRIVATE_DIRECTORY_MODE
+    {
+        nix::unistd::fchown(
+            &directory,
+            Some(nix::unistd::Uid::effective()),
+            Some(nix::unistd::Gid::from_raw(child_gid)),
+        )?;
+        directory.set_permissions(fs::Permissions::from_mode(0o750))?;
+    } else if metadata.gid() != child_gid || metadata.mode() & 0o7777 != 0o750 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "proxy state directory has unsafe group or mode",
+        ));
+    }
+    let metadata = directory.metadata()?;
+    if metadata.gid() != child_gid || metadata.mode() & 0o7777 != 0o750 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "proxy state directory has unsafe group or mode",
+        ));
+    }
+    Ok(())
+}
+
 fn ensure_private_file(path: &Path) -> io::Result<()> {
     use std::fs::OpenOptions;
     use std::io::Write;
@@ -686,13 +742,32 @@ fn ensure_private_file(path: &Path) -> io::Result<()> {
     };
     let metadata = file.metadata()?;
     let path_metadata = fs::symlink_metadata(path)?;
+    let (owner_user, owner_group) = identity::child_ids();
     if !metadata.file_type().is_file()
-        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
-        || metadata.mode() & 0o7777 != PRIVATE_FILE_MODE
         || metadata.nlink() != 1
         || !path_metadata.file_type().is_file()
         || path_metadata.dev() != metadata.dev()
         || path_metadata.ino() != metadata.ino()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "proxy ACME state file has unsafe ownership or mode",
+        ));
+    }
+    if metadata.uid() == nix::unistd::Uid::effective().as_raw()
+        && metadata.gid() == nix::unistd::Gid::effective().as_raw()
+        && metadata.mode() & 0o7777 == PRIVATE_FILE_MODE
+        && identity::rootful()
+    {
+        nix::unistd::fchown(
+            &file,
+            Some(nix::unistd::Uid::from_raw(owner_user)),
+            Some(nix::unistd::Gid::from_raw(owner_group)),
+        )?;
+        file.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
+    } else if metadata.uid() != owner_user
+        || metadata.gid() != owner_group
+        || metadata.mode() & 0o7777 != PRIVATE_FILE_MODE
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,

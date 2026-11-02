@@ -6,6 +6,7 @@
 //! a dynamic snapshot only after Traefik has loaded that generation.
 
 use crate::names::CertificateName;
+use crate::identity;
 use serde_json::{Map, json};
 use std::{
     fmt::Write as _,
@@ -18,6 +19,7 @@ use std::{
 
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
+const PROXY_CONFIG_MODE: u32 = 0o640;
 const MAX_RENDERED_CONFIG_BYTES: usize = 4 * 1024 * 1024;
 
 /// Filename recognized by Traefik's file provider for dynamic snapshots.
@@ -472,19 +474,73 @@ fn render_published_service(
 /// # Errors
 /// Returns an error when the parent directory is unsafe or the staged write cannot be synced and renamed.
 pub fn write_config_atomic(destination: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_config_atomic_with_owner(
+        destination,
+        bytes,
+        nix::unistd::Uid::effective().as_raw(),
+        nix::unistd::Gid::effective().as_raw(),
+        PRIVATE_FILE_MODE,
+        Some(PRIVATE_DIRECTORY_MODE),
+    )
+}
+
+/// Atomically publish a config readable by the isolated Traefik group in rootful mode.
+///
+/// The state directory stays owned by the infraternal agent. A limited group
+/// permission lets the child read known config files without listing or changing them.
+/// # Errors
+/// Returns an ownership or staged-write error without replacing the current generation.
+pub(crate) fn write_proxy_config_atomic(destination: &Path, bytes: &[u8]) -> io::Result<()> {
+    if identity::rootful() {
+        write_config_atomic_with_owner(
+            destination,
+            bytes,
+            nix::unistd::Uid::effective().as_raw(),
+            identity::TRAEFIK_GID,
+            PROXY_CONFIG_MODE,
+            None,
+        )
+    } else {
+        write_config_atomic(destination, bytes)
+    }
+}
+
+fn write_config_atomic_with_owner(
+    destination: &Path,
+    bytes: &[u8],
+    owner_user: u32,
+    owner_group: u32,
+    file_mode: u32,
+    private_directory_mode: Option<u32>,
+) -> io::Result<()> {
     if bytes.len() > MAX_RENDERED_CONFIG_BYTES {
         return Err(invalid_data("configuration exceeds its byte limit"));
     }
     let parent = destination
         .parent()
         .ok_or_else(|| invalid_input("configuration path must have a parent directory"))?;
-    validate_private_directory(parent)?;
+    if let Some(mode) = private_directory_mode {
+        validate_proxy_directory(
+            parent,
+            nix::unistd::Uid::effective().as_raw(),
+            nix::unistd::Gid::effective().as_raw(),
+            mode,
+        )?;
+    } else {
+        validate_proxy_directory(parent, owner_user, owner_group, 0o750)?;
+    }
     let name = destination
         .file_name()
         .filter(|name| !name.is_empty())
         .ok_or_else(|| invalid_input("configuration path must name a file"))?;
     match fs::symlink_metadata(destination) {
-        Ok(metadata) => validate_private_file(&metadata)?,
+        Ok(metadata) => {
+            if !valid_proxy_config_file(&metadata, owner_user, owner_group, file_mode) {
+                return Err(permission_error(
+                    "configuration file has unsafe owner, mode, or links",
+                ));
+            }
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
@@ -492,10 +548,15 @@ pub fn write_config_atomic(destination: &Path, bytes: &[u8]) -> io::Result<()> {
         .to_str()
         .ok_or_else(|| invalid_input("configuration filename must be UTF-8"))?;
     let temporary_path = parent.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
-    let mut temporary = TemporaryConfigFile::create(&temporary_path)?;
+    let mut temporary = TemporaryConfigFile::create(&temporary_path, file_mode, owner_group)?;
     temporary.file.write_all(bytes)?;
     temporary.file.sync_all()?;
-    validate_private_file(&temporary.file.metadata()?)?;
+    validate_proxy_file(
+        &temporary.file.metadata()?,
+        owner_user,
+        owner_group,
+        file_mode,
+    )?;
     fs::rename(&temporary.path, destination)?;
     temporary.disarm();
     File::open(parent)?.sync_all()?;
@@ -530,8 +591,8 @@ fn validate_static_config(config: &StaticConfig) -> io::Result<()> {
             .resolvers
             .iter()
             .any(|resolver| resolver.port() == 0)
-        || !config.dynamic_directory.is_absolute()
-        || !config.dns_challenge.storage_path.is_absolute()
+        || !safe_config_path(&config.dynamic_directory)
+        || !safe_config_path(&config.dns_challenge.storage_path)
         || !valid_provider(&config.dns_challenge.provider)
         || config.dns_challenge.email.trim().is_empty()
         || config
@@ -622,11 +683,17 @@ fn toml_string(value: &str) -> io::Result<String> {
     serde_json::to_string(value).map_err(io::Error::other)
 }
 
-fn validate_private_directory(path: &Path) -> io::Result<()> {
+fn validate_proxy_directory(
+    path: &Path,
+    owner_user: u32,
+    owner_group: u32,
+    required_mode: u32,
+) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_dir()
-        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
-        || metadata.mode() & 0o7777 != PRIVATE_DIRECTORY_MODE
+        || metadata.uid() != owner_user
+        || metadata.gid() != owner_group
+        || metadata.mode() & 0o7777 != required_mode
     {
         return Err(permission_error(
             "configuration directory has unsafe owner or mode",
@@ -635,10 +702,16 @@ fn validate_private_directory(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn validate_private_file(metadata: &fs::Metadata) -> io::Result<()> {
+fn validate_proxy_file(
+    metadata: &fs::Metadata,
+    owner_user: u32,
+    owner_group: u32,
+    required_mode: u32,
+) -> io::Result<()> {
     if !metadata.file_type().is_file()
-        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
-        || metadata.mode() & 0o7777 != PRIVATE_FILE_MODE
+        || metadata.uid() != owner_user
+        || metadata.gid() != owner_group
+        || metadata.mode() & 0o7777 != required_mode
         || metadata.nlink() != 1
     {
         return Err(permission_error(
@@ -646,6 +719,33 @@ fn validate_private_file(metadata: &fs::Metadata) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+fn valid_proxy_config_file(
+    metadata: &fs::Metadata,
+    owner_user: u32,
+    owner_group: u32,
+    required_mode: u32,
+) -> bool {
+    let safe_file = metadata.file_type().is_file() && metadata.nlink() == 1;
+    if !safe_file {
+        return false;
+    }
+    let mode = metadata.mode() & 0o7777;
+    (metadata.uid() == owner_user && metadata.gid() == owner_group && mode == required_mode)
+        || (identity::rootful()
+            && required_mode == PROXY_CONFIG_MODE
+            && metadata.uid() == nix::unistd::Uid::effective().as_raw()
+            && metadata.gid() == nix::unistd::Gid::effective().as_raw()
+            && mode == PRIVATE_FILE_MODE)
+}
+
+fn safe_config_path(path: &Path) -> bool {
+    path.is_absolute()
+        || (!path.as_os_str().is_empty()
+            && path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))))
 }
 
 fn invalid_input(message: &'static str) -> io::Error {
@@ -667,14 +767,17 @@ struct TemporaryConfigFile {
 }
 
 impl TemporaryConfigFile {
-    fn create(path: &Path) -> io::Result<Self> {
+    fn create(path: &Path, mode: u32, group: u32) -> io::Result<Self> {
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(PRIVATE_FILE_MODE)
+            .mode(mode)
             .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
             .open(path)?;
-        file.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
+        if nix::unistd::Uid::effective().is_root() && group != nix::unistd::Gid::effective().as_raw() {
+            nix::unistd::fchown(&file, None, Some(nix::unistd::Gid::from_raw(group)))?;
+        }
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
         Ok(Self {
             path: path.to_owned(),
             file,

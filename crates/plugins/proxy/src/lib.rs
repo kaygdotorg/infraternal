@@ -14,6 +14,7 @@ pub mod config;
 pub mod controller;
 pub mod custody;
 pub mod download;
+mod identity;
 pub mod installer;
 pub mod manifest;
 pub mod mesh_context;

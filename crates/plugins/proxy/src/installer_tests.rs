@@ -162,7 +162,18 @@ fn installer_extracts_only_the_allowlisted_executable_with_private_mode() {
     );
     let metadata = fs::symlink_metadata(&path).expect("binary metadata");
     assert_eq!(metadata.uid(), nix::unistd::geteuid().as_raw());
-    assert_eq!(metadata.mode() & 0o777, 0o500);
+    let expected_gid = if nix::unistd::Uid::effective().is_root() {
+        65_532
+    } else {
+        nix::unistd::Gid::effective().as_raw()
+    };
+    let expected_mode = if nix::unistd::Uid::effective().is_root() {
+        0o550
+    } else {
+        0o500
+    };
+    assert_eq!(metadata.gid(), expected_gid);
+    assert_eq!(metadata.mode() & 0o777, expected_mode);
     let repeated = ComponentInstaller::new(&state.0)
         .install_archive(&manifest, Cursor::new(&archive), "linux", "amd64")
         .expect("reuse immutable installed component");

@@ -39,7 +39,8 @@ fn file_custody_writes_private_secret_and_exposes_only_its_path() {
 
     let metadata = fs::symlink_metadata(&path).expect("token metadata");
     assert!(metadata.is_file());
-    assert_eq!(metadata.uid(), nix::unistd::geteuid().as_raw());
+    assert_eq!(metadata.uid(), expected_proxy_uid());
+    assert_eq!(metadata.gid(), expected_proxy_gid());
     assert_eq!(metadata.mode() & 0o777, 0o600);
     assert_eq!(fs::read(&path).expect("test token contents"), secret);
     assert_eq!(custody.get("cloudflare", "CF_DNS_API_TOKEN").unwrap(), path);
@@ -83,8 +84,25 @@ fn custody_uses_private_state_provider_and_secret_modes() {
         (path, 0o600),
     ] {
         let metadata = fs::symlink_metadata(path).expect("private path metadata");
-        assert_eq!(metadata.uid(), nix::unistd::geteuid().as_raw());
+        assert_eq!(metadata.uid(), expected_proxy_uid());
+        assert_eq!(metadata.gid(), expected_proxy_gid());
         assert_eq!(metadata.mode() & 0o777, expected_mode);
+    }
+}
+
+fn expected_proxy_uid() -> u32 {
+    if nix::unistd::Uid::effective().is_root() {
+        65_532
+    } else {
+        nix::unistd::Uid::effective().as_raw()
+    }
+}
+
+fn expected_proxy_gid() -> u32 {
+    if nix::unistd::Uid::effective().is_root() {
+        65_532
+    } else {
+        nix::unistd::Gid::effective().as_raw()
     }
 }
 

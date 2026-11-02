@@ -1,14 +1,20 @@
 //! Owns the single Traefik child, drains it after the final exposure, and redacts its log stream [#281].
 
-use crate::config::{ListenerPorts, PublishedService, StaticConfig};
+use crate::{
+    config::{ListenerPorts, PublishedService, StaticConfig},
+    identity,
+};
 use nix::fcntl::{Flock, FlockArg};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpStream},
-    os::unix::{
-        fs::{MetadataExt, OpenOptionsExt},
-        process::CommandExt,
+    os::{
+        fd::AsRawFd,
+        unix::{
+            fs::{MetadataExt, OpenOptionsExt},
+            process::CommandExt,
+        },
     },
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
@@ -27,10 +33,17 @@ pub const MAX_RESTART_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_LOG_LINE_BYTES: usize = 8 * 1024;
 const LOG_QUEUE_CAPACITY: usize = 128;
 const MAX_PROVIDER_SECRET_BYTES: usize = 64 * 1024;
-const PRIVATE_EXECUTABLE_MODE: u32 = 0o500;
 const PRIVATE_FILE_MODE: u32 = 0o600;
+const PROXY_CONFIG_MODE: u32 = 0o640;
+const ROOTFUL_EXECUTABLE_MODE: u32 = 0o550;
+const ROOTLESS_EXECUTABLE_MODE: u32 = 0o500;
+const FIRST_PROXY_CHILD_FD: i32 = 64;
 const CONFIG_APPLY_TIMEOUT: Duration = Duration::from_secs(5);
 const CONFIG_APPLY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+#[cfg(target_os = "linux")]
+const PROC_FD_ROOT: &str = "/proc/self/fd";
+#[cfg(not(target_os = "linux"))]
+const PROC_FD_ROOT: &str = "/dev/fd";
 
 /// The lifecycle states of the one process owned by an infraternal agent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -438,66 +451,9 @@ impl TraefikChild {
         provider_files: &[(&str, &Path)],
         log: Arc<ProxyLog>,
     ) -> io::Result<Self> {
-        validate_private_file(executable, PRIVATE_EXECUTABLE_MODE)?;
-        validate_private_file(config, PRIVATE_FILE_MODE)?;
-        let mut variables = Vec::with_capacity(provider_files.len());
-        let mut secrets = Vec::with_capacity(provider_files.len());
-        let mut seen_variables = std::collections::BTreeSet::new();
-        for (name, path) in provider_files {
-            if !valid_provider_variable(name) || !seen_variables.insert(*name) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "DNS provider file variable is invalid or duplicated",
-                ));
-            }
-            validate_private_file(path, PRIVATE_FILE_MODE)?;
-            let mut secret = Zeroizing::new(String::new());
-            let file = OpenOptions::new()
-                .read(true)
-                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-                .open(path)?;
-            validate_file_metadata(&file.metadata()?, PRIVATE_FILE_MODE)?;
-            file.take((MAX_PROVIDER_SECRET_BYTES + 1) as u64)
-                .read_to_string(&mut secret)
-                .map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "DNS provider credential file is not valid UTF-8",
-                    )
-                })?;
-            if secret.len() > MAX_PROVIDER_SECRET_BYTES {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "DNS provider credential file exceeds its byte limit",
-                ));
-            }
-            if !secret.is_empty() {
-                secrets.push(secret);
-            }
-            variables.push((format!("{name}_FILE"), path.to_owned()));
-        }
-        let secrets = Arc::new(secrets);
-
-        let mut command = Command::new(executable);
-        command
-            .arg("--configFile")
-            .arg(config)
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        for (name, path) in variables {
-            command.env(name, path);
-        }
-        #[cfg(unix)]
-        {
-            // Keep shutdown scoped to this child's process group. The process owner also holds
-            // an exclusive file lock; no inherited numeric PID is used to identify an owner.
-            command.process_group(0);
-        }
-        #[cfg(target_os = "linux")]
-        infraternal_shim::prepare_parent_bound_child(&mut command);
-        let mut child = command.spawn()?;
+        let rootful = identity::rootful();
+        let prepared = prepare_child_files(executable, config, provider_files, rootful)?;
+        let (mut child, secrets) = spawn_proxy_command(prepared, rootful)?;
         let stdout = child
             .stdout
             .take()
@@ -556,6 +512,287 @@ impl Drop for TraefikChild {
     fn drop(&mut self) {
         let _ = self.stop();
     }
+}
+
+struct PreparedChildFiles {
+    executable_fd: i32,
+    config_name: std::ffi::OsString,
+    variables: Vec<(String, PathBuf)>,
+    secrets: Arc<Vec<Zeroizing<String>>>,
+    working_directory: File,
+    inherited_files: Vec<File>,
+    inherited_descriptors: Vec<(i32, i32)>,
+}
+
+struct PreparedProviderFiles {
+    variables: Vec<(String, PathBuf)>,
+    redaction_secrets: Arc<Vec<Zeroizing<String>>>,
+}
+
+struct ProxyChildFilePolicy {
+    host_user: u32,
+    child_user: u32,
+    child_group: u32,
+    executable_group: u32,
+    executable_mode: u32,
+    config_group: u32,
+    config_mode: u32,
+    directory_mode: u32,
+}
+
+fn proxy_child_file_policy(rootful: bool) -> ProxyChildFilePolicy {
+    let (child_user, child_group) = identity::child_ids();
+    let host_group = nix::unistd::Gid::effective().as_raw();
+    ProxyChildFilePolicy {
+        host_user: nix::unistd::Uid::effective().as_raw(),
+        child_user,
+        child_group,
+        executable_group: if rootful {
+            identity::TRAEFIK_GID
+        } else {
+            host_group
+        },
+        executable_mode: if rootful {
+            ROOTFUL_EXECUTABLE_MODE
+        } else {
+            ROOTLESS_EXECUTABLE_MODE
+        },
+        config_group: if rootful {
+            identity::TRAEFIK_GID
+        } else {
+            host_group
+        },
+        config_mode: if rootful {
+            PROXY_CONFIG_MODE
+        } else {
+            PRIVATE_FILE_MODE
+        },
+        directory_mode: if rootful { 0o750 } else { 0o700 },
+    }
+}
+
+fn validate_proxy_paths(
+    executable: &Path,
+    config: &Path,
+    policy: &ProxyChildFilePolicy,
+) -> io::Result<(PathBuf, std::ffi::OsString)> {
+    validate_proxy_file(
+        executable,
+        policy.host_user,
+        policy.executable_group,
+        policy.executable_mode,
+    )?;
+    validate_proxy_file(
+        config,
+        policy.host_user,
+        policy.config_group,
+        policy.config_mode,
+    )?;
+    let working_directory_path = config.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "proxy config path has no parent",
+        )
+    })?;
+    validate_proxy_directory(
+        working_directory_path,
+        policy.host_user,
+        policy.config_group,
+        policy.directory_mode,
+    )?;
+    let config_name = config.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "proxy config path has no file name",
+        )
+    })?;
+    Ok((working_directory_path.to_owned(), config_name.to_owned()))
+}
+
+fn prepare_child_files(
+    executable: &Path,
+    config: &Path,
+    provider_files: &[(&str, &Path)],
+    rootful: bool,
+) -> io::Result<PreparedChildFiles> {
+    let policy = proxy_child_file_policy(rootful);
+    let (working_directory_path, config_name) = validate_proxy_paths(executable, config, &policy)?;
+    if provider_files.len() > 32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "DNS provider file count exceeds its limit",
+        ));
+    }
+
+    let mut inherited_files = Vec::with_capacity(provider_files.len() + 2);
+    let mut inherited_descriptors = Vec::with_capacity(provider_files.len() + 1);
+    let mut next_child_fd = FIRST_PROXY_CHILD_FD;
+    let executable_file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(executable)?;
+    validate_proxy_file_metadata(
+        &executable_file.metadata()?,
+        policy.host_user,
+        policy.executable_group,
+        policy.executable_mode,
+    )?;
+    let executable_fd = add_inherited_file(
+        executable_file,
+        &mut inherited_files,
+        &mut inherited_descriptors,
+        &mut next_child_fd,
+    )?;
+    let working_directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(working_directory_path)?;
+    let provider_files = prepare_provider_files(
+        provider_files,
+        policy.child_user,
+        policy.child_group,
+        &mut inherited_files,
+        &mut inherited_descriptors,
+        &mut next_child_fd,
+    )?;
+    Ok(PreparedChildFiles {
+        executable_fd,
+        config_name,
+        variables: provider_files.variables,
+        secrets: provider_files.redaction_secrets,
+        working_directory,
+        inherited_files,
+        inherited_descriptors,
+    })
+}
+
+fn prepare_provider_files(
+    provider_files: &[(&str, &Path)],
+    child_user: u32,
+    child_group: u32,
+    inherited_files: &mut Vec<File>,
+    inherited_descriptors: &mut Vec<(i32, i32)>,
+    next_child_fd: &mut i32,
+) -> io::Result<PreparedProviderFiles> {
+    let mut variables = Vec::with_capacity(provider_files.len());
+    let mut secrets = Vec::with_capacity(provider_files.len());
+    let mut seen_variables = std::collections::BTreeSet::new();
+    for (name, path) in provider_files {
+        if !valid_provider_variable(name) || !seen_variables.insert(*name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "DNS provider file variable is invalid or duplicated",
+            ));
+        }
+        validate_proxy_file(path, child_user, child_group, PRIVATE_FILE_MODE)?;
+        let mut secret = Zeroizing::new(String::new());
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+            .open(path)?;
+        validate_proxy_file_metadata(
+            &file.metadata()?,
+            child_user,
+            child_group,
+            PRIVATE_FILE_MODE,
+        )?;
+        file.take((MAX_PROVIDER_SECRET_BYTES + 1) as u64)
+            .read_to_string(&mut secret)
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "DNS provider credential file is not valid UTF-8",
+                )
+            })?;
+        if secret.len() > MAX_PROVIDER_SECRET_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "DNS provider credential file exceeds its byte limit",
+            ));
+        }
+        if !secret.is_empty() {
+            secrets.push(secret);
+        }
+        let directory_path = path.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "DNS provider file has no parent",
+            )
+        })?;
+        validate_proxy_directory(directory_path, child_user, child_group, 0o700)?;
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+            .open(directory_path)?;
+        let directory_fd = add_inherited_file(
+            directory,
+            inherited_files,
+            inherited_descriptors,
+            next_child_fd,
+        )?;
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "DNS provider file name is invalid",
+                )
+            })?;
+        variables.push((
+            format!("{name}_FILE"),
+            PathBuf::from(format!("{PROC_FD_ROOT}/{directory_fd}/{filename}")),
+        ));
+    }
+    Ok(PreparedProviderFiles {
+        variables,
+        redaction_secrets: Arc::new(secrets),
+    })
+}
+
+fn spawn_proxy_command(
+    prepared: PreparedChildFiles,
+    rootful: bool,
+) -> io::Result<(Child, Arc<Vec<Zeroizing<String>>>)> {
+    let PreparedChildFiles {
+        executable_fd,
+        config_name,
+        variables,
+        secrets,
+        working_directory,
+        inherited_files,
+        inherited_descriptors,
+    } = prepared;
+    let mut command = Command::new(format!("{PROC_FD_ROOT}/{executable_fd}"));
+    command
+        .arg("--configFile")
+        .arg(config_name)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (name, path) in variables {
+        command.env(name, path);
+    }
+    #[cfg(unix)]
+    {
+        // Keep shutdown scoped to this child's process group. The process owner also holds
+        // an exclusive file lock; no inherited numeric PID is used to identify an owner.
+        command.process_group(0);
+    }
+    let child_identity = rootful.then_some((identity::TRAEFIK_UID, identity::TRAEFIK_GID));
+    infraternal_shim::prepare_child_without_control(&mut command);
+    #[cfg(target_os = "linux")]
+    infraternal_shim::prepare_parent_bound_child(&mut command);
+    infraternal_shim::prepare_proxy_child(
+        &mut command,
+        &working_directory,
+        &inherited_descriptors,
+        child_identity,
+    )?;
+    let child = command.spawn()?;
+    drop(inherited_files);
+    Ok((child, secrets))
 }
 
 fn spawn_log_reader<R>(
@@ -627,14 +864,25 @@ fn read_bounded_line<R: BufRead>(reader: &mut R) -> io::Result<Option<BoundedLog
     }
 }
 
-fn validate_private_file(path: &Path, required_mode: u32) -> io::Result<()> {
+fn validate_proxy_file(
+    path: &Path,
+    owner_user: u32,
+    owner_group: u32,
+    required_mode: u32,
+) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
-    validate_file_metadata(&metadata, required_mode)
+    validate_proxy_file_metadata(&metadata, owner_user, owner_group, required_mode)
 }
 
-fn validate_file_metadata(metadata: &fs::Metadata, required_mode: u32) -> io::Result<()> {
+fn validate_proxy_file_metadata(
+    metadata: &fs::Metadata,
+    owner_user: u32,
+    owner_group: u32,
+    required_mode: u32,
+) -> io::Result<()> {
     if !metadata.file_type().is_file()
-        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.uid() != owner_user
+        || metadata.gid() != owner_group
         || metadata.mode() & 0o7777 != required_mode
         || metadata.nlink() != 1
     {
@@ -644,6 +892,45 @@ fn validate_file_metadata(metadata: &fs::Metadata, required_mode: u32) -> io::Re
         ));
     }
     Ok(())
+}
+
+fn validate_proxy_directory(
+    path: &Path,
+    owner_user: u32,
+    owner_group: u32,
+    required_mode: u32,
+) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != owner_user
+        || metadata.gid() != owner_group
+        || metadata.mode() & 0o7777 != required_mode
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "proxy child directory has unsafe ownership or mode",
+        ));
+    }
+    Ok(())
+}
+
+fn add_inherited_file(
+    file: std::fs::File,
+    files: &mut Vec<std::fs::File>,
+    descriptors: &mut Vec<(i32, i32)>,
+    next_child_fd: &mut i32,
+) -> io::Result<i32> {
+    if *next_child_fd >= FIRST_PROXY_CHILD_FD + 64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "proxy child descriptor count exceeds its limit",
+        ));
+    }
+    let target = *next_child_fd;
+    descriptors.push((file.as_raw_fd(), target));
+    files.push(file);
+    *next_child_fd += 1;
+    Ok(target)
 }
 
 fn valid_provider_variable(name: &str) -> bool {
@@ -963,7 +1250,10 @@ fn start_managed_child(
         service.https_port = config.ports.https_for_publication(service.public);
     }
     let static_config = crate::config::render_static_config(&config)?;
-    crate::config::write_config_atomic(&settings.static_config_path, static_config.as_bytes())?;
+    crate::config::write_proxy_config_atomic(
+        &settings.static_config_path,
+        static_config.as_bytes(),
+    )?;
     let generation = write_dynamic_snapshot(settings, services)?;
     let mut child = TraefikChild::spawn(
         &settings.executable,
@@ -1013,7 +1303,7 @@ fn write_dynamic_snapshot(
 ) -> io::Result<String> {
     let generation = uuid::Uuid::new_v4().to_string();
     let rendered = crate::config::render_dynamic_config_with_generation(services, &generation)?;
-    crate::config::write_config_atomic(&settings.dynamic_config_path, &rendered)?;
+    crate::config::write_proxy_config_atomic(&settings.dynamic_config_path, &rendered)?;
     Ok(generation)
 }
 

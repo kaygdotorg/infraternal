@@ -1,5 +1,6 @@
 //! Keeps DNS provider credentials in interim owner-only node files; node-key sealing or `OpenBao` can replace this implementation without changing callers [#281, #289].
 
+use crate::identity;
 use nix::fcntl::{Flock, FlockArg};
 use std::{
     fs::{self, File, OpenOptions},
@@ -66,7 +67,7 @@ impl FileDnsTokenCustody {
     /// # Errors
     /// Returns an I/O error when the state directory or private custody directory is unsafe.
     pub fn open(state: &Path) -> io::Result<Self> {
-        validate_directory(state, PRIVATE_DIRECTORY_MODE)?;
+        validate_state_directory(state)?;
         let root = state.join(SECRET_DIRECTORY);
         ensure_private_directory(&root)?;
         Ok(Self { root })
@@ -87,7 +88,7 @@ impl FileDnsTokenCustody {
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
             let directory = entry.path();
-            validate_directory(&directory, PRIVATE_DIRECTORY_MODE)?;
+            normalize_private_directory(&directory)?;
             let provider = entry
                 .file_name()
                 .into_string()
@@ -106,7 +107,7 @@ impl FileDnsTokenCustody {
         if create {
             ensure_private_directory(&directory)?;
         } else {
-            validate_directory(&directory, PRIVATE_DIRECTORY_MODE)?;
+            normalize_private_directory(&directory)?;
         }
         Ok(directory)
     }
@@ -120,6 +121,7 @@ impl FileDnsTokenCustody {
             .mode(SECRET_MODE)
             .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
             .open(lock_path)?;
+        normalize_private_file(&lock_file)?;
         validate_file_metadata(&lock_file.metadata()?)?;
         let mode = if exclusive {
             FlockArg::LockExclusive
@@ -132,8 +134,22 @@ impl FileDnsTokenCustody {
     fn checked_secret_path(directory: &Path, name: &str) -> io::Result<PathBuf> {
         validate_variable(name)?;
         let path = directory.join(name);
-        let metadata = fs::symlink_metadata(&path)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+            .open(&path)?;
+        normalize_private_file(&file)?;
+        let metadata = file.metadata()?;
         validate_file_metadata(&metadata)?;
+        let path_metadata = fs::symlink_metadata(&path)?;
+        if !path_metadata.file_type().is_file()
+            || path_metadata.dev() != metadata.dev()
+            || path_metadata.ino() != metadata.ino()
+        {
+            return Err(permission_error(
+                "provider token path changed during validation",
+            ));
+        }
         Ok(path)
     }
 
@@ -186,7 +202,7 @@ impl DnsTokenCustody for FileDnsTokenCustody {
         match fs::symlink_metadata(&directory) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error),
-            Ok(_) => validate_directory(&directory, PRIVATE_DIRECTORY_MODE)?,
+            Ok(_) => normalize_private_directory(&directory)?,
         }
         let _lock = Self::lock_provider(&directory, true)?;
         validate_directory(&directory, PRIVATE_DIRECTORY_MODE)?;
@@ -242,7 +258,7 @@ fn validate_variable(name: &str) -> io::Result<()> {
 
 fn ensure_private_directory(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
-        Ok(_) => return validate_directory(path, PRIVATE_DIRECTORY_MODE),
+        Ok(_) => return normalize_private_directory(path),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
@@ -250,26 +266,26 @@ fn ensure_private_directory(path: &Path) -> io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.mode(PRIVATE_DIRECTORY_MODE);
     let created = match builder.create(path) {
-        Ok(()) => {
-            fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE))?;
-            true
-        }
+        Ok(()) => true,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
         Err(error) => return Err(error),
     };
     if created {
+        normalize_private_directory(path)?;
         if let Some(parent) = path.parent() {
             sync_directory(parent)?;
         }
         sync_directory(path)?;
     }
-    validate_directory(path, PRIVATE_DIRECTORY_MODE)
+    normalize_private_directory(path)
 }
 
 fn validate_directory(path: &Path, expected_mode: u32) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
+    let (expected_user, expected_group) = identity::child_ids();
     if !metadata.file_type().is_dir()
-        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.uid() != expected_user
+        || metadata.gid() != expected_group
         || metadata.mode() & 0o7777 != expected_mode
     {
         return Err(permission_error(
@@ -280,8 +296,10 @@ fn validate_directory(path: &Path, expected_mode: u32) -> io::Result<()> {
 }
 
 fn validate_file_metadata(metadata: &fs::Metadata) -> io::Result<()> {
+    let (expected_user, expected_group) = identity::child_ids();
     if !metadata.file_type().is_file()
-        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.uid() != expected_user
+        || metadata.gid() != expected_group
         || metadata.mode() & 0o7777 != SECRET_MODE
         || metadata.nlink() != 1
     {
@@ -290,6 +308,71 @@ fn validate_file_metadata(metadata: &fs::Metadata) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+fn validate_state_directory(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.mode() & 0o7777 != PRIVATE_DIRECTORY_MODE
+    {
+        return Err(permission_error(
+            "agent state directory has unsafe owner or mode",
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_private_directory(path: &Path) -> io::Result<()> {
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = directory.metadata()?;
+    let (expected_user, expected_group) = identity::child_ids();
+    if metadata.uid() == expected_user && metadata.gid() == expected_group {
+        return validate_directory(path, PRIVATE_DIRECTORY_MODE);
+    }
+    if !identity::rootful()
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.gid() != nix::unistd::getegid().as_raw()
+        || metadata.mode() & 0o7777 != PRIVATE_DIRECTORY_MODE
+    {
+        return Err(permission_error(
+            "owner-only directory has unsafe owner or mode",
+        ));
+    }
+    nix::unistd::fchown(
+        &directory,
+        Some(nix::unistd::Uid::from_raw(expected_user)),
+        Some(nix::unistd::Gid::from_raw(expected_group)),
+    )?;
+    directory.set_permissions(fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE))?;
+    validate_directory(path, PRIVATE_DIRECTORY_MODE)
+}
+
+fn normalize_private_file(file: &File) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    let (expected_user, expected_group) = identity::child_ids();
+    if metadata.uid() == expected_user && metadata.gid() == expected_group {
+        return validate_file_metadata(&metadata);
+    }
+    if !identity::rootful()
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.gid() != nix::unistd::getegid().as_raw()
+        || !metadata.file_type().is_file()
+        || metadata.mode() & 0o7777 != SECRET_MODE
+        || metadata.nlink() != 1
+    {
+        return Err(permission_error("owner-only file has unsafe owner or mode"));
+    }
+    nix::unistd::fchown(
+        file,
+        Some(nix::unistd::Uid::from_raw(expected_user)),
+        Some(nix::unistd::Gid::from_raw(expected_group)),
+    )?;
+    file.set_permissions(fs::Permissions::from_mode(SECRET_MODE))?;
+    validate_file_metadata(&file.metadata()?)
 }
 
 fn path_exists(path: &Path) -> io::Result<bool> {
@@ -328,6 +411,14 @@ impl TemporaryPath {
             .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
             .open(&path)?;
         let temporary = Self { path, armed: true };
+        let (owner_user, owner_group) = identity::child_ids();
+        if identity::rootful() {
+            nix::unistd::fchown(
+                &file,
+                Some(nix::unistd::Uid::from_raw(owner_user)),
+                Some(nix::unistd::Gid::from_raw(owner_group)),
+            )?;
+        }
         file.set_permissions(fs::Permissions::from_mode(SECRET_MODE))?;
         file.write_all(bytes)?;
         file.sync_all()?;

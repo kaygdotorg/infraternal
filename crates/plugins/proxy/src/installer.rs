@@ -1,5 +1,6 @@
 //! Publishes only signed, bounded Traefik executables into the node-local component store [#281].
 
+use crate::identity;
 use crate::manifest::{
     ComponentManifest, ComponentManifestVerifier, MAX_COMPONENT_ARCHIVE_BYTES,
     MAX_COMPONENT_EXECUTABLE_BYTES, MAX_RELEASE_SIGNATURE_BYTES, MAX_SIGNED_RELEASE_METADATA_BYTES,
@@ -16,7 +17,9 @@ use std::{
 
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
-const EXECUTABLE_MODE: u32 = 0o500;
+const ROOTFUL_EXECUTABLE_MODE: u32 = 0o550;
+const ROOTLESS_EXECUTABLE_MODE: u32 = 0o500;
+const LEGACY_ROOTFUL_EXECUTABLE_MODE: u32 = 0o500;
 const MAX_ARCHIVE_ENTRIES: usize = 256;
 const MAX_LICENSE_BYTES: u64 = 1024 * 1024;
 const MAX_CHANGELOG_BYTES: u64 = 4 * 1024 * 1024;
@@ -541,9 +544,16 @@ fn extract_allowlisted_executable<R: Read>(
             "Traefik executable does not match its signed digest",
         ));
     }
-    output.set_permissions(fs::Permissions::from_mode(EXECUTABLE_MODE))?;
+    if identity::rootful() {
+        nix::unistd::fchown(
+            &output,
+            Some(nix::unistd::Uid::effective()),
+            Some(nix::unistd::Gid::from_raw(identity::TRAEFIK_GID)),
+        )?;
+    }
+    output.set_permissions(fs::Permissions::from_mode(executable_mode()))?;
     output.sync_all()?;
-    validate_file_metadata(&output.metadata()?, EXECUTABLE_MODE)?;
+    validate_executable_metadata(&output.metadata()?)?;
     if hash_file(&destination)? != manifest.executable_sha256 {
         return Err(invalid_data(
             "installed Traefik executable failed its digest check",
@@ -591,14 +601,71 @@ fn validate_installed(directory: &Path, verified: &VerifiedComponentManifest) ->
     let bin = directory.join("bin");
     validate_directory(&bin, PRIVATE_DIRECTORY_MODE)?;
     let executable = bin.join("traefik");
-    let metadata = fs::symlink_metadata(&executable)?;
-    validate_file_metadata(&metadata, EXECUTABLE_MODE)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(&executable)?;
+    let metadata = file.metadata()?;
     if metadata.len() != verified.manifest().executable_size
         || hash_file(&executable)? != verified.manifest().executable_sha256
         || fs::read_dir(&bin)?.count() != 1
     {
         return Err(invalid_data(
             "existing component installation is inconsistent",
+        ));
+    }
+    if validate_executable_metadata(&metadata).is_err() {
+        if !identity::rootful()
+            || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+            || metadata.gid() != nix::unistd::Gid::effective().as_raw()
+            || metadata.mode() & 0o7777 != LEGACY_ROOTFUL_EXECUTABLE_MODE
+            || !metadata.file_type().is_file()
+            || metadata.nlink() != 1
+        {
+            return Err(permission_error(
+                "installed proxy executable has unsafe owner or mode",
+            ));
+        }
+        nix::unistd::fchown(
+            &file,
+            Some(nix::unistd::Uid::effective()),
+            Some(nix::unistd::Gid::from_raw(identity::TRAEFIK_GID)),
+        )?;
+        file.set_permissions(fs::Permissions::from_mode(ROOTFUL_EXECUTABLE_MODE))?;
+        file.sync_all()?;
+        validate_executable_metadata(&file.metadata()?)?;
+    }
+    let path_metadata = fs::symlink_metadata(&executable)?;
+    if path_metadata.dev() != metadata.dev() || path_metadata.ino() != metadata.ino() {
+        return Err(permission_error(
+            "installed proxy executable changed during validation",
+        ));
+    }
+    Ok(())
+}
+
+fn executable_mode() -> u32 {
+    if identity::rootful() {
+        ROOTFUL_EXECUTABLE_MODE
+    } else {
+        ROOTLESS_EXECUTABLE_MODE
+    }
+}
+
+fn validate_executable_metadata(metadata: &fs::Metadata) -> io::Result<()> {
+    let expected_gid = if identity::rootful() {
+        identity::TRAEFIK_GID
+    } else {
+        nix::unistd::Gid::effective().as_raw()
+    };
+    if !metadata.file_type().is_file()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.gid() != expected_gid
+        || metadata.mode() & 0o7777 != executable_mode()
+        || metadata.nlink() != 1
+    {
+        return Err(permission_error(
+            "proxy executable has unsafe owner or mode",
         ));
     }
     Ok(())
