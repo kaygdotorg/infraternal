@@ -32,6 +32,7 @@ pub(crate) struct PublicationPause {
 /// registration through COMMIT prevents admission from creating a fresh false
 /// signal while the tombstone is not yet visible to a different reader.
 pub(crate) struct Revocation {
+    login_actor: Mutex<Option<crate::embedded::WeakEmbeddedAgent>>,
     changed: watch::Sender<bool>,
     writes: Arc<tokio::sync::RwLock<()>>,
 }
@@ -62,11 +63,46 @@ impl Revocations {
             }
         }
         let signal = Arc::new(Revocation {
+            login_actor: Mutex::default(),
             changed: watch::channel(false).0,
             writes: Arc::default(),
         });
         signals.insert(host, Arc::downgrade(&signal));
         Ok(signal)
+    }
+
+    /// An authorized writer requests person cleanup while the old channel is
+    /// still usable. Retry cleanup while preserving the channel for a bounded
+    /// acknowledgement window; offline hosts are never reported as confirmed.
+    pub(crate) async fn revoke_login(&self, host: Uuid, person: Uuid) -> bool {
+        let actor = self
+            .signals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&host)
+            .and_then(Weak::upgrade)
+            .and_then(|signal| {
+                signal
+                    .login_actor
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            });
+        let Some(actor) = actor else {
+            return false;
+        };
+        // The daemon owns each accepted cleanup independently of its reply.
+        // Retrying is idempotent and allows that cleanup to finish before the
+        // authorized removal cuts the old channel. There is no idle retry work.
+        for _ in 0..3 {
+            if matches!(
+                tokio::time::timeout(Duration::from_millis(100), actor.revoke_login(person)).await,
+                Ok(Ok(()))
+            ) {
+                return true;
+            }
+        }
+        false
     }
 
     pub(crate) async fn quiesce(
@@ -229,6 +265,16 @@ impl AuthorityGuard {
         self.provisioning_owner.is_none()
     }
 
+    /// Bind only after this exact host's actor has been admitted; weak routing
+    /// preserves the existing retirement ownership and registry memory bound.
+    pub(crate) fn bind_login_actor(&self, actor: &crate::embedded::EmbeddedAgent) {
+        *self
+            .signal
+            .login_actor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(actor.downgrade());
+    }
+
     pub(crate) fn permits(&self) -> bool {
         !*self.signal.changed.borrow() && Instant::now() < self.certificate.borrow().expires
     }
@@ -333,6 +379,10 @@ impl AuthorityGuard {
 fn denied() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
 }
+
+#[cfg(test)]
+#[path = "login_revocation_tests.rs"]
+mod login_revocation_tests;
 
 #[cfg(test)]
 mod cut_tests {

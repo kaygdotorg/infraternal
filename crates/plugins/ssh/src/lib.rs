@@ -1,6 +1,7 @@
 //! Implements SSH as the first plugin for saved hosts and hosts without an infraternal agent [4][15][21][22].
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
+pub mod accounts;
 pub mod auth_evidence;
 pub mod auth_once;
 pub mod auth_order;
@@ -11,6 +12,13 @@ pub mod credentials;
 pub mod duplex;
 pub mod install;
 mod lifecycle;
+pub mod mesh_admission;
+pub mod mesh_certificate;
+pub mod mesh_flow;
+pub mod mesh_login;
+#[cfg(target_os = "linux")]
+pub mod mesh_port;
+pub mod mesh_server;
 #[cfg(feature = "session-bridge")]
 pub mod session_bridge;
 pub mod setup;

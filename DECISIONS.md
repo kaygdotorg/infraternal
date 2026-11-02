@@ -2076,8 +2076,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        that socket and trusts our host certificates (no host-key prompt).
        On the target, port 22 of the mesh address reaches the embedded SSH
        server (D197); host `sshd` is never touched (Q3). The target checks
-       the certificate, the network policy and login access. The target
-       account's `authorized_keys` keeps working, without a person identity.
+       the certificate, the network policy and login access.
+     - **Mesh authentication amendment (owner answer, 2026-11-01, #221 Q3):**
+       the infraternal SSH server accepts person certificates or explicit
+       machine identities under access rules; it has no `authorized_keys`
+       path. A host's separate OpenSSH service retains its own authentication
+       when reached over the mesh.
      - **Certificates (Q2b, Q2d, Q2e, Q12).** Valid only from the node they
        were issued to (source address), with the key in the Secure Enclave
        or TPM when present, otherwise memory only. Lifetime **24 h by
@@ -3423,8 +3427,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      `--json` on every command:
      - **Here, in this terminal:** `status`, `machines`, `logs`, `mesh`,
        `access`, `update`, `skill`, `sign-in <server>` (link, code and QR),
-       `up <server>`, and `open <machine>`: a plain one-off shell here, not
-       a saved session and without prefix keys.
+       `up <server>`, `open <machine>`, and `ssh <machine>`. **Owner
+       amendment (2026-11-01, #221 Q1/Q1b):** `ssh` always opens a shell;
+       `open` opens or focuses that machine's screen in the web app canvas
+       when its desktop is available, and otherwise opens a one-off shell
+       with an explanation. A dropped one-off shell prints a recovery handle
+       and resume command. Interactive streaming is not mixed into `--json`.
      - **Sessions (automation only, never interactive):** `sessions
        [<machine>]` lists; `sessions new <machine> --name <n> [-- cmd]`;
        `sessions send <machine>:<session> '<text>'`; `sessions read …

@@ -13,6 +13,16 @@ pub fn registry() -> Result<ActionRegistry, RegistryError> {
 /// Materialize one plugin for its command; core discovery keeps the full registry.
 /// A plugin's own identifier selects its factory, never a handwritten action route.
 pub fn registry_for(root: Option<&str>) -> Result<ActionRegistry, RegistryError> {
+    if root == Some("__shim") {
+        // This synchronous process boundary is entered once for each worker
+        // and terminal. Keep the same declared schema/parser, but do not build
+        // status, skill or operator metadata that this launch cannot execute.
+        return ActionRegistry::new(vec![PluginDefinition::new(
+            "cli",
+            "Inspect this node and manage its configured components.",
+            [session_shim_action()],
+        )]);
+    }
     if let Some(factory) =
         root.and_then(|root| factories().iter().find(|factory| factory.id == root))
     {
@@ -39,7 +49,7 @@ struct PluginFactory {
 }
 
 fn factories() -> &'static [PluginFactory] {
-    &[
+    static FACTORIES: &[PluginFactory] = &[
         #[cfg(feature = "release")]
         PluginFactory {
             id: infraternal_plugin_release::descriptor::DESCRIPTOR.id,
@@ -80,7 +90,8 @@ fn factories() -> &'static [PluginFactory] {
             id: infraternal_plugin_ssh::cli::ID,
             build: infraternal_plugin_ssh::cli::plugin,
         },
-    ]
+    ];
+    FACTORIES
 }
 
 fn build_registry(root: Option<&str>) -> Result<ActionRegistry, RegistryError> {
@@ -370,6 +381,28 @@ fn session_shim_action() -> ActionDefinition {
                     "state".to_owned(),
                     JsonSchema::string("Private session state directory."),
                 ),
+                #[cfg(feature = "plugin-agent")]
+                ("controller_uid".to_owned(), JsonSchema::integer("Authenticated local login controller uid; defaults to root.")),
+                #[cfg(feature = "plugin-agent")]
+                ("login_worker_proc".to_owned(), JsonSchema::string("Pinned authenticated login process directory.")),
+                #[cfg(feature = "plugin-agent")]
+                ("login_worker_pid".to_owned(), JsonSchema::integer("Authenticated host login worker PID.")),
+                #[cfg(feature = "plugin-agent")]
+                ("login_worker_parent".to_owned(), JsonSchema::integer("Authenticated original host login parent PID.")),
+                #[cfg(feature = "plugin-agent")]
+                ("login_cgroup".to_owned(), JsonSchema::string("Verified host login cgroup membership file.")),
+                #[cfg(feature = "plugin-agent")]
+                ("login_ready_fd".to_owned(), JsonSchema::integer("Internal shell-start confirmation descriptor.")),
+                #[cfg(feature = "plugin-agent")]
+                ("login_master_fd".to_owned(), JsonSchema::integer("Internal prestarted terminal master descriptor.")),
+                #[cfg(feature = "plugin-agent")]
+                ("login_lease_fd".to_owned(), JsonSchema::integer("Internal authenticated terminal lease descriptor.")),
+                #[cfg(feature = "plugin-agent")]
+                ("login_socket".to_owned(), JsonSchema::string("Private host login path socket.")),
+                #[cfg(feature = "plugin-agent")]
+                ("login_worker".to_owned(), JsonSchema::boolean("Serve an account login session.")),
+                #[cfg(feature = "plugin-agent")]
+                ("login_proxy".to_owned(), JsonSchema::boolean("Pass one terminal to its login session.")),
                 (
                     "detach".to_owned(),
                     JsonSchema::boolean("Detach from the parent process."),
@@ -395,6 +428,19 @@ fn session_shim_action() -> ActionDefinition {
     )
     .hidden()
     .with_cli_handler(CliHandler::SessionShim)
+}
+
+#[cfg(test)]
+mod internal_selection_tests {
+    //! Private process launches must not allocate unrelated operator metadata.
+    #[test]
+    fn hidden_shim_materializes_only_its_declared_action() {
+        let registry = super::registry_for(Some("__shim")).expect("shim registry");
+        let plugins: Vec<_> = registry.plugins().collect();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].actions.len(), 1);
+        assert_eq!(plugins[0].actions[0].command, ["__shim"]);
+    }
 }
 
 fn skill_input_schema() -> JsonSchema {
@@ -623,6 +669,66 @@ mod tests {
                 "{dependency} remains available without the server plugin: {declaration}"
             );
         }
+    }
+
+    #[cfg(feature = "plugin-agent")]
+    #[test]
+    fn enabled_agent_registers_host_login_shim_flags() {
+        let registry = registry().expect("enabled agent metadata");
+        let action = registry.find(&["__shim"]).expect("shim metadata");
+        for flag in [
+            "controller_uid",
+            "login_worker_proc",
+            "login_worker_pid",
+            "login_worker_parent",
+            "login_cgroup",
+            "login_ready_fd",
+            "login_master_fd",
+            "login_lease_fd",
+            "login_socket",
+            "login_worker",
+            "login_proxy",
+        ] {
+            assert!(
+                action.action.input_schema.properties.contains_key(flag),
+                "enabled host login flag missing: {flag}"
+            );
+        }
+    }
+
+    #[cfg(not(feature = "plugin-agent"))]
+    #[test]
+    fn compiled_out_agent_removes_host_login_shim_flags() {
+        let registry = registry().expect("core metadata");
+        let action = registry
+            .find(&["__shim"])
+            .expect("legacy shim remains available");
+        for flag in [
+            "controller_uid",
+            "login_worker_proc",
+            "login_worker_pid",
+            "login_worker_parent",
+            "login_cgroup",
+            "login_ready_fd",
+            "login_master_fd",
+            "login_lease_fd",
+            "login_socket",
+            "login_worker",
+            "login_proxy",
+        ] {
+            assert!(
+                !action.action.input_schema.properties.contains_key(flag),
+                "compiled-out host login flag remains registered: {flag}"
+            );
+        }
+        assert!(
+            action
+                .action
+                .input_schema
+                .properties
+                .contains_key("session")
+        );
+        assert!(action.action.input_schema.properties.contains_key("uid"));
     }
 
     #[cfg(not(feature = "plugin-agent"))]

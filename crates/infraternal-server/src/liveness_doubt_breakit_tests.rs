@@ -87,6 +87,8 @@ async fn retired_doubt_never_confirms_a_replacement_link_mid_replay() {
 
     let (attempts, _attempts) = mpsc::unbounded_channel();
     let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+    #[cfg(feature = "remote")]
+    let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
     let (changes, notice) = watch::channel(());
     let (inventory, _snapshot) = watch::channel(SessionInventoryState::Pending);
     tokio::spawn(run_actor(
@@ -95,11 +97,15 @@ async fn retired_doubt_never_confirms_a_replacement_link_mid_replay() {
             attempts,
         },
         receiver,
+        #[cfg(feature = "remote")]
+        cleanup_rx,
         changes,
         inventory.clone(),
     ));
     let agent = EmbeddedAgent {
         commands,
+        #[cfg(feature = "remote")]
+        cleanup,
         changes: notice,
         next_attachment_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         session_inventory: inventory,

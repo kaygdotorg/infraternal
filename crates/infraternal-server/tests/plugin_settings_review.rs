@@ -65,7 +65,7 @@ async fn plugin_switches_survive_database_reopen() {
         .unwrap();
     sqlx::migrate!("./migrations").run(&pool).await.unwrap();
     let first = compiled(&pool).await.unwrap();
-    assert_eq!(first.list()["plugins"][0]["enabled"], true);
+    assert_eq!(enabled(&first, "mesh"), true);
     first.set_enabled("mesh", false).await.unwrap();
     drop(first);
     pool.close().await;
@@ -76,7 +76,7 @@ async fn plugin_switches_survive_database_reopen() {
         .unwrap();
     let second = compiled(&pool).await.unwrap();
     assert_eq!(
-        second.list()["plugins"][0]["enabled"],
+        enabled(&second, "mesh"),
         false,
         "disabled plugin reverted to its default on restart"
     );
@@ -90,7 +90,7 @@ async fn plugin_switches_survive_database_reopen() {
         .await
         .unwrap();
     let third = compiled(&pool).await.unwrap();
-    assert_eq!(third.list()["plugins"][0]["enabled"], true);
+    assert_eq!(enabled(&third, "mesh"), true);
     assert_eq!(third.active_workers("mesh"), 0);
     assert!(
         sqlx::query_scalar::<_, bool>(
@@ -122,7 +122,7 @@ async fn failed_plugin_save_restores_previous_state_without_workers() {
         runtime.set_enabled("mesh", false).await,
         Err(PluginError::Storage)
     );
-    assert_eq!(runtime.list()["plugins"][0]["enabled"], true);
+    assert_eq!(enabled(&runtime, "mesh"), true);
     assert_eq!(runtime.active_workers("mesh"), 0);
     assert!(
         compiled(&pool).await.is_err(),
@@ -130,4 +130,16 @@ async fn failed_plugin_save_restores_previous_state_without_workers() {
     );
     drop(runtime);
     pool.close().await;
+}
+
+/// Discovery ordering is unconstrained; persistence assertions name the feature they mutate.
+#[cfg(feature = "mesh")]
+fn enabled(runtime: &infraternal_server::plugins::PluginRuntime, id: &str) -> serde_json::Value {
+    runtime.list()["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plugin| plugin["descriptor"]["id"] == id)
+        .unwrap()["enabled"]
+        .clone()
 }

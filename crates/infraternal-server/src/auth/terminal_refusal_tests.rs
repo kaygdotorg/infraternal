@@ -58,7 +58,7 @@ async fn memory_refusal_preserves_reason_and_counters_to_browser() {
         },
     )
     .await;
-    let call = read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+    let call = read_terminal_open(&mut peer, &mut receive).await;
     let Frame::Call {
         call_id,
         action_id: "terminal.open",

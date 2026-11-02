@@ -13,6 +13,10 @@ mod daemon_writer;
 mod lifecycle;
 #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
 mod native_dispatch;
+mod login_auth;
+mod login_binary;
+mod login_records;
+pub mod logins;
 pub mod plugin_control;
 pub mod plugins;
 // Shim census exists only on the local terminal platform; portable control has no PTYs.
@@ -23,6 +27,7 @@ pub mod relay;
 pub mod remote_client;
 #[cfg(feature = "remote")]
 pub mod remote_cursor;
+mod rootless_sessions;
 #[cfg(feature = "remote")]
 pub use infraternal_plugin_remote::remote_native;
 #[cfg(feature = "remote")]

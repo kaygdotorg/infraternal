@@ -136,6 +136,7 @@ mod tests {
                     80,
                     24,
                     true,
+                    None,
                 )
                 .unwrap()
             })

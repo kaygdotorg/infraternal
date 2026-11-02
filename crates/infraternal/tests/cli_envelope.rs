@@ -232,13 +232,23 @@ fn bare_infraternal_is_the_overview_and_points_to_help() {
     );
 }
 
-/// A machine whose home holds only the units the test writes.
+/// A private machine whose manager always confirms the fixture unit is inactive.
 fn status_in(home: &std::path::Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_infraternal"))
         .args(args)
+        .env_clear()
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join("config"))
-        .env_remove("NO_COLOR")
+        .env("XDG_RUNTIME_DIR", home.join("run"))
+        .env(
+            "INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR",
+            home.join("system"),
+        )
+        .env(
+            "PATH",
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/inactive-manager"),
+        )
         .stdin(std::process::Stdio::null())
         .output()
         .expect("run the real CLI")
@@ -249,8 +259,8 @@ fn status_exits_5_when_something_that_should_run_is_down() {
     let home = std::env::temp_dir().join(format!("cli-status-exit-{}", std::process::id()));
     let units = home.join("config/systemd/user");
     std::fs::create_dir_all(&units).unwrap();
-    // A unit file that no service manager here has loaded is never active (a unique name, so a
-    // real infraternal agent on the machine running the test cannot answer for it).
+    // An unavailable host manager means Unknown, not confirmed-down. The private
+    // manager supplies the inactive observation this exit-code test requires.
     std::fs::write(
         units.join(format!("infraternal-test-{}.service", std::process::id())),
         "[Service]\nExecStart=/usr/bin/infraternal agent run\n",

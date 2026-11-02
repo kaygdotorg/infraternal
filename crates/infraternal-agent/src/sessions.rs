@@ -15,7 +15,10 @@ use nix::{
 use std::{
     fs::{self, DirBuilder},
     io,
-    os::unix::fs::{DirBuilderExt, MetadataExt},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{DirBuilderExt, MetadataExt},
+    },
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -33,7 +36,7 @@ use tokio::{
 const DISCOVERY_HANDSHAKES: usize = 32 * 1024 * 1024 / MAX_FRAME;
 const HANDSHAKE: Duration = Duration::from_secs(2);
 
-/// Init manager detected once at startup, never periodically probed.
+/// Init manager selected once for session work, never periodically re-probed.
 #[derive(Clone, Copy, Debug)]
 pub enum Manager {
     System,
@@ -42,6 +45,16 @@ pub enum Manager {
 }
 
 impl Manager {
+    /// A shim needs direct exec for a live login or the kernel self-image;
+    /// choosing its launcher must not replace the host login backend.
+    pub(crate) fn for_shim(self, exe: &Path, login: bool) -> Self {
+        if login || exe == Path::new("/proc/self/exe") {
+            Self::Detached
+        } else {
+            self
+        }
+    }
+
     /// Probe the applicable manager without trusting environment hints alone.
     pub async fn detect() -> Self {
         let root = Uid::effective().is_root();
@@ -288,7 +301,11 @@ pub async fn connect_shared_writer(
     Ok(session)
 }
 
-async fn connect_with(path: PathBuf, id: [u8; 16], requested: u64) -> io::Result<Session> {
+pub(crate) async fn connect_with(
+    path: PathBuf,
+    id: [u8; 16],
+    requested: u64,
+) -> io::Result<Session> {
     handshake(path, id, Some(requested)).await
 }
 
@@ -386,6 +403,17 @@ async fn discover_inner(state: &Path) -> io::Result<Vec<Session>> {
     for entry in fs::read_dir(state.join("sessions"))? {
         let entry = entry?;
         let path = entry.path();
+        // Markers are published only after bind. If their socket is absent,
+        // interruption between the retirement unlinks left no live probe.
+        if path.extension().is_some_and(|ext| ext == "readiness")
+            && !path.with_extension("sock").try_exists()?
+        {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
         if path.extension().is_none_or(|ext| ext != "sock") {
             continue;
         }
@@ -416,10 +444,16 @@ async fn discover_inner(state: &Path) -> io::Result<Vec<Session>> {
             match connect(path.clone(), id).await {
                 Ok(session) => Ok(Some(session)),
                 Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
-                    match fs::remove_file(path) {
-                        Ok(()) => {}
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                        Err(error) => return Err(error),
+                    // An interrupted fixed probe can leave its role marker.
+                    // Unlink the refused socket first, preserving classification
+                    // for any concurrent revocation while it remains visible.
+                    let marker = path.with_extension("readiness");
+                    for stale in [path, marker] {
+                        match fs::remove_file(stale) {
+                            Ok(()) => {}
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                            Err(error) => return Err(error),
+                        }
                     }
                     Ok(None)
                 }
@@ -501,12 +535,14 @@ impl SessionEvents {
     }
 }
 
-// The audited shim policy closes leg-B fd3 before direct exec. Avoid a shell:
-// anonymous images need /proc/self/exe to resolve while the child is still
-// running the infraternal image, rather than the shell's image [217].
-fn isolated(program: &Path) -> Command {
+// Exclude the trusted leg-B descriptor at direct exec. Anonymous images need
+// /proc/self/exe to resolve before any intermediate program replaces the image.
+// CLOEXEC also preserves Command's private exec-error pipe if it occupies fd3.
+pub(crate) fn isolated(program: &Path) -> Command {
+    // Exclude borrowed leg-B at fresh exec without an extra shell process.
+    // The audited helper preserves Command's error pipe and signal policy.
     let mut command = Command::new(program);
-    infraternal_shim::prepare_child_without_control(command.as_std_mut());
+    infraternal_shim::prepare_isolated_child(command.as_std_mut());
     command.stdin(Stdio::null());
     command
 }
@@ -540,9 +576,9 @@ pub async fn launch(
     launch_with_readiness(exe, state, manager, uid, cols, rows, false).await
 }
 
-/// Fixed readiness commands use the same account, scope and handshake as normal terminals.
+/// Fixed private readiness command retains the enrolled account and normal scope.
 /// # Errors
-/// Returns the same admission and launch errors as `launch`.
+/// Returns the same validation and launch errors as `launch`.
 #[allow(clippy::too_many_arguments)]
 pub async fn launch_with_readiness(
     exe: &Path,
@@ -571,7 +607,117 @@ pub async fn launch_with_command(
     retain_output: bool,
     program: &[String],
 ) -> io::Result<Session> {
+    launch_configured(
+        exe,
+        state,
+        manager,
+        uid,
+        cols,
+        rows,
+        None,
+        None,
+        None,
+        None,
+        None,
+        readiness,
+        None,
+        retain_output,
+        program,
+    )
+    .await
+}
+
+/// Launch a shim whose shell belongs to an authenticated host login worker.
+/// # Errors
+/// Returns the same validation/launch errors as `launch`.
+#[allow(clippy::too_many_arguments)]
+pub async fn launch_with_login(
+    exe: &Path,
+    state: &Path,
+    manager: Manager,
+    uid: u32,
+    cols: u16,
+    rows: u16,
+    login: Option<&Path>,
+    login_cgroup: Option<&Path>,
+    login_worker_pid: Option<i32>,
+    login_worker_parent: Option<i32>,
+    login_worker_proc: Option<&std::fs::File>,
+) -> io::Result<Session> {
+    launch_configured(
+        exe,
+        state,
+        manager,
+        uid,
+        cols,
+        rows,
+        login,
+        login_cgroup,
+        login_worker_pid,
+        login_worker_parent,
+        login_worker_proc,
+        false,
+        None,
+        false,
+        &[],
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn launch_rootless_person(
+    exe: &Path,
+    state: &Path,
+    manager: Manager,
+    uid: u32,
+    cols: u16,
+    rows: u16,
+    person: uuid::Uuid,
+) -> io::Result<Session> {
+    launch_configured(
+        exe,
+        state,
+        manager,
+        uid,
+        cols,
+        rows,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        Some(person),
+        false,
+        &[],
+    )
+    .await
+}
+
+// Keep the ordered authentication/launch/handshake setup together.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn launch_configured(
+    exe: &Path,
+    state: &Path,
+    manager: Manager,
+    uid: u32,
+    cols: u16,
+    rows: u16,
+    login: Option<&Path>,
+    login_cgroup: Option<&Path>,
+    login_worker_pid: Option<i32>,
+    login_worker_parent: Option<i32>,
+    login_worker_proc: Option<&std::fs::File>,
+    readiness: bool,
+    person: Option<uuid::Uuid>,
+    retain_output: bool,
+    program: &[String],
+) -> io::Result<Session> {
+    let manager = manager.for_shim(exe, login.is_some());
     let program_bytes = command_input(program, readiness)?;
+    if login.is_some() && !program.is_empty() {
+        return Err(invalid("login worker command startup is unavailable"));
+    }
     if cols == 0 || rows == 0 || usize::from(cols) * usize::from(rows) > 200_000 {
         return Err(invalid("invalid terminal dimensions"));
     }
@@ -584,6 +730,9 @@ pub async fn launch_with_command(
     let id = uuid::Uuid::new_v4();
     let name = id.simple().to_string();
     let path = state.join("sessions").join(format!("{name}.sock"));
+    let mut reservation = person
+        .map(|person| crate::rootless_sessions::reserve(state, person, id))
+        .transpose()?;
     let watch = socket_readiness(state)?;
     let mut command = if matches!(manager, Manager::Detached) {
         isolated(exe)
@@ -621,9 +770,67 @@ pub async fn launch_with_command(
     if !program.is_empty() {
         command.arg("--command-stdin");
     }
-    if matches!(manager, Manager::Detached) {
+    if matches!(manager, Manager::Detached) && login.is_none() {
         command.arg("--detach");
     }
+    if login.is_some() {
+        // The controller reaps this fresh exec asynchronously. Separate its
+        // session before exec; authenticated placement still precedes Hello
+        // and moves established shims outside the controller service's cgroup.
+        infraternal_shim::prepare_independent_session(command.as_std_mut());
+    }
+    if let Some(endpoint) = login {
+        command.arg("--login-socket").arg(endpoint);
+    }
+    if let Some(path) = login_cgroup {
+        command.arg("--login-cgroup").arg(path);
+    }
+    if let Some(pid) = login_worker_pid {
+        command.arg("--login-worker-pid").arg(pid.to_string());
+    }
+    if let Some(pid) = login_worker_parent {
+        command.arg("--login-worker-parent").arg(pid.to_string());
+    }
+    if let Some(process) = login_worker_proc {
+        let pin = infraternal_shim::inherit_login_process(command.as_std_mut(), process)?;
+        command.arg("--login-worker-proc").arg(pin);
+    }
+    // Start the shell on the original authenticated connection before the
+    // privileged shim exec. Cancellation/spawn failure drops every parent copy;
+    // the worker observes lease EOF and cleans up only this terminal request.
+    let prestarted = if let (Some(endpoint), Some(pid), Some(process)) =
+        (login, login_worker_pid, login_worker_proc)
+    {
+        let prepared = infraternal_shim::login_handoff::Prepared::new(uid, cols, rows)?;
+        let peer = timeout(HANDSHAKE, UnixStream::connect(endpoint))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "login connection timed out"))??;
+        let peer = Registration::new(peer.into_std()?)?;
+        let pin = PathBuf::from(format!("/proc/self/fd/{}", process.as_raw_fd()));
+        timeout(HANDSHAKE, async {
+            loop {
+                let mut ready = peer.writable().await?;
+                if let Ok(result) = ready.try_io(|connection| {
+                    prepared.request(connection, id.as_bytes(), pid, &pin, login_worker_parent)
+                }) {
+                    return result;
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            io::Error::new(io::ErrorKind::TimedOut, "login terminal transfer timed out")
+        })??;
+        let (master, lease) = prepared.inherit(command.as_std_mut(), peer.get_ref())?;
+        command
+            .arg("--login-master-fd")
+            .arg(master.to_string())
+            .arg("--login-lease-fd")
+            .arg(lease.to_string());
+        Some((prepared, peer))
+    } else {
+        None
+    };
     // Resolve host locale in the long-lived launcher and pass only locale
     // variables through the isolated shim start, avoiding per-PTY probing.
     for (name, value) in infraternal_shim::session_locale_environment() {
@@ -646,8 +853,15 @@ pub async fn launch_with_command(
             .write_all(&program_bytes)
             .await?;
     }
-    // The scope launcher lives until its shim exits. Reap independently; waiting
-    // here would hold terminal.open until the user closed the terminal.
+    if let Some(reservation) = &mut reservation {
+        reservation.spawned();
+    }
+    // Command's callbacks retain descriptor duplicates even after spawn. These
+    // must close before awaiting Hello; only the privileged shim owns the lease.
+    drop(command);
+    drop(prestarted);
+    // Scope launchers and directly owned login shims live until terminal exit.
+    // Reap independently; waiting here would hold terminal.open until close.
     tokio::spawn(async move {
         let _ = child.wait().await;
     });

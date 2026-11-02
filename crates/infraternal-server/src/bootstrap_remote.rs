@@ -634,6 +634,22 @@ impl Backend for RemoteBackend {
     }
     fn completed<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, ()> {
         Box::pin(async move {
+            // Only a confirmed new enrollment restores login access. Reconnect
+            // and terminal opens never clear a persisted revocation marker.
+            let actor = self.actor(authority, host).await?;
+            if let Ok(person) = Uuid::parse_str(&authority.owner) {
+                restore_login_access(&actor, person).await?;
+                let account = crate::preferred_accounts::resolve(
+                    &self.issuer.store().0,
+                    &authority.owner,
+                    &crate::auth::hash(cookie(authority)?),
+                    Some(host),
+                )
+                .await
+                .map_err(|_| unavailable())?;
+                confirm_preferred_login(&actor, person, account).await?;
+                self.authorize(authority).await?;
+            }
             self.uid(authority, host)?;
             self.issuer
                 .store()
@@ -686,6 +702,47 @@ async fn wait_installed_actor(
 fn route_unavailable() -> Failure {
     Failure::install("The infraternal agent did not connect. Check the host's service and network.")
 }
+
+async fn confirm_preferred_login(
+    actor: &EmbeddedAgent,
+    person: Uuid,
+    account: String,
+) -> Result<(), Failure> {
+    // The PTY probe alone bypasses preferred account/PAM admission. Reuse the
+    // exact preparation path used before real terminal opens, after restoration.
+    tokio::time::timeout(Duration::from_secs(10), actor.prepare_login(person, Some(account)))
+        .await.map_err(|_| unavailable())?.map_err(|_| Failure::install(
+            "The host connected, but its preferred account login could not open. Check the host login path and try again."))
+}
+
+async fn restore_login_access(actor: &EmbeddedAgent, person: Uuid) -> Result<(), Failure> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Restored {
+        restored: bool,
+    }
+    let unavailable = || {
+        Failure::install(
+            "The host's login access could not be restored. Check its service and add the host again.",
+        )
+    };
+    let input =
+        serde_json::to_vec(&serde_json::json!({"person": person})).map_err(|_| unavailable())?;
+    let reply = tokio::time::timeout(
+        Duration::from_secs(10),
+        actor.call("terminal.login.restore".into(), input),
+    )
+    .await
+    .map_err(|_| unavailable())?
+    .map_err(|_| unavailable())?;
+    if reply.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'{')
+        || !serde_json::from_slice::<Restored>(&reply).is_ok_and(|reply| reply.restored)
+    {
+        return Err(unavailable());
+    }
+    Ok(())
+}
+
 fn cookie(authority: &Authority) -> Result<&str, Failure> {
     std::str::from_utf8(authority.session().ok_or_else(unavailable)?.expose())
         .map_err(|_| unavailable())

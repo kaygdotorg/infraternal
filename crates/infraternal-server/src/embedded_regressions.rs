@@ -17,9 +17,125 @@ fn connection() -> (AgentConnection, UnixStream) {
             next_call_id: 1,
             #[cfg(feature = "remote")]
             owned_control: None,
+            #[cfg(feature = "remote")]
+            owned_cleanup: None,
         },
         peer,
     )
+}
+
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn canceled_retirement_recipient_does_not_cancel_host_cleanup() {
+    let (mut connection, mut peer) = connection();
+    let (reply, result) = oneshot::channel();
+    drop(result);
+    let mut pending = HashMap::new();
+    assert!(
+        process_command(
+            Command::RevokeLogin {
+                person: uuid::Uuid::new_v4(),
+                reply
+            },
+            &mut connection,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut pending
+        )
+        .await
+    );
+    let mut bytes = BytesMut::new();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if decode_muxed_frame(&bytes).is_ok() {
+                break;
+            }
+            assert_ne!(peer.read_buf(&mut bytes).await.unwrap(), 0);
+        }
+    })
+    .await
+    .unwrap();
+    let frame = decode_muxed_frame(&bytes).unwrap();
+    let Frame::Call {
+        call_id,
+        action_id: "terminal.login.revoke",
+        ..
+    } = frame.frame
+    else {
+        panic!("canceled recipient prevented host cleanup submission");
+    };
+    assert_eq!(call_id & BACKGROUND_CALL_BITS, RETIREMENT_CALL_BIT);
+    assert!(pending.is_empty());
+    // The host may finish after caller timeout. Its marked late proof must
+    // leave ordinary protocol errors strict and keep sibling streams alive.
+    assert!(
+        process_incoming(
+            Incoming::Result {
+                call_id,
+                ok: true,
+                json: b"{}".to_vec()
+            },
+            &mut connection,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut pending
+        )
+        .await
+    );
+    assert!(
+        !process_incoming(
+            Incoming::Result {
+                call_id: 99,
+                ok: true,
+                json: b"{}".to_vec()
+            },
+            &mut connection,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut pending
+        )
+        .await
+    );
+}
+
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn retirement_mailbox_bypasses_a_full_ordinary_command_queue() {
+    let (sender, mut commands) = mpsc::channel(1);
+    let (reply, _result) = oneshot::channel();
+    assert!(
+        sender
+            .try_send(Command::Call {
+                action_id: "review.pending".into(),
+                input_json: b"{}".to_vec(),
+                reply
+            })
+            .is_ok()
+    );
+    let (cleanup, mut retirement) = mpsc::unbounded_channel();
+    for _ in 0..96 {
+        let (reply, _result) = oneshot::channel();
+        assert!(
+            cleanup
+                .send(Retirement {
+                    person: uuid::Uuid::new_v4(),
+                    reply
+                })
+                .is_ok()
+        );
+    }
+    for _ in 0..96 {
+        assert!(matches!(
+            next_command(&mut commands, false, &mut retirement).await,
+            Some(Command::RevokeLogin { .. })
+        ));
+        assert_eq!(commands.len(), 1);
+    }
+    drop(cleanup);
+    assert!(matches!(
+        next_command(&mut commands, true, &mut retirement).await,
+        Some(Command::Call { .. })
+    ));
 }
 
 fn attachment(output: mpsc::Sender<TerminalOutput>) -> AttachmentState {
@@ -617,13 +733,15 @@ async fn real_agent_open_uses_uid_and_character_dimensions() {
     assert!(
         process_command(
             Command::Open {
-                readiness: false,
                 size: TerminalSize {
                     cols: 80,
                     rows: 24,
                     px_w: 800,
                     px_h: 600
                 },
+                person: None,
+                account: None,
+                readiness: false,
                 reply
             },
             &mut link,
@@ -671,7 +789,7 @@ async fn real_agent_canonical_uuid_result_is_accepted() {
         )
         .await
     );
-    assert_eq!(result.await.unwrap(), Ok([1; 16]));
+    assert_eq!(result.await.unwrap().unwrap().session_id, [1; 16]);
 }
 
 #[tokio::test]
@@ -1269,6 +1387,264 @@ fn server_reload_mask_is_not_inherited_by_embedded_children() {
     );
 }
 
+#[tokio::test]
+async fn trusted_person_account_and_fallback_metadata_cross_real_socket() {
+    let (mut link, mut peer) = connection();
+    link.execution_uid = 0;
+    let person = uuid::Uuid::new_v4();
+    let (reply, result) = oneshot::channel();
+    let mut pending = HashMap::new();
+    assert!(
+        process_command(
+            Command::Open {
+                size: TerminalSize {
+                    cols: 80,
+                    rows: 24,
+                    px_w: 0,
+                    px_h: 0
+                },
+                person: Some(person),
+                account: Some("alice".into()),
+                readiness: false,
+                reply
+            },
+            &mut link,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut pending
+        )
+        .await
+    );
+    let mut bytes = [0; 1024];
+    let length = peer.read(&mut bytes).await.unwrap();
+    let decoded = decode_muxed_frame(&bytes[..length]).unwrap();
+    let Frame::Call {
+        call_id,
+        action_id,
+        input_json,
+    } = decoded.frame
+    else {
+        panic!("expected login open");
+    };
+    assert_eq!(action_id, "terminal.open");
+    let input: serde_json::Value = serde_json::from_slice(input_json).unwrap();
+    assert_eq!(input["uid"], 0);
+    assert_eq!(input["person"], person.to_string());
+    assert_eq!(input["account"], "alice");
+    let json = serde_json::to_vec(&serde_json::json!({"session_id":"01010101010101010101010101010101", "account":"root","requested_account":"alice","fallback":true,"note":"No user alice here, opened as root"})).unwrap();
+    assert!(
+        process_incoming(
+            Incoming::Result {
+                call_id,
+                ok: true,
+                json
+            },
+            &mut link,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut pending
+        )
+        .await
+    );
+    let opened = result.await.unwrap().unwrap();
+    assert_eq!(opened.session_id, [1; 16]);
+    assert_eq!(opened.account.as_deref(), Some("root"));
+    assert_eq!(opened.requested_account.as_deref(), Some("alice"));
+    assert!(opened.fallback);
+    assert_eq!(
+        opened.note.as_deref(),
+        Some("No user alice here, opened as root")
+    );
+}
+
+#[tokio::test]
+async fn prepare_uses_connection_uid_and_authenticated_person_without_terminal() {
+    let (mut link, mut peer) = connection();
+    link.execution_uid = 1001;
+    let person = uuid::Uuid::new_v4();
+    let (reply, _result) = oneshot::channel();
+    assert!(
+        process_command(
+            Command::PrepareLogin {
+                person,
+                account: Some("alice".into()),
+                reply
+            },
+            &mut link,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut HashMap::new()
+        )
+        .await
+    );
+    let mut bytes = [0; 1024];
+    let length = peer.read(&mut bytes).await.unwrap();
+    let decoded = decode_muxed_frame(&bytes[..length]).unwrap();
+    let Frame::Call {
+        action_id,
+        input_json,
+        ..
+    } = decoded.frame
+    else {
+        panic!("expected preparation");
+    };
+    assert_eq!(action_id, "terminal.login.prepare");
+    let input: serde_json::Value = serde_json::from_slice(input_json).unwrap();
+    assert_eq!(input["uid"], 1001);
+    assert_eq!(input["person"], person.to_string());
+    assert_eq!(input["account"], "alice");
+}
+
+#[tokio::test]
+async fn canceled_preparations_release_control_capacity_and_late_replies_preserve_open() {
+    let (mut link, mut peer) = connection();
+    let mut pending = HashMap::new();
+    let mut first_preparation = None;
+    for _ in 0..=COMMAND_CAPACITY {
+        let (reply, result) = oneshot::channel();
+        assert!(
+            process_command(
+                Command::PrepareLogin {
+                    person: uuid::Uuid::new_v4(),
+                    account: Some("alice".into()),
+                    reply
+                },
+                &mut link,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+                &mut pending
+            )
+            .await
+        );
+        if first_preparation.is_none() {
+            let mut wire = [0; 1024];
+            let length = peer.read(&mut wire).await.unwrap();
+            let decoded = decode_muxed_frame(&wire[..length]).unwrap();
+            let Frame::Call { call_id, .. } = decoded.frame else {
+                panic!("expected preparation");
+            };
+            first_preparation = Some(call_id);
+        }
+        // The websocket's bounded preparation timeout drops this receiver.
+        drop(result);
+    }
+    let (reply, mut result) = oneshot::channel();
+    assert!(
+        process_command(
+            Command::Open {
+                size: TerminalSize {
+                    cols: 80,
+                    rows: 24,
+                    px_w: 0,
+                    px_h: 0
+                },
+                person: None,
+                account: None,
+                readiness: false,
+                reply
+            },
+            &mut link,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut pending
+        )
+        .await
+    );
+    assert!(
+        matches!(result.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+        "canceled preparation exhausted ordinary control admission"
+    );
+    assert_eq!(
+        pending.len(),
+        1,
+        "canceled preparation entries were retained"
+    );
+    let open_call = *pending.keys().next().unwrap();
+    assert!(
+        process_incoming(
+            Incoming::Result {
+                call_id: first_preparation.unwrap(),
+                ok: true,
+                json: b"{}".to_vec()
+            },
+            &mut link,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut pending
+        )
+        .await,
+        "late preparation reply restarted the shared connection"
+    );
+    assert!(pending.contains_key(&open_call));
+    assert!(
+        process_incoming(
+            Incoming::Result {
+                call_id: open_call,
+                ok: true,
+                json: br#"{"session_id":"01010101-0101-0101-0101-010101010101"}"#.to_vec()
+            },
+            &mut link,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut pending
+        )
+        .await
+    );
+    assert_eq!(result.await.unwrap().unwrap().session_id, [1; 16]);
+}
+
+#[tokio::test]
+async fn unknown_ordinary_result_remains_a_protocol_failure() {
+    let (mut link, _peer) = connection();
+    assert!(
+        !process_incoming(
+            Incoming::Result {
+                call_id: 1,
+                ok: true,
+                json: b"{}".to_vec()
+            },
+            &mut link,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut HashMap::new()
+        )
+        .await
+    );
+}
+
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn invalid_login_revocation_ack_never_confirms_cleanup() {
+    let (mut link, _peer) = connection();
+    for json in [
+        br#"{"revoked":false}"#.as_slice(),
+        br"{}",
+        br"[true]",
+        br#"{"revoked":"true"}"#,
+        br#"{"revoked":true,"extra":1}"#,
+    ] {
+        let (reply, result) = oneshot::channel();
+        let mut pending = HashMap::from([(1, PendingCall::Revoke(reply))]);
+        assert!(
+            process_incoming(
+                Incoming::Result {
+                    call_id: 1,
+                    ok: true,
+                    json: json.to_vec()
+                },
+                &mut link,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+                &mut pending
+            )
+            .await
+        );
+        assert!(
+            result.await.unwrap().is_err(),
+            "invalid cleanup acknowledgement confirmed retirement"
+        );
+    }
+}
 /// Plugin invalidations must survive the control-event census decoder during integration.
 #[tokio::test]
 async fn plugin_control_notice_preserves_capability_invalidation() {
@@ -1332,6 +1708,8 @@ async fn greeted_links_that_die_young_escalate_the_actor_retry_delay() {
             attempts,
         },
         receiver,
+        #[cfg(feature = "remote")]
+        mpsc::unbounded_channel().1,
         changes,
         inventory,
     ));

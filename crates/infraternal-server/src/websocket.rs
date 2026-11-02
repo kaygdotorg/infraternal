@@ -677,6 +677,16 @@ async fn run_socket(
     };
     // Welcome was sent while authorized; subsequent drops use the normal resume cleanup.
     pending_welcome.take();
+    // The socket owns this task and aborts it on drop. Polling preparation
+    // only inside select can hold a SQLite connection while a selected frame
+    // awaits authority from the same bounded pool, so it must progress during
+    // those awaits as well. JoinSet preserves cancellation without detaching.
+    let mut login_preparation = tokio::task::JoinSet::new();
+    login_preparation.spawn(prepare_preferred_login(
+        state.clone(),
+        user_id.clone(),
+        session_token.clone(),
+    ));
 
     let (output_tx, mut output_rx) =
         mpsc::channel::<(u32, TerminalOutput)>(OUTPUT_CHANNEL_CAPACITY);
@@ -719,6 +729,7 @@ async fn run_socket(
         loop {
             transport.active(!attachments.is_empty());
             tokio::select! {
+                Some(_) = login_preparation.join_next(), if !login_preparation.is_empty() => {}
                 Some(reply) = plugins.recv() => {
                     let Some(wire) = plugins.accept(reply, &mut encode) else {continue;};
                     #[cfg(any(test, feature = "native-streams"))]
@@ -1102,6 +1113,26 @@ pub(super) async fn while_authorized(
         None,
     )
     .await
+}
+
+#[cfg(feature = "ssh")]
+mod login_preparation;
+
+// Preparation belongs to the socket's JoinSet and advances during frame awaits.
+// Revocation aborts its outstanding requests; offline hosts remain cold until used.
+pub(crate) async fn prepare_preferred_login(
+    state: Arc<WebSocketState>,
+    user: String,
+    token: String,
+) {
+    #[cfg(feature = "ssh")]
+    // The owning socket already watches expiry/revocation and aborts its JoinSet.
+    // Each target resolves preferences under exact session authority. A second
+    // watchdog here can cancel a SQLite checkout during a clock transition and
+    // interfere with the socket's authority read on a bounded connection pool.
+    login_preparation::prepare(state.clone(), &user, &token).await;
+    #[cfg(not(feature = "ssh"))]
+    let _ = (state, user, token);
 }
 
 /// Keep owned results behind the shared guard until its final authority check.
@@ -1968,13 +1999,13 @@ where
                                 infraternal_plugin_api::admission::OpenRefusal::Unavailable,
                             ),
                         })
-                        .and_then(|session| {
+                        .and_then(|opened| {
                             let session_id = if browser_action {
-                                uuid::Uuid::from_bytes(session).to_string()
+                                uuid::Uuid::from_bytes(opened.session_id).to_string()
                             } else {
-                                encode_session_id(&session)
+                                encode_session_id(&opened.session_id)
                             };
-                            serde_json::to_vec(&json!({"session_id": session_id}))
+                            serde_json::to_vec(&json!({"session_id":session_id,"account":opened.account,"requested_account":opened.requested_account,"fallback":opened.fallback,"note":opened.note}))
                                 .map_err(|_| AgentError::Unavailable)
                         });
                     (call_id, result)
@@ -2914,7 +2945,7 @@ async fn open_terminal(
     session_token: &str,
     size: TerminalOpen,
     host: Option<uuid::Uuid>,
-) -> Result<[u8; 16], crate::embedded::AgentError> {
+) -> Result<crate::embedded::TerminalOpened, crate::embedded::AgentError> {
     #[cfg(test)]
     let connect_timeout = state.terminal_connect_timeout;
     #[cfg(not(test))]
@@ -2922,20 +2953,40 @@ async fn open_terminal(
     let agent = terminal_agent(state, user_id, host)
         .await
         .map_err(|()| crate::embedded::AgentError::Unavailable)?;
-    let session_id = tokio::time::timeout(
+    let person =
+        uuid::Uuid::parse_str(user_id).map_err(|_| crate::embedded::AgentError::Rejected)?;
+    #[cfg(feature = "ssh")]
+    let account = Some(
+        crate::preferred_accounts::resolve(
+            &state.pool,
+            user_id,
+            &crate::auth::hash(session_token),
+            host,
+        )
+        .await
+        .map_err(|_| crate::embedded::AgentError::Unavailable)?,
+    );
+    #[cfg(not(feature = "ssh"))]
+    let account = None;
+    let opened = tokio::time::timeout(
         connect_timeout,
-        agent.open(TerminalSize {
-            cols: size.cols,
-            rows: size.rows,
-            px_w: size.px_w,
-            px_h: size.px_h,
-        }),
+        agent.open_for_with_metadata(
+            TerminalSize {
+                cols: size.cols,
+                rows: size.rows,
+                px_w: size.px_w,
+                px_h: size.px_h,
+            },
+            person,
+            account,
+        ),
     )
     .await
     .map_err(|_| crate::embedded::AgentError::Unavailable)??;
     if !session_is_live(state, user_id, session_token).await {
         return Err(crate::embedded::AgentError::Unavailable);
     }
+    let session_id = opened.session_id;
     let now = unix_seconds().map_err(|()| crate::embedded::AgentError::Unavailable)?;
     let changed = sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,remote_host_id) SELECT ?,?,?,?,? FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch() AND (? IS NULL OR EXISTS (SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL))")
         .bind(session_id.as_slice())
@@ -2952,7 +3003,7 @@ async fn open_terminal(
         return Err(crate::embedded::AgentError::Unavailable);
     }
     state.sessions_changed();
-    Ok(session_id)
+    Ok(opened)
 }
 
 /// Core-only builds select the local host and refuse every remote selection.

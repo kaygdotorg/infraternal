@@ -24,7 +24,7 @@ infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", opt
 bytes.workspace = true
 infraternal-protocol.workspace = true
 infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
-infraternal-shim = { workspace = true, features = ["async-fd"] }
+infraternal-shim = { workspace = true, features = ["async-fd", "host-login"] }
 nix = { workspace = true, features = ["inotify", "event"] }
 tokio = { workspace = true, features = ["net", "io-util", "process", "time"] }
 uuid.workspace = true

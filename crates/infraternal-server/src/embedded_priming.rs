@@ -841,6 +841,7 @@ mod tests {
                 encode: Vec::new(),
                 next_call_id: 1,
                 owned_control: None,
+                owned_cleanup: None,
             },
             slots: HashMap::from([(
                 1,

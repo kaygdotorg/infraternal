@@ -903,6 +903,92 @@ mod authority_stall_soak;
 #[cfg(feature = "desktop")]
 #[path = "socket_tests/native_plugin.rs"]
 mod native_plugin;
+
+#[cfg(feature = "ssh")]
+#[tokio::test]
+async fn unanswered_login_preparation_keeps_control_socket_responsive() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let (local, mut peer) = UnixStream::pair().unwrap();
+    let (observed, preparation) = tokio::sync::oneshot::channel();
+    let stub = tokio::spawn(async move {
+        let mut receive = BytesMut::new();
+        read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+        leg_b_send(
+            &mut peer,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                client_info: "login-stall-fixture",
+            },
+        )
+        .await;
+        let wire = read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+        assert!(matches!(
+            decode_muxed_frame(&wire).unwrap().frame,
+            Frame::Call {
+                action_id: "terminal.login.prepare",
+                ..
+            }
+        ));
+        observed.send(()).unwrap();
+        // Keep the transport alive without answering this preparation call.
+        let _ = read_leg_b_frame(&mut peer, &mut receive).await;
+    });
+    let state = crate::websocket::WebSocketState::new(
+        f.auth.clone(),
+        f.auth.pool.clone(),
+        EmbeddedAgent::from_test_socket(local),
+    )
+    .await
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, crate::websocket::router(state))
+            .await
+            .unwrap();
+    });
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .unwrap();
+    assert_server_hello(&mut socket).await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "login-preparation",
+        },
+    )
+    .await;
+    read_welcome(&mut socket).await;
+    tokio::time::timeout(Duration::from_secs(2), preparation)
+        .await
+        .unwrap()
+        .unwrap();
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Ping {
+            nonce: 172,
+            sent_us: 0,
+        },
+    )
+    .await;
+    let response =
+        tokio::time::timeout(Duration::from_secs(1), read_client_frame(&mut socket)).await;
+    server.abort();
+    stub.abort();
+    let wire = response.expect("stalled login preparation blocked socket control");
+    assert!(matches!(
+        decode_muxed_frame(&wire).unwrap().frame,
+        Frame::Pong { nonce: 172, .. }
+    ));
+}
 #[path = "socket_tests/restart_open_liveness_review.rs"]
 mod restart_open_liveness_review;
 #[path = "socket_tests/review_authority_retry.rs"]

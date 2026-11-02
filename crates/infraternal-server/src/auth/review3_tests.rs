@@ -250,7 +250,7 @@ async fn busy_revocation(mode: &str) {
         },
     )
     .await;
-    let wire = read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+    let wire = read_terminal_open(&mut peer, &mut receive).await;
     let Frame::Call { call_id, .. } = decode_muxed_frame(&wire).unwrap().frame else {
         panic!("expected backend call")
     };
@@ -655,7 +655,7 @@ async fn review3_backend_reply_has_a_deadline() {
         },
     )
     .await;
-    let wire = read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+    let wire = read_terminal_open(&mut peer, &mut receive).await;
     let Frame::Call { call_id, .. } = decode_muxed_frame(&wire).unwrap().frame else {
         panic!("backend call")
     };
@@ -922,7 +922,7 @@ async fn review4_open_reply_and_revocation_preserve_authority() {
             },
         )
         .await;
-        let wire = read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+        let wire = read_terminal_open(&mut peer, &mut receive).await;
         let Frame::Call { call_id, .. } = decode_muxed_frame(&wire).unwrap().frame else {
             panic!("backend call")
         };
@@ -1023,7 +1023,7 @@ async fn review4_slow_open_at_user_capacity() {
                 },
             )
             .await;
-            let wire = read_leg_b_frame(&mut peer, &mut receive).await.unwrap();
+            let wire = read_terminal_open(&mut peer, &mut receive).await;
             let Frame::Call { call_id, .. } = decode_muxed_frame(&wire).unwrap().frame else {
                 panic!("backend call");
             };

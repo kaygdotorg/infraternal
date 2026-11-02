@@ -55,6 +55,8 @@ pub mod enrollment;
 #[cfg(all(test, feature = "mesh"))]
 mod mesh_api_tests;
 pub mod plugins;
+#[cfg(feature = "ssh")]
+pub mod preferred_accounts;
 #[cfg(feature = "remote")]
 mod remote_accept;
 #[cfg(feature = "remote")]

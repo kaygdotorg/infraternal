@@ -7,6 +7,44 @@ use tokio::{
     net::UnixStream,
 };
 
+// Controlled replies keep fixed PTY readiness separate from login admission,
+// while asserting the exact trusted person/preferred-account payload.
+fn call_response(
+    call_id: u32,
+    action_id: &str,
+    input_json: &[u8],
+    restoration: Option<&'static [u8]>,
+    preparation: Option<bool>,
+) -> Frame<'static> {
+    if action_id == "terminal.open" {
+        let input: serde_json::Value = serde_json::from_slice(input_json).unwrap();
+        assert_eq!(input["readiness"], true, "canary must bypass login startup");
+    }
+    let json = if action_id == "terminal.login.restore" {
+        let input: serde_json::Value = serde_json::from_slice(input_json).unwrap();
+        assert_eq!(input["person"], Uuid::from_u128(0x88).to_string());
+        restoration.expect("unexpected restoration request")
+    } else {
+        br#"{"session_id":"11111111111111111111111111111111"}"#
+    };
+    if action_id == "terminal.login.prepare" {
+        let input: serde_json::Value = serde_json::from_slice(input_json).unwrap();
+        assert_eq!(input["person"], Uuid::from_u128(0x88).to_string());
+        assert_eq!(input["account"], "deploy");
+        Frame::Result {
+            call_id,
+            ok: preparation.expect("unexpected login preparation"),
+            json: br#"{"prepared":true}"#,
+        }
+    } else {
+        Frame::Result {
+            call_id,
+            ok: true,
+            json,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Retirement {
     Available,
@@ -18,6 +56,8 @@ async fn terminal_peer(
     snapshot: bool,
     retirement: Retirement,
     fail_attach: bool,
+    restoration: Option<&'static [u8]>,
+    preparation: Option<bool>,
     mut cleaned: Option<tokio::sync::oneshot::Sender<()>>,
 ) {
     let mut pending = BytesMut::new();
@@ -45,17 +85,13 @@ async fn terminal_peer(
                 call_id,
                 action_id,
                 input_json,
-            } => {
-                if action_id == "terminal.open" {
-                    let input: serde_json::Value = serde_json::from_slice(input_json).unwrap();
-                    assert_eq!(input["readiness"], true, "canary must bypass login startup");
-                }
-                Some(Frame::Result {
-                    call_id,
-                    ok: true,
-                    json: br#"{"session_id":"11111111111111111111111111111111"}"#,
-                })
-            }
+            } => Some(call_response(
+                call_id,
+                action_id,
+                input_json,
+                restoration,
+                preparation,
+            )),
             Frame::AttachTerm { .. }
                 if matches!(retirement, Retirement::Retired) && frame.stream_id == 4 =>
             {
@@ -134,6 +170,8 @@ async fn readiness_input_preserves_the_terminal_actor_and_host_connection() {
         Retirement::Available,
         false,
         None,
+        None,
+        None,
     ));
     let actor = EmbeddedAgent::from_test_socket(socket);
     tokio::time::timeout(Duration::from_secs(5), canary(&actor))
@@ -160,6 +198,8 @@ async fn readiness_accepts_authoritative_snapshot_output() {
         Retirement::Available,
         false,
         None,
+        None,
+        None,
     ));
     let actor = EmbeddedAgent::from_test_socket(socket);
     tokio::time::timeout(Duration::from_secs(5), canary(&actor))
@@ -180,6 +220,8 @@ async fn failed_attachment_finishes_the_private_command() {
         false,
         Retirement::Available,
         true,
+        None,
+        None,
         Some(cleaned),
     ));
     let actor = EmbeddedAgent::from_test_socket(socket);
@@ -204,6 +246,8 @@ async fn cancellation_keeps_the_owned_session_available_for_cleanup() {
         false,
         Retirement::Available,
         false,
+        None,
+        None,
         Some(cleaned),
     ));
     let actor = EmbeddedAgent::from_test_socket(socket);
@@ -228,9 +272,89 @@ async fn cancellation_keeps_the_owned_session_available_for_cleanup() {
 }
 
 #[tokio::test]
+async fn reenrollment_requires_exact_restoration_acknowledgement() {
+    for (json, success) in [
+        (br#"{"restored":true}"#.as_slice(), true),
+        (br#"{"restored":false}"#.as_slice(), false),
+        (br"[true]".as_slice(), false),
+        (br#"{"restored":true,"extra":1}"#.as_slice(), false),
+        (br#"{"revoked":true}"#.as_slice(), false),
+    ] {
+        let (socket, peer) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(terminal_peer(
+            peer,
+            false,
+            Retirement::Available,
+            false,
+            Some(json),
+            None,
+            None,
+        ));
+        let actor = EmbeddedAgent::from_test_socket(socket);
+        let outcome = restore_login_access(&actor, Uuid::from_u128(0x88)).await;
+        assert_eq!(outcome.is_ok(), success);
+        drop(actor);
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+#[tokio::test]
+async fn readiness_refuses_a_host_whose_preferred_login_path_fails() {
+    let (socket, peer) = UnixStream::pair().unwrap();
+    let task = tokio::spawn(terminal_peer(
+        peer,
+        false,
+        Retirement::Available,
+        false,
+        None,
+        Some(false),
+        None,
+    ));
+    let actor = EmbeddedAgent::from_test_socket(socket);
+    assert!(
+        confirm_preferred_login(&actor, Uuid::from_u128(0x88), "deploy".into())
+            .await
+            .is_err()
+    );
+    drop(actor);
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn readiness_prepares_the_same_person_and_preferred_account_as_terminals() {
+    let (socket, peer) = UnixStream::pair().unwrap();
+    let task = tokio::spawn(terminal_peer(
+        peer,
+        false,
+        Retirement::Available,
+        false,
+        None,
+        Some(true),
+        None,
+    ));
+    let actor = EmbeddedAgent::from_test_socket(socket);
+    confirm_preferred_login(&actor, Uuid::from_u128(0x88), "deploy".into())
+        .await
+        .unwrap();
+    drop(actor);
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
 async fn readiness_accepts_primary_exit_without_reattaching_to_a_retired_session() {
     let (socket, peer) = UnixStream::pair().unwrap();
-    let task = tokio::spawn(terminal_peer(peer, false, Retirement::Retired, false, None));
+    let task = tokio::spawn(terminal_peer(
+        peer,
+        false,
+        Retirement::Retired,
+        false,
+        None,
+        None,
+        None,
+    ));
     let actor = EmbeddedAgent::from_test_socket(socket);
     tokio::time::timeout(Duration::from_secs(5), canary(&actor))
         .await

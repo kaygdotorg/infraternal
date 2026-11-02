@@ -1,6 +1,7 @@
 # Virtual workspace manifest for the Rust pieces of infraternal.
 [workspace]
 resolver = "3"
+exclude = ["vendor/russh", "vendor/russh-sftp"]
 members = [
     "fuzz",
     "crates/infraternal-mesh",
@@ -140,3 +141,8 @@ opt-level = "s"
 # Layout control intents stay off the terminal data path; bound their new code footprint [243,248].
 [profile.release.package.infraternal-plugin-canvas]
 opt-level = "s"
+
+# Keep the D289 SSH engine sources reviewable and apply only their audited transport API patch.
+[patch.crates-io]
+russh = { path = "vendor/russh" }
+russh-sftp = { path = "vendor/russh-sftp" }

@@ -1,0 +1,222 @@
+//! Owns exact-address mesh TCP/22 listeners and reversible nft redirects [D197,D235], #221.
+//!
+//! The node lifecycle must serialize start/stop/recovery and supply only its
+//! applied mesh address/interface. These blocking operations belong outside the
+//! async packet path. No protocol server is started by this module. The mesh
+//! firewall must enforce original TCP/22 access before this is wired to a node.
+
+use std::{
+    fmt::Write as _,
+    io::{self, Write},
+    net::{IpAddr, SocketAddr, TcpListener},
+    process::{Command, Stdio},
+};
+
+const NFT: &str = "/usr/sbin/nft";
+const MARKER: &str = "infraternal.ssh.v1";
+
+/// Observable selection for owner review; no host SSH configuration is changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortMode {
+    Stopped,
+    Direct,
+    Redirect,
+}
+
+/// A listener and its optional owned redirect. Explicit stop is retryable and
+/// reports cleanup failure; Drop is only a best-effort fallback, not evidence.
+pub struct MeshPort {
+    listener: Option<TcpListener>,
+    address: IpAddr,
+    redirected: bool,
+}
+
+impl MeshPort {
+    /// Bind TCP/22, falling back only when another listener occupies the port.
+    /// The caller must recover retained rules before starting a replacement.
+    ///
+    /// # Errors
+    /// Refuses invalid coordinates, foreign/stale tables, missing privileges,
+    /// non-address-in-use bind failures and failed atomic rule installation.
+    pub fn bind(address: IpAddr, interface: &str) -> io::Result<Self> {
+        validate(address, interface)?;
+        // Never silently adopt rules that might still belong to a live listener.
+        if presence(address)? {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        let (listener, redirected) = match TcpListener::bind(SocketAddr::new(address, 22)) {
+            Ok(listener) => (listener, false),
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                (TcpListener::bind(SocketAddr::new(address, 0))?, true)
+            }
+            Err(error) => return Err(error),
+        };
+        if redirected {
+            transaction(&render(address, interface, listener.local_addr()?.port()))?;
+        }
+        Ok(Self {
+            listener: Some(listener),
+            address,
+            redirected,
+        })
+    }
+
+    #[must_use]
+    pub fn mode(&self) -> PortMode {
+        if self.listener.is_none() {
+            PortMode::Stopped
+        } else if self.redirected {
+            PortMode::Redirect
+        } else {
+            PortMode::Direct
+        }
+    }
+
+    /// Borrow the owned listener without transferring lifecycle responsibility.
+    /// A stopped lease has no listener.
+    #[must_use]
+    pub fn listener(&self) -> Option<&TcpListener> {
+        self.listener.as_ref()
+    }
+
+    /// Remove the rules before releasing the socket. Failed removal leaves the
+    /// lease intact so the component cannot report itself stopped prematurely.
+    ///
+    /// # Errors
+    /// Reports failed ownership validation or kernel cleanup; callers retry.
+    pub fn stop(&mut self) -> io::Result<()> {
+        if self.redirected {
+            Self::recover(self.address)?;
+            self.redirected = false;
+        }
+        self.listener = None;
+        Ok(())
+    }
+
+    /// Remove retained owned rules during serialized restart recovery/uninstall.
+    /// This must not be called while another instance owns a live lease.
+    ///
+    /// # Errors
+    /// Never removes an unmarked table; permission/tool failures stay visible.
+    pub fn recover(address: IpAddr) -> io::Result<()> {
+        if presence(address)? {
+            transaction(&format!("delete table inet {}\n", table(address)))?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for MeshPort {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+fn validate(address: IpAddr, interface: &str) -> io::Result<()> {
+    if address.is_unspecified()
+        || address.is_loopback()
+        || address.is_multicast()
+        || interface.is_empty()
+        || interface.len() > 15
+        || !interface
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+    {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    Ok(())
+}
+
+fn table(address: IpAddr) -> String {
+    match address {
+        IpAddr::V4(address) => format!("infraternal_ssh4_{:08x}", u32::from(address)),
+        IpAddr::V6(address) => format!("infraternal_ssh6_{:032x}", u128::from(address)),
+    }
+}
+
+// Table names and script coordinates contain only typed addresses, integer ports
+// and a validated interface. No shell, key material or caller script is accepted.
+fn transaction(script: &str) -> io::Result<()> {
+    let mut child = Command::new(NFT)
+        .args(["-f", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let written = child
+        .stdin
+        .take()
+        .ok_or(io::ErrorKind::BrokenPipe)?
+        .write_all(script.as_bytes());
+    let status = child.wait()?;
+    written?;
+    if !status.success() {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    Ok(())
+}
+
+fn presence(address: IpAddr) -> io::Result<bool> {
+    let output = Command::new(NFT)
+        .args(["-j", "list", "tables"])
+        .stderr(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    let name = table(address);
+    let tables: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(io::Error::other)?;
+    let entries = tables["nftables"].as_array().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing nftables table inventory",
+        )
+    })?;
+    let Some(entry) = entries
+        .iter()
+        .map(|entry| &entry["table"])
+        .find(|entry| entry["family"] == "inet" && entry["name"] == name)
+    else {
+        return Ok(false);
+    };
+    // Ownership must be the exact table comment, never a comment on a rule or a
+    // prefix match. Inventory includes table comments on the supported frontend.
+    if entry["comment"] != MARKER {
+        return Err(io::ErrorKind::AlreadyExists.into());
+    }
+    Ok(true)
+}
+
+fn render(address: IpAddr, interface: &str, port: u16) -> String {
+    let family = if address.is_ipv4() { "ip" } else { "ip6" };
+    let destination = match address {
+        IpAddr::V4(address) => format!("{address}:{port}"),
+        IpAddr::V6(address) => format!("[{address}]:{port}"),
+    };
+    let mut script = format!(
+        "create table inet {} {{\n comment \"{MARKER}\";\n",
+        table(address)
+    );
+    let _ = writeln!(
+        script,
+        " chain incoming {{ type nat hook prerouting priority dstnat; policy accept; iifname \"{interface}\" {family} daddr {address} tcp dport 22 dnat {family} to {destination}; }}"
+    );
+    // DNAT back to the same address supports node-local traffic without moving
+    // the listener onto loopback or intercepting ordinary host SSH destinations.
+    let _ = writeln!(
+        script,
+        " chain local {{ type nat hook output priority dstnat; policy accept; {family} daddr {address} tcp dport 22 dnat {family} to {destination}; }}"
+    );
+    // The internal port is not a second externally usable SSH service. Only a
+    // conntracked flow originally addressed to this node's TCP/22 may reach it.
+    let _ = writeln!(
+        script,
+        " chain guard {{ type filter hook input priority -11; policy accept; {family} daddr {address} tcp dport {port} ct original {family} daddr {address} ct original proto-dst 22 return; {family} daddr {address} tcp dport {port} drop; }}\n}}"
+    );
+    script
+}
+
+#[cfg(test)]
+#[path = "mesh_port_tests.rs"]
+mod tests;

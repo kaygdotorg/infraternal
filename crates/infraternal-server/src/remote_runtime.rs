@@ -412,6 +412,9 @@ impl RemoteHosts {
                 },
             );
         }
+        if let Some(host) = hosts.get(&id) {
+            host.authority.bind_login_actor(&host.actor);
+        }
         if let Some(runtime) = runtime
             && let Some(host) = hosts.get_mut(&id)
         {

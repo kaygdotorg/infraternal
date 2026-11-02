@@ -39,6 +39,8 @@ process-per-user = ["nix/uio", "nix/event"]
 host-diagnostics = ["process-per-user"]
 # Research-only exact cold-history representation; measured before adoption.
 compact-history = ["process-per-user"]
+# Private host-login workers and descriptor transfers compile out with host work.
+host-login = ["nix/uio"]
 # Audited transient process-transfer buffers are removed with the remote plugin.
 ca-handoff = ["dep:openssl"]
 bench-vt = ["dep:alacritty_terminal", "dep:vt100"]

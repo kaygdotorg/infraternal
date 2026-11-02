@@ -1334,6 +1334,8 @@ pub(crate) async fn compiled_with_hosts(
     #[cfg(all(feature = "mesh", feature = "remote"))]
     let mesh_service = mesh_plugin.service();
     let plugins: Vec<Arc<dyn Plugin>> = vec![
+        #[cfg(feature = "ssh")]
+        Arc::new(crate::preferred_accounts::AccountsPlugin::new(pool.clone())),
         #[cfg(feature = "mesh")]
         mesh_plugin,
         #[cfg(feature = "release")]

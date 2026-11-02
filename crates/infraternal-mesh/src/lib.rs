@@ -16,4 +16,7 @@ pub mod coordinator;
 
 pub mod backend;
 
+#[cfg(feature = "relay")]
+pub mod discovery;
+
 pub mod cli;

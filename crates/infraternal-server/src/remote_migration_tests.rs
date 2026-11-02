@@ -1,5 +1,5 @@
 //! Proves deployed schema upgrades preserve remote identity and route data, and
-//! that the release migration chain stays contiguous through shared canvas storage [9][19][64][133], #78, #243.
+//! that the release migration chain stays contiguous through preferred account storage [9][19][64][133], #78, #243.
 
 use sqlx::sqlite::SqlitePoolOptions;
 

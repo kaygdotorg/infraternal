@@ -30,6 +30,7 @@ fn merge_review_replies_cannot_consume_space_reserved_for_deferred_typing() {
             pending: Vec::new(),
             written: 0,
             exited_sent: false,
+            stopping: false,
             request: None,
         };
         (peer, remote)
@@ -145,6 +146,7 @@ fn negotiated_queue_deferral_validates_ranges_before_waiting() {
         pending: Vec::new(),
         written: 0,
         exited_sent: false,
+        stopping: false,
         request: None,
     };
     let mut cursors = Inputs::with_geometry(peer.size);
@@ -240,6 +242,7 @@ fn a_completed_deferred_frame_gives_its_trailing_input_a_fresh_ticket() {
             pending: Vec::new(),
             written: 0,
             exited_sent: false,
+            stopping: false,
             request: None,
         }
     };
@@ -394,6 +397,7 @@ fn coalesced_probe_and_input_preserve_the_written_ack_in_both_orders() {
             pending: Vec::new(),
             written: 0,
             exited_sent: false,
+            stopping: false,
             request: None,
         };
         let mut cursors = Inputs::with_geometry(peer.size);
@@ -465,6 +469,7 @@ fn coalesced_ack_never_overwrites_a_partial_output_and_cursors_survive_peer_loss
         pending: Vec::new(),
         written: 0,
         exited_sent: false,
+        stopping: false,
         request: None,
     };
     let mut cursors = InputCursors::default();
