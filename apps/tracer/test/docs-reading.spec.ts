@@ -145,7 +145,9 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
       await first.click();
       await page.waitForTimeout(300);
       expect(new URL(page.url()).hash).toBe("#source-1");
-      expect(await page.evaluate(() => Math.abs(document.getElementById("source-1")!.getBoundingClientRect().top - 16)), "the source stops 16 px under the top").toBeLessThanOrEqual(1);
+      // References end the page, so the page cannot always scroll far enough to put the source at the very top: it must be in view and marked.
+      expect(await page.evaluate(() => { const r = document.getElementById("source-1")!.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; }), "the source is in view").toBe(true);
+      expect(await page.evaluate(() => document.getElementById("source-1")!.matches(":target")), "and marked as the target").toBe(true);
       await shot("keys-references");
       await page.locator("#source-1 a.back").click();
       await page.waitForTimeout(300);
