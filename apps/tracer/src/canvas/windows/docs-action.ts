@@ -1,14 +1,37 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
- * What the "?" button, its shortcut and its ⌘K row do (issue #304): open the docs heading that explains a window as a window
- * in the Docs cluster, or say in plain words that there is no page about it yet. One function, so the three ways in cannot differ.
+ * What the "?" button, its shortcut and its ⌘K row do (issue #304): open a preview of the docs for this window, anchored to the "?" (a bottom sheet
+ * on a phone). The preview shows the most helpful few lines; its expand icon opens the whole page as a window in the Docs cluster. One function, so the
+ * three ways in cannot differ. Pressing the button again closes the preview; a window with no page yet says so in the preview itself.
  */
+import { openDocsPreview, type DocsPreviewContent } from "../../../../../packages/ui/src/docs-preview";
 import type { Ctx, WinRec } from "../context";
+import { coarse } from "../dom";
 
-export function openWindowDocs(cx: Ctx, rec: WinRec): void {
+let current: { rec: WinRec; close(source: "pointer" | "keyboard"): void } | undefined;
+
+/** The button that opened it, or what stands in when the action group has folded into its "…" menu. */
+function anchorOf(rec: WinRec): HTMLElement {
+  const header = rec.card.header;
+  const wanted = [header.querySelector<HTMLElement>('.ui-window-action[data-action="docs"]'), header.querySelector<HTMLElement>(".ui-window-more"), rec.card.pill];
+  return wanted.find((n): n is HTMLElement => !!n && n.getBoundingClientRect().width > 0) ?? rec.card.pill;
+}
+
+export function openWindowDocs(cx: Ctx, rec: WinRec, source: "pointer" | "keyboard" = "keyboard"): void {
   const adapter = cx.adapters.docs;
   const entry = adapter?.for(rec.model);
   if (!adapter || !entry) return;
-  if (!entry.link) { cx.core.toast.show({ message: "There is no page about this yet." }); return; }
-  void adapter.open(entry.link).then((found) => { if (!found) cx.core.toast.show({ message: "That page is not available right now." }); });
+  if (current?.rec === rec) { current.close(source); return; }
+  current?.close("keyboard");
+  const title = rec.model.host;
+  const link = entry.link;
+  const content: DocsPreviewContent | Promise<DocsPreviewContent> = link
+    ? adapter.preview(link).then((found) => found ?? { title, bullets: [], empty: "That page is not available right now." })
+    : { title, bullets: [], empty: "There is no page about this yet." };
+  const handle = openDocsPreview({
+    stage: cx.stage, anchor: anchorOf(rec), label: `About ${title}`, content, touch: coarse.matches, source,
+    ...(link ? { onExpand: () => { void adapter.open(link).then((found) => { if (!found) cx.core.toast.show({ message: "That page is not available right now." }); }); } } : {}),
+    onClosed: () => { if (current?.rec === rec) current = undefined; },
+  });
+  current = { rec, close: handle.close };
 }

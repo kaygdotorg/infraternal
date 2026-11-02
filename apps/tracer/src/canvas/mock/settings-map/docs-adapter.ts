@@ -7,7 +7,9 @@
  */
 import type { DocsSource } from "../../docs/docs-source";
 import type { DocsAdapter, DocsLink } from "../../docs/docs-adapter";
+import { excerptOf } from "../../docs/docs-excerpt";
 import { SETTINGS_MAP } from "./catalog";
+import { STAND_IN } from "./docs-standin";
 import { spotByWindow } from "./model";
 
 const TERMINAL: DocsLink = { page: "multiplexer", heading: "what-it-does-for-you" };
@@ -26,5 +28,14 @@ export function createMockDocs(source: () => DocsSource | undefined): DocsAdapte
       return undefined;
     },
     open: (link) => source()?.open(link.page, link.heading) ?? Promise.resolve(false),
+    // The excerpt is the index's own quick facts; where the index has none yet, the stand-in in that same shape.
+    async preview(link) {
+      const found = await source()?.lookup(link.page, link.heading);
+      if (!found) return undefined;
+      const standIn = link.heading ? STAND_IN[`${link.page}#${link.heading}`] : undefined;
+      const heading = found.heading && !found.heading.facts && standIn ? { ...found.heading, ...standIn } : found.heading;
+      return excerptOf(found.page, heading);
+    },
+    warm: () => source()?.warm(),
   };
 }

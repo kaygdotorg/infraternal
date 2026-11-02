@@ -17,7 +17,12 @@ import { onDemand } from "../../on-demand";
 import type { Ctx } from "../context";
 
 /** The shape of `index.json` (docs-build.ts `DocsIndexPage`). */
-export interface DocsIndexPage { slug: string; title: string; summary: string; section?: true; parent?: string; facts?: string; headings: { id: string; text: string; facts?: string }[] }
+/**
+ * `facts` is the text of a heading's (or the page's) `> [!FACTS]` block: a few short sentences, the excerpt the "?" preview shows
+ * (docs-excerpt.ts). `factsTable` is a small table in that block, when the docs build provides one. Both are optional.
+ */
+export interface DocsHeading { id: string; text: string; facts?: string; factsTable?: { head: string[]; rows: string[][] } }
+export interface DocsIndexPage { slug: string; title: string; summary: string; section?: true; parent?: string; facts?: string; factsTable?: { head: string[]; rows: string[][] }; headings: DocsHeading[] }
 
 export interface DocsSource {
   /**
@@ -26,7 +31,7 @@ export interface DocsSource {
    */
   open(slug: string, heading?: string): Promise<boolean>;
   /** The page and heading from the index (loading it first), for the "?" excerpt; undefined when there is no such page. */
-  lookup(slug: string, heading?: string): Promise<{ page: DocsIndexPage; heading?: DocsIndexPage["headings"][number] } | undefined>;
+  lookup(slug: string, heading?: string): Promise<{ page: DocsIndexPage; heading?: DocsHeading } | undefined>;
   /** Starts loading the index now, so the first "?" is instant. */
   warm(): void;
   dispose(): void;
