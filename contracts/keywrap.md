@@ -217,7 +217,8 @@ it never extends an already expired key. At the exclusive deadline the server
 commits a permanent tombstone and returns the same `Denied` error as an unknown
 key. An authenticated, scoped use renews at most once per hour per key; denied
 scopes do not renew. Expiry checks, clamping and renewal are serialized with
-revocation. Existing keys receive the default lifetime from migration time once.
+revocation. Expiry uses the maximum of the wall clock and a persisted server
+time high-water mark, so clock rollback and restart cannot revive keys. Existing keys receive the default lifetime from migration time once.
 
 Sign-in currently issues and stores keys but no CLI command reads or sends
 them and no production route calls `api_authorize` (#303). Future CLI callers

@@ -95,12 +95,12 @@ async fn remote_identity_and_sessions_upgrade_dev_v11_and_remain_idempotent() {
 #[tokio::test]
 async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_order() {
     let migrations = sqlx::migrate!("./migrations");
-    let expected: Vec<i64> = (1..=35).collect();
+    let expected: Vec<i64> = (1..=36).collect();
     let versions: Vec<i64> = migrations
         .iter()
         .map(|migration| migration.version)
         .collect();
-    assert_eq!(versions, expected, "fresh releases apply 0001 through 0035");
+    assert_eq!(versions, expected, "fresh releases apply 0001 through 0036");
 
     let production = SqlitePoolOptions::new()
         .max_connections(1)
@@ -130,7 +130,7 @@ async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_ord
             .fetch_one(&production)
             .await
             .unwrap();
-    assert_eq!((version, applied), (35, 35));
+    assert_eq!((version, applied), (36, 36));
     let mesh: (String, Option<String>, Option<String>) =
         sqlx::query_as("SELECT name, name_source, name_claim FROM mesh_nodes WHERE id=42")
             .fetch_one(&production)
@@ -263,7 +263,7 @@ async fn hostname_migration_upgrades_release6_copy_without_changing_canvas_or_ch
             .fetch_all(&production)
             .await
             .unwrap();
-    assert_eq!(after.len(), 35);
+    assert_eq!(after.len(), 36);
     assert_eq!(&after[..28], before.as_slice());
     assert_eq!(after[28].0, 29);
     assert_eq!(after[29].0, 30);
@@ -272,6 +272,7 @@ async fn hostname_migration_upgrades_release6_copy_without_changing_canvas_or_ch
     assert_eq!(after[32].0, 33);
     assert_eq!(after[33].0, 34);
     assert_eq!(after[34].0, 35);
+    assert_eq!(after[35].0, 36);
     let canvas: (i64, String, i64) = sqlx::query_as(
         "SELECT revision,document,initialized FROM canvas_heads WHERE account='owner'",
     )

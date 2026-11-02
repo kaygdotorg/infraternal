@@ -84,6 +84,7 @@ impl Auth {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query("DELETE FROM approvals WHERE token_hash=? AND expires>? AND user_id IS NOT NULL RETURNING user_id,device,scopes")
             .bind(hash(token)).bind(now).fetch_optional(&mut *tx).await?.ok_or(Error::Denied)?;
+        let now = api_key_time(&mut tx, now).await?;
         let key = random();
         sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at) VALUES (?,?,?,?,?,?+(SELECT api_key_lifetime_days*86400 FROM server_settings WHERE id=1))")
             .bind(hash(&key))
@@ -107,6 +108,7 @@ impl Auth {
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool).await?;
         let row = sqlx::query("SELECT user_id,scopes,renewed_at,expires_at,dead,api_key_lifetime_days FROM api_keys CROSS JOIN server_settings WHERE server_settings.id=1 AND token_hash=?")
             .bind(&token_hash).fetch_optional(&mut *tx).await?;
+        let now = api_key_time(&mut tx, now).await?;
         let Some(row) = row else {
             tx.commit().await?;
             return Err(Error::Denied);
@@ -173,4 +175,20 @@ impl Auth {
         let keys: Vec<Value> = rows.iter().map(|r| Ok(json!({"id":r.get::<String,_>("token_hash"),"device":r.get::<String,_>("device"),"scopes":serde_json::from_str::<Value>(r.get("scopes"))?}))).collect::<Result<_>>()?;
         Ok(json!(keys))
     }
+}
+
+/// The writer transaction serializes the persisted high-water mark with expiry.
+/// Only a new maximum writes; rollback and restart cannot make expiry time regress.
+async fn api_key_time(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, wall: i64) -> Result<i64> {
+    let recorded: i64 =
+        sqlx::query_scalar("SELECT api_key_time_high_water FROM server_settings WHERE id=1")
+            .fetch_one(&mut **tx)
+            .await?;
+    if wall > recorded {
+        sqlx::query("UPDATE server_settings SET api_key_time_high_water=? WHERE id=1")
+            .bind(wall)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(wall.max(recorded))
 }

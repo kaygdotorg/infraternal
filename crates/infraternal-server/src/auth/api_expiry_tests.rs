@@ -347,3 +347,31 @@ async fn api_key_shortening_clamps_and_lengthening_requires_successful_renewal()
     assert_eq!(expiry(&f.auth, &key).await, NOW + 3600 + 365 * 86400);
 }
 
+/// J97: denied at deadline, then accepted at deadline-1. Also cover a key
+/// not yet checked at the high-water time, and reconstruction after restart.
+#[tokio::test]
+async fn api_key_wall_clock_rollback_never_revives_or_extends_keys() {
+    let f = fixture().await;
+    let expired = key(&f).await;
+    let unchecked = key(&f).await;
+    let deadline = NOW + 30 * 86400;
+    f.auth.set_test_http_time(deadline);
+    assert!(matches!(
+        f.auth.api_authorize(&expired, "hosts:read").await,
+        Err(Error::Denied)
+    ));
+    let restarted = Auth::new(f.auth.pool.clone(), "auth.example.test", ORIGIN)
+        .await
+        .unwrap();
+    restarted.set_test_http_time(deadline - 1);
+    for key in [expired, unchecked] {
+        assert!(
+            matches!(
+                restarted.api_authorize(&key, "hosts:read").await,
+                Err(Error::Denied)
+            ),
+            "persisted server time must not move backwards"
+        );
+    }
+}
+
