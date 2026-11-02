@@ -75,8 +75,9 @@ export interface RowMenu {
   dispose(): void;
 }
 
-const OPEN = { visualDuration: 0.32, bounce: 0.06 };
-const SHUT = { visualDuration: 0.32, bounce: 0 };
+// Critically damped, never past the target (TASTE: no overshoot, ever; the row settles, it does not bounce).
+const OPEN = { visualDuration: 0.32 };
+const SHUT = { visualDuration: 0.32 };
 /** A swipe moves at most this far past the revealed button before the row stops following (never past its own width). */
 const MIN_REVEAL = 72;
 const LONG_PRESS = 480;
@@ -185,7 +186,7 @@ class Swipe {
   /** Springs to `value`; `velocity` (px/s) is the finger's, so the motion goes on from where the release left it. */
   to(value: number, then?: () => void, velocity = 0): void {
     this.arrive = then && Math.abs(value) >= this.rowWidth - 1 ? then : undefined;
-    // Shutting: critically damped and held to its own side. Opening keeps the little bounce.
+    // Shutting: critically damped and held to its own side. 
     this.closing = value === 0 ? Math.sign(this.x) : 0;
     this.spring.configure(value === 0 ? SHUT : OPEN);
     if (velocity) this.spring.fling(value, velocity); else this.spring.set(value);
