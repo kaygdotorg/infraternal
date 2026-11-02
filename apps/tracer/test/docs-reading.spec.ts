@@ -58,7 +58,7 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
       await page.waitForTimeout(220);
     };
     try {
-      await page.goto("/docs/keys/");
+      await page.goto("/docs/reference/keys/");
       if (size.touch) await asPhone(page);
       await page.evaluate(() => document.fonts.ready);
       await shot("keys-top");
@@ -106,7 +106,7 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
 
       // ---- quick facts: the panel on the page says what index.json says (the "?" preview reads the index) ----------------------
       const index = await (await page.request.get("/docs/index.json")).json() as { pages: { slug: string; headings: { id: string; facts?: string }[] }[] };
-      const fromIndex = index.pages.find((p) => p.slug === "keys")!.headings.filter((h) => h.facts);
+      const fromIndex = index.pages.find((p) => p.slug === "reference/keys")!.headings.filter((h) => h.facts);
       expect(fromIndex.map((h) => h.id)).toEqual(["browser-sign-in", "host-certificate"]);
       for (const h of fromIndex) {
         const shown = await page.evaluate((id) => { let n = document.getElementById(id)!.nextElementSibling; while (n && !n.matches(".callout-facts")) n = n.nextElementSibling; return n!.textContent!.replace(/^\s*Quick facts\s*/, "").replace(/\s+/g, " ").trim(); }, h.id);
@@ -182,7 +182,7 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
       }
 
       // ---- a quote, a table and code on the multiplexer page -------------------------------------------------------------------
-      await page.goto("/docs/multiplexer/");
+      await page.goto("/docs/terminal/multiplexer/");
       if (size.touch) await asPhone(page);
       await page.evaluate(() => document.fonts.ready);
       const quote = await page.evaluate(() => { const q = document.querySelector<HTMLElement>(".doc-body > blockquote")!; const s = getComputedStyle(q); return { left: q.getBoundingClientRect().left - document.querySelector(".doc-body > p")!.getBoundingClientRect().left, rule: s.borderLeftWidth, pad: s.paddingLeft }; });
@@ -243,9 +243,9 @@ test("the canvas reader: the contents follow the reader inside a window, and a c
     await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
     await expect(page.locator('section.cl[data-view="docs"]')).toBeAttached({ timeout: 15_000 });
     await page.keyboard.press("Control+Shift+K");
-    await page.keyboard.type("multiplexer");
+    await page.keyboard.type("infraternal multiplexer");
     await page.keyboard.press("Enter");
-    const window = '.ui-window[data-window-id="d-multiplexer"]';
+    const window = '.ui-window[data-window-id="d-terminal/multiplexer"]';
     await expect(page.locator(`${window} .dr-page h1`)).toHaveText("The Infraternal Multiplexer", { timeout: 10_000 });
     await page.evaluate(() => document.fonts.ready);
     await page.waitForTimeout(900);

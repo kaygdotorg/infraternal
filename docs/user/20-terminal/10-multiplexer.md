@@ -1,5 +1,6 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
-<!-- Role: the page behind the ? in the "switch to the Infraternal Multiplexer" notice (D315, #251). Published at /docs/multiplexer. Reading aids used here: GitHub-style alerts, [!WHY] reasoning blocks, [!FACTS] quick facts (the "?" preview), a quote, and [^n] citations (docs-extras.ts). -->
+<!-- Former slugs: multiplexer -->
+<!-- Role: the page behind the ? in the "switch to the Infraternal Multiplexer" notice (D315, #251). Published at /docs/terminal/multiplexer/. Reading aids used here: GitHub-style alerts, [!WHY] reasoning blocks, [!FACTS] quick facts (the "?" preview), a quote, and [^n] citations (docs-extras.ts). -->
 # The Infraternal Multiplexer
 
 Infraternal keeps every terminal alive on its host, so you rarely need tmux or Zellij on top of it.

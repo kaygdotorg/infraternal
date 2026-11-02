@@ -1,5 +1,6 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
-<!-- Role: the user-facing page "Keys and how long they last" (#302). Published at /docs/keys. It says what the code does today; where a decision is not built yet, a callout and the table say "planned". Reading aids used here: GitHub-style alerts, a [!WHY] reasoning block, [!FACTS] quick facts (the "?" preview), and [^n] citations (docs-extras.ts). -->
+<!-- Former slugs: keys -->
+<!-- Role: the user-facing page "Keys and how long they last" (#302). Published at /docs/reference/keys/. It says what the code does today; where a decision is not built yet, a callout and the table say "planned". Reading aids used here: GitHub-style alerts, a [!WHY] reasoning block, [!FACTS] quick facts (the "?" preview), and [^n] citations (docs-extras.ts). -->
 # Keys and how long they last
 
 This page lists the keys, codes and certificates Infraternal uses, when each one expires, and what happens when something is offline.

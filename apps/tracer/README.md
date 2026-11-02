@@ -132,7 +132,12 @@ measured results and the 50 MB throughput comparison are recorded on issue #50.
 
 ## User docs and their figures (#302)
 
-The pages in `docs/user/*.md` are built into `<dist>/docs` by `build.ts` (`docs-build.ts`); `bun run docs` writes the same tree alone.
+The pages under `docs/user/` are built into `<dist>/docs` by `build.ts` (`docs-build.ts`); `bun run docs` writes the same tree alone.
+A folder is a section (`20-terminal/`), its `index.md` is the section's overview and its other files are pages, so
+`20-terminal/10-multiplexer.md` is `/docs/terminal/multiplexer/` (the `NN-` only orders; folders nest one level only). A page that moved
+says where it used to be on one line, `<!-- Former slugs: multiplexer -->`, and the build writes a redirect page there. The build also
+fails when a string in the app source, a Settings catalog entry (`docs: { page, heading }`) or a link between pages names a page or heading
+that does not exist (`docs-anchors.ts`).
 Beyond plain Markdown a page may use GitHub-style alerts (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`), a folded
 reasoning block (`> [!WHY] Title`), a quick-facts block under a heading (`> [!FACTS]`, which the "?" preview reads from `index.json`),
 `[^name]` citations, quotes with a `> — Name` caption, and figures (`![Alt](figure:name "Caption")`, or `figure:name+clip`).
