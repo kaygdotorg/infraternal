@@ -204,9 +204,8 @@ async fn same_uid_local_status_reads_ca_lock_and_distinguishes_unavailable_socke
     assert!(query_ca_status(directory.state()).is_err());
 
     let mut control = Control::start(directory.state()).unwrap();
-    let source = std::sync::Arc::new(
-        infraternal_server::ca_memory::MemoryCaSource::unprovisioned(None),
-    );
+    let source =
+        std::sync::Arc::new(infraternal_server::ca_memory::MemoryCaSource::unprovisioned(None));
     let server = tokio::spawn(async move { control.requested(Some(source.as_ref())).await });
     let state = directory.state().to_owned();
     let status = tokio::task::spawn_blocking(move || query_ca_status(&state))

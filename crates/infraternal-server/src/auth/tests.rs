@@ -1205,7 +1205,10 @@ async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
         .await
         .unwrap();
     assert_eq!(response.status(), axum::http::StatusCode::OK);
-    let refreshed = response.headers()["set-cookie"].to_str().unwrap().to_owned();
+    let refreshed = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .to_owned();
     assert!(refreshed.starts_with("__Host-infraternal-session-"));
     assert!(refreshed.contains("Expires="));
     assert_eq!(response.headers()["cache-control"], "no-store");

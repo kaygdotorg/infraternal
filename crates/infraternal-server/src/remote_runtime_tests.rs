@@ -170,7 +170,9 @@ async fn expired_host_leaf_is_rejected_by_mtls_and_recovers_with_registered_key_
 
     let (server, _, root, material) = identities();
     let signer = Arc::new(crate::ca_memory::MemoryCaSource::cold_start(root.clone()));
-    signer.unlock_from(&RecoveryUnlock(material.clone())).unwrap();
+    signer
+        .unlock_from(&RecoveryUnlock(material.clone()))
+        .unwrap();
     let source: Arc<dyn crate::ca::CaKeySource> = signer;
     let source_for_hosts = source.clone();
     let (_store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
@@ -228,11 +230,8 @@ async fn expired_host_leaf_is_rejected_by_mtls_and_recovers_with_registered_key_
     let ordinary = remote_tls::client_config(&expired, std::slice::from_ref(&root)).unwrap();
     if let Ok(connection) = remote_tls::dial(address, "localhost", &ordinary).await {
         let mut byte = [0];
-        let result = tokio::time::timeout(
-            Duration::from_secs(1),
-            connection.channel.read(&mut byte),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(1), connection.channel.read(&mut byte)).await;
         assert!(matches!(result, Ok(Err(_)) | Ok(Ok(0))));
     }
     assert!(!hosts.online(host).await);
@@ -245,24 +244,27 @@ async fn expired_host_leaf_is_rejected_by_mtls_and_recovers_with_registered_key_
         .try_into()
         .unwrap();
     let digest = infraternal_plugin_remote::remote_recovery::csr_digest(&csr_der);
-    let operation = infraternal_plugin_remote::remote_recovery::request_id(host, &predecessor, &digest);
+    let operation =
+        infraternal_plugin_remote::remote_recovery::request_id(host, &predecessor, &digest);
     let recovery_tls = remote_tls::recovery_client_config(std::slice::from_ref(&root)).unwrap();
     let recovery = remote_tls::dial_recovery(address, "localhost", &recovery_tls)
         .await
         .unwrap();
-    let challenge_request = infraternal_plugin_remote::remote_recovery::RecoveryRequest::Challenge {
-        host_id: host,
-        predecessor_fingerprint: predecessor,
-        request_id: operation,
-        csr_digest: digest,
-    };
+    let challenge_request =
+        infraternal_plugin_remote::remote_recovery::RecoveryRequest::Challenge {
+            host_id: host,
+            predecessor_fingerprint: predecessor,
+            request_id: operation,
+            csr_digest: digest,
+        };
     write_recovery_request(&recovery.channel, &challenge_request).await;
     let response = infraternal_plugin_remote::remote_recovery::read_response(&recovery.channel)
         .await
         .unwrap();
     let challenge = match response {
         infraternal_plugin_remote::remote_recovery::RecoveryResponse::Challenge {
-            challenge, ..
+            challenge,
+            ..
         } => challenge,
         _ => panic!("eligible host did not receive a proof challenge"),
     };
@@ -292,7 +294,10 @@ async fn expired_host_leaf_is_rejected_by_mtls_and_recovers_with_registered_key_
     let recovered = renewal.current().unwrap();
     assert!(recovered.key.public_eq(&expired.key));
     let published = publisher.0.lock().unwrap().clone().unwrap();
-    assert_eq!(published.to_der().unwrap(), recovered.certificate.to_der().unwrap());
+    assert_eq!(
+        published.to_der().unwrap(),
+        recovered.certificate.to_der().unwrap()
+    );
     assert!(recovered.certificate.not_after() > expired.certificate.not_after());
 
     // A duplicate start request is not proof of the old key. Even after a
@@ -301,12 +306,15 @@ async fn expired_host_leaf_is_rejected_by_mtls_and_recovers_with_registered_key_
         .await
         .unwrap();
     write_recovery_request(&retry.channel, &challenge_request).await;
-    assert!(matches!(
-        infraternal_plugin_remote::remote_recovery::read_response(&retry.channel)
-            .await
-            .unwrap(),
-        infraternal_plugin_remote::remote_recovery::RecoveryResponse::Challenge { .. }
-    ), "a recovery start must not disclose an issued leaf without proof of possession");
+    assert!(
+        matches!(
+            infraternal_plugin_remote::remote_recovery::read_response(&retry.channel)
+                .await
+                .unwrap(),
+            infraternal_plugin_remote::remote_recovery::RecoveryResponse::Challenge { .. }
+        ),
+        "a recovery start must not disclose an issued leaf without proof of possession"
+    );
 
     let altered_replay = infraternal_plugin_remote::remote_recovery::RecoveryRequest::Prove {
         host_id: host,
@@ -337,12 +345,16 @@ async fn expired_host_leaf_is_rejected_by_mtls_and_recovers_with_registered_key_
     )
     .await
     .unwrap();
-    assert_eq!(repeated.to_der().unwrap(), recovered.certificate.to_der().unwrap());
-    let certificates: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_certificates WHERE host_id=?")
-        .bind(host.as_bytes().as_slice())
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    assert_eq!(
+        repeated.to_der().unwrap(),
+        recovered.certificate.to_der().unwrap()
+    );
+    let certificates: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM remote_certificates WHERE host_id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(certificates, 2);
     sqlx::query("UPDATE remote_hosts SET revoked_at=? WHERE id=?")
         .bind(now + 10)

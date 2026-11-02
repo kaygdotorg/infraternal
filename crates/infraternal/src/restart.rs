@@ -147,20 +147,20 @@ impl Control {
                 continue;
             };
             let ControlRequest::Restart { binary, reload } = request else {
-                let status = infraternal_server::ca_status::from_source(
-                    source,
-                    Some(&self.clock_health),
-                )
-                .unwrap_or_else(|_| infraternal_server::ca_status::CaStatus::unavailable());
+                let status =
+                    infraternal_server::ca_status::from_source(source, Some(&self.clock_health))
+                        .unwrap_or_else(|_| infraternal_server::ca_status::CaStatus::unavailable());
                 let result = serde_json::to_vec(&status).map_err(io::Error::other);
                 let sent = match result {
                     Ok(payload) if payload.len() <= 16 * 1024 => {
                         match u16::try_from(payload.len()) {
-                            Ok(length) => async {
-                                socket.write_u16(length).await?;
-                                socket.write_all(&payload).await
+                            Ok(length) => {
+                                async {
+                                    socket.write_u16(length).await?;
+                                    socket.write_all(&payload).await
+                                }
+                                .await
                             }
-                            .await,
                             Err(_) => Err(io::Error::other("status response too large")),
                         }
                     }
@@ -258,16 +258,11 @@ async fn read_request(socket: &mut UnixStream) -> io::Result<ControlRequest> {
 ///
 /// # Errors
 /// Returns unavailable socket, peer-UID, framing, timeout or decode failures to the caller.
-pub(crate) fn query_ca_status(
-    data: &Path,
-) -> io::Result<infraternal_server::ca_status::CaStatus> {
+pub(crate) fn query_ca_status(data: &Path) -> io::Result<infraternal_server::ca_status::CaStatus> {
     let mut socket = std::os::unix::net::UnixStream::connect(data.join("restart/control.sock"))?;
     socket.set_read_timeout(Some(Duration::from_secs(2)))?;
     socket.set_write_timeout(Some(Duration::from_secs(2)))?;
-    let peer = nix::sys::socket::getsockopt(
-        &socket,
-        nix::sys::socket::sockopt::PeerCredentials,
-    )?;
+    let peer = nix::sys::socket::getsockopt(&socket, nix::sys::socket::sockopt::PeerCredentials)?;
     if peer.uid() != nix::unistd::Uid::effective().as_raw() {
         return Err(io::ErrorKind::PermissionDenied.into());
     }

@@ -170,12 +170,7 @@ pub async fn exchange(
             {
                 return Err(denied());
             }
-            (
-                challenge,
-                issuer_fingerprint,
-                issuer_generation,
-                not_after,
-            )
+            (challenge, issuer_fingerprint, issuer_generation, not_after)
         }
         RecoveryResponse::Denied => return Err(denied()),
     };
@@ -192,9 +187,12 @@ pub async fn exchange(
         issuer_generation,
         not_after,
     );
-    let mut signer = openssl::sign::Signer::new_without_digest(&identity.key).map_err(|_| denied())?;
+    let mut signer =
+        openssl::sign::Signer::new_without_digest(&identity.key).map_err(|_| denied())?;
     // Ed25519 consumes the complete transcript in one operation; streaming updates are unsupported.
-    let signature = signer.sign_oneshot_to_vec(&transcript).map_err(|_| denied())?;
+    let signature = signer
+        .sign_oneshot_to_vec(&transcript)
+        .map_err(|_| denied())?;
     write_request(
         &connection.channel,
         &RecoveryRequest::Prove {
@@ -208,7 +206,9 @@ pub async fn exchange(
     )
     .await?;
     match read_response(&connection.channel).await? {
-        RecoveryResponse::Certificate { certificate_der } => canonical_certificate(&certificate_der),
+        RecoveryResponse::Certificate { certificate_der } => {
+            canonical_certificate(&certificate_der)
+        }
         RecoveryResponse::Challenge { .. } | RecoveryResponse::Denied => Err(denied()),
     }
 }
@@ -349,17 +349,45 @@ mod tests {
         assert_ne!(request, request_id(host, &[3; 32], &csr));
         assert_ne!(request, request_id(host, &old, &[3; 32]));
 
-        let base = transcript(host, &old, &request, &csr, &[4; 32], &[5; 32], &[6; 32], 7, 8);
+        let base = transcript(
+            host, &old, &request, &csr, &[4; 32], &[5; 32], &[6; 32], 7, 8,
+        );
         for changed in [
-            transcript(Uuid::from_u128(43), &old, &request, &csr, &[4; 32], &[5; 32], &[6; 32], 7, 8),
-            transcript(host, &[3; 32], &request, &csr, &[4; 32], &[5; 32], &[6; 32], 7, 8),
-            transcript(host, &old, &[3; 32], &csr, &[4; 32], &[5; 32], &[6; 32], 7, 8),
-            transcript(host, &old, &request, &[3; 32], &[4; 32], &[5; 32], &[6; 32], 7, 8),
-            transcript(host, &old, &request, &csr, &[3; 32], &[5; 32], &[6; 32], 7, 8),
-            transcript(host, &old, &request, &csr, &[4; 32], &[3; 32], &[6; 32], 7, 8),
-            transcript(host, &old, &request, &csr, &[4; 32], &[5; 32], &[3; 32], 7, 8),
-            transcript(host, &old, &request, &csr, &[4; 32], &[5; 32], &[6; 32], 8, 8),
-            transcript(host, &old, &request, &csr, &[4; 32], &[5; 32], &[6; 32], 7, 9),
+            transcript(
+                Uuid::from_u128(43),
+                &old,
+                &request,
+                &csr,
+                &[4; 32],
+                &[5; 32],
+                &[6; 32],
+                7,
+                8,
+            ),
+            transcript(
+                host, &[3; 32], &request, &csr, &[4; 32], &[5; 32], &[6; 32], 7, 8,
+            ),
+            transcript(
+                host, &old, &[3; 32], &csr, &[4; 32], &[5; 32], &[6; 32], 7, 8,
+            ),
+            transcript(
+                host, &old, &request, &[3; 32], &[4; 32], &[5; 32], &[6; 32], 7, 8,
+            ),
+            transcript(
+                host, &old, &request, &csr, &[3; 32], &[5; 32], &[6; 32], 7, 8,
+            ),
+            transcript(
+                host, &old, &request, &csr, &[4; 32], &[3; 32], &[6; 32], 7, 8,
+            ),
+            transcript(
+                host, &old, &request, &csr, &[4; 32], &[5; 32], &[3; 32], 7, 8,
+            ),
+            transcript(
+                host, &old, &request, &csr, &[4; 32], &[5; 32], &[6; 32], 8, 8,
+            ),
+            transcript(
+                host, &old, &request, &csr, &[4; 32], &[5; 32], &[6; 32], 7, 9,
+            ),
         ] {
             assert_ne!(base, changed);
         }
@@ -404,9 +432,7 @@ mod tests {
 
         let (channel, mut peer) = tokio::io::duplex(64);
         let channel = Duplex(tokio::sync::Mutex::new(channel));
-        let length = u32::try_from(MAX_FRAME_BYTES + 1)
-            .unwrap()
-            .to_be_bytes();
+        let length = u32::try_from(MAX_FRAME_BYTES + 1).unwrap().to_be_bytes();
         tokio::io::AsyncWriteExt::write_all(&mut peer, &length)
             .await
             .unwrap();

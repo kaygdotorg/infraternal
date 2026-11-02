@@ -133,7 +133,8 @@ async fn connect(
     let mut recovery_attempted = false;
     let connected = loop {
         let credentials = refreshed.as_ref().unwrap_or(&identity.identity);
-        endpoint.set_default_client_config(remote_quic::client_config(credentials, &identity.roots)?);
+        endpoint
+            .set_default_client_config(remote_quic::client_config(credentials, &identity.roots)?);
         let attempt = if kind == ServerLinkKind::Mesh {
             // Mutual TLS keeps the enrolled SAN and identity unchanged. Application
             // proof below completes before any Hello can replace the server actor.

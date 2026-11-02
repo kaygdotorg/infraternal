@@ -282,7 +282,9 @@ async fn run_inner(
                     }
                     // A denial may mean the server clock still considers this
                     // leaf current, so a refused recovery never blocks mTLS.
-                    let _ = renewal.recover(identity.endpoint, &identity.server_name).await;
+                    let _ = renewal
+                        .recover(identity.endpoint, &identity.server_name)
+                        .await;
                 }
             } else {
                 trace_attempt(
@@ -338,7 +340,9 @@ async fn run_inner(
                 .is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied)
                 && let Some(renewal) = renewal
             {
-                let _ = renewal.recover(identity.endpoint, &identity.server_name).await;
+                let _ = renewal
+                    .recover(identity.endpoint, &identity.server_name)
+                    .await;
             }
             result
         }

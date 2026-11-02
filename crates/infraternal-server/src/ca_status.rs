@@ -87,14 +87,11 @@ pub fn from_roots(
 ) -> Result<CaStatus, crate::ca::CaError> {
     if roots.len() > MAX_TRUST_ROOTS
         || roots.iter().any(|(generation, _)| *generation == 0)
-        || roots
-            .iter()
-            .enumerate()
-            .any(|(index, (generation, _))| {
-                roots[..index]
-                    .iter()
-                    .any(|(earlier, _)| earlier == generation)
-            })
+        || roots.iter().enumerate().any(|(index, (generation, _))| {
+            roots[..index]
+                .iter()
+                .any(|(earlier, _)| earlier == generation)
+        })
     {
         return Err(crate::ca::CaError);
     }
@@ -178,7 +175,8 @@ mod tests {
     fn root(not_after: i64) -> X509 {
         let key = PKey::generate_ed25519().unwrap();
         let mut name = X509NameBuilder::new().unwrap();
-        name.append_entry_by_text("CN", "public status test root").unwrap();
+        name.append_entry_by_text("CN", "public status test root")
+            .unwrap();
         let name = name.build();
         let mut certificate = X509::builder().unwrap();
         certificate.set_version(2).unwrap();

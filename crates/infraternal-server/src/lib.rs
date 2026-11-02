@@ -11,8 +11,6 @@ pub mod ca_administration;
 #[cfg(feature = "remote")]
 pub mod ca_bootstrap;
 #[cfg(feature = "remote")]
-pub mod ca_status;
-#[cfg(feature = "remote")]
 pub mod ca_copies;
 #[cfg(feature = "remote")]
 pub mod ca_handoff;
@@ -25,11 +23,13 @@ pub mod ca_membership;
 #[cfg(feature = "remote")]
 pub mod ca_memory;
 #[cfg(feature = "remote")]
-pub mod clock_health;
+pub mod ca_status;
 #[cfg(feature = "canvas")]
 pub mod canvas_store;
 #[cfg(feature = "cli-plugin")]
 pub mod cli;
+#[cfg(feature = "remote")]
+pub mod clock_health;
 mod completion;
 #[cfg(feature = "remote")]
 pub mod csr;
@@ -86,9 +86,9 @@ mod remote_link;
 #[cfg(all(test, feature = "mesh", feature = "remote"))]
 mod remote_mesh_revocation_tests;
 #[cfg(feature = "remote")]
-mod remote_renewal;
-#[cfg(feature = "remote")]
 mod remote_recovery;
+#[cfg(feature = "remote")]
+mod remote_renewal;
 #[cfg(feature = "remote")]
 mod remote_runtime;
 #[cfg(feature = "remote")]

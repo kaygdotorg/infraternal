@@ -97,7 +97,12 @@ async fn ca_http_status_includes_public_root_expiry_and_unknown_clock_state() {
     let roots = status["roots"].as_array().expect("public root metadata");
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0]["generation"], 1);
-    assert!(roots[0]["fingerprint"].as_str().unwrap().starts_with("sha256:"));
+    assert!(
+        roots[0]["fingerprint"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
     assert!(roots[0]["not_after"].as_str().is_some());
     assert_eq!(roots[0]["remaining_seconds"], Value::Null);
     assert_eq!(roots[0]["warning_level"], "unknown");
@@ -414,7 +419,10 @@ async fn ca_status_distinguishes_initial_setup_from_locked_retained_trust() {
                 .unwrap();
         assert_eq!(status["locked"], true);
         assert_eq!(status["initialized"], initialized);
-        assert_eq!(status["roots"].as_array().unwrap().len(), usize::from(initialized));
+        assert_eq!(
+            status["roots"].as_array().unwrap().len(),
+            usize::from(initialized)
+        );
     }
 }
 

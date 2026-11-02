@@ -709,9 +709,7 @@ fn status_result(
 }
 
 #[cfg(feature = "remote")]
-fn ca_status_display(
-    status: &infraternal_server::ca_status::CaStatus,
-) -> (String, String) {
+fn ca_status_display(status: &infraternal_server::ca_status::CaStatus) -> (String, String) {
     if !status.available {
         return (
             "Unavailable".to_owned(),
@@ -770,13 +768,13 @@ fn ca_status_display(
         "Unknown"
     } else {
         match warning {
-        "expired" => "Expired",
-        "7d" => "Expires within 7 days",
-        "30d" => "Expires within 30 days",
-        "90d" => "Expires within 90 days",
-        "365d" => "Expires within 365 days",
-        "none" => "Ready",
-        _ => "Unknown",
+            "expired" => "Expired",
+            "7d" => "Expires within 7 days",
+            "30d" => "Expires within 30 days",
+            "90d" => "Expires within 90 days",
+            "365d" => "Expires within 365 days",
+            "none" => "Ready",
+            _ => "Unknown",
         }
     };
     (

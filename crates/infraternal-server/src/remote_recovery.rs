@@ -49,8 +49,13 @@ struct Bucket {
 impl Limiter {
     fn admit(&self, source: IpAddr, host: Uuid) -> bool {
         let now = Instant::now();
-        bucket_admits(&self.sources, source, now, MAX_SOURCE_BUCKETS, MAX_SOURCE_ATTEMPTS)
-            && bucket_admits(&self.hosts, host, now, MAX_HOST_BUCKETS, MAX_HOST_ATTEMPTS)
+        bucket_admits(
+            &self.sources,
+            source,
+            now,
+            MAX_SOURCE_BUCKETS,
+            MAX_SOURCE_ATTEMPTS,
+        ) && bucket_admits(&self.hosts, host, now, MAX_HOST_BUCKETS, MAX_HOST_ATTEMPTS)
     }
 }
 
@@ -119,13 +124,13 @@ impl Service {
     /// Consume at most one challenge and one proof, then retire the restricted TLS channel.
     pub(crate) async fn serve(&self, channel: TcpTls, source: IpAddr) {
         let exchange = async {
-            let request = infraternal_plugin_remote::remote_recovery::read_request(&channel)
-                .await?;
+            let request =
+                infraternal_plugin_remote::remote_recovery::read_request(&channel).await?;
             let response = self.process(source, request).await;
             infraternal_plugin_remote::remote_recovery::write_response(&channel, &response).await?;
             if matches!(response, RecoveryResponse::Challenge { .. }) {
-                let request = infraternal_plugin_remote::remote_recovery::read_request(&channel)
-                    .await?;
+                let request =
+                    infraternal_plugin_remote::remote_recovery::read_request(&channel).await?;
                 let response = self.process(source, request).await;
                 infraternal_plugin_remote::remote_recovery::write_response(&channel, &response)
                     .await?;
@@ -138,8 +143,9 @@ impl Service {
 
     async fn process(&self, source: IpAddr, request: RecoveryRequest) -> RecoveryResponse {
         let host = match &request {
-            RecoveryRequest::Challenge { host_id, .. }
-            | RecoveryRequest::Prove { host_id, .. } => *host_id,
+            RecoveryRequest::Challenge { host_id, .. } | RecoveryRequest::Prove { host_id, .. } => {
+                *host_id
+            }
         };
         if !self.limiter.admit(source, host) {
             return RecoveryResponse::Denied;
@@ -261,7 +267,18 @@ impl Service {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|_| Denied)?;
-        if let Some((stored_request, stored_digest, stored_nonce, stored_issuer, generation, stored_not_after, expires, certificate, certificate_fingerprint)) = existing {
+        if let Some((
+            stored_request,
+            stored_digest,
+            stored_nonce,
+            stored_issuer,
+            generation,
+            stored_not_after,
+            expires,
+            certificate,
+            certificate_fingerprint,
+        )) = existing
+        {
             if certificate.is_some() {
                 if stored_request.as_slice() == request.as_slice()
                     && stored_digest.as_slice() == digest.as_slice()
@@ -282,14 +299,10 @@ impl Service {
                     }
                     // A start frame never discloses a cached leaf. The enrolled
                     // host must repeat the proof over the durable transcript.
-                    let challenge: [u8; 32] = stored_nonce
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| Denied)?;
-                    let issuer_fingerprint: [u8; 32] = stored_issuer
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| Denied)?;
+                    let challenge: [u8; 32] =
+                        stored_nonce.as_slice().try_into().map_err(|_| Denied)?;
+                    let issuer_fingerprint: [u8; 32] =
+                        stored_issuer.as_slice().try_into().map_err(|_| Denied)?;
                     let issuer_generation = u64::try_from(generation).map_err(|_| Denied)?;
                     return Ok(RecoveryResponse::Challenge {
                         challenge,
@@ -410,7 +423,18 @@ impl Service {
         .fetch_optional(pool)
         .await
         .map_err(|_| Denied)?;
-        let Some((digest, stored_challenge, public_key_fingerprint, issuer_fingerprint, generation, not_after, expires_at, certificate, certificate_fingerprint)) = operation else {
+        let Some((
+            digest,
+            stored_challenge,
+            public_key_fingerprint,
+            issuer_fingerprint,
+            generation,
+            not_after,
+            expires_at,
+            certificate,
+            certificate_fingerprint,
+        )) = operation
+        else {
             return Err(Denied);
         };
         let actual_digest = csr_digest(&csr_der);
@@ -454,8 +478,8 @@ impl Service {
             generation,
             not_after,
         );
-        let public_key = PKey::public_key_from_raw_bytes(&public_key, Id::ED25519)
-            .map_err(|_| Denied)?;
+        let public_key =
+            PKey::public_key_from_raw_bytes(&public_key, Id::ED25519).map_err(|_| Denied)?;
         let mut verifier = Verifier::new_without_digest(&public_key).map_err(|_| Denied)?;
         // Ed25519 verifies the complete transcript in one operation; streaming updates are unsupported.
         if !verifier
@@ -488,7 +512,10 @@ impl Service {
         if !eligible(issued_at, not_after) {
             return Err(Denied);
         }
-        let signed = issuer.authority.sign_host(host, &csr, issued_at).map_err(|_| Denied)?;
+        let signed = issuer
+            .authority
+            .sign_host(host, &csr, issued_at)
+            .map_err(|_| Denied)?;
         let current_issuer = active_issuer(self.source.as_ref())?;
         if current_issuer.fingerprint != issuer.fingerprint
             || current_issuer.generation != issuer.generation
@@ -536,7 +563,9 @@ impl Service {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|_| Denied)?;
-        let Some((digest, stored_challenge, expires_at, certificate, certificate_fingerprint)) = operation else {
+        let Some((digest, stored_challenge, expires_at, certificate, certificate_fingerprint)) =
+            operation
+        else {
             return Err(Denied);
         };
         let actual_digest = csr_digest(csr_der);
@@ -657,9 +686,9 @@ fn active_issuer(source: &dyn CaKeySource) -> Result<ActiveIssuer, Denied> {
         .into_iter()
         .find_map(|(generation, root)| {
             (generation > 0
-                && root.digest(MessageDigest::sha256()).is_ok_and(|digest| {
-                    digest.as_ref() == fingerprint.as_slice()
-                }))
+                && root
+                    .digest(MessageDigest::sha256())
+                    .is_ok_and(|digest| digest.as_ref() == fingerprint.as_slice()))
             .then_some(generation)
         })
         .ok_or(Denied)?;

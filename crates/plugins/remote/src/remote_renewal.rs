@@ -142,15 +142,14 @@ impl RenewalIdentity {
     /// # Errors
     /// Refuses unavailable or denied recovery, invalid certificate metadata, changed identity,
     /// transport failure, or failed durable publication.
-    pub async fn recover(&self, address: std::net::SocketAddr, server_name: &str) -> io::Result<()> {
+    pub async fn recover(
+        &self,
+        address: std::net::SocketAddr,
+        server_name: &str,
+    ) -> io::Result<()> {
         let current = self.current()?;
-        let certificate = crate::remote_recovery::exchange(
-            address,
-            server_name,
-            &current,
-            &self.roots,
-        )
-        .await?;
+        let certificate =
+            crate::remote_recovery::exchange(address, server_name, &current, &self.roots).await?;
         let verify_at = epoch_seconds(certificate.not_before())?;
         let mut identity = self.identity.try_write().map_err(|error| match error {
             std::sync::TryLockError::WouldBlock => io::Error::from(io::ErrorKind::WouldBlock),
