@@ -1,6 +1,14 @@
 //! Two-process operator enrollment and browser-to-PTY proof with memory-only CA fixture keys, #78.
 
 use super::*;
+use axum::{
+    Router,
+    extract::{ConnectInfo, Request, State, WebSocketUpgrade, ws},
+    http::{HeaderValue, StatusCode, header},
+    response::Response,
+    routing::get,
+};
+use axum_server::{accept::Accept, tls_openssl::OpenSSLAcceptor};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use futures_util::{SinkExt, StreamExt};
 use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
@@ -11,17 +19,218 @@ use openssl::{
 };
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::{
+    future::Future,
     io::Write,
+    pin::Pin,
     process::{Child, Command, Stdio},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Instant,
 };
+use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{Message, client::IntoClientRequest},
 };
+use tower::ServiceExt;
 
 type Browser = WebSocketStream<tokio_openssl::SslStream<tokio::net::TcpStream>>;
+type NegotiatedAlpn = Arc<Mutex<Vec<Option<Vec<u8>>>>>;
+
+/// Records protocols selected by the test TLS terminator for the real agent sockets.
+#[derive(Clone)]
+struct RecordingProxyAcceptor {
+    inner: OpenSSLAcceptor<axum_server::accept::NoDelayAcceptor>,
+    negotiated: NegotiatedAlpn,
+}
+
+impl<S> Accept<TcpStream, S> for RecordingProxyAcceptor
+where
+    S: Send + 'static,
+{
+    type Stream = tokio_openssl::SslStream<TcpStream>;
+    type Service = S;
+    type Future = Pin<Box<dyn Future<Output = std::io::Result<(Self::Stream, S)>> + Send>>;
+
+    fn accept(&self, stream: TcpStream, service: S) -> Self::Future {
+        let accepted = self.inner.accept(stream, service);
+        let negotiated = self.negotiated.clone();
+        Box::pin(async move {
+            let (stream, service) = accepted.await?;
+            negotiated
+                .lock()
+                .unwrap()
+                .push(stream.ssl().selected_alpn_protocol().map(<[u8]>::to_vec));
+            Ok((stream, service))
+        })
+    }
+}
+
+#[derive(Clone)]
+struct TlsProxyState {
+    app: Router,
+    backend: SocketAddr,
+}
+
+/// Accept both HTTP/2 and HTTP/1.1 at a TLS edge, then forward to the plain app listener.
+fn tls_proxy(app: Router, backend: SocketAddr) -> Router {
+    Router::new()
+        .route("/remote/agent", get(proxy_websocket))
+        .route("/v1/ws", get(proxy_websocket))
+        .fallback(proxy_http)
+        .with_state(TlsProxyState { app, backend })
+}
+
+async fn proxy_http(
+    State(proxy): State<TlsProxyState>,
+    ConnectInfo(client): ConnectInfo<SocketAddr>,
+    mut request: Request,
+) -> Response {
+    request.headers_mut().insert(
+        "x-forwarded-for",
+        HeaderValue::from_str(&client.ip().to_string()).unwrap(),
+    );
+    request
+        .headers_mut()
+        .insert("x-forwarded-proto", HeaderValue::from_static("https"));
+    // The app sees the trusted local proxy as its TCP peer, as it does behind a TLS terminator.
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 443))));
+    proxy
+        .app
+        .oneshot(request)
+        .await
+        .unwrap_or_else(|never| match never {})
+}
+
+async fn proxy_websocket(
+    State(proxy): State<TlsProxyState>,
+    ConnectInfo(client): ConnectInfo<SocketAddr>,
+    upgrade: WebSocketUpgrade,
+    request: Request,
+) -> Response {
+    let path = request
+        .uri()
+        .path_and_query()
+        .map_or("/", axum::http::uri::PathAndQuery::as_str);
+    let mut upstream_request = format!("ws://{}{path}", proxy.backend)
+        .into_client_request()
+        .unwrap();
+    for name in [header::ORIGIN, header::COOKIE] {
+        if let Some(value) = request.headers().get(&name) {
+            upstream_request.headers_mut().insert(name, value.clone());
+        }
+    }
+    upstream_request.headers_mut().insert(
+        "x-forwarded-for",
+        HeaderValue::from_str(&client.ip().to_string()).unwrap(),
+    );
+    upstream_request
+        .headers_mut()
+        .insert("x-forwarded-proto", HeaderValue::from_static("https"));
+    upgrade.on_upgrade(move |downstream| async move {
+        let Ok((upstream, _)) = tokio_tungstenite::connect_async(upstream_request).await else {
+            return;
+        };
+        bridge_proxy_websocket(downstream, upstream).await;
+    })
+}
+
+async fn bridge_proxy_websocket(
+    mut downstream: ws::WebSocket,
+    mut upstream: WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
+) {
+    loop {
+        tokio::select! {
+            message = downstream.recv() => {
+                let Some(Ok(message)) = message else {
+                    let _ = upstream.close(None).await;
+                    return;
+                };
+                let message = proxy_message_to_upstream(message);
+                if upstream.send(message).await.is_err() {
+                    return;
+                }
+            }
+            message = upstream.next() => {
+                let Some(Ok(message)) = message else {
+                    let _ = downstream.close().await;
+                    return;
+                };
+                let Some(message) = proxy_message_to_downstream(message) else {
+                    continue;
+                };
+                if downstream.send(message).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn proxy_message_to_upstream(message: ws::Message) -> Message {
+    match message {
+        ws::Message::Text(text) => Message::Text(text.as_str().to_owned().into()),
+        ws::Message::Binary(bytes) => Message::Binary(bytes),
+        ws::Message::Ping(bytes) => Message::Ping(bytes),
+        ws::Message::Pong(bytes) => Message::Pong(bytes),
+        ws::Message::Close(frame) => Message::Close(frame.map(|frame| {
+            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                code: frame.code.into(),
+                reason: frame.reason.as_str().to_owned().into(),
+            }
+        })),
+    }
+}
+
+fn proxy_message_to_downstream(message: Message) -> Option<ws::Message> {
+    Some(match message {
+        Message::Text(text) => ws::Message::Text(text.as_str().to_owned().into()),
+        Message::Binary(bytes) => ws::Message::Binary(bytes),
+        Message::Ping(bytes) => ws::Message::Ping(bytes),
+        Message::Pong(bytes) => ws::Message::Pong(bytes),
+        Message::Close(frame) => ws::Message::Close(frame.map(|frame| ws::CloseFrame {
+            code: frame.code.into(),
+            reason: frame.reason.as_str().to_owned().into(),
+        })),
+        Message::Frame(_) => return None,
+    })
+}
+
+/// Prove the front listener negotiates HTTP/2 and reaches its backend over the forwarded route.
+async fn assert_tls_proxy_http2(address: SocketAddr, root: &X509) {
+    let mut connector = SslConnector::builder(SslMethod::tls_client()).unwrap();
+    connector.set_verify(SslVerifyMode::PEER);
+    let mut trust = X509StoreBuilder::new().unwrap();
+    trust.add_cert(root.clone()).unwrap();
+    connector.set_cert_store(trust.build());
+    connector.set_alpn_protos(b"\x02h2").unwrap();
+    let ssl = connector
+        .build()
+        .configure()
+        .unwrap()
+        .into_ssl("localhost")
+        .unwrap();
+    let mut stream =
+        tokio_openssl::SslStream::new(ssl, TcpStream::connect(address).await.unwrap()).unwrap();
+    Pin::new(&mut stream).connect().await.unwrap();
+    assert_eq!(
+        stream.ssl().selected_alpn_protocol(),
+        Some(b"h2".as_slice())
+    );
+    let (mut sender, connection) = h2::client::handshake(stream).await.unwrap();
+    let connection = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = axum::http::Request::builder()
+        .method("GET")
+        .uri(format!("https://localhost:{}/healthz", address.port()))
+        .body(())
+        .unwrap();
+    let (response, _) = sender.send_request(request, false).unwrap();
+    assert_eq!(response.await.unwrap().status(), StatusCode::OK);
+    connection.abort();
+}
 
 /// Copied process fixtures can run on the measurement host without a checkout.
 fn fixture_repository() -> PathBuf {
@@ -220,11 +429,16 @@ struct Fixture {
     cookie: String,
     address: SocketAddr,
     server: tokio::task::JoinHandle<std::io::Result<()>>,
+    proxy_backend: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    proxy_alpn: Option<NegotiatedAlpn>,
     listeners: Option<crate::remote_runtime::RemoteListeners>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.server.abort();
+        if let Some(backend) = &self.proxy_backend {
+            backend.abort();
+        }
     }
 }
 
@@ -247,6 +461,33 @@ async fn fixture_at_with_lock(
     endpoint: SocketAddr,
     cold_locked: bool,
 ) -> Fixture {
+    fixture_at_with_options(directory, address, endpoint, cold_locked, false).await
+}
+
+async fn fixture_at_through_tls_proxy(
+    directory: &Directory,
+    address: SocketAddr,
+    endpoint: SocketAddr,
+) -> Fixture {
+    fixture_at_with_options(directory, address, endpoint, false, true).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn fixture_at_with_options(
+    directory: &Directory,
+    address: SocketAddr,
+    endpoint: SocketAddr,
+    cold_locked: bool,
+    behind_proxy: bool,
+) -> Fixture {
+    let backend_listener = if behind_proxy {
+        Some(TcpListener::bind("127.0.0.1:0").await.unwrap())
+    } else {
+        None
+    };
+    let listen = backend_listener
+        .as_ref()
+        .map_or(address, |listener| listener.local_addr().unwrap());
     let server_data = directory.0.join("server");
     let pool = open_database(&server_data).await.unwrap();
     sqlx::migrate!("./migrations").run(&pool).await.unwrap();
@@ -269,17 +510,21 @@ async fn fixture_at_with_lock(
         format!("https://localhost:{}", address.port())
     };
     let config = ServerConfig {
-        listen: address,
+        listen,
         data_dir: server_data,
         public_origin: origin,
         web_root: std::env::var_os("INFRATERNAL_REMOTE_BROWSER_PROOF")
             .map(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/tracer/dist")),
-        tls: Some(TlsFiles {
+        tls: (!behind_proxy).then(|| TlsFiles {
             certificate: "unused".into(),
             private_key: "unused".into(),
         }),
-        behind_proxy: false,
-        trusted_proxies: vec![],
+        behind_proxy,
+        trusted_proxies: if behind_proxy {
+            vec!["127.0.0.1".parse().unwrap()]
+        } else {
+            vec![]
+        },
     };
     let http_tls = axum_server::tls_openssl::OpenSSLConfig::from_der(
         &identity.certificate.to_der().unwrap(),
@@ -317,14 +562,44 @@ async fn fixture_at_with_lock(
     if std::env::var_os("INFRATERNAL_REMOTE_FORCE_TCP").is_some() {
         listeners.as_ref().unwrap().refuse_quic();
     }
-    let listener = std::net::TcpListener::bind(address).unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let server = tokio::spawn(
-        axum_server::from_tcp(listener)
-            .unwrap()
-            .acceptor(crate::server_tls::acceptor(http_tls))
-            .serve(app.into_make_service_with_connect_info::<SocketAddr>()),
-    );
+    let (server, proxy_backend, proxy_alpn) = if let Some(backend_listener) = backend_listener {
+        let backend_address = backend_listener.local_addr().unwrap();
+        let backend_app = app.clone();
+        let backend = tokio::spawn(async move {
+            axum::serve(
+                backend_listener,
+                backend_app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+        });
+        let listener = std::net::TcpListener::bind(address).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let negotiated = Arc::new(Mutex::new(Vec::new()));
+        let proxy_server = tokio::spawn(
+            axum_server::from_tcp(listener)
+                .unwrap()
+                .acceptor(RecordingProxyAcceptor {
+                    inner: OpenSSLAcceptor::new(http_tls)
+                        .acceptor(axum_server::accept::NoDelayAcceptor::new()),
+                    negotiated: negotiated.clone(),
+                })
+                .serve(
+                    tls_proxy(app, backend_address)
+                        .into_make_service_with_connect_info::<SocketAddr>(),
+                ),
+        );
+        (proxy_server, Some(backend), Some(negotiated))
+    } else {
+        let listener = std::net::TcpListener::bind(address).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = tokio::spawn(
+            axum_server::from_tcp(listener)
+                .unwrap()
+                .acceptor(crate::server_tls::acceptor(http_tls))
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>()),
+        );
+        (server, None, None)
+    };
     Fixture {
         signer,
         material,
@@ -334,6 +609,8 @@ async fn fixture_at_with_lock(
         cookie,
         address,
         server,
+        proxy_backend,
+        proxy_alpn,
         listeners,
     }
 }
@@ -700,7 +977,9 @@ fn cli(binary: &Path, directory: &Directory, join: bool, public_origin: &str) ->
                 },
             )
             .stderr(
-                if std::env::var_os("INFRATERNAL_RECONNECT_CONTROL").is_some() {
+                if std::env::var_os("INFRATERNAL_RECONNECT_CONTROL").is_some()
+                    || std::env::var_os("INFRATERNAL_REMOTE_LINK_TRACE").is_some()
+                {
                     Stdio::inherit()
                 } else {
                     Stdio::null()
@@ -766,6 +1045,7 @@ async fn remote_cli_enrollment_and_browser_terminal_two_processes() {
         &binary,
         "127.0.0.1:4701".parse().unwrap(),
         "127.0.0.1:0".parse().unwrap(),
+        false,
     )
     .await;
 }
@@ -786,6 +1066,28 @@ async fn remote_cli_enrollment_and_browser_terminal_443_without_agent_port() {
         &binary,
         "127.0.0.1:443".parse().unwrap(),
         "127.0.0.1:7443".parse().unwrap(),
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "Run via scripts/verify-addhost-https-namespace with TCP/UDP 7443 blackholed and a TLS HTTP/2 proxy on 443"]
+async fn remote_cli_enrollment_and_browser_terminal_443_through_tls_http2_proxy() {
+    let binary = PathBuf::from(
+        std::env::var_os("INFRATERNAL_REMOTE_TEST_BINARY").expect("real CLI binary required"),
+    );
+    assert!(binary.is_file());
+    assert_ne!(
+        nix::unistd::Uid::effective().as_raw(),
+        0,
+        "rootless fixture required"
+    );
+    remote_cli_enrollment_and_browser_terminal_at(
+        &binary,
+        "127.0.0.1:443".parse().unwrap(),
+        "127.0.0.1:7443".parse().unwrap(),
+        true,
     )
     .await;
 }
@@ -797,9 +1099,17 @@ async fn remote_cli_enrollment_and_browser_terminal_at(
     binary: &Path,
     address: SocketAddr,
     endpoint: SocketAddr,
+    through_tls_proxy: bool,
 ) {
     let directory = Directory::new();
-    let mut fixture = fixture_at(&directory, address, endpoint).await;
+    let mut fixture = if through_tls_proxy {
+        fixture_at_through_tls_proxy(&directory, address, endpoint).await
+    } else {
+        fixture_at(&directory, address, endpoint).await
+    };
+    if through_tls_proxy {
+        assert_tls_proxy_http2(fixture.address, &fixture.root).await;
+    }
     // Current terminal authorization resolves the account UUID and preferred OS
     // username. Keep the acceptance fixture shaped like a real passkey user.
     let owner = uuid::Uuid::new_v4().to_string();
@@ -925,6 +1235,26 @@ async fn remote_cli_enrollment_and_browser_terminal_at(
     .await;
     drop(browser);
     drop(child);
+    if through_tls_proxy {
+        let protocols = fixture.proxy_alpn.as_ref().unwrap().lock().unwrap().clone();
+        assert!(
+            protocols
+                .iter()
+                .any(|protocol| protocol.as_deref() == Some(b"h2")),
+            "the TLS proxy did not negotiate HTTP/2 for its h2 probe"
+        );
+        let http1_count = protocols
+            .iter()
+            .filter(|protocol| protocol.as_deref() == Some(b"http/1.1"))
+            .count();
+        assert!(
+            http1_count >= 3,
+            "the enrolling infraternal agent must select HTTP/1.1 for enrollment, preflight, and its steady-state link; negotiated {protocols:?}"
+        );
+        println!(
+            "tls_proxy h2_probe=true agent_http1_connections={http1_count} trusted_proxy=true"
+        );
+    }
     fixture.server.abort();
     let _ = (&mut fixture.server).await;
     fixture.listeners.take();

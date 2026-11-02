@@ -345,7 +345,7 @@ fn preflight_errors_name_https_and_proxy_upgrade_fixes() {
     let upgrade = Failure::Upgrade.error(io::ErrorKind::InvalidData);
     assert_eq!(
         public_error(&upgrade),
-        "The infraternal agent on this host reached the server over HTTPS, but the server did not accept its WebSocket. Deploy a server with the /remote/agent route and allow WebSocket upgrades through the proxy, then try again."
+        "The infraternal agent on this host reached the server over HTTPS, but the server or proxy did not accept the HTTP/1.1 WebSocket upgrade at /remote/agent. Check that the TLS proxy forwards WebSocket upgrades on this path, then try again."
     );
 }
 
