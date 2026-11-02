@@ -45,7 +45,7 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   if (m.kind === "terminal" && !m.noAccess && cx.adapters.inventory && header) {
     actions.push({ id: "sessions", label: "Sessions", icon: SESSION_ICON.sessions, onSelect: (e) => cx.sessionUi?.toggleManager(rec, e.currentTarget as HTMLElement, e.detail === 0 ? "keyboard" : "pointer") });
   }
-  if (m.kind !== "node" && m.kind !== "settings" && !readOnly) actions.push({ id: "close", label: "Close", icon: ICON.close, onSelect: () => cx.win.close(rec) });
+  if (m.kind !== "node" && m.kind !== "settings" && m.kind !== "docs" && !readOnly) actions.push({ id: "close", label: "Close", icon: ICON.close, onSelect: () => cx.win.close(rec) });
   // An app window or a screen is named by what it shows ("Notebook · Today"); the machine it lives on is the quiet part that gives
   // way first in a narrow pill, with its OS mark in front (D208). A terminal is the other way round: the machine, then its session.
   const title = m.kind === "app" || m.kind === "screen" ? { host: m.session ?? m.host, session: m.host } : { host: m.host, ...(m.user ? { user: m.user } : {}), ...(m.session ? { session: m.session } : {}) };

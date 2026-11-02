@@ -159,8 +159,15 @@ async fn enrolled_clients(
         // permission/setup cost. Each admitted identity is genuinely signed.
         sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootless',1002,?)")
             .bind(id.as_bytes().as_slice()).bind(instant).execute(pool).await.unwrap();
+        let key_digest = openssl::sha::sha256(&host.key.raw_public_key().unwrap());
         let token = store
-            .issue("owner", id, crate::enrollment::Mode::Rootless, instant)
+            .issue(
+                "owner",
+                id,
+                crate::enrollment::Mode::Rootless,
+                instant,
+                &key_digest,
+            )
             .await
             .unwrap();
         let signed = authority.sign_host(id, &csr, instant).unwrap();

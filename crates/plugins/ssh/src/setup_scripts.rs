@@ -8,8 +8,12 @@ stage="$base/.bootstrap-lock"
 [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
 [ ! -e "$stage/state" ] && [ ! -L "$stage/state" ] || exit 71
 # Retain the host's existing identity for immutable same-key re-enrollment.
+# A preflight-prepared state copy already contains the proved private key.
 # The copy stays in its private host-local transaction, never crossing SSH.
-if [ -d "$base/state" ]; then cp -a "$base/state" "$stage/state"; fi
+if [ ! -e "$stage/state" ] && [ ! -L "$stage/state" ]; then
+    if [ -d "$base/state" ] && [ ! -L "$base/state" ]; then cp -a "$base/state" "$stage/state"; else mkdir -m 700 "$stage/state"; fi
+fi
+[ -d "$stage/state" ] && [ ! -L "$stage/state" ] && [ -O "$stage/state" ] && [ "$(stat -c '%a' "$stage/state")" = 700 ] || exit 71
 # Enrollment writes only the staged identity and returns before service activation.
 # Shim rendezvous belongs to the live service, outside identity replacement.
 "$stage/payload" agent --data "$stage/state" join {} --enroll-only >/dev/null

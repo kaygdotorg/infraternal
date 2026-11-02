@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: AGPL-3.0-only */
-/* A docs page inside a canvas window (src/canvas/docs/docs-reader.on-demand.ts). The page body is the one the standalone
+/* A docs page inside a canvas window (src/canvas/docs/docs-body.on-demand.ts). The page body is the one the standalone
    docs render (docs.css); here it takes the app's colours and type scale (--fg, --fg-2, --text-body: 13 px, 16 px on touch)
-   so it follows the theme the person chose. One left edge for the title, paragraphs, lists, code and tables. The window
+   so it follows the theme the person chose (the shared structure, doc.css, is loaded with it). One left edge for the title, paragraphs, lists, code and tables. The window
    scrolls by itself, and its last line breathes as much as its first. */
 .dr-scroll { container-type: inline-size; position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
-.dr-page { position: relative; box-sizing: border-box; max-width: 46rem; margin: 0 auto; padding: 1.25rem 1.5rem 1.5rem; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.7; }
+.dr-page { position: relative; box-sizing: border-box; max-width: calc(70ch + 17rem + 3rem); margin: 0 auto; padding: 1.25rem 1.5rem 1.5rem; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.7; }
 @media (pointer: coarse) { .dr-page { padding-inline: 1.25rem; padding-bottom: calc(1.5rem + env(safe-area-inset-bottom)); } }
-.dr-page h1 { margin: 0 0 1rem; font-size: 1.5em; font-weight: var(--fw-label); line-height: 1.25; letter-spacing: -0.04em; }
+.dr-page h1 { margin: 0 0 0.5rem; font-size: 1.5em; font-weight: var(--fw-label); line-height: 1.25; letter-spacing: -0.04em; }
 .dr-page h2 { margin: 2rem 0 0.5rem; font-size: 1.2em; font-weight: var(--fw-title); line-height: 1.3; }
 .dr-page h3 { margin: 1.5rem 0 0.5rem; font-size: 1em; font-weight: var(--fw-title); line-height: 1.3; }
 .dr-page p, .dr-page ul, .dr-page ol, .dr-page pre, .dr-page blockquote { margin: 0 0 1rem; }

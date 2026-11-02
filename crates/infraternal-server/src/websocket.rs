@@ -2968,7 +2968,7 @@ async fn open_terminal(
     );
     #[cfg(not(feature = "ssh"))]
     let account = None;
-    let opened = tokio::time::timeout(
+    let opened = match tokio::time::timeout(
         connect_timeout,
         agent.open_for_with_metadata(
             TerminalSize {
@@ -2982,8 +2982,22 @@ async fn open_terminal(
         ),
     )
     .await
-    .map_err(|_| crate::embedded::AgentError::Unavailable)??;
+    {
+        Ok(Ok(opened)) => opened,
+        Ok(Err(error)) => {
+            #[cfg(test)]
+            eprintln!("remote terminal open stage=agent-pty-open error={error:?}");
+            return Err(error);
+        }
+        Err(_) => {
+            #[cfg(test)]
+            eprintln!("remote terminal open stage=agent-pty-open result=timeout");
+            return Err(crate::embedded::AgentError::Unavailable);
+        }
+    };
     if !session_is_live(state, user_id, session_token).await {
+        #[cfg(test)]
+        eprintln!("remote terminal open stage=session-authority result=unavailable");
         return Err(crate::embedded::AgentError::Unavailable);
     }
     let session_id = opened.session_id;
@@ -3000,6 +3014,8 @@ async fn open_terminal(
         .await
         .map_err(|_| crate::embedded::AgentError::Unavailable)?;
     if changed.rows_affected() != 1 {
+        #[cfg(test)]
+        eprintln!("remote terminal open stage=session-persist result=unavailable");
         return Err(crate::embedded::AgentError::Unavailable);
     }
     state.sessions_changed();

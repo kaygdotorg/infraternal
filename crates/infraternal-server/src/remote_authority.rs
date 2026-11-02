@@ -235,8 +235,9 @@ pub(crate) mod tests {
         sqlx::query("INSERT INTO remote_hosts (id, owner_id, mode, execution_uid, created_at) VALUES (?, 'owner', 'rootless', 1002, 100)")
             .bind(host.as_bytes().as_slice()).execute(&pool).await.unwrap();
         let store = EnrollmentStore::new(pool.clone());
+        let key_digest = openssl::sha::sha256(&[3u8; 32]);
         let token = store
-            .issue("owner", host, Mode::Rootless, 100)
+            .issue("owner", host, Mode::Rootless, 100, &key_digest)
             .await
             .unwrap();
         store

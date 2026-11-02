@@ -64,8 +64,11 @@ async fn mesh_namespace_client() {
             key,
         },
         roots: vec![X509::from_pem(bundle.root.as_bytes()).unwrap()],
-        endpoint: bundle.endpoint,
+        endpoint: Some(bundle.endpoint),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_root: None,
+        https_system_roots: false,
         execution_uid: 0,
     };
     let state = infraternal_agent::sessions::state(Some(bundle.state.clone())).unwrap();
@@ -611,8 +614,16 @@ async fn root_store(host: &Identity, root: &X509) -> (EnrollmentStore, sqlx::Sql
             .as_secs(),
     )
     .unwrap();
+    let public_key: [u8; 32] = host.key.raw_public_key().unwrap().try_into().unwrap();
+    let key_digest = openssl::sha::sha256(&public_key);
     let token = store
-        .issue("owner", id, crate::enrollment::Mode::Rootful, instant)
+        .issue(
+            "owner",
+            id,
+            crate::enrollment::Mode::Rootful,
+            instant,
+            &key_digest,
+        )
         .await
         .unwrap();
     store
@@ -624,7 +635,7 @@ async fn root_store(host: &Identity, root: &X509) -> (EnrollmentStore, sqlx::Sql
             &crate::enrollment::CertificateRecord {
                 fingerprint: openssl::sha::sha256(&host.certificate.to_der().unwrap()),
                 issuer_fingerprint: openssl::sha::sha256(&root.to_der().unwrap()),
-                public_key: host.key.raw_public_key().unwrap().try_into().unwrap(),
+                public_key,
                 not_before: instant,
                 not_after: instant + 604_800,
             },

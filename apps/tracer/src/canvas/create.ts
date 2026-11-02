@@ -119,7 +119,8 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   (cx as { flip: Ctx["flip"] }).flip = createFlip(() => cx.camera.cam.z, () => cx.invalidate());
 
   cx.memory = createMemory(cx, backdrop);
-  cx.store = createDocumentSync(cx, options.persisted);
+  // The Docs view is the server's, never the person's layout (views/docs.ts): it is not part of the saved document.
+  cx.store = createDocumentSync(cx, (id) => id !== "docs" && (options.persisted?.(id) ?? true));
   cx.nav = createNav(cx);
   cx.view = createViews(cx);
   cx.win = createWindows(cx);
@@ -248,6 +249,8 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
       cx.tree.render();
       cx.pill.paint();
       cx.toolbar.update();
+      // Views that are not the scene's own (the Docs view) come back after the scene replaced every view.
+      window.dispatchEvent(new CustomEvent("tracer:canvas-views"));
     },
     flush: () => cx.store.flush(),
     dispose() {

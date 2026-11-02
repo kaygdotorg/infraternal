@@ -134,7 +134,7 @@ mod tests {
     fn agent_actions_are_complete_and_unavailable_until_lifecycle_exists() {
         let plugin = plugin();
         assert_eq!(plugin.id, "agent");
-        let remote = if cfg!(feature = "remote") { 2 } else { 0 };
+        let remote = if cfg!(feature = "remote") { 3 } else { 0 };
         let unbuilt = if infraternal_plugin_api::PLACEHOLDERS {
             3
         } else {

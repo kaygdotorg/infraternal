@@ -25,7 +25,7 @@ export async function reconcile(cx: Ctx, read: () => SharedPaint, resolve: (targ
   const previousCurrent = cx.state.currentView;
   const previousIndex = previousOrder.indexOf(previousCurrent);
   const keep = new Set([...document.views.map((v) => v.id), ...protectedViews]);
-  for (const c of [...cx.views.values()]) if (c.view.id !== "settings" && !keep.has(c.view.id)) cx.view.remove(c);
+  for (const c of [...cx.views.values()]) if (c.view.id !== "settings" && c.view.id !== "docs" && !keep.has(c.view.id)) cx.view.remove(c);
   for (const view of document.views) {
     let c = cx.views.get(view.id);
     // Graph content is owned by its existing source; layout only positions its pins.

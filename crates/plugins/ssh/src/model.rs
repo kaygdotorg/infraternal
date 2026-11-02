@@ -213,6 +213,22 @@ pub enum InstallStep {
     Readiness,
 }
 
+/// Authored setup messages that may cross the SSH join boundary without exposing remote output.
+pub(super) const JOIN_DIAGNOSTICS: &[&str] = &[
+    "Join DNS lookup failed: Temporary failure in name resolution.",
+    "Join DNS lookup failed: Name or service not known.",
+    "Join DNS lookup failed.",
+    "Join connection failed.",
+    "Join TLS verification failed.",
+    "The infraternal agent on this host cannot resolve the server's HTTPS origin. Check DNS for the public origin and allow outbound TCP 443.",
+    "The infraternal agent on this host cannot reach the server over HTTPS. Allow outbound TCP 443 to the server's public origin, then try again.",
+    "The infraternal agent on this host could not verify the server's HTTPS certificate. Check the public certificate chain and server name, then try again.",
+    "The infraternal agent on this host reached the server over HTTPS, but the server did not accept its WebSocket. Deploy a server with the /remote/agent route and allow WebSocket upgrades through the proxy, then try again.",
+    "The server opened the WebSocket but did not send a valid infraternal agent challenge. Deploy a compatible server build and try again.",
+    "Failed to connect to bus: No medium found",
+    "Failed to connect to bus: No such file or directory",
+];
+
 /// Architecture and expected public path selected by the server's release bundle.
 #[derive(Clone, Debug, Serialize)]
 pub struct MissingBinary {
@@ -392,24 +408,33 @@ impl Failure {
             && !self.already_added
             && self.message != "The matching static infraternal binary is unavailable."
         {
-            self.message = match step {
-                InstallStep::GetArm64Binary | InstallStep::GetX86_64Binary => self.message,
-                InstallStep::Connect => {
+            let join_diagnostic = if matches!(step, InstallStep::Join) {
+                self.log_tail
+                    .iter()
+                    .copied()
+                    .find(|line| JOIN_DIAGNOSTICS.contains(line))
+            } else {
+                None
+            };
+            self.message = match (step, join_diagnostic) {
+                (InstallStep::Join, Some(diagnostic)) => diagnostic,
+                (InstallStep::GetArm64Binary | InstallStep::GetX86_64Binary, _) => self.message,
+                (InstallStep::Connect, _) => {
                     "Connecting to the host failed. Check SSH access and the host service, then try again."
                 }
-                InstallStep::Upload => {
+                (InstallStep::Upload, _) => {
                     "Uploading the infraternal binary failed. Check SSH access and free space on the host, then try again."
                 }
-                InstallStep::Install => {
+                (InstallStep::Install, _) => {
                     "Installing the infraternal agent failed. Check the host service configuration and existing setup files, then try again."
                 }
-                InstallStep::Join => {
+                (InstallStep::Join, _) => {
                     "Joining the host to this server failed. Check the host can reach the server and resolve its address, then try again."
                 }
-                InstallStep::Readiness => {
+                (InstallStep::Readiness, _) => {
                     "Checking terminal readiness failed. Check the infraternal agent service and its terminal session, then try again."
                 }
-                InstallStep::Start => {
+                (InstallStep::Start, _) => {
                     "Starting the infraternal agent service failed. Check the host service status and its configuration, then try again."
                 }
             };

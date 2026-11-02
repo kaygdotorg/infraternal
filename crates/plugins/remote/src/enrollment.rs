@@ -34,6 +34,9 @@ pub struct JoinInvitation {
     pub mode: Mode,
     /// Bound execution uid from the trusted bootstrap probe.
     pub execution_uid: u32,
+    /// Public HTTPS origin used by both enrollment and the agent's WebSocket link.
+    #[serde(default)]
+    pub public_origin: String,
     /// One-time capability: pass privately through stdin, never print or log it.
     pub token: String,
     /// Base64url DER public CA pin for authenticated enrollment and leg B.
@@ -44,9 +47,11 @@ pub struct JoinInvitation {
     /// Reverse-proxy HTTPS uses ordinary verified system roots instead of the internal CA.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub https_system_roots: bool,
-    /// Dial-out UDP/TCP address (same port).
-    pub endpoint: std::net::SocketAddr,
-    /// TLS name verified against the configured server certificate.
+    /// Legacy direct transport address. New invitations omit it.
+    #[serde(default, skip_serializing)]
+    pub endpoint: Option<std::net::SocketAddr>,
+    /// D168 identity authority name retained when the transport moves to a public HTTPS origin.
+    #[serde(default)]
     pub server_name: String,
 }
 

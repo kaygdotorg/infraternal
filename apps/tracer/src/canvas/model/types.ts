@@ -9,8 +9,9 @@ import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 /**
  * What a window shows. A `flow` window holds a short guided task (add a host); it is never saved and closes itself when done. Only a `terminal` window is bound to a session and can split.
  * An `app` window streams one app window of a machine and a `screen` window streams a whole display (D208); neither is saved (see `WindowModel.stream`).
+ * A `docs` window reads one page of the docs (the Docs view, never saved).
  */
-export type WindowKind = "terminal" | "containers" | "logs" | "node" | "settings" | "flow" | "app" | "screen";
+export type WindowKind = "terminal" | "containers" | "logs" | "node" | "settings" | "flow" | "docs" | "app" | "screen";
 
 /** The built-in views have fixed ids; a view someone shared with you gets an id of its own. */
 export type ViewId = string;

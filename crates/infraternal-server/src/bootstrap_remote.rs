@@ -7,7 +7,7 @@ use crate::{
     remote_runtime::RemoteHosts,
 };
 use infraternal_plugin_ssh::{
-    bootstrap::{Authority, Backend, Resolved},
+    bootstrap::{Authority, Backend, PreparedHostKey, Resolved},
     install::JoinMaterial,
     model::{Failure, InstallMode, InstallStep, Target},
     probe::Check,
@@ -202,120 +202,128 @@ impl RemoteBackend {
             .remove(&host);
         Ok(())
     }
+    fn reserve_attempt(
+        &self,
+        authority: &Authority,
+        host: Uuid,
+        uid: u32,
+        address: &str,
+        lookup: Option<&str>,
+    ) -> Result<(), Failure> {
+        let mut attempts = self.attempts.lock().map_err(|_| unavailable())?;
+        // Reserve before any database await. This bounded map is also the
+        // destination journal, so competing batches cannot issue distinct
+        // host records during the lookup/issue gap.
+        if attempts.values().any(|attempt| {
+            attempt.owner == authority.owner
+                && attempt
+                    .destination
+                    .as_ref()
+                    .is_some_and(|(pending, trust)| {
+                        pending == address
+                            || lookup.is_some_and(|value| trust.as_deref() == Some(value))
+                    })
+        }) {
+            return Err(Failure::install(
+                "This host is already being added. Wait for its setup steps to finish.",
+            ));
+        }
+        if attempts.len() >= 1600 {
+            return Err(Failure::install(
+                "Too many host installations are pending. Try again shortly.",
+            ));
+        }
+        attempts.insert(
+            host,
+            Attempt {
+                owner: authority.owner.clone(),
+                batch: authority.batch,
+                uid,
+                link_round_trip: Duration::ZERO,
+                destination: Some((address.to_owned(), lookup.map(str::to_owned))),
+                canary: None,
+                retirement: None,
+            },
+        );
+        Ok(())
+    }
     /// Hand off exact cleanup ownership before the first durable write can run.
     /// Compatibility callers retain the older post-result ownership boundary.
-    fn issue_attempt<'a>(
+    async fn issue_attempt<'a>(
         &'a self,
         authority: &'a Authority,
         target: &'a Target,
         check: &'a Check,
         lookup: Option<String>,
+        binding: &'a PreparedHostKey,
         register: Option<&'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send)>,
-    ) -> Operation<'a, JoinMaterial> {
-        Box::pin(async move {
-            self.authorize(authority).await?;
-            let address = match &target.address {
-                infraternal_plugin_ssh::model::TargetAddress::Manual(address) => address.as_str(),
-                infraternal_plugin_ssh::model::TargetAddress::Discovered(_) => {
-                    return Err(unavailable());
-                }
-            };
-            if !self.issuer.ready() {
-                return Err(Failure::install(
-                    "Set up or unlock host connections with an administrator passkey before adding a host.",
-                ));
+    ) -> Result<JoinMaterial, Failure> {
+        let host = binding.host;
+        let expected_key_digest = binding.digest;
+        self.authorize(authority).await?;
+        let address = match &target.address {
+            infraternal_plugin_ssh::model::TargetAddress::Manual(address) => address.as_str(),
+            infraternal_plugin_ssh::model::TargetAddress::Discovered(_) => {
+                return Err(unavailable());
             }
-            let host = Uuid::new_v4();
-            let (mode, uid) = match target.mode {
-                InstallMode::Rootless => (Mode::Rootless, check.uid),
-                InstallMode::Root => (Mode::Rootful, 0),
-            };
-            {
-                let mut attempts = self.attempts.lock().map_err(|_| unavailable())?;
-                // Reserve before any database await. The bounded attempt map is
-                // also the destination journal, so competing batches cannot
-                // issue distinct host records during the lookup/issue gap.
-                if attempts.values().any(|attempt| {
-                    attempt.owner == authority.owner
-                        && attempt
-                            .destination
-                            .as_ref()
-                            .is_some_and(|(pending, trust)| {
-                                pending == address
-                                    || lookup
-                                        .as_ref()
-                                        .is_some_and(|value| trust.as_ref() == Some(value))
-                            })
-                }) {
-                    return Err(Failure::install(
-                        "This host is already being added. Wait for its setup steps to finish.",
-                    ));
-                }
-                if attempts.len() >= 1600 {
-                    return Err(Failure::install(
-                        "Too many host installations are pending. Try again shortly.",
-                    ));
-                }
-                attempts.insert(
-                    host,
-                    Attempt {
-                        owner: authority.owner.clone(),
-                        batch: authority.batch,
-                        uid,
-                        link_round_trip: Duration::ZERO,
-                        destination: Some((address.to_owned(), lookup.clone())),
-                        canary: None,
-                        retirement: None,
-                    },
-                );
-            }
-            let mut unpublished = Unpublished {
-                backend: self,
-                host,
-                published: false,
-            };
-            let existing: Option<Vec<u8>> = sqlx::query_scalar("SELECT h.id FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)) ORDER BY (b.address=?) DESC, h.id LIMIT 1")
-                .bind(&authority.owner).bind(address).bind(&lookup).bind(&lookup).bind(address).fetch_optional(&self.issuer.store().0).await.map_err(|_|unavailable())?;
-            if let Some(host_id) = existing {
-                let host_id = Uuid::from_slice(&host_id).map_err(|_| unavailable())?;
-                return Err(Failure::install(
-                    "This host is already added. Open its terminal from Console.",
-                )
-                .with_existing_host_id(host_id));
-            }
-            if let Some(register) = register {
-                register(host)?;
-                // AttemptResources now owns cleanup even if SQLx commits without
-                // delivering its acknowledgement. Do not discard that journal.
-                unpublished.published = true;
-            }
-            let invitation = self
-                .issuer
-                .issue_bootstrap(
-                    cookie(authority)?,
-                    InvitationRequest {
-                        host_id: host,
-                        mode,
-                        execution_uid: uid,
-                    },
-                    address,
-                    lookup.as_deref(),
-                )
-                .await;
-            let Ok(mut invitation) = invitation else {
-                return Err(Failure::install(
-                    "The host invitation was refused. Unlock your session and try again.",
-                ));
-            };
-            let stdin = serde_json::to_vec(&invitation);
-            invitation.token.zeroize();
-            let stdin = stdin.map_err(|_| unavailable())?;
+        };
+        if !self.issuer.ready() {
+            return Err(Failure::install(
+                "Set up or unlock host connections with an administrator passkey before adding a host.",
+            ));
+        }
+        let (mode, uid) = match target.mode {
+            InstallMode::Rootless => (Mode::Rootless, check.uid),
+            InstallMode::Root => (Mode::Rootful, 0),
+        };
+        self.reserve_attempt(authority, host, uid, address, lookup.as_deref())?;
+        let mut unpublished = Unpublished {
+            backend: self,
+            host,
+            published: false,
+        };
+        let existing: Option<Vec<u8>> = sqlx::query_scalar("SELECT h.id FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)) ORDER BY (b.address=?) DESC, h.id LIMIT 1")
+            .bind(&authority.owner).bind(address).bind(&lookup).bind(&lookup).bind(address).fetch_optional(&self.issuer.store().0).await.map_err(|_|unavailable())?;
+        if let Some(host_id) = existing {
+            let host_id = Uuid::from_slice(&host_id).map_err(|_| unavailable())?;
+            return Err(Failure::install(
+                "This host is already added. Open its terminal from Console.",
+            )
+            .with_existing_host_id(host_id));
+        }
+        if let Some(register) = register {
+            register(host)?;
+            // AttemptResources now owns cleanup even if SQLx commits without
+            // delivering its acknowledgement. Do not discard that journal.
             unpublished.published = true;
-            Ok(JoinMaterial {
-                host,
-                url: format!("{}/remote/join", self.issuer.origin()),
-                stdin: Secret::new(stdin),
-            })
+        }
+        let invitation = self
+            .issuer
+            .issue_bootstrap(
+                cookie(authority)?,
+                InvitationRequest {
+                    host_id: host,
+                    mode,
+                    execution_uid: uid,
+                    expected_key_digest: Some(expected_key_digest),
+                },
+                address,
+                lookup.as_deref(),
+            )
+            .await;
+        let Ok(mut invitation) = invitation else {
+            return Err(Failure::install(
+                "The host invitation was refused. Unlock your session and try again.",
+            ));
+        };
+        let stdin = serde_json::to_vec(&invitation);
+        invitation.token.zeroize();
+        let stdin = stdin.map_err(|_| unavailable())?;
+        unpublished.published = true;
+        Ok(JoinMaterial {
+            host,
+            url: format!("{}/remote/join", self.issuer.origin()),
+            stdin: Secret::new(stdin),
         })
     }
 }
@@ -356,6 +364,15 @@ impl Backend for RemoteBackend {
         Box::pin(async move {
             self.authorize(authority).await?;
             let uid = self.uid(authority, host)?;
+            let expected_key_digest = self
+                .issuer
+                .store()
+                .host_key_digest(host)
+                .await
+                .map_err(|_| unavailable())?
+                .ok_or_else(|| {
+                    Failure::install("The host's SSH-proved key is unavailable; retry add-host.")
+                })?;
             let mut invitation = self
                 .issuer
                 .reissue(
@@ -368,6 +385,7 @@ impl Backend for RemoteBackend {
                             Mode::Rootless
                         },
                         execution_uid: uid,
+                        expected_key_digest: Some(expected_key_digest),
                     },
                 )
                 .await
@@ -478,6 +496,9 @@ impl Backend for RemoteBackend {
             self.base.resolve(authority, target, credential).await
         })
     }
+    fn enrollment_origin(&self) -> Option<String> {
+        Some(self.issuer.origin().to_owned())
+    }
     fn invitation<'a>(
         &'a self,
         authority: &'a Authority,
@@ -493,7 +514,12 @@ impl Backend for RemoteBackend {
         check: &'a Check,
         lookup: Option<String>,
     ) -> Operation<'a, JoinMaterial> {
-        self.issue_attempt(authority, target, check, lookup, None)
+        let _ = (authority, target, check, lookup);
+        Box::pin(async {
+            Err(Failure::install(
+                "Prepare the infraternal agent's key over SSH before issuing its invitation.",
+            ))
+        })
     }
     fn invitation_registered<'a>(
         &'a self,
@@ -503,7 +529,26 @@ impl Backend for RemoteBackend {
         lookup: Option<String>,
         register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
     ) -> Operation<'a, JoinMaterial> {
-        self.issue_attempt(authority, target, check, lookup, Some(register))
+        let _ = (authority, target, check, lookup, register);
+        Box::pin(async {
+            Err(Failure::install(
+                "Prepare the infraternal agent's key over SSH before issuing its invitation.",
+            ))
+        })
+    }
+    fn invitation_registered_with_key<'a>(
+        &'a self,
+        authority: &'a Authority,
+        target: &'a Target,
+        check: &'a Check,
+        lookup: Option<String>,
+        binding: PreparedHostKey,
+        register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
+    ) -> Operation<'a, JoinMaterial> {
+        Box::pin(async move {
+            self.issue_attempt(authority, target, check, lookup, &binding, Some(register))
+                .await
+        })
     }
     fn connected_facts<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, ()> {
         Box::pin(async move {
@@ -1715,6 +1760,9 @@ mod tests {
         }
     }
     impl Backend for PausedInvitation {
+        fn enrollment_origin(&self) -> Option<String> {
+            self.inner.enrollment_origin()
+        }
         fn resolve<'a>(
             &'a self,
             a: &'a Authority,
@@ -1755,6 +1803,24 @@ mod tests {
                 self.pause(
                     self.inner
                         .invitation_registered(a, t, c, lookup, register)
+                        .await?,
+                )
+                .await
+            })
+        }
+        fn invitation_registered_with_key<'a>(
+            &'a self,
+            a: &'a Authority,
+            t: &'a Target,
+            c: &'a Check,
+            lookup: Option<String>,
+            binding: PreparedHostKey,
+            register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
+        ) -> Operation<'a, JoinMaterial> {
+            Box::pin(async move {
+                self.pause(
+                    self.inner
+                        .invitation_registered_with_key(a, t, c, lookup, binding, register)
                         .await?,
                 )
                 .await

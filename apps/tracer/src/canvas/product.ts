@@ -193,8 +193,6 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     }, openHost(hostId) { canvas.cx.win.open(hostId); }, hasHost: (hostId) => sessions.hosts().some((host) => host.id === hostId) },
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
   });
-  // The docs, searchable in the palette and read in a window beside the others (#302).
-  const docs = installDocsSource(core, createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)));
   const authority = createAuthorityControl(core, { service: loadProvisioning });
   let welcomedOnce = false;
   const offAuthorityWelcome = connection.onWelcome(() => {
@@ -214,7 +212,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   })).then((adapter) => { readyRemoval = adapter; });
   const saved = await store.load();
   if (options.isCurrent?.() === false) {
-    disposed = true; offPending?.(); pendingNotice.dispose(); store.dispose?.(); offRoundTrip(); offSessionInventory(); offAuthorityWelcome(); authority.dispose(); addHost.dispose(); docs.dispose(); inventory.dispose(); sessions.dispose(); pool.dispose(); connection.dispose();
+    disposed = true; offPending?.(); pendingNotice.dispose(); store.dispose?.(); offRoundTrip(); offSessionInventory(); offAuthorityWelcome(); authority.dispose(); addHost.dispose(); inventory.dispose(); sessions.dispose(); pool.dispose(); connection.dispose();
     throw Error("The signed-in screen changed while layout was loading.");
   }
   // Positions the person pinned in the Mesh graph come back from the canvas document (D180).
@@ -228,6 +226,8 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     float: false,
     persisted: (id) => id !== "settings",
   });
+  // The docs: a Docs view with a window per page, and searchable in the palette (#302).
+  const docs = installDocsSource(core, canvas.cx);
   canvasReady = () => canvas.cx.win.setHostIdentity({ host: embedded.name }, { ...(embedded.os ? { os: embedded.os } : {}), ...(embedded.user ? { user: embedded.user } : {}) });
   // Remote hosts: every open window of a host takes what the list says, whenever the list says it.
   const applyIdentities = (hosts: readonly { id: string; name: string; user?: string; os?: HostPlatform }[]): void => {

@@ -434,10 +434,14 @@ fn registry() -> crate::plugin_control::Registry {
 }
 fn identity(ca: &remote_tls::Identity, endpoint: SocketAddr) -> RemoteIdentity {
     RemoteIdentity {
+        host_id: uuid::Uuid::new_v4(),
         identity: leaf(ca, false),
         roots: vec![ca.certificate.clone()],
-        endpoint,
+        endpoint: Some(endpoint),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_root: None,
+        https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
     }
 }
@@ -1510,10 +1514,14 @@ async fn unavailable_credentials_do_not_end_server_link() {
     expired.sign(&ca.key, MessageDigest::null()).unwrap();
     credentials.certificate = expired.build();
     let identity = RemoteIdentity {
+        host_id: uuid::Uuid::new_v4(),
         identity: credentials,
         roots: vec![ca.certificate],
-        endpoint: "127.0.0.1:1".parse().unwrap(),
+        endpoint: Some("127.0.0.1:1".parse().unwrap()),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_root: None,
+        https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
     };
     let directory = Directory::new();
@@ -1533,10 +1541,14 @@ async fn unavailable_credentials_do_not_end_server_link() {
 async fn failed_control_worker_returns_to_retry_owner() {
     let ca = root();
     let identity = RemoteIdentity {
+        host_id: uuid::Uuid::new_v4(),
         identity: leaf(&ca, false),
         roots: vec![ca.certificate],
-        endpoint: "127.0.0.1:1".parse().unwrap(),
+        endpoint: Some("127.0.0.1:1".parse().unwrap()),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_root: None,
+        https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
     };
     let directory = Directory::new();
@@ -1610,7 +1622,7 @@ async fn backed_candidate_refusal_keeps_new_datagrams_on_mesh_discovery() {
     use std::future::Future as _;
     let (server, identity, registry, link, mesh, _control, _accepted) =
         backed_candidate_fixture().await;
-    let enrolled = identity.endpoint;
+    let enrolled = identity.endpoint.unwrap();
     tokio::time::pause();
     let path = link.path.as_ref().unwrap();
     let mut active = std::pin::pin!(std::future::pending::<io::Result<()>>());

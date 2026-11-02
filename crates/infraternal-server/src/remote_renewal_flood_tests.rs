@@ -95,7 +95,7 @@ async fn remote_cli_renewal_under_50m_load_preserves_every_byte_and_writer() {
     .await;
     let (host, identity) = super::super::renewal::enrolled_at_half_life(&fixture).await;
     seed_cli_identity(&directory, &fixture, host, &identity);
-    let process = cli(&binary, &directory, false);
+    let process = cli(&binary, &directory, false, "https://localhost:4701");
     let mut browser = browser(
         fixture.address,
         &fixture.root,

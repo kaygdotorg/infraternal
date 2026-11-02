@@ -180,7 +180,7 @@ async fn cli_live_renewal_cost_and_durable_identity_on_unchanged_transport() {
     .await;
     let (host, identity) = super::renewal::enrolled_at_half_life(&fixture).await;
     seed_cli_identity(&directory, &fixture, host, &identity);
-    let process = cli(&binary, &directory, false);
+    let process = cli(&binary, &directory, false, "https://localhost:4701");
     let mut browser = browser(
         fixture.address,
         &fixture.root,

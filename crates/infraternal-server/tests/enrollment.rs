@@ -2,7 +2,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(feature = "remote")]
 
-use infraternal_server::enrollment::{CertificateRecord, EnrollmentError, EnrollmentStore, Mode};
+use infraternal_server::enrollment::{
+    CertificateRecord, EnrollmentError, EnrollmentStore, JoinToken, Mode,
+};
 use sha2::{Digest, Sha256};
 use sqlx::{
     SqlitePool,
@@ -75,6 +77,14 @@ fn denied(result: &Result<(), EnrollmentError>) {
     assert!(matches!(result, Err(EnrollmentError::Denied)));
 }
 
+async fn issue_bound(store: &EnrollmentStore, host: Uuid, mode: Mode, now: i64) -> JoinToken {
+    let digest: [u8; 32] = Sha256::digest([3u8; 32]).into();
+    store
+        .issue("owner", host, mode, now, &digest)
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 // One sequential capability lifecycle keeps each failed admission tied to the same invitation.
 #[allow(clippy::too_many_lines)]
@@ -82,27 +92,27 @@ async fn invitation_is_hashed_replaced_and_bound_to_owner_host_mode_and_exact_ex
     let db = Database::new().await;
     let store = db.store();
     assert!(matches!(
-        store.issue("stranger", db.host, Mode::Rootless, 100).await,
+        store
+            .issue("stranger", db.host, Mode::Rootless, 100, &[0u8; 32])
+            .await,
         Err(EnrollmentError::Denied)
     ));
     assert!(matches!(
-        store.issue("owner", db.host, Mode::Rootful, 100).await,
+        store
+            .issue("owner", db.host, Mode::Rootful, 100, &[0u8; 32])
+            .await,
         Err(EnrollmentError::Denied)
     ));
     for time in [-1, i64::MAX] {
         assert!(matches!(
-            store.issue("owner", db.host, Mode::Rootless, time).await,
+            store
+                .issue("owner", db.host, Mode::Rootless, time, &[0u8; 32])
+                .await,
             Err(EnrollmentError::Denied)
         ));
     }
-    let old = store
-        .issue("owner", db.host, Mode::Rootless, 100)
-        .await
-        .unwrap();
-    let current = store
-        .issue("owner", db.host, Mode::Rootless, 100)
-        .await
-        .unwrap();
+    let old = issue_bound(&store, db.host, Mode::Rootless, 100).await;
+    let current = issue_bound(&store, db.host, Mode::Rootless, 100).await;
     let stored: Vec<u8> = sqlx::query_scalar("SELECT digest FROM remote_join_tokens")
         .fetch_one(&db.pool)
         .await
@@ -188,10 +198,7 @@ async fn invitation_is_hashed_replaced_and_bound_to_owner_host_mode_and_exact_ex
 async fn concurrent_redemption_has_one_winner_and_one_certificate() {
     let db = Database::new().await;
     let store = db.store();
-    let token = store
-        .issue("owner", db.host, Mode::Rootless, 100)
-        .await
-        .unwrap();
+    let token = issue_bound(&store, db.host, Mode::Rootless, 100).await;
     let first = certificate(10);
     let second = certificate(11);
     let (a, b) = tokio::join!(
@@ -211,10 +218,7 @@ async fn concurrent_redemption_has_one_winner_and_one_certificate() {
 async fn invalid_certificate_and_failed_insert_preserve_the_invitation() {
     let db = Database::new().await;
     let store = db.store();
-    let token = store
-        .issue("owner", db.host, Mode::Rootless, 100)
-        .await
-        .unwrap();
+    let token = issue_bound(&store, db.host, Mode::Rootless, 100).await;
     let mut invalid = certificate(10);
     invalid.not_after -= 1;
     denied(
@@ -232,10 +236,7 @@ async fn invalid_certificate_and_failed_insert_preserve_the_invitation() {
         )
         .await
         .unwrap();
-    let replacement = store
-        .issue("owner", db.host, Mode::Rootless, 102)
-        .await
-        .unwrap();
+    let replacement = issue_bound(&store, db.host, Mode::Rootless, 102).await;
     assert!(matches!(
         store
             .redeem(
@@ -263,11 +264,8 @@ async fn invalid_certificate_and_failed_insert_preserve_the_invitation() {
 #[tokio::test]
 async fn revocation_tombstone_refuses_existing_and_new_invitations_after_restart() {
     let db = Database::new().await;
-    let token = db
-        .store()
-        .issue("owner", db.host, Mode::Rootless, 100)
-        .await
-        .unwrap();
+    let store = db.store();
+    let token = issue_bound(&store, db.host, Mode::Rootless, 100).await;
     sqlx::query("UPDATE remote_hosts SET revoked_at=101 WHERE id=?")
         .bind(db.host.as_bytes().as_slice())
         .execute(&db.pool)
@@ -300,7 +298,9 @@ async fn revocation_tombstone_refuses_existing_and_new_invitations_after_restart
             .await,
     );
     assert!(matches!(
-        restarted.issue("owner", db.host, Mode::Rootless, 102).await,
+        restarted
+            .issue("owner", db.host, Mode::Rootless, 102, &[0u8; 32])
+            .await,
         Err(EnrollmentError::Denied)
     ));
     pool.close().await;
@@ -310,10 +310,7 @@ async fn revocation_tombstone_refuses_existing_and_new_invitations_after_restart
 async fn malformed_capabilities_and_certificate_overflow_are_refused_before_mutation() {
     let db = Database::new().await;
     let store = db.store();
-    let token = store
-        .issue("owner", db.host, Mode::Rootless, 100)
-        .await
-        .unwrap();
+    let token = issue_bound(&store, db.host, Mode::Rootless, 100).await;
     for secret in ["", "not-a-token", &"A".repeat(44), &"!".repeat(43)] {
         denied(
             &store
@@ -379,10 +376,7 @@ async fn enrollment_storage_at_500_hosts() {
         sqlx::query("INSERT INTO remote_hosts (id, owner_id, mode, execution_uid, created_at) VALUES (?, 'owner', 'rootless', 1002, 100)")
             .bind(host.as_bytes().as_slice()).execute(&db.pool).await.unwrap();
         let start = std::time::Instant::now();
-        let token = store
-            .issue("owner", host, Mode::Rootless, 100)
-            .await
-            .unwrap();
+        let token = issue_bound(&store, host, Mode::Rootless, 100).await;
         issue.push(start.elapsed().as_micros());
         let certificate = CertificateRecord {
             fingerprint: Sha256::digest(host.as_bytes()).into(),

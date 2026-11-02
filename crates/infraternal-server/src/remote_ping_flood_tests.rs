@@ -151,13 +151,17 @@ async fn primary_ping_during_terminal_flood() {
         loss_ppm,
     ));
     let identity = infraternal_agent::remote_client::RemoteIdentity {
+        host_id: uuid::Uuid::new_v4(),
         identity: Identity {
             certificate: node.certificate.clone(),
             key: node.key.clone(),
         },
         roots: vec![root.clone()],
-        endpoint,
+        endpoint: Some(endpoint),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_root: None,
+        https_system_roots: false,
         execution_uid: uid,
     };
     let node_state = state.clone();

@@ -9,8 +9,15 @@ pub(crate) async fn admitted_store(
     let fingerprint = openssl::sha::sha256(&host.certificate.to_der().unwrap());
     let (store, pool, host_id) = crate::enrollment::authority::tests::enrolled().await;
     let instant = now().unwrap();
+    let key_digest = openssl::sha::sha256(&host.key.raw_public_key().unwrap());
     let token = store
-        .issue("owner", host_id, crate::enrollment::Mode::Rootless, instant)
+        .issue(
+            "owner",
+            host_id,
+            crate::enrollment::Mode::Rootless,
+            instant,
+            &key_digest,
+        )
         .await
         .unwrap();
     store

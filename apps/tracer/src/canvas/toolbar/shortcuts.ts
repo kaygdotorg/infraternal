@@ -58,7 +58,7 @@ export function installShortcuts(cx: Ctx): () => void {
     if (!cx.inputLock.state && w && isTerminal(w)) void run(w);
   };
   // One press, one window: a repeat is ignored, and the window closes before the next press can see it.
-  const closeActive = (e: KeyboardEvent): void => { if (e.repeat) return; const w = state.activeWin; if (w && !cx.inputLock.state && w.model.kind !== "node" && w.model.kind !== "settings") cx.win.closeKey(w); };
+  const closeActive = (e: KeyboardEvent): void => { if (e.repeat) return; const w = state.activeWin; if (w && !cx.inputLock.state && w.model.kind !== "node" && w.model.kind !== "settings" && w.model.kind !== "docs") cx.win.closeKey(w); };
   const removeBindings = [
     ...bindTerminalFont(() => cx.adapters.activeTerminal?.()),
     bindShortcut("canvas-lock", () => cx.nav.setCanvasLock(!state.canvasLock)),

@@ -12,6 +12,8 @@ use infraternal_plugin_api::{
     RoleDef, SchemaRef, SettingDefault, Target,
 };
 #[cfg(feature = "transport")]
+pub mod agent_link;
+#[cfg(feature = "transport")]
 pub mod enrollment;
 #[cfg(feature = "transport")]
 pub mod remote_bindings;

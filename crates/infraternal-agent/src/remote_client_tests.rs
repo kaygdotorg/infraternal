@@ -38,10 +38,14 @@ impl Drop for StateDirectory {
 async fn rootless_uid_mismatch_is_refused_before_dial() {
     let ca = root();
     let identity = RemoteIdentity {
+        host_id: uuid::Uuid::new_v4(),
         identity: leaf(&ca, false),
         roots: vec![ca.certificate],
-        endpoint: "127.0.0.1:1".parse().unwrap(),
+        endpoint: Some("127.0.0.1:1".parse().unwrap()),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_root: None,
+        https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw().wrapping_add(1),
     };
     let result = run(&identity, None).await.unwrap_err();
@@ -135,10 +139,14 @@ async fn unavailable_udp_does_not_add_seconds_before_tcp_admission() {
     let tls =
         remote_tls::server_config(&server_identity, std::slice::from_ref(&ca.certificate)).unwrap();
     let identity = RemoteIdentity {
+        host_id: uuid::Uuid::new_v4(),
         identity: client_identity,
         roots: vec![ca.certificate],
-        endpoint: address,
+        endpoint: Some(address),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_root: None,
+        https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
     };
     let state = StateDirectory::new();
@@ -179,10 +187,14 @@ async fn winning_quic_drops_the_unfinished_tls_dial_before_control_dispatch() {
     let (proxy_address, proxy) =
         crate::transport_diagnostics::udp_proxy_on(socket, server.local_addr().unwrap());
     let identity = RemoteIdentity {
+        host_id: uuid::Uuid::new_v4(),
         identity: client_identity,
         roots: vec![ca.certificate],
-        endpoint: proxy_address,
+        endpoint: Some(proxy_address),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_root: None,
+        https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
     };
     let state = StateDirectory::new();
@@ -263,13 +275,17 @@ fn supervisor_identity(
     endpoint: std::net::SocketAddr,
 ) -> RemoteIdentity {
     RemoteIdentity {
+        host_id: uuid::Uuid::new_v4(),
         identity: Identity {
             certificate: client.certificate.clone(),
             key: client.key.clone(),
         },
         roots: vec![ca.certificate.clone()],
-        endpoint,
+        endpoint: Some(endpoint),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_root: None,
+        https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
     }
 }
@@ -530,13 +546,17 @@ async fn unavailable_local_credentials_retry_without_creating_state() {
         .sign(&ca.key, openssl::hash::MessageDigest::null())
         .unwrap();
     let identity = RemoteIdentity {
+        host_id: uuid::Uuid::new_v4(),
         identity: Identity {
             certificate: certificate.build(),
             key,
         },
         roots: vec![ca.certificate],
-        endpoint: "127.0.0.1:1".parse().unwrap(),
+        endpoint: Some("127.0.0.1:1".parse().unwrap()),
         server_name: "localhost".into(),
+        public_origin: None,
+        https_root: None,
+        https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
     };
     let directory = StateDirectory::new();

@@ -5,7 +5,7 @@ use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
 use openssl::{
     hash::MessageDigest,
-    pkey::PKey,
+    pkey::{PKey, Private},
     x509::{X509NameBuilder, X509Req},
 };
 use serde_json::{Value, json};
@@ -92,6 +92,40 @@ async fn assert_invitation_admission(app: &Router, invitation: &Value, token: &s
     }
 }
 
+async fn assert_bound_join_response(
+    app: &Router,
+    store: &EnrollmentStore,
+    key: &PKey<Private>,
+    join: Value,
+) {
+    let response = request(app, "/remote/join", join.clone(), None, "").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: JoinResponse =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(response.execution_uid, 1002);
+    let der = B64.decode(response.certificate_der).unwrap();
+    assert!(
+        openssl::x509::X509::from_der(&der)
+            .unwrap()
+            .public_key()
+            .unwrap()
+            .public_eq(key)
+    );
+    assert_eq!(
+        store
+            // Admission observes time after issuance, including a slow test host.
+            .admit(&openssl::sha::sha256(&der), now().unwrap())
+            .await
+            .unwrap()
+            .execution_uid,
+        1002
+    );
+    assert_eq!(
+        request(app, "/remote/join", join, None, "").await.status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
 #[tokio::test]
 async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() {
     let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
@@ -113,7 +147,18 @@ async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() 
         server_name: "localhost".into(),
     };
     let app = router(auth, pool.clone(), source.clone(), endpoint);
-    let invitation = json!({"host_id":host,"mode":"rootless","execution_uid":1002});
+    let key = PKey::generate_ed25519().unwrap();
+    let key_digest = openssl::sha::sha256(&key.raw_public_key().unwrap());
+    let unbound = request(
+        &app,
+        "/remote/invitations",
+        json!({"host_id":host,"mode":"rootless","execution_uid":1002}),
+        Some(&token),
+        "https://auth.example.test",
+    )
+    .await;
+    assert_eq!(unbound.status(), StatusCode::BAD_REQUEST);
+    let invitation = json!({"host_id":host,"mode":"rootless","execution_uid":1002,"expected_key_digest":key_digest});
     assert_invitation_admission(&app, &invitation, &token).await;
     let response = request(
         &app,
@@ -124,8 +169,11 @@ async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() 
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    let joined: JoinInvitation =
+    let published: Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(published["public_origin"], "https://auth.example.test");
+    assert!(published.get("endpoint").is_none());
+    let joined: JoinInvitation = serde_json::from_value(published).unwrap();
     assert_eq!(joined.execution_uid, 1002);
     assert_eq!(
         joined.ca_der,
@@ -143,7 +191,6 @@ async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() 
         .status(),
         StatusCode::FORBIDDEN
     );
-    let key = PKey::generate_ed25519().unwrap();
     let join = json!({"host_id":host,"mode":"rootless","token":joined.token,"csr_der":B64.encode(csr(&key))});
     assert_eq!(
         request(&app, "/remote/join", join.clone(), None, "")
@@ -160,32 +207,7 @@ async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() 
             .status(),
         StatusCode::BAD_REQUEST
     );
-    let response = request(&app, "/remote/join", join.clone(), None, "").await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let response: JoinResponse =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(response.execution_uid, 1002);
-    let der = B64.decode(response.certificate_der).unwrap();
-    assert!(
-        openssl::x509::X509::from_der(&der)
-            .unwrap()
-            .public_key()
-            .unwrap()
-            .public_eq(&key)
-    );
-    assert_eq!(
-        store
-            // Admission observes the time after issuance, including a slow test host.
-            .admit(&openssl::sha::sha256(&der), now().unwrap())
-            .await
-            .unwrap()
-            .execution_uid,
-        1002
-    );
-    assert_eq!(
-        request(&app, "/remote/join", join, None, "").await.status(),
-        StatusCode::FORBIDDEN
-    );
+    assert_bound_join_response(&app, &store, &key, join).await;
 }
 
 #[tokio::test]
@@ -217,7 +239,7 @@ async fn invitation_publication_rechecks_session_after_host_creation() {
     let response = request(
         &app,
         "/remote/invitations",
-        json!({"host_id":host,"mode":"rootless","execution_uid":1002}),
+        json!({"host_id":host,"mode":"rootless","execution_uid":1002,"expected_key_digest":vec![7u8;32]}),
         Some(&token),
         "https://auth.example.test",
     )
