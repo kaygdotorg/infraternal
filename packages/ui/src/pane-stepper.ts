@@ -20,8 +20,8 @@ import { Spring } from "./spring";
 export type StepDirection = 1 | -1 | 0;
 
 const SLIDE = 20;
-const PANE_SPRING = { visualDuration: 0.34, bounce: 0.14 };
-const HEIGHT_SPRING = { visualDuration: 0.36, bounce: 0 };
+const PANE_SPRING = { visualDuration: 0.34 } as const;
+const HEIGHT_SPRING = { visualDuration: 0.36 } as const;
 
 export class PaneStepper {
   private current: HTMLElement | undefined;
@@ -88,7 +88,7 @@ export class PaneStepper {
       }
       if (pane !== this.current && Math.abs(value) >= 1) { this.drop(pane); return; }
       pane.style.transform = `translate3d(${value * SLIDE}px, 0, 0)`;
-      // An arriving pane's spring may overshoot past centre; that overshoot moves it, it does not fade it.
+      // The springs are critically damped, so `value` never crosses 0; the clamp below only guards the endpoints.
       const away = pane === this.current && enter !== 0 ? value * Math.sign(enter) : Math.abs(value);
       pane.style.opacity = String(Math.max(0, Math.min(1, 1 - away)));
     }, PANE_SPRING);

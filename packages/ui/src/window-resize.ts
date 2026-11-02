@@ -62,8 +62,8 @@ export interface WindowResizeHost {
   centered?: boolean;
   /**
    * Past the minimum or maximum the size resists like rubber instead of stopping, and on release
-   * it springs back to the limit with a soft bounce. Release always springs to rest (a slight
-   * settle); with `snap` it rests on the nearest snap point.
+   * it springs back to the limit without overshoot. Release always springs to rest;
+   * with `snap` it rests on the nearest snap point.
    */
   rubber?: boolean;
   /**
@@ -128,7 +128,7 @@ export function settleResize(apply: (frame: ResizeFrame) => void, from: ResizeFr
     const l = (a: number, b: number): number => a + (b - a) * p;
     if (p === 1) { apply(to); done(); return; }
     apply({ width: l(from.width, to.width), height: l(from.height, to.height), top: l(from.top, to.top), shiftX: l(from.shiftX, to.shiftX) });
-  }, { visualDuration: 0.42, bounce: 0.28 });
+  }, { visualDuration: 0.42 });
   spring.set(1);
   return () => { cancelled = true; spring.set(spring.value, true); };
 }

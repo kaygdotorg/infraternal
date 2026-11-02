@@ -28,7 +28,7 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 | `layout/droplet.on-demand.ts`, `droplet-handle.ts` | the droplet split (short-lived WebGL, only while it plays; loaded on demand, warmed when idle) | `loadDroplet` `endSplit` |
 | `views/world.ts` | building a view, sizing it on the grid, settle, hover card, dragging a view | `ViewsModule` (`cx.view`) |
 | `views/body.ts`, `settings*.ts`, `icons.ts` | what is inside a window by kind; Settings panels; icons | `makeBody`, `SettingsSource` |
-| `windows/frame.ts`, `move.ts` | window card, activation, pill grab and move, resize | `makeWindow`, `setActive`, `beginMove` |
+| `windows/frame.ts`, `move.on-demand.ts` | window card, activation, pill grab and move, resize | `makeWindow`, `setActive`, `beginMove` |
 | `windows/visibility.ts` | which windows are live: near the screen, live level of detail, view not far, page not hidden; tells each binding `setVisible` (the only caller) | `Visibility` |
 | `memory.ts` | views far from the camera are not painted; a hidden page releases big surfaces | `Memory` (reports far views and a paused page to `visibility`) |
 | `windows/lifecycle.ts` | open, close (never ends the session), split | `WindowsModule` (`cx.win`) |

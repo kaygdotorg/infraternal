@@ -79,7 +79,7 @@ export function scrollColumn(colEl: HTMLElement, top: number, instant = false): 
   if (run && idle) run.sp.set(box.scrollTop, true); // the column was moved by something else since: start from where it is
   if (!run) {
     const own = { sp: undefined as unknown as Spring, target };
-    own.sp = restPx(new Spring(box.scrollTop, (v) => { box.scrollTop = v; if (v === own.target) delete box.dataset.wheel; }, { visualDuration: 0.4, bounce: 0.1 }));
+    own.sp = restPx(new Spring(box.scrollTop, (v) => { box.scrollTop = v; if (v === own.target) delete box.dataset.wheel; }, { visualDuration: 0.4 }));
     scrolls.set(box, own);
     run = own;
   }

@@ -811,7 +811,7 @@
 .ui-conn[hidden] { display: none; }
 @media (pointer: coarse) { .ui-conn::after { content: ""; position: absolute; inset: -0.5rem; } }
 /* Keys that were typed while the link was down and are kept to be sent (connection-indicator.ts `queued`): one small amber key at the glyph's corner. */
-.ui-conn-q { position: absolute; right: -0.1875rem; top: -0.1875rem; display: grid; place-items: center; width: 0.5625rem; height: 0.5625rem; border-radius: 50%; background: var(--ui-conn-ground, var(--bg)); opacity: 0; transform: scale(0.4); transition: opacity 160ms ease-out, transform 220ms cubic-bezier(0.34, 1.4, 0.64, 1); pointer-events: none; }
+.ui-conn-q { position: absolute; right: -0.1875rem; top: -0.1875rem; display: grid; place-items: center; width: 0.5625rem; height: 0.5625rem; border-radius: 50%; background: var(--ui-conn-ground, var(--bg)); opacity: 0; transform: scale(0.4); transition: opacity 160ms ease-out, transform 220ms cubic-bezier(0.23, 1, 0.32, 1); pointer-events: none; }
 .ui-conn-q svg { width: 0.5625rem; height: 0.5625rem; fill: none; stroke: var(--warn); stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 .ui-conn[data-queued] .ui-conn-q { opacity: 1; transform: none; }
 .ui-conn-g { position: absolute; inset: 0; display: grid; place-items: center; opacity: 0; transform: scale(0.6); pointer-events: none;
@@ -849,7 +849,7 @@
 .ui-conn-g-resumed .disc { fill: color-mix(in oklab, var(--ok) 22%, transparent); }
 .ui-conn .ui-conn-g-resumed .tick { stroke: var(--ok); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 /* The tick arrives with a little overshoot, because something just happened. */
-.ui-conn[data-state="resumed"] .ui-conn-g-resumed { transition-timing-function: ease-out, cubic-bezier(0.34, 1.4, 0.64, 1); }
+.ui-conn[data-state="resumed"] .ui-conn-g-resumed { transition-timing-function: ease-out, cubic-bezier(0.23, 1, 0.32, 1); }
 
 .ui-conn .ui-conn-g-approximate .frame { stroke: var(--fg-2); stroke-width: 1.4; }
 .ui-conn-g-approximate .fill { fill: var(--fg-2); opacity: 0.55; }

@@ -233,7 +233,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
         this.float.style.opacity = String(clamped);
         this.float.style.transform = `translateY(${(1 - value) * 12}px) scale(${0.97 + value * 0.03})`;
         scrim.style.opacity = String(clamped);
-      }, { visualDuration: 0.32, bounce: 0.14 });
+      }, { visualDuration: 0.32 });
       if (review?.failures.length) {
         this.run = review.run;
         this.jobs = review.failures.map((failure) => ({

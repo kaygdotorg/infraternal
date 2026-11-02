@@ -165,8 +165,8 @@ export function createViews(cx: Ctx): ViewsModule {
   const ghost = el("div", "cl-ghost");
   let ghostX: Spring, ghostY: Spring;
   const paintGhost = (): void => { if (ghostX && ghostY) ghost.style.transform = `translate(${ghostX.value}px, ${ghostY.value}px)`; };
-  ghostX = restPx(new Spring(0, () => paintGhost(), { visualDuration: 0.3, bounce: 0.12 }));
-  ghostY = restPx(new Spring(0, () => paintGhost(), { visualDuration: 0.3, bounce: 0.12 }));
+  ghostX = restPx(new Spring(0, () => paintGhost(), { visualDuration: 0.3 }));
+  ghostY = restPx(new Spring(0, () => paintGhost(), { visualDuration: 0.3 }));
   world.append(ghost);
 
   const wireView = (c: ViewRec): void => {
@@ -257,7 +257,7 @@ export function createViews(cx: Ctx): ViewsModule {
       sx: undefined as unknown as Spring, sy: undefined as unknown as Spring,
     };
     const place = (): void => { root.style.transform = `translate(${c.x}px, ${c.y}px)`; cx.invalidate(); cx.memory?.cull(); };
-    const POS = { visualDuration: 0.5, bounce: 0.2 };
+    const POS = { visualDuration: 0.5 } as const;
     c.sx = restPx(new Spring(view.x, (v) => { c.x = v; place(); }, POS));
     c.sy = restPx(new Spring(view.y, (v) => { c.y = v; place(); }, POS));
     if (view.layout === "tiled") {

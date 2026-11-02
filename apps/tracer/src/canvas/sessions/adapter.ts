@@ -54,6 +54,8 @@ export interface SessionBinding {
    * The renderer stays; the new session's id arrives through `changed`, as for any new shell.
    */
   openNew?(): void;
+  /** Whether a vertical wheel of this sign is the window's terminal's to take (D275): scrollback to move, or a program on the screen. Absent: no. */
+  wheelUse?(deltaY: number): boolean | undefined;
   /** The window's box changed; the renderer refits to the new cell grid. */
   refit(): void;
   /** The window closed. The session is not ended. */
