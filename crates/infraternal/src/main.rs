@@ -1260,28 +1260,49 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
     }
 
     #[cfg(feature = "plugin-agent")]
-    {
-    #[cfg(feature = "plugin-agent")]
+    if let Some(result) = run_login_shim_if_requested(matches, &options) {
+        return result;
+    }
+    match options.run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("shim startup/session failed: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Dispatch the private login workers only when their authenticated fields are present.
+#[cfg(feature = "plugin-agent")]
+#[cold]
+fn run_login_shim_if_requested(
+    matches: &ArgMatches,
+    options: &shim_cli::Options,
+) -> Option<ExitCode> {
     let login_socket = matches.get_one::<String>("login_socket").map(PathBuf::from);
-    #[cfg(feature = "plugin-agent")]
     if matches
         .get_one::<String>("login_worker_proc")
         .is_some_and(|path| infraternal_shim::protect_login_process_at(Path::new(path)).is_err())
     {
-        return ExitCode::FAILURE;
+        return Some(ExitCode::FAILURE);
     }
     let prestarted = match prestarted_descriptors(matches) {
         Ok(descriptors) => descriptors,
-        Err(code) => return code,
+        Err(code) => return Some(code),
     };
     if matches.get_flag("login_worker") || matches.get_flag("login_proxy") {
         if prestarted.is_some() {
-            return ExitCode::from(2);
+            return Some(ExitCode::from(2));
         }
         let Some(endpoint) = login_socket.as_deref() else {
-            return ExitCode::from(2);
+            return Some(ExitCode::from(2));
         };
-        return run_login_command(matches, &options.session, options.uid, endpoint);
+        return Some(run_login_command(
+            matches,
+            &options.session,
+            options.uid,
+            endpoint,
+        ));
     }
     let login_cgroup = matches.get_one::<String>("login_cgroup").map(PathBuf::from);
     let login_worker_pid = matches
@@ -1299,12 +1320,15 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
         || login_worker_parent.is_some()
         || login_worker_proc.is_some()
         || prestarted.is_some();
-    if has_login_config {
-        if options.command_stdin {
-            eprintln!("command startup with a host login is unavailable");
-            return ExitCode::from(2);
-        }
-        return match run_shim(
+    if !has_login_config {
+        return None;
+    }
+    if options.command_stdin {
+        eprintln!("command startup with a host login is unavailable");
+        return Some(ExitCode::from(2));
+    }
+    Some(
+        match run_shim(
             &options.session,
             options.uid,
             options.cols,
@@ -1327,16 +1351,8 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
                 eprintln!("shim startup/session failed: {error}");
                 ExitCode::from(1)
             }
-        };
-    }
-    }
-    match options.run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("shim startup/session failed: {error}");
-            ExitCode::from(1)
-        }
-    }
+        },
+    )
 }
 
 #[cfg(feature = "plugin-agent")]
