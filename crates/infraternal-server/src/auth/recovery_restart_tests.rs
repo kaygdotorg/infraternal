@@ -450,3 +450,81 @@ async fn recovery_status_never_restarts_and_uses_only_server_elapsed_time() {
         .unwrap();
     assert_eq!(rows, 0);
 }
+
+#[tokio::test]
+async fn recovery_elapsed_is_checkpointed_without_client_checks() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture_v2().await;
+    f.auth
+        .test_recovery_elapsed
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    let _request = attempt(&f, "recovery-start", NOW, false).await;
+    tokio::time::pause();
+    f.auth
+        .test_recovery_elapsed
+        .store(60 * SECOND, std::sync::atomic::Ordering::Relaxed);
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    tokio::time::resume();
+    // Await the asynchronous SQLite write; the timeout bounds a hung test, not performance.
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let saved: i64 =
+                sqlx::query_scalar("SELECT elapsed FROM recovery_clock WHERE singleton=1")
+                    .fetch_one(&f.auth.pool)
+                    .await
+                    .unwrap();
+            if saved == 60 * SECOND {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("idle recovery progress must survive a restart");
+}
+
+#[tokio::test]
+async fn recovery_shutdown_flush_and_restarts_credit_only_measured_progress() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture_v2().await;
+    f.auth
+        .test_recovery_elapsed
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    let request = attempt(&f, "recovery-start", NOW, false).await;
+    let token = str_field(&request, "token");
+    let mut auth = f.auth.clone();
+    let mut saved = 0;
+    for measured in [37, 60, 60] {
+        // Graceful shutdown flushes even before the first periodic checkpoint.
+        auth.test_recovery_elapsed
+            .store(measured * SECOND, std::sync::atomic::Ordering::Relaxed);
+        auth.checkpoint_recovery_clock().await.unwrap();
+        saved += measured;
+        let restarted = Auth::new(f.auth.pool.clone(), "auth.example.test", ORIGIN)
+            .await
+            .unwrap();
+        restarted
+            .test_recovery_elapsed
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        let status = restarted
+            .recovery_status(token, NOW + 100 * DAY)
+            .await
+            .unwrap();
+        assert_eq!(status["delay_seconds"], DAY - saved);
+        assert_eq!(status["ready"], false);
+        auth = restarted;
+    }
+    // An abrupt restart cannot credit the not-yet-checkpointed 59 seconds or downtime.
+    auth.test_recovery_elapsed
+        .store(59 * SECOND, std::sync::atomic::Ordering::Relaxed);
+    drop(auth);
+    let restarted = Auth::new(f.auth.pool.clone(), "auth.example.test", ORIGIN)
+        .await
+        .unwrap();
+    restarted
+        .test_recovery_elapsed
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    let status = restarted.recovery_status(token, NOW - DAY).await.unwrap();
+    assert_eq!(status["delay_seconds"], DAY - saved);
+    assert_eq!(status["ready"], false);
+}

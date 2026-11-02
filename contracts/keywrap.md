@@ -356,9 +356,13 @@ Recovery authority uses a persisted logical clock advanced only by elapsed monot
 process uptime, under the database writer lock. Start, resume, readiness, completion
 and signed-in status all use that clock. Wall-clock steps in either direction credit
 no elapsed time and add no waiting time. On process restart, only committed progress
-survives: unrecorded uptime and downtime are not credited. Each restart can discard up to 24 hours of
-unrecorded wait progress and up to 48 hours of unrecorded lifetime progress,
-in addition to the downtime itself. There is no background timer.
+survives: unrecorded uptime and downtime are not credited. While a request is
+active, the server checkpoints measured progress every 60 seconds; normal shutdown
+(SIGINT or SIGTERM) flushes before exit, including before the first minute.
+With successful checkpointing, each abrupt restart discards at most about a
+minute of uptime, plus downtime. Scheduler or storage failures can delay a save;
+failures remain fail-closed and never earn unmeasured credit. With no active
+request, the worker waits for a request notification without an idle timer.
 On upgrade from wall-based recovery, existing requests end because prior elapsed
 time and continued validity cannot be proven. Re-entering the words starts a fresh
 request with a full elapsed wait and lifetime; old bearers remain invalid. Unix dates in replies are

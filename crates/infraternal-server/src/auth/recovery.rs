@@ -9,6 +9,10 @@ const SECOND: i64 = 1_000_000_000;
 pub(super) struct Clock {
     epoch: i64,
     started: std::time::Instant,
+    wake: std::sync::Arc<tokio::sync::Notify>,
+    worker: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
+    #[cfg(test)]
+    pub(super) test_elapsed: std::sync::Arc<std::sync::atomic::AtomicI64>,
 }
 impl Clock {
     pub(super) async fn load(pool: &sqlx::SqlitePool) -> Result<Self> {
@@ -18,13 +22,105 @@ impl Clock {
         Ok(Self {
             epoch,
             started: std::time::Instant::now(),
+            wake: std::sync::Arc::default(),
+            worker: std::sync::Mutex::default(),
+            #[cfg(test)]
+            test_elapsed: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(i64::MIN)),
         })
     }
 
     fn sample(&self) -> Result<i64> {
+        #[cfg(test)]
+        {
+            let elapsed = self.test_elapsed.load(std::sync::atomic::Ordering::Relaxed);
+            if elapsed != i64::MIN {
+                return self.epoch.checked_add(elapsed.max(0)).ok_or(Error::Invalid);
+            }
+        }
         let elapsed =
             i64::try_from(self.started.elapsed().as_nanos()).map_err(|_| Error::Invalid)?;
         self.epoch.checked_add(elapsed).ok_or(Error::Invalid)
+    }
+
+    // One writer-serialized measurement serves checkpoints and every authority check.
+    async fn record(&self, tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<i64> {
+        sqlx::query("UPDATE recovery_clock SET elapsed=elapsed WHERE singleton=1")
+            .execute(&mut **tx)
+            .await?;
+        Ok(sqlx::query_scalar(
+            "UPDATE recovery_clock SET elapsed=MAX(elapsed,?) WHERE singleton=1 RETURNING elapsed",
+        )
+        .bind(self.sample()?)
+        .fetch_one(&mut **tx)
+        .await?)
+    }
+
+    async fn checkpoint(&self, pool: &sqlx::SqlitePool) -> Result<()> {
+        let mut tx = pool.begin().await?;
+        self.record(&mut tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn active(pool: &sqlx::SqlitePool) -> Result<bool> {
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM recovery WHERE expires>(SELECT elapsed FROM recovery_clock WHERE singleton=1))")
+            .fetch_one(pool).await?)
+    }
+
+    // The task owns only a weak clock reference while sleeping. Dropping the last
+    // Auth aborts it, so neither the pool nor recovery timers outlive their owner.
+    // With no active recovery it waits on notification, without an idle timer.
+    pub(super) fn start_checkpointing(self: &std::sync::Arc<Self>, pool: sqlx::SqlitePool) {
+        let weak = std::sync::Arc::downgrade(self);
+        let wake = self.wake.clone();
+        let mut deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        let task = tokio::spawn(async move {
+            loop {
+                match Self::active(&pool).await {
+                    Ok(false) => wake.notified().await,
+                    Ok(true) | Err(_) => {
+                        tokio::select! {
+                            () = tokio::time::sleep_until(deadline) => {},
+                            () = wake.notified() => {},
+                        }
+                    }
+                }
+                deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+                let Some(clock) = weak.upgrade() else {
+                    return;
+                };
+                // Recheck after waking: cancellation must not keep an idle writer alive.
+                let result = async {
+                    if Self::active(&pool).await? {
+                        clock.checkpoint(&pool).await?;
+                    }
+                    Ok::<_, Error>(())
+                }
+                .await;
+                if result.is_err() {
+                    tracing::warn!(
+                        "could not checkpoint recovery elapsed time; unrecorded progress remains uncredited"
+                    );
+                }
+            }
+        });
+        *self
+            .worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task.abort_handle());
+    }
+}
+
+impl Drop for Clock {
+    fn drop(&mut self) {
+        if let Some(worker) = self
+            .worker
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            worker.abort();
+        }
     }
 }
 
@@ -54,38 +150,30 @@ impl Auth {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         wall: i64,
     ) -> Result<i64> {
-        sqlx::query("UPDATE recovery_clock SET elapsed=elapsed WHERE singleton=1")
-            .execute(&mut **tx)
-            .await?;
-        let candidate = self.recovery_clock.sample()?;
+        let elapsed = self.recovery_clock.record(tx).await?;
         // Legacy fixtures explicitly simulate time with their supplied Unix clock.
-        // Clock-step regressions instead inject elapsed nanoseconds independently.
+        // Clock-step regressions inject measured nanoseconds into Clock itself.
         #[cfg(test)]
-        let candidate = {
-            let elapsed = self
-                .test_recovery_elapsed
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if elapsed == i64::MIN {
-                super::devices::api_key_time(tx, wall)
-                    .await?
-                    .checked_mul(SECOND)
-                    .ok_or(Error::Invalid)?
-                    .max(candidate)
-            } else {
-                self.recovery_clock
-                    .epoch
-                    .checked_add(elapsed.max(0))
-                    .ok_or(Error::Invalid)?
-            }
-        };
+        if self
+            .test_recovery_elapsed
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == i64::MIN
+        {
+            let legacy = super::devices::api_key_time(tx, wall)
+                .await?
+                .checked_mul(SECOND)
+                .ok_or(Error::Invalid)?;
+            return Ok(sqlx::query_scalar("UPDATE recovery_clock SET elapsed=MAX(elapsed,?) WHERE singleton=1 RETURNING elapsed")
+                .bind(legacy).fetch_one(&mut **tx).await?);
+        }
         #[cfg(not(test))]
         let _ = wall;
-        Ok(sqlx::query_scalar(
-            "UPDATE recovery_clock SET elapsed=MAX(elapsed,?) WHERE singleton=1 RETURNING elapsed",
-        )
-        .bind(candidate)
-        .fetch_one(&mut **tx)
-        .await?)
+        Ok(elapsed)
+    }
+
+    /// Save only measured uptime before the server exits, even before the first minute.
+    pub(crate) async fn checkpoint_recovery_clock(&self) -> Result<()> {
+        self.recovery_clock.checkpoint(&self.pool).await
     }
 
     /// Start a 24-hour delayed recovery; repeat requests do not reset or accelerate it.
@@ -207,6 +295,7 @@ impl Auth {
             record(&mut tx, user, "start", wall).await?;
         }
         self.recovery_changes.commit(tx, user, None).await?;
+        self.recovery_clock.wake.notify_one();
         Ok((token, estimate(ready, elapsed, wall), delay(ready, elapsed)))
     }
 
@@ -241,6 +330,7 @@ impl Auth {
         self.recovery_changes
             .commit(tx, &session.user_id, None)
             .await?;
+        self.recovery_clock.wake.notify_one();
         Ok(())
     }
 

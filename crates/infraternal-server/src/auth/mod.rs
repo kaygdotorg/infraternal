@@ -230,6 +230,9 @@ impl Auth {
         migration_compat::normalize_production_index(&pool).await?;
         migration_compat::MIGRATIONS.run(&pool).await?;
         let recovery_clock = Arc::new(recovery::Clock::load(&pool).await?);
+        recovery_clock.start_checkpointing(pool.clone());
+        #[cfg(test)]
+        let test_recovery_elapsed = recovery_clock.test_elapsed.clone();
         let (setup_consumed, _) = watch::channel(());
         Ok(Self {
             pool,
@@ -249,7 +252,7 @@ impl Auth {
             #[cfg(test)]
             test_http_time: Arc::new(AtomicI64::new(i64::MIN)),
             #[cfg(test)]
-            test_recovery_elapsed: Arc::new(AtomicI64::new(i64::MIN)),
+            test_recovery_elapsed,
         })
     }
 

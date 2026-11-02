@@ -57,8 +57,11 @@ Re-entering your words while a recovery is pending resumes that request, with th
 
 The wait and expiry count elapsed server uptime, so a clock correction cannot
 skip or lengthen the wait. A server restart keeps the progress already recorded,
-but does not count downtime or uptime since the last recorded check. Each restart
-can add at most 24 hours of extra waiting, plus downtime. The displayed date is
+but does not count downtime or unrecorded uptime. While recovery is active, the
+server saves measured progress every 60 seconds and on normal shutdown. With
+successful checkpoints, an abrupt restart loses at most about a minute of
+progress, plus downtime; a normal shutdown saves progress before exiting.
+Storage failures keep recovery waiting rather than crediting unmeasured time. The displayed date is
 an estimate and can move after a clock correction. The recovery page refreshes
 the server status every minute while waiting, when its countdown reaches zero,
 and when you return to the page. It shows "Ready now" only after the server
