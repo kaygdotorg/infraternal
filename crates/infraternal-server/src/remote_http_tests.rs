@@ -183,7 +183,9 @@ async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() 
         request(
             &app,
             "/remote/invitations",
-            json!({"host_id":host,"mode":"rootless","execution_uid":1003}),
+            // Keep this second request bound so it exercises single use rather
+            // than failing the key-binding validation first.
+            json!({"host_id":host,"mode":"rootless","execution_uid":1003,"expected_key_digest":key_digest}),
             Some(&token),
             "https://auth.example.test"
         )
