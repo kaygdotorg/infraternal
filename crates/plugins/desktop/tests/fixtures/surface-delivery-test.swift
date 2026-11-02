@@ -39,6 +39,7 @@ enum HelperFailure: Error { case invalid, permission, unavailable }
         fill(127)
         source.receiveFrame(pixel, ticks: mach_absolute_time(), damage: damage)
         awaitCount(1)
+        expect(lock.withLock { keys.first == true }, "first packet is a keyframe")
         for _ in 0..<7 {
             Thread.sleep(forTimeInterval: 0.035)
             source.receiveFrame(pixel, ticks: mach_absolute_time(), damage: damage)
