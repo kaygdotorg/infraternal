@@ -53,8 +53,9 @@ replace either Network access or Login access.
 SSH-specific signing stays under the existing protected signing authority.
 The adapter must not export CA key material or introduce a second ordinary
 memory signer. A local signing request is bound to the requesting process and
-the current session identity. Forwarded signing requests are refused by
-default and require an explicit per-rule grant.
+the current session identity. Requests arriving through SSH agent forwarding
+are always refused (D235): the infraternal agent never signs a forwarded
+request.
 
 ## OpenSSH-equivalent operations
 
@@ -62,9 +63,10 @@ The product supports local, remote and dynamic port forwarding (`-L`, `-R`,
 `-D`), rsync, scp and SFTP; command execution and exit status; signals and
 terminal resize; environment and locale; and managed host trust. These are
 part of the contract even where S0's recovered adapter does not yet implement
-them. Agent forwarding (`-A`) is also in product scope, off by default, and
-allowed only by an explicit per-rule grant. No default or implicit grant may
-enable it.
+them. Agent forwarding (`-A`) is NOT supported: D235 says the infraternal
+agent never signs a request that arrives through agent forwarding. A per-rule
+opt-in was proposed by the orchestrator on 2026-11-01 but not confirmed by the
+owner; it would need an explicit D235 amendment first (open question on #221).
 
 Prompt and scale targets for the fully wired product are about 0.3 s on a LAN
 and 1.5 s at 150 ms RTT, with first-login/link setup reported separately. Size
