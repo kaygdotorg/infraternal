@@ -218,7 +218,7 @@ async fn same_uid_local_status_reads_ca_lock_and_distinguishes_unavailable_socke
     assert!(!status.clock_healthy);
     assert!(status.roots.is_empty());
     server.abort();
-    assert!(server.await.unwrap_err().is_cancelled());
+    assert!(server.await.is_err_and(|error| error.is_cancelled()));
 }
 
 #[tokio::test]
