@@ -59,18 +59,35 @@ fn mesh_listener_uses_the_mesh_ip_and_disables_admin_and_usage_surfaces() {
     assert!(rendered.contains("127.0.0.1:19999"));
     assert!(rendered.contains("sendAnonymousUsage = false"));
     assert!(!rendered.contains("0.0.0.0"));
-    assert!(!rendered.contains("[api]"));
+    assert!(rendered.contains("[api]\ndashboard = false\ninsecure = false"));
     assert!(!rendered.contains("api@internal"));
 }
 
 #[test]
-fn private_ping_is_routed_automatically_without_enabling_the_admin_api() {
+fn config_generation_probe_is_gated_on_the_loopback_health_entrypoint() {
+    let dynamic = render_dynamic_config(&[]).expect("empty dynamic configuration");
+    let dynamic: Value = serde_json::from_slice(&dynamic).expect("dynamic JSON");
+    let probe = &dynamic["http"]["routers"]["infraternal-config-generation"];
+    assert_eq!(probe["entryPoints"], serde_json::json!(["health"]));
+    assert_eq!(probe["service"], "api@internal");
+    let rule = probe["rule"].as_str().expect("generation route rule");
+    assert!(rule.contains("Method(`GET`)") && rule.contains("Path(`/api/rawdata`)"));
+    assert!(rule.contains("Header(`X-Infraternal-Config-Generation`, `"));
+    assert!(!rule.contains("Headers("));
+
+    let rendered_static_config =
+        render_static_config(&static_config(false)).expect("private static config");
+    assert!(rendered_static_config.contains("\n[api]\ndashboard = false\ninsecure = false"));
+    assert!(rendered_static_config.contains("[entryPoints.health]\naddress = \"127.0.0.1:"));
+}
+
+#[test]
+fn private_ping_and_generation_probe_use_only_the_loopback_api_surface() {
     let rendered = render_static_config(&static_config(false)).expect("render static config");
     assert!(rendered.contains("[ping]"));
     assert!(rendered.contains("manualRouting = false"));
-    assert!(!rendered.contains("[api]"));
-    assert!(!rendered.contains("dashboard"));
-    assert!(!rendered.contains("insecure"));
+    assert!(rendered.contains("[api]\ndashboard = false\ninsecure = false"));
+    assert!(rendered.contains("[entryPoints.health]\naddress = \"127.0.0.1:"));
 }
 
 #[test]

@@ -1,7 +1,8 @@
 //! Renders mesh-bound static settings and exact-host dynamic routes atomically [#281].
 //! Mesh routes use the same accepted peer addresses as mesh DNS. When mesh and public exposures
 //! coexist, they use separate mesh-IP and wildcard listeners with disjoint ports. Certificate
-//! state remains node-local.
+//! state remains node-local. A nonce-gated rawdata route on the loopback-only health entrypoint
+//! lets the supervisor acknowledge a dynamic snapshot only after Traefik has loaded that generation.
 
 use crate::names::CertificateName;
 use serde_json::{Map, json};
@@ -202,6 +203,7 @@ pub fn render_static_config(config: &StaticConfig) -> io::Result<String> {
         "\n[ping]\nentryPoint = \"health\"\nmanualRouting = false"
     )
     .map_err(io::Error::other)?;
+    writeln!(rendered, "\n[api]\ndashboard = false\ninsecure = false").map_err(io::Error::other)?;
     writeln!(
         rendered,
         "\n[providers.file]\ndirectory = {}\nwatch = true",
@@ -314,6 +316,18 @@ fn render_dns_resolvers(config: &DnsChallenge, rendered: &mut String) -> io::Res
 /// # Errors
 /// Returns permission denied when a mesh route has no accepted sources, or invalid data for an unsafe route.
 pub fn render_dynamic_config(services: &[PublishedService]) -> io::Result<Vec<u8>> {
+    let generation = uuid::Uuid::new_v4().to_string();
+    render_dynamic_config_with_generation(services, &generation)
+}
+
+/// Render a complete snapshot with a private probe that is unique to this generation.
+pub(crate) fn render_dynamic_config_with_generation(
+    services: &[PublishedService],
+    generation: &str,
+) -> io::Result<Vec<u8>> {
+    let generation = uuid::Uuid::parse_str(generation)
+        .map_err(|_| invalid_input("dynamic config generation must be a UUID"))?
+        .to_string();
     if services.len() > 4096 {
         return Err(invalid_data("published service count exceeds its limit"));
     }
@@ -334,6 +348,18 @@ pub fn render_dynamic_config(services: &[PublishedService]) -> io::Result<Vec<u8
             &mut proxy_services,
         )?;
     }
+    // The nonce makes a 200 response an exact generation acknowledgment. This route can only use
+    // the private loopback health entrypoint and exposes one API path with the current nonce.
+    routers.insert(
+        "infraternal-config-generation".to_owned(),
+        json!({
+            "rule": format!(
+                "Method(`GET`) && Path(`/api/rawdata`) && Header(`X-Infraternal-Config-Generation`, `{generation}`)"
+            ),
+            "entryPoints": ["health"],
+            "service": "api@internal",
+        }),
+    );
     let bytes = serde_json::to_vec(&json!({
         "http": {
             "routers": routers,

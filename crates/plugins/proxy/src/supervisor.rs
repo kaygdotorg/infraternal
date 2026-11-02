@@ -29,6 +29,8 @@ const LOG_QUEUE_CAPACITY: usize = 128;
 const MAX_PROVIDER_SECRET_BYTES: usize = 64 * 1024;
 const PRIVATE_EXECUTABLE_MODE: u32 = 0o500;
 const PRIVATE_FILE_MODE: u32 = 0o600;
+const CONFIG_APPLY_TIMEOUT: Duration = Duration::from_secs(5);
+const CONFIG_APPLY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The lifecycle states of the one process owned by an infraternal agent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -332,6 +334,83 @@ pub fn check_private_ping(address: SocketAddr, timeout: Duration) -> io::Result<
             io::ErrorKind::ConnectionAborted,
             "proxy private health ping did not return HTTP 200",
         ))
+    }
+}
+
+/// Check the exact dynamic snapshot through its nonce-gated loopback-only rawdata route.
+///
+/// # Errors
+/// Returns an error when the endpoint is not loopback, the request times out, or the generation is not active.
+fn check_private_config_generation(
+    address: SocketAddr,
+    generation: &str,
+    timeout: Duration,
+) -> io::Result<()> {
+    if !address.ip().is_loopback() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "proxy config checks must use loopback",
+        ));
+    }
+    if uuid::Uuid::parse_str(generation).is_err() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "proxy config generation is invalid",
+        ));
+    }
+    let mut stream = TcpStream::connect_timeout(&address, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    write!(
+        stream,
+        "GET /api/rawdata HTTP/1.1\r\nHost: localhost\r\nX-Infraternal-Config-Generation: {generation}\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut status = String::new();
+    BufReader::new(stream).take(1024).read_line(&mut status)?;
+    let mut fields = status.split_ascii_whitespace();
+    if matches!(
+        (fields.next(), fields.next()),
+        (Some("HTTP/1.1" | "HTTP/1.0"), Some("200"))
+    ) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "proxy private config generation probe did not return HTTP 200",
+        ))
+    }
+}
+
+fn wait_for_config_generation(
+    address: SocketAddr,
+    generation: &str,
+    timeout: Duration,
+) -> io::Result<()> {
+    if !address.ip().is_loopback() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "proxy config checks must use loopback",
+        ));
+    }
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "proxy did not apply the dynamic config generation before the deadline",
+            ));
+        }
+        if check_private_config_generation(
+            address,
+            generation,
+            remaining.min(Duration::from_millis(250)),
+        )
+        .is_ok()
+        {
+            return Ok(());
+        }
+        thread::sleep(remaining.min(CONFIG_APPLY_POLL_INTERVAL));
     }
 }
 
@@ -763,13 +842,14 @@ fn replace_services(
     runtime: &mut SupervisorRuntime,
     services: Vec<PublishedService>,
 ) -> io::Result<Option<ListenerPorts>> {
-    runtime.services = services;
+    let previous_services = std::mem::replace(&mut runtime.services, services);
     let active_count = runtime.services.len();
     let desired_scope = ExposureScope::for_services(&runtime.services);
+    let revoked_routes = revoked_mesh_route_ids(&previous_services, &runtime.services);
     let action = runtime.lifecycle.update(active_count, Instant::now());
     let result = match action {
         LifecycleAction::Start => start_runtime_child(settings, log, runtime).map(Some),
-        LifecycleAction::BeginDrain => match write_dynamic_snapshot(settings, &[]) {
+        LifecycleAction::BeginDrain => match apply_dynamic_snapshot(settings, &[]) {
             Ok(()) => Ok(runtime.listener_ports),
             Err(error) => {
                 let stop_result = stop_child(&mut runtime.child);
@@ -797,8 +877,18 @@ fn replace_services(
                     runtime.listener_ports = Some(ports);
                     runtime.listener_ports
                 })
+            } else if revoked_routes.is_empty() {
+                apply_dynamic_snapshot(settings, &runtime.services).map(|()| runtime.listener_ports)
             } else {
-                write_dynamic_snapshot(settings, &runtime.services).map(|()| runtime.listener_ports)
+                let route_removal_snapshot: Vec<_> = runtime
+                    .services
+                    .iter()
+                    .filter(|service| !revoked_routes.contains(&service.id))
+                    .cloned()
+                    .collect();
+                apply_dynamic_snapshot(settings, &route_removal_snapshot)
+                    .and_then(|()| apply_dynamic_snapshot(settings, &runtime.services))
+                    .map(|()| runtime.listener_ports)
             }
         }
         LifecycleAction::Stop => {
@@ -919,9 +1009,8 @@ fn start_managed_child(
         service.https_port = config.ports.https_for_publication(service.public);
     }
     let static_config = crate::config::render_static_config(&config)?;
-    let dynamic_config = crate::config::render_dynamic_config(services)?;
     crate::config::write_config_atomic(&settings.static_config_path, static_config.as_bytes())?;
-    crate::config::write_config_atomic(&settings.dynamic_config_path, &dynamic_config)?;
+    let generation = write_dynamic_snapshot(settings, services)?;
     let mut child = TraefikChild::spawn(
         &settings.executable,
         &settings.static_config_path,
@@ -953,6 +1042,11 @@ fn start_managed_child(
         )
         .is_ok()
         {
+            wait_for_config_generation(
+                settings.private_ping_address,
+                &generation,
+                CONFIG_APPLY_TIMEOUT,
+            )?;
             return Ok((child, scope, config.ports));
         }
         thread::sleep(remaining.min(Duration::from_millis(100)));
@@ -995,9 +1089,44 @@ fn restart_for_listener_scope(
 fn write_dynamic_snapshot(
     settings: &SupervisorSettings,
     services: &[PublishedService],
+) -> io::Result<String> {
+    let generation = uuid::Uuid::new_v4().to_string();
+    let rendered = crate::config::render_dynamic_config_with_generation(services, &generation)?;
+    crate::config::write_config_atomic(&settings.dynamic_config_path, &rendered)?;
+    Ok(generation)
+}
+
+fn apply_dynamic_snapshot(
+    settings: &SupervisorSettings,
+    services: &[PublishedService],
 ) -> io::Result<()> {
-    let rendered = crate::config::render_dynamic_config(services)?;
-    crate::config::write_config_atomic(&settings.dynamic_config_path, &rendered)
+    let generation = write_dynamic_snapshot(settings, services)?;
+    wait_for_config_generation(
+        settings.private_ping_address,
+        &generation,
+        CONFIG_APPLY_TIMEOUT,
+    )
+}
+
+fn revoked_mesh_route_ids(
+    previous: &[PublishedService],
+    next: &[PublishedService],
+) -> std::collections::BTreeSet<String> {
+    previous
+        .iter()
+        .filter_map(|old| {
+            if old.public {
+                return None;
+            }
+            let new = next.iter().find(|candidate| candidate.id == old.id)?;
+            (!new.public
+                && old
+                    .allowed_sources
+                    .iter()
+                    .any(|source| !new.allowed_sources.contains(source)))
+            .then(|| old.id.clone())
+        })
+        .collect()
 }
 
 fn stop_child(child: &mut Option<TraefikChild>) -> io::Result<()> {

@@ -12,11 +12,12 @@ use crate::{
 };
 use std::{
     env,
-    io::{Read, Write},
+    io::{BufRead, Write},
     net::{SocketAddr, TcpListener},
     os::unix::fs::PermissionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::mpsc,
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -34,7 +35,7 @@ fn health_server_sequence(responses: Vec<&'static [u8]>) -> (SocketAddr, JoinHan
     let server = thread::spawn(move || {
         let expected_responses = responses.len();
         let mut served = 0;
-        for response in responses {
+        while served < expected_responses {
             let deadline = Instant::now() + Duration::from_secs(1);
             let accepted = loop {
                 match listener.accept() {
@@ -48,27 +49,40 @@ fn health_server_sequence(responses: Vec<&'static [u8]>) -> (SocketAddr, JoinHan
                     Err(_) => break None,
                 }
             };
-            let Some((mut stream, _)) = accepted else {
+            let Some((stream, _)) = accepted else {
                 eprintln!(
                     "private health fixture accepted {served} of {expected_responses} expected requests"
                 );
                 break;
             };
-            let mut request = [0_u8; 20];
-            if let Err(error) = stream.read_exact(&mut request) {
+            let mut request = std::io::BufReader::new(stream);
+            let mut request_line = String::new();
+            if let Err(error) = request.read_line(&mut request_line) {
                 eprintln!("private health fixture could not read request: {error}");
                 break;
             }
-            if &request != b"GET /ping HTTP/1.1\r\n" {
-                eprintln!("private health fixture received an unexpected request prefix");
-                break;
+            loop {
+                let mut line = String::new();
+                if request.read_line(&mut line).is_err() || line.is_empty() || line == "\r\n" {
+                    break;
+                }
             }
-            if let Err(error) = stream.write_all(response) {
+            let response = if request_line.starts_with("GET /api/rawdata ") {
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".as_slice()
+            } else if request_line.starts_with("GET /ping ") {
+                responses[served]
+            } else {
+                eprintln!("private health fixture received an unexpected request");
+                break;
+            };
+            if let Err(error) = request.get_mut().write_all(response) {
                 eprintln!("private health fixture could not write response: {error}");
                 break;
             }
-            served += 1;
-            eprintln!("private health fixture answered request {served}/{expected_responses}");
+            if request_line.starts_with("GET /ping ") {
+                served += 1;
+                eprintln!("private health fixture answered request {served}/{expected_responses}");
+            }
         }
     });
     (address, server)
@@ -382,6 +396,273 @@ fn live_process_without_a_healthy_private_ping_is_reported_unhealthy() {
         !healthy,
         "a live child with a failed private ping is unhealthy"
     );
+}
+
+#[test]
+fn mesh_grant_revocation_removes_the_route_before_narrowing_its_allowlist() {
+    let root = std::env::temp_dir().join(format!("proxy-revocation-{}", uuid::Uuid::new_v4()));
+    let state = root.join("state");
+    std::fs::create_dir_all(&state).expect("create supervisor state");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .expect("private fixture root");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+        .expect("private fixture state");
+
+    let executable = root.join("fake-traefik");
+    std::fs::write(&executable, b"#!/bin/sh\nexec /bin/sleep 60\n").expect("write fake Traefik");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500))
+        .expect("private executable mode");
+    let dynamic_path = state.join(DYNAMIC_CONFIG_FILENAME);
+    let probe = generation_probe_server(dynamic_path.clone(), false);
+    let settings = generation_probe_settings(&root, &state, executable, probe.address);
+    let supervisor = TraefikSupervisor::start(settings, std::sync::Arc::new(|_: String| {}))
+        .expect("start idle supervisor");
+    let mut service = PublishedService {
+        id: "docs".to_owned(),
+        hostname: "docs.n1.example.test".to_owned(),
+        backend: "127.0.0.1:3000".parse().expect("backend"),
+        allowed_sources: vec![
+            "10.77.0.2".parse().expect("first granted peer"),
+            "10.77.0.3".parse().expect("second granted peer"),
+        ],
+        public: false,
+        https_port: 10_443,
+        certificate: CertificateName::Wildcard("*.n1.example.test".to_owned()),
+    };
+    supervisor
+        .replace(vec![service.clone()])
+        .expect("start one process for the authorized route");
+    service.allowed_sources = vec!["10.77.0.3".parse().expect("remaining granted peer")];
+
+    thread::scope(|scope| {
+        let (result_sender, result_receiver) = mpsc::channel();
+        let update = scope.spawn(move || {
+            result_sender
+                .send(supervisor.replace(vec![service]))
+                .expect("send route replacement result");
+        });
+
+        let observation = probe
+            .pending_snapshot
+            .recv_timeout(Duration::from_secs(2))
+            .expect("supervisor must await the route-removal generation");
+        assert!(
+            observation
+                .headers
+                .to_ascii_lowercase()
+                .contains("x-infraternal-config-generation:"),
+            "generation probe must identify the snapshot it is checking"
+        );
+        assert!(
+            !observation.snapshot.contains("docs.n1.example.test"),
+            "the previously authorized route must be removed while the narrower grant is pending"
+        );
+        assert!(
+            result_receiver.try_recv().is_err(),
+            "revocation must remain unacknowledged until Traefik confirms route removal"
+        );
+
+        probe
+            .release_pending
+            .send(())
+            .expect("release applied generation");
+        result_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("route update response")
+            .expect("confirm the narrowed route snapshot")
+            .expect("listener ports");
+        update.join().expect("finish route update");
+    });
+
+    let final_snapshot = std::fs::read_to_string(dynamic_path).expect("read narrowed route");
+    assert!(final_snapshot.contains("docs.n1.example.test"));
+    assert!(final_snapshot.contains("10.77.0.3/32"));
+    assert!(!final_snapshot.contains("10.77.0.2/32"));
+    drop(probe);
+    std::fs::remove_dir_all(root).expect("remove supervisor fixture");
+}
+
+#[test]
+fn unconfirmed_route_removal_stops_the_proxy_and_returns_a_timeout() {
+    let root = std::env::temp_dir().join(format!("proxy-config-timeout-{}", uuid::Uuid::new_v4()));
+    let state = root.join("state");
+    std::fs::create_dir_all(&state).expect("create supervisor state");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .expect("private fixture root");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+        .expect("private fixture state");
+
+    let executable = root.join("fake-traefik");
+    std::fs::write(&executable, b"#!/bin/sh\nexec /bin/sleep 60\n").expect("write fake Traefik");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500))
+        .expect("private executable mode");
+    let dynamic_path = state.join(DYNAMIC_CONFIG_FILENAME);
+    let probe = generation_probe_server(dynamic_path, true);
+    let supervisor = TraefikSupervisor::start(
+        generation_probe_settings(&root, &state, executable, probe.address),
+        std::sync::Arc::new(|_: String| {}),
+    )
+    .expect("start idle supervisor");
+    let service = PublishedService {
+        id: "docs".to_owned(),
+        hostname: "docs.n1.example.test".to_owned(),
+        backend: "127.0.0.1:3000".parse().expect("backend"),
+        allowed_sources: vec!["10.77.0.2".parse().expect("mesh peer")],
+        public: false,
+        https_port: 10_443,
+        certificate: CertificateName::Wildcard("*.n1.example.test".to_owned()),
+    };
+    supervisor
+        .replace(vec![service])
+        .expect("start one process for the authorized route");
+
+    let error = supervisor
+        .replace(Vec::new())
+        .expect_err("an unconfirmed empty route snapshot must fail");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(
+        !supervisor.is_running().expect("observe stopped proxy"),
+        "an unconfirmed revocation must stop the child and deny all routes"
+    );
+    drop(supervisor);
+    drop(probe);
+    std::fs::remove_dir_all(root).expect("remove supervisor fixture");
+}
+
+struct ConfigGenerationObservation {
+    headers: String,
+    snapshot: String,
+}
+
+struct GenerationProbe {
+    address: SocketAddr,
+    pending_snapshot: mpsc::Receiver<ConfigGenerationObservation>,
+    release_pending: mpsc::Sender<()>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl Drop for GenerationProbe {
+    fn drop(&mut self) {
+        let _ = self.release_pending.send(());
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn generation_probe_server(
+    dynamic_path: PathBuf,
+    reject_after_first_generation: bool,
+) -> GenerationProbe {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind private generation probe");
+    listener
+        .set_nonblocking(true)
+        .expect("make private probe interruptible");
+    let address = listener.local_addr().expect("generation probe address");
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let worker_stop = std::sync::Arc::clone(&stop);
+    let (pending_sender, pending_snapshot) = mpsc::channel();
+    let (release_pending, released) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        let mut generation_requests = 0;
+        while !worker_stop.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let mut request = std::io::BufReader::new(stream);
+                    let mut request_line = String::new();
+                    if request.read_line(&mut request_line).is_err() {
+                        continue;
+                    }
+                    let mut headers = String::new();
+                    loop {
+                        let mut line = String::new();
+                        if request.read_line(&mut line).is_err() || line.is_empty() {
+                            break;
+                        }
+                        if line == "\r\n" {
+                            break;
+                        }
+                        headers.push_str(&line);
+                    }
+                    if request_line.starts_with("GET /api/rawdata ") {
+                        generation_requests += 1;
+                        if generation_requests == 2 && !reject_after_first_generation {
+                            let snapshot = std::fs::read_to_string(&dynamic_path)
+                                .expect("read staged route-removal snapshot");
+                            let _ = pending_sender
+                                .send(ConfigGenerationObservation { headers, snapshot });
+                            let _ = released.recv_timeout(Duration::from_secs(3));
+                        }
+                    }
+                    let response = if request_line.starts_with("GET /ping ") {
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+                            .as_slice()
+                    } else if reject_after_first_generation && generation_requests > 1 {
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .as_slice()
+                    } else {
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".as_slice()
+                    };
+                    let _ = request.get_mut().write_all(response);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return,
+            }
+        }
+    });
+    GenerationProbe {
+        address,
+        pending_snapshot,
+        release_pending,
+        stop,
+        worker: Some(worker),
+    }
+}
+
+fn generation_probe_settings(
+    root: &Path,
+    state: &Path,
+    executable: PathBuf,
+    address: SocketAddr,
+) -> SupervisorSettings {
+    let acme_storage = state.join("acme.json");
+    std::fs::write(&acme_storage, b"{}").expect("write persistent ACME fixture");
+    std::fs::set_permissions(&acme_storage, std::fs::Permissions::from_mode(0o600))
+        .expect("private ACME mode");
+    SupervisorSettings {
+        executable,
+        static_config_path: root.join("static.toml"),
+        dynamic_config_path: state.join(DYNAMIC_CONFIG_FILENAME),
+        static_config: StaticConfig {
+            mesh_address: "10.77.0.1".parse().expect("mesh address"),
+            ports: ListenerPorts {
+                http: 10_080,
+                https: 10_443,
+                mesh_http: None,
+                mesh_https: None,
+            },
+            public: false,
+            private_ping_port: address.port(),
+            dynamic_directory: state.to_owned(),
+            dns_challenge: DnsChallenge {
+                provider: "httpreq".to_owned(),
+                email: "operator@example.test".to_owned(),
+                storage_path: acme_storage,
+                ca_server: Some("https://127.0.0.1:14000/dir".to_owned()),
+                resolvers: Vec::new(),
+                disable_authoritative_ns_checks: false,
+            },
+        },
+        provider_files: Vec::new(),
+        private_ping_address: address,
+        startup_timeout: Duration::from_secs(2),
+    }
 }
 
 #[test]
