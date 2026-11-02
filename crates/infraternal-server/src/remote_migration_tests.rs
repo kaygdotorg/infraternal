@@ -263,13 +263,14 @@ async fn hostname_migration_upgrades_release6_copy_without_changing_canvas_or_ch
             .fetch_all(&production)
             .await
             .unwrap();
-    assert_eq!(after.len(), 33);
+    assert_eq!(after.len(), 34);
     assert_eq!(&after[..28], before.as_slice());
     assert_eq!(after[28].0, 29);
     assert_eq!(after[29].0, 30);
     assert_eq!(after[30].0, 31);
     assert_eq!(after[31].0, 32);
     assert_eq!(after[32].0, 33);
+    assert_eq!(after[33].0, 34);
     let canvas: (i64, String, i64) = sqlx::query_as(
         "SELECT revision,document,initialized FROM canvas_heads WHERE account='owner'",
     )
@@ -303,7 +304,7 @@ async fn hostname_migration_upgrades_release6_copy_without_changing_canvas_or_ch
         "ok"
     );
     println!(
-        "RELEASE7_MIGRATION before=28 after=33 preserved_checksums=28 canvas_revision=7 receipt_count=0 placeholder=unnamed-42 integrity=ok"
+        "RELEASE7_MIGRATION before=28 after=34 preserved_checksums=28 canvas_revision=7 receipt_count=0 placeholder=unnamed-42 integrity=ok"
     );
 }
 
