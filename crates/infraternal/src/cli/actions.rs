@@ -995,13 +995,19 @@ mod default_build_tests {
         let registry = registry().expect("registry");
         assert!(registry.actions().all(|a| a.action.availability
             != infraternal_plugin_api::ActionAvailability::NotAvailableYet),);
-        let commands: [&[&str]; 5] = [
+        let commands: &[&[&str]] = &[
             &["up"],
             &["relay", "up"],
             &["mesh", "list"],
+            #[cfg(not(feature = "plugin-proxy"))]
             &["publish"],
             &["host", "facts", "read"],
         ];
+        #[cfg(feature = "plugin-proxy")]
+        {
+            assert!(registry.find(&["publish"]).is_some());
+            assert!(registry.find(&["unpublish"]).is_some());
+        }
         for command in commands {
             assert!(registry.find(command).is_none(), "{command:?}");
         }
