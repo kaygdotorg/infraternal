@@ -194,12 +194,12 @@ pub(crate) async fn tcp(
             .lock()
             .is_ok_and(|known| known.contains(&address));
         let regular_sources = if known_source {
-            &limits.reserved_sources
+            &context.limits.reserved_sources
         } else {
             &idle_sources
         };
         let regular_slots = if known_source {
-            &limits.reserved
+            &context.limits.reserved
         } else {
             &idle
         };

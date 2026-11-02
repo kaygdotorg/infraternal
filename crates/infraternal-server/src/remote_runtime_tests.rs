@@ -202,13 +202,13 @@ async fn expired_identity(
         .execute(pool)
         .await
         .unwrap();
-    Ok((
+    (
         Identity {
             certificate: X509::from_der(&previous.der).unwrap(),
             key,
         },
         csr_der,
-    ))
+    )
 }
 
 fn recovery_challenge_request(
