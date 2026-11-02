@@ -20,7 +20,7 @@
  * A mistake in one of these fails the build with the page and the marker named: an unknown alert, a citation with no source, a source
  * nothing cites. The structure a reader relies on cannot rot silently, the same rule `checkOutline` applies to headings.
  */
-import { ICON_ALERT, ICON_HELP, ICON_INFO, ICON_KEY } from "../../packages/ui/src/icons";
+import { ICON_ALERT, ICON_HELP, ICON_INFO } from "../../packages/ui/src/icons";
 
 /** The most characters a quick-facts block may hold: a sentence or two, because the "?" preview shows it whole. */
 export const FACTS_MAX = 320;
@@ -37,6 +37,8 @@ function outsideCode(html: string, change: (text: string) => string): string {
 
 const ICON_WARN = `<path d="M12 4.5l8.5 14.5h-17z"/><path d="M12 10.5v3.5M12 16.8v.01"/>`;
 const ICON_BULB = `<path d="M9 18h6M10 21h4"/><path d="M12 3.5a5.5 5.5 0 0 0-3.2 10c.5.4.7.9.7 1.5h5c0-.6.2-1.1.7-1.5a5.5 5.5 0 0 0-3.2-10z"/>`;
+/** A bolt, for the quick facts: the short version of a section. */
+const ICON_BOLT = `<path d="M13 3.5L5.5 13.5H11l-1 7 7.5-10H12z"/>`;
 const ICON_STOP = `<path d="M8.2 3.5h7.6l4.7 4.7v7.6l-4.7 4.7H8.2l-4.7-4.7V8.2z"/><path d="M12 8v5M12 16.2v.01"/>`;
 
 interface Kind { title: string; icon: string }
@@ -47,7 +49,7 @@ const KINDS: Record<string, Kind> = {
   IMPORTANT: { title: "Important", icon: ICON_ALERT },
   WARNING: { title: "Warning", icon: ICON_WARN },
   CAUTION: { title: "Caution", icon: ICON_STOP },
-  FACTS: { title: "Quick facts", icon: ICON_KEY },
+  FACTS: { title: "Quick facts", icon: ICON_BOLT },
   WHY: { title: "Why it works this way", icon: ICON_HELP },
 };
 
