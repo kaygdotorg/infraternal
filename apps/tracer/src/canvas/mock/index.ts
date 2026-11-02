@@ -80,7 +80,6 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   const authority = createAuthorityControl(core, { service: async () => provisioning, canUnlock: () => world.role === "operator" });
   // `?inbox=3` adds two more kinds of waiting item, to see the card with several lines (test double only).
   if (new URLSearchParams(location.search).get("inbox") === "3") inboxFor(core).set("mock-extra", mockInboxItems());
-  const docs = installDocsSource(core, createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)));
   const addHost = createAddHost(core, {
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
     service: provisioning,
@@ -124,6 +123,9 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     },
   });
   const cx = canvas.cx;
+  // The docs: a Docs view with a window per page, and searchable in the palette (#302). The production canvas always has them
+  // (when the server has docs); the test double adds them only with `?docs=1`, so the scenes keep the views they are about.
+  const docs = new URLSearchParams(location.search).get("docs") === "1" ? installDocsSource(core, cx) : undefined;
   const { camera, state } = cx;
   const stopOffer = offerMeshView(cx, mesh);
   let sceneIndex = 0;
@@ -372,7 +374,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       mockupTag.remove();
       chip?.remove();
       stopOffer();
-      addHost.dispose(); docs.dispose();
+      addHost.dispose(); docs?.dispose();
       canvas.dispose();
       mesh.dispose();
       sessions.dispose();

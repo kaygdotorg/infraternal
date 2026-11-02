@@ -53,7 +53,7 @@ await Promise.all([
   cp("sessions.css", `${dist}/sessions.css`),
   cp("addhost.css", `${dist}/addhost.css`),
   cp("version.css", `${dist}/version.css`),
-  // A docs page in a canvas window loads this the first time one is opened (#302).
+  // A docs page in a window of the Docs view loads this the first time one comes near the screen (#302).
   cp("docs-reader.css", `${dist}/docs-reader.css`),
   // The person's card (D283) loads its own styles when it is first wanted, so they are not part of the first screen (D188).
   cp("account.css", `${dist}/account.css`),

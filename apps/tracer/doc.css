@@ -1,0 +1,57 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* The structure every docs page shares (docs-build.ts `renderDoc`): the title and its one-line summary, the table of contents,
+   the body and the footer. The standalone pages (docs.css) and the canvas reader (docs-reader.css) both load it, so it only
+   uses the tokens both define (--fg, --fg-2, --text-secondary, --row, --fw-*) and no colour of its own.
+
+   Measure: the text never runs wider than 70 characters of the page font, which is where a line of this monospace reads
+   comfortably. Table of contents: where the page has room for it beside the text it is a sticky column on the right; where
+   it does not (a phone, a window one column wide) it is one folded row under the summary. The page is the query container
+   (`main` in docs.css, `.dr-scroll` in docs-reader.css). */
+.doc { display: grid; grid-template-columns: minmax(0, 1fr); }
+.doc-head, .doc-body { min-width: 0; max-width: 70ch; }
+.doc .lede { margin: 0 0 1.5rem; color: var(--fg-2); font-weight: var(--fw-secondary); }
+
+/* The footer: where a page names the decisions behind it. Quiet, set apart by a hairline, and never part of the contents. */
+.doc .notes { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid rgb(from var(--fg) r g b / 0.1); color: var(--fg-2); font-size: var(--text-secondary); font-weight: var(--fw-secondary); line-height: 1.6; }
+.doc .notes > :last-child { margin-bottom: 0; }
+
+/* Narrow: one folded row. Its text starts at the page's left edge, like the title above it. */
+.doc .toc { margin: 0 0 1.5rem; }
+.doc .toc-side { display: none; }
+.doc .toc ol { margin: 0; padding: 0; list-style: none; }
+.doc .toc li { margin: 0; }
+.doc .toc ol ol { padding-left: 1rem; }
+.doc .toc a { display: block; box-sizing: border-box; min-height: var(--row); padding: 0.25rem 0; color: var(--fg-2); font-weight: var(--fw-body); text-decoration: none; overflow-wrap: anywhere; }
+.doc .toc a:hover { color: var(--fg); }
+.doc .toc a:active { color: var(--fg); }
+.doc .toc-fold { border-block: 1px solid rgb(from var(--fg) r g b / 0.1); }
+.doc .toc-fold summary { display: flex; align-items: center; justify-content: space-between; min-height: var(--row); box-sizing: border-box; padding: 0.25rem 0; color: var(--fg); font-weight: var(--fw-label); cursor: pointer; list-style: none; -webkit-tap-highlight-color: transparent; }
+.doc .toc-fold summary::-webkit-details-marker { display: none; }
+/* The chevron is drawn, not typed: a font glyph would not centre on the text's line. */
+.doc .toc-fold summary::after { content: ""; width: 0.4em; height: 0.4em; margin-right: 0.2em; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: translateY(-0.12em) rotate(45deg); transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1); }
+.doc .toc-fold[open] summary::after { transform: translateY(0.1em) rotate(-135deg); }
+.doc .toc-fold > ol { padding-bottom: 0.5rem; }
+@media (prefers-reduced-motion: reduce) { .doc .toc-fold summary::after { transition: none; } }
+
+/* Wide: the text and, to its right, the contents that stay in view while the page scrolls. */
+@container (min-width: 52rem) {
+  .doc { grid-template-columns: minmax(0, 70ch) 14rem; grid-template-rows: auto 1fr; grid-template-areas: "head toc" "body toc"; column-gap: 3rem; }
+  .doc-head { grid-area: head; }
+  .doc-body { grid-area: body; }
+  .doc .toc { grid-area: toc; position: sticky; top: 1.5rem; align-self: start; max-height: calc(100dvh - 3rem); margin: 0; overflow-y: auto; overscroll-behavior: contain; }
+  .doc .toc-fold { display: none; }
+  .doc .toc-side { display: block; }
+  .doc .toc-title { margin: 0 0 0.5rem; color: var(--fg); font-weight: var(--fw-label); }
+  .doc .toc a { min-height: 0; padding: 0.1875rem 0; }
+}
+
+/* The list of pages under the front page: one row per page, the title over its one-line summary. */
+.doc .pages { margin: 0 0 1rem; padding: 0; list-style: none; }
+.doc .pages li { margin: 0; border-bottom: 1px solid rgb(from var(--fg) r g b / 0.1); }
+.doc .pages a { display: flex; flex-direction: column; gap: 2px; min-height: var(--row); box-sizing: border-box; padding: 10px 0; text-decoration: none; transition: transform 120ms cubic-bezier(0.23, 1, 0.32, 1); }
+.doc .pages a:active { transform: scale(0.98); }
+.doc .pages strong { font-weight: var(--fw-label); }
+.doc .pages span { color: var(--fg-2); font-size: var(--text-secondary); font-weight: var(--fw-secondary); }
+
+/* The first heading of the body sits one summary-gap under the title block, not a section gap. */
+.doc .doc-body > :first-child { margin-top: 0; }

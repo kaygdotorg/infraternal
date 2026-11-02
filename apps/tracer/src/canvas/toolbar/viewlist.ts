@@ -45,7 +45,7 @@ export function createViewList(cx: Ctx): ViewList {
       (b.querySelector(".cl-viewrow-name") as HTMLElement).textContent = c.view.name;
       // Generated Settings section cards are navigation, not saved workspace memberships.
       const count = c.view.id === "settings" ? [...c.wins.values()].filter((w) => w.model.kind !== "settings").length : c.wins.size;
-      (b.querySelector(".cl-viewrow-meta") as HTMLElement).textContent = c.view.layout === "graph" ? `${c.view.nodes.filter((v) => v.kind === "host").length} hosts` : c.view.id === "settings" && count === 0 ? "" : `${count} ${count === 1 ? "window" : "windows"}`;
+      (b.querySelector(".cl-viewrow-meta") as HTMLElement).textContent = c.view.layout === "graph" ? `${c.view.nodes.filter((v) => v.kind === "host").length} hosts` : c.view.id === "settings" && count === 0 ? "" : `${count} ${c.view.id === "docs" ? (count === 1 ? "page" : "pages") : count === 1 ? "window" : "windows"}`;
       const keys = b.querySelector(".cl-viewrow-keys") as HTMLElement;
       for (const cap of keyCaps(viewKeys(i))) keys.append(el("kbd", "", cap));
       b.addEventListener("click", () => { close(); cx.nav.flyView(c.view.id); });

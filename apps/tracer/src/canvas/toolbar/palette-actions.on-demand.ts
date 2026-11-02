@@ -26,7 +26,7 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
   else if (kind === "unlink") cx.sharing?.unlinkCurrent();
   else if (kind === "split") { if (active && isTerminal(active)) void cx.win.split(active, value === "right" ? "right" : "down"); }
   else if (kind === "new") { if (active && isTerminal(active)) void cx.win.newWindow(active, value === "right" ? "right" : "below"); }
-  else if (kind === "close") { if (active && active.model.kind !== "node" && active.model.kind !== "settings") cx.win.closeKey(active); }
+  else if (kind === "close") { if (active && active.model.kind !== "node" && active.model.kind !== "settings" && active.model.kind !== "docs") cx.win.closeKey(active); }
   else if (kind === "canvaslock") cx.nav.setCanvasLock(value === "on");
   else if (kind === "inputlock") cx.inputLock.toggle();
   else if (kind === "win" && value) {

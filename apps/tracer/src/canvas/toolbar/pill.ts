@@ -55,7 +55,7 @@ export function createPill(cx: Ctx): PillModule {
       : c.view.id === "console" ? inventory
         ? inventory.hosts().filter((name) => allowedHosts.has(name)).reduce((count, name) => count + inventory.list(name).length, 0)
         : c.wins.size : c.wins.size;
-    const noun = !c ? "" : c.view.id === "console" ? "session" : c.view.layout === "graph" ? "host" : "window";
+    const noun = !c ? "" : c.view.id === "console" ? "session" : c.view.layout === "graph" ? "host" : c.view.id === "docs" ? "page" : "window";
     // Without a connection the inventory is unknown, not empty: "0 sessions" would be untrue.
     if (sess && stage.dataset.connected === "false" && !free && c) sess.innerHTML = '· <span class="cl-noun">offline</span>';
     else if (sess) sess.innerHTML = free || !c ? `· ${views.size}<span class="cl-noun"> views</span>` : `· ${n}<span class="cl-noun"> ${noun}${n === 1 ? "" : "s"}</span>${c.view.team ? " · team" : ""}`;
