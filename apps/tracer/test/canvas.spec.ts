@@ -637,7 +637,9 @@ test("shortcuts: the palette offers Keyboard shortcuts, lock shortcuts are liste
   await page.keyboard.press("Enter");
   const panel = page.locator(".ui-shortcuts");
   await expect(panel).toBeVisible();
-  await expect(panel.locator(".ui-shortcuts-row", { hasText: "Lock or unlock" }).locator("kbd")).toHaveText(["Ctrl", "Shift", "L"]);
+  // Key labels follow the platform (#121, TASTE "Every platform sees its own conventions"): on an Apple keyboard the written
+  // "Ctrl+Shift+L" is drawn as the glyphs ⌃ ⇧ L, one cap each; the words stay on Windows and Linux (the next test).
+  await expect(panel.locator(".ui-shortcuts-row", { hasText: "Lock or unlock" }).locator("kbd")).toHaveText(["⌃", "⇧", "L"]);
   await expect(panel.locator(".ui-shortcuts-row", { hasText: "command palette" }).locator("kbd")).toHaveText(["⌘", "K", "⌘", "⇧", "P"]);
   await page.keyboard.press("Escape");
   await expect(panel).toHaveCount(0);
