@@ -4,6 +4,7 @@ import { precompress } from "./precompress";
 import { browserFileLoader } from "./browser-build";
 import { classifyChunks, type MetaOutput } from "./chunk-classes";
 import { buildDocs } from "./docs-build";
+import { docsDatasetPlugin } from "./docs-dataset";
 
 // TRACER_DIST builds elsewhere (a build next to a running preview server must not replace its files).
 const dist = process.env.TRACER_DIST ?? "dist";
@@ -17,6 +18,10 @@ if (!["off", "preview", "1"].includes(recoveryUiMode)) {
 // The clusters concept mockup (#89) is preview-only (D162): the production bundle leaves it out
 // unless the build asks for it, so it never counts against the transfer budget or ships.
 const clustersPreview = process.env.INFRATERNAL_CLUSTERS_PREVIEW === "1";
+// The docs' figures (#302) are captured from this preview build with the mock world's names replaced by plain ones
+// (docs-dataset.ts). The transform only exists in a build that asks for it; the product never has it.
+const docsDataset = process.env.TRACER_DATASET === "docs";
+if (docsDataset && !clustersPreview) throw new Error("TRACER_DATASET=docs needs INFRATERNAL_CLUSTERS_PREVIEW=1: the mock world is only in the preview build");
 // The commit the bundle was built from, shown (and copied) from Settings, About. A tree
 // without git history reports nothing, and the UI then says "dev". Reproducible
 // package builds supply the source revision and timestamp explicitly.
@@ -31,14 +36,14 @@ const build = await Bun.build({
   splitting: true, // the terminal chunk loads after sign-in (see src/main.ts)
   define: { __CLUSTERS_PREVIEW__: JSON.stringify(clustersPreview), __RECOVERY_UI_MODE__: JSON.stringify(recoveryUiMode), __BUILD_DATE__: JSON.stringify(process.env.INFRATERNAL_BUILD_DATE ?? new Date().toISOString()), __BUILD_COMMIT__: JSON.stringify(/^[0-9a-f]{40}$/.test(commit) ? commit : "") },
   metafile: true,
-  plugins: clustersPreview ? [browserFileLoader] : [browserFileLoader, {
+  plugins: [...(docsDataset ? [docsDatasetPlugin] : []), ...(clustersPreview ? [browserFileLoader] : [browserFileLoader, {
     // Without the preview flag the mockups resolve to empty modules (their calls are unreachable: the define is false).
     name: "leave-out-mockups",
     setup(builder) {
       builder.onResolve({ filter: /^\.\/(canvas\/mock(\/windows-proto\/canvas)?|canvas\/model\/layout-review-double|add-host-prototype|perf-hud\.on-demand)$/ }, (args) => ({ path: args.path, namespace: "left-out" }));
       builder.onLoad({ filter: /.*/, namespace: "left-out" }, () => ({ contents: "export const mountMockup = undefined; export const mountAddHostPrototype = undefined; export const mountCanvas = undefined; export const mountPerfHud = undefined; export const createLayoutReviewDouble = undefined;", loader: "js" }));
     },
-  }],
+  }])],
 });
 if (!build.success) {
   throw new Error(build.logs.map((log) => log.message).join("\n"));
