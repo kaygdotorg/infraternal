@@ -130,6 +130,7 @@ test("a duplicate name is refused in plain words and the old name comes back; no
 test("the Views tree renames a Mesh host the same way, and a single click still flies to it", async ({ page }) => {
   await open(page);
   await page.locator("#sidebar-toggle").click();
+  await expect(page.locator('#tree[data-rows="ready"]')).toHaveCount(1); // the tree's rename starts from the row actions, which load with the sidebar
   await expect(page.locator("#sidebar")).toBeVisible();
   const leaf = page.locator('#tree .bm-leaf[data-id="n-build-01"]');
   await expect(leaf).toBeVisible();
@@ -213,6 +214,7 @@ test.describe("touch", () => {
     await shoot(page, "field-clear-393x852-short-name");
     await page.keyboard.press("Escape");
     await page.locator("#sidebar-toggle").tap();
+    await expect(page.locator('#tree[data-rows="ready"]')).toHaveCount(1); // the tree's rename starts from the row actions, which load with the sidebar
     await expect(page.locator("#sidebar")).toBeVisible();
     const label = page.locator('#tree .bm-leaf[data-id="n-nix-cache"] .bm-label');
     await label.scrollIntoViewIfNeeded();
@@ -226,6 +228,7 @@ test.describe("touch", () => {
   test("in the Views tree the first tap flies and the sidebar waits for the second", async ({ page }) => {
     await open(page, PHONE);
     await page.locator("#sidebar-toggle").tap();
+    await expect(page.locator('#tree[data-rows="ready"]')).toHaveCount(1); // the tree's rename starts from the row actions, which load with the sidebar
     await expect(page.locator("#sidebar")).toBeVisible();
     const label = page.locator('#tree .bm-leaf[data-id="n-build-01"] .bm-label');
     await label.scrollIntoViewIfNeeded(); // the tree is longer than the phone
@@ -245,6 +248,7 @@ test.describe("touch", () => {
   test("a single tap on a name in the tree still closes the sidebar, a moment later", async ({ page }) => {
     await open(page, PHONE);
     await page.locator("#sidebar-toggle").tap();
+    await expect(page.locator('#tree[data-rows="ready"]')).toHaveCount(1); // the tree's rename starts from the row actions, which load with the sidebar
     const label = page.locator('#tree .bm-leaf[data-id="n-build-01"] .bm-label');
     await label.tap();
     await expect(page.locator("#sidebar")).toBeHidden({ timeout: 3000 });
@@ -337,6 +341,7 @@ test("desktop: the open field never sits under the status dot, for short, usual 
   await page.keyboard.press("Escape");
   // The Views tree: the field in a leaf row.
   await page.locator("#sidebar-toggle").click();
+  await expect(page.locator('#tree[data-rows="ready"]')).toHaveCount(1); // the tree's rename starts from the row actions, which load with the sidebar
   await expect(page.locator("#sidebar")).toBeVisible();
   await page.locator('#tree .bm-leaf[data-id="n-nix-cache"] .bm-label').dblclick();
   await expect(field(page)).toBeVisible();
