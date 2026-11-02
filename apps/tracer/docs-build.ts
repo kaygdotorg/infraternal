@@ -10,7 +10,11 @@
  * The server needs nothing for it: a page is `docs/<slug>/index.html`, which the web root serves for the
  * directory (and for `/docs/<slug>`, by redirect), with the `.br`/`.gz` encodings `precompress` writes next to it.
  * Markdown is rendered by the bundler's built-in renderer, so no dependency is added. The pages are plain HTML
- * and CSS with no script, so they are never part of the app's JavaScript budget (transfer-budget.ts).
+ * and CSS. The one script is `doc.js` (doc-page.ts, deferred): it marks the section being read in the contents and lets a code
+ * block be copied. It is a separate file from the app's bundle, so it is never part of the app's JavaScript budget
+ * (transfer-budget.ts); the canvas reader runs the same code from an on-demand chunk (docs-body.on-demand.ts).
+ *
+ * The reading aids (callouts, reasoning blocks, quick facts, citations, quotes, copyable code) are in docs-extras.ts.
  *
  * There is no list of pages. Every `*.md` file in `docs/user/` is a page: the folder is the one place where a
  * page for the people who use Infraternal belongs, and internal planning and engineering notes stay outside it.
@@ -27,6 +31,8 @@
  */
 import { cp, mkdir, readdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { citations, factsOf, readingAids, sourcesOf, type Facts } from "./docs-extras";
+import { figures, type FigureManifest, type FigureOptions } from "./docs-figure";
 
 const root = resolve(import.meta.dirname, "../..");
 
@@ -37,10 +43,16 @@ export const INDEX_SLUG = "index";
 
 const escapeHtml = (text: string): string => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-/** One searchable heading of a page: `id` is the anchor in the rendered page, `text` its plain title. */
-export interface DocsHeading { id: string; text: string }
-/** One page of `index.json`, which the app reads (titles and headings only, never body text). */
-export interface DocsIndexPage { slug: string; title: string; summary: string; headings: DocsHeading[] }
+/**
+ * One searchable heading of a page: `id` is the anchor in the rendered page, `text` its plain title. `facts` is the text of the
+ * heading's `> [!FACTS]` block, if the page wrote one (docs-extras.ts): the excerpt the "?" preview shows for this heading.
+ */
+export interface DocsHeading { id: string; text: string; facts?: string }
+/**
+ * One page of `index.json`, which the app reads (titles, headings and quick facts, never body text). `facts` is the page's own
+ * excerpt (a `[!FACTS]` block under the title); a page without one is previewed by its `summary`.
+ */
+export interface DocsIndexPage { slug: string; title: string; summary: string; facts?: string; headings: DocsHeading[] }
 /** A heading with its level, which the table of contents needs and the index does not. */
 export interface OutlineHeading extends DocsHeading { level: 2 | 3 }
 
@@ -152,25 +164,32 @@ export function tocFor(headings: readonly OutlineHeading[]): string {
 }
 
 /** A page ready to be written: its parts as the index sees them, and the body markup both outputs share. */
-export interface RenderedDoc { slug: string; title: string; summary: string; headings: OutlineHeading[]; html: string }
+export interface RenderedDoc { slug: string; title: string; summary: string; headings: OutlineHeading[]; facts: Facts; html: string; figureFiles: string[] }
 
 /**
  * Renders one page. `html` is the page without chrome (docs-reader.on-demand loads it into a canvas window; the standalone page
  * wraps it): a head (title and summary), the table of contents, the body, and the footer. `extra` is markup the build adds at
  * the end of the body (the front page's list of pages).
  */
-export function renderDoc(slug: string, markdown: string, extra = (_title: string): string => ""): RenderedDoc {
+export function renderDoc(slug: string, markdown: string, extra = (_title: string): string => "", figureOptions: Omit<FigureOptions, "page"> = { manifest: {} }): RenderedDoc {
   const renderer = (Bun as unknown as { markdown: { html(text: string): string } }).markdown;
   // The licence and role comments at the top of a source file are for the repository, not for readers.
-  const source = markdown.replace(/<!--[\s\S]*?-->\n?/g, "");
+  const commentFree = markdown.replace(/<!--[\s\S]*?-->\n?/g, "");
+  const { markdown: source, sources } = sourcesOf(commentFree, renderer.html, slug);
   const rendered = renderer.html(source);
   const problems = checkOutline(rendered);
   if (problems.length > 0) throw new Error(`docs page "${slug}": ${problems.join("; ")}`);
   const parts = splitPage(rendered);
-  const withExtra = `${parts.body}\n${extra(parts.title)}`;
+  // Callouts, quotes and code blocks first; then the citations, whose list of references ends the body (and is a heading in the
+  // contents); then whatever the build itself adds (the front page's list of pages).
+  const cited = citations(readingAids(parts.body, slug), sources, slug);
+  // Figures (docs-figure.ts) are the page's pictures; the files they use are copied next to the page by buildDocs.
+  const pictured = figures(cited.body, { ...figureOptions, page: slug });
+  const withExtra = `${pictured.html}\n${cited.references}\n${extra(parts.title)}`;
   // A wide table scrolls by itself instead of widening the page.
   const wrapped = labelCells(withExtra).replace(/<table>/g, '<div class="table"><table>').replace(/<\/table>/g, "</table></div>");
   const { html: body, headings } = anchorHeadings(wrapped);
+  const facts = factsOf(body, slug);
   const notes = parts.notes ? `\n<footer class="notes">\n${parts.notes}\n</footer>` : "";
   const html = `<div class="doc">
 <div class="doc-head">
@@ -183,7 +202,7 @@ ${body}${notes}
 </div>
 </div>
 `;
-  return { slug, title: parts.title, summary: parts.summary, headings, html };
+  return { slug, title: parts.title, summary: parts.summary, headings, facts, html, figureFiles: pictured.files };
 }
 
 /** Reads the pages of a folder: `index.md` is the front page, every other `*.md` is a page, ordered by file name. */
@@ -214,6 +233,7 @@ function page(title: string, body: string): string {
 <title>${escapeHtml(title)}</title>
 <link rel="stylesheet" href="/docs/docs.css">
 <link rel="stylesheet" href="/docs/doc.css">
+<script src="/docs/doc.js" defer></script>
 </head><body>
 <header><a href="/docs/">Infraternal docs</a></header>
 <main>
@@ -228,6 +248,13 @@ function pageList(pages: readonly { slug: string; title: string; summary: string
   return `<h2>All pages</h2>\n<ul class="pages">\n${rows}\n</ul>`;
 }
 
+/** The figures of the pages in `source`: the capture's manifest and folder (docs-figure.ts). A tree with none has none, and its figures are pending. */
+export async function figureOptionsFor(source: string = USER_DOCS_DIR): Promise<Omit<FigureOptions, "page"> & { directory: string }> {
+  const directory = resolve(source, "figures");
+  const manifestFile = Bun.file(resolve(directory, "manifest.json"));
+  return { manifest: (await manifestFile.exists() ? await manifestFile.json() : {}) as FigureManifest, directory };
+}
+
 /** Writes the docs tree into `out` (for the app build, `<dist>/docs`), reading the pages of `source`. */
 export async function buildDocs(out: string, source: string = USER_DOCS_DIR): Promise<DocsIndexPage[]> {
   await mkdir(resolve(out, "fonts"), { recursive: true });
@@ -238,12 +265,24 @@ export async function buildDocs(out: string, source: string = USER_DOCS_DIR): Pr
     // The docs carry their own copy of the font, so the tree stands alone on a static host.
     cp(resolve(import.meta.dirname, "fonts/maple-mono-nf/roman.latin.woff2"), resolve(out, "fonts/roman.latin.woff2")),
   ]);
+  // The page script: the section being read, and copying code. Bundled here, minified, as a file of its own.
+  const script = await Bun.build({ entrypoints: [resolve(import.meta.dirname, "doc-page.ts")], target: "browser", minify: true, outdir: out, naming: { entry: "doc.js" } });
+  if (!script.success) throw new Error(`docs script: ${script.logs.map(String).join("; ")}`);
   const { index: frontText, pages } = await readUserDocs(source);
-  const rendered = pages.map(({ slug, text }) => renderDoc(slug, text));
+  // The figures the capture made (docs-figure.ts). A tree with no figures folder simply has none.
+  const figureOptions = await figureOptionsFor(source);
+  const figureDirectory = figureOptions.directory;
+  const rendered = pages.map(({ slug, text }) => renderDoc(slug, text, undefined, figureOptions));
   const entries = rendered.map(({ slug, title, summary }) => ({ slug, title, summary }));
   // The front page's text is optional: without one the list stands alone under a generic title.
-  const front = renderDoc(INDEX_SLUG, frontText ?? "# Documentation\n\nGuides for using Infraternal.\n", () => pageList(entries));
+  const front = renderDoc(INDEX_SLUG, frontText ?? "# Documentation\n\nGuides for using Infraternal.\n", () => pageList(entries), figureOptions);
   const all = [front, ...rendered];
+  // Only the pictures a page uses are copied, so a retired figure never ships.
+  const used = [...new Set(all.flatMap((doc) => doc.figureFiles))];
+  if (used.length > 0) {
+    await mkdir(resolve(out, "figures"), { recursive: true });
+    await Promise.all(used.map((file) => cp(resolve(figureDirectory, file), resolve(out, "figures", file))));
+  }
   for (const doc of all) {
     const directory = doc === front ? resolve(out, INDEX_SLUG) : resolve(out, doc.slug);
     await mkdir(directory, { recursive: true });
@@ -253,7 +292,10 @@ export async function buildDocs(out: string, source: string = USER_DOCS_DIR): Pr
   }
   await writeFile(resolve(out, "index.html"), page("Infraternal docs", front.html));
   // Titles and headings only, so the file stays a few hundred bytes per page; the app fetches it when it is idle.
-  const index: DocsIndexPage[] = all.map(({ slug, title, summary, headings }) => ({ slug, title, summary, headings: headings.map(({ id, text }) => ({ id, text })) }));
+  const index: DocsIndexPage[] = all.map(({ slug, title, summary, headings, facts }) => ({
+    slug, title, summary, ...(facts.page ? { facts: facts.page } : {}),
+    headings: headings.map(({ id, text }) => ({ id, text, ...(facts.headings[id] ? { facts: facts.headings[id] } : {}) })),
+  }));
   await writeFile(resolve(out, "index.json"), JSON.stringify({ pages: index }));
   return index;
 }

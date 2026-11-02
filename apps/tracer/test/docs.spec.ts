@@ -6,7 +6,7 @@
  *
  * Measured, not eyeballed (TASTE): one left edge for the header, title, summary, headings, text, code, table and footer (±0.5 px); the
  * text column is 70 characters wide; the contents are sticky beside the page on a wide screen and folded on a phone; the page never
- * scrolls sideways and ships no script. Captures (1440×900 at 2×, 393×852 at 3×) go to the external evidence directory.
+ * scrolls sideways and ships one small deferred script. Captures (1440×900 at 2×, 393×852 at 3×) go to the external evidence directory.
  */
 import { existsSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
@@ -59,8 +59,8 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
       await page.screenshot({ path: `${OUT}/${size.name}-${scheme}-multiplexer.png` });
       await page.screenshot({ path: `${OUT}/${size.name}-${scheme}-multiplexer-full.png`, fullPage: true });
 
-      // No script, no comments from the source file, and the page's own scheme colours.
-      expect(await page.locator("script").count()).toBe(0);
+      // One small deferred script (the section being read, copying code), no comments from the source file, and the page's own scheme colours.
+      expect(await page.locator("script").evaluateAll((scripts) => scripts.map((s) => s.getAttribute("src")))).toEqual(["/docs/doc.js"]);
       expect(await page.content()).not.toContain("SPDX");
       const background = await page.evaluate(() => getComputedStyle(document.body.parentElement!).backgroundColor);
       expect(background).toBe(scheme === "dark" ? "rgb(16, 17, 19)" : "rgb(246, 246, 244)");
@@ -149,11 +149,11 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
       await page.goto("/docs/keys/");
       if (size.touch) await asPhone(page);
       await expect(page.getByRole("heading", { level: 1, name: "Keys and how long they last" })).toBeVisible();
-      expect(await page.evaluate(() => [...document.querySelectorAll(".doc-body h2")].map((h) => h.textContent))).toEqual(["The short version", "Signing in", "Adding and trusting hosts", "Between machines"]);
+      expect(await page.evaluate(() => [...document.querySelectorAll(".doc-body h2")].map((h) => h.textContent))).toEqual(["The short version", "Signing in", "Adding and trusting hosts", "Between machines", "References"]);
       await page.screenshot({ path: `${OUT}/${size.name}-${scheme}-keys.png` });
 
       // The web root serves the encodings precompress writes next to every text file, so the pages need them too.
-      for (const file of ["multiplexer/index.html", "multiplexer/fragment.html", "index/fragment.html", "index.html", "docs.css", "doc.css", "index.json"]) {
+      for (const file of ["multiplexer/index.html", "multiplexer/fragment.html", "index/fragment.html", "index.html", "docs.css", "doc.css", "doc.js", "index.json"]) {
         for (const ext of ["br", "gz"]) expect(existsSync(resolve(process.env.TRACER_DIST ?? "dist", "docs", `${file}.${ext}`)), `${file}.${ext}`).toBe(true);
       }
       expect(failures).toEqual([]);

@@ -17,7 +17,7 @@ import { onDemand } from "../../on-demand";
 import type { Ctx } from "../context";
 
 /** The shape of `index.json` (docs-build.ts `DocsIndexPage`). */
-export interface DocsIndexPage { slug: string; title: string; summary: string; headings: { id: string; text: string }[] }
+export interface DocsIndexPage { slug: string; title: string; summary: string; facts?: string; headings: { id: string; text: string; facts?: string }[] }
 
 export interface DocsSource { dispose(): void }
 
