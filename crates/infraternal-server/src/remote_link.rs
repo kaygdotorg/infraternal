@@ -873,7 +873,7 @@ impl RemoteLink {
             },
             authority: None,
             renewal: std::sync::atomic::AtomicBool::new(false),
-            peer_caps,
+            peer_caps: AtomicU64::new(peer_caps),
             greeting_sent,
             priming: Arc::new(std::sync::Mutex::new(None)),
         })
