@@ -76,8 +76,8 @@ async function flight(label: string, go: () => Promise<void>): Promise<void> {
 }
 
 test("after a view flight, zero style writes and zero frames from 600 ms after it ends", async () => {
-  await flight("flight to Settings", async () => { await page.locator(".cl-viewsbtn").click(); await page.locator('.cl-viewrow[data-view="settings"]').click(); });
-  await flight("flight back to Console", async () => { await page.locator(".cl-viewsbtn").click(); await page.locator('.cl-viewrow[data-view="console"]').click(); });
+  await flight("flight to Settings", async () => { await page.locator("#capsule").click(); await page.locator('.cl-viewrow[data-view="settings"]').click(); });
+  await flight("flight back to Console", async () => { await page.locator("#capsule").click(); await page.locator('.cl-viewrow[data-view="console"]').click(); });
 });
 
 test("after opening a window (layout springs, column flip, camera), the canvas is still", async () => {
