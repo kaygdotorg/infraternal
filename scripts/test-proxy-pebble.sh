@@ -9,6 +9,8 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
     exit 2
 }
 scratch_root="${INFRATERNAL_PROXY_E2E_ROOT:-${HOME}/.cache/codex-scratch/j62/pebble}"
+scratch_parent="$(dirname -- "$scratch_root")"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$scratch_parent/target}"
 pebble_root="$scratch_root/pebble-v2.9.0"
 component_root="$scratch_root/traefik-component"
 asset_root="$scratch_root/assets"
@@ -39,17 +41,38 @@ fetch_verified \
 
 mkdir -p "$pebble_root/bin" "$pebble_root/test/config" \
     "$pebble_root/test/certs/localhost"
-tar --extract --gzip --file "$asset_root/pebble-linux-amd64.tar.gz" \
-    --directory "$pebble_root/bin" --no-same-owner --no-same-permissions
-tar --extract --gzip --file "$asset_root/pebble-challtestsrv-linux-amd64.tar.gz" \
-    --directory "$pebble_root/bin" --no-same-owner --no-same-permissions
 pebble_bin="$pebble_root/bin/pebble"
 challenge_bin="$pebble_root/bin/pebble-challtestsrv"
+staging_bin_dir=""
+traefik_stage=""
+cleanup_staged_executables() {
+    if [[ -n "$staging_bin_dir" ]]; then
+        rm -rf -- "$staging_bin_dir"
+    fi
+    if [[ -n "$traefik_stage" ]]; then
+        rm -f -- "$traefik_stage"
+    fi
+}
+trap cleanup_staged_executables EXIT
+staging_bin_dir="$(mktemp -d "$pebble_root/bin/.extract.XXXXXX")"
+staged_pebble="$staging_bin_dir/pebble"
+staged_challenge="$staging_bin_dir/pebble-challtestsrv"
+# Cached test executables are 0500; same-filesystem staging avoids truncating them on reruns.
+tar --extract --to-stdout --gzip --file "$asset_root/pebble-linux-amd64.tar.gz" \
+    pebble-linux-amd64/linux/amd64/pebble > "$staged_pebble"
+tar --extract --to-stdout --gzip --file "$asset_root/pebble-challtestsrv-linux-amd64.tar.gz" \
+    pebble-challtestsrv-linux-amd64/linux/amd64/pebble-challtestsrv > "$staged_challenge"
+chmod 0500 "$staged_pebble" "$staged_challenge"
+[[ -x "$staged_pebble" && -x "$staged_challenge" ]] || {
+    printf 'Pinned Pebble archives did not contain the expected binaries.\n' >&2
+    exit 1
+}
+mv -f -- "$staged_pebble" "$pebble_bin"
+mv -f -- "$staged_challenge" "$challenge_bin"
 [[ -x "$pebble_bin" && -x "$challenge_bin" ]] || {
     printf 'Pinned Pebble archives did not contain the expected binaries.\n' >&2
     exit 1
 }
-chmod 0500 "$pebble_bin" "$challenge_bin"
 
 pebble_source="https://raw.githubusercontent.com/letsencrypt/pebble/39065bb084771bb1c31046e0fd0c3c200a9e8b45"
 fetch_verified \
@@ -81,10 +104,12 @@ manifest="$component_root/proxy-traefik-linux-amd64.json"
 archive="$component_root/components/0.1.0/proxy/linux/amd64/traefik_v3.7.17_linux_amd64.tar.gz"
 traefik_bin="$component_root/bin/traefik"
 mkdir -p "$(dirname -- "$traefik_bin")"
+traefik_stage="$(mktemp "$(dirname -- "$traefik_bin")/.traefik.XXXXXX")"
 expected_executable_sha="$(jq -er '.executable_sha256' "$manifest")"
-tar --extract --to-stdout --gzip --file "$archive" traefik > "$traefik_bin"
-printf '%s  %s\n' "$expected_executable_sha" "$traefik_bin" | sha256sum --check --status
-chmod 0500 "$traefik_bin"
+tar --extract --to-stdout --gzip --file "$archive" traefik > "$traefik_stage"
+printf '%s  %s\n' "$expected_executable_sha" "$traefik_stage" | sha256sum --check --status
+chmod 0500 "$traefik_stage"
+mv -f -- "$traefik_stage" "$traefik_bin"
 
 export INFRATERNAL_PROXY_E2E_PEBBLE="$pebble_bin"
 export INFRATERNAL_PROXY_E2E_CHALLTESTSRV="$challenge_bin"

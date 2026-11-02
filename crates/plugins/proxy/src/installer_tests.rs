@@ -170,6 +170,25 @@ fn installer_extracts_only_the_allowlisted_executable_with_private_mode() {
 }
 
 #[test]
+fn installer_accepts_the_signed_release_changelog_without_extracting_it() {
+    let executable = b"signed executable bytes";
+    let archive = archive(executable, Some(("CHANGELOG.md", tar::EntryType::Regular)));
+    let manifest = verified_manifest(&archive, executable);
+    let state = TempState::new();
+    let path = ComponentInstaller::new(&state.0)
+        .install_archive(&manifest, Cursor::new(&archive), "linux", "amd64")
+        .expect("accept the signed release changelog");
+
+    assert_eq!(fs::read(&path).expect("installed executable"), executable);
+    assert_eq!(
+        fs::read_dir(path.parent().expect("bin directory"))
+            .expect("list installed files")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn installer_rejects_bad_archive_checksum_and_wrong_architecture() {
     let executable = b"signed executable bytes";
     let archive = archive(executable, None);

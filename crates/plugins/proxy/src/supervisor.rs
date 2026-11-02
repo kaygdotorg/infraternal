@@ -488,8 +488,10 @@ where
     thread::spawn(move || {
         let mut reader = BufReader::new(reader);
         loop {
-            let Ok(Some(line)) = read_bounded_line(&mut reader) else {
-                return;
+            let line = match read_bounded_line(&mut reader) {
+                Ok(Some(BoundedLogLine::Complete(line))) => line,
+                Ok(Some(BoundedLogLine::Oversized)) => continue,
+                Ok(None) | Err(_) => return,
             };
             let line = String::from_utf8_lossy(&line);
             let known_secrets: Vec<_> = secrets.iter().map(|secret| secret.as_str()).collect();
@@ -500,8 +502,14 @@ where
     })
 }
 
-fn read_bounded_line<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
+enum BoundedLogLine {
+    Complete(Vec<u8>),
+    Oversized,
+}
+
+fn read_bounded_line<R: BufRead>(reader: &mut R) -> io::Result<Option<BoundedLogLine>> {
     let mut line = Vec::with_capacity(MAX_LOG_LINE_BYTES);
+    let mut oversized = false;
     loop {
         let (consumed, newline, eof) = {
             let available = reader.fill_buf()?;
@@ -510,23 +518,31 @@ fn read_bounded_line<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<u8>>> 
             } else {
                 let newline_at = available.iter().position(|byte| *byte == b'\n');
                 let consumed = newline_at.map_or(available.len(), |index| index + 1);
-                let copied = consumed.min(MAX_LOG_LINE_BYTES.saturating_sub(line.len()));
+                let remaining = MAX_LOG_LINE_BYTES.saturating_sub(line.len());
+                let copied = consumed.min(remaining);
                 line.extend_from_slice(&available[..copied]);
+                oversized |= consumed > remaining;
                 (consumed, newline_at.is_some(), false)
             }
         };
         if eof {
             return if line.is_empty() {
                 Ok(None)
+            } else if oversized {
+                Ok(Some(BoundedLogLine::Oversized))
             } else {
-                Ok(Some(line))
+                Ok(Some(BoundedLogLine::Complete(line)))
             };
         }
         reader.consume(consumed);
         if newline {
-            return Ok(Some(line));
+            return Ok(Some(if oversized {
+                BoundedLogLine::Oversized
+            } else {
+                BoundedLogLine::Complete(line)
+            }));
         }
-        // Any bytes beyond the cap are consumed on the next iteration without being retained.
+        // Continue draining an oversized record so neither stream can block the child.
     }
 }
 
@@ -676,8 +692,27 @@ struct SupervisorRuntime {
     lifecycle: Lifecycle,
     services: Vec<PublishedService>,
     child: Option<TraefikChild>,
-    listener_is_public: bool,
+    listener_scope: Option<ExposureScope>,
     listener_ports: Option<ListenerPorts>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExposureScope {
+    public: bool,
+    mesh: bool,
+}
+
+impl ExposureScope {
+    fn for_services(services: &[PublishedService]) -> Self {
+        Self {
+            public: services.iter().any(|service| service.public),
+            mesh: services.iter().any(|service| !service.public),
+        }
+    }
+
+    const fn needs_separate_mesh_listeners(self) -> bool {
+        self.public && self.mesh
+    }
 }
 
 fn run_supervisor(
@@ -728,6 +763,7 @@ fn replace_services(
 ) -> io::Result<Option<ListenerPorts>> {
     runtime.services = services;
     let active_count = runtime.services.len();
+    let desired_scope = ExposureScope::for_services(&runtime.services);
     let action = runtime.lifecycle.update(active_count, Instant::now());
     let result = match action {
         LifecycleAction::Start => start_runtime_child(settings, log, runtime).map(Some),
@@ -746,17 +782,14 @@ fn replace_services(
         LifecycleAction::Apply | LifecycleAction::Keep => {
             if runtime.services.is_empty() {
                 Ok(runtime.listener_ports)
-            } else if runtime.child.is_some()
-                && runtime.listener_is_public
-                    != runtime.services.iter().any(|service| service.public)
-            {
+            } else if runtime.child.is_some() && runtime.listener_scope != Some(desired_scope) {
                 restart_for_listener_scope(
                     settings,
                     &runtime.services,
                     Arc::clone(log),
                     &mut runtime.lifecycle,
                     &mut runtime.child,
-                    &mut runtime.listener_is_public,
+                    &mut runtime.listener_scope,
                 )
                 .map(|ports| {
                     runtime.listener_ports = Some(ports);
@@ -767,6 +800,7 @@ fn replace_services(
             }
         }
         LifecycleAction::Stop => {
+            runtime.listener_scope = None;
             runtime.listener_ports = None;
             Ok(None)
         }
@@ -791,10 +825,10 @@ fn start_runtime_child(
     log: &Arc<ProxyLog>,
     runtime: &mut SupervisorRuntime,
 ) -> io::Result<ListenerPorts> {
-    let (started, public, ports) =
+    let (started, scope, ports) =
         start_managed_child(settings, &runtime.services, Arc::clone(log))?;
     runtime.child = Some(started);
-    runtime.listener_is_public = public;
+    runtime.listener_scope = Some(scope);
     runtime.listener_ports = Some(ports);
     let _ = runtime
         .lifecycle
@@ -823,6 +857,7 @@ fn handle_supervisor_timeout(
     {
         LifecycleAction::Stop => {
             let _ = stop_child(&mut runtime.child);
+            runtime.listener_scope = None;
             runtime.listener_ports = None;
         }
         LifecycleAction::Start if start_runtime_child(settings, log, runtime).is_err() => {
@@ -862,14 +897,22 @@ fn start_managed_child(
     settings: &SupervisorSettings,
     services: &[PublishedService],
     log: Arc<ProxyLog>,
-) -> io::Result<(TraefikChild, bool, ListenerPorts)> {
+) -> io::Result<(TraefikChild, ExposureScope, ListenerPorts)> {
     let mut config = settings.static_config.clone();
-    config.public = services.iter().any(|service| service.public);
-    config.ports = crate::config::detect_listener_ports(
-        nix::unistd::Uid::effective().is_root(),
-        config.mesh_address,
-        config.public,
-    );
+    let scope = ExposureScope::for_services(services);
+    config.public = scope.public;
+    config.ports = if scope.needs_separate_mesh_listeners() {
+        crate::config::detect_mixed_listener_ports(
+            nix::unistd::Uid::effective().is_root(),
+            config.mesh_address,
+        )?
+    } else {
+        crate::config::detect_listener_ports(
+            nix::unistd::Uid::effective().is_root(),
+            config.mesh_address,
+            config.public,
+        )
+    };
     let static_config = crate::config::render_static_config(&config)?;
     let dynamic_config = crate::config::render_dynamic_config(services)?;
     crate::config::write_config_atomic(&settings.static_config_path, static_config.as_bytes())?;
@@ -905,7 +948,7 @@ fn start_managed_child(
         )
         .is_ok()
         {
-            return Ok((child, config.public, config.ports));
+            return Ok((child, scope, config.ports));
         }
         thread::sleep(remaining.min(Duration::from_millis(100)));
     }
@@ -917,7 +960,7 @@ fn restart_for_listener_scope(
     log: Arc<ProxyLog>,
     lifecycle: &mut Lifecycle,
     child: &mut Option<TraefikChild>,
-    listener_is_public: &mut bool,
+    listener_scope: &mut Option<ExposureScope>,
 ) -> io::Result<ListenerPorts> {
     let stopped = stop_child(child);
     let LifecycleAction::RetryAfter(delay) = lifecycle.child_exited(services.len(), Instant::now())
@@ -931,9 +974,9 @@ fn restart_for_listener_scope(
         return Err(io::Error::other("proxy listener restart was not scheduled"));
     }
     match start_managed_child(settings, services, log) {
-        Ok((started, public, ports)) => {
+        Ok((started, scope, ports)) => {
             *child = Some(started);
-            *listener_is_public = public;
+            *listener_scope = Some(scope);
             let _ = lifecycle.child_started(services.len(), Instant::now());
             Ok(ports)
         }
@@ -1003,3 +1046,7 @@ fn acquire_supervisor_lock(static_config_path: &Path) -> io::Result<Flock<File>>
         }
     })
 }
+
+#[cfg(test)]
+#[path = "supervisor_regressions.rs"]
+mod reviewer_regressions;

@@ -2,7 +2,8 @@
 
 use super::config::{
     DnsChallenge, ListenerPorts, PublishedService, StaticConfig, detect_listener_ports,
-    render_dynamic_config, render_static_config, select_listener_ports, write_config_atomic,
+    detect_mixed_listener_ports, render_dynamic_config, render_static_config,
+    select_listener_ports, write_config_atomic,
 };
 use crate::names::CertificateName;
 use serde_json::Value;
@@ -32,6 +33,8 @@ fn static_config(public: bool) -> StaticConfig {
         ports: ListenerPorts {
             http: 10080,
             https: 10443,
+            mesh_http: None,
+            mesh_https: None,
         },
         public,
         private_ping_port: 19999,
@@ -41,6 +44,8 @@ fn static_config(public: bool) -> StaticConfig {
             email: "operator@example.net".to_owned(),
             storage_path: PathBuf::from("/var/lib/infraternal/proxy/tls/acme.json"),
             ca_server: Some("https://pebble.invalid/dir".to_owned()),
+            resolvers: Vec::new(),
+            disable_authoritative_ns_checks: false,
         },
     }
 }
@@ -51,10 +56,9 @@ fn mesh_listener_uses_the_mesh_ip_and_disables_admin_and_usage_surfaces() {
     assert!(rendered.contains("100.64.0.2:10080"));
     assert!(rendered.contains("100.64.0.2:10443"));
     assert!(rendered.contains("127.0.0.1:19999"));
-    assert!(rendered.contains("dashboard = false"));
-    assert!(rendered.contains("insecure = false"));
     assert!(rendered.contains("sendAnonymousUsage = false"));
     assert!(!rendered.contains("0.0.0.0"));
+    assert!(!rendered.contains("[api]"));
     assert!(!rendered.contains("api@internal"));
 }
 
@@ -63,8 +67,9 @@ fn private_ping_is_routed_automatically_without_enabling_the_admin_api() {
     let rendered = render_static_config(&static_config(false)).expect("render static config");
     assert!(rendered.contains("[ping]"));
     assert!(rendered.contains("manualRouting = false"));
-    assert!(rendered.contains("dashboard = false"));
-    assert!(rendered.contains("insecure = false"));
+    assert!(!rendered.contains("[api]"));
+    assert!(!rendered.contains("dashboard"));
+    assert!(!rendered.contains("insecure"));
 }
 
 #[test]
@@ -74,7 +79,9 @@ fn public_binding_is_explicit_and_root_and_rootless_ports_follow_the_owner_choic
         root_free,
         ListenerPorts {
             http: 80,
-            https: 443
+            https: 443,
+            mesh_http: None,
+            mesh_https: None,
         }
     );
     assert_eq!(
@@ -82,6 +89,8 @@ fn public_binding_is_explicit_and_root_and_rootless_ports_follow_the_owner_choic
         ListenerPorts {
             http: 10080,
             https: 10443,
+            mesh_http: None,
+            mesh_https: None,
         }
     );
     assert_eq!(
@@ -89,6 +98,8 @@ fn public_binding_is_explicit_and_root_and_rootless_ports_follow_the_owner_choic
         ListenerPorts {
             http: 10080,
             https: 10443,
+            mesh_http: None,
+            mesh_https: None,
         }
     );
 
@@ -99,12 +110,98 @@ fn public_binding_is_explicit_and_root_and_rootless_ports_follow_the_owner_choic
 }
 
 #[test]
+fn mixed_public_and_mesh_routes_use_separate_listeners() {
+    let source = "100.64.0.5".parse().expect("mesh source");
+    let mesh = mesh_service(vec![source]);
+    let mut public = mesh_service(Vec::new());
+    public.id = "status".to_owned();
+    public.hostname = "status.build01.ssh.kayg.org".to_owned();
+    public.public = true;
+
+    let dynamic = render_dynamic_config(&[mesh, public]).expect("mixed dynamic config");
+    let dynamic: Value = serde_json::from_slice(&dynamic).expect("dynamic JSON");
+    assert_eq!(
+        dynamic["http"]["routers"]["http.docs"]["entryPoints"],
+        serde_json::json!(["mesh-http"])
+    );
+    assert_eq!(
+        dynamic["http"]["routers"]["docs"]["entryPoints"],
+        serde_json::json!(["mesh-https"])
+    );
+    assert_eq!(
+        dynamic["http"]["routers"]["http.status"]["entryPoints"],
+        serde_json::json!(["http"])
+    );
+    assert_eq!(
+        dynamic["http"]["routers"]["status"]["entryPoints"],
+        serde_json::json!(["https"])
+    );
+}
+
+#[test]
+fn mixed_public_static_config_keeps_mesh_listeners_bound_to_the_mesh_ip() {
+    let mut config = static_config(true);
+    config.ports = ListenerPorts {
+        http: 80,
+        https: 443,
+        mesh_http: Some(10080),
+        mesh_https: Some(10443),
+    };
+    let rendered = render_static_config(&config).expect("mixed static config");
+    assert!(rendered.contains("[entryPoints.mesh-http]"));
+    assert!(rendered.contains("100.64.0.2:10080"));
+    assert!(rendered.contains("[entryPoints.mesh-https]"));
+    assert!(rendered.contains("100.64.0.2:10443"));
+}
+
+#[test]
+fn mixed_listener_selection_keeps_public_and_mesh_ports_disjoint() {
+    let ports = detect_mixed_listener_ports(false, IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        .expect("select separate rootless listeners");
+
+    assert_eq!(ports.http, 10_080);
+    assert_eq!(ports.https, 10_443);
+    let mesh_http = ports.mesh_http.expect("mesh HTTP listener");
+    let mesh_https = ports.mesh_https.expect("mesh HTTPS listener");
+    assert_ne!(mesh_http, ports.http);
+    assert_ne!(mesh_http, ports.https);
+    assert_ne!(mesh_https, ports.http);
+    assert_ne!(mesh_https, ports.https);
+    assert_ne!(mesh_http, mesh_https);
+}
+
+#[test]
+fn explicit_dns_resolver_is_rendered_for_staging_acme_validation() {
+    let mut config = static_config(false);
+    config.dns_challenge.resolvers = vec!["127.0.0.1:8053".parse().expect("Pebble DNS resolver")];
+
+    let rendered = render_static_config(&config).expect("render static config");
+
+    assert!(rendered.contains("resolvers = [\"127.0.0.1:8053\"]"));
+}
+
+#[test]
+fn synthetic_dns_validation_can_skip_authoritative_checks_and_keep_recursive_checks() {
+    let mut config = static_config(false);
+    config.dns_challenge.resolvers = vec!["127.0.0.1:8053".parse().expect("test DNS resolver")];
+    config.dns_challenge.disable_authoritative_ns_checks = true;
+
+    let rendered = render_static_config(&config).expect("render staging ACME config");
+
+    assert!(rendered.contains("[certificatesResolvers.dns.acme.dnsChallenge.propagation]"));
+    assert!(rendered.contains("disableANSChecks = true"));
+    assert!(rendered.contains("resolvers = [\"127.0.0.1:8053\"]"));
+}
+
+#[test]
 fn rootless_port_detection_never_probes_or_selects_privileged_ports() {
     assert_eq!(
         detect_listener_ports(false, "10.77.0.1".parse().expect("mesh address"), false),
         ListenerPorts {
             http: 10080,
             https: 10443,
+            mesh_http: None,
+            mesh_https: None,
         }
     );
 }
@@ -159,7 +256,7 @@ fn atomic_config_writes_are_owner_only_and_replace_the_previous_snapshot() {
     let root = std::env::temp_dir().join(format!("proxy-config-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&root).expect("create config root");
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("private root mode");
-    let destination = root.join("dynamic.json");
+    let destination = root.join(crate::config::DYNAMIC_CONFIG_FILENAME);
 
     write_config_atomic(&destination, b"first").expect("write first snapshot");
     write_config_atomic(&destination, b"second").expect("replace snapshot");

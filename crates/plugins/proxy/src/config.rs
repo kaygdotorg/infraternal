@@ -1,6 +1,7 @@
 //! Renders mesh-bound static settings and exact-host dynamic routes atomically [#281].
-//! Mesh routes use the same accepted peer addresses as mesh DNS; public listeners appear only
-//! after an explicit public exposure. Certificate state remains node-local.
+//! Mesh routes use the same accepted peer addresses as mesh DNS. When mesh and public exposures
+//! coexist, they use separate mesh-IP and wildcard listeners with disjoint ports. Certificate
+//! state remains node-local.
 
 use crate::names::CertificateName;
 use serde_json::{Map, json};
@@ -17,13 +18,35 @@ const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
 const MAX_RENDERED_CONFIG_BYTES: usize = 4 * 1024 * 1024;
 
+/// Filename recognized by Traefik's file provider for dynamic snapshots.
+pub const DYNAMIC_CONFIG_FILENAME: &str = "services.yaml";
+
 /// Listener ports selected from node privilege and conventional-port availability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ListenerPorts {
-    /// HTTP listener port.
+    /// HTTP port for the primary listener scope.
     pub http: u16,
-    /// HTTPS listener port.
+    /// HTTPS port for the primary listener scope.
     pub https: u16,
+    /// HTTP port for mesh-only routes when public routes use the primary listeners.
+    pub mesh_http: Option<u16>,
+    /// HTTPS port for mesh-only routes when public routes use the primary listeners.
+    pub mesh_https: Option<u16>,
+}
+
+impl ListenerPorts {
+    /// Select the HTTPS port for a route's audience.
+    #[must_use]
+    pub const fn https_for_publication(self, public: bool) -> u16 {
+        if public {
+            self.https
+        } else {
+            match self.mesh_https {
+                Some(port) => port,
+                None => self.https,
+            }
+        }
+    }
 }
 
 /// DNS-01 resolver values safe to render into the static configuration.
@@ -37,6 +60,10 @@ pub struct DnsChallenge {
     pub storage_path: PathBuf,
     /// Optional staging directory endpoint for tests.
     pub ca_server: Option<String>,
+    /// DNS resolvers used for challenge propagation checks; empty uses the system resolvers.
+    pub resolvers: Vec<SocketAddr>,
+    /// Skip authoritative-name-server checks for synthetic zones while keeping recursive checks.
+    pub disable_authoritative_ns_checks: bool,
 }
 
 /// Inputs for rendering the static Traefik file.
@@ -84,11 +111,15 @@ pub const fn select_listener_ports(
         ListenerPorts {
             http: 80,
             https: 443,
+            mesh_http: None,
+            mesh_https: None,
         }
     } else {
         ListenerPorts {
             http: 10080,
             https: 10443,
+            mesh_http: None,
+            mesh_https: None,
         }
     }
 }
@@ -108,31 +139,46 @@ pub fn detect_listener_ports(rootful: bool, mesh_address: IpAddr, public: bool) 
     select_listener_ports(rootful, available(80), available(443))
 }
 
+/// Select separate mesh-address ports when public and mesh-only routes share one process.
+///
+/// # Errors
+/// Returns an address-in-use error when no bounded pair of high ports is available.
+pub fn detect_mixed_listener_ports(
+    rootful: bool,
+    mesh_address: IpAddr,
+) -> io::Result<ListenerPorts> {
+    let mut ports = detect_listener_ports(rootful, mesh_address, true);
+    let available = |port| TcpListener::bind(SocketAddr::new(mesh_address, port)).is_ok();
+    for offset in 0..=255_u16 {
+        let Some(http) = 10_080_u16.checked_add(offset) else {
+            break;
+        };
+        let Some(https) = 10_443_u16.checked_add(offset) else {
+            break;
+        };
+        if [ports.http, ports.https].contains(&http)
+            || [ports.http, ports.https].contains(&https)
+            || !available(http)
+            || !available(https)
+        {
+            continue;
+        }
+        ports.mesh_http = Some(http);
+        ports.mesh_https = Some(https);
+        return Ok(ports);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AddrInUse,
+        "no separate high ports are available for mesh-only proxy routes",
+    ))
+}
+
 /// Render a complete Traefik static configuration in TOML.
 ///
 /// # Errors
 /// Returns an error when a path, provider value, or endpoint cannot be represented safely.
 pub fn render_static_config(config: &StaticConfig) -> io::Result<String> {
     validate_static_config(config)?;
-    let (plain_address, tls_address) = if config.public {
-        (
-            SocketAddr::new(
-                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                config.ports.http,
-            )
-            .to_string(),
-            SocketAddr::new(
-                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                config.ports.https,
-            )
-            .to_string(),
-        )
-    } else {
-        (
-            SocketAddr::new(config.mesh_address, config.ports.http).to_string(),
-            SocketAddr::new(config.mesh_address, config.ports.https).to_string(),
-        )
-    };
     let dynamic_directory = config
         .dynamic_directory
         .to_str()
@@ -148,29 +194,7 @@ pub fn render_static_config(config: &StaticConfig) -> io::Result<String> {
         "[global]\ncheckNewVersion = false\nsendAnonymousUsage = false"
     )
     .map_err(io::Error::other)?;
-    writeln!(
-        rendered,
-        "\n[api]\ndashboard = false\ninsecure = false\ndebug = false"
-    )
-    .map_err(io::Error::other)?;
-    writeln!(
-        rendered,
-        "\n[entryPoints.http]\naddress = {}",
-        toml_string(&plain_address)?
-    )
-    .map_err(io::Error::other)?;
-    writeln!(
-        rendered,
-        "\n[entryPoints.https]\naddress = {}",
-        toml_string(&tls_address)?
-    )
-    .map_err(io::Error::other)?;
-    let health_address = toml_string(&format!("127.0.0.1:{}", config.private_ping_port))?;
-    writeln!(
-        rendered,
-        "\n[entryPoints.health]\naddress = {health_address}"
-    )
-    .map_err(io::Error::other)?;
+    render_entry_points(config, &mut rendered)?;
     writeln!(
         rendered,
         "\n[ping]\nentryPoint = \"health\"\nmanualRouting = false"
@@ -198,13 +222,92 @@ pub fn render_static_config(config: &StaticConfig) -> io::Result<String> {
         toml_string(&config.dns_challenge.provider)?
     )
     .map_err(io::Error::other)?;
+    render_dns_resolvers(&config.dns_challenge, &mut rendered)?;
+    if config.dns_challenge.disable_authoritative_ns_checks {
+        writeln!(
+            rendered,
+            "\n[certificatesResolvers.dns.acme.dnsChallenge.propagation]\ndisableANSChecks = true"
+        )
+        .map_err(io::Error::other)?;
+    }
     if rendered.len() > MAX_RENDERED_CONFIG_BYTES {
         return Err(invalid_data("static configuration exceeds its byte limit"));
     }
     Ok(rendered)
 }
 
+fn render_entry_points(config: &StaticConfig, rendered: &mut String) -> io::Result<()> {
+    let (plain_address, tls_address) = if config.public {
+        (
+            SocketAddr::new(
+                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                config.ports.http,
+            )
+            .to_string(),
+            SocketAddr::new(
+                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                config.ports.https,
+            )
+            .to_string(),
+        )
+    } else {
+        (
+            SocketAddr::new(config.mesh_address, config.ports.http).to_string(),
+            SocketAddr::new(config.mesh_address, config.ports.https).to_string(),
+        )
+    };
+    writeln!(
+        rendered,
+        "[entryPoints.http]\naddress = {}",
+        toml_string(&plain_address)?
+    )
+    .map_err(io::Error::other)?;
+    writeln!(
+        rendered,
+        "\n[entryPoints.https]\naddress = {}",
+        toml_string(&tls_address)?
+    )
+    .map_err(io::Error::other)?;
+    if let (Some(mesh_http), Some(mesh_https)) = (config.ports.mesh_http, config.ports.mesh_https) {
+        writeln!(
+            rendered,
+            "\n[entryPoints.mesh-http]\naddress = {}",
+            toml_string(&SocketAddr::new(config.mesh_address, mesh_http).to_string())?
+        )
+        .map_err(io::Error::other)?;
+        writeln!(
+            rendered,
+            "\n[entryPoints.mesh-https]\naddress = {}",
+            toml_string(&SocketAddr::new(config.mesh_address, mesh_https).to_string())?
+        )
+        .map_err(io::Error::other)?;
+    }
+    let health_address = toml_string(&format!("127.0.0.1:{}", config.private_ping_port))?;
+    writeln!(
+        rendered,
+        "\n[entryPoints.health]\naddress = {health_address}"
+    )
+    .map_err(io::Error::other)?;
+    Ok(())
+}
+
+fn render_dns_resolvers(config: &DnsChallenge, rendered: &mut String) -> io::Result<()> {
+    if config.resolvers.is_empty() {
+        return Ok(());
+    }
+    let resolvers = config
+        .resolvers
+        .iter()
+        .map(|resolver| toml_string(&resolver.to_string()))
+        .collect::<io::Result<Vec<_>>>()?
+        .join(", ");
+    writeln!(rendered, "resolvers = [{resolvers}]").map_err(io::Error::other)
+}
+
 /// Render one exact-host dynamic snapshot with per-service mesh source filters.
+///
+/// The compact JSON document is valid YAML and callers write it with
+/// [`DYNAMIC_CONFIG_FILENAME`], because the file provider skips `.json` files.
 ///
 /// # Errors
 /// Returns permission denied when a mesh route has no accepted sources, or invalid data for an unsafe route.
@@ -217,9 +320,17 @@ pub fn render_dynamic_config(services: &[PublishedService]) -> io::Result<Vec<u8
     let mut proxy_services = Map::new();
     let mut seen_ids = std::collections::BTreeSet::new();
     let mut seen_hosts = std::collections::BTreeSet::new();
+    let split_mesh_listeners = services.iter().any(|service| service.public)
+        && services.iter().any(|service| !service.public);
     for service in services {
         validate_published_service(service, &mut seen_ids, &mut seen_hosts)?;
-        render_published_service(service, &mut routers, &mut middlewares, &mut proxy_services)?;
+        render_published_service(
+            service,
+            split_mesh_listeners,
+            &mut routers,
+            &mut middlewares,
+            &mut proxy_services,
+        )?;
     }
     let bytes = serde_json::to_vec(&json!({
         "http": {
@@ -258,12 +369,18 @@ fn validate_published_service<'a>(
 
 fn render_published_service(
     service: &PublishedService,
+    split_mesh_listeners: bool,
     routers: &mut Map<String, serde_json::Value>,
     middlewares: &mut Map<String, serde_json::Value>,
     proxy_services: &mut Map<String, serde_json::Value>,
 ) -> io::Result<()> {
     let access_middleware = format!("{}-mesh-access", service.id);
     let redirect_middleware = format!("{}-https-redirect", service.id);
+    let (plain_entry_point, tls_entry_point) = if split_mesh_listeners && !service.public {
+        ("mesh-http", "mesh-https")
+    } else {
+        ("http", "https")
+    };
     if !service.public {
         if service.allowed_sources.is_empty() {
             return Err(io::Error::new(
@@ -306,7 +423,7 @@ fn render_published_service(
         format!("http.{}", service.id),
         json!({
             "rule": rule,
-            "entryPoints": ["http"],
+            "entryPoints": [plain_entry_point],
             "middlewares": plain_middlewares,
             "service": service.id,
         }),
@@ -318,7 +435,7 @@ fn render_published_service(
         service.id.clone(),
         json!({
             "rule": rule,
-            "entryPoints": ["https"],
+            "entryPoints": [tls_entry_point],
             "middlewares": tls_middlewares,
             "service": service.id,
             "tls": {
@@ -370,6 +487,20 @@ pub fn write_config_atomic(destination: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 fn validate_static_config(config: &StaticConfig) -> io::Result<()> {
+    let mesh_listener_valid = match (config.ports.mesh_http, config.ports.mesh_https) {
+        (None, None) => true,
+        (Some(http), Some(https)) => {
+            config.public
+                && http != 0
+                && https != 0
+                && http != https
+                && ![config.ports.http, config.ports.https].contains(&http)
+                && ![config.ports.http, config.ports.https].contains(&https)
+                && config.private_ping_port != http
+                && config.private_ping_port != https
+        }
+        _ => false,
+    };
     if config.mesh_address.is_unspecified()
         || config.mesh_address.is_loopback()
         || config.ports.http == 0
@@ -378,6 +509,13 @@ fn validate_static_config(config: &StaticConfig) -> io::Result<()> {
         || config.private_ping_port == 0
         || config.private_ping_port == config.ports.http
         || config.private_ping_port == config.ports.https
+        || !mesh_listener_valid
+        || config.dns_challenge.resolvers.len() > 16
+        || config
+            .dns_challenge
+            .resolvers
+            .iter()
+            .any(|resolver| resolver.port() == 0)
         || !config.dynamic_directory.is_absolute()
         || !config.dns_challenge.storage_path.is_absolute()
         || !valid_provider(&config.dns_challenge.provider)

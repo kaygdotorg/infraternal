@@ -18,8 +18,9 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 const EXECUTABLE_MODE: u32 = 0o500;
 const MAX_ARCHIVE_ENTRIES: usize = 256;
 const MAX_LICENSE_BYTES: u64 = 1024 * 1024;
+const MAX_CHANGELOG_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_EXPANDED_ARCHIVE_BYTES: u64 =
-    MAX_COMPONENT_EXECUTABLE_BYTES + MAX_LICENSE_BYTES + 2 * 1024 * 1024;
+    MAX_COMPONENT_EXECUTABLE_BYTES + MAX_LICENSE_BYTES + MAX_CHANGELOG_BYTES + 2 * 1024 * 1024;
 
 /// Owns the downloaded-on-demand component directory beneath one infraternal state directory.
 pub struct ComponentInstaller {
@@ -51,8 +52,8 @@ impl ComponentInstaller {
     /// Verify an archive against a release-signed manifest, then atomically publish its executable.
     ///
     /// The archive is first streamed into an exclusive private temporary file and hashed before any
-    /// decompression. Extraction accepts only the two signed release members and writes the single
-    /// executable into a private staging directory before an atomic directory rename.
+    /// decompression. Extraction accepts the signed executable, license, and bounded changelog
+    /// members, writing only the executable into a private staging directory before atomic rename.
     ///
     /// # Errors
     /// Returns an error when the signed target, archive, extracted files or store permissions fail validation.
@@ -265,6 +266,7 @@ fn extract_executable(
 struct ArchiveMembers {
     executable: bool,
     license: bool,
+    changelog: bool,
 }
 
 fn extract_archive_entry<R: Read>(
@@ -289,6 +291,9 @@ fn extract_archive_entry<R: Read>(
     } else if path == b"LICENSE.md" && !members.license {
         validate_traefik_license(entry)?;
         members.license = true;
+    } else if path == b"CHANGELOG.md" && !members.changelog {
+        validate_traefik_changelog(entry)?;
+        members.changelog = true;
     } else {
         return Err(invalid_data(
             "component archive contains an unallowlisted path",
@@ -367,6 +372,20 @@ fn validate_traefik_license<R: Read>(entry: tar::Entry<'_, R>) -> io::Result<()>
     {
         return Err(invalid_data(
             "Traefik archive does not contain its MIT license",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_traefik_changelog<R: Read>(entry: tar::Entry<'_, R>) -> io::Result<()> {
+    let declared_size = entry.size();
+    if declared_size > MAX_CHANGELOG_BYTES {
+        return Err(invalid_data("Traefik changelog exceeds its byte limit"));
+    }
+    let read_size = io::copy(&mut entry.take(MAX_CHANGELOG_BYTES + 1), &mut io::sink())?;
+    if read_size != declared_size {
+        return Err(invalid_data(
+            "Traefik changelog does not match its declared size",
         ));
     }
     Ok(())

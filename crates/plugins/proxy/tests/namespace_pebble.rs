@@ -7,12 +7,15 @@
 )]
 
 use infraternal_plugin_proxy::{
-    config::{DnsChallenge, ListenerPorts, PublishedService, StaticConfig},
+    config::{
+        DYNAMIC_CONFIG_FILENAME, DnsChallenge, ListenerPorts, PublishedService, StaticConfig,
+    },
     names::CertificateName,
     supervisor::{SupervisorSettings, TraefikSupervisor},
 };
 use serde_json::{Value, json};
 use std::{
+    collections::VecDeque,
     env,
     fs::{self, OpenOptions},
     io::{self, Read, Write},
@@ -21,8 +24,8 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -118,10 +121,16 @@ fn run_namespace_case() {
             .current_dir(&fixture_root)
             .arg("-config")
             .arg(pebble_config)
-            .env("PEBBLE_VA_NOSLEEP", "1")
-            .env("PEBBLE_VA_DNS_SERVER", "127.0.0.1:8053"),
+            .arg("-dnsserver")
+            .arg("127.0.0.1:8053")
+            .env("PEBBLE_VA_NOSLEEP", "1"),
     );
     wait_for_tcp("127.0.0.1:14000".parse().expect("ACME address"));
+    wait_for_tcp("127.0.0.1:15000".parse().expect("Pebble management address"));
+    let issued_certificate_root = private_file(
+        &root.join("pebble-issued-root.pem"),
+        &fetch_pebble_issued_root(&pebble_ca),
+    );
 
     let adapter = start_httpreq_adapter();
     let backend = start_backend();
@@ -133,17 +142,21 @@ fn run_namespace_case() {
     let _storage = private_file(&storage_path, b"{}");
     let health_port = free_loopback_port();
     let executable = write_ca_wrapper(&root.join("traefik-with-pebble-ca"), &pebble_ca, &traefik);
+    let log_tail = Arc::new(Mutex::new(VecDeque::new()));
+    let captured_log_tail = Arc::clone(&log_tail);
 
     let supervisor = TraefikSupervisor::start(
         SupervisorSettings {
             executable,
-            static_config_path: state.join("static.toml"),
-            dynamic_config_path: state.join("dynamic.json"),
+            static_config_path: root.join("traefik.toml"),
+            dynamic_config_path: state.join(DYNAMIC_CONFIG_FILENAME),
             static_config: StaticConfig {
                 mesh_address: IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)),
                 ports: ListenerPorts {
                     http: 10080,
                     https: 10443,
+                    mesh_http: None,
+                    mesh_https: None,
                 },
                 public: false,
                 private_ping_port: health_port,
@@ -153,13 +166,22 @@ fn run_namespace_case() {
                     email: "proxy-test@example.org".to_owned(),
                     storage_path: storage_path.clone(),
                     ca_server: Some("https://127.0.0.1:14000/dir".to_owned()),
+                    resolvers: vec!["127.0.0.1:8053".parse().expect("Pebble DNS resolver")],
+                    disable_authoritative_ns_checks: true,
                 },
             },
             provider_files: vec![("HTTPREQ_ENDPOINT".to_owned(), endpoint_file)],
             private_ping_address: SocketAddr::from(([127, 0, 0, 1], health_port)),
             startup_timeout: Duration::from_secs(20),
         },
-        Arc::new(|_line| {}),
+        Arc::new(move |line| {
+            if let Ok(mut lines) = captured_log_tail.lock() {
+                if lines.len() == 64 {
+                    lines.pop_front();
+                }
+                lines.push_back(line);
+            }
+        }),
     )
     .expect("start the node-local Traefik owner");
 
@@ -178,17 +200,47 @@ fn run_namespace_case() {
 
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut response = None;
+    let mut last_curl_failure = String::new();
     while Instant::now() < deadline {
-        let attempt = curl_request("100.64.0.2", hostname, &pebble_ca);
+        let attempt = curl_request("100.64.0.2", hostname, &issued_certificate_root, true);
         if attempt.status.success() && response_status(&attempt.stdout) == Some(200) {
             response = Some(attempt.stdout);
             break;
         }
+        last_curl_failure = format!(
+            "exit={:?}, http={:?}, stderr={}",
+            attempt.status.code(),
+            response_status(&attempt.stdout),
+            String::from_utf8_lossy(&attempt.stderr).trim()
+        );
         thread::sleep(Duration::from_millis(500));
     }
-    let response =
-        String::from_utf8(response.expect("Pebble DNS-01 certificate and mesh route became ready"))
-            .expect("backend response is UTF-8");
+    let Some(response) = response else {
+        let unverified = curl_request("100.64.0.2", hostname, &issued_certificate_root, false);
+        let unverified_curl = format!(
+            "exit={:?}, http={:?}, backend_body={}, stderr={}",
+            unverified.status.code(),
+            response_status(&unverified.stdout),
+            unverified
+                .stdout
+                .windows(BACKEND_BODY.len())
+                .any(|window| window == BACKEND_BODY),
+            String::from_utf8_lossy(&unverified.stderr).trim()
+        );
+        let captured_logs = log_tail.lock().map_or_else(
+            |_| "Traefik log buffer was poisoned".to_owned(),
+            |lines| lines.iter().cloned().collect::<Vec<_>>().join("\n"),
+        );
+        let adapter_failures = adapter.errors.lock().map_or_else(
+            |_| "HTTPREQ error buffer was poisoned".to_owned(),
+            |errors| errors.iter().cloned().collect::<Vec<_>>().join("; "),
+        );
+        panic!(
+            "Pebble DNS-01 certificate and mesh route became ready; HTTPREQ calls={}; adapter errors={adapter_failures}; last verified curl={last_curl_failure}; unverified curl={unverified_curl}; Traefik logs:\n{captured_logs}",
+            adapter.requests.load(Ordering::Relaxed)
+        );
+    };
+    let response = String::from_utf8(response).expect("backend response is UTF-8");
     assert!(response.contains("proxy-test-backend"));
     assert!(
         fs::metadata(&storage_path)
@@ -197,9 +249,14 @@ fn run_namespace_case() {
             > 2
     );
 
-    let denied = curl_request("100.64.0.3", hostname, &pebble_ca);
+    let denied = curl_request("100.64.0.3", hostname, &issued_certificate_root, true);
     assert_eq!(response_status(&denied.stdout), Some(403));
-    let unknown_host = curl_request("100.64.0.2", "other.node.example.org", &pebble_ca);
+    let unknown_host = curl_request(
+        "100.64.0.2",
+        "other.node.example.org",
+        &issued_certificate_root,
+        true,
+    );
     assert_eq!(response_status(&unknown_host.stdout), Some(404));
 
     drop(supervisor);
@@ -214,6 +271,35 @@ fn required_path(name: &str) -> PathBuf {
     PathBuf::from(
         env::var_os(name).unwrap_or_else(|| panic!("{name} must be set by the test script")),
     )
+}
+
+fn fetch_pebble_issued_root(service_ca: &Path) -> Vec<u8> {
+    let output = Command::new("curl")
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--connect-timeout",
+            "2",
+            "--max-time",
+            "5",
+            "--cacert",
+        ])
+        .arg(service_ca)
+        .args([
+            "--resolve",
+            "localhost:15000:127.0.0.1",
+            "https://localhost:15000/roots/0",
+        ])
+        .output()
+        .expect("fetch Pebble's ephemeral ACME root certificate");
+    assert!(
+        output.status.success()
+            && output.stdout.starts_with(b"-----BEGIN CERTIFICATE-----"),
+        "Pebble management endpoint did not return a certificate: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    output.stdout
 }
 
 fn run(program: &str, arguments: &[&str]) {
@@ -248,7 +334,7 @@ fn free_loopback_port() -> u16 {
 
 fn write_ca_wrapper(destination: &Path, ca_file: &Path, traefik: &Path) -> PathBuf {
     let script = format!(
-        "#!/bin/sh\nSSL_CERT_FILE={} exec {} \"$@\"\n",
+        "#!/bin/sh\nSSL_CERT_FILE={} TRAEFIK_LOG_LEVEL=DEBUG exec {} \"$@\"\n",
         shell_quote(ca_file),
         shell_quote(traefik)
     );
@@ -354,6 +440,8 @@ fn start_backend() -> Backend {
 
 struct HttpReqAdapter {
     value: String,
+    requests: Arc<AtomicUsize>,
+    errors: Arc<Mutex<VecDeque<String>>>,
     _worker: Worker,
 }
 
@@ -362,13 +450,25 @@ fn start_httpreq_adapter() -> HttpReqAdapter {
     listener
         .set_nonblocking(true)
         .expect("nonblocking DNS provider fixture");
+    let requests = Arc::new(AtomicUsize::new(0));
+    let worker_requests = Arc::clone(&requests);
+    let errors = Arc::new(Mutex::new(VecDeque::new()));
+    let worker_errors = Arc::clone(&errors);
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = Arc::clone(&stop);
     let join = thread::spawn(move || {
         while !worker_stop.load(Ordering::Acquire) {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    handle_httpreq(stream);
+                    worker_requests.fetch_add(1, Ordering::Relaxed);
+                    if let Err(error) = handle_httpreq(stream)
+                        && let Ok(mut errors) = worker_errors.lock()
+                    {
+                        if errors.len() == 16 {
+                            let _ = errors.pop_front();
+                        }
+                        errors.push_back(error.to_string());
+                    }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
@@ -379,6 +479,8 @@ fn start_httpreq_adapter() -> HttpReqAdapter {
     });
     HttpReqAdapter {
         value: "http://127.0.0.1:8054".to_owned(),
+        requests,
+        errors,
         _worker: Worker {
             stop,
             join: Some(join),
@@ -386,7 +488,7 @@ fn start_httpreq_adapter() -> HttpReqAdapter {
     }
 }
 
-fn handle_httpreq(mut stream: TcpStream) {
+fn handle_httpreq(mut stream: TcpStream) -> io::Result<()> {
     let result = read_http_json(&mut stream).and_then(|(path, body)| {
         let request: Value = serde_json::from_slice(&body).map_err(io::Error::other)?;
         let fqdn = request["fqdn"]
@@ -435,10 +537,11 @@ fn handle_httpreq(mut stream: TcpStream) {
     } else {
         "500 Internal Server Error"
     };
-    let _ = write!(
+    write!(
         stream,
         "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-    );
+    )?;
+    result
 }
 
 fn read_http_json(stream: &mut TcpStream) -> io::Result<(String, Vec<u8>)> {
@@ -510,18 +613,27 @@ fn read_http_json(stream: &mut TcpStream) -> io::Result<(String, Vec<u8>)> {
     ))
 }
 
-fn curl_request(source: &str, hostname: &str, ca_file: &Path) -> std::process::Output {
-    Command::new("curl")
-        .args([
-            "--silent",
-            "--show-error",
-            "--interface",
-            source,
-            "--resolve",
-        ])
-        .arg(format!("{hostname}:443:100.64.0.1"))
-        .args(["--cacert"])
-        .arg(ca_file)
+fn curl_request(
+    source: &str,
+    hostname: &str,
+    ca_file: &Path,
+    verify_certificate: bool,
+) -> std::process::Output {
+    let mut command = Command::new("curl");
+    command.args([
+        "--silent",
+        "--show-error",
+        "--interface",
+        source,
+        "--resolve",
+    ]);
+    command.arg(format!("{hostname}:443:100.64.0.1"));
+    if verify_certificate {
+        command.args(["--cacert"]).arg(ca_file);
+    } else {
+        command.args(["--insecure", "--verbose"]);
+    }
+    command
         .args([
             "--connect-timeout",
             "2",

@@ -21,8 +21,10 @@ TRAEFIK_VERSION = "3.7.17"
 MAX_CHECKSUM_BYTES = 64 * 1024
 MAX_COMPONENT_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_COMPONENT_EXECUTABLE_BYTES = 512 * 1024 * 1024
+MAX_CHANGELOG_BYTES = 4 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 256
 MAX_LICENSE_BYTES = 1024 * 1024
+ALLOWLISTED_ARCHIVE_MEMBERS = frozenset({"traefik", "LICENSE.md", "CHANGELOG.md"})
 CHUNK_BYTES = 64 * 1024
 SUPPORTED_TARGETS = {
     ("linux", "amd64"),
@@ -81,10 +83,11 @@ def verify_checksum(stream: BinaryIO, checksums: dict[str, str], filename: str) 
 
 
 def inspect_archive(stream: BinaryIO) -> dict[str, str | int]:
-    """Inspect gzip tar members without extracting them, accepting only safe regular files."""
+    """Inspect only the exact regular members accepted by the node installer."""
     names: set[str] = set()
     executable_digest: str | None = None
     executable_size: int | None = None
+    license_present = False
     license_text = bytearray()
     total_size = 0
     entry_count = 0
@@ -105,13 +108,19 @@ def inspect_archive(stream: BinaryIO) -> dict[str, str | int]:
                     or name in names
                 ):
                     raise ValueError("Traefik archive contains an unsafe or duplicate path")
+                if name not in ALLOWLISTED_ARCHIVE_MEMBERS:
+                    raise ValueError("Traefik archive contains an unallowlisted path")
                 names.add(name)
                 if not member.isfile() or member.mode & 0o6000:
                     raise ValueError("Traefik archive contains a non-regular or privileged entry")
                 if member.size < 0 or member.size > MAX_COMPONENT_EXECUTABLE_BYTES:
                     raise ValueError("Traefik archive entry exceeds the component payload bound")
+                if name == "CHANGELOG.md" and member.size > MAX_CHANGELOG_BYTES:
+                    raise ValueError("Traefik changelog exceeds its byte bound")
                 total_size += member.size
-                if total_size > MAX_COMPONENT_EXECUTABLE_BYTES + MAX_LICENSE_BYTES:
+                if total_size > (
+                    MAX_COMPONENT_EXECUTABLE_BYTES + MAX_LICENSE_BYTES + MAX_CHANGELOG_BYTES
+                ):
                     raise ValueError("Traefik archive expands beyond the component payload bound")
                 source = archive.extractfile(member)
                 if source is None:
@@ -125,6 +134,7 @@ def inspect_archive(stream: BinaryIO) -> dict[str, str | int]:
                     if name == "traefik":
                         digest.update(chunk)
                     elif name == "LICENSE.md":
+                        license_present = True
                         if len(license_text) + len(chunk) > MAX_LICENSE_BYTES:
                             raise ValueError("Traefik license file exceeds its bound")
                         license_text.extend(chunk)
@@ -135,7 +145,7 @@ def inspect_archive(stream: BinaryIO) -> dict[str, str | int]:
                     executable_size = read_size
         if executable_digest is None or executable_size is None:
             raise ValueError("Traefik archive does not contain its executable")
-        if b"MIT License" not in license_text:
+        if not license_present or b"MIT License" not in license_text:
             raise ValueError("Traefik archive does not contain the expected MIT license")
     except (ReadError, OSError, EOFError) as error:
         raise ValueError("Traefik archive is malformed") from error

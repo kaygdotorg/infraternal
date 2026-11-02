@@ -5,7 +5,9 @@ use super::supervisor::{
     TraefikSupervisor, check_private_ping, redact_log_line,
 };
 use crate::{
-    config::{DnsChallenge, ListenerPorts, PublishedService, StaticConfig},
+    config::{
+        DYNAMIC_CONFIG_FILENAME, DnsChallenge, ListenerPorts, PublishedService, StaticConfig,
+    },
     names::CertificateName,
 };
 use std::{
@@ -232,13 +234,15 @@ fn live_process_without_a_healthy_private_ping_is_reported_unhealthy() {
     let (health_address, health_server) = health_server_sequence(vec![HEALTHY, UNHEALTHY]);
     let settings = SupervisorSettings {
         executable,
-        static_config_path: state.join("static.toml"),
-        dynamic_config_path: state.join("dynamic.json"),
+        static_config_path: root.join("static.toml"),
+        dynamic_config_path: state.join(DYNAMIC_CONFIG_FILENAME),
         static_config: StaticConfig {
             mesh_address: "10.77.0.1".parse().expect("mesh address"),
             ports: ListenerPorts {
                 http: 10080,
                 https: 10443,
+                mesh_http: None,
+                mesh_https: None,
             },
             public: false,
             private_ping_port: health_address.port(),
@@ -248,6 +252,8 @@ fn live_process_without_a_healthy_private_ping_is_reported_unhealthy() {
                 email: "operator@example.test".to_owned(),
                 storage_path: acme_storage,
                 ca_server: Some("https://127.0.0.1:14000/dir".to_owned()),
+                resolvers: Vec::new(),
+                disable_authoritative_ns_checks: false,
             },
         },
         provider_files: Vec::new(),
@@ -304,13 +310,15 @@ fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state(
     let dynamic_directory = state.clone();
     let settings = SupervisorSettings {
         executable,
-        static_config_path: state.join("static.toml"),
-        dynamic_config_path: state.join("dynamic.json"),
+        static_config_path: root.join("static.toml"),
+        dynamic_config_path: state.join(DYNAMIC_CONFIG_FILENAME),
         static_config: StaticConfig {
             mesh_address: "10.77.0.1".parse().expect("mesh address"),
             ports: ListenerPorts {
                 http: 10080,
                 https: 10443,
+                mesh_http: None,
+                mesh_https: None,
             },
             public: false,
             private_ping_port: health_address.port(),
@@ -320,6 +328,8 @@ fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state(
                 email: "operator@example.test".to_owned(),
                 storage_path: acme_storage.clone(),
                 ca_server: Some("https://127.0.0.1:14000/dir".to_owned()),
+                resolvers: Vec::new(),
+                disable_authoritative_ns_checks: false,
             },
         },
         provider_files: Vec::new(),
@@ -347,10 +357,12 @@ fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state(
         ListenerPorts {
             http: 10_080,
             https: 10_443,
+            mesh_http: None,
+            mesh_https: None,
         }
     );
     assert!(supervisor.is_running().expect("process after first route"));
-    let dynamic_path = state.join("dynamic.json");
+    let dynamic_path = state.join(DYNAMIC_CONFIG_FILENAME);
     let dynamic = std::fs::read_to_string(&dynamic_path).expect("read published route");
     assert!(dynamic.contains("docs.n1.example.test"));
 

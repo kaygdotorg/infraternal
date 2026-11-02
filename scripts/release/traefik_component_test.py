@@ -71,7 +71,21 @@ class ComponentManifestTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             traefik_component.verify_checksum(io.BytesIO(payload + b"tamper"), sums, filename)
 
-    def test_archive_inspection_uses_only_the_regular_allowlisted_executable(self) -> None:
+    def test_archive_inspection_accepts_the_official_allowlisted_members(self) -> None:
+        payload = archive(
+            [
+                ("traefik", b"official executable", "file"),
+                ("LICENSE.md", b"MIT License\n", "file"),
+                ("CHANGELOG.md", b"release notes", "file"),
+            ]
+        )
+        inspected = traefik_component.inspect_archive(io.BytesIO(payload))
+        self.assertEqual(
+            inspected["executable_sha256"],
+            hashlib.sha256(b"official executable").hexdigest(),
+        )
+
+    def test_archive_inspection_rejects_unallowlisted_regular_members(self) -> None:
         payload = archive(
             [
                 ("traefik", b"official executable", "file"),
@@ -79,11 +93,8 @@ class ComponentManifestTests(unittest.TestCase):
                 ("README.md", b"ignored metadata", "file"),
             ]
         )
-        inspected = traefik_component.inspect_archive(io.BytesIO(payload))
-
-        self.assertEqual(inspected["executable_sha256"], hashlib.sha256(b"official executable").hexdigest())
-        self.assertEqual(inspected["executable_size"], len(b"official executable"))
-        self.assertEqual(inspected["license"], "MIT")
+        with self.assertRaises(ValueError):
+            traefik_component.inspect_archive(io.BytesIO(payload))
 
     def test_archive_inspection_rejects_links_and_parent_traversal(self) -> None:
         for member_name, kind in [("traefik-link", "symlink"), ("../outside", "file")]:

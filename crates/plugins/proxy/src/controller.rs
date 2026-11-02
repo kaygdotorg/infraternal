@@ -158,6 +158,8 @@ impl Default for ProxyController {
                 listener_ports: ListenerPorts {
                     http: 10_080,
                     https: 10_443,
+                    mesh_http: None,
+                    mesh_https: None,
                 },
             })),
             factory: None,
@@ -385,7 +387,12 @@ impl ProxyController {
             |route| {
                 format!(
                     "Stopped new connections to {}; existing connections may drain for up to 10 seconds.",
-                    https_url(&route.hostname, state.listener_ports.https)
+                    https_url(
+                        &route.hostname,
+                        state
+                            .listener_ports
+                            .https_for_publication(route.public)
+                    )
                 )
             },
         );
@@ -494,6 +501,8 @@ impl SupervisorFactory for DownloadedTraefikFactory {
             ports: ListenerPorts {
                 http: 10_080,
                 https: 10_443,
+                mesh_http: None,
+                mesh_https: None,
             },
             public: false,
             private_ping_port,
@@ -503,13 +512,15 @@ impl SupervisorFactory for DownloadedTraefikFactory {
                 email: profile.email.clone(),
                 storage_path: acme_storage,
                 ca_server: None,
+                resolvers: Vec::new(),
+                disable_authoritative_ns_checks: false,
             },
         };
         let supervisor = TraefikSupervisor::start(
             SupervisorSettings {
                 executable,
                 static_config_path: proxy_state.join("traefik.toml"),
-                dynamic_config_path: dynamic_directory.join("services.toml"),
+                dynamic_config_path: dynamic_directory.join(crate::config::DYNAMIC_CONFIG_FILENAME),
                 static_config,
                 provider_files,
                 private_ping_address: SocketAddr::new(
@@ -666,7 +677,10 @@ fn publication_list(
             Some(json!({
                 "port": exposure.spec.port,
                 "hostname": route.hostname,
-                "url": https_url(&route.hostname, state.listener_ports.https),
+                "url": https_url(
+                    &route.hostname,
+                    state.listener_ports.https_for_publication(route.public)
+                ),
                 "public": exposure.spec.public,
                 "reachable": reachable,
                 "access": if reachable && exposure.spec.public {"internet"} else if reachable {"mesh grant"} else if !state.enabled {"proxy is off"} else if exposure.spec.public {"proxy is starting"} else {"blocked by Mesh grants"},
@@ -794,6 +808,8 @@ mod tests {
         controller_with_ports(ListenerPorts {
             http: 10_080,
             https: 10_443,
+            mesh_http: None,
+            mesh_https: None,
         })
     }
 
@@ -831,6 +847,8 @@ mod tests {
         let (controller, _) = controller_with_ports(ListenerPorts {
             http: 80,
             https: 443,
+            mesh_http: None,
+            mesh_https: None,
         });
         controller
             .set_mesh_context(Some(context(&[(3000, Ipv4Addr::new(10, 254, 0, 3))])))
@@ -844,6 +862,42 @@ mod tests {
         assert_eq!(
             value["services"][0]["url"],
             "https://port-3000.web01.ssh.kayg.org"
+        );
+    }
+
+    #[test]
+    fn mixed_publication_urls_use_the_listener_for_each_audience() {
+        let (controller, _) = controller_with_ports(ListenerPorts {
+            http: 80,
+            https: 443,
+            mesh_http: Some(10080),
+            mesh_https: Some(10443),
+        });
+        controller
+            .set_mesh_context(Some(context(&[
+                (3000, Ipv4Addr::new(10, 254, 0, 3)),
+                (3001, Ipv4Addr::new(10, 254, 0, 3)),
+            ])))
+            .expect("apply accepted context");
+        controller
+            .call("proxy.publish", br#"{"port":3000}"#)
+            .expect("publish mesh route");
+
+        let output = controller
+            .call(
+                "proxy.publish",
+                br#"{"port":3001,"public":true,"confirm_public":true}"#,
+            )
+            .expect("publish public route");
+        let value: Value = serde_json::from_slice(&output).expect("publication result JSON");
+
+        assert_eq!(
+            value["services"][0]["url"],
+            "https://port-3000.web01.ssh.kayg.org:10443"
+        );
+        assert_eq!(
+            value["services"][1]["url"],
+            "https://port-3001.web01.ssh.kayg.org"
         );
     }
 
