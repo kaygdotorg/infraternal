@@ -19,24 +19,51 @@ import type { Ctx } from "../context";
 /** The shape of `index.json` (docs-build.ts `DocsIndexPage`). */
 export interface DocsIndexPage { slug: string; title: string; summary: string; section?: true; parent?: string; facts?: string; headings: { id: string; text: string; facts?: string }[] }
 
-export interface DocsSource { dispose(): void }
+export interface DocsSource {
+  /**
+   * Opens a docs page (at a heading when it has one): its window in the Docs view is focused and in view. Loads the index first if it
+   * has not loaded yet. Resolves false when there is no such page (or the docs are not served), so the caller can say so in plain words.
+   */
+  open(slug: string, heading?: string): Promise<boolean>;
+  /** The page and heading from the index (loading it first), for the "?" excerpt; undefined when there is no such page. */
+  lookup(slug: string, heading?: string): Promise<{ page: DocsIndexPage; heading?: DocsIndexPage["headings"][number] } | undefined>;
+  /** Starts loading the index now, so the first "?" is instant. */
+  warm(): void;
+  dispose(): void;
+}
 
 export function installDocsSource(core: CoreScreen, cx: Ctx): DocsSource {
   const controller = new AbortController();
   let rows: PaletteEntry[] = [];
-  let starting = false;
-  const start = (): void => {
-    if (starting) return;
-    starting = true;
-    void onDemand(() => import("./docs-index.on-demand"))
-      .then((module) => module.startDocs(core, cx, controller.signal, (made) => { rows = made; }))
+  let pages: DocsIndexPage[] | undefined;
+  let starting: Promise<void> | undefined;
+  const start = (): Promise<void> => {
+    if (starting) return starting;
+    starting = onDemand(() => import("./docs-index.on-demand"))
+      .then((module) => module.startDocs(core, cx, controller.signal, (made, index) => { rows = made; pages = index; }))
       // No docs on this server, or offline: nothing is offered, and the next ⌘K tries again.
-      .catch(() => { starting = false; });
+      .catch(() => { starting = undefined; });
+    return starting;
   };
-  const removeProvider = core.addPaletteProvider(() => { start(); return rows; });
+  const removeProvider = core.addPaletteProvider(() => { void start(); return rows; });
   const idle = (window as { requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number }).requestIdleCallback;
-  const timer = idle ? idle(start, { timeout: 5000 }) : window.setTimeout(start, 2000);
+  const begin = (): void => { void start(); };
+  const timer = idle ? idle(begin, { timeout: 5000 }) : window.setTimeout(begin, 2000);
   return {
+    async open(slug, heading) {
+      await start();
+      if (!pages?.some((page) => page.slug === slug)) return false;
+      const module = await onDemand(() => import("./docs-body.on-demand"));
+      return module.openDocsPage(cx, slug, heading);
+    },
+    async lookup(slug, heading) {
+      await start();
+      const page = pages?.find((entry) => entry.slug === slug);
+      if (!page) return undefined;
+      const at = heading ? page.headings.find((h) => h.id === heading) : undefined;
+      return { page, ...(at ? { heading: at } : {}) };
+    },
+    warm() { void start(); },
     dispose() {
       controller.abort();
       removeProvider();
