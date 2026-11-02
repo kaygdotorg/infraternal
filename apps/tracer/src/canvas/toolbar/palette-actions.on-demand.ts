@@ -1,5 +1,6 @@
 /** Dispatches canvas palette actions on first selection; inventory rows stay synchronous and current at sign-in (D188). */
 import type { Ctx, WinRec } from "../context";
+import { beginRename } from "../mesh/rename.on-demand";
 import type { ViewId } from "../model/types";
 import { isTerminal } from "../views/body";
 
@@ -41,7 +42,7 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
     // Goes to the Mesh view, where the host's card opens its name field as soon as the card is on screen.
     const host = decodeURIComponent(value);
     if (detail?.source === "keyboard") cx.camera.keyFlight(() => cx.nav.flyView("mesh")); else cx.nav.flyView("mesh");
-    cx.mesh?.beginRename(host);
+    beginRename(cx, host);
   }
   else if (kind === "access" && value) {
     // The machine's details open on the Host tab with the consent under "Access level": a window of the host comes into view,

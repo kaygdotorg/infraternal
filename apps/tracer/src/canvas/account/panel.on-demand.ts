@@ -28,7 +28,7 @@
  * the list stays the shared one, and the pane is this card's own.
  */
 import { ICONS } from "../../../../../packages/ui/src/icons";
-import { inlineRename } from "../../../../../packages/ui/src/inline-rename";
+import { inlineRename } from "../../../../../packages/ui/src/inline-rename.on-demand";
 import { decorateKeyValueRow } from "../../../../../packages/ui/src/kv-decorate";
 import { createKeyValueList, type KeyValueList, type KeyValueRow } from "../../../../../packages/ui/src/kv-list";
 import { createSidebarCard } from "../../../../../packages/ui/src/sidebar-card";

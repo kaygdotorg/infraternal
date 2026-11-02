@@ -7,18 +7,17 @@
  * this module handles. A row's `source` is "keyboard" when it was picked without the pointer, and keyboard
  * flights are the short version (camera.keyFlight).
  */
-import { ICONS, ICON_KEY, withLockBadge } from "../../../../../packages/ui/src/icons";
+import { ICONS, withLockBadge } from "../../../../../packages/ui/src/icons";
 import { shortcutLabel } from "../../../../../packages/ui/src/platform";
 import type { PaletteEntry } from "../../core-screen";
 import type { Ctx, ViewRec, WinRec } from "../context";
-import { onDemand } from "../../on-demand";
+import { onDemand, whenIdle } from "../../on-demand";
 import { recentRows } from "../recency";
 import { windowLabel } from "../windows/label";
 import { SETTINGS_SECTIONS } from "../views/settings";
 import { ICON, SECTION_ICON, SESSION_ICON, viewIcon } from "../views/icons";
 import { byFrecency } from "../sessions/inventory";
 import { isTerminal } from "../views/body";
-import { isFreeView } from "../layout/stops";
 import { viewKeys } from "./viewlist";
 import { bindingText } from "./shortcuts";
 
@@ -38,6 +37,9 @@ export function viewRecentWindows(cx: Ctx, c: ViewRec, n: number): WinRec[] {
 
 export function installPalette(cx: Ctx): () => void {
   const { core, signal, state, views } = cx;
+  // The rows that act on a host (remove, rename, full access) come from an on-demand module that loads at idle (D188).
+  let hostRows: ((cx: Ctx) => PaletteEntry[]) | undefined;
+  whenIdle(() => { void onDemand(() => import("./palette-hosts.on-demand")).then((m) => { if (!signal.aborted) hostRows = m.hostEntries; }, () => undefined); });
   const removeProvider = core.addPaletteProvider(() => {
     const out: PaletteEntry[] = [];
     [...views.values()].forEach((c, i) => {
@@ -79,17 +81,10 @@ export function installPalette(cx: Ctx): () => void {
     out.push({ group: "Canvas", glyph: "▦", icon: cx.inputLock.state ? withLockBadge(ICONS.terminal) : ICONS.terminal, label: cx.inputLock.state ? "Input lock off" : "Input lock on", hint: `the active window only · ${bindingText("input-lock")}`, action: "canvas:inputlock" });
     // Any host's shell by name. Keywords ride in the hint so "ssh", "terminal" and "console" find them.
     for (const host of cx.adapters.sessions.hosts()) {
-      if (host.id !== "embedded" && cx.adapters.hostRemoval?.label()) out.push({ group: "Hosts", glyph: "×", label: `${cx.adapters.hostRemoval.label()}: ${host.name}`, hint: "revoke access · uninstall", action: `canvas:removehost:${host.id}` });
-      // The consent for full access (#215): found by typing, like every action; it opens the machine's details on the row.
-      if (cx.adapters.privilege && !cx.adapters.privilege.isFull(host.name)) out.push({ group: "Hosts", glyph: "✓", icon: ICON_KEY, label: `Allow full access on ${host.name}`, hint: "host · privileged access", action: `canvas:access:${encodeURIComponent(host.name)}`, queryOnly: true });
       out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${host.name}`, hint: `terminal · ssh · console${host.online === false ? " · offline" : ""}`, action: `canvas:open:${host.id}` });
     }
-    // Mesh hosts by name, so "rename build-01" finds the way to the host's name field (D-rule: the palette reaches
-    // everything). Only while the Mesh draws each host as a card; a big mesh has no card to put the field on.
-    const meshView = views.get("mesh");
-    if (cx.mesh && cx.adapters.mesh?.status() === "ready" && meshView && !isFreeView(meshView.view)) {
-      for (const name of cx.adapters.mesh.data().nodes.keys()) out.push({ group: "Mesh", glyph: "✎", icon: SESSION_ICON.rename, label: `Rename ${name}`, hint: "mesh · host · name", action: `canvas:rename:${encodeURIComponent(name)}` });
-    }
+    // Remove, rename and full-access rows for hosts: built by an on-demand module that loads at idle (D188).
+    if (hostRows) out.push(...hostRows(cx));
     for (const row of cx.adapters.containers?.rows() ?? []) out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${row.name}`, hint: "container · terminal · console", action: `canvas:ctr:${row.name}` });
     // Every session on every host (D178), by name, with its state in the hint so "detached" or "exited" finds them.
     const inv = cx.adapters.inventory;

@@ -26,6 +26,7 @@ import type { Ctx, WinRec } from "../context";
 import { coarse } from "../dom";
 import { isTerminal } from "../views/body";
 import { createRowPill } from "./row-pill";
+import { createRowRename } from "./row-rename.on-demand";
 import { SESSION_ICON } from "../views/icons";
 
 const OPEN_ICON = '<path d="M5 12h14m-6-6 6 6-6 6"/>';
@@ -39,12 +40,15 @@ const rowIn = (tree: HTMLElement, target: Element): HTMLElement | undefined => {
 export interface RowActionsHooks {
   /** Closes the sidebar (a phone: after something opened). */
   closeSidebar(): void;
-  /** Opens the rename field on a row of the tree (the tree owns the shared inline-rename field); false when the row cannot be renamed. */
+  /** Opens the rename field on a row of the tree by its id (the menu's Rename); false when the row cannot be renamed. */
   rename(id: string): boolean;
+  /** A rename field is open (`true`) or closed (`false`): the tree is not rebuilt under it. */
+  editing(open: boolean): void;
 }
 
-export function createRowActions(cx: Ctx, tree: HTMLElement, hooks: RowActionsHooks): { menu: RowMenu; rowEntries(): PaletteEntry[]; actionsOf(row: HTMLElement): RowAction[]; dispose(): void } {
+export function createRowActions(cx: Ctx, tree: HTMLElement, hooks: RowActionsHooks): { menu: RowMenu; openRename(row: HTMLElement): boolean; rowEntries(): PaletteEntry[]; actionsOf(row: HTMLElement): RowAction[]; dispose(): void } {
   const closeSidebar = hooks.closeSidebar;
+  const openRename = createRowRename(cx, hooks.editing);
   const inv = cx.adapters.inventory;
   const toast = cx.core.toast;
   const afterOpen = (): void => { if (coarse.matches) closeSidebar(); };
@@ -152,7 +156,9 @@ export function createRowActions(cx: Ctx, tree: HTMLElement, hooks: RowActionsHo
     if (row && action) menu.perform(row, action, "keyboard");
   };
   window.addEventListener("tracer:canvas-action", onAction);
+  // The focused row's actions are palette rows, computed when the palette opens.
+  const offEntries = cx.core.addPaletteProvider(rowEntries);
   // The hover pill and the F2 / Delete keys (#215): the pointer's and keyboard's shortcuts to the same row actions.
   const offPill = createRowPill(cx, tree, menu, actions, closeSidebar);
-  return { menu, rowEntries, actionsOf: actions, dispose() { window.removeEventListener("tracer:canvas-action", onAction); offPill(); menu.dispose(); } };
+  return { menu, openRename, rowEntries, actionsOf: actions, dispose() { window.removeEventListener("tracer:canvas-action", onAction); offEntries(); offPill(); menu.dispose(); } };
 }

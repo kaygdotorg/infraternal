@@ -9,7 +9,9 @@
  */
 import { mountConfirmTip } from "../../../../../packages/ui/src/tooltip";
 import { createWindowCard } from "../../../../../packages/ui/src/window-card";
-import { beginInlineRename, onDoubleActivate, placeOverName, type InlineRename } from "../../../../../packages/ui/src/inline-rename";
+import { renameHost, takePendingRename } from "./rename.on-demand";
+import { onDoubleActivate } from "../../../../../packages/ui/src/double-activate";
+import { beginInlineRename, placeOverName, type InlineRename } from "../../../../../packages/ui/src/inline-rename.on-demand";
 import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
 import { clamp } from "../camera/camera";
 import type { Ctx, ViewRec, WinRec } from "../context";
@@ -258,7 +260,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
         rec.card.setTitle({ host: next });
         rec.card.root.dataset.renaming = "pending";
         const settle = (): void => { if (rec.card.root.dataset.renaming === "pending") delete rec.card.root.dataset.renaming; };
-        void cx.mesh?.renameHost(n.id, next).then(settle, () => { if (boundTo.get(rec)?.id === n.id) rec.card.setTitle({ host: n.label }); settle(); });
+        void renameHost(cx, n.id, next).then(settle, () => { if (boundTo.get(rec)?.id === n.id) rec.card.setTitle({ host: n.label }); settle(); });
       },
       close: () => { restore(); renaming.delete(rec); },
     }));
@@ -598,7 +600,9 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     if (state.canvasLock && state.currentView === c.view.id && cx.camera.target) cx.nav.flyView(c.view.id);
   };
 
-  return {
+  // A name field the palette asked for before this code had loaded opens once the card is on screen.
+  queueMicrotask(() => { const early = takePendingRename(); if (early) api.beginRename(early); });
+  const api: GraphViewModule = {
     buildGraph,
     refresh: refreshGraph,
     pulseNew,
@@ -614,4 +618,5 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     rest() { redrawMesh(); },
     stats() { const c = views.get("mesh"); const g = c && graphOf(c); if (!g) return undefined; return { level: g.level(), ...g.stats() }; },
   };
+  return api;
 }

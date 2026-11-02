@@ -1,6 +1,6 @@
 /** Builds the accessible host/session tree and updates its current-host indicators. */
 import { ICON_DETACHED, icon } from "./icons";
-import { beginInlineRename, onDoubleActivate, placeOverName, type InlineRename } from "./inline-rename";
+import { onDoubleActivate } from "./double-activate";
 
 import { cssPx } from "./ui-scale";
 export interface BranchLeaf {
@@ -42,12 +42,11 @@ export interface BranchedOptions {
   active: string;
   onSelect?: (id: string) => void;
   /**
-   * Saves a renamed leaf: resolves when accepted, rejects when refused (the caller says why). The tree shows the new
-   * name at once and puts the old one back when this rejects.
+   * Opens the rename field on a renamable row (a double click or double tap, F2, or the row menu's Rename); false when it cannot.
+   * The caller owns the field and the saving (the sidebar's is an on-demand module, D188): this tree only knows which rows
+   * may be renamed and what gesture starts it.
    */
-  rename?: (id: string, name: string) => Promise<void>;
-  /** A rename field opened (`true`) or closed (`false`): a tree that is rebuilt while one is open would drop it. */
-  onRenaming?: (renaming: boolean) => void;
+  openRename?: (row: HTMLElement) => boolean;
 }
 
 export interface BranchedMenu {
@@ -299,40 +298,14 @@ export function branchedMenu(
   // Renaming in place: a double click or double tap on a renamable row's name, F2 or the row menu on the focused row. The
   // click that comes first still selects the leaf (a single click keeps its meaning); the field is placed over the name,
   // never inside the button. A row is a leaf (its button) or a caption that names a host.
-  let renaming: InlineRename | undefined;
   const renamableOf = (from: Element | null): HTMLElement | undefined => from?.closest<HTMLElement>("[data-renamable][data-id]") ?? undefined;
   const leafOf = (event: Event): HTMLElement | undefined => (event.target instanceof Element ? renamableOf(event.target) : undefined);
   const abort = new AbortController();
-  const beginRename = (row: HTMLElement): boolean => {
-    const label = row.querySelector<HTMLElement>(".bm-label");
-    const id = row.dataset.id;
-    if (!opts.rename || !label || !id || renaming) return false;
-    const container = row.matches(".bm-leaf") ? row.parentElement! : row;
-    const was = label.textContent ?? "";
-    let restore = (): void => undefined;
-    opts.onRenaming?.(true);
-    renaming = beginInlineRename({
-      value: was,
-      label: row.dataset.renameLabel ?? "Host name",
-      place: (input) => { restore = placeOverName(label, container, input); },
-      commit: (value) => {
-        const next = value.trim();
-        if (!next || next === was) return;
-        label.textContent = next;
-        row.dataset.pending = "";
-        row.setAttribute("aria-busy", "true");
-        const settle = (): void => { delete row.dataset.pending; row.removeAttribute("aria-busy"); };
-        opts.rename!(id, next).then(settle, () => { label.textContent = was; settle(); });
-      },
-      close: () => { restore(); renaming = undefined; opts.onRenaming?.(false); },
-    });
-    return true;
-  };
-  if (opts.rename) {
+  if (opts.openRename) {
     // The key is the first press's row id: the tree is rebuilt, and re-sorted, between the two presses.
     onDoubleActivate(host, (event, key) => {
       const row = typeof key === "string" ? [...host.querySelectorAll<HTMLElement>("[data-renamable][data-id]")].find((n) => n.dataset.id === key) : leafOf(event);
-      if (row) beginRename(row);
+      if (row) opts.openRename!(row);
     }, abort.signal, (event) => leafOf(event)?.dataset.id); // by id: the tree is rebuilt between the two taps, its buttons are new
   }
 
@@ -349,7 +322,7 @@ export function branchedMenu(
     },
     rename(id) {
       const row = [...host.querySelectorAll<HTMLElement>("[data-renamable][data-id]")].find((n) => n.dataset.id === id);
-      return row ? beginRename(row) : false;
+      return row ? opts.openRename?.(row) ?? false : false;
     },
     dispose() {
       disposed = true;

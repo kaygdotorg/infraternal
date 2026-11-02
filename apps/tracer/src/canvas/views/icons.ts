@@ -29,7 +29,6 @@ export const ICON = {
 export const SESSION_ICON = {
   sessions: '<rect x="4" y="9.5" width="16" height="10.5" rx="2.5"/><path d="M7 6h10M9.5 2.75h5"/>',
   end: '<rect x="7" y="7" width="10" height="10" rx="2"/>',
-  trash: '<path d="M5 7h14M10 7V4.5h4V7M7 7l.8 12.5h8.4L17 7M10.5 11v5M13.5 11v5"/>',
   rename: '<path d="M4.5 19.5l.9-3.9L16.4 4.6a2 2 0 0 1 2.8 2.8L8.2 18.4z"/><path d="M14.5 6.5l3 3"/>',
   pin: '<path d="M9 4.5h6l-.8 4.6 2.8 3.4H7l2.8-3.4z"/><path d="M12 12.5v7"/>',
   users: '<circle cx="9" cy="9" r="3"/><path d="M3.5 19c0-3 2.4-5 5.5-5s5.5 2 5.5 5"/><path d="M16 6.3a3 3 0 0 1 0 5.4M17.5 14.4c1.8.6 3 2.3 3 4.6"/>',

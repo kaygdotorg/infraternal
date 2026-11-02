@@ -21,7 +21,8 @@ import { SESSION_ICON } from "../views/icons";
 
 type Act = "info" | "rename" | "remove";
 const TIP: Record<Act, string> = { info: "Info", rename: "Rename", remove: "Remove" };
-const ICON: Record<Act, string> = { info: ICON_INFO, rename: SESSION_ICON.rename, remove: SESSION_ICON.trash };
+const BIN = '<path d="M5 7h14M10 7V4.5h4V7M7 7l.8 12.5h8.4L17 7M10.5 11v5M13.5 11v5"/>';
+const ICON: Record<Act, string> = { info: ICON_INFO, rename: SESSION_ICON.rename, remove: BIN };
 
 /** The row (a host caption or a session's `li`) a node is in, with the id the tree wrote on it. */
 const rowOf = (tree: HTMLElement, node: Element | null): { row: HTMLElement; id: string } | undefined => {

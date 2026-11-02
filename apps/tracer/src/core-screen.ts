@@ -117,7 +117,7 @@ export interface CoreScreen {
   settingsPanels: { toolbar: SettingsSection; shortcuts: SettingsSection; about: SettingsSection };
   /** The row that shows now. */
   toolbarRow(): "canvas" | "keys";
-  setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void, extras?: Pick<BranchedOptions, "rename" | "onRenaming">): BranchedMenu;
+  setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void, extras?: Pick<BranchedOptions, "openRename">): BranchedMenu;
   /** Adds palette rows computed each time the palette opens (state-dependent actions); returns a remover. */
   addPaletteProvider(provider: () => PaletteEntry[]): () => void;
   /** Refreshes visible contextual rows after authoritative data changes, keeping the query and selected action. */
