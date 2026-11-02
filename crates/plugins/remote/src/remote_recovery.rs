@@ -64,30 +64,43 @@ pub fn request_id(
     openssl::sha::sha256(&input)
 }
 
+/// Public transcript fields signed by the registered key during recovery.
+#[derive(Clone, Copy)]
+pub struct RecoveryTranscript<'a> {
+    /// Stable registered host identity.
+    pub host_id: Uuid,
+    /// Fingerprint of the expired certificate being replaced.
+    pub predecessor_fingerprint: &'a [u8; 32],
+    /// Idempotent operation identifier bound to the CSR.
+    pub request_id: &'a [u8; 32],
+    /// Digest of the candidate CSR.
+    pub csr_digest: &'a [u8; 32],
+    /// One-use server challenge.
+    pub challenge: &'a [u8; 32],
+    /// Fingerprint of the registered identity key.
+    pub public_key_fingerprint: &'a [u8; 32],
+    /// Fingerprint of the CA issuer that signs the replacement leaf.
+    pub issuer_fingerprint: &'a [u8; 32],
+    /// Generation of that issuer.
+    pub issuer_generation: u64,
+    /// Expiry of the predecessor certificate.
+    pub not_after: i64,
+}
+
 /// Produce the canonical domain-separated bytes both sides sign and verify.
 #[must_use]
-pub fn transcript(
-    host_id: Uuid,
-    predecessor_fingerprint: &[u8; 32],
-    request_id: &[u8; 32],
-    csr_digest: &[u8; 32],
-    challenge: &[u8; 32],
-    public_key_fingerprint: &[u8; 32],
-    issuer_fingerprint: &[u8; 32],
-    issuer_generation: u64,
-    not_after: i64,
-) -> Vec<u8> {
+pub fn transcript(fields: RecoveryTranscript<'_>) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(32 + 16 + 32 * 6 + 16);
     bytes.extend_from_slice(b"infraternal/remote-recovery/proof/v1\0");
-    bytes.extend_from_slice(host_id.as_bytes());
-    bytes.extend_from_slice(predecessor_fingerprint);
-    bytes.extend_from_slice(request_id);
-    bytes.extend_from_slice(csr_digest);
-    bytes.extend_from_slice(challenge);
-    bytes.extend_from_slice(public_key_fingerprint);
-    bytes.extend_from_slice(issuer_fingerprint);
-    bytes.extend_from_slice(&issuer_generation.to_be_bytes());
-    bytes.extend_from_slice(&not_after.to_be_bytes());
+    bytes.extend_from_slice(fields.host_id.as_bytes());
+    bytes.extend_from_slice(fields.predecessor_fingerprint);
+    bytes.extend_from_slice(fields.request_id);
+    bytes.extend_from_slice(fields.csr_digest);
+    bytes.extend_from_slice(fields.challenge);
+    bytes.extend_from_slice(fields.public_key_fingerprint);
+    bytes.extend_from_slice(fields.issuer_fingerprint);
+    bytes.extend_from_slice(&fields.issuer_generation.to_be_bytes());
+    bytes.extend_from_slice(&fields.not_after.to_be_bytes());
     bytes
 }
 
@@ -108,43 +121,18 @@ pub async fn exchange(
     identity: &remote_tls::Identity,
     roots: &[openssl::x509::X509],
 ) -> io::Result<openssl::x509::X509> {
-    use openssl::{
-        hash::MessageDigest,
-        pkey::Id,
-        x509::{X509NameBuilder, X509Req},
-    };
-
-    if roots.is_empty() || roots.len() > 16 || identity.key.id() != Id::ED25519 {
+    if roots.is_empty() || roots.len() > 16 {
         return Err(denied());
     }
-    let host_id = host_id(&identity.certificate)?;
-    let predecessor_fingerprint: [u8; 32] = identity
-        .certificate
-        .digest(MessageDigest::sha256())
-        .map_err(|_| denied())?
-        .as_ref()
-        .try_into()
-        .map_err(|_| denied())?;
-    let mut csr = X509Req::builder().map_err(|_| denied())?;
-    csr.set_subject_name(&X509NameBuilder::new().map_err(|_| denied())?.build())
-        .map_err(|_| denied())?;
-    csr.set_pubkey(&identity.key).map_err(|_| denied())?;
-    csr.sign(&identity.key, MessageDigest::null())
-        .map_err(|_| denied())?;
-    let csr_der = csr.build().to_der().map_err(|_| denied())?;
-    if csr_der.len() > 4096 {
-        return Err(denied());
-    }
-    let csr_digest = csr_digest(&csr_der);
-    let request_id = request_id(host_id, &predecessor_fingerprint, &csr_digest);
+    let proof = prepare_proof(identity)?;
     let config = remote_tls::recovery_client_config(roots)?;
     let connection = remote_tls::dial_recovery(address, server_name, &config).await?;
 
     let challenge_request = RecoveryRequest::Challenge {
-        host_id,
-        predecessor_fingerprint,
-        request_id,
-        csr_digest,
+        host_id: proof.host_id,
+        predecessor_fingerprint: proof.predecessor_fingerprint,
+        request_id: proof.request_id,
+        csr_digest: proof.csr_digest,
     };
     write_request(&connection.channel, &challenge_request).await?;
     let challenge_response = read_response(&connection.channel).await?;
@@ -159,12 +147,11 @@ pub async fn exchange(
             issuer_generation,
             not_after,
         } => {
-            let public_key = identity.key.raw_public_key().map_err(|_| denied())?;
-            if public_key_fingerprint != openssl::sha::sha256(&public_key)
+            if public_key_fingerprint != proof.public_key_fingerprint
                 || issuer_generation == 0
-                || not_after != epoch_seconds(identity.certificate.not_after())?
+                || not_after != proof.not_after
                 || !roots.iter().any(|root| {
-                    root.digest(MessageDigest::sha256())
+                    root.digest(openssl::hash::MessageDigest::sha256())
                         .is_ok_and(|digest| digest.as_ref() == issuer_fingerprint.as_slice())
                 })
             {
@@ -174,19 +161,17 @@ pub async fn exchange(
         }
         RecoveryResponse::Denied => return Err(denied()),
     };
-    let public_key = identity.key.raw_public_key().map_err(|_| denied())?;
-    let public_key_fingerprint = openssl::sha::sha256(&public_key);
-    let transcript = transcript(
-        host_id,
-        &predecessor_fingerprint,
-        &request_id,
-        &csr_digest,
-        &challenge,
-        &public_key_fingerprint,
-        &issuer_fingerprint,
+    let transcript = transcript(RecoveryTranscript {
+        host_id: proof.host_id,
+        predecessor_fingerprint: &proof.predecessor_fingerprint,
+        request_id: &proof.request_id,
+        csr_digest: &proof.csr_digest,
+        challenge: &challenge,
+        public_key_fingerprint: &proof.public_key_fingerprint,
+        issuer_fingerprint: &issuer_fingerprint,
         issuer_generation,
         not_after,
-    );
+    });
     let mut signer =
         openssl::sign::Signer::new_without_digest(&identity.key).map_err(|_| denied())?;
     // Ed25519 consumes the complete transcript in one operation; streaming updates are unsupported.
@@ -196,11 +181,11 @@ pub async fn exchange(
     write_request(
         &connection.channel,
         &RecoveryRequest::Prove {
-            host_id,
-            predecessor_fingerprint,
-            request_id,
+            host_id: proof.host_id,
+            predecessor_fingerprint: proof.predecessor_fingerprint,
+            request_id: proof.request_id,
             challenge,
-            csr_der,
+            csr_der: proof.csr_der,
             signature,
         },
     )
@@ -211,6 +196,58 @@ pub async fn exchange(
         }
         RecoveryResponse::Challenge { .. } | RecoveryResponse::Denied => Err(denied()),
     }
+}
+
+struct ClientProof {
+    host_id: Uuid,
+    predecessor_fingerprint: [u8; 32],
+    request_id: [u8; 32],
+    csr_digest: [u8; 32],
+    csr_der: Vec<u8>,
+    public_key_fingerprint: [u8; 32],
+    not_after: i64,
+}
+
+fn prepare_proof(identity: &remote_tls::Identity) -> io::Result<ClientProof> {
+    use openssl::{
+        hash::MessageDigest,
+        pkey::Id,
+        x509::{X509NameBuilder, X509Req},
+    };
+
+    if identity.key.id() != Id::ED25519 {
+        return Err(denied());
+    }
+    let host_id = host_id(&identity.certificate)?;
+    let predecessor_fingerprint = identity
+        .certificate
+        .digest(MessageDigest::sha256())
+        .map_err(|_| denied())?
+        .as_ref()
+        .try_into()
+        .map_err(|_| denied())?;
+    let public_key = identity.key.raw_public_key().map_err(|_| denied())?;
+    let public_key_fingerprint = openssl::sha::sha256(&public_key);
+    let mut csr = X509Req::builder().map_err(|_| denied())?;
+    csr.set_subject_name(&X509NameBuilder::new().map_err(|_| denied())?.build())
+        .map_err(|_| denied())?;
+    csr.set_pubkey(&identity.key).map_err(|_| denied())?;
+    csr.sign(&identity.key, MessageDigest::null())
+        .map_err(|_| denied())?;
+    let csr_der = csr.build().to_der().map_err(|_| denied())?;
+    if csr_der.len() > 4096 {
+        return Err(denied());
+    }
+    let csr_digest = csr_digest(&csr_der);
+    Ok(ClientProof {
+        host_id,
+        predecessor_fingerprint,
+        request_id: request_id(host_id, &predecessor_fingerprint, &csr_digest),
+        csr_digest,
+        csr_der,
+        public_key_fingerprint,
+        not_after: epoch_seconds(identity.certificate.not_after())?,
+    })
 }
 
 fn host_id(certificate: &openssl::x509::X509) -> io::Result<Uuid> {
@@ -349,45 +386,58 @@ mod tests {
         assert_ne!(request, request_id(host, &[3; 32], &csr));
         assert_ne!(request, request_id(host, &old, &[3; 32]));
 
-        let base = transcript(
-            host, &old, &request, &csr, &[4; 32], &[5; 32], &[6; 32], 7, 8,
-        );
+        let challenge = [4; 32];
+        let public_key = [5; 32];
+        let issuer = [6; 32];
+        let base_fields = RecoveryTranscript {
+            host_id: host,
+            predecessor_fingerprint: &old,
+            request_id: &request,
+            csr_digest: &csr,
+            challenge: &challenge,
+            public_key_fingerprint: &public_key,
+            issuer_fingerprint: &issuer,
+            issuer_generation: 7,
+            not_after: 8,
+        };
+        let base = transcript(base_fields);
         for changed in [
-            transcript(
-                Uuid::from_u128(43),
-                &old,
-                &request,
-                &csr,
-                &[4; 32],
-                &[5; 32],
-                &[6; 32],
-                7,
-                8,
-            ),
-            transcript(
-                host, &[3; 32], &request, &csr, &[4; 32], &[5; 32], &[6; 32], 7, 8,
-            ),
-            transcript(
-                host, &old, &[3; 32], &csr, &[4; 32], &[5; 32], &[6; 32], 7, 8,
-            ),
-            transcript(
-                host, &old, &request, &[3; 32], &[4; 32], &[5; 32], &[6; 32], 7, 8,
-            ),
-            transcript(
-                host, &old, &request, &csr, &[3; 32], &[5; 32], &[6; 32], 7, 8,
-            ),
-            transcript(
-                host, &old, &request, &csr, &[4; 32], &[3; 32], &[6; 32], 7, 8,
-            ),
-            transcript(
-                host, &old, &request, &csr, &[4; 32], &[5; 32], &[3; 32], 7, 8,
-            ),
-            transcript(
-                host, &old, &request, &csr, &[4; 32], &[5; 32], &[6; 32], 8, 8,
-            ),
-            transcript(
-                host, &old, &request, &csr, &[4; 32], &[5; 32], &[6; 32], 7, 9,
-            ),
+            transcript(RecoveryTranscript {
+                host_id: Uuid::from_u128(43),
+                ..base_fields
+            }),
+            transcript(RecoveryTranscript {
+                predecessor_fingerprint: &[3; 32],
+                ..base_fields
+            }),
+            transcript(RecoveryTranscript {
+                request_id: &[3; 32],
+                ..base_fields
+            }),
+            transcript(RecoveryTranscript {
+                csr_digest: &[3; 32],
+                ..base_fields
+            }),
+            transcript(RecoveryTranscript {
+                challenge: &[3; 32],
+                ..base_fields
+            }),
+            transcript(RecoveryTranscript {
+                public_key_fingerprint: &[3; 32],
+                ..base_fields
+            }),
+            transcript(RecoveryTranscript {
+                issuer_fingerprint: &[3; 32],
+                ..base_fields
+            }),
+            transcript(RecoveryTranscript {
+                issuer_generation: 8,
+                ..base_fields
+            }),
+            transcript(RecoveryTranscript {
+                not_after: 9,
+                ..base_fields
+            }),
         ] {
             assert_ne!(base, changed);
         }

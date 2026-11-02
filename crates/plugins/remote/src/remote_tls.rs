@@ -260,6 +260,8 @@ pub async fn dial_recovery(
     name: &str,
     config: &SslConnector,
 ) -> io::Result<RecoveryConnection> {
+    use openssl::x509::X509VerifyResult;
+
     let socket = dial_socket(address).await?;
     let ssl = config
         .configure()
@@ -271,7 +273,6 @@ pub async fn dial_recovery(
         .await
         .map_err(|_| denied())?
         .map_err(|_| denied())?;
-    use openssl::x509::X509VerifyResult;
     if stream.ssl().verify_result() != X509VerifyResult::OK
         || stream.ssl().selected_alpn_protocol() != Some(RECOVERY_PROTOCOL)
     {
@@ -335,6 +336,8 @@ pub async fn accept_recovery_aware(
     socket: tokio::net::TcpStream,
     config: &SslAcceptor,
 ) -> io::Result<AcceptedConnection> {
+    use openssl::{hash::MessageDigest, x509::X509VerifyResult};
+
     socket.set_nodelay(true)?;
     let ssl = openssl::ssl::Ssl::new(config.context()).map_err(|_| denied())?;
     let mut stream = tokio_openssl::SslStream::new(ssl, socket).map_err(|_| denied())?;
@@ -342,7 +345,6 @@ pub async fn accept_recovery_aware(
         .await
         .map_err(|_| denied())?
         .map_err(|_| denied())?;
-    use openssl::{hash::MessageDigest, x509::X509VerifyResult};
     if stream.ssl().verify_result() != X509VerifyResult::OK {
         return Err(denied());
     }

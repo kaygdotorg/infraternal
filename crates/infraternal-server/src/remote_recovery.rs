@@ -8,7 +8,7 @@ use crate::{
 };
 use infraternal_agent::{channel::Channel, remote_tls::TcpTls};
 use infraternal_plugin_remote::remote_recovery::{
-    RecoveryRequest, RecoveryResponse, csr_digest, request_id, transcript,
+    RecoveryRequest, RecoveryResponse, RecoveryTranscript, csr_digest, request_id, transcript,
 };
 use openssl::{
     hash::MessageDigest,
@@ -467,17 +467,18 @@ impl Service {
         let generation = u64::try_from(generation).map_err(|_| Denied)?;
         let issuer_fingerprint: [u8; 32] = issuer_fingerprint.try_into().map_err(|_| Denied)?;
         let challenge: [u8; 32] = stored_challenge.try_into().map_err(|_| Denied)?;
-        let transcript = transcript(
-            host,
-            &predecessor,
-            &request,
-            &csr_digest(&csr_der),
-            &challenge,
-            &key_fingerprint,
-            &issuer_fingerprint,
-            generation,
+        let csr_digest = csr_digest(&csr_der);
+        let transcript = transcript(RecoveryTranscript {
+            host_id: host,
+            predecessor_fingerprint: &predecessor,
+            request_id: &request,
+            csr_digest: &csr_digest,
+            challenge: &challenge,
+            public_key_fingerprint: &key_fingerprint,
+            issuer_fingerprint: &issuer_fingerprint,
+            issuer_generation: generation,
             not_after,
-        );
+        });
         let public_key =
             PKey::public_key_from_raw_bytes(&public_key, Id::ED25519).map_err(|_| Denied)?;
         let mut verifier = Verifier::new_without_digest(&public_key).map_err(|_| Denied)?;
