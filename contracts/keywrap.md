@@ -339,12 +339,18 @@ private CLI socket; runtime logs do not disclose it. Enrollment consumes it once
 
 Additive `recovery-resume` accepts the same identity and authentication fields
 as recovery-start. It verifies the key on every call and takes the writer lock
-before inspecting pending state. Without a pending row it creates recovery with
-the D113 delay. With a row it reissues a capability and retains **exactly** its
-stored ready time, even after the previous capability expires. Reissuing extends
-only the capability lifetime (48 hours from this verification), never the wait.
+before inspecting pending state. While a request is unexpired, it reissues a
+capability and retains **exactly** its stored ready time and expiry. It neither
+resets the wait nor extends the lifetime. At the exclusive expiry, the request
+is finished; starting or resuming creates a new attempt with ready time 24 hours
+and expiry 48 hours from the new server time (D113's live same-account session
+exemption still applies). A cancelled request is also finished permanently.
+Creation uses the maximum of the live SQLite statement clock, the supplied server
+clock and the persisted API-key time high-water mark, updated under the writer
+lock. Clock rollback and process restart cannot backdate a fresh wait (#309).
 The previous capability and any replacement ceremony bound to it become invalid.
-Cancellation and successful replacement delete the row. Verifier start/resume both preserve existing deadlines.
+Cancellation and successful replacement delete the row. Verifier start/resume
+both preserve pending deadlines and replace expired ones.
 
 The result is `{token,ready_at,delay_seconds}` with delay_seconds equal to the
 nonnegative remaining time measured by the server. A browser may discard all
@@ -355,7 +361,8 @@ server authority. No key or capability is persisted by the browser.
 ## Signed-in recovery visibility and audit (#45, D25)
 
 Authenticated `session` adds `recovery_pending: {ready_at} | null`. It includes
-pending state even after capability expiry because resumption keeps that deadline.
+the last stored ready time until cancellation or replacement, including an expired
+row. This notice grants no recovery authority; a new attempt replaces that deadline.
 No words, verifier, capability or requesting-device identity are disclosed.
 
 Browsers subscribe on control stream 0 with the existing Subscribe frame:
@@ -368,8 +375,9 @@ state notifications, not an audit stream. No polling timer runs on idle devices.
 A signed-in browser shows a toast once per new deadline and a persistent notice
 with a Cancel recovery control. Session reads on foreground return repair state.
 
-Start (not resume), cancel (when a row existed), and complete audit rows commit in
-the same SQLite transaction as their state changes. Rows contain only account ID,
+Audit rows for each new attempt (including a resume after expiry), cancellation
+(when a row existed), and completion commit in the same SQLite transaction as
+their state changes. Rows contain only account ID,
 event and Unix time. Invalid requests, reissues and repeat cancellation cannot
 invent completion or duplicate start evidence. Notification is after commit.
 
@@ -459,8 +467,10 @@ The client exposes a callable function for that future screen.
 
 ### Remaining wait bounds (R3, #45)
 
-Resumption reports the stored deadline's actual remaining seconds, even above
-24 hours after a clock rollback. The client accepts nonnegative safe integer
+Resumption reports the stored deadline's remaining seconds against the maximum
+of live statement time and the persisted server time high-water mark. A backward
+clock adjustment does not move that time backward or alter the deadline.
+The client continues to accept nonnegative safe integer
 waits through the recovery capability policy maximum of 48 hours (172800 seconds)
 and rejects larger or malformed durations; it does not change the deadline.
 Its monotonic countdown never grants server authority.

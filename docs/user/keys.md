@@ -53,6 +53,8 @@ The 24 recovery words are your way back in when you lose your passkeys. They are
 
 Starting a recovery from a device that is not signed in waits 24 hours, so that a stranger with stolen words cannot take over before you notice. Any signed-in device can cancel it, and a device already signed in to the same account skips the wait. After the wait you have until 48 hours after the start to finish.
 
+Re-entering your words while a recovery is pending resumes that request, with the same wait and expiry. Once it expires or is cancelled, starting again creates a new request with a fresh 24-hour wait and 48-hour expiry (unless you are already signed in). Each new request notifies your signed-in devices.
+
 A finished recovery signs out every session, removes every passkey and API key, and gives you new words. So each set of words works once.
 
 ### First-owner setup code

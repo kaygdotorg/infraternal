@@ -91,22 +91,25 @@ impl Auth {
         }
         // Do not slide or check the cookie before Argon2: revocation/expiry can occur
         // during verification. This recheck shares the writer lock with request creation.
-        let now = clock()?;
-        let existed: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM recovery WHERE user_id=?)")
+        // Share the persisted server high-water mark with API-key authorization:
+        // wall-clock rollback or a process restart must not backdate a fresh wait.
+        let now = super::devices::api_key_time(&mut tx, clock()?).await?;
+        let previous_expiry: Option<i64> =
+            sqlx::query_scalar("SELECT expires FROM recovery WHERE user_id=?")
                 .bind(user)
-                .fetch_one(&mut *tx)
+                .fetch_optional(&mut *tx)
                 .await?;
         let token = random();
         let conflict = if resume {
-            "ON CONFLICT(user_id) DO UPDATE SET token_hash=excluded.token_hash,expires=excluded.expires"
+            "ON CONFLICT(user_id) DO UPDATE SET token_hash=excluded.token_hash,ready=CASE WHEN recovery.expires<=MAX(?,unixepoch()) THEN excluded.ready ELSE recovery.ready END,expires=CASE WHEN recovery.expires<=MAX(?,unixepoch()) THEN excluded.expires ELSE recovery.expires END"
         } else {
             "ON CONFLICT(user_id) DO UPDATE SET token_hash=excluded.token_hash,ready=excluded.ready,expires=excluded.expires WHERE recovery.expires<=MAX(?,unixepoch())"
         };
         // Evaluate session/account/expiry inside the very statement that grants the
         // waiver. SQLite's statement clock covers executor delays after Rust sampled
         // time; MAX also respects the explicit future clock used by library callers.
-        // Resumption changes only bearer lifetime, never the stored ready deadline.
+        // Resumption rotates only the bearer while pending. Expiry is terminal:
+        // replacing an expired request starts both deadlines anew, including at equality.
         let sql = format!(
             "WITH clock(now) AS (SELECT MAX(?,unixepoch())) INSERT INTO recovery(user_id,token_hash,ready,expires) SELECT ?,?,CASE WHEN EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>clock.now) THEN clock.now ELSE clock.now+? END,clock.now+? FROM clock WHERE 1 {conflict} RETURNING ready,MAX(ready-MAX(?,unixepoch()),0),MAX(?,unixepoch())"
         );
@@ -118,7 +121,8 @@ impl Auth {
             .bind(user)
             .bind(DAY)
             .bind(2 * DAY);
-        if !resume {
+        query = query.bind(now);
+        if resume {
             query = query.bind(now);
         }
         let (ready, delay, authority_now) = query
@@ -127,7 +131,9 @@ impl Auth {
             .fetch_optional(&mut *tx)
             .await?
             .ok_or(Error::Denied)?;
-        if !existed {
+        // Persist SQLite's statement-time observation too, not only the earlier sample.
+        super::devices::api_key_time(&mut tx, authority_now).await?;
+        if previous_expiry.is_none_or(|expires| expires <= authority_now) {
             record(&mut tx, user, "start", authority_now).await?;
         }
         self.recovery_changes.commit(tx, user, None).await?;

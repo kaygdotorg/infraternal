@@ -3138,7 +3138,7 @@ async fn audit_recovery_after_page_discard_can_resume_at_original_deadline() {
         "AUDIT discarded page: retry_at_24h_denied={denied_at_day}; retry_at_48h_ready_offset_hours={}",
         (ready - NOW) / 3600
     );
-    assert_eq!(ready, NOW + DAY);
+    assert_eq!(ready, NOW + 3 * DAY);
     assert!(
         !denied_at_day,
         "re-entering correct words after 24h cannot recover the pending capability; denied until 48h then another 24h wait"
@@ -3387,6 +3387,9 @@ mod reviewer_tests;
 
 #[path = "rotation_tests.rs"]
 mod rotation_tests;
+
+#[path = "recovery_restart_tests.rs"]
+mod recovery_restart_tests;
 
 #[cfg(feature = "remote")]
 #[path = "ca_membership_tests.rs"]

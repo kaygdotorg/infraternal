@@ -133,7 +133,7 @@ async fn reviewer_disk_cancel_complete_races() {
 async fn reviewer_disk_restart_and_concurrent_resume() {
     let _guard = SERIAL.lock().await;
     let (mut f, path) = disk_fixture().await;
-    let (old, ready, _) = v2_start(&f, NOW).await;
+    let (old, _, _) = v2_start(&f, NOW).await;
     f.auth.pool.close().await;
     let pool = SqlitePoolOptions::new()
         .max_connections(4)
@@ -149,21 +149,24 @@ async fn reviewer_disk_restart_and_concurrent_resume() {
     let a = v2_start(&f, NOW + 3 * DAY);
     let b = v2_start(&f, NOW + 3 * DAY);
     let (a, b) = tokio::join!(a, b);
+    let ready = NOW + 4 * DAY;
     assert_eq!(a.1, ready);
     assert_eq!(b.1, ready);
     assert!(f.auth.recovery_ready(&old, NOW + 3 * DAY).await.is_err());
-    let live_a = f.auth.recovery_ready(&a.0, NOW + 3 * DAY).await.is_ok();
-    let live_b = f.auth.recovery_ready(&b.0, NOW + 3 * DAY).await.is_ok();
+    assert!(f.auth.recovery_ready(&a.0, ready - 1).await.is_err());
+    assert!(f.auth.recovery_ready(&b.0, ready - 1).await.is_err());
+    let live_a = f.auth.recovery_ready(&a.0, ready).await.is_ok();
+    let live_b = f.auth.recovery_ready(&b.0, ready).await.is_ok();
     assert_ne!(live_a, live_b);
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM recovery_audit WHERE event='start'")
         .fetch_one(&f.auth.pool)
         .await
         .unwrap();
-    assert_eq!(count, 1);
+    assert_eq!(count, 2);
     f.auth.pool.close().await;
     std::fs::remove_file(path).unwrap();
     println!(
-        "REVIEW disk restart: original deadline preserved after 72h; concurrent resume: one live capability, one start audit"
+        "REVIEW disk restart: fresh wait after 72h; concurrent resume: one live capability, two start audits"
     );
 }
 
@@ -281,13 +284,13 @@ async fn expired_finish_after_writer_wait(ceremony_expires: bool) {
 }
 
 #[tokio::test]
-async fn reviewer_server_clock_rollback_retains_deadline_and_reports_more_than_day() {
+async fn reviewer_server_clock_rollback_retains_deadline_and_uses_persisted_time() {
     let _guard = SERIAL.lock().await;
     let (f, path) = disk_fixture().await;
     let (_, ready, _) = v2_start(&f, NOW).await;
     let (_, again, delay) = v2_start(&f, NOW - 3600).await;
     assert_eq!(again, ready);
-    assert_eq!(delay, DAY + 3600);
+    assert_eq!(delay, DAY);
     assert!(
         f.auth
             .recovery_ready(&v2_start(&f, NOW - 3600).await.0, NOW - 3600)
@@ -296,7 +299,9 @@ async fn reviewer_server_clock_rollback_retains_deadline_and_reports_more_than_d
     );
     f.auth.pool.close().await;
     std::fs::remove_file(path).unwrap();
-    println!("REVIEW server clock rollback: ready unchanged, remaining duration = 90000 seconds");
+    println!(
+        "REVIEW server clock rollback: ready unchanged, persisted remaining duration = 86400 seconds"
+    );
 }
 
 #[tokio::test]
