@@ -272,7 +272,7 @@ impl Service {
             now,
         };
         let signed =
-            tokio::task::spawn_blocking(move || verify_and_sign_candidate(candidate_proof))
+            tokio::task::spawn_blocking(move || verify_and_sign_candidate(&candidate_proof))
                 .await
                 .map_err(|_| denied())??;
         let candidate_public_key = signed.public_key;
@@ -707,7 +707,7 @@ impl Service {
     }
 }
 
-fn verify_and_sign_candidate(proof: CandidateProof) -> io::Result<VerifiedCandidate> {
+fn verify_and_sign_candidate(proof: &CandidateProof) -> io::Result<VerifiedCandidate> {
     let csr = ValidatedCsr::parse(&proof.csr_der).map_err(|_| denied())?;
     let public_key: [u8; 32] = csr
         .key()
