@@ -589,6 +589,8 @@
   min-height: var(--ui-row-h); padding: 0.25rem 0; border-bottom: 1px solid var(--line);
 }
 .ui-kv-row:last-child { border-bottom: 0; }
+/* A row's pane (`panel` in kv-list.ts) takes the whole row under the key and the value. */
+.ui-kv-row > .ui-kv-panel { grid-column: 1 / -1; min-width: 0; }
 /* Titled sections inside one list: the quiet eyebrow of the settings headings, no box or rule of its own. */
 .ui-kv-section + .ui-kv-section { margin-top: 0.75rem; }
 .ui-kv-rows { display: flex; flex-direction: column; }

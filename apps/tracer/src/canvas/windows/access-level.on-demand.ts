@@ -218,6 +218,8 @@ export function createPrivilegeCard(host: string, env: PrivilegeCardEnv): Privil
     viewport.replaceChildren();
     stepper = new PaneStepper(viewport);
     consent(0);
+    // The pane is full height inside its (still closed) clip, so it can be brought into view at once, before the clip has grown.
+    requestAnimationFrame(() => { if (open) card.scrollIntoView({ block: "nearest" }); });
     // An offline machine is said at once, before the person types a password it could not take.
     void service.probe(host).then((probe) => { if (open && !busy && !probe.reachable) unreachable("offline", 0); });
     root.setAttribute("data-open", "");
