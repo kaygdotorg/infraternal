@@ -35,7 +35,13 @@ impl Pair {
         .unwrap();
         let key_digest = openssl::sha::sha256(&host.key.raw_public_key().unwrap());
         let token = store
-            .issue("owner", id, crate::enrollment::Mode::Rootless, now, &key_digest)
+            .issue(
+                "owner",
+                id,
+                crate::enrollment::Mode::Rootless,
+                now,
+                &key_digest,
+            )
             .await
             .unwrap();
         store

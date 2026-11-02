@@ -765,13 +765,7 @@ async fn cancelled_connection_withdraws_retained_registry_capabilities() {
         "127.0.0.1:0".parse().unwrap(),
     )
     .unwrap();
-    let identity = RemoteIdentity {
-        identity: leaf(&ca, false),
-        roots: vec![ca.certificate],
-        endpoint: server.local_addr().unwrap(),
-        server_name: "localhost".into(),
-        execution_uid: nix::unistd::Uid::effective().as_raw(),
-    };
+    let identity = supervisor_identity(&ca, &leaf(&ca, false), server.local_addr().unwrap());
     let caps = Arc::new(AtomicU64::new(0));
     let mut registry = infraternal_plugin_api::PluginRegistry::default();
     registry

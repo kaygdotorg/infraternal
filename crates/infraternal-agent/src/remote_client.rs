@@ -151,6 +151,59 @@ fn observe_failure(observer: Option<&FailureObserver<'_>>, stage: &'static str, 
     }
 }
 
+async fn ensure_service(
+    service: &Mutex<Option<crate::plugin_control::Service>>,
+    state: &std::path::Path,
+    installation: Option<&crate::plugins::Installation>,
+    #[cfg(target_os = "linux")] lifetime: &Mutex<Option<std::sync::Arc<std::fs::File>>>,
+    #[cfg(any(test, feature = "native-streams"))] supplied: Option<crate::plugin_control::Registry>,
+) -> io::Result<crate::plugin_control::Registry> {
+    let mut local = service.lock().await;
+    if local.as_ref().is_some_and(|local| local.registry.ended()) {
+        local.take();
+    }
+    if local.is_none() {
+        #[cfg(any(test, feature = "native-streams"))]
+        let supplied_service = match supplied {
+            Some(registry) => {
+                Some(crate::plugin_control::Service::with_registry(state, registry).await?)
+            }
+            None => None,
+        };
+        #[cfg(not(any(test, feature = "native-streams")))]
+        let supplied_service = None;
+        *local = Some(if let Some(service) = supplied_service {
+            service
+        } else {
+            #[cfg(target_os = "linux")]
+            let service = trace_attempt(
+                "plugin-service-start",
+                crate::plugin_control::Service::start_retained(
+                    state,
+                    installation,
+                    &mut *lifetime.lock().await,
+                )
+                .await,
+            )?;
+            #[cfg(not(target_os = "linux"))]
+            let service = trace_attempt(
+                "plugin-service-start",
+                crate::plugin_control::Service::start(
+                    state,
+                    crate::plugins::ExecutionMode::Remote,
+                    installation,
+                )
+                .await,
+            )?;
+            service
+        });
+    }
+    local
+        .as_ref()
+        .map(|local| local.registry.clone())
+        .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))
+}
+
 async fn run_inner(
     identity: &RemoteIdentity,
     state: Option<PathBuf>,
@@ -196,52 +249,16 @@ async fn run_inner(
             let state = trace_attempt("state-path", crate::sessions::state_path(state.clone()))?;
             #[cfg(not(target_os = "linux"))]
             let state = trace_attempt("state-path", crate::control::runtime_state(state))?;
-            let mut local = service.lock().await;
-            if local.as_ref().is_some_and(|local| local.registry.ended()) {
-                local.take();
-            }
-            if local.is_none() {
+            let plugins = ensure_service(
+                service,
+                &state,
+                installation,
+                #[cfg(target_os = "linux")]
+                lifetime,
                 #[cfg(any(test, feature = "native-streams"))]
-                let supplied_service = match supplied {
-                    Some(registry) => {
-                        Some(crate::plugin_control::Service::with_registry(&state, registry).await?)
-                    }
-                    None => None,
-                };
-                #[cfg(not(any(test, feature = "native-streams")))]
-                let supplied_service = None;
-                *local = Some(if let Some(service) = supplied_service {
-                    service
-                } else {
-                    #[cfg(target_os = "linux")]
-                    let service = trace_attempt(
-                        "plugin-service-start",
-                        crate::plugin_control::Service::start_retained(
-                            &state,
-                            installation,
-                            &mut *lifetime.lock().await,
-                        )
-                        .await,
-                    )?;
-                    #[cfg(not(target_os = "linux"))]
-                    let service = trace_attempt(
-                        "plugin-service-start",
-                        crate::plugin_control::Service::start(
-                            &state,
-                            crate::plugins::ExecutionMode::Remote,
-                            installation,
-                        )
-                        .await,
-                    )?;
-                    service
-                });
-            }
-            let plugins = local
-                .as_ref()
-                .ok_or(io::ErrorKind::NotConnected)?
-                .registry
-                .clone();
-            drop(local);
+                supplied,
+            )
+            .await?;
             #[cfg(any(test, feature = "native-streams"))]
             let _availability = Availability(plugins.clone());
             #[cfg(any(test, feature = "native-streams"))]
