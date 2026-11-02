@@ -9,7 +9,7 @@ async fn pool() -> sqlx::SqlitePool {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::raw_sql(include_str!("../migrations/0037_wire_writer_clock.sql"))
+    sqlx::raw_sql(include_str!("../migrations/0038_wire_writer_clock.sql"))
         .execute(&pool)
         .await
         .unwrap();
