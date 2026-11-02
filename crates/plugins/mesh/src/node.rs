@@ -463,7 +463,7 @@ impl Node {
             {
                 return Err(io::ErrorKind::InvalidData.into());
             }
-            let mut config = if chunk.from_version.is_some() {
+            let config = if chunk.from_version.is_some() {
                 self.config.clone().ok_or(io::ErrorKind::InvalidData)?
             } else {
                 Config {
@@ -484,10 +484,12 @@ impl Node {
                 }
             };
             #[cfg(feature = "mesh-dns-spike")]
-            {
+            let config = {
+                let mut config = config;
                 config.name.clone_from(&chunk.name);
                 config.dns_suffix.clone_from(&chunk.dns_suffix);
-            }
+                config
+            };
             self.pending = Some(Pending {
                 server: chunk.server,
                 next: 0,

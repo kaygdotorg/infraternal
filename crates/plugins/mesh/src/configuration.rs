@@ -59,13 +59,11 @@ fn compile_inner(
         .find(|member| member.node.id == node)
         .map(|member| member.node.host.clone());
     #[cfg(feature = "mesh-dns-spike")]
-    let dns_suffix = if checkpoint.settings.dns_suffix_is_explicit
-        || checkpoint.settings.dns_suffix != crate::dataplane::DEFAULT_DNS_SUFFIX
-    {
-        checkpoint.settings.dns_suffix.clone()
-    } else {
-        default_dns_suffix.to_owned()
-    };
+    let dns_suffix = selected_dns_suffix(
+        &checkpoint.settings.dns_suffix,
+        checkpoint.settings.dns_suffix_is_explicit,
+        default_dns_suffix,
+    );
     #[cfg(feature = "mesh-dns-spike")]
     let exposure_dns_suffix = dns_suffix.clone();
     #[cfg(not(feature = "mesh-dns-spike"))]
@@ -149,6 +147,19 @@ fn compile_inner(
         #[cfg(feature = "mesh-dns-spike")]
         peer_names,
     })
+}
+
+#[cfg(any(feature = "mesh-dns-spike", test))]
+fn selected_dns_suffix(
+    configured_suffix: &str,
+    explicit: bool,
+    default_dns_suffix: &str,
+) -> String {
+    if explicit || configured_suffix != crate::dataplane::DEFAULT_DNS_SUFFIX {
+        configured_suffix.to_owned()
+    } else {
+        default_dns_suffix.to_owned()
+    }
 }
 
 /// Derive the default mesh zone from the server's configured public origin.
@@ -416,5 +427,26 @@ impl Chunks {
         policy.union(&TrafficPolicy::Ports(std::collections::BTreeSet::from([
             port,
         ])));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selected_dns_suffix;
+
+    #[test]
+    fn server_dns_suffix_is_default_and_explicit_or_legacy_choices_win() {
+        assert_eq!(
+            selected_dns_suffix("internal", false, "example.org"),
+            "example.org"
+        );
+        assert_eq!(
+            selected_dns_suffix("custom.example", false, "example.org"),
+            "custom.example"
+        );
+        assert_eq!(
+            selected_dns_suffix("internal", true, "example.org"),
+            "internal"
+        );
     }
 }
