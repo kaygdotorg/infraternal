@@ -4,7 +4,7 @@
  */
 import { whenIdle } from "../../on-demand";
 import type { PopoverSource } from "../../../../../packages/ui/src/anchored-popover";
-import type { PaletteEntry } from "../core-screen";
+import type { PaletteEntry } from "../../core-screen";
 import type { Ctx, WinRec } from "../context";
 import type { SessionBinding } from "../sessions/adapter";
 import type { AppWindowsAdapter } from "./adapter";
