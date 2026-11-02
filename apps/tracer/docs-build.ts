@@ -35,6 +35,55 @@ function titleOf(html: string): string {
   return match[1]!.replace(/<[^>]+>/g, "").trim();
 }
 
+/** One searchable heading of a page: `id` is the anchor in the rendered page, `text` its plain title. */
+export interface DocsHeading { id: string; text: string }
+/** One page of `index.json`, which the app's command palette searches (titles and headings only, never body text). */
+export interface DocsIndexPage { slug: string; title: string; summary: string; headings: DocsHeading[] }
+
+const plain = (html: string): string => html.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#0*39;/g, "'").trim();
+
+/** A heading's anchor: lower-case words joined by hyphens, numbered when the page already used it. */
+function anchorFor(text: string, used: Set<string>): string {
+  const base = text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "") || "section";
+  let id = base;
+  for (let n = 2; used.has(id); n += 1) id = `${base}-${n}`;
+  used.add(id);
+  return id;
+}
+
+/**
+ * Gives every level-2 and level-3 heading an `id` (keeping one the renderer already wrote) and lists them. The ids make a
+ * palette result open the page at its heading. Level 1 is the page title and is not listed twice.
+ */
+export function anchorHeadings(html: string): { html: string; headings: DocsHeading[] } {
+  const used = new Set<string>();
+  const headings: DocsHeading[] = [];
+  const out = html.replace(/<h([23])((?:\s[^>]*)?)>([\s\S]*?)<\/h\1>/g, (_all, level: string, attrs: string, inner: string) => {
+    const text = plain(inner);
+    const existing = /\sid="([^"]+)"/.exec(attrs)?.[1];
+    const id = existing ?? anchorFor(text, used);
+    used.add(id);
+    headings.push({ id, text });
+    return `<h${level}${existing ? attrs : `${attrs} id="${id}"`}>${inner}</h${level}>`;
+  });
+  return { html: out, headings };
+}
+
+/**
+ * Copies each column's heading onto its cells as `data-label`. A narrow window (the canvas reader on a phone) stacks a row's
+ * cells and prints the label before each value (docs-reader.css), so a wide table never needs sideways scrolling there.
+ */
+export function labelCells(html: string): string {
+  return html.replace(/<table>[\s\S]*?<\/table>/g, (table) => {
+    const labels = [...table.matchAll(/<th[^>]*>([\s\S]*?)<\/th>/g)].map((match) => plain(match[1]!));
+    return table.replace(/<tr[^>]*>([\s\S]*?)<\/tr>/g, (row, inner: string) => {
+      if (inner.includes("<th")) return row;
+      let column = 0;
+      return row.replace(/<td([^>]*)>/g, (_cell, attrs: string) => `<td${attrs} data-label="${escapeHtml(labels[column++] ?? "")}">`);
+    });
+  });
+}
+
 function page(title: string, body: string): string {
   // The two page colours are the sign-in card's (auth-scheme.ts PAGE), so the browser chrome blends in on a phone.
   return `<!doctype html>
@@ -63,16 +112,22 @@ export async function buildDocs(out: string): Promise<void> {
     cp(resolve(import.meta.dirname, "fonts/maple-mono-nf/roman.latin.woff2"), resolve(out, "fonts/roman.latin.woff2")),
   ]);
   const entries: { slug: string; title: string; summary: string }[] = [];
+  const index: DocsIndexPage[] = [];
   for (const { slug, source, summary } of DOCS_PAGES) {
     // The licence and role comments at the top of a source file are for the repository, not for readers.
     const text = (await Bun.file(resolve(root, source)).text()).replace(/<!--[\s\S]*?-->\n?/g, "");
     // A wide table scrolls by itself instead of widening the page.
-    const html = markdown.html(text).replace(/<table>/g, '<div class="table"><table>').replace(/<\/table>/g, "</table></div>");
+    const { html, headings } = anchorHeadings(labelCells(markdown.html(text)).replace(/<table>/g, '<div class="table"><table>').replace(/<\/table>/g, "</table></div>"));
     const title = titleOf(html);
     entries.push({ slug, title, summary });
+    index.push({ slug, title, summary, headings });
     await mkdir(resolve(out, slug), { recursive: true });
     await writeFile(resolve(out, slug, "index.html"), page(`${title} · Infraternal docs`, html));
+    // The same body without the page chrome: the app shows it in a canvas window (docs-reader.on-demand.ts).
+    await writeFile(resolve(out, slug, "fragment.html"), html);
   }
+  // Titles and headings only, so the file stays a few hundred bytes per page; the palette fetches it on its first open.
+  await writeFile(resolve(out, "index.json"), JSON.stringify({ pages: index }));
   const list = entries.map((entry) => `<li><a href="/docs/${entry.slug}/"><strong>${escapeHtml(entry.title)}</strong><span>${escapeHtml(entry.summary)}</span></a></li>`).join("\n");
   await writeFile(resolve(out, "index.html"), page("Infraternal docs", `<h1>Documentation</h1>\n<ul class="pages">\n${list}\n</ul>`));
 }
