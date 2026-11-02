@@ -375,3 +375,27 @@ async fn api_key_wall_clock_rollback_never_revives_or_extends_keys() {
     }
 }
 
+/// J97: sample at deadline-1, resume at deadline+1. Holding the sole pool
+/// connection deterministically forces the authorization future to await DB access.
+#[tokio::test]
+async fn api_key_expiry_is_resampled_after_database_wait() {
+    use std::{future::Future, task::Poll};
+    let f = fixture().await;
+    let key = key(&f).await;
+    let deadline = NOW + 30 * 86400;
+    let held = f.auth.pool.acquire().await.unwrap();
+    f.auth.set_test_http_time(deadline - 1);
+    let mut authorization = Box::pin(f.auth.api_authorize(&key, "hosts:read"));
+    std::future::poll_fn(|cx| {
+        assert!(authorization.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    f.auth.set_test_http_time(deadline + 1);
+    drop(held);
+    assert!(
+        matches!(authorization.await, Err(Error::Denied)),
+        "time sampled before waiting must not renew an expired key"
+    );
+    assert_eq!(expiry(&f.auth, &key).await, deadline);
+}

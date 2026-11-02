@@ -101,14 +101,15 @@ impl Auth {
 
     /// Validate a CLI/MCP key for one explicit scope; no browser session or fresh-tap privilege.
     pub async fn api_authorize(&self, token: &str, scope: &str) -> Result<String> {
-        let now = super::http::current_time(self)?;
         let token_hash = hash(token);
         // Serialize expiry, policy clamping, renewal and revocation. A dead row
         // remains dead even if the owner subsequently lengthens the policy.
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool).await?;
         let row = sqlx::query("SELECT user_id,scopes,renewed_at,expires_at,dead,api_key_lifetime_days FROM api_keys CROSS JOIN server_settings WHERE server_settings.id=1 AND token_hash=?")
             .bind(&token_hash).fetch_optional(&mut *tx).await?;
-        let now = api_key_time(&mut tx, now).await?;
+        // Sample only after acquiring the writer and reading the key: pool or
+        // lock waits must not carry a pre-expiry timestamp into renewal.
+        let now = api_key_time(&mut tx, super::http::current_time(self)?).await?;
         let Some(row) = row else {
             tx.commit().await?;
             return Err(Error::Denied);
