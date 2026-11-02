@@ -10,7 +10,10 @@ import type { Metrics } from "../layout/geometry";
 import type { ViewModel } from "../model/types";
 
 export const DOCS_VIEW = "docs";
-/** A window's id is `d-<slug>`; the slug is the page's folder in `/docs/`. */
+/**
+ * A window's id is `d-<slug>`; the slug is the page's address under `/docs/`, a slash between section and page included
+ * (`d-terminal/multiplexer`). The body of the window takes the slug back out of the id (views/body.ts), so the id keeps it whole.
+ */
 export const docsWindowId = (slug: string): string => `d-${slug}`;
 
 /** What the view needs to know about a page. */

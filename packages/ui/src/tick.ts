@@ -1,12 +1,11 @@
 /**
  * The one tick (DECISIONS 99). Every checkmark in infraternal uses this primitive —
- * checkboxes, stepper steps, completed bootstrap steps, "copied" — so the same springy
+ * checkboxes, stepper steps, completed bootstrap steps, "copied" — so the same spring
  * interaction appears wherever a tick appears (code reuse rule).
  *
- * ONE spring value t (0 → 1, visual duration 0.2 s,
- * bounce 0.2) drives everything:
+ * ONE critically damped spring value t (0 → 1, visual duration 0.2 s, no overshoot: TASTE §3) drives everything:
  *   fill   scale(t)                       — grows from the centre
- *   box    scale(1 + 0.35 · max(0, t − 1)) — swells only on overshoot
+ *   box    scale(1 + 0.35 · max(0, t − 1)) — stays at 1: t never passes 1
  *   tick   strokeDashoffset 1 − clamp(t)   — draws on as the fill grows
  *   label  opacity 1 − (1 − 0.42) · clamp(t), strike scaleX((clamp(t) − 0.12) / 0.72)
  * Pointer toggles animate; keyboard toggles are instant (no animation for keyboard

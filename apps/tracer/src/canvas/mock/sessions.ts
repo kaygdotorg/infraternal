@@ -38,6 +38,8 @@ export function createMockSessions(core: CoreScreen, world: MockWorld, inventory
         },
         focus() { if (live) core.terminalHost.focus({ preventScroll: true }); },
         setActive() {}, refit() {},
+        // Only the live terminal has a scrollback; the previews are plain text that does not scroll.
+        ...(live ? { wheelUse: (deltaY: number) => core.wheelUse(deltaY) } : {}),
         // The live terminal's canvas holds pixels only while its window can be seen.
         setVisible(visible) { if (live) { if (visible) core.restoreSurface(); else core.releaseSurface(); } },
         dispose() { if (live) holder.append(core.terminalHost); },

@@ -51,8 +51,8 @@ export const clamp = (v: number, lo: number, hi: number): number => Math.max(lo,
 
 // Critically damped (no overshoot, no long tail): settles within 1 px in about 1.76 x the visual duration (a little more as measured on camera centre and zoom together), in
 // test/clusters-flight.spec.ts. Pointer, touch and pill flights about 350 ms (was 1.3 s); a key's about 190 ms (was 430 ms) (the motion rule).
-const FLIGHT = { visualDuration: 0.16, bounce: 0 };
-const KEY_FLIGHT = { visualDuration: 0.08, bounce: 0 };
+const FLIGHT = { visualDuration: 0.16 } as const;
+const KEY_FLIGHT = { visualDuration: 0.08 } as const;
 const REST_DELAY = 140;
 export const MIN_ZOOM = 0.08;
 export const MAX_ZOOM = 2;

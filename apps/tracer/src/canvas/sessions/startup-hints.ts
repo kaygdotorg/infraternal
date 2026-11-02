@@ -18,8 +18,8 @@ interface Connection {
   readonly isWelcomed: boolean;
 }
 
-/** The page about our multiplexer, served by this same server: every instance carries the docs for the version it runs (D44, D223; source docs/user/multiplexer.md, built by docs-build.ts). */
-export const MULTIPLEXER_DOCS_URL = "/docs/multiplexer/";
+/** The page about our multiplexer, served by this same server: every instance carries the docs for the version it runs (D44, D223; source docs/user/20-terminal/10-multiplexer.md, built by docs-build.ts). */
+export const MULTIPLEXER_DOCS_URL = "/docs/terminal/multiplexer/";
 const MULTIPLEXER_NAMES: Record<string, string> = { tmux: "tmux", zellij: "Zellij" };
 /** The name people know the program by; an unknown future one shows as the server reports it. */
 export const multiplexerName = (id: string): string => MULTIPLEXER_NAMES[id] ?? id;

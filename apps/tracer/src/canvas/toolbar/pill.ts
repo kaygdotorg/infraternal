@@ -68,7 +68,7 @@ export function createPill(cx: Ctx): PillModule {
   let swiped = false;
   const parts = (): HTMLElement[] => [...capsule.querySelectorAll<HTMLElement>("#capsule-os, .capsule-host, .capsule-session, .ui-conn")];
   const setShift = (x: number, opacity = 1): void => { for (const part of parts()) { part.style.transform = x === 0 ? "" : `translateX(${x}px)`; part.style.opacity = opacity === 1 ? "" : String(opacity); } };
-  const shiftSpring = (from: number, to: number, cfg: { visualDuration: number; bounce: number }, done?: () => void): void => {
+  const shiftSpring = (from: number, to: number, cfg: { visualDuration: number; bounce?: 0 }, done?: () => void): void => {
     const sp = new Spring(from, (v) => { setShift(v, 1 - Math.min(1, Math.abs(v) / (capsule.offsetWidth * 0.6))); if (v === to) done?.(); }, cfg);
     restPx(sp);
     sp.set(to);
@@ -102,13 +102,13 @@ export function createPill(cx: Ctx): PillModule {
     const target = ids[at + dir];
     const commits = target && (Math.abs(dx) > 56 || Math.abs(v) > 0.5) && Math.sign(v || dx) === Math.sign(dx);
     const width = capsule.offsetWidth;
-    if (!commits) { shiftSpring(dx, 0, { visualDuration: 0.4, bounce: 0.3 }); return; }
+    if (!commits) { shiftSpring(dx, 0, { visualDuration: 0.4 }); return; }
     hold = true;
     cx.nav.flyView(target as ViewId);
-    shiftSpring(dx, -dir * width * 0.6, { visualDuration: 0.18, bounce: 0 }, () => {
+    shiftSpring(dx, -dir * width * 0.6, { visualDuration: 0.18 }, () => {
       hold = false;
       paint();
-      shiftSpring(dir * width * 0.6, 0, { visualDuration: 0.42, bounce: 0.22 });
+      shiftSpring(dir * width * 0.6, 0, { visualDuration: 0.42 });
     });
   };
   capsule.addEventListener("pointerup", end, { signal });
