@@ -25,7 +25,7 @@
  * An action says its direction (`swipe: "left" | "right"`); a row without an action in the gesture's direction gives
  * a little and comes back. Nothing here knows what a row is: the list's code runs the action.
  */
-import { Spring } from "./spring";
+import { Spring, type SpringConfig } from "./spring";
 import { mountRowAsk } from "./row-confirm";
 
 export interface RowAction {
@@ -76,8 +76,8 @@ export interface RowMenu {
 }
 
 // Critically damped, never past the target (TASTE: no overshoot, ever; the row settles, it does not bounce).
-const OPEN = { visualDuration: 0.32, bounce: 0 };
-const SHUT = { visualDuration: 0.32, bounce: 0 };
+const OPEN: SpringConfig = { visualDuration: 0.32 };
+const SHUT: SpringConfig = { visualDuration: 0.32 };
 /** A swipe moves at most this far past the revealed button before the row stops following (never past its own width). */
 const MIN_REVEAL = 72;
 const LONG_PRESS = 480;
