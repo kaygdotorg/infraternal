@@ -2,7 +2,7 @@
  * Shapes an app-window canvas card to the machine's stream dimensions. This module is reached only through the
  * app-window on-demand body, keeping its feature-specific resize logic out of every canvas session's deferred bundle.
  */
-import { shapeFor } from "../../../../../packages/ui/src/window-resize";
+import { shapeFor } from "./shape-math";
 import type { Ctx, WinRec } from "../context";
 import { scrollerOf } from "../layout/columns";
 import { resizeHost } from "../windows/frame";

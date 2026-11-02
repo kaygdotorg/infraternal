@@ -10,7 +10,8 @@
  * The 60 fps rule lives in the camera; the instant-work rule here: every handler does at most a layout read and a
  * transform write, and everything else (saving, the tree, arrows) is coalesced to a microtask, a frame or a timer.
  */
-import { installAppWindows } from "./appwin/hook";
+import { onDemand, whenIdle } from "../on-demand";
+import type { AppWindowsHook } from "./appwin/hook.on-demand";
 import { mountToast } from "../../../../packages/ui/src/toast";
 import type { CoreScreen } from "../core-screen";
 import { createMemory } from "./memory";
@@ -132,8 +133,53 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   cx.tree = createTree(cx);
   if (options.adapters.mesh) cx.mesh = createMesh(cx, options.adapters.mesh);
   if (options.adapters.sharing) cx.sharing = createSharingHandle(cx, options.adapters.sharing);
-  const appWindows = installAppWindows(cx);
-  if (appWindows) cx.appWindows = appWindows;
+  const appWindowsAdapter = options.adapters.appWindows;
+  let appWindowsRuntime: AppWindowsHook | undefined;
+  let appWindowsLoading: Promise<AppWindowsHook | undefined> | undefined;
+  let appWindowsGeneration = 0;
+  let appWindowsDisposed = false;
+  // Keep this bridge small in the deferred canvas; the picker, inventory, body and frame shaping stay on demand.
+  // The generation guard prevents a pending import from starting work after feature-off or canvas disposal.
+  const loadAppWindows = (): Promise<AppWindowsHook | undefined> => {
+    if (!appWindowsAdapter || appWindowsDisposed || cx.signal.aborted || !appWindowsAdapter.available()) return Promise.resolve(undefined);
+    if (appWindowsRuntime) return Promise.resolve(appWindowsRuntime);
+    if (!appWindowsLoading) {
+      const epoch = appWindowsGeneration;
+      appWindowsLoading = onDemand(() => import("./appwin/hook.on-demand")).then((module) => {
+        if (epoch !== appWindowsGeneration || appWindowsDisposed || cx.signal.aborted || !appWindowsAdapter.available()) return undefined;
+        return (appWindowsRuntime = module.installAppWindowsRuntime(cx, appWindowsAdapter));
+      }).catch(() => {
+        if (epoch === appWindowsGeneration && !appWindowsDisposed && appWindowsAdapter.available()) {
+          appWindowsLoading = undefined;
+          cx.toast.show({ message: "Could not load app windows. Try again.", tone: "error", duration: 5000 });
+        }
+        return undefined;
+      });
+    }
+    return appWindowsLoading;
+  };
+  const warmAppWindows = (): void => {
+    if (appWindowsAdapter?.available()) whenIdle(() => { void loadAppWindows(); });
+  };
+  const offAppWindows = appWindowsAdapter?.onChange(() => {
+    if (appWindowsDisposed || cx.signal.aborted) return;
+    if (appWindowsAdapter.available()) warmAppWindows();
+    else if (!appWindowsRuntime) { appWindowsGeneration++; appWindowsLoading = undefined; }
+  });
+  if (appWindowsAdapter) {
+    cx.appWindows = {
+      load: loadAppWindows,
+      dispose() {
+        appWindowsDisposed = true;
+        appWindowsGeneration++;
+        offAppWindows?.();
+        appWindowsRuntime?.dispose();
+        appWindowsRuntime = undefined;
+        appWindowsLoading = undefined;
+      },
+    };
+    warmAppWindows();
+  }
   cx.toolbar = createToolbar(cx);
   installGestures(cx);
   const removeShortcuts = installShortcuts(cx);

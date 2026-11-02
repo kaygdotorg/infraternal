@@ -78,10 +78,10 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
       onChange(listener) { window.addEventListener(EXTENDED_INFO_EVENT, listener); return () => window.removeEventListener(EXTENDED_INFO_EVENT, listener); },
     },
     // Offered only when the server says it can stream (D208): a server without the feature never shows a switch that does nothing.
-    ...(cx.appWindows?.serverCan ? [{
+    ...(cx.adapters.appWindows?.serverCan() ? [{
       id: "app-windows", title: "App windows", label: "Stream app windows", hint: "Open an app window or a whole screen from a Mac on the canvas",
-      get: () => cx.appWindows?.pref ?? false, set: (on: boolean) => cx.appWindows?.setWanted(on),
-      onChange: (listener: () => void) => cx.appWindows?.onChange(listener) ?? (() => undefined),
+      get: () => cx.adapters.appWindows?.pref ?? false, set: (on: boolean) => cx.adapters.appWindows?.setWanted(on),
+      onChange: (listener: () => void) => cx.adapters.appWindows?.onChange(listener) ?? (() => undefined),
     }] : []),
     ...(cx.adapters.startupHints?.switches() ?? [])],
     ...(cx.adapters.authority ? { statuses: [authorityPref(cx.adapters.authority)] } : {}),
@@ -97,8 +97,8 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
       case "hosts": {
         // The Settings windows are drawn at load, before the server has said what it can do: the panel draws again when that
         // changes, so the app-windows switch appears (and only then) without a reload.
-        let can = cx.appWindows?.serverCan, stop = renderHosts(pane, hostsApi());
-        const off = cx.appWindows?.onChange(() => { if (cx.appWindows?.serverCan === can) return; can = cx.appWindows?.serverCan; stop(); stop = renderHosts(pane, hostsApi()); });
+        let can = cx.adapters.appWindows?.serverCan(), stop = renderHosts(pane, hostsApi());
+        const off = cx.adapters.appWindows?.onChange(() => { if (cx.adapters.appWindows?.serverCan() === can) return; can = cx.adapters.appWindows?.serverCan(); stop(); stop = renderHosts(pane, hostsApi()); });
         return () => { off?.(); stop(); };
       }
       case "toolbar": return core.settingsPanels.toolbar.render(pane);

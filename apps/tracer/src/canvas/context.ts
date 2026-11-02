@@ -44,7 +44,7 @@ import type { SessionUi } from "./windows/session-hooks";
 import type { SettingsSource } from "./views/settings-body.on-demand";
 import type { RecentList } from "./recency";
 import type { AppWindowsAdapter } from "./appwin/adapter";
-import type { AppWindowsHook } from "./appwin/hook";
+import type { AppWindowsHook } from "./appwin/hook.on-demand";
 
 /** One window on the canvas: its card, its model and the things that must be undone when it goes. */
 export interface WinRec {
@@ -144,6 +144,12 @@ export interface Adapters {
   startupHints?: import("./sessions/startup-hints").StartupHints;
 }
 
+/** Loads the app-window runtime only after the desktop stream is wanted and supported. */
+export interface AppWindowsLoader {
+  load(): Promise<AppWindowsHook | undefined>;
+  dispose(): void;
+}
+
 export interface Ctx {
   readonly core: CoreScreen;
   readonly stage: HTMLElement;
@@ -188,6 +194,6 @@ export interface Ctx {
   toolbar: ToolbarModule;
   mesh?: MeshModule;
   sharing?: SharingModule;
-  /** App windows and screens; exists only with an `appWindows` adapter. */
-  appWindows?: AppWindowsHook;
+  /** Deferred loader for app-window and screen behavior; absent in mockups. */
+  appWindows?: AppWindowsLoader;
 }

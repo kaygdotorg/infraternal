@@ -46,7 +46,12 @@ export function createToolbar(cx: Ctx): ToolbarModule {
     // With app windows on, "+" opens the picker: the shells, screens and app windows of every machine behind one field (D208).
     // Without them it opens a shell on the first host, as it always did.
     add.addEventListener("click", (e) => {
-      if (cx.appWindows?.active) { cx.appWindows.togglePicker(add, e.detail === 0 ? "keyboard" : "pointer"); return; }
+      const appWindows = cx.adapters.appWindows;
+      if (appWindows?.available()) {
+        const loading = cx.appWindows?.load();
+        if (loading) { const source = e.detail === 0 ? "keyboard" : "pointer"; void loading.then((runtime) => { if (runtime && appWindows.available() && add.isConnected) runtime.togglePicker(add, source); }); }
+        return;
+      }
       const host = cx.adapters.sessions.hosts()[0]; if (host) cx.win.open(host.name);
     }, { signal });
   }

@@ -52,17 +52,11 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
     return;
   }
   if (m.kind === "app" || m.kind === "screen") {
-    // The stream's code loaded before this window could be opened (only it opens one); without it the window explains itself.
-    const binding = cx.adapters.appWindows ? cx.appWindows?.bindingFor(rec) : undefined;
-    if (!binding) {
-      const box = el("div", "cl-noaccess");
-      box.innerHTML = '<p class="cl-noaccess-title">App windows are off</p><p class="cl-noaccess-hint">Turn them on in Settings, Hosts, then open this window again.</p>';
-      body.append(box);
-      return;
-    }
-    rec.binding = binding;
-    rec.card.setStatus("connecting");
-    binding.mount(body);
+    let gone = false;
+    rec.cleanup = () => { gone = true; };
+    void onDemand(() => import("../appwin/body.on-demand")).then((module) => {
+      if (!gone && !rec.closing && rec.card.root.isConnected) module.mountAppWindowBody(cx, rec, () => gone);
+    }).catch(() => { if (!gone) body.textContent = "Could not load app windows. Try again."; });
     return;
   }
   if (m.kind === "settings") {

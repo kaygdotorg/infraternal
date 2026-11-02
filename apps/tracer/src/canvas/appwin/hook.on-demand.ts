@@ -1,15 +1,24 @@
 /**
- * App-window canvas lifecycle, loaded with its picker and stream body. Keeping the large feature module graph behind
- * this boundary leaves only the availability bridge in the shared canvas bundle.
+ * App-window canvas lifecycle, loaded only when the feature is wanted and supported. Keeping its module graph behind
+ * this boundary leaves the deferred canvas with a small availability loader.
  */
 import { whenIdle } from "../../on-demand";
+import type { PopoverSource } from "../../../../../packages/ui/src/anchored-popover";
+import type { PaletteEntry } from "../core-screen";
 import type { Ctx, WinRec } from "../context";
 import type { SessionBinding } from "../sessions/adapter";
 import type { AppWindowsAdapter } from "./adapter";
 import { createAppWindowsPart, type AppWindowsPart } from "./appwin.on-demand";
-import type { AppWindowsHook } from "./hook";
 
-/** Installs the feature lifecycle after the shared bridge has loaded this on-demand module. */
+export interface AppWindowsHook {
+  togglePicker(anchor: HTMLElement, source: PopoverSource, query?: string): void;
+  paletteEntries(): PaletteEntry[];
+  openFromPalette(value: string): void;
+  bindingFor(rec: WinRec): SessionBinding | undefined;
+  dispose(): void;
+}
+
+/** Installs the feature lifecycle after the canvas loader reaches this on-demand module. */
 export function installAppWindowsRuntime(cx: Ctx, adapter: AppWindowsAdapter): AppWindowsHook {
   let part: AppWindowsPart | undefined;
   let disposed = false;
@@ -37,16 +46,10 @@ export function installAppWindowsRuntime(cx: Ctx, adapter: AppWindowsAdapter): A
   if (adapter.available()) ensurePart();
   cx.core.refreshPalette();
   return {
-    get active() { return adapter.available(); },
-    get serverCan() { return adapter.serverCan(); },
-    get pref() { return adapter.pref; },
-    setWanted: (on) => adapter.setWanted(on),
-    onChange: (listener) => adapter.onChange(listener),
     togglePicker(anchor, source, query) { ensurePart()?.togglePicker(anchor, source, query); },
     paletteEntries: () => (adapter.available() ? part?.paletteEntries() ?? [] : []),
     openFromPalette(value) { ensurePart()?.openFromPalette(value); },
     bindingFor: (rec: WinRec): SessionBinding | undefined => part?.bindingFor(rec),
-    warm,
     dispose() {
       disposed = true;
       off();

@@ -38,7 +38,10 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
     if (host) cx.adapters.hostRemoval?.remove(host.id, host.name, active?.card.pill ?? core.stage);
   }
   else if (kind === "open" && value) cx.win.open(value);
-  else if (kind === "appwin" && value) cx.appWindows?.openFromPalette(value);
+  else if (kind === "appwin" && value) {
+    const loading = cx.appWindows?.load();
+    if (loading) void loading.then((runtime) => { if (runtime && cx.adapters.appWindows?.available()) runtime.openFromPalette(value); });
+  }
   else if (kind === "session" && value) { const [host, sid] = value.split("/"); if (host && sid) cx.win.openSession(host, sid); }
   else if (kind === "sessions") {
     const anchor = active?.card.header.querySelector<HTMLButtonElement>("[data-action='sessions']");
