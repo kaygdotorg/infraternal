@@ -236,7 +236,7 @@ fn run_namespace_case() {
             |errors| errors.iter().cloned().collect::<Vec<_>>().join("; "),
         );
         panic!(
-            "Pebble DNS-01 certificate and mesh route became ready; HTTPREQ calls={}; adapter errors={adapter_failures}; last verified curl={last_curl_failure}; unverified curl={unverified_curl}; Traefik logs:\n{captured_logs}",
+            "Pebble DNS-01 certificate and mesh route did not become trusted before the deadline; HTTPREQ calls={}; adapter errors={adapter_failures}; last verified curl={last_curl_failure}; unverified curl={unverified_curl}; Traefik logs:\n{captured_logs}",
             adapter.requests.load(Ordering::Relaxed)
         );
     };
