@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-only */
 /* The docs pages (docs-build.ts): ink and paper, following the system like the sign-in pages, with the
-   sign-in card's colours, the product's type scale (13 px, 16 px on touch) and weights, and no script.
+   sign-in card's colours, the product's type scale (13 px, 16 px on touch) and weights. One small deferred script (doc.js) marks the section being read.
    Mobile-first: one column, a 44 px target for every link row on touch, and the safe areas respected. */
 @font-face {
   font-family: "Maple Mono NF";

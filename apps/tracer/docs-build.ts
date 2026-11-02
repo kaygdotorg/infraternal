@@ -10,7 +10,9 @@
  * The server needs nothing for it: a page is `docs/<slug>/index.html`, which the web root serves for the
  * directory (and for `/docs/<slug>`, by redirect), with the `.br`/`.gz` encodings `precompress` writes next to it.
  * Markdown is rendered by the bundler's built-in renderer, so no dependency is added. The pages are plain HTML
- * and CSS with no script, so they are never part of the app's JavaScript budget (transfer-budget.ts).
+ * and CSS. The one script is `doc.js` (doc-page.ts, deferred): it marks the section being read in the contents and lets a code
+ * block be copied. It is a separate file from the app's bundle, so it is never part of the app's JavaScript budget
+ * (transfer-budget.ts); the canvas reader runs the same code from an on-demand chunk (docs-body.on-demand.ts).
  *
  * The reading aids (callouts, reasoning blocks, quick facts, citations, quotes, copyable code) are in docs-extras.ts.
  *
@@ -228,6 +230,7 @@ function page(title: string, body: string): string {
 <title>${escapeHtml(title)}</title>
 <link rel="stylesheet" href="/docs/docs.css">
 <link rel="stylesheet" href="/docs/doc.css">
+<script src="/docs/doc.js" defer></script>
 </head><body>
 <header><a href="/docs/">Infraternal docs</a></header>
 <main>
@@ -252,6 +255,9 @@ export async function buildDocs(out: string, source: string = USER_DOCS_DIR): Pr
     // The docs carry their own copy of the font, so the tree stands alone on a static host.
     cp(resolve(import.meta.dirname, "fonts/maple-mono-nf/roman.latin.woff2"), resolve(out, "fonts/roman.latin.woff2")),
   ]);
+  // The page script: the section being read, and copying code. Bundled here, minified, as a file of its own.
+  const script = await Bun.build({ entrypoints: [resolve(import.meta.dirname, "doc-page.ts")], target: "browser", minify: true, outdir: out, naming: { entry: "doc.js" } });
+  if (!script.success) throw new Error(`docs script: ${script.logs.map(String).join("; ")}`);
   const { index: frontText, pages } = await readUserDocs(source);
   const rendered = pages.map(({ slug, text }) => renderDoc(slug, text));
   const entries = rendered.map(({ slug, title, summary }) => ({ slug, title, summary }));
