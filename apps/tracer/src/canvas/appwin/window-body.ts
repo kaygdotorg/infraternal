@@ -30,6 +30,7 @@ import { DesktopKeyboard } from "../../../../../packages/protocol/src/desktop-in
 import { containedRect, framePoint, modifierBits, movedEnough, scrollDelta, wireButton } from "./input";
 import { controlLine, describe, type ControlState, type StateView, type StreamState } from "./status";
 import { AppStream } from "./stream";
+import { shapeStreamWindow } from "./shape";
 import type { AppTarget } from "./inventory";
 import type { StreamConnection } from "./adapter";
 
@@ -468,7 +469,7 @@ export class AppBinding implements SessionBinding {
   /** The canvas window takes the machine's shape (TASTE "A remote window takes its own shape"); a no-op once it has it. */
   /** `looking` marks the change as the window following the machine, so the size it causes never takes control. */
   private applyShape(aspect: number | undefined, looking: boolean): boolean {
-    if (aspect === undefined || this.disposed || !this.rec.shape?.(this.stage, aspect)) return false;
+    if (aspect === undefined || this.disposed || !shapeStreamWindow(this.cx, this.rec, this.stage, aspect)) return false;
     if (looking) this.shapedAt = performance.now();
     return true;
   }

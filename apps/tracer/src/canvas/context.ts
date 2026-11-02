@@ -65,11 +65,6 @@ export interface WinRec {
   binding?: SessionBinding;
   /** Releases what the body holds (a settings panel). */
   cleanup?: () => void;
-  /**
-   * Gives a streamed window the remote window's shape: the picture area `inner` gets `aspect` (width / height). Set by
-   * the frame for a window it can resize on its own; returns whether the frame changed.
-   */
-  shape?: (inner: HTMLElement, aspect: number) => boolean;
   /** Retained host setup status shown in the machine pill (addhost/setup-pill.on-demand.ts, D255). */
   setup?: { handlePill(source: "pointer" | "keyboard"): boolean; isPending(): boolean; dispose(): void };
 }
