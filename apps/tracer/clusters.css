@@ -415,7 +415,7 @@
 .cl-settings-nest > .ui-settings-pane { padding: 0; overflow: visible; }
 .cl-settings-later { margin: 0; padding: 0.5rem 0; color: var(--ui-text-secondary); font-size: var(--text-secondary, 0.75rem); line-height: 1.4; }
 
-/* A Settings window has no input lock, so its title pill does not leave room for one: it may use the whole header (the product's
-   cap is half of it, for the lock). Five windows to a row are a fifth of the screen each, and the cap cut "Profile" to "Pr…". */
-.cl[data-view="settings"] .ui-window-pill { max-width: 100%; }
+/* A Settings window has no input lock, so its title pill does not leave room for one: it may use the header up to its own action group (the
+   product's cap is half of it, for the lock, and cut "Published Services" to "Published Serv…"). The room left is the group's: 28 px per button and the gap. */
+.cl[data-view="settings"] .ui-window-pill { max-width: calc(100% - 3rem); }
 .cl-keys .ui-sp-sub { white-space: pre-line; }

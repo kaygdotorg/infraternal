@@ -51,8 +51,6 @@ import { createDataMode, mountDataToggle } from "./data-mode";
 import { DATA_IDS, type DataId } from "./data-ids";
 import type { AccountMock } from "./account";
 import { createStartupDemo } from "./startup-demo";
-import type { ColumnModel } from "../model/types";
-import { loadGroups } from "../layout/groups-handle";
 import { buildSettingsMapView, visibleMap } from "./settings-map/model";
 import { createMockDocs } from "./settings-map/docs-adapter";
 
@@ -149,7 +147,6 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     inventory.reset();
     const named = (host: string): { id: string; name: string } | undefined => { const id = DEFAULT_SESSION[host]; const rec = id ? inventory.get(host, id) : undefined; return rec ? { id: rec.id, name: rec.name } : undefined; };
     // `?settings=sections` (#304): Settings is built from the table, one row per component and one window per group.
-    let grid: ColumnModel[] | undefined;
     canvas.setViews((m: Metrics) => {
       const views = buildViews(world.role, m, mesh, world.screens, world.omit, sceneIndex === 6 && world.role === "operator", named);
       if (!settingsRows) return views;
@@ -158,18 +155,9 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       const built = views.map((v) => {
         if (v.id === "console" && noAccess) return { ...v, cols: v.cols.map((col) => ({ ...col, wins: col.wins.map((w) => (w.kind === "terminal" && w.host === noAccess ? { ...w, noAccess: true, lines: [] } : w)) })) };
         if (v.id !== "settings") return v;
-        const b = buildSettingsMapView(visibleMap(world.role === "operator"), m, cx.viewport.clientWidth || innerWidth, v); grid = b.cols; return b;
+        return buildSettingsMapView(visibleMap(world.role === "operator"), m, v);
       });
       return built;
-    });
-    // A view is built as plain columns, which drops the empty ones; the grid is then written back, as a saved layout is.
-    if (settingsRows && !state.metrics.narrow) void loadGroups().then((groups) => {
-      const c = cx.views.get("settings");
-      if (!c || !grid || signal.aborted) return;
-      groups.applyCols(cx, c, grid);
-      c.view.cols = grid;
-      cx.view.geometry(c);
-      cx.view.settle("settings", undefined, true);
     });
     cx.sharing?.reset();
   };

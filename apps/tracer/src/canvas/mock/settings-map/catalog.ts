@@ -82,7 +82,7 @@ export const SETTINGS_MAP: readonly ComponentDef[] = [
     { id: "scrollback", title: "Scrollback", settings: [
       { id: "scrollback-lines", title: "Lines Kept", explain: "How many lines each terminal keeps for you to scroll back through.", spec: { kind: "number", unit: "lines", default: 10000, min: 1000, max: 100000 } /* PLACEHOLDER */, keywords: "scrollback history buffer" },
     ] },
-    { id: "multiplexer", title: "Multiplexer", docs: { page: "multiplexer", heading: "what-it-does-for-you" }, settings: [
+    { id: "multiplexer", title: "Multiplexer", docs: { page: "terminal/multiplexer", heading: "offer-to-switch" }, settings: [
       { id: "multiplexer-offer", title: "Offer To Switch", explain: "Ask, in a new shell, whether to switch to the Infraternal Multiplexer.", spec: { kind: "switch", default: true } /* PLACEHOLDER */, keywords: "multiplexer tmux switch" },
     ] },
   ] },
@@ -90,25 +90,25 @@ export const SETTINGS_MAP: readonly ComponentDef[] = [
     { id: "profile", title: "Profile", facts: [ // PLACEHOLDER
       { title: "Who You Are", rows: [{ key: "Name", value: "Kay G" }, { key: "Username", value: "kayg" }, { key: "Email", value: "none yet" }] },
     ] },
-    { id: "passkeys", title: "Passkeys", docs: { page: "keys", heading: "passkey" }, facts: [ // PLACEHOLDER: from the account facts
+    { id: "passkeys", title: "Passkeys", docs: { page: "reference/keys", heading: "passkey" }, facts: [ // PLACEHOLDER: from the account facts
       { title: "Added", rows: [{ key: "iPhone 15", value: "added 2 weeks ago" }, { key: "MacBook Pro", value: "added 3 months ago" }] },
     ] },
-    { id: "recovery", title: "Recovery", docs: { page: "keys", heading: "recovery-words" }, facts: [
+    { id: "recovery", title: "Recovery", docs: { page: "reference/keys", heading: "recovery-words" }, facts: [
       { title: "Recovery Key", rows: [{ key: "Status", value: "saved" }, { key: "Last Checked", value: "6 days ago" }] },
     ] },
-    { id: "apps", title: "Apps", docs: { page: "keys", heading: "cli-sign-in-api-key" }, settings: [
+    { id: "apps", title: "Apps", docs: { page: "reference/keys", heading: "keys-last" }, settings: [
       { id: "app-key", title: "Keys Last", explain: "Each use starts the time again; a key unused this long stops working.", spec: days(30, 1, 365) /* OWNER 30 d sliding, 1–365 d */, keywords: "cli mcp api key token sliding" },
     ], keys: [ // PLACEHOLDER: the list of command-line and AI-tool keys (last used, expires, revoke)
       { id: "k1", name: "laptop", kind: "cli", lastUsed: "2 hours ago", expires: "in 28 days" },
       { id: "k2", name: "Claude Code", kind: "mcp", lastUsed: "yesterday", expires: "in 21 days" },
       { id: "k3", name: "build script", kind: "cli", lastUsed: "6 days ago", expires: "in 24 days" },
     ] },
-    { id: "devices", title: "Devices", docs: { page: "keys", heading: "browser-sign-in" }, settings: [
+    { id: "devices", title: "Devices", docs: { page: "reference/keys", heading: "browsers-stay-signed-in-for" }, settings: [
       { id: "browser-session", title: "Browsers Stay Signed In For", explain: "Every visit starts the time again; a browser unused this long signs out.", spec: days(30, 1, 90) /* OWNER 30 d sliding, 1–90 d */, keywords: "login session browser cookie sliding" },
     ], panel: "devices" },
   ] },
   { id: "machines", title: "Machines", icon: "machines", admin: true, groups: [
-    { id: "new-machines", title: "New Machines", docs: { page: "keys", heading: "host-join-token" }, settings: [
+    { id: "new-machines", title: "New Machines", docs: { page: "reference/keys", heading: "add-link-lasts" }, settings: [
       { id: "add-link", title: "Add Link Lasts", explain: "How long the one-time link for adding a machine works.", spec: minutes(15, 1, 60) /* OWNER 15 min; range PLACEHOLDER */, keywords: "add host token enrol enroll link" },
       { id: "join-code", title: "Join Code Lasts", explain: "How long the short code you type after “up” works.", spec: minutes(10, 1, 30) /* OWNER 10 min; range PLACEHOLDER */, keywords: "up code join" },
       { id: "install-mode", title: "Install For", explain: "Whether a new machine gets infraternal for the whole system or for one user.", spec: { kind: "choice", options: [{ id: "system", label: "System" }, { id: "user", label: "User" }], default: "system" } /* default PLACEHOLDER */, keywords: "install mode root rootless" },
@@ -120,7 +120,7 @@ export const SETTINGS_MAP: readonly ComponentDef[] = [
     ] },
   ] },
   { id: "mesh", title: "Mesh", icon: "mesh", admin: true, groups: [
-    { id: "keys", title: "Keys", docs: { page: "keys", heading: "wireguard-session-keys" }, settings: [
+    { id: "keys", title: "Keys", docs: { page: "reference/keys", heading: "connection-keys" }, settings: [
       { id: "connection-keys", title: "Connection Keys", explain: "How often every machine swaps the keys that encrypt mesh traffic (WireGuard).", spec: days(7, 1, 30) /* OWNER 7 d; range PLACEHOLDER */, keywords: "wireguard rotation rotate encryption" },
       { id: "machine-identity", title: "Machine Identity", explain: "How often each machine replaces the key that proves who it is.", spec: days(7, 1, 90) /* OWNER 7 d; range PLACEHOLDER */, keywords: "identity rotation rotate key" },
       { id: "renewal-window", title: "Renewal Grace Period", explain: "A machine whose certificate ran out can still renew itself for this long, then it must be added again.", spec: days(90, 1, 365) /* OWNER 90 d after expiry; range PLACEHOLDER */, keywords: "certificate renew expiry self-renewal" },

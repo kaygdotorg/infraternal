@@ -12,10 +12,10 @@ import { SETTINGS_MAP } from "./catalog";
 import { STAND_IN } from "./docs-standin";
 import { spotByWindow } from "./model";
 
-const TERMINAL: DocsLink = { page: "multiplexer", heading: "what-it-does-for-you" };
-const NO_ACCESS: DocsLink = { page: "keys", heading: "at-a-glance" };
+const TERMINAL: DocsLink = { page: "terminal/multiplexer", heading: "what-it-does-for-you" };
+const NO_ACCESS: DocsLink = { page: "reference/keys", heading: "all-keys-at-a-glance" };
 /** The add-host dialog is a window titled "Add hosts". */
-const ADD_HOST: DocsLink = { page: "keys", heading: "host-join-token" };
+const ADD_HOST: DocsLink = { page: "reference/keys", heading: "host-join-token" };
 
 /** `source` is read when a button is pressed: the docs source is made after the canvas, which needs this adapter first. */
 export function createMockDocs(source: () => DocsSource | undefined): DocsAdapter {

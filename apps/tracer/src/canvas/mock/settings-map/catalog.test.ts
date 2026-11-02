@@ -3,29 +3,29 @@
 import { expect, test } from "bun:test";
 import { parseValue, defaultValue, formatValue } from "../../../../../../packages/ui/src/setting-value";
 import { SETTINGS_MAP } from "./catalog";
-import { LEGACY, MAX_WINDOWS, entriesOf, locate, spots, trackPlan, valueOf, visibleMap, winId } from "./model";
+import { defaultWidth, metricsFor } from "../../layout/geometry";
+import { runsOf } from "../../layout/grid";
+import { LEGACY, SETTINGS_ROWS, buildSettingsMapView, entriesOf, locate, spots, valueOf, visibleMap, winId } from "./model";
 
-test("no row holds more windows than the grid is planned for", () => {
-  for (const comp of SETTINGS_MAP) expect(comp.groups.length).toBeLessThanOrEqual(MAX_WINDOWS);
-});
-
-test("the tracks make every window of every row exactly as wide as the others in its row, and every row flush", () => {
-  for (const counts of [[4, 3, 5, 2, 4, 2, 2], [5, 2, 1, 1, 1], [3], [1], [5]]) for (const target of [1428, 1100, 1900]) {
-    const plan = trackPlan(counts, target, 12);
-    const total = plan.widths.reduce((a, b) => a + b, 0) + 12 * (plan.widths.length - 1);
-    for (const n of new Set(counts)) {
-      const sizes = Array.from({ length: n }, (_, k) => {
-        const { start, span } = plan.place(n, k);
-        expect(start).toBeGreaterThanOrEqual(0);
-        return plan.widths.slice(start, start + span).reduce((a, b) => a + b, 0) + 12 * (span - 1);
-      });
-      for (const s of sizes) expect(Math.abs(s - sizes[0]!)).toBeLessThan(0.01);
-      expect(Math.abs(sizes.reduce((a, b) => a + b, 0) + 12 * (n - 1) - total)).toBeLessThan(0.01);
-    }
-    // Every track has a window that starts in it (the canvas drops a track without one).
-    const starts = new Set<number>();
-    for (const n of new Set(counts)) for (let k = 0; k < n; k++) starts.add(plan.place(n, k).start);
-    expect(starts.size).toBe(plan.widths.length);
+test("Settings is one row of windows for each component: one grid, the layout's size, no window spans", () => {
+  for (const admin of [true, false]) for (const [w, h, coarse] of [[1440, 900, false], [1024, 768, false], [2560, 1300, false], [393, 852, true]] as const) {
+    const m = metricsFor(w, h, coarse);
+    const map = visibleMap(admin);
+    const view = buildSettingsMapView(map, m, { id: "settings", name: "Settings", layout: "tiled", cols: [], nodes: [], x: 0, y: 0 });
+    // One column for each window of the longest row, every one the width a terminal window has (Window Sizes): the screen is the only input.
+    const tracks = Math.max(...map.map((c) => c.groups.length));
+    expect(view.cols.length).toBe(tracks);
+    for (const col of view.cols) { expect(col.w).toBe(defaultWidth(m, tracks)); expect(col.group).toBe(SETTINGS_ROWS); }
+    // A component is a band, its windows in the tracks from the left, in the order of the table, at the layout's height; no window has a span.
+    map.forEach((comp, band) => comp.groups.forEach((g, k) => {
+      const win = view.cols[k]!.wins.find((x) => x.id === winId(comp.id, g.id));
+      expect(win?.row, `${comp.id} is band ${band}`).toBe(band);
+      expect(win?.h).toBe(1);
+      expect(win?.span).toBeUndefined(); expect(win?.rows).toBeUndefined();
+    }));
+    // The canvas sees it as ONE group, with every track in it, although no window crosses a seam.
+    const runs = runsOf(view.cols.map((c) => ({ ...(c.group !== undefined ? { group: c.group } : {}), wins: c.wins.map((x) => ({ span: x.span ?? 1, ...(x.row !== undefined ? { row: x.row } : {}) })) })));
+    expect(runs).toEqual([{ from: 0, to: tracks - 1, rows: map.length }]);
   }
 });
 
@@ -72,7 +72,7 @@ test("an administrator sees every row; others only the personal ones, and no row
 test("a window's docs link points at a page, and only the windows the owner named have one", () => {
   const linked = spots(SETTINGS_MAP).filter((s) => s.group.docs).map((s) => `${s.comp.id}.${s.group.id}`);
   expect(linked).toEqual(["terminal.multiplexer", "you.passkeys", "you.recovery", "you.apps", "you.devices", "machines.new-machines", "mesh.keys"]);
-  for (const { group } of spots(SETTINGS_MAP)) if (group.docs) expect(["keys", "multiplexer"]).toContain(group.docs.page);
+  for (const { group } of spots(SETTINGS_MAP)) if (group.docs) expect(["reference/keys", "terminal/multiplexer"]).toContain(group.docs.page);
 });
 
 test("the owner's map: rows, windows and their order", () => {
