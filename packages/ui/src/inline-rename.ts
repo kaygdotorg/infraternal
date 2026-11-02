@@ -168,6 +168,21 @@ export function placeOverName(name: HTMLElement, container: HTMLElement, input: 
   for (let el = name.parentElement; el && el !== container; el = el.parentElement) {
     if (getComputedStyle(el).overflowX !== "visible") right = Math.min(right, el.getBoundingClientRect().right);
   }
+  // A clip that cuts the name's own room short (a pill that cannot grow, on a phone, beside a status icon) must not cut the
+  // typing room too: the field takes the free room after the name, up to whatever is drawn next to it, until its text fits.
+  const wanted = at.left + (textPx + 1) * scale;
+  if (right < wanted) {
+    let free = box.right;
+    search: for (let el: HTMLElement | null = name; el && el !== container; el = el.parentElement) {
+      for (let sibling = el.nextElementSibling; sibling; sibling = sibling.nextElementSibling) {
+        const r = sibling.getBoundingClientRect();
+        if (sibling === input || r.width < 0.5 || r.height < 0.5 || getComputedStyle(sibling).visibility === "hidden") continue;
+        free = r.left - (FIELD_PAD_PX + 1) * scale; // the field's box reaches its padding and the caret pixel past `right`
+        break search;
+      }
+    }
+    right = Math.max(right, Math.min(wanted, free));
+  }
   // One pixel more than the name, so the caret at the end of a name that fills the box does not scroll the text.
   const width = (right - at.left) / scale + 2 * FIELD_PAD_PX + 1;
   input.style.cssText = `${fontCss}position:absolute;z-index:2;left:${left}px;top:${(at.top - box.top + at.height / 2) / scale}px;transform:translateY(-50%);width:${width}px;padding:0 ${FIELD_PAD_PX}px;max-width:calc(100% - ${Math.max(left, 0)}px)`;
