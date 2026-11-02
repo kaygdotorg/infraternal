@@ -4,9 +4,13 @@
  * desktop, in the ink and paper themes. A list reads as one: when any row's hint does not fit beside its name, every row of
  * that list puts the hint under the name, left-aligned with it; otherwise every hint is beside its name. Each section's own
  * list must be on screen before anything is measured, so the spec cannot pass on the wrong view.
- * Alignment (owner, 2026-11-01): hints never follow the length of their own name. Beside their names, every hint of a
- * list starts at one x; under their names, at the name's own x; both within 0.5 px. Section headings sit one shared gap
- * above their first row (`--ui-heading-gap`, packages/ui), in every heading style the package has.
+ * Alignment (owner, 2026-11-02, #306: "Paper (left aligned) ... light (right aligned)... if the width is smaller ... 'light'
+ * becomes a subtitle to Paper"): names are left, descriptions right-aligned and ending at one x in every row, selected or
+ * not, before the tick's own fixed column; when the list is too narrow every description is a left-aligned subtitle on
+ * its name's x and no name is truncated. Rows start on their heading's left edge, and the names of every list in a window
+ * share one left edge (the swatch's place is reserved only where the window has a swatch list). All within 0.5 px.
+ * Section headings sit one shared gap above their first row (`--ui-heading-gap`, packages/ui), in every heading style
+ * the package has.
  * Review screenshots land in the external job evidence directory.
  */
 import { tracerEvidencePath } from "./evidence-path";
@@ -16,7 +20,7 @@ import { resolve } from "node:path";
 import { uiFactor } from "./ui-factor";
 
 const captures = tracerEvidencePath("settings-rows");
-const SIZES = [{ w: 375, h: 667, touch: true }, { w: 393, h: 852, touch: true }, { w: 1440, h: 900, touch: false }] as const;
+const SIZES = [{ w: 375, h: 667, touch: true, dpr: 3 }, { w: 393, h: 852, touch: true, dpr: 3 }, { w: 1440, h: 900, touch: false, dpr: 2 }] as const;
 /** Each section, the palette words that open it, and a list that proves the section is the one on screen. */
 const SECTIONS = [
   { name: "Appearance", words: "settings: appearance", list: "Theme" },
@@ -37,17 +41,25 @@ const rows = (page: Page) => page.evaluate(() => [...document.querySelectorAll<H
   const l = label.getBoundingClientRect(), h = hint.getBoundingClientRect(), row = t.closest(".ui-sp-row")!.getBoundingClientRect();
   const line = parseFloat(getComputedStyle(label).lineHeight) || parseFloat(getComputedStyle(label).fontSize) * 1.3;
   const hasHint = hint.textContent !== "";
+  const rowEl = t.closest(".ui-sp-row")!, list = t.closest(".ui-sp-list")!;
+  const text = t.getBoundingClientRect(), tickEl = rowEl.querySelector(".ui-sp-tick")!, tickRect = tickEl.getBoundingClientRect();
+  // An unselected tick is drawn scaled down (its reveal animation), which shrinks its rect around its centre: measure the
+  // column it occupies in the layout, its centre and its used width.
+  const tickHalf = (parseFloat(getComputedStyle(tickEl).width) || 0) / 2, tickMid = tickRect.left + tickRect.width / 2;
   return {
+    window: t.closest(".ui-window")?.getAttribute("data-window-id") ?? "", mode: list.hasAttribute("data-stacked") ? "stacked" : "beside",
+    headingLeft: list.previousElementSibling!.getBoundingClientRect().left, rowLeft: row.left, firstLeft: rowEl.firstElementChild!.getBoundingClientRect().left,
+    tickLeft: tickMid - tickHalf, tickRight: tickMid + tickHalf, textRight: text.right, labelRight: l.right, truncated: label.scrollWidth > label.clientWidth + 0.5 || getComputedStyle(label).textOverflow === "ellipsis",
     list: t.closest(".ui-sp-list")!.getAttribute("aria-label")!, name: label.textContent!, hint: hint.textContent!, hasHint, labelH: l.height, line, clipped: label.scrollWidth > label.clientWidth + 1,
     overlap: hasHint && l.left < h.right && h.left < l.right && l.top < h.bottom && h.top < l.bottom,
     stacked: hasHint && h.top >= l.bottom - 1, hintLeft: h.left, labelLeft: l.left, rowW: row.width, rowRight: row.right, hintRight: h.right, hintH: h.height,
   };
 }));
 
-for (const theme of ["ink", "paper"]) for (const { w, h, touch } of SIZES) test(`settings rows ${theme} ${w}x${h}: names are one line and never meet their hints`, async ({ browser }) => {
+for (const theme of ["ink", "paper"]) for (const { w, h, touch, dpr } of SIZES) test(`settings rows ${theme} ${w}x${h}: names are one line and never meet their hints`, async ({ browser }) => {
   test.setTimeout(120_000);
   await mkdir(captures, { recursive: true });
-  const context = await browser.newContext({ viewport: { width: w, height: h }, hasTouch: touch, isMobile: touch, deviceScaleFactor: touch ? 3 : 1 });
+  const context = await browser.newContext({ viewport: { width: w, height: h }, hasTouch: touch, isMobile: touch, deviceScaleFactor: dpr });
   const page = await context.newPage();
   try {
     // The test double is shared and occasionally slow to hand the canvas its first windows; reload rather than fail on that.
@@ -84,13 +96,38 @@ for (const theme of ["ink", "paper"]) for (const { w, h, touch } of SIZES) test(
         if (r.hasHint) expect(r.hintRight, `${section.name}/${r.name}: hint stays inside the row`).toBeLessThanOrEqual(r.rowRight + 0.5);
         if (r.stacked) expect(Math.abs(r.hintLeft - r.labelLeft), `${section.name}/${r.name}: stacked hint aligns with the name`).toBeLessThanOrEqual(0.5);
       }
-      // Beside their names: one column per list, whatever the length of each name.
+      const spread = (xs: number[]): number => Math.max(...xs) - Math.min(...xs);
       for (const name of new Set(list.map((r) => r.list))) {
-        const beside = list.filter((r) => r.list === name && r.hasHint && !r.stacked).map((r) => r.hintLeft);
-        if (beside.length > 1) expect(Math.max(...beside) - Math.min(...beside), `${section.name}/${name}: hints share one left edge`).toBeLessThanOrEqual(0.5);
-        const names = list.filter((r) => r.list === name).map((r) => r.labelLeft);
-        expect(Math.max(...names) - Math.min(...names), `${section.name}/${name}: names share one left edge`).toBeLessThanOrEqual(0.5);
+        const own = list.filter((r) => r.list === name);
+        // Beside their names the descriptions are right-aligned: one right edge for the list, whatever the length of each
+        // description or name, and clear of the tick's own column (a selected row ends where an unselected one does).
+        const beside = own.filter((r) => r.hasHint && !r.stacked);
+        if (beside.length > 1) expect(spread(beside.map((r) => r.hintRight)), `${section.name}/${name}: descriptions share one right edge`).toBeLessThanOrEqual(0.5);
+        for (const r of beside) expect(r.hintRight, `${section.name}/${r.name}: the description ends before the tick column`).toBeLessThanOrEqual(r.tickLeft + 0.5);
+        expect(spread(own.map((r) => r.tickRight)), `${section.name}/${name}: the tick has one fixed column`).toBeLessThanOrEqual(0.5);
+        for (const r of own) expect(Math.abs(r.tickRight - r.rowRight), `${section.name}/${r.name}: the tick column is the row's far right`).toBeLessThanOrEqual(0.5);
+        // Under their names, subtitles sit on the name's own x (asserted per row above) and nothing is truncated.
+        for (const r of own) {
+          expect(r.truncated, `${section.name}/${r.name}: the name is never truncated`).toBe(false);
+          expect(r.labelRight, `${section.name}/${r.name}: the name fits its column`).toBeLessThanOrEqual(r.textRight + 0.5);
+        }
+        expect(spread(own.map((r) => r.labelLeft)), `${section.name}/${name}: names share one left edge`).toBeLessThanOrEqual(0.5);
+        // Rows start on their heading's left edge: no extra indent.
+        for (const r of own) {
+          expect(Math.abs(r.rowLeft - r.headingLeft), `${section.name}/${r.name}: the row starts on its heading's left edge`).toBeLessThanOrEqual(0.5);
+          expect(Math.abs(r.firstLeft - r.headingLeft), `${section.name}/${r.name}: its first mark (swatch, or the name) sits on that edge`).toBeLessThanOrEqual(0.5);
+        }
       }
+      // Names share one left edge across every list of one window, and a window without swatches leaves no empty slot.
+      for (const win of new Set(list.map((r) => r.window))) {
+        const inWindow = list.filter((r) => r.window === win);
+        expect(spread(inWindow.map((r) => r.labelLeft)), `${section.name}/${win}: names of every list in the window share one left edge`).toBeLessThanOrEqual(0.5);
+        for (const r of inWindow.filter((x) => x.list === "Phones" || x.list === "Desktop")) expect(Math.abs(r.labelLeft - r.headingLeft), `${section.name}/${r.name}: no empty swatch slot`).toBeLessThanOrEqual(0.5);
+      }
+      // The whole list decides together, and by the list's width: phones stack the long Window Sizes descriptions under
+      // their names; Theme's one-word descriptions stay beside at every width we ship.
+      if (section.name === "Window Sizes" && w < 600) for (const r of list.filter((x) => x.list === "Phones")) expect(r.mode, `${r.name}: narrow lists show subtitles`).toBe("stacked");
+      if (section.name === "Appearance") for (const r of list.filter((x) => x.list === "Theme")) expect(r.mode, `${r.name}: short descriptions stay beside`).toBe("beside");
       // The heading sits the shared gap above the first row: the gap is the heading's own bottom padding.
       const gap = await page.evaluate((listName) => {
         const l = document.querySelector(`.ui-sp-list[aria-label="${listName}"]`)!;
@@ -107,6 +144,8 @@ for (const theme of ["ink", "paper"]) for (const { w, h, touch } of SIZES) test(
       expect(Math.abs(gap.padding - gap.token), `${section.name}: heading gap equals the token`).toBeLessThanOrEqual(0.5);
       expect(Math.abs(gap.between), `${section.name}: nothing but the heading's own padding sits between it and its list`).toBeLessThanOrEqual(0.5);
       await page.screenshot({ path: resolve(captures, `${section.name.replace(/ /g, "-").toLowerCase()}-${theme}-${w}x${h}.png`) });
+      // 2× crop of the section's own window, for the review of the alignment by eye.
+      await page.locator(`.ui-window:has(.ui-sp-list[aria-label="${section.list}"])`).first().screenshot({ path: resolve(captures, `${section.name.replace(/ /g, "-").toLowerCase()}-${theme}-${w}x${h}-window.png`) }).catch(() => undefined);
     }
   } finally { await context.close(); }
 });

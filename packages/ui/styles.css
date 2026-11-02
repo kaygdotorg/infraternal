@@ -929,20 +929,29 @@
 .ui-sp-row { display: flex; align-items: center; gap: 0.625rem; width: 100%; min-height: var(--ui-row-h, 2rem); padding: 0 0.5rem; border: 0; border-radius: 0.5rem; background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
 .ui-sp-row:active { transform: scale(var(--ui-press-scale, 0.97)); }
 @media (hover: hover) and (pointer: fine) { .ui-sp-row:hover { background: var(--hover); } }
-.ui-sp-swatch { position: relative; flex: none; width: 1.125rem; height: 1.125rem; border-radius: 50%; border: 1px solid var(--overlay-line); }
+.ui-sp-swatch, .ui-sp-slot { flex: none; width: 1.125rem; height: 1.125rem; }
+.ui-sp-swatch { position: relative; border-radius: 50%; border: 1px solid var(--overlay-line); }
 .ui-sp-swatch::after { content: ""; position: absolute; right: 2px; bottom: 2px; width: 0.375rem; height: 0.375rem; border-radius: 50%; background: var(--dot); }
-/* Name and hint share a line: the name is one unbreakable line and the hint sits right-aligned beside it. When the list's
-   widest row does not fit (decided per list in fitHints) the list is `data-stacked` and every hint sits under its name,
-   left-aligned, balanced and allowed two lines. The tick stays centred on the row. */
-.ui-sp-text { display: flex; flex: 1; align-items: baseline; column-gap: 0.625rem; min-width: 0; padding: 0.3125rem 0; }
-/* Beside its name, a hint starts where the list's widest name ends (fitHints sets --ui-sp-label-w), so a list's hints
-   share one left edge instead of following each name's length. */
-.ui-sp-text .ui-sp-label { flex: none; width: var(--ui-sp-label-w, auto); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-[data-stacked] > .ui-sp-row .ui-sp-label { width: auto; }
-.ui-sp-text .ui-sp-hint { flex: none; white-space: nowrap; color: var(--ui-text-secondary); }
+/* An option row (choice list): the name is left, the description is right-aligned at the end of the text column, and the
+   tick keeps its own fixed column after it (always laid out, only its opacity changes), so every description of a list
+   ends at one x whether or not its row is selected. The name is one unbreakable line and is never truncated. When the
+   list's widest row does not fit (decided per list in fitHints) the list is `data-stacked` and every description sits
+   under its name as a left-aligned subtitle, balanced and allowed two lines. The tick stays centred on the row. */
+.ui-sp-text { display: flex; flex: 1; align-items: baseline; justify-content: space-between; column-gap: 0.625rem; min-width: 0; padding: 0.3125rem 0; }
+.ui-sp-text .ui-sp-label { flex: none; white-space: nowrap; }
+.ui-sp-text .ui-sp-hint { flex: none; margin-left: auto; text-align: right; white-space: nowrap; color: var(--ui-text-secondary); }
 .ui-sp-text .ui-sp-hint:empty { display: none; }
-[data-stacked] > .ui-sp-row .ui-sp-text { flex-direction: column; align-items: flex-start; row-gap: 1px; }
-[data-stacked] > .ui-sp-row .ui-sp-hint { white-space: normal; text-wrap: balance; max-width: 100%; }
+[data-stacked] > .ui-sp-row .ui-sp-text { flex-direction: column; align-items: flex-start; justify-content: flex-start; row-gap: 1px; }
+[data-stacked] > .ui-sp-row .ui-sp-hint { margin-left: 0; text-align: left; white-space: normal; text-wrap: balance; max-width: 100%; }
+/* Rows of a choice list start at their heading's left edge: no indent, so the swatch or the name sits exactly under the
+   heading's first letter. The hover fill still has room around the content: it is a pseudo-element that bleeds 0.5rem to
+   each side into the pane's own padding (the row's box, and so every measurement of it, stays on the heading's edge). */
+.ui-sp-list[role="radiogroup"] > .ui-sp-row { position: relative; isolation: isolate; padding: 0; }
+.ui-sp-list[role="radiogroup"] > .ui-sp-row::before { content: ""; position: absolute; inset: 0 -0.5rem; z-index: -1; border-radius: 0.5rem; pointer-events: none; transition: background-color 140ms ease; }
+@media (hover: hover) and (pointer: fine) {
+  .ui-sp-list[role="radiogroup"] > .ui-sp-row:hover { background: none; }
+  .ui-sp-list[role="radiogroup"] > .ui-sp-row:hover::before { background: var(--hover); }
+}
 .ui-sp-hint { color: var(--ui-text-secondary); }
 /* A destructive row (remove, sign out) names its action in the danger colour; the hint under it stays quiet. */
 .ui-sp-row[data-tone="danger"] .ui-sp-label { color: var(--danger); }

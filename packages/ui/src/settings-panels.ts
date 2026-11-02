@@ -55,12 +55,15 @@ function heading(text: string): HTMLElement {
 export interface ChoiceItem { id: string; label: string; hint?: string; swatch?: { bg: string; accent: string } }
 
 /**
- * Decides once per list, and again only when its width changes (a ResizeObserver callback, never per frame), how hints
- * sit with their names. Beside: every name takes the width of the list's widest name (`--ui-sp-label-w`), so all hints
- * start at one x, a column, however long each name is. Under: when the widest name + gap + the longest hint is wider than the
- * room the list has, every row puts its hint under its name instead. Measured in the inline layout, where names and hints
- * are `nowrap` and report their natural widths. One decision per list keeps every row's hint in the same place, and a
- * stacked list does not jump when the selection changes.
+ * Decides once per list, and again only when its width changes (a ResizeObserver on the list itself, the list being the
+ * container: never the viewport, never per frame), how descriptions sit with their names. Beside: the name is left and
+ * the description right-aligned at the end of the text column (see the CSS), the layout of every row that fits. Under:
+ * when any row's name + gap + description is wider than the room the list's text column has, every row of the list puts
+ * its description under its name as a subtitle instead. Each row is measured against its own two widths, not against the
+ * widest name, because beside the names no longer share a column. Measured in the beside layout, where names and
+ * descriptions are `nowrap` and report their natural widths. One decision per list keeps every row in the same mode (a
+ * short row never stacks alone or stays beside while its siblings stack), and a stacked list does not jump when the
+ * selection changes. A CSS container query cannot compare a container with the width of its own text, hence the observer.
  */
 function fitHints(list: HTMLElement): void {
   let width = -1;
@@ -68,15 +71,15 @@ function fitHints(list: HTMLElement): void {
     if (!list.isConnected) { observer.disconnect(); return; }
     if (list.clientWidth === 0) return;
     list.removeAttribute("data-stacked");
-    list.style.removeProperty("--ui-sp-label-w");
-    const texts = [...list.querySelectorAll<HTMLElement>(".ui-sp-text")];
-    const hinted = texts.filter((t) => t.querySelector<HTMLElement>(".ui-sp-hint")!.textContent !== "");
+    const hinted = [...list.querySelectorAll<HTMLElement>(".ui-sp-text")].filter((t) => t.querySelector<HTMLElement>(".ui-sp-hint")!.textContent !== "");
     if (hinted.length === 0) return;
-    // Rounded up so a name never loses a fraction of a pixel to its own column and gets an ellipsis. The used width, not a
-    // rect: a rect carries every transform above it (the canvas camera's zoom), and a column measured at 0.8 would clip at 1.
-    const column = Math.ceil(Math.max(...texts.map((t) => Number.parseFloat(getComputedStyle(t.querySelector<HTMLElement>(".ui-sp-label")!).width) || 0)));
-    list.style.setProperty("--ui-sp-label-w", `${column}px`);
-    const stack = hinted.some((t) => column + 10 + t.querySelector<HTMLElement>(".ui-sp-hint")!.scrollWidth > t.clientWidth);
+    // The used widths, not rects: a rect carries every transform above it (the canvas camera's zoom), and a name measured
+    // at 0.8 would be judged to fit at 1. Rounded up so a fraction of a pixel never lets a name touch its description.
+    const used = (n: Element): number => Number.parseFloat(getComputedStyle(n).width) || 0;
+    const stack = hinted.some((t) => {
+      const gap = Number.parseFloat(getComputedStyle(t).columnGap) || 0;
+      return Math.ceil(used(t.querySelector(".ui-sp-label")!) + gap + used(t.querySelector(".ui-sp-hint")!)) > used(t);
+    });
     if (stack) list.dataset.stacked = "";
   };
   const observer = new ResizeObserver(() => {
@@ -89,12 +92,14 @@ function fitHints(list: HTMLElement): void {
 }
 
 /**
- * A titled radio list of rows: a label, an optional quiet subtitle (the technical detail) and a tick on the current one.
- * The name never wraps. A list reads as one: if the widest row cannot hold its name and hint on one line, every row of the
- * list puts its hint under its name (`data-stacked` on the list, see `fitHints`), so text never collides at any width
- * (TASTE: "Text never collides").
+ * A titled radio list of rows: a label on the left, an optional quiet description (the technical detail) on the right, and
+ * a tick in its own column at the far right on the current one. The name never wraps and is never truncated. A list reads
+ * as one: if any row cannot hold its name and description on one line, every row of the list puts its description under
+ * its name as a subtitle (`data-stacked` on the list, see `fitHints`), so text never collides at any width (TASTE: "Text
+ * never collides"). `reserveSwatch` keeps the swatch's place empty in a list without swatches whose window also has a list
+ * with them (Settings → Appearance), so names line up across the window; a window without swatches reserves nothing.
  */
-function choiceBlock(title: string, items: ChoiceItem[], kind: string, current: () => string, pick: (id: string) => void): HTMLElement {
+function choiceBlock(title: string, items: ChoiceItem[], kind: string, current: () => string, pick: (id: string) => void, reserveSwatch = false): HTMLElement {
   const block = document.createElement("section");
   block.append(heading(title));
   const list = document.createElement("div");
@@ -107,7 +112,8 @@ function choiceBlock(title: string, items: ChoiceItem[], kind: string, current: 
     row.className = "ui-sp-row";
     row.dataset.id = item.id;
     row.setAttribute("role", "radio");
-    row.innerHTML = `${item.swatch ? '<span class="ui-sp-swatch" aria-hidden="true"></span>' : ""}<span class="ui-sp-text"><span class="ui-sp-label"></span><span class="ui-sp-hint"></span></span><svg class="ui-sp-tick" viewBox="0 0 24 24" aria-hidden="true">${CHECK}</svg>`;
+    const lead = item.swatch ? '<span class="ui-sp-swatch" aria-hidden="true"></span>' : reserveSwatch ? '<span class="ui-sp-slot" aria-hidden="true"></span>' : "";
+    row.innerHTML = `${lead}<span class="ui-sp-text"><span class="ui-sp-label"></span><span class="ui-sp-hint"></span></span><svg class="ui-sp-tick" viewBox="0 0 24 24" aria-hidden="true">${CHECK}</svg>`;
     (row.querySelector(".ui-sp-label") as HTMLElement).textContent = item.label;
     (row.querySelector(".ui-sp-hint") as HTMLElement).textContent = item.hint ?? "";
     const sw = row.querySelector<HTMLElement>(".ui-sp-swatch");
@@ -220,9 +226,10 @@ export function renderAppearance(container: HTMLElement, api: AppearanceApi): ()
   root.className = "ui-sp";
   container.append(root);
 
-  const choices = (title: string, items: ChoiceItem[], kind: string, current: () => string): HTMLElement => choiceBlock(title, items, kind, current, (id) => api.act(`${kind}:${id}`));
+  // Themes carry a swatch and fonts do not: the font list keeps the swatch's place so both lists' names share one left edge.
+  const choices = (title: string, items: ChoiceItem[], kind: string, current: () => string, reserveSwatch = false): HTMLElement => choiceBlock(title, items, kind, current, (id) => api.act(`${kind}:${id}`), reserveSwatch);
   const theme = choices("Theme", api.themes.map((t) => ({ id: t.id, label: t.name, hint: t.dark ? "dark" : "light", swatch: { bg: t.bg, accent: t.accent } })), "theme", () => api.state().theme);
-  const font = choices("Font", api.fonts.map((f) => ({ id: f.id, label: f.label, hint: f.hint })), "font", () => api.state().font);
+  const font = choices("Font", api.fonts.map((f) => ({ id: f.id, label: f.label, hint: f.hint })), "font", () => api.state().font, api.themes.length > 0);
   const background = document.createElement("section");
   background.append(heading("Background"));
   const bgTabs = createCapsuleTabs([{ id: "none", label: "Plain" }, { id: "soft", label: "Soft" }, { id: "mesh", label: "Mesh" }], api.state().background, (id) => api.act(`bg:${id}`), "Background");
