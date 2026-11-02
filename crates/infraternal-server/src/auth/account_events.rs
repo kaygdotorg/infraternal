@@ -220,17 +220,20 @@ mod tests {
         // Public auth futures may be dropped from a thread with no runtime entered.
         std::thread::scope(|scope| scope.spawn(move || drop(commit)).join().unwrap());
         reader.rollback().await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        // The pool has one connection, so this read waits behind the detached
+        // commit itself. The generous bound catches a lost commit without making
+        // ordinary scheduler delay part of the behavior under test.
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM state")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(rows, 1);
             revoked.changed().await.unwrap();
             events.changed().await.unwrap();
         })
         .await
-        .unwrap();
-        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM state")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(rows, 1);
+        .expect("cancelled waiter did not observe commit and account notifications");
         assert!(!other_change.has_changed().unwrap());
         assert!(!other_revocation.has_changed().unwrap());
         pool.close().await;

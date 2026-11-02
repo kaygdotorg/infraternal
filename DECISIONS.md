@@ -1018,6 +1018,19 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        already cover it).
      - **Interfaces:** CLI (`infraternal mesh status` and friends), API and
        MCP expose everything; the UI is the primary way to use it.
+     **Linux engine amended (owner, 2026-11-02, #260):** "using kernel
+     wireguard right now is a path backward, let's directly use gotatun
+     and keep shipping improvements. our own app would become a nice
+     dogfood." Linux nodes run the userspace GotaTun engine from our fork
+     (github.com/kaygdotorg/gotatun, pinned by commit; MPL-2.0, already
+     allowed by cargo-deny), the same engine family as macOS (D169).
+     Kernel WireGuard stays selectable per node only as a transition
+     fallback. Measured on #260 (R4b, perf VM): at the time of the
+     switch the fork matched kernel throughput (about 3.0 / 2.5 Gbit/s at
+     1 / 8 flows) at 21.9 KiB per peer, with loaded p99 latency about 3×
+     kernel's. That gap is tracked work, not an accepted cost. A
+     userspace engine lets mesh SSH and published services on the
+     node's mesh address be answered in-process (#221 S4, #281).
 164. **Mesh membership and access:**
      - **Automatic join:** every infraternal agent joins the mesh.
      - **Deny by default:** a joined node reaches only the server until
@@ -3523,3 +3536,23 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        engines (Pingora, Sozu, rpxy) against Traefik as a managed sidecar,
        on size, memory, speed, TLS stack and licence. Rejected: our own
        proxy engine and an HTTP-01-only default.
+317. **User docs: structure and page shape (owner, 2026-11-02, #311;
+     extends D315):** "agreed with everything else". Sections follow the
+     product's own parts in Settings order: Get started first, then
+     Terminal, Machines, Mesh, Access (its own section: network, login and
+     privileged access), You, Sharing, Appearance, and Reference last.
+     - **Addresses** are nested, `/docs/<section>/<page>/#<heading>`, two
+       folder levels at most. The two shipped flat pages redirect.
+     - **One heading per setting**, named exactly like its Settings
+       title. Its quick-facts block is the only place its default and
+       range are written. A "?" lands on that heading and previews that
+       block.
+     - **No page for a feature that is not built**, only a "Planned"
+       callout where it comes up.
+     - **Names:** You › Apps keeps the name "Apps" (owner: "just call it
+       Apps"). Rejected: "Tool Keys".
+     - Rejected: sections by kind (start / guides / concepts / reference).
+       That splits one noun across three places and gives a "?" several
+       candidate pages.
+     - Open: where docs media lives, and whether docs ship detached from
+       the app (owner refining, 2026-11-02).
