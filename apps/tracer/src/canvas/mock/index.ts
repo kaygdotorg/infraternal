@@ -29,6 +29,7 @@ import { mockInboxItems } from "./inbox-items";
 import { inboxFor } from "../inbox-host";
 import { createOverlayFlowHost } from "../addhost/flow-host";
 import { createWindowFlowHost } from "../addhost/window-host";
+import { installDocsSource } from "../docs/docs-source";
 import type { EnrolledHost } from "../addhost/service";
 import { createMockProvisioning } from "./addhost-service";
 import { attachSetup, warmSetup } from "../addhost/setup-attach";
@@ -79,6 +80,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   const authority = createAuthorityControl(core, { service: async () => provisioning, canUnlock: () => world.role === "operator" });
   // `?inbox=3` adds two more kinds of waiting item, to see the card with several lines (test double only).
   if (new URLSearchParams(location.search).get("inbox") === "3") inboxFor(core).set("mock-extra", mockInboxItems());
+  const docs = installDocsSource(core, createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)));
   const addHost = createAddHost(core, {
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
     service: provisioning,
@@ -370,7 +372,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       mockupTag.remove();
       chip?.remove();
       stopOffer();
-      addHost.dispose();
+      addHost.dispose(); docs.dispose();
       canvas.dispose();
       mesh.dispose();
       sessions.dispose();
