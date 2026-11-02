@@ -224,14 +224,15 @@ export function onDoubleActivate(target: HTMLElement, handler: (event: Event, ke
     down = undefined;
     if (moved) { lastTaps.delete(target); return; }
     const now = event.timeStamp, key = keyOf(event), last = lastTaps.get(target);
-    if (key === undefined) { lastTaps.delete(target); return; }
     const apart = last ? Math.hypot(event.clientX - last.x, event.clientY - last.y) : Infinity;
-    // The same thing twice, or (a list that re-sorted under a pointer that did not move: opening a session moves it to the top)
-    // another thing at the same spot: the first one is the one meant, and `handler` gets its key.
+    // The same thing twice, or (a list that was rebuilt and re-sorted under a pointer that did not move: opening a session moves it
+    // to the top, and the release can land on the gap or on another row) anything at the same spot: the first one is the one
+    // meant, and `handler` gets its key.
     if (last && now - last.at <= (event.pointerType === "mouse" ? DOUBLE_CLICK_MS : DOUBLE_TAP_MS) && (last.key === key ? apart <= DOUBLE_TAP_SLOP : apart <= SAME_SPOT)) {
       lastTaps.delete(target);
       handler(event, last.key);
-    } else lastTaps.set(target, { x: event.clientX, y: event.clientY, at: now, key });
+    } else if (key === undefined) lastTaps.delete(target);
+    else lastTaps.set(target, { x: event.clientX, y: event.clientY, at: now, key });
   }, { signal });
   target.addEventListener("pointercancel", () => { down = undefined; }, { signal });
 }
