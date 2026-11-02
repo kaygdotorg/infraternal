@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
  * The docs in the palette (#302): the heading anchors the docs build writes, the rows made from the index, what the
- * palette's own search text would match, and the action ids. The browser behaviour (search, open, alignment, phone) is
- * test/docs-palette.spec.ts.
+ * palette's own search text would match, and the action ids. The browser behaviour (search, the Docs view, alignment, phone) is
+ * test/docs-palette.spec.ts. What the build makes of a page is docs-build.test.ts.
  */
 import { expect, test } from "bun:test";
 import { anchorHeadings, labelCells } from "../../../docs-build";
@@ -11,7 +11,7 @@ import { parseDocsAction, type DocsIndexPage } from "./docs-source";
 
 test("headings of level two and three get anchors; the title is not listed", () => {
   const { html, headings } = anchorHeadings("<h1>Keys</h1><h2>The table</h2><p>x</p><h3>WireGuard &amp; mesh</h3><h2>The table</h2>");
-  expect(headings).toEqual([{ id: "the-table", text: "The table" }, { id: "wireguard-mesh", text: "WireGuard & mesh" }, { id: "the-table-2", text: "The table" }]);
+  expect(headings).toEqual([{ id: "the-table", text: "The table", level: 2 }, { id: "wireguard-mesh", text: "WireGuard & mesh", level: 3 }, { id: "the-table-2", text: "The table", level: 2 }]);
   expect(html).toContain('<h2 id="the-table">The table</h2>');
   expect(html).toContain('<h2 id="the-table-2">The table</h2>');
   expect(html).toContain("<h1>Keys</h1>");
@@ -19,7 +19,7 @@ test("headings of level two and three get anchors; the title is not listed", () 
 
 test("an anchor the renderer already wrote is kept, and tags inside a heading are not part of its text", () => {
   const { html, headings } = anchorHeadings('<h2 id="own">Use <code>up</code> codes</h2>');
-  expect(headings).toEqual([{ id: "own", text: "Use up codes" }]);
+  expect(headings).toEqual([{ id: "own", text: "Use up codes", level: 2 }]);
   expect(html).toBe('<h2 id="own">Use <code>up</code> codes</h2>');
 });
 

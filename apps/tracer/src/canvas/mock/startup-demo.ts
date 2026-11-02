@@ -7,7 +7,7 @@
  * It runs the product's own notice (`createStartupHints`, the shared toast, the shared confirmation) against a
  * pretend `terminal.startup` service: a startup file held in memory, with the same rules as the real helper
  * (nothing is written without `confirmed`, undo needs the exact line). The live terminal on the canvas prints what a
- * shell would show, so ✓ and Restore visibly change the file. ? opens this server's own `/docs/multiplexer/` (built from `docs/multiplexer.md`).
+ * shell would show, so ✓ and Restore visibly change the file. ? opens this server's own `/docs/multiplexer/` (built from `docs/user/multiplexer.md`).
  * The palette (⌘K) has "Mockup: ask again", because answering the question uses it up for the host, as in the product.
  */
 import type { CoreScreen, PaletteEntry } from "../../core-screen";
