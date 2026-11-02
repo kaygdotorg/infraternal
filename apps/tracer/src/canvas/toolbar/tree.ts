@@ -16,8 +16,6 @@ import type { ViewId } from "../model/types";
 import { coarse } from "../dom";
 import { isFreeView } from "../layout/stops";
 import { onDemand, whenIdle } from "../../on-demand";
-import { createRowActions } from "./row-actions";
-import { createRowPill } from "./row-pill";
 
 export interface TreeModule {
   /** Rebuilds the sidebar tree from the views (coalesced). */
@@ -73,6 +71,19 @@ export function createTree(cx: Ctx): TreeModule {
   let marks = new Set<string>();
   /** The shared tree behind the sidebar; the row menu's Rename and F2 open its inline-rename field through it. */
   let treeMenu: BranchedMenu | undefined;
+  /** The row menu, swipes and pill (D309, #215): their code loads the first time the sidebar is shown (D188). */
+  let rows: { rowEntries(): import("../../core-screen").PaletteEntry[]; dispose(): void } | undefined;
+  let loadingRows = false;
+  const loadRows = (): void => {
+    const host = stage.querySelector<HTMLElement>("#tree");
+    if (rows || loadingRows || !host) return;
+    loadingRows = true;
+    void onDemand(() => import("./row-actions.on-demand")).then((m) => {
+      loadingRows = false;
+      if (signal.aborted) return;
+      rows = m.createRowActions(cx, host, { closeSidebar: () => { stage.querySelector<HTMLButtonElement>("#sidebar-toggle[aria-expanded='true']")?.click(); }, rename: (id) => treeMenu?.rename(id) ?? false });
+    }, () => { loadingRows = false; });
+  };
   /**
    * Saves a rename by what the row is: a session through the inventory (its name and pin travel through the account's
    * canvas layout stream, #293), a host or a Mesh node through the Mesh API (`mesh.node.rename`, #259).
@@ -98,6 +109,7 @@ export function createTree(cx: Ctx): TreeModule {
       if (sidebar?.hidden) { stale = true; return; }
       if (editing) return;
       stale = false;
+      loadRows();
       treeMenu = core.setHostTree(sections(), current(), (id) => {
         const close = (): void => { if (coarse.matches) stage.querySelector<HTMLButtonElement>("#sidebar-toggle[aria-expanded='true']")?.click(); };
         if (id.startsWith("s:")) {
@@ -138,16 +150,12 @@ export function createTree(cx: Ctx): TreeModule {
     const id = raw.replace(/^view:/, "") as ViewId;
     if (id && views.has(id)) cx.nav.flyView(id);
   }, { signal });
-  // The row menu and swipes (D309): one shared component, with this list's items; its actions are palette rows for the focused row.
-  const closeSidebar = (): void => { stage.querySelector<HTMLButtonElement>("#sidebar-toggle[aria-expanded='true']")?.click(); };
-  const rowMenu = tree ? createRowActions(cx, tree, { closeSidebar, rename: (id) => treeMenu?.rename(id) ?? false }) : undefined;
-  // The hover pill and the F2 / Delete keys (#215): the pointer's and keyboard's shortcuts to the same row actions.
-  const offPill = tree && rowMenu ? createRowPill(cx, tree, rowMenu.menu, rowMenu.actionsOf, closeSidebar) : undefined;
-  const offRows = rowMenu ? core.addPaletteProvider(() => rowMenu.rowEntries()) : undefined;
+  // The row menu's actions are palette rows for the focused row (the module loads with the sidebar, see loadRows).
+  const offRows = core.addPaletteProvider(() => rows?.rowEntries() ?? []);
   const markDivider = (): void => { stage.querySelector('#tree .bm-sec[data-id="view:settings"]')?.classList.add("cl-divided"); };
   const observer = tree ? new MutationObserver(markDivider) : undefined;
   if (tree) observer!.observe(tree, { childList: true });
   const sideTitle = stage.querySelector<HTMLElement>(".sidebar-title");
   if (sideTitle) sideTitle.textContent = "Views";
-  return { render, dispose() { observer?.disconnect(); shown?.disconnect(); offRows?.(); offPill?.(); rowMenu?.dispose(); } };
+  return { render, dispose() { observer?.disconnect(); shown?.disconnect(); offRows(); rows?.dispose(); } };
 }

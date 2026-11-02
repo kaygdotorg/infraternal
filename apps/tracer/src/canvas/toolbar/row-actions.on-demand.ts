@@ -12,6 +12,10 @@
  *   running); a left swipe closes it.
  *
  * Every action is also a palette row for the focused row (`rowEntries`), so nothing is reachable only by gesture.
+ *
+ * It is an on-demand module (D188): the tree loads it the first time the sidebar is shown, with the shared row menu
+ * (packages/ui/src/row-menu.ts), the in-row question and the hover pill (row-pill.ts), so none of it is on the first
+ * screen's path or in the deferred canvas. It also makes the pill, which asks the same `actions`.
  */
 import { branchRowId } from "../../../../../packages/ui/src/branched";
 import { writeClipboard, CLIPBOARD } from "../../../../../packages/ui/src/copy-feedback";
@@ -21,6 +25,7 @@ import type { PaletteEntry } from "../../core-screen";
 import type { Ctx, WinRec } from "../context";
 import { coarse } from "../dom";
 import { isTerminal } from "../views/body";
+import { createRowPill } from "./row-pill";
 import { SESSION_ICON } from "../views/icons";
 
 const OPEN_ICON = '<path d="M5 12h14m-6-6 6 6-6 6"/>';
@@ -147,5 +152,7 @@ export function createRowActions(cx: Ctx, tree: HTMLElement, hooks: RowActionsHo
     if (row && action) menu.perform(row, action, "keyboard");
   };
   window.addEventListener("tracer:canvas-action", onAction);
-  return { menu, rowEntries, actionsOf: actions, dispose() { window.removeEventListener("tracer:canvas-action", onAction); menu.dispose(); } };
+  // The hover pill and the F2 / Delete keys (#215): the pointer's and keyboard's shortcuts to the same row actions.
+  const offPill = createRowPill(cx, tree, menu, actions, closeSidebar);
+  return { menu, rowEntries, actionsOf: actions, dispose() { window.removeEventListener("tracer:canvas-action", onAction); offPill(); menu.dispose(); } };
 }
