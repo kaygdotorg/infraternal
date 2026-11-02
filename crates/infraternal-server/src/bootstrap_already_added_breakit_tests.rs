@@ -17,7 +17,13 @@ impl SshTransport for Looked {
     ) -> Operation<'_, Arc<dyn SshSession>> {
         Box::pin(async move {
             self.0.fetch_add(1, Ordering::Relaxed);
-            Ok(Arc::new(LookedSession(Sniff(self.0.clone()), self.1)) as Arc<dyn SshSession>)
+            Ok(Arc::new(LookedSession(
+                Sniff {
+                    opens: self.0.clone(),
+                    refuse_key_payload_upload: false,
+                },
+                self.1,
+            )) as Arc<dyn SshSession>)
         })
     }
 }
@@ -67,7 +73,10 @@ async fn a_non_owner_session_never_learns_the_owners_host_id() {
     sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,'member','fixture',?,?,1)")
         .bind(crate::auth::hash(&cookie)).bind(now + 3600).bind(now).execute(&f.pool).await.unwrap();
     let runner = Bootstrap::new(
-        Arc::new(Sniff(f.opens.clone())),
+        Arc::new(Sniff {
+            opens: f.opens.clone(),
+            refuse_key_payload_upload: false,
+        }),
         f.backend.clone(),
         BinaryPaths { x86_64: "must-not-read-payload".into(), aarch64: "must-not-read-payload".into() },
     );

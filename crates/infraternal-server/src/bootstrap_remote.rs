@@ -106,6 +106,53 @@ impl RemoteBackend {
             .map(|attempt| attempt.uid)
             .ok_or_else(unavailable)
     }
+    async fn existing_host(
+        &self,
+        owner: &str,
+        address: &str,
+        lookup: Option<&str>,
+    ) -> Result<Option<Uuid>, Failure> {
+        let existing: Option<Vec<u8>> = sqlx::query_scalar("SELECT h.id FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)) ORDER BY (b.address=?) DESC, h.id LIMIT 1")
+            .bind(owner)
+            .bind(address)
+            .bind(lookup)
+            .bind(lookup)
+            .bind(address)
+            .fetch_optional(&self.issuer.store().0)
+            .await
+            .map_err(|_| unavailable())?;
+        existing
+            .map(|host_id| Uuid::from_slice(&host_id).map_err(|_| unavailable()))
+            .transpose()
+    }
+    fn already_added(host_id: Uuid) -> Failure {
+        Failure::install("This host is already added. Open its terminal from Console.")
+            .with_existing_host_id(host_id)
+    }
+    /// Find persisted duplicates before the installer needs the matching payload.
+    async fn ensure_not_already_added(
+        &self,
+        authority: &Authority,
+        target: &Target,
+        lookup: Option<&str>,
+    ) -> Result<(), Failure> {
+        self.authorize(authority).await?;
+        let infraternal_plugin_ssh::model::TargetAddress::Manual(address) = &target.address else {
+            return Err(unavailable());
+        };
+        if !self.issuer.ready() {
+            return Err(Failure::install(
+                "Set up or unlock host connections with an administrator passkey before adding a host.",
+            ));
+        }
+        if let Some(host_id) = self
+            .existing_host(&authority.owner, address, lookup)
+            .await?
+        {
+            return Err(Self::already_added(host_id));
+        }
+        Ok(())
+    }
     async fn actor(&self, authority: &Authority, host: Uuid) -> Result<EmbeddedAgent, Failure> {
         self.authorize(authority).await?;
         self.uid(authority, host)?;
@@ -211,9 +258,8 @@ impl RemoteBackend {
         lookup: Option<&str>,
     ) -> Result<(), Failure> {
         let mut attempts = self.attempts.lock().map_err(|_| unavailable())?;
-        // Reserve before any database await. This bounded map is also the
-        // destination journal, so competing batches cannot issue distinct
-        // host records during the lookup/issue gap.
+        // Preflight can overlap while a key is prepared; reserve at publication
+        // so only one concurrent attempt can issue for this destination.
         if attempts.values().any(|attempt| {
             attempt.owner == authority.owner
                 && attempt
@@ -282,14 +328,14 @@ impl RemoteBackend {
             host,
             published: false,
         };
-        let existing: Option<Vec<u8>> = sqlx::query_scalar("SELECT h.id FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)) ORDER BY (b.address=?) DESC, h.id LIMIT 1")
-            .bind(&authority.owner).bind(address).bind(&lookup).bind(&lookup).bind(address).fetch_optional(&self.issuer.store().0).await.map_err(|_|unavailable())?;
-        if let Some(host_id) = existing {
-            let host_id = Uuid::from_slice(&host_id).map_err(|_| unavailable())?;
-            return Err(Failure::install(
-                "This host is already added. Open its terminal from Console.",
-            )
-            .with_existing_host_id(host_id));
+        // Preflight avoids staging for an existing host. Repeat the durable
+        // check after reserving the destination so another server process
+        // cannot add the same host between preflight and invitation issuance.
+        if let Some(existing_host) = self
+            .existing_host(&authority.owner, address, lookup.as_deref())
+            .await?
+        {
+            return Err(Self::already_added(existing_host));
         }
         if let Some(register) = register {
             register(host)?;
@@ -498,6 +544,17 @@ impl Backend for RemoteBackend {
     }
     fn enrollment_origin(&self) -> Option<String> {
         Some(self.issuer.origin().to_owned())
+    }
+    fn preflight_existing_host<'a>(
+        &'a self,
+        authority: &'a Authority,
+        target: &'a Target,
+        lookup: Option<String>,
+    ) -> Operation<'a, ()> {
+        Box::pin(async move {
+            self.ensure_not_already_added(authority, target, lookup.as_deref())
+                .await
+        })
     }
     fn invitation<'a>(
         &'a self,
@@ -1354,7 +1411,10 @@ mod tests {
             self.0.clone().ok_or(CaError)
         }
     }
-    struct Sniff(Arc<AtomicUsize>);
+    struct Sniff {
+        opens: Arc<AtomicUsize>,
+        refuse_key_payload_upload: bool,
+    }
     impl SshTransport for Sniff {
         fn open(
             &self,
@@ -1363,8 +1423,11 @@ mod tests {
             _: MeshEvidence,
         ) -> Operation<'_, Arc<dyn SshSession>> {
             Box::pin(async move {
-                self.0.fetch_add(1, Ordering::Relaxed);
-                Ok(Arc::new(Sniff(self.0.clone())) as Arc<dyn SshSession>)
+                self.opens.fetch_add(1, Ordering::Relaxed);
+                Ok(Arc::new(Sniff {
+                    opens: self.opens.clone(),
+                    refuse_key_payload_upload: self.refuse_key_payload_upload,
+                }) as Arc<dyn SshSession>)
             })
         }
     }
@@ -1372,6 +1435,48 @@ mod tests {
         fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
             Box::pin(async move {
                 if !script.starts_with(infraternal_plugin_ssh::probe::CHECK_SCRIPT) {
+                    // #291 prepares the agent key before publishing its bound
+                    // invitation. Reuse the cached payload and return a canonical
+                    // digest in that preflight. The failure variant reports a
+                    // usable codec so the real staged upload reaches its refusal.
+                    if script.contains("printf 'reuse") {
+                        assert!(matches!(input, Input::Empty));
+                        return Ok(CommandOutput {
+                            stdout: if self.refuse_key_payload_upload {
+                                b"zstd\n".to_vec()
+                            } else {
+                                b"reuse\n".to_vec()
+                            },
+                        });
+                    }
+                    if self.refuse_key_payload_upload
+                        && (script.contains("zstd -dc > \"$stage/payload\"")
+                            || script.contains("gzip -dc > \"$stage/payload\"")
+                            || script.contains("cat > \"$stage/payload\""))
+                    {
+                        assert!(matches!(input, Input::Bytes(_) | Input::File(_)));
+                        return Err(Failure::install(
+                            "The fixture refused the key-preparation payload upload.",
+                        )
+                        .at(InstallStep::Upload));
+                    }
+                    if script.contains("ln \"$cache/payload\" \"$stage/payload\"") {
+                        assert!(matches!(input, Input::Empty));
+                        return Ok(CommandOutput { stdout: Vec::new() });
+                    }
+                    if script.contains("prepare-join-key") {
+                        assert!(matches!(input, Input::Empty));
+                        return Ok(CommandOutput {
+                            stdout: b"KEY-DIGEST 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n".to_vec(),
+                        });
+                    }
+                    if matches!(input, Input::Bytes(_)) {
+                        // Invitations stay in stdin. Refusing setup exercises the
+                        // post-publication cleanup path without reading or logging it.
+                        return Err(Failure::install(
+                            "The fixture refused the post-invitation setup.",
+                        ));
+                    }
                     // Staging failure still requests rollback. Refuse cleanup
                     // safely so the backend must retire its public authority
                     // even when the host cannot be reached.
@@ -1451,12 +1556,27 @@ mod tests {
         start_backend(f, owner, f.backend.clone())
     }
     fn start_backend(f: &Fixture, owner: &str, backend: Arc<dyn Backend>) -> Batch {
+        start_backend_with_payload_refusal(f, owner, backend, false)
+    }
+    fn start_backend_refusing_key_payload_upload(f: &Fixture, owner: &str) -> Batch {
+        start_backend_with_payload_refusal(f, owner, f.backend.clone(), true)
+    }
+    fn start_backend_with_payload_refusal(
+        f: &Fixture,
+        owner: &str,
+        backend: Arc<dyn Backend>,
+        refuse_key_payload_upload: bool,
+    ) -> Batch {
+        let fixture_payload = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         let runner = Bootstrap::new(
-            Arc::new(Sniff(f.opens.clone())),
+            Arc::new(Sniff {
+                opens: f.opens.clone(),
+                refuse_key_payload_upload,
+            }),
             backend,
             BinaryPaths {
-                x86_64: "must-not-read-payload".into(),
-                aarch64: "must-not-read-payload".into(),
+                x86_64: fixture_payload.clone(),
+                aarch64: fixture_payload,
             },
         );
         runner
@@ -1474,9 +1594,13 @@ mod tests {
             )
             .unwrap()
     }
+    // A generous failure bound keeps a lost event from hanging the suite without
+    // treating ordinary scheduler load as a functional deadline.
+    const TEST_HANG_BOUND: Duration = Duration::from_secs(60);
+
     async fn finished(batch: &Batch) -> Event {
-        let mut changed = batch.subscribe();
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(TEST_HANG_BOUND, async {
+            let mut changed = batch.subscribe();
             loop {
                 if let Some(event) = batch
                     .events(0)
@@ -1486,11 +1610,34 @@ mod tests {
                 {
                     return event;
                 }
-                changed.changed().await.unwrap();
+                changed
+                    .changed()
+                    .await
+                    .expect("bootstrap batch closed before publishing a terminal event");
             }
         })
         .await
-        .unwrap()
+        .expect("bootstrap batch did not publish a terminal event within the test hang bound")
+    }
+    async fn wait_invitation_committed(batch: &Batch, paused: &PausedInvitation) {
+        tokio::time::timeout(TEST_HANG_BOUND, async {
+            let mut changed = batch.subscribe();
+            loop {
+                tokio::select! {
+                    () = paused.committed.notified() => return,
+                    result = changed.changed() => {
+                        result.expect("bootstrap batch closed before invitation publication");
+                        if let Some(event) = batch.events(0).1.into_iter()
+                            .find(|event| matches!(event.step, Step::Failed | Step::Done))
+                        {
+                            panic!("bootstrap ended before invitation publication: {}", event.message);
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("invitation was not committed within the test hang bound");
     }
     #[tokio::test]
     #[allow(
@@ -1695,6 +1842,31 @@ mod tests {
         }
         assert!(f.backend.attempts.lock().unwrap().is_empty());
     }
+
+    #[tokio::test]
+    async fn failed_key_payload_upload_does_not_publish_a_host_record() {
+        let f = fixture(true).await;
+        let event = finished(&start_backend_refusing_key_payload_upload(&f, "owner")).await;
+        assert_eq!(event.step, Step::Failed);
+        assert!(matches!(
+            event.failure.as_ref().unwrap().failed_step.as_ref(),
+            Some(InstallStep::Upload)
+        ));
+        let rows: Vec<(Vec<u8>, i64, Option<i64>)> =
+            sqlx::query_as("SELECT id,execution_uid,revoked_at FROM remote_hosts")
+                .fetch_all(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "key preparation failed before invitation issuance"
+        );
+        assert_eq!(rows[0].0, f.prior.as_bytes());
+        assert_eq!(rows[0].1, 1002);
+        assert!(rows[0].2.is_none());
+        assert!(f.backend.attempts.lock().unwrap().is_empty());
+    }
     #[tokio::test]
     async fn unpublished_attempt_drop_releases_only_its_ownership() {
         let f = fixture(true).await;
@@ -1762,6 +1934,14 @@ mod tests {
     impl Backend for PausedInvitation {
         fn enrollment_origin(&self) -> Option<String> {
             self.inner.enrollment_origin()
+        }
+        fn preflight_existing_host<'a>(
+            &'a self,
+            a: &'a Authority,
+            t: &'a Target,
+            lookup: Option<String>,
+        ) -> Operation<'a, ()> {
+            self.inner.preflight_existing_host(a, t, lookup)
         }
         fn resolve<'a>(
             &'a self,
@@ -1849,9 +2029,7 @@ mod tests {
             release: tokio::sync::Notify::new(),
         });
         let batch = start_backend(&f, "owner", paused.clone());
-        tokio::time::timeout(Duration::from_secs(5), paused.committed.notified())
-            .await
-            .unwrap();
+        wait_invitation_committed(&batch, &paused).await;
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT count(*) FROM remote_hosts WHERE revoked_at IS NULL"
@@ -1863,11 +2041,11 @@ mod tests {
         );
         let mut changed = batch.subscribe();
         drop(batch);
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(TEST_HANG_BOUND, async {
             while changed.changed().await.is_ok() {}
         })
         .await
-        .unwrap();
+        .expect("cancelled bootstrap batch did not close its event stream");
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT count(*) FROM remote_hosts WHERE revoked_at IS NULL"

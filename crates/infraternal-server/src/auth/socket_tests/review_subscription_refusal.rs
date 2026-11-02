@@ -176,9 +176,19 @@ async fn refusal_ends_subscription(case: Refusal) {
                 sub_id: 82,
                 event_json,
             } => {
+                // The oversized filter cannot identify a provider, so the
+                // dispatcher must use its generic response. The saturated
+                // case has a valid Mesh topic and keeps the specific refusal.
+                let expected_error = if matches!(case, Refusal::Saturated)
+                    || !(cfg!(feature = "canvas") || cfg!(feature = "remote"))
+                {
+                    "mesh unavailable"
+                } else {
+                    "plugin unavailable"
+                };
                 assert_eq!(
                     serde_json::from_slice::<Value>(event_json).unwrap(),
-                    json!({"type":"error","error": if cfg!(feature = "remote") && !matches!(case, Refusal::Saturated) { "plugin unavailable" } else { "mesh unavailable" }})
+                    json!({"type":"error","error": expected_error})
                 );
                 break;
             }
