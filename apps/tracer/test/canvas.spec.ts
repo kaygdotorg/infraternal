@@ -323,6 +323,9 @@ test("touch: press and hold on a header reveals corner handles; a handle resizes
   await page.waitForTimeout(650);
   await expect(window0).toHaveAttribute("data-resize", "touch");
   await touch("touchEnd", []);
+  // The hold ends with a 220 ms settle from scale(0.985) back to rest (window-resize.ts). A rect read inside it is still scaled
+  // (a 44 px grip measures 43.99994), so wait for the state, no running animation on the window, not for a time.
+  await expect.poll(() => window0.evaluate((node) => node.getAnimations().length)).toBe(0);
   const before = await windowBox(page, 0);
   const grip = (await window0.locator(".ui-window-resize[data-edge='se']").boundingBox())!;
   expect(grip.width).toBeGreaterThanOrEqual(44);
