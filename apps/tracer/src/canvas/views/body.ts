@@ -59,6 +59,21 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
     });
     return;
   }
+  if (m.kind === "docs") {
+    // A docs page is read, so its code and its text wait until the window first comes near the screen (the Docs view can sit
+    // unvisited for a whole session at no cost). Opening a page from the palette flies here, which is the same moment.
+    let release: (() => void) | undefined, gone = false;
+    const near = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      near.disconnect();
+      void onDemand(() => import("../docs/docs-body.on-demand")).then((mod) => {
+        if (!gone) release = mod.mountDocsBody(cx, m.id.slice(2), body);
+      });
+    }, { rootMargin: "50%" });
+    near.observe(body);
+    rec.cleanup = () => { gone = true; near.disconnect(); release?.(); };
+    return;
+  }
   if (m.kind === "flow") {
     // A flow fills its own body (the add-host wizard); the window only gives it a frame and a place on the canvas.
     body.classList.add("cl-flow");

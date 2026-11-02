@@ -6,8 +6,8 @@
  */
 import { expect, test } from "bun:test";
 import { anchorHeadings, labelCells } from "../../../docs-build";
-import { docsRows } from "./docs-index.on-demand";
-import { parseDocsAction, type DocsIndexPage } from "./docs-source";
+import { docsRows, parseDocsAction } from "./docs-index.on-demand";
+import type { DocsIndexPage } from "./docs-source";
 
 test("headings of level two and three get anchors; the title is not listed", () => {
   const { html, headings } = anchorHeadings("<h1>Keys</h1><h2>The table</h2><p>x</p><h3>WireGuard &amp; mesh</h3><h2>The table</h2>");

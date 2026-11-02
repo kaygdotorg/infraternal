@@ -6,8 +6,8 @@
  */
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 
-/** What a window shows. A `flow` window holds a short guided task (add a host); it is never saved and closes itself when done. Only a `terminal` window is bound to a session and can split. */
-export type WindowKind = "terminal" | "containers" | "logs" | "node" | "settings" | "flow";
+/** What a window shows. A `docs` window reads one page of the docs (the Docs view, never saved). A `flow` window holds a short guided task (add a host); it is never saved and closes itself when done. Only a `terminal` window is bound to a session and can split. */
+export type WindowKind = "terminal" | "containers" | "logs" | "node" | "settings" | "flow" | "docs";
 
 /** The built-in views have fixed ids; a view someone shared with you gets an id of its own. */
 export type ViewId = string;

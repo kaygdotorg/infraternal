@@ -40,7 +40,9 @@ export const SESSION_ICON = {
 } as const;
 
 export const lineIcon = (path: string): string => `<svg viewBox="0 0 24 24" class="is-line" aria-hidden="true">${path}</svg>`;
-export const VIEW_ICON: Record<string, string> = { console: ICON.console, containers: ICON.containers, mesh: ICON.node, settings: '<circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/>' };
+/** A book: the Docs view, its windows and its palette rows. */
+const DOCS_ICON = '<path d="M6 4h12v13H8a2 2 0 0 0-2 2z"/><path d="M6 19a2 2 0 0 0 2 2h10v-4"/>';
+export const VIEW_ICON: Record<string, string> = { docs: DOCS_ICON, console: ICON.console, containers: ICON.containers, mesh: ICON.node, settings: '<circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/>' };
 /** A shared or custom view has the generic layout icon. */
 export const viewIcon = (id: string): string => VIEW_ICON[id] ?? ICON.views;
 export const SECTION_ICON: Record<string, string> = {
@@ -60,4 +62,4 @@ export const SECTION_ICON: Record<string, string> = {
 /** The icon in a window's pill: the host's OS mark for a terminal (the machine glyph until the system is known; never a terminal glyph), a glyph for the other kinds. */
 export const iconFor = (m: WindowModel): string =>
   m.kind === "terminal" ? hostIconMarkup(m.os ?? "unknown", "ui-host-mark")
-    : m.kind === "settings" ? lineIcon(SECTION_ICON[m.id.slice(2)] ?? viewIcon("settings")) : m.kind === "containers" ? lineIcon(ICON.containers) : m.kind === "logs" ? lineIcon(ICON.logs) : m.kind === "flow" ? lineIcon(ICON.plus) : lineIcon(ICON.node);
+    : m.kind === "settings" ? lineIcon(SECTION_ICON[m.id.slice(2)] ?? viewIcon("settings")) : m.kind === "containers" ? lineIcon(ICON.containers) : m.kind === "logs" ? lineIcon(ICON.logs) : m.kind === "flow" ? lineIcon(ICON.plus) : m.kind === "docs" ? lineIcon(DOCS_ICON) : lineIcon(ICON.node);
