@@ -77,10 +77,10 @@ pub struct PublishedService {
 #[must_use]
 pub const fn select_listener_ports(
     rootful: bool,
-    http_port_available: bool,
-    https_port_available: bool,
+    plain_http_port_available: bool,
+    tls_port_available: bool,
 ) -> ListenerPorts {
-    if rootful && http_port_available && https_port_available {
+    if rootful && plain_http_port_available && tls_port_available {
         ListenerPorts {
             http: 80,
             https: 443,

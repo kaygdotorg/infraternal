@@ -1,8 +1,8 @@
 //! Publishes only signed, bounded Traefik executables into the node-local component store [#281].
 
 use crate::manifest::{
-    ComponentManifestVerifier, MAX_COMPONENT_ARCHIVE_BYTES, MAX_COMPONENT_EXECUTABLE_BYTES,
-    VerifiedComponentManifest, verify_component_manifest,
+    ComponentManifest, ComponentManifestVerifier, MAX_COMPONENT_ARCHIVE_BYTES,
+    MAX_COMPONENT_EXECUTABLE_BYTES, VerifiedComponentManifest, verify_component_manifest,
 };
 use nix::fcntl::{Flock, FlockArg};
 use sha2::{Digest, Sha256};
@@ -225,7 +225,6 @@ fn extract_executable(
     bin: &Path,
     verified: &VerifiedComponentManifest,
 ) -> io::Result<()> {
-    let manifest = verified.manifest();
     let input = OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
@@ -233,105 +232,21 @@ fn extract_executable(
     let decoder = flate2::read::GzDecoder::new(input);
     let limited = decoder.take(MAX_EXPANDED_ARCHIVE_BYTES + 1);
     let mut archive = tar::Archive::new(limited);
-    let mut executable_found = false;
-    let mut license_found = false;
+    let mut members = ArchiveMembers::default();
     let mut entry_count = 0_usize;
 
     for entry in archive.entries()? {
-        let mut entry = entry?;
+        let entry = entry?;
         entry_count = entry_count
             .checked_add(1)
             .ok_or_else(|| invalid_data("component archive has too many entries"))?;
         if entry_count > MAX_ARCHIVE_ENTRIES {
             return Err(invalid_data("component archive has too many entries"));
         }
-        let raw_path = entry.path_bytes();
-        let path = raw_path.as_ref();
-        let entry_type = entry.header().entry_type();
-        let mode = entry.header().mode()?;
-        if !entry_type.is_file() || mode & 0o6000 != 0 {
-            return Err(invalid_data(
-                "component archive contains a non-regular entry",
-            ));
-        }
-        if path == b"traefik" && !executable_found {
-            if entry.size() != manifest.executable_size
-                || entry.size() == 0
-                || entry.size() > MAX_COMPONENT_EXECUTABLE_BYTES
-            {
-                return Err(invalid_data(
-                    "Traefik executable size does not match its manifest",
-                ));
-            }
-            let destination = bin.join("traefik");
-            let mut output = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(PRIVATE_FILE_MODE)
-                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-                .open(&destination)?;
-            let mut digest = Sha256::new();
-            let mut written = 0_u64;
-            let mut buffer = [0_u8; 64 * 1024];
-            loop {
-                let count = entry.read(&mut buffer)?;
-                if count == 0 {
-                    break;
-                }
-                written = written
-                    .checked_add(
-                        u64::try_from(count)
-                            .map_err(|_| invalid_data("executable is too large"))?,
-                    )
-                    .ok_or_else(|| invalid_data("executable is too large"))?;
-                if written > manifest.executable_size {
-                    return Err(invalid_data("Traefik executable exceeds its declared size"));
-                }
-                output.write_all(&buffer[..count])?;
-                digest.update(&buffer[..count]);
-            }
-            if written != manifest.executable_size
-                || format!("{:x}", digest.finalize()) != manifest.executable_sha256
-            {
-                return Err(invalid_data(
-                    "Traefik executable does not match its signed digest",
-                ));
-            }
-            output.set_permissions(fs::Permissions::from_mode(EXECUTABLE_MODE))?;
-            output.sync_all()?;
-            validate_file_metadata(&output.metadata()?, EXECUTABLE_MODE)?;
-            if hash_file(&destination)? != manifest.executable_sha256 {
-                return Err(invalid_data(
-                    "installed Traefik executable failed its digest check",
-                ));
-            }
-            executable_found = true;
-        } else if path == b"LICENSE.md" && !license_found {
-            let declared_size = entry.size();
-            if declared_size == 0 || declared_size > MAX_LICENSE_BYTES {
-                return Err(invalid_data("Traefik license file exceeds its byte limit"));
-            }
-            let mut bytes = Vec::with_capacity(
-                usize::try_from(declared_size).map_err(|_| invalid_data("license is too large"))?,
-            );
-            entry.take(declared_size + 1).read_to_end(&mut bytes)?;
-            if u64::try_from(bytes.len()).map_err(|_| invalid_data("license is too large"))?
-                != declared_size
-                || !bytes.windows(11).any(|part| part == b"MIT License")
-            {
-                return Err(invalid_data(
-                    "Traefik archive does not contain its MIT license",
-                ));
-            }
-            license_found = true;
-        } else {
-            return Err(invalid_data(
-                "component archive contains an unallowlisted path",
-            ));
-        }
+        extract_archive_entry(entry, bin, verified.manifest(), &mut members)?;
     }
 
-    if !executable_found || !license_found {
+    if !members.executable || !members.license {
         return Err(invalid_data(
             "component archive is missing a required member",
         ));
@@ -341,6 +256,117 @@ fn extract_executable(
     if remaining.limit() == 0 {
         return Err(invalid_data(
             "component archive expands beyond its byte limit",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct ArchiveMembers {
+    executable: bool,
+    license: bool,
+}
+
+fn extract_archive_entry<R: Read>(
+    entry: tar::Entry<'_, R>,
+    bin: &Path,
+    manifest: &ComponentManifest,
+    members: &mut ArchiveMembers,
+) -> io::Result<()> {
+    let raw_path = entry.path_bytes();
+    let path = raw_path.as_ref();
+    let entry_type = entry.header().entry_type();
+    let mode = entry.header().mode()?;
+    if !entry_type.is_file() || mode & 0o6000 != 0 {
+        return Err(invalid_data(
+            "component archive contains a non-regular entry",
+        ));
+    }
+
+    if path == b"traefik" && !members.executable {
+        extract_allowlisted_executable(entry, bin, manifest)?;
+        members.executable = true;
+    } else if path == b"LICENSE.md" && !members.license {
+        validate_traefik_license(entry)?;
+        members.license = true;
+    } else {
+        return Err(invalid_data(
+            "component archive contains an unallowlisted path",
+        ));
+    }
+    Ok(())
+}
+
+fn extract_allowlisted_executable<R: Read>(
+    mut entry: tar::Entry<'_, R>,
+    bin: &Path,
+    manifest: &ComponentManifest,
+) -> io::Result<()> {
+    if entry.size() != manifest.executable_size
+        || entry.size() == 0
+        || entry.size() > MAX_COMPONENT_EXECUTABLE_BYTES
+    {
+        return Err(invalid_data(
+            "Traefik executable size does not match its manifest",
+        ));
+    }
+    let destination = bin.join("traefik");
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(PRIVATE_FILE_MODE)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(&destination)?;
+    let mut digest = Sha256::new();
+    let mut written = 0_u64;
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        let count = entry.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        written = written
+            .checked_add(u64::try_from(count).map_err(|_| invalid_data("executable is too large"))?)
+            .ok_or_else(|| invalid_data("executable is too large"))?;
+        if written > manifest.executable_size {
+            return Err(invalid_data("Traefik executable exceeds its declared size"));
+        }
+        output.write_all(&buffer[..count])?;
+        digest.update(&buffer[..count]);
+    }
+    if written != manifest.executable_size
+        || format!("{:x}", digest.finalize()) != manifest.executable_sha256
+    {
+        return Err(invalid_data(
+            "Traefik executable does not match its signed digest",
+        ));
+    }
+    output.set_permissions(fs::Permissions::from_mode(EXECUTABLE_MODE))?;
+    output.sync_all()?;
+    validate_file_metadata(&output.metadata()?, EXECUTABLE_MODE)?;
+    if hash_file(&destination)? != manifest.executable_sha256 {
+        return Err(invalid_data(
+            "installed Traefik executable failed its digest check",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_traefik_license<R: Read>(mut entry: tar::Entry<'_, R>) -> io::Result<()> {
+    let declared_size = entry.size();
+    if declared_size == 0 || declared_size > MAX_LICENSE_BYTES {
+        return Err(invalid_data("Traefik license file exceeds its byte limit"));
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(declared_size).map_err(|_| invalid_data("license is too large"))?,
+    );
+    entry.take(declared_size + 1).read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).map_err(|_| invalid_data("license is too large"))?
+        != declared_size
+        || !bytes.windows(11).any(|part| part == b"MIT License")
+    {
+        return Err(invalid_data(
+            "Traefik archive does not contain its MIT license",
         ));
     }
     Ok(())
@@ -370,7 +396,7 @@ fn hash_file(path: &Path) -> io::Result<String> {
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
         .open(path)?;
     let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
         let count = file.read(&mut buffer)?;
         if count == 0 {

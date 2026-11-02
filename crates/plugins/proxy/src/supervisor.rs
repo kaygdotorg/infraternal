@@ -671,24 +671,13 @@ enum Inbox {
     Disconnected,
 }
 
+#[derive(Default)]
 struct SupervisorRuntime {
     lifecycle: Lifecycle,
     services: Vec<PublishedService>,
     child: Option<TraefikChild>,
     listener_is_public: bool,
     listener_ports: Option<ListenerPorts>,
-}
-
-impl Default for SupervisorRuntime {
-    fn default() -> Self {
-        Self {
-            lifecycle: Lifecycle::default(),
-            services: Vec::new(),
-            child: None,
-            listener_is_public: false,
-            listener_ports: None,
-        }
-    }
 }
 
 fn run_supervisor(
@@ -836,13 +825,12 @@ fn handle_supervisor_timeout(
             let _ = stop_child(&mut runtime.child);
             runtime.listener_ports = None;
         }
-        LifecycleAction::Start => {
-            if start_runtime_child(settings, log, runtime).is_err() {
-                let _ = runtime
-                    .lifecycle
-                    .child_exited(runtime.services.len(), Instant::now());
-            }
+        LifecycleAction::Start if start_runtime_child(settings, log, runtime).is_err() => {
+            let _ = runtime
+                .lifecycle
+                .child_exited(runtime.services.len(), Instant::now());
         }
+        LifecycleAction::Start => {}
         _ => {}
     }
 }
