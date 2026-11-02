@@ -454,8 +454,14 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   // blurred surface per frame; the instant swap costs one repaint (p95 16.7-33 ms headless).
   // The palette closes in the same step so it never fades over a repainting page.
   const swapLook = (): void => {
+    // Every token changes in this step, so no element may start a transition from its old value (a window card's border
+    // colour, the palette's own close): transitions are off while the first frame with the new styles is made, and on again
+    // after it. The attribute is set before anything changes, and removed after two frames, so the style recalculation that
+    // would start the transitions always sees it. It costs one attribute and no forced layout (TASTE "No lag while animating").
+    ROOT.setAttribute("data-look-swap", "");
     setPalette(false, "keyboard");
     void applyLook(true);
+    requestAnimationFrame(() => requestAnimationFrame(() => ROOT.removeAttribute("data-look-swap")));
   };
 
 

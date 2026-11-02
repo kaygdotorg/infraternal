@@ -329,6 +329,8 @@ button { color: inherit; }
 :root[data-ui-font="mono"] .palette-input input::placeholder { letter-spacing: inherit; }
 .backdrop { position: fixed; z-index: 0; inset: 0; pointer-events: none; opacity: 0; transition: opacity 240ms ease-out; }
 .terminal-screen[data-no-motion] .backdrop { transition: none; }
+/* A theme, card, window or background pick swaps every token at once (core-screen.ts swapLook): nothing may fade from its old value. */
+:root[data-look-swap] *, :root[data-look-swap] *::before, :root[data-look-swap] *::after { transition: none !important; }
 .terminal-screen[data-bg="mesh"] .backdrop { opacity: 1; background: var(--mesh-image, none) center / cover no-repeat, var(--bg); }
 .terminal-screen[data-bg="mesh"] .backdrop::before {
   content: ""; position: absolute; inset: 0; pointer-events: none;
