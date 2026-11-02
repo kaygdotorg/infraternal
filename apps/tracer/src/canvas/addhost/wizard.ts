@@ -748,11 +748,11 @@ export class Wizard {
     // "Fix" opens the page that can mend this failure; plain retries and dead ends have only the retry button.
     // Retrying a host with leftovers would only find them again, so it is offered "Start fresh" instead.
     const fix = state === "failed" ? guideFor(job.entry.label, job.view.failure).fix : "none";
-    row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed" || fix === "start-fresh";
+    row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed" || fix === "start-fresh" || fix === "replace-stuck-install";
     const fixButton = row.querySelector<HTMLElement>(".ah-job-fix")!;
     fixButton.hidden = fix === "none" || fix === "retry";
     // The button names what it opens or does.
-    fixButton.textContent = fix === "choose-method" ? "Sign in another way" : fix === "host-key" ? "Check the key" : fix === "start-fresh" ? "Start fresh" : "Install from the host";
+    fixButton.textContent = fix === "choose-method" ? "Sign in another way" : fix === "host-key" ? "Check the key" : fix === "replace-stuck-install" ? "Replace the stuck install" : fix === "start-fresh" ? "Start fresh" : "Install from the host";
     this.marks.get(job.target)?.set(state);
     // A failure opens its steps so the reason sits next to the step that failed.
     if (state === "failed" && !row.dataset.touched) { row.dataset.open = "true"; row.querySelector(".ah-run-toggle")?.setAttribute("aria-expanded", "true"); }
@@ -806,6 +806,8 @@ export class Wizard {
     const hostId = job.view.failure?.already_added ? job.view.failure.host_id : undefined;
     const openId = hostId && this.deps.sink.hasHost?.(hostId) !== false ? hostId : undefined;
     const guide: Guide = guideFor(job.entry.label, job.view.failure, openId !== undefined);
+    const replaceStuck = guide.fix === "replace-stuck-install";
+    if (replaceStuck) guide.fix = "start-fresh";
     // Leftovers and a running setup are news to act on, not errors: a neutral icon, no red.
     const icon = guide.fix === "start-fresh" || (guide.fix === "none" && guide.tone === "info") ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? ICON.pending : ICON.warning;
     page.innerHTML = `${this.hero(icon, guide.tone === "danger" ? "danger" : "")}<h1 class="ah-title">${escapeHtml(guide.title)}</h1>
@@ -814,6 +816,10 @@ export class Wizard {
     const open = openId ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="open-terminal" data-host-id="${escapeHtml(openId)}">${svg(ICON.terminal)}<span>Open a terminal</span></button>` : "";
     const install = guide.fix === "install-command" ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="install">Install from the host</button>` : "";
     this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${open}${guide.fix === "none" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
+    if (replaceStuck) {
+      const label = this.foot.querySelector<HTMLElement>('[data-ah="start-fresh"] span');
+      if (label) label.textContent = "Replace the stuck install";
+    }
   }
 
   private renderHostKey(page: HTMLElement): void {

@@ -55,6 +55,14 @@ export function failureLine(failure: FailureDetail | undefined): string {
   }
 }
 
+/** Turn the validated host lease coordinates into the message shown in the flow. */
+function setupLockLine(lock: NonNullable<FailureDetail["setup_lock"]>, active: boolean): string {
+  const owner = lock.pid === undefined ? "an unidentified process" : `process ${lock.pid}`;
+  return active
+    ? `${owner[0]?.toUpperCase()}${owner.slice(1)} on ${lock.machine} holds the setup lock since ${lock.since}.`
+    : `The failed install on ${lock.machine} was last held by ${owner} since ${lock.since}.`;
+}
+
 export interface StageView { id: StageId; label: string; state: StageState; detail: string }
 
 const NETWORK_NAMES: Record<NetworkProvider, string> = { netbird: "NetBird", tailscale: "Tailscale", twingate: "Twingate", other: "your network" };
@@ -101,7 +109,7 @@ export function stagesOf(view: TargetView): StageView[] {
 }
 
 /** What fixes a failure; the wizard shows the matching page or button. */
-export type FixAction = "choose-method" | "host-key" | "install-command" | "retry" | "start-fresh" | "none";
+export type FixAction = "choose-method" | "host-key" | "install-command" | "retry" | "start-fresh" | "replace-stuck-install" | "none";
 
 /**
  * `tone` is the news, not the severity: "info" for a host that needs a decision or a wait (leftovers, a setup still
@@ -164,17 +172,25 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
       fix: "none",
       tone: "danger",
     };
-    case "stale_previous_attempt": return {
-      title: "This host has leftovers from an earlier setup",
-      happened: "infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.",
-      next: "",
-      fix: "start-fresh",
-      tone: "info",
-    };
+    case "stale_previous_attempt":
+      if (failure.setup_lock?.active === false) return {
+        title: "A stuck infraternal agent was found on " + name,
+        happened: setupLockLine(failure.setup_lock, false),
+        next: "",
+        fix: "replace-stuck-install",
+        tone: "info",
+      };
+      return {
+        title: "This host has leftovers from an earlier setup",
+        happened: "infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.",
+        next: "",
+        fix: "start-fresh",
+        tone: "info",
+      };
     case "setup_running": return {
-      title: "Setup is already running on this host",
-      happened: "Another setup for this host hasn't finished. Wait for it, or try again in a moment.",
-      next: "",
+      title: failure.setup_lock ? "Setup is running on " + failure.setup_lock.machine : "Setup is already running on this host",
+      happened: failure.setup_lock ? setupLockLine(failure.setup_lock, true) : failure.message,
+      next: failure.setup_lock ? "Wait for it to finish. If it stays stuck, replace the stuck install." : "Another setup for this host hasn't finished. Wait for it, or try again in a moment.",
       fix: "retry",
       tone: "info",
     };

@@ -1515,8 +1515,16 @@ case "$kind" in
     upgrade) :;;
     *) exit 71;;
 esac
+if [ -e "$stage/activating" ] || [ -L "$stage/activating" ]; then
+    [ -f "$stage/activating" ] && [ ! -L "$stage/activating" ] && [ -O "$stage/activating" ] && [ "$(stat -c '%a:%h:%s' "$stage/activating")" = 600:1:0 ] || exit 71
+    [ ! -e "$stage/failed" ] && [ ! -L "$stage/failed" ] || exit 71
+    mv -T "$stage/activating" "$stage/failed"
+fi
+if [ -e "$stage/failed" ] || [ -L "$stage/failed" ]; then
+    [ -f "$stage/failed" ] && [ ! -L "$stage/failed" ] && [ -O "$stage/failed" ] && [ "$(stat -c '%a:%h:%s' "$stage/failed")" = 600:1:0 ] || exit 71
+fi
 retire_setup_lease
-if [ -f "$stage/activating" ]; then
+if [ -f "$stage/failed" ]; then
     $manager stop infraternal-agent.service >/dev/null 2>&1
 fi
 if [ "$kind" = fresh ]; then
@@ -1530,7 +1538,7 @@ if [ -f "$stage/linger-requested" ]; then
     fi
     rm -f "$stage/linger-requested"
 fi
-if [ -f "$stage/activating" ]; then
+if [ -f "$stage/failed" ]; then
     $manager disable infraternal-agent.service >/dev/null 2>&1 || :
     if [ -f "$stage/replacing-binary" ] || [ -f "$stage/previous-binary" ]; then rm -f "$base/bin/live" "$base/bin/current"; fi
     if [ "${preserve_session:-no}" != yes ] || [ "$kind" != fresh ]; then
@@ -1552,7 +1560,7 @@ if [ -f "$stage/activating" ]; then
     [ ! -f "$stage/was-enabled" ] || $manager enable infraternal-agent.service
     [ ! -f "$stage/was-active" ] || $manager start infraternal-agent.service
 fi
-if [ -f "$stage/stopping" ] && [ -f "$stage/was-active" ] && [ ! -f "$stage/stop-refused" ] && [ ! -f "$stage/activating" ]; then
+if [ -f "$stage/stopping" ] && [ -f "$stage/was-active" ] && [ ! -f "$stage/stop-refused" ] && [ ! -f "$stage/activating" ] && [ ! -f "$stage/failed" ]; then
     $manager start infraternal-agent.service
 fi
 if [ "$kind" = fresh ]; then

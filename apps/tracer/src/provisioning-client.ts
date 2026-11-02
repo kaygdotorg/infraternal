@@ -50,6 +50,8 @@ export interface FailureDetail {
   kind: FailureKind;
   message: string;
   log_tail: string[];
+  /** Validated host-local setup lease coordinates for lock and interrupted-upgrade guidance. */
+  setup_lock?: { machine: string; pid?: number; since: string; active: boolean };
   /** Observed SHA256 host-key fingerprints; untrusted, present only for `host-key`. */
   fingerprints?: string[];
   host_key_challenge?: string;
@@ -137,9 +139,33 @@ export function bootstrapUrl(): string {
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const isStrings = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === "string");
 
+function parseSetupLock(value: unknown): FailureDetail["setup_lock"] | undefined {
+  if (!isRecord(value)
+    || typeof value.machine !== "string"
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/.test(value.machine)
+    || typeof value.since !== "string"
+    || !(value.since === "unknown" || /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value.since))
+    || typeof value.active !== "boolean"
+    || (value.pid !== undefined && value.pid !== null
+      && (typeof value.pid !== "number" || !Number.isSafeInteger(value.pid) || value.pid < 1 || value.pid > 0xffff_ffff))) {
+    return undefined;
+  }
+  const lock: NonNullable<FailureDetail["setup_lock"]> = {
+    machine: value.machine,
+    since: value.since,
+    active: value.active,
+  };
+  if (typeof value.pid === "number") lock.pid = value.pid;
+  return lock;
+}
+
 function parseFailure(value: unknown): FailureDetail | undefined {
   if (!isRecord(value) || typeof value.kind !== "string" || !KINDS.includes(value.kind) || typeof value.message !== "string") return undefined;
   const failure: FailureDetail = { kind: value.kind as FailureKind, message: value.message, log_tail: isStrings(value.log_tail) ? value.log_tail : [] };
+  if (value.kind === "setup_running" || value.kind === "stale_previous_attempt") {
+    const setupLock = parseSetupLock(value.setup_lock);
+    if (setupLock) failure.setup_lock = setupLock;
+  }
   if (isStrings(value.fingerprints) && value.fingerprints.length) failure.fingerprints = value.fingerprints;
   if (typeof value.host_key_challenge === "string") failure.host_key_challenge = value.host_key_challenge;
   if (["get-arm64-binary", "get-x86-64-binary", "connect", "upload", "install", "join", "start", "readiness"].includes(String(value.failed_step))) failure.failed_step = value.failed_step as NonNullable<FailureDetail["failed_step"]>;

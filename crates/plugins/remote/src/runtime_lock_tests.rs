@@ -305,6 +305,156 @@ fn session_inspection_finds_bound_endpoints_by_identity() {
     drop(control);
 }
 
+/// A non-dumpable legacy shim can be retired only through its owned session socket.
+fn start_legacy_shim(
+    path: &std::path::Path,
+    session: &str,
+    reported_pid: &str,
+) -> std::process::Child {
+    use std::io::{BufRead, BufReader, Read};
+
+    let shim = r#"
+import ctypes, os, socket, struct, sys
+path, session, reported_pid = sys.argv[1:]
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(path)
+os.chmod(path, 0o600)
+listener.listen(1)
+ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)
+print('READY', flush=True)
+peer, _ = listener.accept()
+def frame(body):
+    return struct.pack('<I', len(body)) + body
+def read_frame():
+    header = peer.recv(4)
+    while len(header) < 4:
+        header += peer.recv(4 - len(header))
+    size = struct.unpack('<I', header)[0]
+    body = b''
+    while len(body) < size:
+        body += peer.recv(size - len(body))
+    return body
+hello = b'\x01' + struct.pack('<H', 1) + struct.pack('<Q', 0)
+pid = os.getpid() if reported_pid == 'self' else os.getpid() + 1
+hello += bytes.fromhex(session) + struct.pack('<I', pid)
+hello += struct.pack('<HHQQQ', 80, 24, 0, 0, 0)
+peer.sendall(frame(hello))
+assert read_frame() == b'\x02' + struct.pack('<Q', 0)
+assert read_frame() == b'\x13' + struct.pack('<Q', 0)
+assert read_frame() == b'\x16\x01'
+peer.sendall(frame(b'\x20' + struct.pack('<iQ', 0, 0)))
+assert read_frame() == b'\x21'
+while True:
+    peer.recv(1)
+"#;
+    let mut server = std::process::Command::new("python3")
+        .args(["-c", shim])
+        .arg(path)
+        .arg(session)
+        .arg(reported_pid)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(server.stdout.take().unwrap());
+    let mut ready = String::new();
+    stdout.read_line(&mut ready).unwrap();
+    drop(stdout);
+    if ready != "READY\n" {
+        let _ = server.kill();
+        let status = server.wait().unwrap();
+        let mut stderr_text = String::new();
+        BufReader::new(server.stderr.take().unwrap())
+            .read_to_string(&mut stderr_text)
+            .unwrap();
+        panic!("legacy shim fixture did not start: {ready:?}, {status}: {stderr_text}");
+    }
+    server
+}
+
+#[test]
+fn stale_session_cleanup_reaps_legacy_shell_before_stopping_its_shim() {
+    use std::{
+        io::{BufReader, Read},
+        os::unix::process::ExitStatusExt,
+    };
+
+    let fixture = Fixture::new();
+    let nested = fixture.state().join("sessions");
+    fs::create_dir(&nested).unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
+    let id = uuid::Uuid::new_v4();
+    let path = nested.join(format!("{}.sock", id.simple()));
+    let mut server = start_legacy_shim(&path, &id.simple().to_string(), "self");
+    let base = fixture.0.join("base");
+    let root = fs::metadata(&base).unwrap();
+    let args = [
+        "--bootstrap-runtime".into(),
+        base.as_os_str().to_owned(),
+        format!("{}:{}", root.dev(), root.ino()).into(),
+        "sessions-stop".into(),
+    ];
+    let result = command(&mut args.into_iter());
+    if result != Some(0) {
+        let _ = server.kill();
+    }
+    let status = server.wait().unwrap();
+    let mut stderr_text = String::new();
+    BufReader::new(server.stderr.take().unwrap())
+        .read_to_string(&mut stderr_text)
+        .unwrap();
+    assert_eq!(
+        result,
+        Some(0),
+        "legacy session cleanup was refused: {stderr_text}"
+    );
+    assert_eq!(status.signal(), Some(nix::libc::SIGTERM));
+    assert!(!path.exists(), "retired session socket was left behind");
+}
+
+#[test]
+fn session_cleanup_refuses_a_hello_that_names_another_peer_process() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let fixture = Fixture::new();
+    let nested = fixture.state().join("sessions");
+    fs::create_dir(&nested).unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
+    let id = uuid::Uuid::new_v4();
+    let path = nested.join(format!("{}.sock", id.simple()));
+    let mut server = start_legacy_shim(&path, &id.simple().to_string(), "other");
+    let base = fixture.0.join("base");
+    let root = fs::metadata(&base).unwrap();
+    let args = [
+        "--bootstrap-runtime".into(),
+        base.as_os_str().to_owned(),
+        format!("{}:{}", root.dev(), root.ino()).into(),
+        "sessions-stop".into(),
+    ];
+    let result = command(&mut args.into_iter());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    let stopped_by_helper = loop {
+        if server.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    let still_bound = kernel_holds(&path) == Some(true);
+    if !stopped_by_helper {
+        let _ = server.kill();
+    }
+    let status = server.wait().unwrap();
+    assert_eq!(result, Some(77), "mismatched peer pid was not refused");
+    assert!(!stopped_by_helper, "cleanup signalled an unverified peer");
+    assert!(still_bound, "unverified session endpoint was changed");
+    assert_eq!(status.signal(), Some(nix::libc::SIGKILL));
+    assert!(path.exists(), "unverified session socket was removed");
+}
+
 /// A held lifetime description remains an explicit nonblocking refusal.
 #[test]
 fn lifetime_contention_preserves_would_block() {

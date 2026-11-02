@@ -1,4 +1,5 @@
 """Exercise the shipped ownership shell on isolated real files and live Unix listeners (#169)."""
+import datetime
 import os
 from pathlib import Path
 import re
@@ -12,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # Confirmation programs: the shared guard, the lease (rollback retires it),
 # runtime cleanup and the inspector, in the order install.rs sends them.
 INSPECT = ''.join((ROOT / f'src/{name}').read_text() for name in ('setup_guard.sh', 'setup_lock.sh', 'runtime_cleanup.sh', 'previous_attempt.sh'))
+RUNTIME_CLEANUP = (ROOT / 'src/runtime_cleanup.sh').read_text()
 SOURCE = (ROOT / 'src/install.rs').read_text()
 CONSTANTS = dict(re.findall(r'(?:pub\(crate\) )?const (\w+): &str = r#"(.*?)"#;', SOURCE, re.S))
 HOST, TRANSACTION = '1' * 32, '2' * 32
@@ -27,6 +29,12 @@ class EarlierSetup(unittest.TestCase):
         self.temp.mkdir(mode=0o700)
         self.base = Path.cwd() / self.temp / 'infraternal'
         self.base.mkdir(mode=0o700)
+        self.home = Path.cwd() / self.temp / 'home'
+        self.home.mkdir(mode=0o700)
+        self.unit = self.home / '.config/systemd/user/infraternal-agent.service'
+        self.launcher = self.home / '.local/bin/infraternal'
+        self.manager_log = Path.cwd() / self.temp / 'manager.log'
+        self.children = []
         helper = Path(os.environ['INFRATERNAL_TEST_RUNTIME_HELPER'])
         cache = Path(str(self.base) + '.bootstrap-cache')
         cache.mkdir(mode=0o700)
@@ -53,12 +61,104 @@ class EarlierSetup(unittest.TestCase):
         os.chdir(previous)
 
     def tearDown(self):
-        self.listener.close()
+        if self.listener:
+            self.listener.close()
+        for child in self.children:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=5)
         shutil.rmtree(self.temp)
 
+    def shell_script(self, body):
+        return f'''set -euC
+umask 077
+base="{self.base}"
+home="{self.home}"
+unit="{self.unit}"
+launcher="{self.launcher}"
+manager=mock_manager
+manager_log="{self.manager_log}"
+mock_manager() {{ printf '%s\\n' "$*" >> "$manager_log"; }}
+host={HOST}
+transaction={TRANSACTION}
+''' + INSPECT + body
+
     def run_shell(self, body):
-        script = f'set -euC\numask 077\nbase="{self.base}"\nhost={HOST}\ntransaction={TRANSACTION}\n' + INSPECT + body
-        return subprocess.run(['/bin/sh', '-c', script], capture_output=True)
+        script = self.shell_script(body)
+        environment = dict(os.environ, HOME=str(self.home))
+        return subprocess.run(['/bin/sh', '-c', script], capture_output=True, env=environment)
+
+    def make_upgrade_fixture(self, lease='99999999 1\n'):
+        if self.listener:
+            self.listener.close()
+            self.listener = None
+        self.receipt.unlink(missing_ok=True)
+        shutil.rmtree(self.base)
+        self.base.mkdir(mode=0o700)
+        self.identity = f'{self.base.stat().st_dev}:{self.base.stat().st_ino}'
+        self.owner.write_text(HOST + '\n')
+        self.owner.chmod(0o600)
+
+        stage = self.base / '.bootstrap-lock'
+        stage.mkdir(mode=0o700)
+        for name, value in [
+            ('transaction', TRANSACTION + '\n'),
+            ('kind', 'upgrade\n'),
+            ('lease', lease),
+        ]:
+            marker = stage / name
+            marker.write_text(value)
+            marker.chmod(0o600)
+        for name in ('activating', 'replacing-binary', 'replacing-launcher'):
+            marker = stage / name
+            marker.touch(mode=0o600)
+            marker.chmod(0o600)
+
+        payload = stage / 'payload'
+        shutil.copyfile(os.environ['INFRATERNAL_TEST_RUNTIME_HELPER'], payload)
+        payload.chmod(0o700)
+        cache = stage / 'cache'
+        cache.mkdir(mode=0o700)
+        os.link(payload, cache / 'payload')
+        owner = cache / 'owner'
+        owner.write_text('INFRATERNAL_PAYLOAD_CACHE_V1\n')
+        owner.chmod(0o600)
+
+        binary_dir = self.base / 'bin'
+        binary_dir.mkdir(mode=0o700)
+        live = binary_dir / 'live'
+        shutil.copyfile(os.environ['INFRATERNAL_TEST_RUNTIME_HELPER'], live)
+        live.chmod(0o700)
+        (binary_dir / 'current').symlink_to(live)
+        self.launcher.parent.mkdir(parents=True, mode=0o700)
+        self.launcher.symlink_to(binary_dir / 'current')
+
+        self.unit.parent.mkdir(parents=True, mode=0o700)
+        self.unit.write_text(
+            f'# infraternal bootstrap {HOST}\n[Unit]\n[Service]\n'
+            f'ExecStart="{binary_dir / "current"}" agent --data "{self.base / "state"}" '
+            f'--state "{self.base / "sessions"}" run\n[Install]\nWantedBy=default.target\n'
+        )
+        self.unit.chmod(0o600)
+        enabled = self.unit.parent / 'default.target.wants/infraternal-agent.service'
+        enabled.parent.mkdir(mode=0o700)
+        enabled.symlink_to(self.unit)
+
+        state = self.base / 'state'
+        state.mkdir(mode=0o700)
+        self.identity_path = state / 'identity.json'
+        self.identity_path.write_text('{"endpoint":"127.0.0.1:7443"}\n')
+        self.identity_path.chmod(0o600)
+        runtime = self.base / 'sessions'
+        (runtime / 'sessions').mkdir(parents=True, mode=0o700)
+        runtime.chmod(0o700)
+        (runtime / 'sessions').chmod(0o700)
+        lifetime = runtime / '.lifetime-lock'
+        lifetime.touch(mode=0o600)
+        lifetime.chmod(0o600)
+        self.socket = runtime / 'sessions' / ('3' * 32 + '.sock')
+        self.manager_log.unlink(missing_ok=True)
+        return stage, payload
 
     def recover(self, expected=None):
         if expected is None:
@@ -316,12 +416,230 @@ class EarlierSetup(unittest.TestCase):
                 child.terminate()
                 child.wait()
 
-    def test_live_lock_holder_is_refused(self):
+    def test_live_parent_lock_reports_the_actual_holder_not_the_inspector(self):
         self.listener.close()
+        inspect_now = self.temp / 'inspect-now'
+        observer = subprocess.Popen(
+            ['/bin/sh', '-c', self.shell_script(
+                f'\nwhile [ ! -e "{inspect_now}" ]; do sleep 0.01; done\ninspect_previous'
+            )],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=dict(os.environ, HOME=str(self.home)),
+        )
+        self.children.append(observer)
         with subprocess.Popen(['/bin/sh', '-c', 'exec 9< "$1"; flock 9; echo ready; read answer', 'sh', str(self.base.parent)], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
             self.assertEqual(child.stdout.readline(), b'ready\n')
-            self.assertEqual(self.run_shell('\ninspect_previous').returncode, 73)
+            stat = Path(f'/proc/{child.pid}/stat').read_text()
+            suffix = stat[stat.rfind(') ') + 2:].split()
+            start_time = suffix[19]
+            boot_time = next(int(line.split()[1]) for line in Path('/proc/stat').read_text().splitlines() if line.startswith('btime '))
+            since = datetime.datetime.fromtimestamp(boot_time + int(start_time) / os.sysconf('SC_CLK_TCK'), datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            inspect_now.touch(mode=0o600)
+            stdout, stderr = observer.communicate(timeout=5)
+            fields = stdout.decode().strip().split(' ')
+            self.assertEqual(observer.returncode, 0, stderr.decode())
+            self.assertEqual(fields[:2], ['INFRATERNAL_SETUP_LOCKED', socket.gethostname()])
+            self.assertEqual(fields[2:4], [str(child.pid), start_time])
+            self.assertEqual(fields[4], since)
             child.communicate(b'done\n')
+
+    def test_upgrade_journal_rejects_extra_lease_fields(self):
+        stage, _ = self.make_upgrade_fixture('99999999 1 extra\n')
+        result = self.run_shell('\ninspect_previous')
+        self.assertEqual(result.returncode, 75, result.stderr.decode())
+        self.assertTrue(stage.exists(), 'a malformed lease cannot authorize takeover')
+
+    def test_upgrade_journal_rejects_an_oversized_lease(self):
+        stage, _ = self.make_upgrade_fixture('9' * 70 + '\n')
+        result = self.run_shell('\ninspect_previous')
+        self.assertEqual(result.returncode, 75, result.stderr.decode())
+        self.assertTrue(stage.exists(), 'an oversized lease cannot authorize takeover')
+
+    def test_archived_failed_upgrade_with_dead_lease_owner_is_classified_for_replacement(self):
+        # Sanitized from the archived #305 field fixture. It keeps the exact
+        # journal shape and an old 7443 endpoint without the private key or binary.
+        stage, _ = self.make_upgrade_fixture()
+        stale_socket = self.socket
+        listener = socket.socket(socket.AF_UNIX)
+        previous = Path.cwd()
+        try:
+            os.chdir(self.sessions)
+            listener.bind(stale_socket.name)
+        finally:
+            os.chdir(previous)
+        listener.close()
+        stale_socket.chmod(0o600)
+        # A crash can leave the private Exited record between its write and rename.
+        ending = self.sessions / ('4' * 32 + '.ending')
+        ending.write_bytes(bytes(17))
+        ending.chmod(0o600)
+
+        result = self.run_shell('\ninspect_previous')
+        fields = result.stdout.decode().strip().split(' ')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(fields[:2], ['INFRATERNAL_SETUP_UPGRADE', HOST])
+        self.assertEqual(fields[2], TRANSACTION)
+        self.assertEqual(fields[3], self.identity)
+        self.assertEqual(fields[4], socket.gethostname())
+        self.assertEqual(fields[5:7], ['99999999', '1'])
+        since = datetime.datetime.fromtimestamp(
+            (stage / 'lease').stat().st_mtime, datetime.timezone.utc
+        ).strftime('%Y-%m-%dT%H:%M:%SZ')
+        self.assertEqual(fields[7], since)
+        self.assertEqual(fields[8], '1')
+        self.assertEqual(self.identity_path.read_text(), '{"endpoint":"127.0.0.1:7443"}\n')
+
+    def test_upgrade_with_lifetime_lock_requests_helper_refresh_before_confirmation(self):
+        stage, _ = self.make_upgrade_fixture()
+        shutil.rmtree(Path(str(self.base) + '.bootstrap-cache'))
+        previous = Path.cwd()
+        try:
+            os.chdir(self.sessions)
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(self.socket.name)
+            self.socket.chmod(0o600)
+        finally:
+            os.chdir(previous)
+
+        result = self.run_shell('\ninspect_previous')
+        self.assertEqual(
+            result.returncode,
+            76,
+            'preflight must request a compatible runtime helper before offering replacement',
+        )
+        self.assertTrue(stage.exists(), 'preflight must preserve the failed-upgrade journal')
+        self.assertTrue(self.identity_path.exists(), 'preflight must preserve enrolled state')
+
+    def test_failed_upgrade_rollback_marks_failed_before_stopping_the_service(self):
+        stage, _ = self.make_upgrade_fixture()
+        script = self.shell_script(f'''
+receipt="$base.bootstrap-rollback-$transaction"
+manager=observe_manager
+observe_manager() {{
+ printf '%s\\n' "$*" >> "$manager_log"
+ if [ "$1" = stop ]; then
+  [ -f "$stage/failed" ] && [ ! -e "$stage/activating" ] || exit 80
+ fi
+}}
+{CONSTANTS['ROLLBACK_TRANSACTION']}
+''')
+        result = subprocess.run(['/bin/sh', '-c', script], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertIn('stop infraternal-agent.service', self.manager_log.read_text())
+        self.assertFalse(stage.exists(), 'a rolled back upgrade must retire its journal')
+
+    def test_live_setup_lock_diagnostic_names_the_machine_process_and_start_time(self):
+        self.listener.close()
+        stage = self.base / '.bootstrap-lock'
+        stage.mkdir(mode=0o700)
+        holder = subprocess.Popen(
+            ['/bin/sh', '-c', 'exec 7< "$1"; flock 7; echo ready; read answer', 'sh', str(stage)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+        )
+        self.children.append(holder)
+        self.assertEqual(holder.stdout.readline(), b'ready\n')
+        stat = Path(f'/proc/{holder.pid}/stat').read_text()
+        suffix = stat[stat.rfind(') ') + 2:].split()
+        start_time = suffix[19]
+        lease = stage / 'lease'
+        lease.write_text(f'{holder.pid} {start_time}\n')
+        lease.chmod(0o600)
+
+        result = self.run_shell('\ninspect_previous')
+        fields = result.stdout.decode().strip().split(' ')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(fields[:2], ['INFRATERNAL_SETUP_LOCKED', socket.gethostname()])
+        self.assertEqual(fields[2:4], [str(holder.pid), start_time])
+        since = datetime.datetime.fromtimestamp(
+            lease.stat().st_mtime, datetime.timezone.utc
+        ).strftime('%Y-%m-%dT%H:%M:%SZ')
+        self.assertEqual(fields[4], since)
+        holder.communicate(b'done\n', timeout=5)
+
+    def test_replacement_stops_only_the_journaled_payload_process_and_keeps_host_state(self):
+        stage, payload = self.make_upgrade_fixture()
+        # A process launched through the journaled payload path has that exact
+        # executable inode in /proc; sleep gives the shell a real process to stop.
+        shutil.copyfile('/bin/sleep', payload)
+        payload.chmod(0o700)
+        child = subprocess.Popen(
+            [str(payload), '30'],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.children.append(child)
+        import time
+        time.sleep(.02)
+        self.assertIsNone(
+            child.poll(),
+            'the journaled payload process must be live before replacement',
+        )
+
+        expected = self.run_shell('\ninspect_previous').stdout.decode().strip()
+        body = f'''\nsetup_guard
+observed=$(inspect_previous)
+[ "$observed" = "{expected}" ] || exit 75
+replace_stuck_install "$observed"
+'''
+        result = self.run_shell(body)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        child.wait(timeout=5)
+        self.assertFalse(stage.exists())
+        self.assertTrue((self.base / 'bin/live').exists(), 'the old binary remains available for transactional replacement')
+        self.assertTrue(self.identity_path.exists(), 'identity and state stay available for HTTPS re-enrollment')
+        self.assertEqual(self.manager_log.read_text().splitlines(), [
+            'stop infraternal-agent.service',
+            'disable infraternal-agent.service',
+            'daemon-reload',
+        ])
+
+    def test_replacement_does_not_signal_an_unrelated_process_with_a_host_file_open(self):
+        stage, payload = self.make_upgrade_fixture()
+        expected = self.run_shell('\ninspect_previous').stdout.decode().strip()
+        opened = open(self.base / 'bin/live', 'rb')
+        unrelated = subprocess.Popen(['sleep', '30'], pass_fds=[opened.fileno()])
+        self.children.append(unrelated)
+        opened.close()
+        body = f'''\nsetup_guard
+observed=$(inspect_previous)
+[ "$observed" = "{expected}" ] || exit 75
+replace_stuck_install "$observed"
+'''
+        result = self.run_shell(body)
+        self.assertEqual(result.returncode, 73, result.stderr.decode())
+        self.assertIsNone(unrelated.poll(), 'a process that only has a host file open is not an infraternal agent')
+        self.assertTrue(stage.exists(), 'uncertain host activity keeps the journal for retry')
+
+    def test_reused_lease_pid_with_a_different_start_time_is_never_signalled(self):
+        stage, _ = self.make_upgrade_fixture(f'{os.getpid()} 1\n')
+        expected = self.run_shell('\ninspect_previous').stdout.decode().strip()
+        result = self.run_shell(
+            f'\nsetup_guard\nobserved=$(inspect_previous)\n'
+            f'[ "$observed" = "{expected}" ] || exit 75\n'
+            'replace_stuck_install "$observed"\n'
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertTrue(Path(f'/proc/{os.getpid()}').exists(), 'the reused PID belongs to this test process')
+        self.assertFalse(stage.exists())
+
+    def test_failed_upgrade_rollback_replaces_activating_with_failed_before_stop(self):
+        stage, _ = self.make_upgrade_fixture()
+        body = f'''\nstage="$base/.bootstrap-lock"
+mock_manager() {{
+    [ -f "$stage/failed" ] && [ ! -e "$stage/activating" ] || exit 90
+    return 1
+}}
+{RUNTIME_CLEANUP}
+{CONSTANTS['FRESH_CLEANUP']}
+{CONSTANTS['ROLLBACK_TRANSACTION']}
+'''
+        result = self.run_shell(body)
+        self.assertEqual(result.returncode, 1, result.stderr.decode())
+        self.assertTrue((stage / 'failed').exists(), 'the rollback journal must record failed activation')
+        self.assertFalse((stage / 'activating').exists(), 'a failed activation cannot remain labeled activating')
 
     def test_recovery_keeps_lock_through_removal(self):
         self.listener.close()

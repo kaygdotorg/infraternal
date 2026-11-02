@@ -35,3 +35,35 @@ test("readiness failure retains its trusted step through the socket", () => {
     expect(events[0]?.failure?.failed_step).toBe("readiness");
   } finally { globalThis.WebSocket = original; }
 });
+
+test("validated setup-lock coordinates reach the wizard through the socket", () => {
+  const original = globalThis.WebSocket;
+  let socket: EventTarget;
+  class Socket extends EventTarget {
+    constructor() { super(); socket = this; }
+  }
+  globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+  try {
+    const events: BootstrapEvent[] = [];
+    new ProvisioningRun({ onEvent: (event) => events.push(event) }, { url: "ws://localhost/bootstrap" });
+    socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: 1, target: "host", attempt: 1, step: "check", message: "Stuck install", elapsed_ms: 1,
+      failure: { kind: "stale_previous_attempt", message: "Replace the stuck install.", log_tail: [], setup_lock: { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false } } }) }));
+    expect(events[0]?.failure?.setup_lock).toEqual({ machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false });
+  } finally { globalThis.WebSocket = original; }
+});
+
+test("malformed setup-lock coordinates cannot expose the replacement action", () => {
+  const original = globalThis.WebSocket;
+  let socket: EventTarget;
+  class Socket extends EventTarget {
+    constructor() { super(); socket = this; }
+  }
+  globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+  try {
+    const events: BootstrapEvent[] = [];
+    new ProvisioningRun({ onEvent: (event) => events.push(event) }, { url: "ws://localhost/bootstrap" });
+    socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: 1, target: "host", attempt: 1, step: "check", message: "Stuck install", elapsed_ms: 1,
+      failure: { kind: "stale_previous_attempt", message: "Replace the stuck install.", log_tail: [], setup_lock: { machine: "bad host", pid: 0, since: "not a time", active: false } } }) }));
+    expect(events[0]?.failure?.setup_lock).toBeUndefined();
+  } finally { globalThis.WebSocket = original; }
+});

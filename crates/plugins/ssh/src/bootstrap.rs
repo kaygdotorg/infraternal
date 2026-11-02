@@ -32,6 +32,16 @@ pub struct PreparedHostKey {
     pub digest: [u8; 32],
 }
 
+/// Inputs for replacing a stuck install while retaining its enrolled host identity.
+/// The backend revalidates the host against the target and prepared key before reissuing authority.
+pub struct StuckInstallRequest<'a> {
+    pub target: &'a Target,
+    pub check: &'a Check,
+    pub host: uuid::Uuid,
+    pub lookup: Option<String>,
+    pub binding: PreparedHostKey,
+}
+
 /// Trusted request authority stays in memory and is never Debug or serialized.
 /// Browser enrollment must recheck this exact session atomically, not owner id alone.
 pub struct Authority {
@@ -75,6 +85,19 @@ pub trait Backend: Send + Sync {
         _: uuid::Uuid,
     ) -> Operation<'a, JoinMaterial> {
         Box::pin(async { Err(Failure::unsupported("Host setup retry is unavailable.")) })
+    }
+    /// Rejoin an enrolled host after the person explicitly replaces its stuck upgrade.
+    fn reissue_stuck_install<'a>(
+        &'a self,
+        _: &'a Authority,
+        _: StuckInstallRequest<'a>,
+        _: &'a mut (dyn FnMut(uuid::Uuid) -> Result<(), Failure> + Send),
+    ) -> Operation<'a, JoinMaterial> {
+        Box::pin(async {
+            Err(Failure::unsupported(
+                "Replacing a stuck install needs a compatible server enrollment path.",
+            ))
+        })
     }
     /// Detached setup observes revocation independently of the wizard socket.
     fn authority_cancelled<'a>(&'a self, _: &'a Authority) -> Operation<'a, ()> {
@@ -1091,19 +1114,23 @@ impl Bootstrap {
                 result => result?,
             }
             let lookup = session.trust_lookup();
-            if let Some(previous) = previous {
+            let replacement_host = if let Some(previous) = previous {
                 // Only this server's durable failed-host binding finishes the
-                // earlier setup without asking; anything else still asks (#230).
-                let automatic = self
-                    .backend
-                    .owns_failed_setup(
-                        &batch.authority,
-                        target,
-                        &check,
-                        previous.host,
-                        lookup.clone(),
-                    )
-                    .await?;
+                // earlier setup without asking; replacing a stuck upgrade still
+                // requires explicit confirmation (#230).
+                let automatic = if previous.replacement_host().is_some() {
+                    false
+                } else {
+                    self.backend
+                        .owns_failed_setup(
+                            &batch.authority,
+                            target,
+                            &check,
+                            previous.host,
+                            lookup.clone(),
+                        )
+                        .await?
+                };
                 self.await_start_fresh(
                     batch,
                     target,
@@ -1114,10 +1141,15 @@ impl Bootstrap {
                     automatic,
                 )
                 .await?;
-            }
+                previous.replacement_host()
+            } else {
+                None
+            };
             // Existing remote identities must be reported before the first
             // payload is staged, even if the replacement binary is unavailable.
-            if server_origin.is_some() {
+            // A stuck upgrade already names its enrolled identity; reissue checks
+            // that exact host binding before publishing the replacement enrollment.
+            if server_origin.is_some() && replacement_host.is_none() {
                 self.backend
                     .preflight_existing_host(&batch.authority, target, lookup.clone())
                     .await?;
@@ -1133,7 +1165,7 @@ impl Bootstrap {
                 let binary = full_binary
                     .clone()
                     .unwrap_or_else(|| session_binary.clone());
-                let host = uuid::Uuid::new_v4();
+                let host = replacement_host.unwrap_or_else(uuid::Uuid::new_v4);
                 resources.installation =
                     Some(Installation::new_pending(session.clone(), target, host)?);
                 let transaction = resources.installation.as_ref().ok_or_else(|| {
@@ -1151,21 +1183,50 @@ impl Bootstrap {
                 resources.host = Some(host);
                 Ok(())
             };
-            let join = if let Some(binding) = key_binding {
-                self.backend
-                    .invitation_registered_with_key(
-                        &batch.authority,
-                        target,
-                        &check,
-                        lookup.clone(),
-                        binding,
-                        &mut register,
-                    )
-                    .await?
-            } else {
-                self.backend
-                    .invitation_registered(&batch.authority, target, &check, lookup, &mut register)
-                    .await?
+            let join = match (replacement_host, key_binding) {
+                (Some(host), Some(binding)) => {
+                    self.backend
+                        .reissue_stuck_install(
+                            &batch.authority,
+                            StuckInstallRequest {
+                                target,
+                                check: &check,
+                                host,
+                                lookup: lookup.clone(),
+                                binding,
+                            },
+                            &mut register,
+                        )
+                        .await?
+                }
+                (Some(_), None) => {
+                    return Err(Failure::install(
+                        "Replacing this stuck install needs HTTPS enrollment.",
+                    ));
+                }
+                (None, Some(binding)) => {
+                    self.backend
+                        .invitation_registered_with_key(
+                            &batch.authority,
+                            target,
+                            &check,
+                            lookup.clone(),
+                            binding,
+                            &mut register,
+                        )
+                        .await?
+                }
+                (None, None) => {
+                    self.backend
+                        .invitation_registered(
+                            &batch.authority,
+                            target,
+                            &check,
+                            lookup,
+                            &mut register,
+                        )
+                        .await?
+                }
             };
             let key_prepared = server_origin.is_some();
             resources.host = Some(join.host);
@@ -1585,10 +1646,7 @@ impl Bootstrap {
                 Step::Check,
                 "This host has leftovers from an earlier setup",
                 started,
-                Some(Failure::new(
-                    crate::model::FailureKind::StalePreviousAttempt,
-                    "infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.",
-                )),
+                Some(previous.stuck_failure()),
                 Some(Box::new(previous.findings(target.mode, challenge))),
             );
             resumed.await.map_err(|_| {

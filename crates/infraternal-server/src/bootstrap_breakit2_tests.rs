@@ -747,12 +747,12 @@ impl AuthProvider for FixtureProvider {
     }
     fn user_key(&self) -> Operation<'_, Option<Credentials>> {
         Box::pin(async move {
-            Ok(self
-                .0
-                .lock()
-                .unwrap()
-                .take()
-                .map(|key| Credentials::PrivateKey {
+            let key = self.0.lock().unwrap().take();
+            println!(
+                "DIAG breakit2 auth_provider=user_key key_present={}",
+                key.is_some()
+            );
+            Ok(key.map(|key| Credentials::PrivateKey {
                     key,
                     passphrase: None,
                 }))
@@ -778,6 +778,10 @@ impl SshTransport for FixtureTransport {
             // order: real network-only refusal, then lazy key authentication.
             // Browser passkey unlocking is outside this native fixture.
             let key = self.private.lock().unwrap().take();
+            println!(
+                "DIAG breakit2 transport_open key_present={}",
+                key.is_some()
+            );
             AutoAuth::new(self.transport.clone())
                 .open(
                     destination,
@@ -802,7 +806,60 @@ pub(super) struct ObservedBackend(
     pub(super) Option<CanaryHook>,
     pub(super) Option<CanaryReturnHook>,
 );
+
+/// Seed the prior host record only after the real target presents its existing key digest.
+/// The live fixture owns the user files; the disposable server owns this matching ledger row.
+async fn seed_replacement_host(
+    backend: &RemoteBackend,
+    authority: &Authority,
+    request: &StuckInstallRequest<'_>,
+) {
+    assert_eq!(request.host, request.binding.host);
+    let (mode, execution_uid) = match request.target.mode {
+        InstallMode::Rootless => (Mode::Rootless, i64::from(request.check.uid)),
+        InstallMode::Root => (Mode::Rootful, 0),
+    };
+    let address = match &request.target.address {
+        infraternal_plugin_ssh::model::TargetAddress::Manual(address) => address,
+        infraternal_plugin_ssh::model::TargetAddress::Discovered(_) => {
+            panic!("the live replacement fixture needs a manual address")
+        }
+    };
+    let now = unix_now().unwrap();
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,?,?,?)")
+        .bind(request.host.as_bytes().as_slice())
+        .bind(&authority.owner)
+        .bind(mode.as_str())
+        .bind(execution_uid)
+        .bind(now)
+        .execute(&backend.issuer.store().0)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,?,?)")
+        .bind(request.host.as_bytes().as_slice())
+        .bind(address)
+        .bind(request.lookup.as_deref())
+        .execute(&backend.issuer.store().0)
+        .await
+        .unwrap();
+    let _ = backend
+        .issuer
+        .store()
+        .issue(
+            &authority.owner,
+            request.host,
+            mode,
+            now,
+            &request.binding.digest,
+        )
+        .await
+        .unwrap();
+}
+
 impl Backend for ObservedBackend {
+    fn enrollment_origin(&self) -> Option<String> {
+        self.0.enrollment_origin()
+    }
     fn observe_link(&self, a: &Authority, h: Uuid, round_trip: Duration) {
         self.0.observe_link(a, h, round_trip);
     }
@@ -836,6 +893,25 @@ impl Backend for ObservedBackend {
             "reissue_invitation",
             self.0.reissue_invitation(a, h),
         ))
+    }
+    fn reissue_stuck_install<'a>(
+        &'a self,
+        authority: &'a Authority,
+        request: StuckInstallRequest<'a>,
+        register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
+    ) -> Operation<'a, JoinMaterial> {
+        let backend = self.0.clone();
+        if std::env::var_os("BREAKIT2_REPLACE_STUCK").is_some() {
+            Box::pin(async move {
+                seed_replacement_host(&backend, authority, &request).await;
+                backend
+                    .reissue_stuck_install(authority, request, register)
+                    .await
+            })
+        } else {
+            self.0
+                .reissue_stuck_install(authority, request, register)
+        }
     }
     fn stop(&self) -> Operation<'_, ()> {
         self.0.stop()
@@ -966,6 +1042,17 @@ impl Backend for ObservedBackend {
     }
 }
 
+#[tokio::test]
+async fn observed_backend_preserves_the_public_enrollment_origin() {
+    let fixture = fixture(false).await;
+    let backend = ObservedBackend(fixture.backend.clone(), None, None);
+
+    assert_eq!(
+        backend.enrollment_origin().as_deref(),
+        Some("https://remote.example.test")
+    );
+}
+
 // Mirror the fixed production canary only for opt-in boundary diagnostics.
 // No remote text or capability is logged; normal measurements delegate unchanged.
 async fn diagnostic_canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), Failure> {
@@ -1092,11 +1179,19 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     )
     .await
     .unwrap();
+    let local_endpoint = listeners.local_addr().unwrap();
+    let advertised_port = std::env::var("BREAKIT2_PUBLIC_LINK_PORT")
+        .ok()
+        .map(|port| port.parse::<u16>().expect("valid advertised link port"))
+        .unwrap_or(local_endpoint.port());
     let endpoint = EnrollmentEndpoint {
         ca_der: material.issuer().to_der().unwrap(),
-        endpoint: listeners.local_addr().unwrap(),
+        endpoint: std::net::SocketAddr::new(local_endpoint.ip(), advertised_port),
         server_name: server_name.clone(),
     };
+    if std::env::var_os("BREAKIT2_PUBLIC_LINK_PORT").is_some() {
+        println!("METRIC breakit2 agent_link_port={advertised_port}");
+    }
     let auth = Auth::new(
         f.pool.clone(),
         &server_name,
@@ -1131,6 +1226,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         sessions_changed: Mutex::default(),
     });
     let timeout_retry = std::env::var_os("BREAKIT2_TIMEOUT_RETRY").is_some();
+    let replace_stuck = std::env::var_os("BREAKIT2_REPLACE_STUCK").is_some();
     let retry_private =
         (timeout_retry || std::env::var_os("BREAKIT2_RETRY").is_some()).then(|| private.clone());
     // Adding the same host a second time must name the existing host (#189).
@@ -1192,7 +1288,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
             Secret::new(f.cookie.as_bytes().to_vec()),
             vec![Target {
                 id: "live".into(),
-                address: TargetAddress::Manual(address),
+                address: TargetAddress::Manual(address.clone()),
                 credential: None,
                 mode,
                 root_consent: mode == InstallMode::Root,
@@ -1239,9 +1335,20 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let mut prompt_published_at = None;
     let mut retry_started_at = None;
     let mut joined_host = None;
+    let mut replaced_stuck = false;
     let result = tokio::time::timeout(Duration::from_secs(220), async {
         loop {
             let events = batch.events(0).1;
+            if replace_stuck
+                && !replaced_stuck
+                && let Some(challenge) = events
+                    .iter()
+                    .find_map(|event| event.leftovers.as_deref().map(|leftovers| leftovers.challenge))
+            {
+                runner.start_fresh(&batch, "owner", "live", challenge).unwrap();
+                replaced_stuck = true;
+                println!("REPLACEMENT breakit2 action=start_fresh accepted=true");
+            }
             if let Some(event) = events.iter().find(|event| {
                 event.attempt == selected_attempt && matches!(event.step, Step::Done | Step::Failed)
             }) {
@@ -1382,6 +1489,19 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
             published_retry,
             "the injected published setup failure must be retried"
         );
+    }
+    if replace_stuck {
+        assert!(replaced_stuck, "the stale install did not offer replacement");
+        assert_eq!(result, Step::Done, "the stuck install replacement failed");
+        let address_records: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM remote_host_bootstrap WHERE address=?",
+        )
+        .bind(&address)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(address_records, 1, "replacement left duplicate host records");
+        println!("REPLACEMENT breakit2 completed=true address_records=1");
     }
     if let Some(private) = readd_private
         && result == Step::Done

@@ -7,7 +7,7 @@ use crate::{
     remote_runtime::RemoteHosts,
 };
 use infraternal_plugin_ssh::{
-    bootstrap::{Authority, Backend, PreparedHostKey, Resolved},
+    bootstrap::{Authority, Backend, PreparedHostKey, Resolved, StuckInstallRequest},
     install::JoinMaterial,
     model::{Failure, InstallMode, InstallStep, Target},
     probe::Check,
@@ -605,6 +605,84 @@ impl Backend for RemoteBackend {
         Box::pin(async move {
             self.issue_attempt(authority, target, check, lookup, &binding, Some(register))
                 .await
+        })
+    }
+    fn reissue_stuck_install<'a>(
+        &'a self,
+        authority: &'a Authority,
+        request: StuckInstallRequest<'a>,
+        register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
+    ) -> Operation<'a, JoinMaterial> {
+        let StuckInstallRequest {
+            target,
+            check,
+            host,
+            lookup,
+            binding,
+        } = request;
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            if binding.host != host {
+                return Err(Failure::unsupported(
+                    "The interrupted install belongs to another enrolled host.",
+                ));
+            }
+            let address = match &target.address {
+                infraternal_plugin_ssh::model::TargetAddress::Manual(address) => address.as_str(),
+                infraternal_plugin_ssh::model::TargetAddress::Discovered(_) => {
+                    return Err(unavailable());
+                }
+            };
+            let lookup = lookup.as_deref();
+            let registered: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.id=? AND h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)))")
+                .bind(host.as_bytes().as_slice())
+                .bind(&authority.owner)
+                .bind(address)
+                .bind(lookup)
+                .bind(lookup)
+                .fetch_one(&self.issuer.store().0)
+                .await
+                .map_err(|_| unavailable())?;
+            if !registered {
+                return Err(Failure::unsupported(
+                    "The interrupted install no longer matches this enrolled host.",
+                ));
+            }
+            let stored_digest = self
+                .issuer
+                .store()
+                .host_key_digest(host)
+                .await
+                .map_err(|_| unavailable())?
+                .ok_or_else(unavailable)?;
+            if stored_digest != binding.digest {
+                return Err(Failure::install(
+                    "The interrupted install's host identity does not match its enrolled key.",
+                ));
+            }
+            if !self.issuer.ready() {
+                return Err(Failure::install(
+                    "Set up or unlock host connections with an administrator passkey before adding a host.",
+                ));
+            }
+            let uid = match target.mode {
+                InstallMode::Rootless => check.uid,
+                InstallMode::Root => 0,
+            };
+            self.reserve_attempt(authority, host, uid, address, lookup)?;
+            let mut unpublished = Unpublished {
+                backend: self,
+                host,
+                published: false,
+            };
+            register(host)?;
+            // The existing host remains enrolled if the replacement attempt fails.
+            unpublished.published = true;
+            let join = self.reissue_invitation(authority, host).await?;
+            if join.host != host {
+                return Err(unavailable());
+            }
+            Ok(join)
         })
     }
     fn connected_facts<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, ()> {
@@ -1492,6 +1570,51 @@ mod tests {
             })
         }
     }
+    struct RejoinSession {
+        check: Vec<u8>,
+        digest: [u8; 32],
+        scripts: Arc<Mutex<Vec<String>>>,
+    }
+    impl SshTransport for RejoinSession {
+        fn open(
+            &self,
+            _: Destination,
+            _: Credentials,
+            _: MeshEvidence,
+        ) -> Operation<'_, Arc<dyn SshSession>> {
+            Box::pin(async move {
+                Ok(Arc::new(Self {
+                    check: self.check.clone(),
+                    digest: self.digest,
+                    scripts: self.scripts.clone(),
+                }) as Arc<dyn SshSession>)
+            })
+        }
+    }
+    impl SshSession for RejoinSession {
+        fn run<'a>(&'a self, script: &'a str, _: Input<'a>) -> Operation<'a, CommandOutput> {
+            let script = script.to_owned();
+            Box::pin(async move {
+                self.scripts.lock().unwrap().push(script.clone());
+                let stdout = if script.starts_with(infraternal_plugin_ssh::probe::CHECK_SCRIPT) {
+                    self.check.clone()
+                } else if script.contains("prepare-join-key") {
+                    let mut encoded = String::with_capacity(64);
+                    for byte in self.digest {
+                        for nibble in [byte >> 4, byte & 0x0f] {
+                            encoded.push(char::from(b"0123456789abcdef"[usize::from(nibble)]));
+                        }
+                    }
+                    format!("KEY-DIGEST {encoded}\n").into_bytes()
+                } else if script.contains(" agent --data ") && script.contains(" join ") {
+                    return Err(Failure::install("stop after the reissued invitation"));
+                } else {
+                    Vec::new()
+                };
+                Ok(CommandOutput { stdout })
+            })
+        }
+    }
     struct Fixture {
         backend: Arc<RemoteBackend>,
         pool: sqlx::SqlitePool,
@@ -1800,6 +1923,117 @@ mod tests {
                 .unwrap(),
             1
         );
+        assert!(f.backend.attempts.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn replacing_a_journaled_old_install_reissues_its_identity_without_a_duplicate_host() {
+        let f = fixture(true).await;
+        sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,'user@fixture',NULL)")
+            .bind(f.prior.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let digest = f
+            .backend
+            .issuer
+            .store()
+            .host_key_digest(f.prior)
+            .await
+            .unwrap()
+            .unwrap();
+        let host = f.prior.simple();
+        let transaction = Uuid::new_v4().simple();
+        let check = format!(
+            "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_UPGRADE {host} {transaction} 1:2 fixture 99999999 1 2026-11-02T04:05:06Z 0\n"
+        )
+        .into_bytes();
+        let scripts = Arc::new(Mutex::new(Vec::new()));
+        let transport = Arc::new(RejoinSession {
+            check,
+            digest,
+            scripts: scripts.clone(),
+        });
+        let binary = std::env::current_exe().unwrap();
+        let runner = Bootstrap::new(
+            transport,
+            f.backend.clone(),
+            BinaryPaths {
+                x86_64: binary.clone(),
+                aarch64: binary,
+            },
+        );
+        let batch = runner
+            .start_authenticated(
+                "owner".into(),
+                Secret::new(f.cookie.as_bytes().to_vec()),
+                vec![Target {
+                    id: "one".into(),
+                    address: TargetAddress::Manual("user@fixture".into()),
+                    credential: None,
+                    mode: InstallMode::Rootless,
+                    root_consent: false,
+                }],
+                None,
+            )
+            .unwrap();
+        let mut changed = batch.subscribe();
+        let challenge = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let events = batch.events(0).1;
+                if let Some(leftovers) = events.iter().find_map(|event| event.leftovers.as_ref()) {
+                    break leftovers.challenge;
+                }
+                assert!(
+                    events.iter().all(|event| event.step != Step::Failed),
+                    "the old install must reach the explicit replacement action: {events:?}"
+                );
+                changed.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        runner
+            .start_fresh(&batch, "owner", "one", challenge)
+            .unwrap();
+        let event = finished(&batch).await;
+        assert_eq!(event.step, Step::Failed);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM remote_hosts")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        let revoked: bool =
+            sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM remote_hosts WHERE id=?")
+                .bind(f.prior.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert!(
+            !revoked,
+            "a failed replacement attempt must preserve the old host record"
+        );
+        let invitations: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM remote_join_tokens WHERE host_id=? AND consumed_at IS NULL",
+        )
+        .bind(f.prior.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            invitations, 1,
+            "the previous host must receive a fresh join invitation"
+        );
+        let scripts = scripts.lock().unwrap();
+        assert!(
+            scripts
+                .iter()
+                .any(|script| script.contains("https://remote.example.test/remote/join"))
+        );
+        assert!(scripts.iter().all(|script| !script.contains(":7443")));
         assert!(f.backend.attempts.lock().unwrap().is_empty());
     }
     #[tokio::test]

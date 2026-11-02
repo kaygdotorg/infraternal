@@ -1,15 +1,23 @@
-//! Coordinates remote runtime lifetime with transaction cleanup without host interpreters [17], #230.
+//! Coordinates runtime lifetime and safely retires owned session shims for bootstrap cleanup [17], #230.
 //! Filesystem setup stays outside CLI and supervisor pollers to bound release size [243].
 
-use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr, connect, socket};
+use infraternal_shim::frame::{Frame, MAX_FRAME};
+use nix::sys::socket::{
+    AddressFamily, SockFlag, SockType, UnixAddr, connect, getsockopt, socket,
+    sockopt::PeerCredentials,
+};
 use std::{
     fs::{self, File, OpenOptions},
-    io,
+    io::{self, Read, Write},
     os::{
         fd::AsRawFd,
-        unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt},
+        unix::{
+            fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt},
+            net::UnixStream,
+        },
     },
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 /// One fixed file in the private runtime state; never replace it while the runtime is live.
@@ -18,8 +26,8 @@ pub const LOCK: &str = ".lifetime-lock";
 /// Capability level printed by `--bootstrap-runtime-version`; raise it with every new mode.
 /// The cleanup script compares it with the level it needs, so a cached helper that predates
 /// a mode asks for a refresh (76) instead of refusing the mode. Helpers before levels print
-/// nothing and read as 0. Level 1: `inspect`/`retire`; level 2: `sessions`.
-pub const LEVEL: &[u8] = b"2\n";
+/// nothing and read as 0. Level 1: `inspect`/`retire`; level 2: `sessions`; level 3: `sessions-stop`.
+pub const LEVEL: &[u8] = b"3\n";
 
 fn refused() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
@@ -440,6 +448,263 @@ fn sessions(runtime: &File) -> Result<(), u8> {
     }
     Ok(())
 }
+
+/// Read the start tick and state for a PID, keeping the command's closing parenthesis intact.
+fn process_identity(pid: i32) -> io::Result<(u64, u8)> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let (_, suffix) = stat
+        .rsplit_once(')')
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+    let mut fields = suffix.split_ascii_whitespace();
+    let state = fields
+        .next()
+        .and_then(|value| value.as_bytes().first().copied())
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+    let start = fields
+        .nth(18)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?
+        .parse()
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    Ok((start, state))
+}
+
+fn write_session_frame(stream: &mut UnixStream, frame: &Frame) -> io::Result<()> {
+    stream.write_all(&frame.encode()?)
+}
+
+fn read_session_frame(stream: &mut UnixStream) -> io::Result<Frame> {
+    let mut prefix = [0_u8; 4];
+    stream.read_exact(&mut prefix)?;
+    let length = u32::from_le_bytes(prefix) as usize;
+    if length == 0 || length > MAX_FRAME {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let mut body = vec![0_u8; length];
+    stream.read_exact(&mut body)?;
+    Frame::decode(&body)
+}
+
+fn session_id(path: &Path) -> Result<[u8; 16], u8> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".sock"))
+        .ok_or(77)?;
+    let id = uuid::Uuid::parse_str(name).map_err(|_| 77)?;
+    if id.simple().to_string() != name {
+        return Err(77);
+    }
+    Ok(*id.as_bytes())
+}
+
+/// Remove one unchanged endpoint only after the kernel confirms it is unbound.
+fn retire_session_socket(path: &Path, before: &fs::Metadata) -> Result<(), u8> {
+    let after = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(77),
+    };
+    if !same(before, &after)
+        || !after.file_type().is_socket()
+        || after.uid() != nix::unistd::Uid::effective().as_raw()
+        || after.mode() & 0o777 != 0o600
+        || after.nlink() != 1
+    {
+        return Err(77);
+    }
+    if kernel_bound(&[(path.to_path_buf(), after.clone())]).ok_or(77)? {
+        return Err(73);
+    }
+    let named = fs::symlink_metadata(path).map_err(|_| 77)?;
+    if !same(&after, &named) || !named.file_type().is_socket() {
+        return Err(77);
+    }
+    fs::remove_file(path).map_err(|_| 77)
+}
+
+/// Shut down only the process authenticated by both the session socket and its Hello.
+#[cold]
+#[inline(never)]
+fn stop_session(path: &Path, before: &fs::Metadata) -> Result<(), u8> {
+    let id = session_id(path)?;
+    let mut stream = match UnixStream::connect(path) {
+        Ok(stream) => stream,
+        Err(_) => {
+            if kernel_bound(&[(path.to_path_buf(), before.clone())]).ok_or(77)? {
+                return Err(73);
+            }
+            return retire_session_socket(path, before);
+        }
+    };
+    let timeout = Some(Duration::from_secs(2));
+    stream.set_read_timeout(timeout).map_err(|_| 77)?;
+    stream.set_write_timeout(timeout).map_err(|_| 77)?;
+    let credentials = getsockopt(&stream, PeerCredentials).map_err(|_| 77)?;
+    let pid = credentials.pid();
+    if pid <= 0 || credentials.uid() != nix::unistd::Uid::effective().as_raw() {
+        return Err(77);
+    }
+    let (birth, state) = process_identity(pid).map_err(|_| 77)?;
+    if matches!(state, b'Z' | b'X' | b'x') {
+        return Err(77);
+    }
+    let pidfd = infraternal_shim::process_exit_descriptor(u32::try_from(pid).map_err(|_| 77)?)
+        .map_err(|_| 77)?;
+    if process_identity(pid).map_err(|_| 77)?.0 != birth {
+        return Err(77);
+    }
+    let (version, session, hello_pid, head) =
+        match read_session_frame(&mut stream).map_err(|_| 77)? {
+            Frame::Hello {
+                version,
+                session,
+                pid,
+                head,
+                ..
+            } => (version, session, pid, head),
+            _ => return Err(77),
+        };
+    if version != 1 || session != id || i32::try_from(hello_pid).ok() != Some(pid) {
+        return Err(77);
+    }
+    let (current_birth, current_state) = process_identity(pid).map_err(|_| 77)?;
+    if current_birth != birth || matches!(current_state, b'Z' | b'X' | b'x') {
+        return Err(77);
+    }
+
+    write_session_frame(&mut stream, &Frame::Attach(0)).map_err(|_| 77)?;
+    write_session_frame(&mut stream, &Frame::ReadFrom(head)).map_err(|_| 77)?;
+    write_session_frame(
+        &mut stream,
+        &Frame::Signal(nix::sys::signal::Signal::SIGHUP as u8),
+    )
+    .map_err(|_| 77)?;
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut frames = 0_u16;
+    loop {
+        if Instant::now() >= deadline || frames == 1024 {
+            return Err(77);
+        }
+        stream
+            .set_read_timeout(Some(deadline.saturating_duration_since(Instant::now())))
+            .map_err(|_| 77)?;
+        frames += 1;
+        match read_session_frame(&mut stream).map_err(|_| 77)? {
+            Frame::Exited(_, _) => break,
+            Frame::Output(_, _)
+            | Frame::Snapshot(_, _)
+            | Frame::SnapshotWithFlags(_, _, _)
+            | Frame::InputAck(_)
+            | Frame::InputState(_, _)
+            | Frame::Error(_, _) => {}
+            _ => return Err(77),
+        }
+    }
+    write_session_frame(&mut stream, &Frame::ExitAck).map_err(|_| 77)?;
+    drop(stream);
+    // ExitAck proves that the shim has reaped its shell. The pidfd pins only the
+    // same verified shim if it has not already retired itself.
+    if process_identity(pid).is_ok_and(|(current, state)| current == birth && state != b'Z') {
+        if let Err(error) = infraternal_shim::signal_process_descriptor(
+            std::os::fd::AsFd::as_fd(&pidfd),
+            nix::sys::signal::Signal::SIGTERM,
+        ) && error.raw_os_error() != Some(nix::libc::ESRCH)
+        {
+            return Err(77);
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match process_identity(pid) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Ok((current, state)) if current != birth || matches!(state, b'Z' | b'X' | b'x') => {
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => return Err(77),
+        }
+        if Instant::now() >= deadline {
+            return Err(73);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match kernel_bound(&[(path.to_path_buf(), before.clone())]).ok_or(77)? {
+            false => return retire_session_socket(path, before),
+            true if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            true => return Err(73),
+        }
+    }
+}
+
+/// Retire all session rendezvous after the old service has stopped.
+#[cold]
+#[inline(never)]
+fn stop_sessions(runtime: &File) -> Result<(), u8> {
+    let nested = match directory(&at(runtime, "sessions")) {
+        Ok(nested) => Some(nested),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(_) => return Err(71),
+    };
+    let mut files = Vec::new();
+    for (directory, top) in [(Some(runtime), true), (nested.as_ref(), false)] {
+        let Some(directory) = directory else { continue };
+        for entry in fs::read_dir(at(directory, "")).map_err(|_| 77)? {
+            let entry = entry.map_err(|_| 77)?;
+            let name = entry.file_name();
+            if !name.as_encoded_bytes().ends_with(b".sock") || (top && name == "plugins.sock") {
+                continue;
+            }
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|_| 77)?;
+            if !metadata.file_type().is_socket()
+                || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+                || metadata.mode() & 0o777 != 0o600
+                || metadata.nlink() != 1
+            {
+                return Err(71);
+            }
+            session_id(&path)?;
+            files.push((path, metadata));
+            if files.len() > 1024 {
+                return Err(77);
+            }
+        }
+    }
+    for (path, metadata) in files {
+        if kernel_bound(&[(path.clone(), metadata.clone())]).ok_or(77)? {
+            stop_session(&path, &metadata)?;
+        } else {
+            retire_session_socket(&path, &metadata)?;
+        }
+    }
+    Ok(())
+}
+
+/// Take the legacy runtime lock when present so a replacement cannot race a managed runtime.
+#[cold]
+#[inline(never)]
+fn stop_sessions_locked(runtime: &File) -> Result<(), u8> {
+    let path = at(runtime, LOCK);
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(nix::libc::O_NOFOLLOW)
+                .open(&path)
+                .map_err(|_| 71)?;
+            checked_lock(&file, &path).map_err(|_| 71)?;
+            file.try_lock().map_err(|error| lock_status(&error))?;
+            checked_lock(&file, &path).map_err(|_| 71)?;
+            stop_sessions(runtime)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => stop_sessions(runtime),
+        Err(_) => Err(71),
+    }
+}
 // Only a conflicting holder is live; other lock failures are uncertain.
 fn lock_status(error: &std::fs::TryLockError) -> u8 {
     match error {
@@ -485,6 +750,9 @@ pub fn command(arguments: &mut dyn Iterator<Item = std::ffi::OsString>) -> Optio
         // Session inspection takes no lock and never removes anything.
         if mode == "sessions" {
             return sessions(&runtime);
+        }
+        if mode == "sessions-stop" {
+            return stop_sessions_locked(&runtime);
         }
         let lock_path = at(&runtime, LOCK);
         let legacy = match fs::symlink_metadata(&lock_path) {

@@ -1,6 +1,7 @@
 /** Pins add-host copy to actual authentication and installation evidence (#87). */
 import { expect, test } from "bun:test";
 import { authLabel, failureDiagnostics, guideFor } from "../src/canvas/addhost/model";
+import type { FailureDetail } from "../src/provisioning-client";
 
 test("a user key does not imply that it was saved", () => {
   expect(authLabel({ method: "user-key" })).toBe("your key");
@@ -29,6 +30,35 @@ test("leftovers offer one way forward in plain words, with a neutral tone", () =
 test("a setup already running says to wait", () => {
   const guide = guideFor("host", { kind: "setup_running", message: "x", log_tail: [] });
   expect(guide).toMatchObject({ title: "Setup is already running on this host", fix: "retry", tone: "info" });
+});
+
+test("a held setup lock identifies its machine, process, age and replacement path", () => {
+  const failure = {
+    kind: "setup_running",
+    message: "Setup is already running on this host.",
+    log_tail: [],
+    setup_lock: { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: true },
+  } as unknown as FailureDetail;
+  const guide = guideFor("fixture host", failure);
+  expect(guide.happened).toBe("Process 254 on build-node holds the setup lock since 2026-11-02T04:05:06Z.");
+  expect(guide.next).toContain("replace the stuck install");
+});
+
+test("a failed upgrade offers an explicit stuck-install replacement", () => {
+  const failure = {
+    kind: "stale_previous_attempt",
+    message: "An earlier install stopped while replacing this infraternal agent.",
+    log_tail: [],
+    setup_lock: { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false },
+  } as unknown as FailureDetail;
+  const guide = guideFor("fixture host", failure);
+  expect(guide).toMatchObject({
+    title: "A stuck infraternal agent was found on fixture host",
+    happened: "The failed install on build-node was last held by process 254 since 2026-11-02T04:05:06Z.",
+    fix: "replace-stuck-install",
+    tone: "info",
+  });
+  expect(guide.next).toBe("");
 });
 
 test("install advice follows the step that stopped, and never tells people to restore access", () => {

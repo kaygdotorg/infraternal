@@ -5,7 +5,7 @@ runtime_helper() {
  [ -f "$helper" ] && [ ! -L "$helper" ] && [ -O "$helper" ] && [ "$(stat -c '%a' "$helper")" = 700 ] || exit 76
  # Capability level (runtime_lock::LEVEL); a cache at another level may lack a mode used here.
  level=$("$helper" --bootstrap-runtime-version 2>/dev/null) || exit 76
- [ "$level" = 2 ] || exit 76
+ [ "$level" = 3 ] || exit 76
 }
 control_socket() {
  [ -e "$base/sessions" ] || [ -L "$base/sessions" ] || return 0
@@ -48,7 +48,7 @@ validate_retired_stage() {
    payload)
     [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] || exit 71
     case "$(stat -c '%a' "$entry")" in 600|700) continue;; *) exit 71;; esac;;
-   transaction|kind|lease|unit|activating|stopping|stop-refused|had-binary|had-state|had-launcher|was-active|was-enabled|replacing-binary|replacing-state|replacing-unit|replacing-launcher|linger-requested) :;;
+   transaction|kind|lease|unit|activating|failed|stopping|stop-refused|had-binary|had-state|had-launcher|was-active|was-enabled|replacing-binary|replacing-state|replacing-unit|replacing-launcher|linger-requested) :;;
    *) exit 75;;
   esac
   [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a:%h' "$entry")" = 600:1 ] || exit 71

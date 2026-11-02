@@ -1881,17 +1881,20 @@ async fn active_transaction_is_live_between_ssh_setup_commands() {
     let session = Local {
         root: fixture.root.clone(),
     };
-    let result = session
+    let output = session
         .run(
             &infraternal_plugin_ssh::previous_attempt::check_script(fixture.target.mode),
             Input::Empty,
         )
-        .await;
-    let refused = infraternal_plugin_ssh::previous_attempt::classify(result.err().unwrap());
+        .await
+        .unwrap();
+    let refused =
+        infraternal_plugin_ssh::previous_attempt::parse_check(&output.stdout).unwrap_err();
     assert_eq!(
         refused.kind,
         infraternal_plugin_ssh::model::FailureKind::SetupRunning
     );
+    assert!(refused.to_string().contains("holds the setup lock"));
     assert!(fixture.base().join(".bootstrap-lock").exists());
     transaction.rollback().await.unwrap();
     assert!(!fixture.base().exists());
@@ -1922,6 +1925,25 @@ fn earlier_attempt_records_reject_suffixes_truncation_and_unbounded_counts() {
     ] {
         assert!(infraternal_plugin_ssh::previous_attempt::parse_check(invalid.as_bytes()).is_err());
     }
+}
+
+#[test]
+fn earlier_attempt_lock_diagnostic_names_machine_process_and_start_time() {
+    use infraternal_plugin_ssh::model::FailureKind;
+
+    let check = "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\n";
+    let lock =
+        format!("{check}INFRATERNAL_SETUP_LOCKED build-node 254 9917 2026-11-02T04:05:06Z\n");
+    let error = infraternal_plugin_ssh::previous_attempt::parse_check(lock.as_bytes()).unwrap_err();
+    assert_eq!(error.kind, FailureKind::SetupRunning);
+    let message = serde_json::to_value(error).unwrap()["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(message.contains("build-node"));
+    assert!(message.contains("254"));
+    assert!(message.contains("2026-11-02T04:05:06Z"));
+    assert!(message.contains("holds the setup lock"));
 }
 
 #[test]

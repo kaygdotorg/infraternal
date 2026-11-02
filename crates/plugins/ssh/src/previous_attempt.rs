@@ -49,6 +49,16 @@ pub struct PreviousAttempt {
     pub(crate) transaction: uuid::Uuid,
     identity: String,
     sockets: u16,
+    lease_owner: Option<LeaseOwner>,
+}
+
+/// The old lease coordinates remain bound into the replacement confirmation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LeaseOwner {
+    machine: String,
+    pid: u32,
+    birth: u64,
+    since: String,
 }
 
 /// Fold the ownership check into the existing SSH sniff, without another round trip.
@@ -97,15 +107,40 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
         .ok_or_else(refused)?
         .split(' ')
         .collect();
-    let [
-        "INFRATERNAL_SETUP_STALE",
-        host,
-        transaction,
-        identity,
-        sockets,
-    ] = fields.as_slice()
-    else {
-        return Err(refused());
+    if let ["INFRATERNAL_SETUP_LOCKED", machine, pid, birth, since] = fields.as_slice() {
+        let (machine, pid, since) = parse_active_lock(machine, pid, birth, since)?;
+        return Err(Failure::new(
+            FailureKind::SetupRunning,
+            "Setup is already running on this host.",
+        )
+        .with_setup_lock(machine, pid, since, true));
+    }
+    let (host, transaction, identity, sockets, lease_owner) = match fields.as_slice() {
+        [
+            "INFRATERNAL_SETUP_STALE",
+            host,
+            transaction,
+            identity,
+            sockets,
+        ] => (*host, *transaction, *identity, *sockets, None),
+        [
+            "INFRATERNAL_SETUP_UPGRADE",
+            host,
+            transaction,
+            identity,
+            machine,
+            pid,
+            birth,
+            since,
+            sockets,
+        ] => (
+            *host,
+            *transaction,
+            *identity,
+            *sockets,
+            Some(parse_lease_owner(machine, pid, birth, since)?),
+        ),
+        _ => return Err(refused()),
     };
     let host = canonical_id(host)?;
     let transaction = canonical_id(transaction)?;
@@ -118,6 +153,9 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
             return Err(refused());
         }
     }
+    if sockets.is_empty() || !sockets.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(refused());
+    }
     let sockets = sockets.parse::<u16>().map_err(|_| refused())?;
     if sockets > 1024 {
         return Err(refused());
@@ -127,7 +165,100 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
         transaction,
         identity: (*identity).into(),
         sockets,
+        lease_owner,
     }))
+}
+
+fn parse_machine(value: &str) -> Result<String, Failure> {
+    if value.is_empty()
+        || value.len() > 253
+        || value.starts_with('-')
+        || value.starts_with('.')
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(refused());
+    }
+    Ok(value.to_owned())
+}
+
+fn parse_since(value: &str) -> Result<String, Failure> {
+    if value == "unknown" {
+        return Ok(value.to_owned());
+    }
+    let bytes = value.as_bytes();
+    let separators = [
+        (4, b'-'),
+        (7, b'-'),
+        (10, b'T'),
+        (13, b':'),
+        (16, b':'),
+        (19, b'Z'),
+    ];
+    if bytes.len() != 20
+        || separators
+            .iter()
+            .any(|(index, separator)| bytes.get(*index) != Some(separator))
+        || bytes.iter().enumerate().any(|(index, byte)| {
+            !separators.iter().any(|(at, _)| *at == index) && !byte.is_ascii_digit()
+        })
+    {
+        return Err(refused());
+    }
+    Ok(value.to_owned())
+}
+
+fn parse_pid(value: &str) -> Result<u32, Failure> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(refused());
+    }
+    let pid = value.parse::<u32>().map_err(|_| refused())?;
+    if pid == 0 {
+        return Err(refused());
+    }
+    Ok(pid)
+}
+
+fn parse_birth(value: &str) -> Result<u64, Failure> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(refused());
+    }
+    value.parse::<u64>().map_err(|_| refused())
+}
+
+fn parse_active_lock(
+    machine: &str,
+    pid: &str,
+    birth: &str,
+    since: &str,
+) -> Result<(String, Option<u32>, String), Failure> {
+    let machine = parse_machine(machine)?;
+    let pid = if pid == "unknown" {
+        if birth != "unknown" {
+            return Err(refused());
+        }
+        None
+    } else {
+        let pid = parse_pid(pid)?;
+        parse_birth(birth)?;
+        Some(pid)
+    };
+    Ok((machine, pid, parse_since(since)?))
+}
+
+fn parse_lease_owner(
+    machine: &str,
+    pid: &str,
+    birth: &str,
+    since: &str,
+) -> Result<LeaseOwner, Failure> {
+    Ok(LeaseOwner {
+        machine: parse_machine(machine)?,
+        pid: parse_pid(pid)?,
+        birth: parse_birth(birth)?,
+        since: parse_since(since)?,
+    })
 }
 
 fn canonical_id(value: &str) -> Result<uuid::Uuid, Failure> {
@@ -139,14 +270,47 @@ fn canonical_id(value: &str) -> Result<uuid::Uuid, Failure> {
 }
 
 impl PreviousAttempt {
+    /// A stale upgrade journal belongs to an already enrolled host and needs replacement.
+    #[must_use]
+    pub(crate) fn replacement_host(&self) -> Option<uuid::Uuid> {
+        self.lease_owner.as_ref().map(|_| self.host)
+    }
+
+    /// Preserve lease coordinates when presenting the explicit stuck-upgrade action.
+    #[must_use]
+    pub(crate) fn stuck_failure(&self) -> Failure {
+        let failure = Failure::new(
+            FailureKind::StalePreviousAttempt,
+            "An earlier install stopped while replacing this infraternal agent.",
+        );
+        if let Some(owner) = &self.lease_owner {
+            failure.with_setup_lock(
+                owner.machine.clone(),
+                Some(owner.pid),
+                owner.since.clone(),
+                false,
+            )
+        } else {
+            failure
+        }
+    }
+
     #[must_use]
     pub fn findings(&self, mode: InstallMode, challenge: uuid::Uuid) -> Leftovers {
         Leftovers {
             challenge,
             mode,
             findings: vec![
-                "Earlier setup ownership marker",
-                "Fresh setup ownership journal",
+                if self.lease_owner.is_some() {
+                    "An interrupted upgrade journal"
+                } else {
+                    "Earlier setup ownership marker"
+                },
+                if self.lease_owner.is_some() {
+                    "The enrolled host identity is kept"
+                } else {
+                    "Fresh setup ownership journal"
+                },
                 if self.sockets == 0 {
                     "No live setup found"
                 } else {
@@ -165,6 +329,34 @@ impl PreviousAttempt {
         target: &Target,
     ) -> Result<(), Failure> {
         target.validate()?;
+        // Confirmation mutates: it needs the lease routines as well as the guard.
+        let setup_lock = crate::install::SETUP_LOCK;
+        if let Some(owner) = &self.lease_owner {
+            let expected = format!(
+                "INFRATERNAL_SETUP_UPGRADE {} {} {} {} {} {} {} {}",
+                self.host.simple(),
+                self.transaction.simple(),
+                self.identity,
+                owner.machine,
+                owner.pid,
+                owner.birth,
+                owner.since,
+                self.sockets
+            );
+            let body = format!(
+                "{setup_lock}\n{}\n{INSPECT}\nreplace_stuck_install {}\n",
+                crate::install::RUNTIME_CLEANUP,
+                crate::transport::shell_quote(&expected)
+            );
+            session
+                .run(
+                    &Installation::script_for(target.mode, self.host, self.transaction, &body),
+                    Input::Empty,
+                )
+                .await
+                .map_err(classify)?;
+            return Ok(());
+        }
         let expected = format!(
             "INFRATERNAL_SETUP_STALE {} {} {} {}",
             self.host.simple(),
@@ -172,8 +364,6 @@ impl PreviousAttempt {
             self.identity,
             self.sockets
         );
-        // Confirmation mutates: it needs the lease routines as well as the guard.
-        let setup_lock = crate::install::SETUP_LOCK;
         // Revalidate listeners after ownership reads, immediately before removal.
         // The exact observed record already contains the root identity; reuse its
         // penultimate field rather than allocating another formatted shell argument.

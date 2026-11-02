@@ -7,6 +7,279 @@ hex_id() {
  [ "${#1}" = 32 ] || exit 75
  case "$1" in *[!0-9a-f]*) exit 75;; esac
 }
+setup_process_start_epoch() {
+ process_start_ticks "$1" || return 1
+ setup_ticks=$process_start_ticks
+ setup_boot=
+ while read -r setup_key setup_value setup_rest; do
+  [ "$setup_key" = btime ] || continue
+  setup_boot=$setup_value
+  break
+ done < /proc/stat
+ setup_hz=$(getconf CLK_TCK 2>/dev/null) || return 1
+ case "$setup_boot:$setup_hz" in *[!0-9:]*|:*|*:) return 1;; esac
+ [ "$setup_hz" -gt 0 ] || return 1
+ setup_lock_epoch=$((setup_boot + setup_ticks / setup_hz))
+}
+setup_lock_descriptor() {
+ setup_candidate=$1
+ setup_descriptor=$2
+ setup_expected=$3
+ [ -L "$setup_descriptor" ] && [ "$setup_expected" -ef "$setup_descriptor" ] || return 1
+ process_start_ticks "$setup_candidate" || return 1
+ setup_lock_pid=$setup_candidate
+ setup_lock_birth=$process_start_ticks
+ setup_lock_epoch=
+ if [ -f "$base/.bootstrap-lock/lease" ] && [ ! -L "$base/.bootstrap-lock/lease" ]; then
+  setup_lease_epoch=$(stat -c '%Y' "$base/.bootstrap-lock/lease" 2>/dev/null || :)
+  case "$setup_lease_epoch" in ''|*[!0-9]*) :;; *) setup_lock_epoch=$setup_lease_epoch;; esac
+ fi
+ [ -n "$setup_lock_epoch" ] || setup_process_start_epoch "$setup_candidate" || return 1
+}
+parse_setup_lease() {
+ setup_lease_file=$1
+ [ -f "$setup_lease_file" ] && [ ! -L "$setup_lease_file" ] && [ -O "$setup_lease_file" ] || return 1
+ [ "$(stat -c '%a:%h' "$setup_lease_file" 2>/dev/null || :)" = 600:1 ] || return 1
+ setup_lease_size=$(stat -c '%s' "$setup_lease_file" 2>/dev/null || :)
+ case "$setup_lease_size" in ''|*[!0-9]*) return 1;; esac
+ [ "$setup_lease_size" -ge 4 ] && [ "$setup_lease_size" -le 64 ] || return 1
+ IFS=' ' read -r setup_lease_pid setup_lease_birth setup_lease_extra < "$setup_lease_file" || return 1
+ [ -z "$setup_lease_extra" ] || return 1
+ case "$setup_lease_pid:$setup_lease_birth" in *[!0-9:]*|:*|*:|*:*:*) return 1;; esac
+ [ "$(cat "$setup_lease_file" 2>/dev/null || :)" = "$setup_lease_pid $setup_lease_birth" ] || return 1
+ [ "$setup_lease_size" -eq $((${#setup_lease_pid} + ${#setup_lease_birth} + 2)) ] || return 1
+}
+report_setup_lock() {
+ setup_locked_machine=$(hostname 2>/dev/null || :)
+ case "$setup_locked_machine" in
+  ''|[-.]*|*[!a-zA-Z0-9._-]*) setup_locked_machine=unknown;;
+ esac
+ [ "${#setup_locked_machine}" -le 253 ] || setup_locked_machine=unknown
+ setup_lock_pid=unknown
+ setup_lock_birth=unknown
+ setup_lock_epoch=
+ setup_stage="$base/.bootstrap-lock"
+ if [ -d "$setup_stage" ] && [ ! -L "$setup_stage" ] && [ -f "$setup_stage/lease" ] && [ ! -L "$setup_stage/lease" ]; then
+  if parse_setup_lease "$setup_stage/lease"; then
+   if [ -n "$setup_lease_pid" ] && process_start_ticks "$setup_lease_pid"; then
+    if [ "$process_start_ticks" = "$setup_lease_birth" ] && [ -L "/proc/$setup_lease_pid/fd/7" ] && [ "$setup_stage" -ef "/proc/$setup_lease_pid/fd/7" ]; then
+     setup_lock_pid=$setup_lease_pid
+     setup_lock_birth=$setup_lease_birth
+     setup_lock_epoch=$(stat -c '%Y' "$setup_stage/lease" 2>/dev/null || :)
+    fi
+   fi
+  fi
+ fi
+ if [ "$setup_lock_pid" = unknown ]; then
+  for setup_process in /proc/[0-9]*; do
+   [ -O "$setup_process" ] || continue
+   setup_candidate=${setup_process##*/}
+   [ "$setup_candidate" != "$$" ] || continue
+   if [ -d "$setup_stage" ] && setup_lock_descriptor "$setup_candidate" "$setup_process/fd/7" "$setup_stage"; then break; fi
+   if [ -n "${parent:-}" ] && setup_lock_descriptor "$setup_candidate" "$setup_process/fd/9" "$parent"; then break; fi
+  done
+ fi
+ setup_since=unknown
+ case "$setup_lock_epoch" in ''|*[!0-9]*) :;;
+  *) setup_since=$(date -u -d "@$setup_lock_epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || :);;
+ esac
+ case "$setup_since" in
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) :;;
+  *) setup_since=unknown;;
+ esac
+ printf 'INFRATERNAL_SETUP_LOCKED %s %s %s %s\n' "$setup_locked_machine" "$setup_lock_pid" "$setup_lock_birth" "$setup_since"
+}
+private_tree() {
+ setup_tree=$1
+ [ -d "$setup_tree" ] && [ ! -L "$setup_tree" ] && [ -O "$setup_tree" ] && [ "$(stat -c '%a' "$setup_tree")" = 700 ] || exit 71
+ setup_bad=$(find "$setup_tree" \( ! -uid "$(id -u)" -o ! \( -type d -o -type f \) -o -perm /077 -o \( -type d ! -perm 0700 \) \) -print -quit) || exit 71
+ [ -z "$setup_bad" ] || exit 71
+ setup_count=$(find "$setup_tree" -printf . | wc -c)
+ [ "$setup_count" -le 4096 ] || exit 75
+}
+validate_upgrade_socket_dir() {
+ setup_socket_dir=$1
+ [ -d "$setup_socket_dir" ] && [ ! -L "$setup_socket_dir" ] && [ -O "$setup_socket_dir" ] && [ "$(stat -c '%a' "$setup_socket_dir")" = 700 ] || exit 71
+ setup_entry_count=0
+ for setup_socket in "$setup_socket_dir"/* "$setup_socket_dir"/.[!.]* "$setup_socket_dir"/..?*; do
+  [ -e "$setup_socket" ] || [ -L "$setup_socket" ] || continue
+  setup_entry_count=$((setup_entry_count + 1))
+  [ "$setup_entry_count" -le 1024 ] || exit 75
+  setup_socket_name=${setup_socket##*/}
+  case "$setup_socket_name" in
+   *.ending)
+    setup_socket_id=${setup_socket_name%.*}
+    hex_id "$setup_socket_id"
+    private_file "$setup_socket"
+    setup_record_size=$(stat -c '%s' "$setup_socket")
+    case "$setup_socket_name:$setup_record_size" in
+     *.ending:*) [ "$setup_record_size" -le 17 ] || exit 71;;
+     *) exit 71;;
+    esac;;
+   *)
+    [ -S "$setup_socket" ] && [ ! -L "$setup_socket" ] && [ -O "$setup_socket" ] && [ "$(stat -c '%a' "$setup_socket")" = 600 ] || exit 71
+    setup_socket_id=${setup_socket_name%.sock}
+    [ "$setup_socket_name" = "$setup_socket_id.sock" ] || exit 71
+    hex_id "$setup_socket_id";;
+  esac
+ done
+}
+validate_upgrade_sessions() {
+ setup_runtime=$1
+ [ -d "$setup_runtime" ] && [ ! -L "$setup_runtime" ] && [ -O "$setup_runtime" ] && [ "$(stat -c '%a' "$setup_runtime")" = 700 ] || exit 71
+ for setup_runtime_entry in "$setup_runtime"/* "$setup_runtime"/.[!.]* "$setup_runtime"/..?*; do
+  [ -e "$setup_runtime_entry" ] || [ -L "$setup_runtime_entry" ] || continue
+  case "${setup_runtime_entry##*/}" in
+   .lifetime-lock)
+    [ -f "$setup_runtime_entry" ] && [ ! -L "$setup_runtime_entry" ] && [ -O "$setup_runtime_entry" ] && [ "$(stat -c '%a:%h' "$setup_runtime_entry")" = 600:1 ] || exit 71;;
+   plugins.sock)
+    [ -S "$setup_runtime_entry" ] && [ ! -L "$setup_runtime_entry" ] && [ -O "$setup_runtime_entry" ] && [ "$(stat -c '%a' "$setup_runtime_entry")" = 600 ] || exit 71;;
+   sessions) validate_upgrade_socket_dir "$setup_runtime_entry";;
+   *)
+    [ -S "$setup_runtime_entry" ] && [ ! -L "$setup_runtime_entry" ] && [ -O "$setup_runtime_entry" ] && [ "$(stat -c '%a' "$setup_runtime_entry")" = 600 ] || exit 71
+    setup_runtime_name=${setup_runtime_entry##*/}
+    setup_runtime_id=${setup_runtime_name%.sock}
+    [ "$setup_runtime_name" = "$setup_runtime_id.sock" ] || exit 71
+    hex_id "$setup_runtime_id";;
+  esac
+ done
+}
+validate_upgrade_stage() {
+ stage="$base/.bootstrap-lock"
+ [ -d "$stage" ] && [ ! -L "$stage" ] && [ -O "$stage" ] && [ "$(stat -c '%a' "$stage")" = 700 ] || exit 71
+ private_file "$stage/transaction"
+ [ "$(cat "$stage/transaction")" = "$previous_transaction" ] || exit 75
+ private_file "$stage/kind"
+ [ "$(cat "$stage/kind")" = upgrade ] || exit 75
+ parse_setup_lease "$stage/lease" || exit 75
+ setup_upgrade_lease_pid=$setup_lease_pid
+ setup_upgrade_lease_birth=$setup_lease_birth
+ for entry in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
+  [ -e "$entry" ] || [ -L "$entry" ] || continue
+  case "${entry##*/}" in
+   transaction|kind|lease) :;;
+   activating|failed|stopping|stop-refused|had-binary|had-state|had-launcher|was-active|was-enabled|replacing-binary|replacing-state|replacing-unit|replacing-launcher|linger-requested)
+    private_file "$entry"
+    [ "$(stat -c '%s' "$entry")" = 0 ] || exit 75;;
+   payload)
+    [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a' "$entry")" = 700 ] || exit 71;;
+   previous-binary)
+    [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a:%h' "$entry")" = 700:1 ] || exit 71;;
+   unit|previous-unit)
+    [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a:%h' "$entry")" = 600:1 ] || exit 71
+    [ "$(stat -c '%s' "$entry")" -le 4096 ] || exit 75;;
+   cache)
+    private_tree "$entry"
+    for cache_entry in "$entry"/* "$entry"/.[!.]* "$entry"/..?*; do
+     [ -e "$cache_entry" ] || [ -L "$cache_entry" ] || continue
+     case "${cache_entry##*/}" in
+      owner) private_file "$cache_entry"; [ "$(cat "$cache_entry")" = INFRATERNAL_PAYLOAD_CACHE_V1 ] || exit 75;;
+      payload)
+       [ -f "$cache_entry" ] && [ ! -L "$cache_entry" ] && [ -O "$cache_entry" ] && [ "$(stat -c '%a:%h' "$cache_entry")" = 700:2 ] || exit 71
+       [ "$stage/payload" -ef "$cache_entry" ] || exit 71;;
+      *) exit 75;;
+     esac
+    done;;
+   state|previous-state) private_tree "$entry";;
+   *) exit 75;;
+  esac
+ done
+ if [ -f "$stage/payload" ] && [ ! -L "$stage/payload" ]; then
+  setup_payload_links=$(stat -c '%h' "$stage/payload")
+  case "$setup_payload_links" in
+   1)
+    [ ! -e "$stage/cache/payload" ] && [ ! -L "$stage/cache/payload" ] || exit 71;;
+   2)
+    if [ -e "$stage/cache/payload" ] || [ -L "$stage/cache/payload" ]; then
+     [ -f "$stage/cache/payload" ] && [ ! -L "$stage/cache/payload" ] && [ "$stage/payload" -ef "$stage/cache/payload" ] || exit 71
+    else
+     setup_cache="$base.bootstrap-cache"
+     [ -d "$setup_cache" ] && [ ! -L "$setup_cache" ] && [ -O "$setup_cache" ] && [ "$(stat -c '%a' "$setup_cache")" = 700 ] || exit 71
+     private_file "$setup_cache/owner"
+     [ "$(cat "$setup_cache/owner")" = INFRATERNAL_PAYLOAD_CACHE_V1 ] || exit 75
+     [ -f "$setup_cache/payload" ] && [ ! -L "$setup_cache/payload" ] && [ -O "$setup_cache/payload" ] && [ "$(stat -c '%a:%h' "$setup_cache/payload")" = 700:2 ] && [ "$stage/payload" -ef "$setup_cache/payload" ] || exit 71
+    fi;;
+   *) exit 71;;
+  esac
+ fi
+ [ ! -e "$stage/activating" ] || [ ! -e "$stage/failed" ] || exit 75
+ [ -f "$stage/activating" ] || [ -f "$stage/failed" ] || exit 75
+}
+validate_upgrade_root() {
+ [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ] && [ "$(stat -c '%a' "$base")" = 700 ] || exit 71
+ private_file "$base/.bootstrap-owner"
+ [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || exit 75
+ previous_host=$(cat "$base/.bootstrap-owner")
+ hex_id "$previous_host"
+ identity=$(stat -c '%d:%i' "$base")
+ [ -d "$base/bin" ] && [ ! -L "$base/bin" ] && [ -O "$base/bin" ] && [ "$(stat -c '%a' "$base/bin")" = 700 ] || exit 71
+ [ -f "$base/bin/live" ] && [ ! -L "$base/bin/live" ] && [ -O "$base/bin/live" ] && [ "$(stat -c '%a:%h' "$base/bin/live")" = 700:1 ] || exit 71
+ [ -L "$base/bin/current" ] && [ "$(readlink "$base/bin/current")" = "$base/bin/live" ] || exit 71
+ for entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
+  [ -e "$entry" ] || [ -L "$entry" ] || continue
+  case "${entry##*/}" in
+   .bootstrap-owner|.bootstrap-lock|bin|state|sessions) :;;
+   .bootstrap-ready)
+    private_file "$entry"
+    [ "$(cat "$entry")" = "$previous_host" ] || exit 75;;
+   *) exit 71;;
+  esac
+ done
+ private_tree "$base/state"
+ if [ -e "$base/sessions" ] || [ -L "$base/sessions" ]; then validate_upgrade_sessions "$base/sessions"; fi
+ for entry in "$base/bin"/* "$base/bin"/.[!.]* "$base/bin"/..?*; do
+  [ -e "$entry" ] || [ -L "$entry" ] || continue
+  case "${entry##*/}" in live) :;; current) [ -L "$entry" ] && [ "$(readlink "$entry")" = "$base/bin/live" ] || exit 71;; *) exit 71;; esac
+ done
+ [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$base/bin/current" ] || exit 71
+ [ -f "$unit" ] && [ ! -L "$unit" ] && [ -O "$unit" ] && [ "$(stat -c '%a:%h' "$unit")" = 600:1 ] || exit 71
+ [ "$(stat -c '%s' "$unit")" -le 4096 ] || exit 75
+ grep -Fxq "# infraternal bootstrap $previous_host" "$unit" || exit 71
+ grep -Fxq "ExecStart=\"$base/bin/current\" agent --data \"$base/state\" --state \"$base/sessions\" run" "$unit" || exit 71
+ setup_wanted=$(sed -n 's/^WantedBy=//p' "$unit")
+ case "$setup_wanted" in default.target|multi-user.target) :;; *) exit 75;; esac
+ setup_wants_dir="$(dirname "$unit")/$setup_wanted.wants"
+ [ -d "$setup_wants_dir" ] && [ ! -L "$setup_wants_dir" ] && [ -O "$setup_wants_dir" ] || exit 71
+ setup_wants_mode=$(stat -c '%a' "$setup_wants_dir")
+ [ "$((0$setup_wants_mode & 022))" = 0 ] || exit 71
+ setup_wants="$setup_wants_dir/infraternal-agent.service"
+ [ -L "$setup_wants" ] || exit 71
+ case "$(readlink "$setup_wants")" in "$unit"|../infraternal-agent.service) :;; *) exit 71;; esac
+}
+inspect_upgrade() {
+ validate_upgrade_root
+ validate_upgrade_stage
+ [ -d /proc ] || exit 75
+ setup_lock_epoch=$(stat -c '%Y' "$stage/lease" 2>/dev/null || :)
+ case "$setup_lock_epoch" in ''|*[!0-9]*) exit 75;; esac
+ setup_since=$(date -u -d "@$setup_lock_epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || :)
+ case "$setup_since" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) :;; *) exit 75;; esac
+ setup_locked_machine=$(hostname 2>/dev/null || :)
+ case "$setup_locked_machine" in ''|[-.]*|*[!a-zA-Z0-9._-]*) setup_locked_machine=unknown;; esac
+ [ "${#setup_locked_machine}" -le 253 ] || setup_locked_machine=unknown
+ if [ -e "/proc/$setup_upgrade_lease_pid/stat" ]; then
+  process_start_ticks "$setup_upgrade_lease_pid" || exit 75
+  if [ "$process_start_ticks" = "$setup_upgrade_lease_birth" ] && [ -L "/proc/$setup_upgrade_lease_pid/fd/7" ] && [ "$stage" -ef "/proc/$setup_upgrade_lease_pid/fd/7" ]; then
+   printf 'INFRATERNAL_SETUP_LOCKED %s %s %s %s\n' "$setup_locked_machine" "$setup_upgrade_lease_pid" "$setup_upgrade_lease_birth" "$setup_since"
+   return
+  fi
+ fi
+ setup_sockets=0
+ for setup_socket_dir in "$base/sessions" "$base/sessions/sessions"; do
+  [ -d "$setup_socket_dir" ] || continue
+  for setup_socket in "$setup_socket_dir"/*.sock; do
+   [ -S "$setup_socket" ] && [ ! -L "$setup_socket" ] && [ -O "$setup_socket" ] || continue
+   setup_sockets=$((setup_sockets + 1))
+   [ "$setup_sockets" -le 1024 ] || exit 75
+  done
+ done
+  # Discover an old or missing helper before offering replacement. The public
+  # recovery path can refresh it now, before stopping the enrolled service.
+  if [ "$setup_sockets" -gt 0 ] || [ -e "$base/sessions/.lifetime-lock" ] || [ -L "$base/sessions/.lifetime-lock" ]; then
+   runtime_helper
+  fi
+ printf 'INFRATERNAL_SETUP_UPGRADE %s %s %s %s %s %s %s %s\n' "$previous_host" "$previous_transaction" "$identity" "$setup_locked_machine" "$setup_upgrade_lease_pid" "$setup_upgrade_lease_birth" "$setup_since" "$setup_sockets"
+}
 not_live() {
  if [ -d "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ]; then
   exec 8< "$base/.bootstrap-lock"
@@ -58,7 +331,21 @@ no_redirect() {
 }
 inspect_previous() {
  no_redirect
+ setup_allow_locked_inspection=yes
  setup_guard
+ if [ "${setup_blocked:-no}" = yes ]; then
+  report_setup_lock
+  return
+ fi
+ if [ -d "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ]; then
+  exec 8< "$base/.bootstrap-lock"
+  if ! flock -n 8; then
+   exec 8<&-
+   report_setup_lock
+   return
+  fi
+  exec 8<&-
+ fi
  receipt=
  for candidate in "$base".bootstrap-rollback-*; do
   [ -e "$candidate" ] || [ -L "$candidate" ] || continue
@@ -115,10 +402,15 @@ inspect_previous() {
    [ -d "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ] && [ -O "$base/.bootstrap-lock" ] && [ "$(stat -c '%a' "$base/.bootstrap-lock")" = 700 ] || exit 71
    private_file "$base/.bootstrap-lock/transaction"
    private_file "$base/.bootstrap-lock/kind"
-   [ "$(cat "$base/.bootstrap-lock/kind")" = fresh ] || exit 75
+   previous_kind=$(cat "$base/.bootstrap-lock/kind")
+   case "$previous_kind" in fresh|upgrade) :;; *) exit 75;; esac
    previous_transaction=$(cat "$base/.bootstrap-lock/transaction")
   fi
   hex_id "$previous_transaction"
+ fi
+ if [ -z "$receipt" ] && [ "${previous_kind:-fresh}" = upgrade ]; then
+  inspect_upgrade
+  return
  fi
  not_live
  validate_control_socket
@@ -195,4 +487,38 @@ inspect_previous() {
   done
  done
  printf 'INFRATERNAL_SETUP_STALE %s %s %s %s\n' "$previous_host" "$previous_transaction" "$identity" "$sockets"
+}
+stop_stage_shims() {
+ runtime_helper
+ "$helper" --bootstrap-runtime "$base" "$(stat -c '%d:%i' "$base")" sessions-stop </dev/null || exit $?
+ for setup_process in /proc/[0-9]*; do
+  [ -O "$setup_process" ] || continue
+  setup_candidate=${setup_process##*/}
+  [ "$setup_candidate" != "$$" ] || continue
+  [ "$stage/payload" -ef "$setup_process/exe" ] || continue
+  # A leftover payload process without an authenticated session endpoint cannot
+  # be stopped safely. Keep the install intact and let the caller retry.
+  process_start_ticks "$setup_candidate" || exit 73
+  [ "$stage/payload" -ef "$setup_process/exe" ] || exit 73
+  exit 73
+ done
+}
+replace_stuck_install() {
+ setup_guard
+ replace_expected=$1
+ replace_observed=$(inspect_previous)
+ [ "$replace_observed" = "$replace_expected" ] || exit 75
+ set -- $replace_expected
+ [ "$#" = 9 ] && [ "$1" = INFRATERNAL_SETUP_UPGRADE ] || exit 75
+ stage="$base/.bootstrap-lock"
+ retire_setup_lease
+ $manager stop infraternal-agent.service >/dev/null 2>&1 || exit 73
+ $manager disable infraternal-agent.service >/dev/null 2>&1 || exit 73
+ $manager daemon-reload >/dev/null 2>&1 || exit 73
+ stop_stage_shims
+ exec 7<&-
+ not_live
+ exec 7< "$stage"
+ flock -n 7 || exit 73
+ rm -rf "$stage"
 }

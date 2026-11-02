@@ -1,17 +1,12 @@
 # Manage the bounded setup lease while the shared guard protects journal mutation.
 # Proof notes are beside Installation::script in install.rs [17][243].
 lease_birth_field() {
- # The comm field may contain spaces and parentheses; field 22 is the twentieth suffix field.
- lease_suffix=${1##*) }
- [ "$lease_suffix" != "$1" ] || return 1
- case "$lease_suffix" in *[!a-zA-Z0-9\ -]*) return 1;; esac
- set -- $lease_suffix
- lease_actual_birth=${20-}
- case "$lease_actual_birth" in ''|*[!0-9]*) return 1;; esac
+ process_birth_field "$1" || return 1
+ lease_actual_birth=$process_birth
 }
 read_lease_birth() {
- IFS= read -r lease_stat < "/proc/$1/stat" || return 1
- lease_birth_field "$lease_stat"
+ process_start_ticks "$1" || return 1
+ lease_actual_birth=$process_start_ticks
 }
 start_setup_lease() {
  exec 7< "$stage"

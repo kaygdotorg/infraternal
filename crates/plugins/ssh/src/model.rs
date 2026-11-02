@@ -2,6 +2,7 @@
 
 use crate::auth_order::Authentication;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::net::Ipv6Addr;
 
 pub(crate) const SOCKET_PROBE_UNAVAILABLE: &str = "Finishing earlier setup needs the matching infraternal binary on this host. Its files were kept.";
@@ -266,6 +267,18 @@ struct FailureIds {
     host_key_challenge: Option<uuid::Uuid>,
     /// The owner's existing host that makes this an already-added failure.
     existing_host_id: Option<uuid::Uuid>,
+    /// Validated lease owner details for the setup-running and stuck-upgrade messages.
+    setup_lock: Option<SetupLock>,
+}
+
+/// Host-local lease metadata parsed from the fixed setup-check record.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SetupLock {
+    machine: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
+    since: String,
+    active: bool,
 }
 
 /// Serialize the failure's wire fields; each UUID has its own key and its own field.
@@ -276,10 +289,13 @@ impl Serialize for Failure {
     {
         use serde::ser::SerializeStruct;
 
-        let mut state = serializer.serialize_struct("Failure", 12)?;
+        let mut state = serializer.serialize_struct("Failure", 14)?;
         state.serialize_field("kind", &self.kind)?;
-        state.serialize_field("message", &self.message)?;
+        state.serialize_field("message", &self.public_message())?;
         state.serialize_field("log_tail", &self.log_tail)?;
+        if let Some(setup_lock) = self.ids.as_deref().and_then(|ids| ids.setup_lock.as_ref()) {
+            state.serialize_field("setup_lock", setup_lock)?;
+        }
         if let Some(failed_step) = self.failed_step {
             state.serialize_field("failed_step", &failed_step)?;
         }
@@ -332,6 +348,44 @@ impl Failure {
             host_key_changed: false,
             choose_method: false,
             ids: None,
+        }
+    }
+    /// Attach validated lease coordinates without growing the common failure payload.
+    #[must_use]
+    pub(crate) fn with_setup_lock(
+        mut self,
+        machine: String,
+        pid: Option<u32>,
+        since: String,
+        active: bool,
+    ) -> Self {
+        self.ids.get_or_insert_with(Box::default).setup_lock = Some(SetupLock {
+            machine,
+            pid,
+            since,
+            active,
+        });
+        self
+    }
+
+    fn public_message(&self) -> Cow<'_, str> {
+        let Some(lock) = self.ids.as_deref().and_then(|ids| ids.setup_lock.as_ref()) else {
+            return Cow::Borrowed(self.message);
+        };
+        let process = lock.pid.map_or_else(
+            || "unknown process".to_owned(),
+            |pid| format!("process {pid}"),
+        );
+        if lock.active {
+            Cow::Owned(format!(
+                "On {}, {process} holds the setup lock since {}. If the install is stuck, retry after the lease expires, then replace the stuck install.",
+                lock.machine, lock.since
+            ))
+        } else {
+            Cow::Owned(format!(
+                "The failed setup on {} left a lease last held by {process} since {}. Replace the stuck install to continue.",
+                lock.machine, lock.since
+            ))
         }
     }
     /// Return the public challenge only while this error represents a host-key refusal.
@@ -492,7 +546,7 @@ impl std::fmt::Display for Failure {
             Some(InstallStep::GetX86_64Binary) => f.write_str("Get the x86_64 binary: ")?,
             _ => (),
         }
-        f.write_str(self.message)
+        f.write_str(&self.public_message())
     }
 }
 impl std::error::Error for Failure {}

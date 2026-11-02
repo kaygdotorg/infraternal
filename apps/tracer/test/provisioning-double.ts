@@ -24,6 +24,7 @@
  * - `stale*`: an earlier setup left leftovers: the attempt pauses on a `check` event carrying
  *   `failure.kind: "stale_previous_attempt"` and `leftovers` (challenge, mode, findings); `start-fresh` with that challenge
  *   continues the same attempt to done. Closing the socket cancels the pause (contracts/ssh-bootstrap.md, #169)
+ * - `stuck*`: an interrupted upgrade carries its validated lock coordinates and resumes through the explicit replacement action
  * - `added*`: the host is already added: an `install` failure with `already_added` and the existing `host_id`, no details
  * - `running*`: `setup_running` once; the retry succeeds
  * - `unsupported*`: reported after sign-in, never succeeds; `broken*`: install fails, the retry works
@@ -64,7 +65,7 @@ interface BootstrapEvent {
   host_id?: string;
   session_id?: string;
   leftovers?: { challenge: string; mode: "rootless" | "root"; findings: string[] };
-  failure?: { failed_step?: "connect" | "start"; kind: FailureKind; message: string; log_tail: string[]; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string };
+  failure?: { failed_step?: "connect" | "start"; kind: FailureKind; message: string; log_tail: string[]; setup_lock?: { machine: string; pid?: number; since: string; active: boolean }; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string };
   authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
 }
 
@@ -259,6 +260,22 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
         if (failure?.beforeLogin) { later(target, pace(target, 0) + 400, fail); return; }
         later(target, pace(target, 0) / 2, () => {
           emit(target, "check", "Signed in. Checking the system.", undefined, authOf(target));
+          // Hosts named `stuck*`: the check finds an interrupted upgrade and pauses on the explicit replacement action.
+          if (/^stuck/.test(target.name) && !target.fresh) {
+            target.challenge = challengeOf(target.id);
+            target.resume = () => walk(1);
+            emit(target, "check", "A stuck infraternal agent was found", {
+              kind: "stale_previous_attempt",
+              message: "The failed setup on build-node left a lease last held by process 254 since 2026-11-02T04:05:06Z. Replace the stuck install to continue.",
+              log_tail: [],
+              setup_lock: { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false },
+            }, undefined, {
+              challenge: target.challenge,
+              mode: target.mode,
+              findings: ["An interrupted upgrade journal", "The enrolled host identity is kept", "Local sockets with no listener"],
+            });
+            return;
+          }
           // Hosts named `stale*`: the check finds leftovers and the attempt pauses on a `check` event until `start-fresh`.
           if (/^stale/.test(target.name) && !target.fresh) {
             target.challenge = challengeOf(target.id);

@@ -66,8 +66,7 @@ impl AutoAuth {
     ) -> Result<
         (
             Arc<dyn SshSession>,
-            CommandOutput,
-            Option<crate::install::Checked>,
+            Result<(CommandOutput, Option<crate::install::Checked>), Failure>,
         ),
         Failure,
     > {
@@ -75,14 +74,18 @@ impl AutoAuth {
             .transport
             .open(destination.clone(), credentials, mesh)
             .await?;
-        // Only an allowlisted read-only check reaches this method; it proves auth.
-        // Command-status failures do not qualify as SSH authentication refusals.
-        let (output, channel) = if bridge {
-            session.check_stream(script).await?
+        // Opening the SSH session proves this credential authenticated. Keep the
+        // session even when the read-only check returns a recoverable command status:
+        // callers may need the same connection to refresh an old setup helper.
+        let result = if bridge {
+            session.check_stream(script).await
         } else {
-            (session.run(script, Input::Empty).await?, None)
+            session
+                .run(script, Input::Empty)
+                .await
+                .map(|output| (output, None))
         };
-        Ok((session, output, channel))
+        Ok((session, result))
     }
 
     async fn automatic(
@@ -95,8 +98,7 @@ impl AutoAuth {
     ) -> Result<
         (
             Arc<dyn SshSession>,
-            CommandOutput,
-            Option<crate::install::Checked>,
+            Result<(CommandOutput, Option<crate::install::Checked>), Failure>,
             Authentication,
         ),
         Failure,
@@ -152,12 +154,11 @@ impl AutoAuth {
                 .authenticate(&destination, credentials, mesh, script, bridge)
                 .await
             {
-                Ok((session, output, channel)) => {
+                Ok((session, result)) => {
                     let evidence = session.authentication();
                     return Ok((
                         session,
-                        output,
-                        channel,
+                        result,
                         Authentication {
                             method: if evidence
                                 .is_some_and(|receipt| receipt.method == AuthMethod::Network)
@@ -177,7 +178,7 @@ impl AutoAuth {
                         },
                     ));
                 }
-                Err(error) if error.kind == FailureKind::Auth => {}
+                Err(error) if error.kind == FailureKind::Auth && error.exit_status.is_none() => {}
                 Err(error) => return Err(error),
             }
         }
@@ -352,7 +353,7 @@ impl Pending {
             .ok_or_else(|| {
                 Failure::install("The one-connection authentication attempt has ended.")
             })?;
-        let (session, output, channel, authentication) = AutoAuth::new(self.transport.clone())
+        let (session, result, authentication) = AutoAuth::new(self.transport.clone())
             .automatic(
                 self.destination.clone(),
                 provider,
@@ -372,7 +373,7 @@ impl Pending {
             .map_err(|_| Failure::install("The SSH trust result is unavailable."))? =
             session.trust_lookup();
         *selected = Some(session);
-        Ok((output, channel))
+        result
     }
 }
 
@@ -399,6 +400,7 @@ fn authentication_check(script: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct TimedSession(Mutex<Option<std::time::Duration>>);
     impl SshSession for TimedSession {
@@ -463,5 +465,88 @@ mod tests {
             assert!(!authentication_check(&format!("{check}\ntouch unexpected")));
         }
         assert!(!authentication_check("true"));
+    }
+
+    struct FailingCheckSession(AtomicUsize);
+    impl SshSession for FailingCheckSession {
+        fn run<'a>(&'a self, _: &'a str, _: Input<'a>) -> Operation<'a, CommandOutput> {
+            let call = self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if call == 0 {
+                    let mut failure = Failure::install("The cached setup helper needs refresh.");
+                    failure.exit_status = Some(76);
+                    Err(failure)
+                } else {
+                    Ok(CommandOutput {
+                        stdout: b"check complete\n".to_vec(),
+                    })
+                }
+            })
+        }
+    }
+
+    struct FailingCheckTransport {
+        opens: AtomicUsize,
+        session: Arc<FailingCheckSession>,
+    }
+    impl SshTransport for FailingCheckTransport {
+        fn open(
+            &self,
+            _: Destination,
+            _: Credentials,
+            _: MeshEvidence,
+        ) -> Operation<'_, Arc<dyn SshSession>> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            let session: Arc<dyn SshSession> = self.session.clone();
+            Box::pin(async move { Ok(session) })
+        }
+    }
+
+    struct NetworkOnlyProvider;
+    impl AuthProvider for NetworkOnlyProvider {
+        fn network(&self) -> Option<NetworkProvider> {
+            Some(NetworkProvider::Other)
+        }
+        fn server_key(&self) -> Operation<'_, Option<Credentials>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn user_key(&self) -> Operation<'_, Option<Credentials>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn password(&self) -> Operation<'_, Option<Credentials>> {
+            Box::pin(async { Ok(None) })
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_nonzero_check_keeps_session_for_helper_refresh() {
+        let session = Arc::new(FailingCheckSession(AtomicUsize::new(0)));
+        let transport = Arc::new(FailingCheckTransport {
+            opens: AtomicUsize::new(0),
+            session: session.clone(),
+        });
+        let pending = Pending {
+            transport: transport.clone(),
+            destination: Destination::parse("user@fixture").unwrap(),
+            mesh: MeshEvidence::default(),
+            provider: Mutex::new(Some(Arc::new(NetworkOnlyProvider))),
+            selected: tokio::sync::Mutex::new(None),
+            authentication: Mutex::new(None),
+            trust_lookup: Mutex::new(None),
+        };
+
+        let failure = match pending.run(CHECK_SCRIPT, Input::Empty).await {
+            Ok(_) => panic!("first helper probe must request refresh"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.exit_status, Some(76));
+        let output = pending
+            .run(CHECK_SCRIPT, Input::Empty)
+            .await
+            .expect("the authenticated session must remain available for retry");
+
+        assert_eq!(output.stdout, b"check complete\n");
+        assert_eq!(session.0.load(Ordering::SeqCst), 2);
+        assert_eq!(transport.opens.load(Ordering::SeqCst), 1);
     }
 }
