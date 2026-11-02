@@ -1,7 +1,7 @@
 //! Exercises drain, restart, and secret-safe proxy log behavior [#281, #289].
 
 use super::supervisor::{
-    DRAIN_TIMEOUT, Lifecycle, LifecycleAction, LifecyclePhase, SupervisorSettings,
+    DRAIN_TIMEOUT, Lifecycle, LifecycleAction, LifecyclePhase, SupervisorSettings, TraefikChild,
     TraefikSupervisor, check_private_ping, redact_log_line,
 };
 use crate::{
@@ -11,9 +11,12 @@ use crate::{
     names::CertificateName,
 };
 use std::{
+    env,
     io::{Read, Write},
     net::{SocketAddr, TcpListener},
     os::unix::fs::PermissionsExt,
+    path::PathBuf,
+    process::{Command, Stdio},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -69,6 +72,100 @@ fn health_server_sequence(responses: Vec<&'static [u8]>) -> (SocketAddr, JoinHan
         }
     });
     (address, server)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn abrupt_parent_helper_exits() {
+    let Some(root) = env::var_os("PROXY_CRASH_HELPER_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let executable = root.join("fake-traefik");
+    let config = root.join("traefik.toml");
+    let pid_file = root.join("child.pid");
+    std::fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec /bin/sleep 60\n",
+            pid_file.display()
+        ),
+    )
+    .expect("write child fixture");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500))
+        .expect("set private executable mode");
+    std::fs::write(&config, b"{}").expect("write config fixture");
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
+        .expect("set private config mode");
+
+    let log = std::sync::Arc::new(|_: String| {});
+    let _child = TraefikChild::spawn(&executable, &config, &[], log).expect("spawn child");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !pid_file.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        pid_file.exists(),
+        "fake child did not record its process id"
+    );
+    std::process::exit(0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn abrupt_infraternal_parent_exit_stops_the_traefik_child() {
+    let root = std::env::temp_dir().join(format!("proxy-crash-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).expect("create crash fixture");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .expect("set private fixture mode");
+
+    let helper = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--exact",
+            "supervisor_tests::abrupt_parent_helper_exits",
+            "--nocapture",
+        ])
+        .env("PROXY_CRASH_HELPER_ROOT", &root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run abrupt-exit fixture");
+    assert!(
+        helper.success(),
+        "abrupt-exit fixture did not start the child"
+    );
+
+    let child_pid = std::fs::read_to_string(root.join("child.pid"))
+        .expect("child pid file")
+        .parse::<u32>()
+        .expect("child process id");
+    let child_proc = PathBuf::from(format!("/proc/{child_pid}/stat"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let stopped = loop {
+        match std::fs::read_to_string(&child_proc) {
+            Ok(stat) => {
+                let state = stat
+                    .rsplit_once(") ")
+                    .and_then(|(_, rest)| rest.chars().next());
+                if state == Some('Z') {
+                    break true;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break true,
+            Err(_) => {}
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    if !stopped {
+        let _ = Command::new("kill")
+            .args(["-KILL", &child_pid.to_string()])
+            .status();
+    }
+    std::fs::remove_dir_all(root).expect("remove crash fixture");
+    assert!(stopped, "Traefik kept serving after its parent exited");
 }
 
 #[test]
@@ -268,6 +365,7 @@ fn live_process_without_a_healthy_private_ping_is_reported_unhealthy() {
         backend: "127.0.0.1:3000".parse().expect("backend"),
         allowed_sources: vec!["10.77.0.2".parse().expect("mesh peer")],
         public: false,
+        https_port: 10_443,
         certificate: CertificateName::Wildcard("*.n1.example.test".to_owned()),
     };
     supervisor
@@ -346,6 +444,9 @@ fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state(
         backend: "127.0.0.1:3000".parse().expect("backend"),
         allowed_sources: vec!["10.77.0.2".parse().expect("mesh peer")],
         public: false,
+        // The route starts with the controller's fallback. The supervisor must
+        // replace it with the selected listener before rendering a redirect.
+        https_port: 443,
         certificate: CertificateName::Wildcard("*.n1.example.test".to_owned()),
     };
     let listener_ports = supervisor
@@ -365,6 +466,10 @@ fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state(
     let dynamic_path = state.join(DYNAMIC_CONFIG_FILENAME);
     let dynamic = std::fs::read_to_string(&dynamic_path).expect("read published route");
     assert!(dynamic.contains("docs.n1.example.test"));
+    assert!(
+        dynamic.contains("\"port\":\"10443\""),
+        "HTTP redirect must use the selected HTTPS listener port: {dynamic}"
+    );
 
     supervisor
         .replace(Vec::new())

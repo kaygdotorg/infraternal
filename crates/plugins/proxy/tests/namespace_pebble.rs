@@ -8,7 +8,8 @@
 
 use infraternal_plugin_proxy::{
     config::{
-        DYNAMIC_CONFIG_FILENAME, DnsChallenge, ListenerPorts, PublishedService, StaticConfig,
+        DYNAMIC_CONFIG_FILENAME, DnsChallenge, PublishedService, StaticConfig,
+        detect_listener_ports,
     },
     names::CertificateName,
     supervisor::{SupervisorSettings, TraefikSupervisor},
@@ -126,7 +127,11 @@ fn run_namespace_case() {
             .env("PEBBLE_VA_NOSLEEP", "1"),
     );
     wait_for_tcp("127.0.0.1:14000".parse().expect("ACME address"));
-    wait_for_tcp("127.0.0.1:15000".parse().expect("Pebble management address"));
+    wait_for_tcp(
+        "127.0.0.1:15000"
+            .parse()
+            .expect("Pebble management address"),
+    );
     let issued_certificate_root = private_file(
         &root.join("pebble-issued-root.pem"),
         &fetch_pebble_issued_root(&pebble_ca),
@@ -141,6 +146,9 @@ fn run_namespace_case() {
     let storage_path = root.join("acme.json");
     let _storage = private_file(&storage_path, b"{}");
     let health_port = free_loopback_port();
+    let mesh_address = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1));
+    let listener_ports =
+        detect_listener_ports(nix::unistd::Uid::effective().is_root(), mesh_address, false);
     let executable = write_ca_wrapper(&root.join("traefik-with-pebble-ca"), &pebble_ca, &traefik);
     let log_tail = Arc::new(Mutex::new(VecDeque::new()));
     let captured_log_tail = Arc::clone(&log_tail);
@@ -151,13 +159,8 @@ fn run_namespace_case() {
             static_config_path: root.join("traefik.toml"),
             dynamic_config_path: state.join(DYNAMIC_CONFIG_FILENAME),
             static_config: StaticConfig {
-                mesh_address: IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)),
-                ports: ListenerPorts {
-                    http: 10080,
-                    https: 10443,
-                    mesh_http: None,
-                    mesh_https: None,
-                },
+                mesh_address,
+                ports: listener_ports,
                 public: false,
                 private_ping_port: health_port,
                 dynamic_directory: state.clone(),
@@ -186,23 +189,31 @@ fn run_namespace_case() {
     .expect("start the node-local Traefik owner");
 
     let hostname = "docs.node.example.org";
-    supervisor
+    let started_listener_ports = supervisor
         .replace(vec![PublishedService {
             id: "docs".to_owned(),
             hostname: hostname.to_owned(),
             backend: backend.address,
             allowed_sources: vec!["100.64.0.2".parse().expect("granted mesh peer")],
             public: false,
+            https_port: listener_ports.https_for_publication(false),
             certificate: CertificateName::Wildcard("*.node.example.org".to_owned()),
         }])
         .expect("publish one granted mesh service")
         .expect("published listener ports");
+    assert_eq!(started_listener_ports, listener_ports);
 
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut response = None;
     let mut last_curl_failure = String::new();
     while Instant::now() < deadline {
-        let attempt = curl_request("100.64.0.2", hostname, &issued_certificate_root, true);
+        let attempt = curl_request(
+            "100.64.0.2",
+            hostname,
+            &issued_certificate_root,
+            listener_ports.https,
+            true,
+        );
         if attempt.status.success() && response_status(&attempt.stdout) == Some(200) {
             response = Some(attempt.stdout);
             break;
@@ -216,7 +227,13 @@ fn run_namespace_case() {
         thread::sleep(Duration::from_millis(500));
     }
     let Some(response) = response else {
-        let unverified = curl_request("100.64.0.2", hostname, &issued_certificate_root, false);
+        let unverified = curl_request(
+            "100.64.0.2",
+            hostname,
+            &issued_certificate_root,
+            listener_ports.https,
+            false,
+        );
         let unverified_curl = format!(
             "exit={:?}, http={:?}, backend_body={}, stderr={}",
             unverified.status.code(),
@@ -249,12 +266,34 @@ fn run_namespace_case() {
             > 2
     );
 
-    let denied = curl_request("100.64.0.3", hostname, &issued_certificate_root, true);
+    let redirect = http_redirect_request("100.64.0.2", hostname, listener_ports.http);
+    assert_eq!(response_status(&redirect.stdout), Some(301));
+    let expected_redirect = if listener_ports.https == 443 {
+        format!("location: https://{hostname}/")
+    } else {
+        format!("location: https://{hostname}:{}/", listener_ports.https)
+    };
+    assert!(
+        String::from_utf8_lossy(&redirect.stdout)
+            .to_ascii_lowercase()
+            .contains(&expected_redirect),
+        "mesh HTTP redirect must target its HTTPS listener port: {}",
+        String::from_utf8_lossy(&redirect.stdout)
+    );
+
+    let denied = curl_request(
+        "100.64.0.3",
+        hostname,
+        &issued_certificate_root,
+        listener_ports.https,
+        true,
+    );
     assert_eq!(response_status(&denied.stdout), Some(403));
     let unknown_host = curl_request(
         "100.64.0.2",
         "other.node.example.org",
         &issued_certificate_root,
+        listener_ports.https,
         true,
     );
     assert_eq!(response_status(&unknown_host.stdout), Some(404));
@@ -294,8 +333,7 @@ fn fetch_pebble_issued_root(service_ca: &Path) -> Vec<u8> {
         .output()
         .expect("fetch Pebble's ephemeral ACME root certificate");
     assert!(
-        output.status.success()
-            && output.stdout.starts_with(b"-----BEGIN CERTIFICATE-----"),
+        output.status.success() && output.stdout.starts_with(b"-----BEGIN CERTIFICATE-----"),
         "Pebble management endpoint did not return a certificate: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     );
@@ -617,6 +655,7 @@ fn curl_request(
     source: &str,
     hostname: &str,
     ca_file: &Path,
+    https_port: u16,
     verify_certificate: bool,
 ) -> std::process::Output {
     let mut command = Command::new("curl");
@@ -627,7 +666,7 @@ fn curl_request(
         source,
         "--resolve",
     ]);
-    command.arg(format!("{hostname}:443:100.64.0.1"));
+    command.arg(format!("{hostname}:{https_port}:100.64.0.1"));
     if verify_certificate {
         command.args(["--cacert"]).arg(ca_file);
     } else {
@@ -642,9 +681,33 @@ fn curl_request(
             "--write-out",
             "\n%{http_code}",
         ])
-        .arg(format!("https://{hostname}/"))
+        .arg(format!("https://{hostname}:{https_port}/"))
         .output()
         .expect("run isolated HTTPS request")
+}
+
+fn http_redirect_request(source: &str, hostname: &str, http_port: u16) -> std::process::Output {
+    Command::new("curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--include",
+            "--interface",
+            source,
+            "--resolve",
+        ])
+        .arg(format!("{hostname}:{http_port}:100.64.0.1"))
+        .args([
+            "--connect-timeout",
+            "2",
+            "--max-time",
+            "5",
+            "--write-out",
+            "\n%{http_code}",
+        ])
+        .arg(format!("http://{hostname}:{http_port}/"))
+        .output()
+        .expect("run isolated HTTP redirect request")
 }
 
 fn response_status(bytes: &[u8]) -> Option<u16> {

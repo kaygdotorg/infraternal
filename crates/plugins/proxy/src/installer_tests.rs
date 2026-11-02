@@ -170,6 +170,34 @@ fn installer_extracts_only_the_allowlisted_executable_with_private_mode() {
 }
 
 #[test]
+fn existing_component_is_verified_before_requesting_an_archive_again() {
+    let executable = b"signed executable bytes";
+    let archive = archive(executable, None);
+    let manifest = verified_manifest(&archive, executable);
+    let state = TempState::new();
+    let installer = ComponentInstaller::new(&state.0);
+    let installed_path = installer
+        .install_archive(&manifest, Cursor::new(&archive), "linux", "amd64")
+        .expect("install component once");
+
+    let reused = installer
+        .install_stream(
+            &manifest,
+            |_output| {
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "archive source is offline",
+                ))
+            },
+            "linux",
+            "amd64",
+        )
+        .expect("reuse valid executable before contacting the archive source");
+
+    assert_eq!(reused, installed_path);
+}
+
+#[test]
 fn installer_accepts_the_signed_release_changelog_without_extracting_it() {
     let executable = b"signed executable bytes";
     let archive = archive(executable, Some(("CHANGELOG.md", tar::EntryType::Regular)));

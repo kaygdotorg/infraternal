@@ -922,6 +922,22 @@ pub(super) fn prepare_child(command: &mut Command) {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn prepare_parent_bound_child(command: &mut Command) {
+    let owner = unistd::getpid();
+    // SAFETY: the child hook runs between fork and exec and only calls prctl/getppid wrappers.
+    // Installing the signal before checking the parent closes the fork-to-hook race.
+    unsafe {
+        command.pre_exec(move || {
+            nix::sys::prctl::set_pdeathsig(Signal::SIGTERM).map_err(io::Error::from)?;
+            if unistd::getppid() != owner {
+                return Err(io::Error::other("proxy owner exited before child startup"));
+            }
+            Ok(())
+        });
+    }
+}
+
 /// Keep the public direct-exec policy on the same audited descriptor boundary.
 pub(super) fn prepare_child_without_control(command: &mut Command) {
     prepare_isolated_child(command);

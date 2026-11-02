@@ -23,6 +23,7 @@ fn mesh_service(sources: Vec<IpAddr>) -> PublishedService {
             .expect("backend socket"),
         allowed_sources: sources,
         public: false,
+        https_port: 10_443,
         certificate: CertificateName::Wildcard("*.build01.ssh.kayg.org".to_owned()),
     }
 }
@@ -117,6 +118,7 @@ fn mixed_public_and_mesh_routes_use_separate_listeners() {
     public.id = "status".to_owned();
     public.hostname = "status.build01.ssh.kayg.org".to_owned();
     public.public = true;
+    public.https_port = 443;
 
     let dynamic = render_dynamic_config(&[mesh, public]).expect("mixed dynamic config");
     let dynamic: Value = serde_json::from_slice(&dynamic).expect("dynamic JSON");
@@ -135,6 +137,14 @@ fn mixed_public_and_mesh_routes_use_separate_listeners() {
     assert_eq!(
         dynamic["http"]["routers"]["status"]["entryPoints"],
         serde_json::json!(["https"])
+    );
+    assert_eq!(
+        dynamic["http"]["middlewares"]["docs-https-redirect"]["redirectScheme"]["port"],
+        "10443"
+    );
+    assert_eq!(
+        dynamic["http"]["middlewares"]["status-https-redirect"]["redirectScheme"]["port"],
+        "443"
     );
 }
 
@@ -241,6 +251,10 @@ fn https_router_uses_the_exposure_id_and_http_redirect_uses_a_disjoint_key() {
     assert_eq!(
         config["http"]["routers"]["http.docs"]["entryPoints"][0],
         "http"
+    );
+    assert_eq!(
+        config["http"]["middlewares"]["docs-https-redirect"]["redirectScheme"]["port"],
+        "10443"
     );
 }
 

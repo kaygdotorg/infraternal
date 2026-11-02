@@ -416,6 +416,8 @@ impl TraefikChild {
             // an exclusive file lock; no inherited numeric PID is used to identify an owner.
             command.process_group(0);
         }
+        #[cfg(target_os = "linux")]
+        infraternal_shim::prepare_parent_bound_child(&mut command);
         let mut child = command.spawn()?;
         let stdout = child
             .stdout
@@ -785,7 +787,7 @@ fn replace_services(
             } else if runtime.child.is_some() && runtime.listener_scope != Some(desired_scope) {
                 restart_for_listener_scope(
                     settings,
-                    &runtime.services,
+                    &mut runtime.services,
                     Arc::clone(log),
                     &mut runtime.lifecycle,
                     &mut runtime.child,
@@ -826,7 +828,7 @@ fn start_runtime_child(
     runtime: &mut SupervisorRuntime,
 ) -> io::Result<ListenerPorts> {
     let (started, scope, ports) =
-        start_managed_child(settings, &runtime.services, Arc::clone(log))?;
+        start_managed_child(settings, &mut runtime.services, Arc::clone(log))?;
     runtime.child = Some(started);
     runtime.listener_scope = Some(scope);
     runtime.listener_ports = Some(ports);
@@ -895,7 +897,7 @@ fn receive_command(receiver: &mpsc::Receiver<SupervisorCommand>, phase: Lifecycl
 
 fn start_managed_child(
     settings: &SupervisorSettings,
-    services: &[PublishedService],
+    services: &mut [PublishedService],
     log: Arc<ProxyLog>,
 ) -> io::Result<(TraefikChild, ExposureScope, ListenerPorts)> {
     let mut config = settings.static_config.clone();
@@ -913,6 +915,9 @@ fn start_managed_child(
             config.public,
         )
     };
+    for service in services.iter_mut() {
+        service.https_port = config.ports.https_for_publication(service.public);
+    }
     let static_config = crate::config::render_static_config(&config)?;
     let dynamic_config = crate::config::render_dynamic_config(services)?;
     crate::config::write_config_atomic(&settings.static_config_path, static_config.as_bytes())?;
@@ -956,7 +961,7 @@ fn start_managed_child(
 
 fn restart_for_listener_scope(
     settings: &SupervisorSettings,
-    services: &[PublishedService],
+    services: &mut [PublishedService],
     log: Arc<ProxyLog>,
     lifecycle: &mut Lifecycle,
     child: &mut Option<TraefikChild>,

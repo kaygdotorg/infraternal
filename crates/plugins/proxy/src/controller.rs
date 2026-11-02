@@ -220,6 +220,22 @@ impl ProxyController {
         if state.mesh == context {
             return Ok(());
         }
+        let listener_address_changed = matches!(
+            (state.mesh.as_ref(), context.as_ref()),
+            (Some(previous), Some(next)) if previous.mesh_address != next.mesh_address
+        );
+        let mesh_identity_lost = context.is_none();
+        if listener_address_changed || mesh_identity_lost {
+            // Static entry points bind an IP address, so a dynamic route reload cannot move them.
+            // Dropping the old owner closes stale listeners before a changed identity is reused.
+            state.supervisor = None;
+        }
+        if mesh_identity_lost {
+            // Retain publication intent, but never retain a route bound to an expired Mesh identity.
+            for exposure in state.exposures.values_mut() {
+                exposure.last_route = None;
+            }
+        }
         state.mesh = context;
         self.reconcile(&mut state)
     }
@@ -321,8 +337,8 @@ impl ProxyController {
                 NameShape::PerMachineWildcard
             },
         };
-        let route =
-            route_for(spec, &context).map_err(|_| infraternal_plugin_api::PluginError::Rejected)?;
+        let route = route_for(spec, &context, state.listener_ports)
+            .map_err(|_| infraternal_plugin_api::PluginError::Rejected)?;
         if !route.public && route.allowed_sources.is_empty() {
             return error_reply(
                 "not_allowed",
@@ -594,32 +610,50 @@ fn ensure_private_directory(path: &Path) -> io::Result<()> {
 
 fn ensure_private_file(path: &Path) -> io::Result<()> {
     use std::fs::OpenOptions;
-    match OpenOptions::new()
+    use std::io::Write;
+    let mut file = match OpenOptions::new()
+        .read(true)
         .write(true)
         .create_new(true)
         .mode(PRIVATE_FILE_MODE)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
         .open(path)
     {
-        Ok(file) => file.sync_all()?,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+            .open(path)?,
         Err(error) => return Err(error),
-    }
-    let metadata = fs::symlink_metadata(path)?;
+    };
+    let metadata = file.metadata()?;
+    let path_metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file()
         || metadata.uid() != nix::unistd::Uid::effective().as_raw()
         || metadata.mode() & 0o7777 != PRIVATE_FILE_MODE
         || metadata.nlink() != 1
+        || !path_metadata.file_type().is_file()
+        || path_metadata.dev() != metadata.dev()
+        || path_metadata.ino() != metadata.ino()
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "proxy ACME state file has unsafe ownership or mode",
         ));
     }
+    if metadata.len() == 0 {
+        file.write_all(b"{}")?;
+    }
+    file.sync_all()?;
     Ok(())
 }
 
-fn route_for(spec: ExposureSpec, context: &AcceptedMeshContext) -> io::Result<PublishedService> {
+fn route_for(
+    spec: ExposureSpec,
+    context: &AcceptedMeshContext,
+    listener_ports: ListenerPorts,
+) -> io::Result<PublishedService> {
     let service_label = format!("port-{}", spec.port);
     let names = exposure_names(
         spec.shape,
@@ -633,6 +667,7 @@ fn route_for(spec: ExposureSpec, context: &AcceptedMeshContext) -> io::Result<Pu
         backend: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), spec.port),
         allowed_sources: context.allowed_sources(spec.port),
         public: spec.public,
+        https_port: listener_ports.https_for_publication(spec.public),
         certificate: names.certificate,
     })
 }
@@ -645,7 +680,7 @@ fn refresh_routes(state: &mut ControllerState) -> io::Result<Vec<PublishedServic
     let mut routes = Vec::new();
     for exposure in state.exposures.values_mut() {
         if let Some(context) = &context {
-            exposure.last_route = Some(route_for(exposure.spec, context)?);
+            exposure.last_route = Some(route_for(exposure.spec, context, state.listener_ports)?);
         }
         let Some(route) = exposure.last_route.as_ref() else {
             continue;
@@ -752,9 +787,13 @@ mod tests {
     use serde_json::Value;
     use std::net::{IpAddr, Ipv4Addr};
 
+    type Snapshots = Arc<Mutex<Vec<Vec<PublishedService>>>>;
+    type StartedAddresses = Arc<Mutex<Vec<IpAddr>>>;
+
     #[derive(Clone)]
     struct FakeFactory {
         snapshots: Arc<Mutex<Vec<Vec<PublishedService>>>>,
+        started_addresses: Arc<Mutex<Vec<IpAddr>>>,
         listener_ports: ListenerPorts,
     }
 
@@ -764,7 +803,11 @@ mod tests {
     }
 
     impl SupervisorFactory for FakeFactory {
-        fn start(&self, _context: &AcceptedMeshContext) -> io::Result<Box<dyn RouteSupervisor>> {
+        fn start(&self, context: &AcceptedMeshContext) -> io::Result<Box<dyn RouteSupervisor>> {
+            self.started_addresses
+                .lock()
+                .map_err(|_| io::Error::other("fixture start log is unavailable"))?
+                .push(context.mesh_address);
             Ok(Box::new(FakeSupervisor {
                 snapshots: Arc::clone(&self.snapshots),
                 listener_ports: self.listener_ports,
@@ -792,10 +835,14 @@ mod tests {
     }
 
     fn context(ports: &[(u16, Ipv4Addr)]) -> AcceptedMeshContext {
+        context_at(IpAddr::V4(Ipv4Addr::new(10, 254, 0, 2)), ports)
+    }
+
+    fn context_at(mesh_address: IpAddr, ports: &[(u16, Ipv4Addr)]) -> AcceptedMeshContext {
         AcceptedMeshContext::new(
             "web01".to_owned(),
             "ssh.kayg.org".to_owned(),
-            IpAddr::V4(Ipv4Addr::new(10, 254, 0, 2)),
+            mesh_address,
             [],
             ports
                 .iter()
@@ -816,12 +863,67 @@ mod tests {
     fn controller_with_ports(
         listener_ports: ListenerPorts,
     ) -> (ProxyController, Arc<Mutex<Vec<Vec<PublishedService>>>>) {
+        let (controller, snapshots, _) = controller_with_ports_and_starts(listener_ports);
+        (controller, snapshots)
+    }
+
+    fn controller_with_ports_and_starts(
+        listener_ports: ListenerPorts,
+    ) -> (ProxyController, Snapshots, StartedAddresses) {
         let snapshots = Arc::new(Mutex::new(Vec::new()));
+        let started_addresses = Arc::new(Mutex::new(Vec::new()));
         let factory = Arc::new(FakeFactory {
             snapshots: Arc::clone(&snapshots),
+            started_addresses: Arc::clone(&started_addresses),
             listener_ports,
         });
-        (ProxyController::with_factory(factory), snapshots)
+        (
+            ProxyController::with_factory(factory),
+            snapshots,
+            started_addresses,
+        )
+    }
+
+    #[test]
+    fn production_acme_storage_initializes_as_a_private_json_object() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = env::temp_dir().join(format!("proxy-acme-init-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).expect("create ACME storage root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE))
+            .expect("make ACME storage root private");
+        let path = root.join("acme.json");
+
+        ensure_private_file(&path).expect("initialize ACME storage");
+
+        assert_eq!(fs::read(&path).expect("read ACME storage"), b"{}");
+        assert_eq!(
+            fs::symlink_metadata(&path)
+                .expect("inspect ACME storage")
+                .mode()
+                & 0o7777,
+            PRIVATE_FILE_MODE
+        );
+        fs::remove_dir_all(root).expect("remove ACME storage fixture");
+    }
+
+    #[test]
+    fn production_acme_storage_repairs_an_existing_empty_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = env::temp_dir().join(format!("proxy-acme-empty-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).expect("create ACME storage root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE))
+            .expect("make ACME storage root private");
+        let path = root.join("acme.json");
+        fs::write(&path, b"").expect("create empty ACME storage");
+        fs::set_permissions(&path, fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+            .expect("make empty ACME storage private");
+
+        ensure_private_file(&path).expect("repair empty ACME storage");
+
+        assert_eq!(fs::read(&path).expect("read ACME storage"), b"{}");
+        fs::remove_dir_all(root).expect("remove ACME storage fixture");
     }
 
     #[test]
@@ -978,6 +1080,71 @@ mod tests {
                 .expect("fixture snapshots")
                 .last()
                 .is_some_and(Vec::is_empty)
+        );
+    }
+
+    #[test]
+    fn an_accepted_mesh_address_change_restarts_the_proxy_listener() {
+        let (controller, _, started_addresses) = controller_with_ports_and_starts(ListenerPorts {
+            http: 10_080,
+            https: 10_443,
+            mesh_http: None,
+            mesh_https: None,
+        });
+        controller
+            .set_mesh_context(Some(context(&[(3000, Ipv4Addr::new(10, 254, 0, 3))])))
+            .expect("apply accepted context");
+        controller
+            .call("proxy.publish", br#"{"port":3000}"#)
+            .expect("publish authorized port");
+
+        controller
+            .set_mesh_context(Some(context_at(
+                IpAddr::V4(Ipv4Addr::new(10, 254, 0, 9)),
+                &[(3000, Ipv4Addr::new(10, 254, 0, 3))],
+            )))
+            .expect("replace listener with accepted Mesh address");
+
+        assert_eq!(
+            *started_addresses.lock().expect("factory start log"),
+            [
+                IpAddr::V4(Ipv4Addr::new(10, 254, 0, 2)),
+                IpAddr::V4(Ipv4Addr::new(10, 254, 0, 9)),
+            ]
+        );
+    }
+
+    #[test]
+    fn losing_mesh_identity_and_rejoining_on_a_new_address_restarts_the_proxy_listener() {
+        let (controller, _, started_addresses) = controller_with_ports_and_starts(ListenerPorts {
+            http: 10_080,
+            https: 10_443,
+            mesh_http: None,
+            mesh_https: None,
+        });
+        controller
+            .set_mesh_context(Some(context(&[(3000, Ipv4Addr::new(10, 254, 0, 3))])))
+            .expect("apply initial accepted context");
+        controller
+            .call("proxy.publish", br#"{"port":3000}"#)
+            .expect("publish authorized port");
+
+        controller
+            .set_mesh_context(None)
+            .expect("remove missing Mesh identity");
+        controller
+            .set_mesh_context(Some(context_at(
+                IpAddr::V4(Ipv4Addr::new(10, 254, 0, 9)),
+                &[(3000, Ipv4Addr::new(10, 254, 0, 3))],
+            )))
+            .expect("apply new accepted context");
+
+        assert_eq!(
+            *started_addresses.lock().expect("factory start log"),
+            [
+                IpAddr::V4(Ipv4Addr::new(10, 254, 0, 2)),
+                IpAddr::V4(Ipv4Addr::new(10, 254, 0, 9)),
+            ]
         );
     }
 }

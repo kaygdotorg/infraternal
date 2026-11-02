@@ -16,6 +16,9 @@ const TOOLS: [&str; 2] = [
 const CHAINS: [&str; 3] = ["IFM_IN", "IFM_OUT", "IFM_FWD"];
 const GUARD: &str = "IFM_GUARD";
 const DELIVERY: &str = "IFM_DELIVERY";
+// Only peers with an inbound TCP grant can reach an entry point. Traefik's exact-host
+// middleware then checks the source against that route's original backend-port grant.
+const PROXY_INGRESS_PORTS: [u16; 4] = [80, 443, 10_080, 10_443];
 /// Restore is atomic per table, so adoption records interrupted tables separately.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Ownership {
@@ -346,6 +349,25 @@ fn render_with_aliases(
                             .or_default()
                             .insert(address);
                     }
+                    if direction == 0 && ports.iter().any(|port| port.protocol == Protocol::Tcp) {
+                        for proxy_port in PROXY_INGRESS_PORTS {
+                            let already_granted = ports.iter().any(|port| {
+                                port.protocol == Protocol::Tcp && port.number == proxy_port
+                            });
+                            if !already_granted {
+                                groups
+                                    .entry((
+                                        direction,
+                                        Some(crate::policy::rules::Port {
+                                            protocol: Protocol::Tcp,
+                                            number: proxy_port,
+                                        }),
+                                    ))
+                                    .or_default()
+                                    .insert(address);
+                            }
+                        }
+                    }
                 }
                 TrafficPolicy::None => {}
             }
@@ -611,6 +633,37 @@ mod tests {
         );
         assert!(!rules.contains("-A IFM_IN -s 10.254.0.2 -p tcp --dport 22 -j ACCEPT"));
         assert!(rules.contains("-A IFM_OUT -d 10.254.0.2 -p tcp --dport 443 -j ACCEPT"));
+    }
+    #[test]
+    fn proxy_listener_ports_are_limited_to_peers_with_tcp_ingress_grants() {
+        let mut config = config(&[2, 3]);
+        for peer in config.peers.values_mut() {
+            peer.inbound = TrafficPolicy::None;
+        }
+        config.peers.get_mut(&NodeId(2)).expect("tcp peer").inbound =
+            TrafficPolicy::Ports(std::collections::BTreeSet::from([
+                crate::policy::rules::Port {
+                    protocol: Protocol::Tcp,
+                    number: 3000,
+                },
+            ]));
+        config.peers.get_mut(&NodeId(3)).expect("udp peer").inbound =
+            TrafficPolicy::Ports(std::collections::BTreeSet::from([
+                crate::policy::rules::Port {
+                    protocol: Protocol::Udp,
+                    number: 53,
+                },
+            ]));
+
+        let rules = render(&config, false, Ownership::default());
+        for port in [80, 443, 10_080, 10_443] {
+            assert!(rules.contains(&format!(
+                "-A IFM_IN -s 10.254.0.2 -p tcp -m conntrack --ctorigdstport {port} -j ACCEPT"
+            )));
+            assert!(!rules.contains(&format!(
+                "-A IFM_IN -s 10.254.0.3 -p tcp -m conntrack --ctorigdstport {port} -j ACCEPT"
+            )));
+        }
     }
     #[test]
     fn replacement_retains_established_rules_and_does_not_duplicate_hooks() {

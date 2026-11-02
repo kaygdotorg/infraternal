@@ -49,6 +49,7 @@ class ComponentManifestTests(unittest.TestCase):
 
             manifest = json.loads(manifest_path.read_text())
             self.assertEqual(manifest["release_version"], "0.1.0")
+            self.assertEqual(manifest["executable"], "traefik")
             self.assertEqual(manifest["archive_sha256"], digest)
             self.assertEqual(manifest["archive_size"], len(payload))
             self.assertEqual(manifest["executable_sha256"], hashlib.sha256(b"signed executable").hexdigest())

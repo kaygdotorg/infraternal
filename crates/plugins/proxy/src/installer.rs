@@ -2,7 +2,8 @@
 
 use crate::manifest::{
     ComponentManifest, ComponentManifestVerifier, MAX_COMPONENT_ARCHIVE_BYTES,
-    MAX_COMPONENT_EXECUTABLE_BYTES, VerifiedComponentManifest, verify_component_manifest,
+    MAX_COMPONENT_EXECUTABLE_BYTES, MAX_RELEASE_SIGNATURE_BYTES, MAX_SIGNED_RELEASE_METADATA_BYTES,
+    VerifiedComponentManifest, verify_component_manifest,
 };
 use nix::fcntl::{Flock, FlockArg};
 use sha2::{Digest, Sha256};
@@ -89,17 +90,19 @@ impl ComponentInstaller {
         manifest.manifest().validate_for(os, arch)?;
         let root = self.store_directory()?;
         let _lock = lock_store(&root)?;
-        let archive_file = stage_archive(&root, manifest, download)?;
         let destination = root.join(&manifest.manifest().executable_sha256);
         if path_exists(&destination)? {
             validate_installed(&destination, manifest)?;
+            store_signed_bundle(&destination, manifest)?;
             return Ok(destination.join("bin").join("traefik"));
         }
 
+        let archive_file = stage_archive(&root, manifest, download)?;
         let mut staging = TemporaryDirectory::create(&root)?;
         let bin = staging.path.join("bin");
         create_private_directory(&bin)?;
         extract_executable(&archive_file.path, &bin, manifest)?;
+        store_signed_bundle(&staging.path, manifest)?;
         sync_directory(&bin)?;
         sync_directory(&staging.path)?;
         fs::rename(&staging.path, &destination)?;
@@ -132,6 +135,92 @@ impl ComponentInstaller {
         self.install_archive(&manifest, archive, os, arch)
     }
 
+    /// Reuse a locally installed executable only when its persisted release signature still verifies.
+    ///
+    /// # Errors
+    /// Returns an error when a candidate bundle is malformed, untrusted, or its executable was changed.
+    pub(crate) fn find_installed(
+        &self,
+        release_version: &str,
+        os: &str,
+        arch: &str,
+        verifier: &dyn ComponentManifestVerifier,
+    ) -> io::Result<Option<PathBuf>> {
+        if !crate::manifest::valid_release_version(release_version)
+            || !matches!(os, "linux" | "darwin")
+            || !matches!(arch, "amd64" | "arm64")
+        {
+            return Err(invalid_data("component lookup target is invalid"));
+        }
+        // A read-only lookup must not create the component tree before the remote manifest is trusted.
+        let Some(root) = self.existing_store_directory()? else {
+            return Ok(None);
+        };
+        let _lock = lock_store(&root)?;
+        let manifest_filename = ComponentManifest::signed_filename(os, arch);
+        let mut found = None;
+        for entry in fs::read_dir(&root)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(digest) = name.to_str() else {
+                continue;
+            };
+            if !valid_component_digest(digest) {
+                continue;
+            }
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let directory = entry.path();
+            validate_directory(&directory, PRIVATE_DIRECTORY_MODE)?;
+            let bundles = directory.join("bundles");
+            let release = bundles.join(release_version);
+            let target = release.join(os).join(arch);
+            if !path_exists(&target)? {
+                continue;
+            }
+            validate_directory(&bundles, PRIVATE_DIRECTORY_MODE)?;
+            validate_directory(&release, PRIVATE_DIRECTORY_MODE)?;
+            validate_directory(&release.join(os), PRIVATE_DIRECTORY_MODE)?;
+            validate_directory(&target, PRIVATE_DIRECTORY_MODE)?;
+
+            let manifest_bytes = read_signed_metadata(
+                &target.join(&manifest_filename),
+                MAX_SIGNED_RELEASE_METADATA_BYTES,
+            )?;
+            let checksums = read_signed_metadata(
+                &target.join("SHA256SUMS"),
+                MAX_SIGNED_RELEASE_METADATA_BYTES,
+            )?;
+            let signature =
+                read_signed_metadata(&target.join("SHA256SUMS.sig"), MAX_RELEASE_SIGNATURE_BYTES)?;
+            let candidate = verify_component_manifest(
+                &manifest_bytes,
+                &manifest_filename,
+                &checksums,
+                &signature,
+                os,
+                arch,
+                verifier,
+            )?;
+            if candidate.manifest().release_version != release_version
+                || candidate.manifest().executable_sha256 != digest
+            {
+                return Err(invalid_data(
+                    "stored component bundle does not match its installation path",
+                ));
+            }
+            validate_installed(&directory, &candidate)?;
+            if found.is_some() {
+                return Err(invalid_data(
+                    "multiple installed components match the requested release",
+                ));
+            }
+            found = Some(directory.join("bin").join("traefik"));
+        }
+        Ok(found)
+    }
+
     fn store_directory(&self) -> io::Result<PathBuf> {
         validate_directory(&self.state, PRIVATE_DIRECTORY_MODE)?;
         let components = self.state.join("components");
@@ -140,6 +229,112 @@ impl ComponentInstaller {
         create_private_directory(&proxy)?;
         Ok(proxy)
     }
+
+    fn existing_store_directory(&self) -> io::Result<Option<PathBuf>> {
+        validate_directory(&self.state, PRIVATE_DIRECTORY_MODE)?;
+        let components = self.state.join("components");
+        match fs::symlink_metadata(&components) {
+            Ok(_) => validate_directory(&components, PRIVATE_DIRECTORY_MODE)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        let proxy = components.join("proxy");
+        match fs::symlink_metadata(&proxy) {
+            Ok(_) => validate_directory(&proxy, PRIVATE_DIRECTORY_MODE)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        Ok(Some(proxy))
+    }
+}
+
+fn store_signed_bundle(
+    component_directory: &Path,
+    verified: &VerifiedComponentManifest,
+) -> io::Result<()> {
+    let manifest = verified.manifest();
+    let bundles = component_directory.join("bundles");
+    create_private_directory(&bundles)?;
+    let release = bundles.join(&manifest.release_version);
+    create_private_directory(&release)?;
+    let os = release.join(&manifest.os);
+    create_private_directory(&os)?;
+    let (manifest_bytes, manifest_filename, checksums, signature) = verified.signed_bundle_parts();
+    let destination = os.join(&manifest.arch);
+    if path_exists(&destination)? {
+        validate_directory(&destination, PRIVATE_DIRECTORY_MODE)?;
+        for (name, expected, limit) in [
+            (
+                manifest_filename,
+                manifest_bytes,
+                MAX_SIGNED_RELEASE_METADATA_BYTES,
+            ),
+            ("SHA256SUMS", checksums, MAX_SIGNED_RELEASE_METADATA_BYTES),
+            ("SHA256SUMS.sig", signature, MAX_RELEASE_SIGNATURE_BYTES),
+        ] {
+            if read_signed_metadata(&destination.join(name), limit)? != expected {
+                return Err(invalid_data(
+                    "stored component bundle conflicts with verified release metadata",
+                ));
+            }
+        }
+        return Ok(());
+    }
+
+    let mut staging = TemporaryDirectory::create(&os)?;
+    for (name, bytes) in [
+        (manifest_filename, manifest_bytes),
+        ("SHA256SUMS", checksums),
+        ("SHA256SUMS.sig", signature),
+    ] {
+        write_signed_metadata(&staging.path.join(name), bytes)?;
+    }
+    sync_directory(&staging.path)?;
+    fs::rename(&staging.path, &destination)?;
+    staging.disarm();
+    sync_directory(&os)?;
+    Ok(())
+}
+
+fn write_signed_metadata(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(PRIVATE_FILE_MODE)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    validate_file_metadata(&file.metadata()?, PRIVATE_FILE_MODE)
+}
+
+fn read_signed_metadata(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(path)?;
+    validate_file_metadata(&file.metadata()?, PRIVATE_FILE_MODE)?;
+    if file.metadata()?.len() > u64::try_from(limit).unwrap_or(u64::MAX) {
+        return Err(invalid_data(
+            "stored component metadata exceeds its byte limit",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(invalid_data(
+            "stored component metadata exceeds its byte limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn valid_component_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn stage_archive<F>(

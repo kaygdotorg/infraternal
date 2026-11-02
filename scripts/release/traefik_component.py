@@ -260,6 +260,7 @@ def write_component_bundle(
             "mirror_path": mirror_path,
             "archive_sha256": archive_digest,
             "archive_size": size,
+            "executable": "traefik",
             **inspected,
         }
         manifest_path = output / f"proxy-traefik-{os_name}-{arch}.json"

@@ -1,7 +1,7 @@
 //! Long-lived local PTY sessions with frozen v1 resume semantics [13][17].
 //!
-//! Unsafe code is confined to the audited PTY/process, readiness and Ghostty FFI boundaries; data modules
-//! forbid it. Each boundary documents descriptor, pointer and fork invariants.
+//! Unsafe code is confined to the audited PTY/process, parent-bound child, readiness and Ghostty FFI boundaries;
+//! data modules forbid it. Each boundary documents descriptor, pointer and fork invariants.
 #![deny(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 mod child;
@@ -98,6 +98,15 @@ pub fn protect_login_process_at(path: &std::path::Path) -> std::io::Result<()> {
 /// This avoids an intermediate shell changing `/proc/self/exe` for anonymous images.
 pub fn prepare_child_without_control(command: &mut std::process::Command) {
     pty::prepare_child_without_control(command);
+}
+
+/// Ensure a Linux child exits if its infraternal owner exits before the child.
+///
+/// The pre-exec boundary installs the parent-death signal before checking the
+/// parent identity, closing the fork-to-exec race within the audited shim.
+#[cfg(target_os = "linux")]
+pub fn prepare_parent_bound_child(command: &mut std::process::Command) {
+    pty::prepare_parent_bound_child(command);
 }
 
 /// Apply the same default child signal policy to a POSIX spawn launcher.

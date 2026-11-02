@@ -11,6 +11,9 @@ use std::{
 };
 const NFT: &str = "/usr/sbin/nft";
 const TABLE: &str = "infraternal_mesh";
+// Only peers with an inbound TCP grant can reach an entry point. Traefik's exact-host
+// middleware then checks the source against that route's original backend-port grant.
+const PROXY_INGRESS_PORTS: [u16; 4] = [80, 443, 10_080, 10_443];
 
 // These plans only remove previously validated permissions. Changed identity,
 // routes, bindings or concrete rules require the ordinary two-family preflight.
@@ -352,6 +355,18 @@ fn render_with_aliases(
                                     entries.push(format!("{address} . {}", port.number));
                                 }
                             }
+                            if inbound
+                                && protocol == Some(Protocol::Tcp)
+                                && ports.iter().any(|port| port.protocol == Protocol::Tcp)
+                            {
+                                for proxy_port in PROXY_INGRESS_PORTS {
+                                    if !ports.iter().any(|port| {
+                                        port.protocol == Protocol::Tcp && port.number == proxy_port
+                                    }) {
+                                        entries.push(format!("{address} . {proxy_port}"));
+                                    }
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -607,6 +622,34 @@ mod tests {
         ));
         assert!(!rules.contains("ip saddr . tcp dport @incoming4_tcp accept"));
         assert!(rules.contains("ip daddr . tcp dport @outgoing4_tcp accept"));
+    }
+    #[test]
+    fn proxy_listener_ports_are_limited_to_peers_with_tcp_ingress_grants() {
+        let mut config = config();
+        for peer in config.peers.values_mut() {
+            peer.inbound = TrafficPolicy::None;
+        }
+        config.peers.get_mut(&NodeId(2)).expect("tcp peer").inbound =
+            TrafficPolicy::Ports(std::collections::BTreeSet::from([
+                crate::policy::rules::Port {
+                    protocol: Protocol::Tcp,
+                    number: 3000,
+                },
+            ]));
+        config.peers.get_mut(&NodeId(3)).expect("udp peer").inbound =
+            TrafficPolicy::Ports(std::collections::BTreeSet::from([
+                crate::policy::rules::Port {
+                    protocol: Protocol::Udp,
+                    number: 53,
+                },
+            ]));
+
+        let rules = render(&config, false);
+        for port in [80, 443, 10_080, 10_443] {
+            assert!(rules.contains(&format!("10.254.0.2 . {port}")));
+            assert!(!rules.contains(&format!("10.254.0.3 . {port}")));
+        }
+        assert!(rules.contains("ct original protocol tcp ct original ip saddr . ct original proto-dst @incoming4_tcp accept"));
     }
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]

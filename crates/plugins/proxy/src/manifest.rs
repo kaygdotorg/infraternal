@@ -13,8 +13,8 @@ use std::{
 pub const TRAEFIK_VERSION: &str = "3.7.17";
 pub const MAX_COMPONENT_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_COMPONENT_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_SIGNED_RELEASE_METADATA_BYTES: usize = 64 * 1024;
-const MAX_RELEASE_SIGNATURE_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_SIGNED_RELEASE_METADATA_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_RELEASE_SIGNATURE_BYTES: usize = 16 * 1024;
 const ALLOWED_SIGNERS: &str = include_str!("../../../../release/allowed_signers");
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -87,13 +87,28 @@ impl ComponentManifest {
 
 /// A manifest whose bytes are covered by a verified product release signature.
 #[derive(Clone, Debug)]
-pub struct VerifiedComponentManifest(ComponentManifest);
+pub struct VerifiedComponentManifest {
+    manifest: ComponentManifest,
+    manifest_bytes: Vec<u8>,
+    manifest_filename: String,
+    signed_checksums: Vec<u8>,
+    signature: Vec<u8>,
+}
 
 impl VerifiedComponentManifest {
     /// Read the immutable manifest fields after signature and target validation.
     #[must_use]
     pub const fn manifest(&self) -> &ComponentManifest {
-        &self.0
+        &self.manifest
+    }
+
+    pub(crate) fn signed_bundle_parts(&self) -> (&[u8], &str, &[u8], &[u8]) {
+        (
+            &self.manifest_bytes,
+            &self.manifest_filename,
+            &self.signed_checksums,
+            &self.signature,
+        )
     }
 }
 
@@ -195,7 +210,13 @@ pub fn verify_component_manifest(
     let manifest: ComponentManifest = serde_json::from_slice(manifest_bytes)
         .map_err(|_| invalid_data("component manifest is invalid JSON"))?;
     manifest.validate_for(os, arch)?;
-    Ok(VerifiedComponentManifest(manifest))
+    Ok(VerifiedComponentManifest {
+        manifest,
+        manifest_bytes: manifest_bytes.to_vec(),
+        manifest_filename: manifest_filename.to_owned(),
+        signed_checksums: signed_checksums.to_vec(),
+        signature: signature.to_vec(),
+    })
 }
 
 fn parse_checksums(checksums: &[u8]) -> io::Result<BTreeMap<String, String>> {

@@ -149,6 +149,11 @@ impl<T: ComponentTransport> ComponentDownloader<T> {
         if !crate::manifest::valid_release_version(release_version) {
             return Err(invalid_input("component release version is invalid"));
         }
+        if let Some(executable) =
+            installer.find_installed(release_version, os, arch, manifest_verifier)?
+        {
+            return Ok(executable);
+        }
         let release_mirror = self
             .mirror
             .join(&format!("{release_version}/"))
@@ -176,8 +181,7 @@ impl<T: ComponentTransport> ComponentDownloader<T> {
         }
 
         let manifest = verified_manifest.manifest();
-        let mirror_archive = self
-            .mirror
+        let mirror_archive = release_mirror
             .join(&manifest.mirror_path)
             .map_err(io::Error::other)?;
         let upstream_archive = Url::parse(&manifest.archive_url).map_err(io::Error::other)?;

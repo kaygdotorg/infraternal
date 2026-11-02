@@ -96,6 +96,8 @@ pub struct PublishedService {
     pub allowed_sources: Vec<IpAddr>,
     /// Whether this exposure also accepts traffic from the public internet.
     pub public: bool,
+    /// HTTPS listener port used by the redirect from this route's HTTP entry point.
+    pub https_port: u16,
     /// Wildcard or exact certificate name requested by the resolver.
     pub certificate: CertificateName,
 }
@@ -354,7 +356,8 @@ fn validate_published_service<'a>(
     validate_label(&service.id)?;
     validate_hostname(&service.hostname)?;
     validate_certificate_name(&service.certificate, &service.hostname)?;
-    if !service.backend.ip().is_loopback() || service.backend.port() == 0 {
+    if !service.backend.ip().is_loopback() || service.backend.port() == 0 || service.https_port == 0
+    {
         return Err(invalid_input(
             "published backends must use a loopback TCP address",
         ));
@@ -410,7 +413,11 @@ fn render_published_service(
     }
     middlewares.insert(
         redirect_middleware.clone(),
-        json!({"redirectScheme": {"scheme": "https", "permanent": true}}),
+        json!({"redirectScheme": {
+            "scheme": "https",
+            "port": service.https_port.to_string(),
+            "permanent": true
+        }}),
     );
     let rule = format!("Host(`{}`)", service.hostname);
     let mut plain_middlewares = vec![redirect_middleware];

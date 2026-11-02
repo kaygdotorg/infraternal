@@ -2,7 +2,7 @@
 
 use super::{
     download::{ComponentDownloader, ComponentTransport},
-    installer::ComponentInstaller,
+    installer::{ComponentInstaller, SignedComponentBundle},
     manifest::{ComponentManifest, ComponentManifestVerifier, TRAEFIK_VERSION},
 };
 use sha2::{Digest, Sha256};
@@ -111,7 +111,7 @@ fn signed_fixture(archive: &[u8]) -> (Vec<(String, Vec<u8>)>, String, String) {
             (format!("{base}SHA256SUMS"), checksum.into_bytes()),
             (format!("{base}SHA256SUMS.sig"), b"valid signature".to_vec()),
         ],
-        format!("https://mirror.example/releases/{}", manifest.mirror_path),
+        format!("{base}{}", manifest.mirror_path),
         manifest.archive_url,
     )
 }
@@ -165,6 +165,64 @@ fn mirror_archive_is_streamed_after_the_product_signature_is_verified() {
     let requests = requests.lock().expect("request fixture lock");
     assert!(requests.contains(&mirror_archive));
     assert!(!requests.contains(&upstream_archive));
+}
+
+#[test]
+fn imported_bundle_restarts_without_transport_or_network_metadata() {
+    let archive = fixture_archive();
+    let (metadata, mirror_archive, _) = signed_fixture(&archive);
+    let mut bundle_files: BTreeMap<_, _> = metadata.into_iter().collect();
+    bundle_files.insert(mirror_archive, archive.clone());
+    let manifest = bundle_files
+        .remove("https://mirror.example/releases/0.1.0/proxy-traefik-linux-amd64.json")
+        .expect("signed component manifest");
+    let checksums = bundle_files
+        .remove("https://mirror.example/releases/0.1.0/SHA256SUMS")
+        .expect("signed checksum list");
+    let signature = bundle_files
+        .remove("https://mirror.example/releases/0.1.0/SHA256SUMS.sig")
+        .expect("release signature");
+    let state = TempState::new();
+    let installer = ComponentInstaller::new(&state.0);
+    installer
+        .import_bundle(
+            SignedComponentBundle {
+                manifest: &manifest,
+                manifest_filename: "proxy-traefik-linux-amd64.json",
+                signed_checksums: &checksums,
+                signature: &signature,
+            },
+            "linux",
+            "amd64",
+            &FixtureVerifier(true),
+            io::Cursor::new(archive),
+        )
+        .expect("import signed bundle");
+
+    let transport = FixtureTransport {
+        bodies: BTreeMap::new(),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    };
+    let requests = transport.requests.clone();
+    let executable = ComponentDownloader::new(
+        Url::parse("https://mirror.example/releases/").expect("mirror URL"),
+        transport,
+    )
+    .expect("valid mirror")
+    .install(
+        &installer,
+        "0.1.0",
+        "linux",
+        "amd64",
+        &FixtureVerifier(true),
+    )
+    .expect("reuse imported executable without network");
+
+    assert_eq!(
+        fs::read(executable).expect("offline executable"),
+        b"signed executable bytes"
+    );
+    assert!(requests.lock().expect("request fixture lock").is_empty());
 }
 
 #[test]
