@@ -23,6 +23,7 @@ const root = resolve(import.meta.dirname, "../..");
 /** The published pages, in index order. `summary` is the one line the index shows under the title. */
 export const DOCS_PAGES = [
   { slug: "multiplexer", source: "docs/multiplexer.md", summary: "Sessions that survive disconnects, and switching from tmux or Zellij." },
+  { slug: "keys", source: "docs/keys.md", summary: "Every key and code, where it lives and when it expires or changes." },
 ] as const;
 
 const escapeHtml = (text: string): string => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
