@@ -88,3 +88,7 @@ test("counted closes are reported when their window ends, without another close"
   expect(notes.summaryDue()).toBeUndefined();
   expect(notes.flush(120_000)).toBeUndefined();
 });
+
+test("recovery teardown tells the person why their device was signed out", () => {
+  expect(plainCloseReason("recovery completed")).toBe("Recovery completed. This device has been signed out.");
+});

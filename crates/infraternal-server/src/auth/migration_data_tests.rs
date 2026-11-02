@@ -184,3 +184,35 @@ async fn dev_v29_and_production_v30_upgrade_without_retagging_or_losing_ownershi
         }
     }
 }
+
+#[tokio::test]
+async fn wall_based_recovery_upgrade_ends_old_bearers_without_changing_credentials() {
+    let pool = database().await;
+    let mut old = sqlx::migrate!("./migrations");
+    old.migrations
+        .to_mut()
+        .retain(|migration| migration.version <= 36);
+    old.run(&pool).await.unwrap();
+    sqlx::raw_sql("INSERT INTO users(id,name,username,display_name,owner,recovery_hash) VALUES('recovery-upgrade','owner','owner','Owner',1,'synthetic-verifier'); INSERT INTO recovery VALUES('recovery-upgrade','synthetic-bearer',1,2);")
+        .execute(&pool).await.unwrap();
+    MIGRATIONS.run(&pool).await.unwrap();
+    let requests: i64 = sqlx::query_scalar("SELECT count(*) FROM recovery")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        requests, 0,
+        "unprovable wall-clock requests must not gain a fresh lifetime"
+    );
+    let verifier: String =
+        sqlx::query_scalar("SELECT recovery_hash FROM users WHERE id='recovery-upgrade'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(verifier, "synthetic-verifier");
+    let elapsed: i64 = sqlx::query_scalar("SELECT elapsed FROM recovery_clock WHERE singleton=1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(elapsed, 0);
+}

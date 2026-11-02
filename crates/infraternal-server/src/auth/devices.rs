@@ -180,7 +180,10 @@ impl Auth {
 
 /// The writer transaction serializes the persisted high-water mark with expiry.
 /// Only a new maximum writes; rollback and restart cannot make expiry time regress.
-async fn api_key_time(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, wall: i64) -> Result<i64> {
+pub(super) async fn api_key_time(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    wall: i64,
+) -> Result<i64> {
     let recorded: i64 =
         sqlx::query_scalar("SELECT api_key_time_high_water FROM server_settings WHERE id=1")
             .fetch_one(&mut **tx)

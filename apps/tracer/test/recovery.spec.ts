@@ -90,6 +90,9 @@ for (const delay of [0, 86400]) {
       await new Promise<void>((resolve) => { releaseStart = resolve; });
       await route.fulfill({ json: { token: "public-recovery-fixture", delay_seconds: delay, ready_at: readyAt } });
     });
+    await page.route("**/auth/recovery-status", route => route.fulfill({ json: {
+      ready: true, delay_seconds: 0, ready_at: readyAt,
+    } }));
     await page.route("**/auth/recovery-ready", route => ready ? route.fulfill({ json: {
       ceremony: "public-recovery-ceremony", user_id: userId, recovery_words: rotated, old_recovery_wrap: oldWrap,
       options: { publicKey: { challenge: b64(new Uint8Array(32).fill(5)), rp: { id: "localhost", name: "Fixture" },

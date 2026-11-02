@@ -728,8 +728,14 @@ async fn run_socket(
             }
             changed = revocations.changed() => {
                 if changed.is_err() { break; }
+                let completion = revocations.completion_generation();
                 match authority_deadline(&state, &user_id, &session_token, false).await {
-                    Ok(deadline) => expiry = deadline,
+                    Ok(deadline) => {
+                        expiry = deadline;
+                        // This session survived the observed completion (for example,
+                        // it is the replacement session). Do not mislabel a later logout.
+                        revocations.acknowledge_completion(completion);
+                    }
                     Err(miss) => {
                         // Unproven authority after the bounded retry is server
                         // unavailability; only a known deletion/expiry is refusal.
@@ -982,7 +988,8 @@ async fn run_socket(
     // A known server_busy outcome reports only server status, so it does not
     // need another liveness read. Other close details require confirmed
     // liveness, reusing the close-log read or making one non-renewing attempt.
-    if loop_result.is_err() {
+    let recovery_completed = revocations.committed_recovery_completed().await;
+    if loop_result.is_err() && !recovery_completed {
         let close_allowed = if authority_unavailable_known {
             true
         } else {
@@ -1019,8 +1026,17 @@ async fn run_socket(
             .await;
         }
     }
-    let _ =
-        tokio::time::timeout(CLOSE_TIMEOUT, send_message(&mut sink, Message::Close(None))).await;
+    // Completion deleted the old session atomically. Its content-free notice is
+    // part of teardown, so it needs no live-session check and precedes disconnect.
+    let close = recovery_completed.then(|| axum::extract::ws::CloseFrame {
+        code: 1008,
+        reason: "recovery completed".into(),
+    });
+    let _ = tokio::time::timeout(
+        CLOSE_TIMEOUT,
+        send_message(&mut sink, Message::Close(close)),
+    )
+    .await;
     // Drop transport before metadata cleanup so a busy SQLite writer cannot retain a revoked socket.
     drop(sink);
     drop(transport);
@@ -1180,7 +1196,11 @@ async fn send_recovery_snapshot<K>(
 where
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
-    let pending = state.auth.pending_recovery(user).await.map_err(|_| ())?;
+    let pending = state
+        .auth
+        .pending_recovery(user, now_seconds()?)
+        .await
+        .map_err(|_| ())?;
     // A global wake must never reveal another account's recovery timing.
     if *last == RecoverySnapshot::Read(pending) {
         return Ok(());

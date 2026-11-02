@@ -64,6 +64,7 @@ export interface ProductCanvasOptions {
   /** Ends the old account screen when its authenticated lifetime changes; `work` says what happened to queued layout edits. */
   onSessionRevoked?: (work: RevokedWork) => void;
   onRecoveryPending?: (readyAt: number | undefined) => void;
+  onRecoveryCompleted?: (message: string) => void;
   /** The signed-in person: the sidebar's person pill opens their card (D283). Absent, the pill keeps its small menu. */
   person?: { name: string; username: string };
 }
@@ -85,6 +86,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const connection: MuxConnection = new MuxConnection({
     ...(options.sessionIncarnation ? { sessionIncarnation: options.sessionIncarnation } : {}),
     ...(options.onRecoveryPending ? { onRecoveryPending: options.onRecoveryPending } : {}),
+    ...(options.onRecoveryCompleted ? { onRecoveryCompleted: options.onRecoveryCompleted } : {}),
     onConnectionChange: (connected) => {
       core.setConnection(connected);
       if (!connected) options.onSessionCheck?.();
