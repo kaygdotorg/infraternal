@@ -215,7 +215,8 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
       await expect(block.locator(".ui-copied")).toHaveText("Copied");
       expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(code);
       await page.waitForTimeout(260);
-      const copied = await block.evaluate((b) => { const o = b.querySelector(".ui-copied")!.getBoundingClientRect(); const c = b.querySelector("pre code")!; const line = parseFloat(getComputedStyle(c).lineHeight); const r = c.getBoundingClientRect(); return { left: o.left - r.left, mid: o.top + o.height / 2 - (r.top + line / 2), codeOpacity: getComputedStyle(c).opacity }; });
+      // The first line of the block: the block's top, its padding, and half the block's own line height (the code inside is a little smaller).
+      const copied = await block.evaluate((b) => { const o = b.querySelector(".ui-copied")!.getBoundingClientRect(); const pre = b.querySelector("pre")!; const c = b.querySelector("pre code")!; const style = getComputedStyle(pre); const line = parseFloat(style.lineHeight); const r = c.getBoundingClientRect(); return { left: o.left - r.left, mid: o.top + o.height / 2 - (pre.getBoundingClientRect().top + parseFloat(style.paddingTop) + line / 2), codeOpacity: getComputedStyle(c).opacity }; });
       expect(Math.abs(copied.left), "Copied starts where the code starts").toBeLessThanOrEqual(0.5);
       expect(Math.abs(copied.mid), "Copied sits on the code's first line").toBeLessThanOrEqual(0.5);
       expect(copied.codeOpacity, "the code gives way to the confirmation").toBe("0");
@@ -249,6 +250,17 @@ test("the canvas reader: the contents follow the reader inside a window, and a c
     await page.evaluate(() => document.fonts.ready);
     await page.waitForTimeout(900);
     const camera = await page.evaluate(() => document.querySelector<HTMLElement>(".cl-world")?.style.transform ?? "");
+    // A figure in a window picks its picture by the window's width and the app's theme (ink here), not by the browser's own settings.
+    // (Only where the figures have been captured: no picture is committed, and otherwise the figure is a placeholder.)
+    if (await page.locator(`${window} .figure:not(.figure-pending)`).count() > 0) {
+      const figureOf = () => page.evaluate((selector) => { const a = document.querySelector<HTMLElement>(`${selector} .dr-page`)!; const img = a.querySelector<HTMLImageElement>(".figure img")!; return { src: img.currentSrc, narrow: a.clientWidth < 520 }; }, window);
+      // (Scroll the window itself, never scrollIntoView, so the lazy picture is near and the canvas stays where it is.)
+      await page.evaluate((selector) => { const s = document.querySelector<HTMLElement>(`${selector} .dr-scroll`)!; s.scrollTop = document.querySelector<HTMLElement>(`${selector} .figure`)!.offsetTop - 80; }, window);
+      await expect.poll(async () => (await figureOf()).src, { timeout: 8000 }).not.toBe("");
+      const figure = await figureOf();
+      expect(figure.src, "the window's width chooses the size").toContain(figure.narrow ? ".phone." : ".desktop.");
+      expect(figure.src, "the theme chooses ink or paper").toContain(".ink.");
+    }
     // Scroll the window to a section: the folded contents mark it.
     await page.evaluate((selector) => { const s = document.querySelector<HTMLElement>(`${selector} .dr-scroll`)!; const h = document.querySelector<HTMLElement>(`${selector} #undoing-a-switch`)!; s.scrollTop = h.offsetTop - 12; }, window);
     await page.waitForTimeout(300);
