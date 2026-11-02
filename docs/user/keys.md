@@ -19,7 +19,7 @@ In the table, **Works** means the version you are running does it today. **Plann
 | Recovery words | No expiry | New words after each use | Works |
 | First-owner setup code | 24 hours, one use | A new one at each server start, until an owner exists | Works |
 | CLI sign-in code | 10 minutes, one use | Not renewable | Works |
-| CLI sign-in API key | No expiry | Never | Works. Under review |
+| CLI sign-in API key | 30 days by default; configurable from 1 to 365 days | Renewed silently when used | Issued and stored; no CLI command uses it yet |
 | Host join token | 15 minutes, one use | Not renewable | Works |
 | `up` join code | 10 minutes, one use | Not renewable | Planned |
 | Host certificate | 7 days | At half-life, 3.5 days | Works. Renewal after expiry is planned |
@@ -69,9 +69,23 @@ The code lasts 10 minutes and works once. If you are away from the browser, it s
 
 ### CLI sign-in API key
 
-Approving a CLI sign-in gives that device an API key, kept in a file that only your user can read. **This key does not expire today.** It works until you revoke it in the app (which asks for a fresh passkey tap), or until a recovery removes all keys.
+Approving a CLI sign-in gives that device an API key, kept in a file only your
+user can read. The default lifetime is **30 days without use**, configurable
+from **1 to 365 days** through the server's security settings API field
+`api_key_lifetime_days`. The Settings → Security control is planned.
 
-It works whenever the server is reachable. Whether these keys should expire is under review.
+The server renews a valid key silently when it is used, writing the renewal
+at most once per hour. The server's current lifetime setting applies on each
+check, including to existing keys, so shortening it can expire a key on its
+next use. A key that expires needs `infraternal sign-in <server>` again.
+Revoking it in the app takes effect immediately; recovery removes all keys.
+Existing keys receive their first lifetime when the server is upgraded.
+Nothing renews while the CLI is offline or unused.
+
+**No CLI command uses these stored sign-in keys yet.** Sign-in issues and
+stores them; authenticated remote actions are planned. Their expiry and
+renewal are enforced by the server authorization code when a caller uses it.
+
 
 ## Adding and trusting hosts
 

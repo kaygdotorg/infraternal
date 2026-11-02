@@ -103,6 +103,8 @@ Argon2 work at two simultaneous calls; exhausted capacity fails closed.
 | device-approve | `{code}` + fresh session | `{ok:true}` |
 | device-redeem | `{token:poll_token}` | `{api_key}` once |
 | api-list | `{}` + session | device/scopes and nonsecret revocation `id` |
+| security-settings | `{}` + live owner session | `{api_key_lifetime_days}` |
+| security-settings-update | `{api_key_lifetime_days: integer 1..365}` + fresh owner session | saved `{api_key_lifetime_days}` |
 | api-revoke | `{id}` + fresh session | `{ok:true}` |
 | logout | `{}` + session | revoked session and expired cookie |
 
@@ -200,6 +202,26 @@ in a QR code); it cannot poll/redeem. Approval expires after ten minutes and
 redeems once with a separate 256-bit polling capability. API-key listing and
 revocation never reveal bearer keys. The multi-user schema is in core [29,31];
 invite/role management remains outside this lane.
+
+API keys expire after inactivity [D311 amendment, 2026-11-02, #269]. The server
+setting `api_key_lifetime_days` defaults to 30, accepts integers from 1 through
+365, and is read at each authorization check. Both settings actions require the
+pinned browser Origin and a live owner session; changes additionally require
+fresh passkey authority, rechecked under the database writer lock. Unknown
+fields, missing values and values outside the range return 400. No UI is added.
+
+The effective deadline is the key's server-recorded last renewal plus the
+current configured lifetime. The boundary is exclusive: at the deadline the
+key fails with the same `Denied` error as an unknown key. An authenticated,
+scoped use renews the deadline at most once per hour per key; denied scopes do
+not renew. Concurrent uses cannot double-renew or recreate a revoked key.
+The stored `expires` field records the deadline at issuance or last renewal;
+policy changes take effect at check time without rewriting all keys. Existing
+keys receive a full default lifetime from the migration time, once only.
+
+Sign-in currently issues and stores keys but no CLI command reads or sends
+them and no production route calls `api_authorize` (#303). Future CLI callers
+use the shared invalid-key diagnostic with D303 exit 3; they never print a key.
 
 ## Admission and trusted ingress
 

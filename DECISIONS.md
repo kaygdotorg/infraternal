@@ -3363,6 +3363,18 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Order:** D241 shell marker → `mux` sessions with `--json`, skill and
        MCP → canvas verbs and the tmux subset → laptop sign-in → one-command
        join → macOS mesh service → native apps and app windows.
+     - **API-key lifetime amendment (owner, 2026-11-02, #269):** keys
+       issued by `infraternal sign-in` expire after 30 days without use by
+       default. The server setting `api_key_lifetime_days` accepts 1–365
+       days and is read at each authorization check, so shortening it applies
+       to existing keys on their next use. Authenticated use renews silently,
+       with renewal writes limited to once per hour per key. Expired keys
+       fail exactly like unknown keys and require sign-in again; revocation
+       stays immediate. At upgrade existing keys start their first lifetime
+       from deployment. The settings API ships first; Settings → Security UI
+       follows separately. Rejected: permanent keys, client-authoritative
+       expiry, and a database write for every request. CLI commands do not
+       yet consume the stored keys; that integration is tracked in #303.
 312. **Layout edits live per tab; the server is the only saved copy
      (owner, 2026-10-30, #250; replaces the multi-tab layout journal):**
      - Each tab keeps its unconfirmed canvas layout edits in memory and
