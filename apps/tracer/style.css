@@ -464,6 +464,8 @@ button { color: inherit; }
 .bm-sec.is-current > .bm-head { color: var(--fg); }
 .bm-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--fw-label); }
 .bm-meta { margin-left: auto; color: var(--fg-3); font: var(--fw-secondary) var(--text-caption)/1.2 var(--font-mono); white-space: nowrap; }
+/* The detached note is an icon, drawn like the marks beside it: small, quiet, on the right of the row. */
+.bm-meta.is-detached { display: grid; flex: none; place-items: center; }
 .bm-icon { display: grid; width: 1.125rem; height: 1.125rem; flex: none; place-items: center; color: var(--fg-3); }
 .bm-icon svg { width: 1rem; height: 1rem; fill: currentColor; stroke: none; }
 .bm-fold { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 240ms var(--ease-out); }
@@ -478,6 +480,9 @@ button { color: inherit; }
 .bm-leaf:disabled { opacity: 0.56; cursor: default; }
 .glyph { width: 1.125rem; flex: none; color: var(--fg-3); font: var(--fw-label) var(--text-caption)/1 var(--font-mono); }
 .bm-leaf[aria-current] { color: var(--fg); }
+/* A renamed host shows its new name at once and settles to full strength when the server accepts it. */
+.bm-label { transition: opacity 140ms ease; }
+.bm-leaf[data-pending] .bm-label { opacity: 0.6; }
 .bm-leaf[aria-current] .glyph { color: var(--accent); }
 
 /* Palette open from the keyboard is immediate; pointer-open uses only opacity/transform. */

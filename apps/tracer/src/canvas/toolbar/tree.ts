@@ -44,7 +44,7 @@ export function createTree(cx: Ctx): TreeModule {
       // A big graph lists no nodes: a thousand rows would be the cost of the sidebar, and its cards are not all in the
       // DOM. The section still flies to the view, where the clusters are.
       leaves: graph
-        ? (isFreeView(c.view) ? [] : c.view.nodes).map((n) => ({ id: `n-${n.id}`, label: n.label, glyph: n.kind === "tag" ? "#" : "◦" }))
+        ? (isFreeView(c.view) ? [] : c.view.nodes).map((n) => ({ id: `n-${n.id}`, label: n.label, glyph: n.kind === "tag" ? "#" : "◦", ...(n.kind === "host" && c.view.id === "mesh" ? { renamable: true } : {}) }))
         : [...c.wins.values()].map((w) => ({ id: w.model.id, label: w.model.kind === "terminal" ? `${w.model.host}${w.model.session ? ` · ${w.model.session}` : ""}` : w.model.kind === "settings" || w.model.kind === "docs" ? w.model.host : (w.model.session ?? w.model.kind), glyph: w.model.kind === "terminal" ? "›_" : "▤" })),
     };
   });
@@ -64,6 +64,10 @@ export function createTree(cx: Ctx): TreeModule {
   };
   let queued = false;
   let stale = false;
+  /** A host's name is being edited in the tree: it is not rebuilt under the person's hands (it is, once they are done). */
+  let editing = false;
+  /** A second tap on a host's name renames it; the sidebar on a phone therefore waits this long before it closes. */
+  const DOUBLE_TAP_WAIT_MS = 360;
   let marks = new Set<string>();
   const sidebar = stage.querySelector<HTMLElement>("#sidebar");
   const render = (): void => {
@@ -74,6 +78,7 @@ export function createTree(cx: Ctx): TreeModule {
       if (signal.aborted) return;
       // A closed sidebar costs a rebuild and a layout for nothing; it is rebuilt when it opens.
       if (sidebar?.hidden) { stale = true; return; }
+      if (editing) return;
       stale = false;
       core.setHostTree(sections(), current(), (id) => {
         if (id.startsWith("s:")) {
@@ -86,8 +91,14 @@ export function createTree(cx: Ctx): TreeModule {
         if (!target) return;
         cx.win.setActive(target);
         if (target.model.kind === "node") cx.nav.flyView("mesh"); else cx.nav.focusWindow(target);
-        if (coarse.matches) stage.querySelector<HTMLButtonElement>("#sidebar-toggle[aria-expanded='true']")?.click();
-      });
+        const close = (): void => { if (coarse.matches) stage.querySelector<HTMLButtonElement>("#sidebar-toggle[aria-expanded='true']")?.click(); };
+        // The flight starts at once; only the closing of the sidebar waits, and only for a name that can be renamed.
+        if (coarse.matches && target.model.kind === "node" && target.model.id.startsWith("n-") && cx.mesh) window.setTimeout(() => { if (!editing) close(); }, DOUBLE_TAP_WAIT_MS);
+        else close();
+      }, cx.mesh ? {
+        rename: (id, name) => cx.mesh!.renameHost(id.replace(/^n-/, ""), name),
+        onRenaming: (open) => { editing = open; if (!open) render(); },
+      } : undefined);
       // A mark that was not on the last tree draws in; the others stay still.
       const now = new Set<string>();
       for (const leaf of stage.querySelectorAll<HTMLElement>("#tree .bm-leaf")) {

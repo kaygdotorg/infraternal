@@ -28,6 +28,7 @@
 import { mountConfirmTip, type ConfirmTipController } from "../../../../../packages/ui/src/tooltip";
 import { openAnchoredPopover, type AnchoredPopover, type PopoverSource } from "../../../../../packages/ui/src/anchored-popover";
 import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
+import { beginInlineRename } from "../../../../../packages/ui/src/inline-rename";
 import { ICON_ALERT, ICON_X, icon } from "../../../../../packages/ui/src/icons";
 import { createSpinner } from "../../../../../packages/ui/src/spinner";
 import { Spring } from "../../../../../packages/ui/src/spring";
@@ -474,29 +475,15 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     private edit(li: HTMLElement, host: string, s: SessionRecord): void {
       const name = li.querySelector<HTMLElement>(".cl-sx-name");
       if (!name || li.querySelector(".cl-sx-name-input")) return;
-      const input = el("input", "cl-sx-name-input");
-      input.value = s.name;
-      input.setAttribute("aria-label", "Session name");
-      input.spellcheck = false;
-      input.autocomplete = "off";
-      name.replaceWith(input);
       this.renaming = s.id;
-      input.focus({ preventScroll: true });
-      input.select();
-      let done = false;
-      const finish = (commit: boolean): void => {
-        if (done) return;
-        done = true;
-        this.renaming = undefined;
-        if (commit) inventory.rename(host, s.id, input.value);
-        this.render();
-      };
-      input.addEventListener("keydown", (event) => {
-        event.stopPropagation();
-        if (event.key === "Enter") { event.preventDefault(); finish(true); }
-        else if (event.key === "Escape") { event.preventDefault(); finish(false); }
+      beginInlineRename({
+        value: s.name,
+        label: "Session name",
+        className: "cl-sx-name-input",
+        place: (input) => name.replaceWith(input),
+        commit: (value) => inventory.rename(host, s.id, value),
+        close: () => { this.renaming = undefined; this.render(); },
       });
-      input.addEventListener("blur", () => finish(true));
     }
   }
 

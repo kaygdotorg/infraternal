@@ -252,7 +252,18 @@ test("the sidebar is the inventory: markers, detached notes and exit codes, in f
     const leaf = (id: string) => page.locator(`#tree .bm-leaf[data-id='s:${id}']`);
     await expect(leaf("build-01/deploy").locator(".ui-state-dot")).toHaveAttribute("data-state", "open");
     await expect(leaf("build-01/journal").locator(".ui-state-dot")).toHaveAttribute("data-state", "detached");
-    await expect(leaf("build-01/journal").locator(".bm-meta")).toHaveText("detached");
+    // A detached session shows an icon, never the word; its name is the icon's accessible label, its tooltip, and part of the row's own name.
+    const note = leaf("build-01/journal").locator(".bm-meta");
+    await expect(note).toHaveText("");
+    await expect(note.locator("svg")).toHaveCount(1);
+    await expect(note).toHaveAttribute("role", "img");
+    await expect(note).toHaveAttribute("aria-label", "Detached");
+    await expect(leaf("build-01/journal")).toHaveAttribute("aria-label", /build-01.*detached|journal, detached/);
+    await expect(leaf("build-01/deploy").locator(".bm-meta svg")).toHaveCount(0);
+    await expect(leaf("build-01/bench").locator(".bm-meta svg")).toHaveCount(0);
+    await note.hover();
+    await expect(page.locator(".tip")).toHaveText("Detached");
+    await page.mouse.move(700, 450);
     await expect(leaf("build-01/journal").locator(".ui-mark")).toHaveAttribute("data-mark", "output");
     await expect(leaf("build-01/release").locator(".ui-mark")).toHaveAttribute("data-mark", "ok");
     await expect(leaf("build-01/bench").locator(".bm-meta")).toHaveText("0");
@@ -263,6 +274,35 @@ test("the sidebar is the inventory: markers, detached notes and exit codes, in f
     expect(order).toEqual(["s:build-01/deploy", "s:build-01/release", "s:build-01/journal", "s:build-01/tests", "s:build-01/bench", "s:build-01/migrate"]);
     await expect(leaf("studio-mac/local-api").locator(".ui-mark")).toHaveAttribute("data-mark", "output", { timeout: 6000 });
     await expect(leaf("edge-arm/edge-shell").locator(".ui-mark")).toHaveAttribute("data-mark", "ok", { timeout: 9000 });
+  } finally { await context.close(); }
+});
+
+test("the tick, the cross and the dot beside a session say what they mean in a tooltip", async ({ browser }) => {
+  const { context, page } = await open(browser, DESKTOP, 2);
+  try {
+    const leaf = (id: string) => page.locator(`#tree .bm-leaf[data-id='s:${id}']`);
+    const tipOf = async (id: string): Promise<string> => {
+      await leaf(id).locator(".ui-mark").hover();
+      await expect(page.locator(".tip")).toBeVisible();
+      const text = (await page.locator(".tip").textContent()) ?? "";
+      await page.mouse.move(700, 450);
+      await expect(page.locator(".tip")).toBeHidden();
+      return text;
+    };
+    expect(await tipOf("build-01/release")).toBe("Finished successfully"); // detached, a command finished well
+    expect(await tipOf("build-01/journal")).toBe("New output");
+    expect(await tipOf("build-01/bench")).toBe("Finished successfully, exit code 0"); // exited: the tick is the exit code in a picture
+    expect(await tipOf("build-01/migrate")).toBe("Failed, exit code 1");
+  } finally { await context.close(); }
+});
+
+test("review flag ?marks=words: exited rows say finished or failed in words", async ({ browser }) => {
+  const context = await browser.newContext({ viewport: DESKTOP });
+  const page = await context.newPage();
+  try {
+    await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=none&sessions=2&marks=words");
+    await expect(page.locator("#tree .bm-leaf[data-id='s:build-01/bench'] .bm-meta")).toHaveText("finished", { timeout: 20_000 });
+    await expect(page.locator("#tree .bm-leaf[data-id='s:build-01/migrate'] .bm-meta")).toHaveText("failed · 1");
   } finally { await context.close(); }
 });
 

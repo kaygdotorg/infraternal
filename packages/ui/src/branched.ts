@@ -1,4 +1,6 @@
 /** Builds the accessible host/session tree and updates its current-host indicators. */
+import { ICON_DETACHED, icon } from "./icons";
+import { beginInlineRename, onDoubleActivate, placeOverName, type InlineRename } from "./inline-rename";
 
 import { cssPx } from "./ui-scale";
 export interface BranchLeaf {
@@ -16,6 +18,10 @@ export interface BranchLeaf {
   heading?: boolean;
   /** A quiet note after the label: new output (a dot), or the result of a finished command. */
   mark?: "output" | "ok" | "fail";
+  /** What the warm tooltip of the mark says, when the default ("Finished successfully", "Failed", "New output") is not enough. */
+  markTip?: string;
+  /** The label is a name the person may change by double click or double tap (the tree's `rename` option saves it). */
+  renamable?: boolean;
 }
 
 export interface BranchSection {
@@ -30,13 +36,27 @@ export interface BranchSection {
   leaves: BranchLeaf[];
 }
 
+export interface BranchedOptions {
+  active: string;
+  onSelect?: (id: string) => void;
+  /**
+   * Saves a renamed leaf: resolves when accepted, rejects when refused (the caller says why). The tree shows the new
+   * name at once and puts the old one back when this rejects.
+   */
+  rename?: (id: string, name: string) => Promise<void>;
+  /** A rename field opened (`true`) or closed (`false`): a tree that is rebuilt while one is open would drop it. */
+  onRenaming?: (renaming: boolean) => void;
+}
+
 export interface BranchedMenu {
   /** `notify` is false only when synchronizing a model update back into the tree. */
   select(id: string, instant?: boolean, notify?: boolean): void;
   dispose(): void;
 }
 
-const MARK_NAME = { output: "new output", ok: "command finished", fail: "command failed" } as const;
+const DETACHED_NAME = "Detached";
+const MARK_TIP = { output: "New output", ok: "Finished successfully", fail: "Failed" } as const;
+const MARK_NAME ={ output: "new output", ok: "command finished", fail: "command failed" } as const;
 const RADIUS = 8;
 const STUB = 12;
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
@@ -109,6 +129,7 @@ function makeSection(section: BranchSection): HTMLElement {
     const button = el("button", "bm-leaf");
     button.type = "button";
     button.dataset.id = leaf.id;
+    if (leaf.renamable) button.dataset.renamable = "";
     button.disabled = Boolean(leaf.disabled);
     const spoken = [leaf.label, leaf.state, leaf.mark ? MARK_NAME[leaf.mark] : "", leaf.meta].filter(Boolean);
     button.setAttribute("aria-label", spoken.join(", "));
@@ -118,12 +139,21 @@ function makeSection(section: BranchSection): HTMLElement {
     const label = el("span", "bm-label");
     label.textContent = leaf.label;
     const leafMeta = el("span", "bm-meta");
-    leafMeta.textContent = leaf.meta ?? "";
+    if (leaf.state === "detached") {
+      // The note for a detached session is an icon, not the word: the hollow dot already says "not open" and the
+      // word took a third of the row. The warm tooltip and the accessible name carry the word (TASTE: icons with tooltips).
+      leafMeta.classList.add("is-detached");
+      leafMeta.dataset.tip = DETACHED_NAME;
+      leafMeta.setAttribute("role", "img");
+      leafMeta.setAttribute("aria-label", DETACHED_NAME);
+      leafMeta.innerHTML = icon(ICON_DETACHED);
+    } else leafMeta.textContent = leaf.meta ?? "";
     button.append(glyph, label);
     if (leaf.mark) {
       const mark = el("span", "ui-mark");
       mark.dataset.mark = leaf.mark;
-      mark.setAttribute("aria-hidden", "true");
+      mark.setAttribute("aria-hidden", "true"); // the row's own name already says it (MARK_NAME)
+      mark.dataset.tip = leaf.markTip ?? MARK_TIP[leaf.mark]; // an icon without a tooltip is a bug (TASTE)
       button.append(mark);
     }
     button.append(leafMeta);
@@ -143,7 +173,7 @@ function makeSection(section: BranchSection): HTMLElement {
 export function branchedMenu(
   host: HTMLElement,
   sections: BranchSection[],
-  opts: { active: string; onSelect?: (id: string) => void },
+  opts: BranchedOptions,
 ): BranchedMenu {
   host.replaceChildren();
   host.classList.add("bm");
@@ -248,6 +278,38 @@ export function branchedMenu(
   };
   host.addEventListener("click", onClick);
 
+  // Renaming in place: a double click or double tap on a renamable leaf's name. The click that comes first still
+  // selects the leaf (a single click keeps its meaning); the field is placed over the name, never inside the button.
+  let renaming: InlineRename | undefined;
+  const leafOf = (event: Event): HTMLElement | undefined => (event.target instanceof Element ? event.target.closest<HTMLElement>(".bm-leaf[data-renamable]") ?? undefined : undefined);
+  const abort = new AbortController();
+  if (opts.rename) {
+    onDoubleActivate(host, (event) => {
+      const leaf = leafOf(event);
+      const label = leaf?.querySelector<HTMLElement>(".bm-label");
+      const id = leaf?.dataset.id;
+      if (!leaf || !label || !id || renaming) return;
+      const was = label.textContent ?? "";
+      let restore = (): void => undefined;
+      opts.onRenaming?.(true);
+      renaming = beginInlineRename({
+        value: was,
+        label: "Host name",
+        place: (input) => { restore = placeOverName(label, leaf.parentElement!, input); },
+        commit: (value) => {
+          const next = value.trim();
+          if (!next || next === was) return;
+          label.textContent = next;
+          leaf.dataset.pending = "";
+          leaf.setAttribute("aria-busy", "true");
+          const settle = (): void => { delete leaf.dataset.pending; leaf.removeAttribute("aria-busy"); };
+          opts.rename!(id, next).then(settle, () => { label.textContent = was; settle(); });
+        },
+        close: () => { restore(); renaming = undefined; opts.onRenaming?.(false); },
+      });
+    }, abort.signal, (event) => leafOf(event)?.dataset.id); // by id: the tree is rebuilt between the two taps, its buttons are new
+  }
+
   // Observe folds as well as the host so branch geometry stays aligned after a fold toggles.
   const observer = new ResizeObserver(() => layout(false));
   observer.observe(host);
@@ -263,6 +325,7 @@ export function branchedMenu(
       disposed = true;
       observer.disconnect();
       host.removeEventListener("click", onClick);
+      abort.abort();
     },
   };
   // No first layout here: the observer above reports the host after the browser's own layout and before paint, so the
