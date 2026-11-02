@@ -1,6 +1,6 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- Role: the user-facing page "Keys and how long they last" (#302). Published at /docs/reference/keys/. It says what the code does today; where a decision is not built yet, a callout and the table say "planned". A setting that changes how long a key lasts has its own heading, named like its Settings title (D317), and its default and range are written only in that heading's [!FACTS]. Reading aids used here: GitHub-style alerts, a [!WHY] reasoning block, [!FACTS] quick facts (the "?" preview), and [^n] citations (docs-extras.ts). -->
 <!-- Former slugs: keys -->
-<!-- Role: the user-facing page "Keys and how long they last" (#302). Published at /docs/reference/keys/. It says what the code does today; where a decision is not built yet, a callout and the table say "planned". Reading aids used here: GitHub-style alerts, a [!WHY] reasoning block, [!FACTS] quick facts (the "?" preview), and [^n] citations (docs-extras.ts). -->
 # Keys and how long they last
 
 This page lists the keys, codes and certificates Infraternal uses, when each one expires, and what happens when something is offline.
@@ -16,19 +16,19 @@ Most of these keys you never see. They renew by themselves while a host is onlin
 
 | Key | Lasts | Renewed | Today |
 |---|---|---|---|
-| Browser sign-in | 30 days | The server side slides with use; the browser's copy does not yet | Works, with one gap (see below) |
+| Browser sign-in | [Browsers Stay Signed In For](#browsers-stay-signed-in-for) | The server side slides with use; the browser's copy does not yet | Works, with one gap (see below) |
 | Passkey | No expiry | Never | Works |
 | Recovery words | No expiry | New words after each use | Works |
 | First-owner setup code | 24 hours, one use | A new one at each server start, until an owner exists | Works |
 | CLI sign-in code | 10 minutes, one use | Not renewable | Works |
-| CLI sign-in API key | 30 days by default; configurable from 1 to 365 days | Renewed silently when used | Issued and stored; no CLI command uses it yet |
-| Host join token | 15 minutes, one use | Not renewable | Works |
-| `up` join code | 10 minutes, one use | Not renewable | Planned |
+| CLI sign-in API key | [Keys Last](#keys-last) | Renewed silently when used | Issued and stored; no CLI command uses it yet |
+| Host join token | [Add Link Lasts](#add-link-lasts), one use | Not renewable | Works |
+| `up` join code | [Join Code Lasts](#join-code-lasts), one use | Not renewable | Planned |
 | Host certificate | 7 days | At half-life, 3.5 days | Works. Renewal after expiry is planned |
 | Machine CA root | 10 years | Rollover is planned | Works. Expiry warnings are planned |
 | WireGuard session keys | About 2 minutes | By WireGuard itself | Works |
-| WireGuard static key | 7 days | Automatically, with overlap | Planned |
-| Node identity key | 7 days | Automatically, signed by the old key | Planned |
+| WireGuard static key | [Connection Keys](#connection-keys) | Automatically, with overlap | Planned |
+| Node identity key | [Machine Identity](#machine-identity) | Automatically, signed by the old key | Planned |
 | Mesh SSH person certificate | 24 hours | Silently, before it runs out | Planned |
 
 > [!WHY] Why keys expire and rotate
@@ -45,14 +45,24 @@ These are the keys that get you into Infraternal, and back in when something goe
 ### Browser sign-in
 
 > [!FACTS]
-> Lasts 30 days. Using Infraternal renews the server's copy. The cookie in your browser ends 30 days after you signed in.
+> Using Infraternal renews the server's copy of the session. The cookie in your browser ends a fixed time after you signed in.
 
-When you sign in with a passkey, the server gives your browser a session that lasts 30 days. Using Infraternal keeps the server's copy alive: every use pushes its end 30 days forward.
+When you sign in with a passkey, the server gives your browser a session that lasts as long as [Browsers Stay Signed In For](#browsers-stay-signed-in-for) says. Using Infraternal keeps the server's copy alive: every use starts that time again.
 
 > [!WARNING] Under review
-> The cookie in your browser works differently today. It is written once, at sign-in, and ends 30 days after that, however often you use it. So a browser that has been signed in for 30 days asks you to sign in again, even if you used it yesterday. Making the cookie renew too is planned.
+> The cookie in your browser works differently today. It is written once, at sign-in, and ends that long after, however often you use it. So a browser that has been signed in for the full time asks you to sign in again, even if you used it yesterday. Making the cookie renew too is planned.
 
 The session lives in the server's database and in that cookie, and nowhere else. While the server is offline nothing renews, and you can sign in again only once it is back. Destructive actions ask for a fresh passkey tap whatever the session says.
+
+### Browsers Stay Signed In For
+
+> [!FACTS]
+> Default 30 days. Every visit starts the time again on the server; a browser unused for this long signs out.
+
+This is how long the session in [Browser sign-in](#browser-sign-in) lasts.
+
+> [!WARNING] Planned
+> The control in Settings is not built yet. Until it is, the length is the default for everyone.
 
 ### Passkey
 
@@ -88,7 +98,7 @@ The code lasts 10 minutes and works once. If you are away from the browser, it s
 
 ### CLI sign-in API key
 
-Approving a CLI sign-in gives that device an API key, kept in a file only your user can read. The default lifetime is **30 days without use**, configurable from **1 to 365 days** through the server's security settings API field `api_key_lifetime_days`.
+Approving a CLI sign-in gives that device an API key, kept in a file only your user can read. How long it lasts without use is set by [Keys Last](#keys-last).
 
 The server renews a valid key silently when it is used, writing the renewal at most once per hour. The server's current lifetime setting applies on each check, including to existing keys, so shortening it can expire a key on its next use. Lengthening applies at the next successful renewal; it cannot bring an expired key back.
 
@@ -97,22 +107,42 @@ A key that expires needs `infraternal sign-in <server>` again. Revoking it in th
 > [!WARNING] Under review
 > No CLI command uses these stored sign-in keys yet. Sign-in issues and stores them; authenticated remote actions are planned. The Settings → Security control for the lifetime is planned too. Their expiry and renewal are enforced by the server whenever a caller uses a key.
 
+### Keys Last
+
+> [!FACTS]
+> Default 30 days without use. Range 1 to 365 days. Each use starts the time again; a key unused for this long stops working.
+
+Until the control in Settings exists, the server's security settings API field `api_key_lifetime_days` sets it. It applies to keys on the CLI sign-in API key's rules above.
+
 ## Adding and trusting hosts
 
 These keys let a host join, and let the server and the host trust each other.
 
 ### Host join token
 
-Adding a host by SSH gives the host a join token. It lasts 15 minutes and works once. A host that sends a faulty request does not use it up.
+Adding a host by SSH gives the host a join token. It works once, for the time [Add Link Lasts](#add-link-lasts) sets. A host that sends a faulty request does not use it up.
 
-Adding the same host again replaces the token. If the 15 minutes pass, add the host again.
+Adding the same host again replaces the token. If the time runs out, add the host again.
 
-![Adding a Raspberry Pi: pick it from the list, continue, choose a user install, and watch the steps finish.](figure:add-machine+clip "Adding a machine. The join token it uses lasts 15 minutes and works once.")
+![Adding a Raspberry Pi: pick it from the list, continue, choose a user install, and watch the steps finish.](figure:add-machine+clip "Adding a machine. The join token it uses works once and runs out.")
+
+### Add Link Lasts
+
+> [!FACTS]
+> Default 15 minutes. How long the one-time link, and the join token behind it, works for adding a machine.
 
 ### `up` join code
 
 > [!WARNING] Not available yet
-> The planned one-command install (`infraternal up <server>`) will use a join code that lasts 10 minutes and works once. Until it exists, the CLI sign-in code above is the only 10-minute code.
+> The planned one-command install (`infraternal up <server>`) will use a join code that works once, for the time [Join Code Lasts](#join-code-lasts) sets.
+
+### Join Code Lasts
+
+> [!FACTS]
+> Default 10 minutes, one use. How long the short code you type after `up` works.
+
+> [!WARNING] Planned
+> This comes with the `up` command. Until it exists, the CLI sign-in code above is the only code of this kind.
 
 ### Host certificate
 
@@ -126,7 +156,15 @@ The host keeps the same private key across renewals. The key is stored on the ho
 > [!CAUTION] A host that stays offline for more than 7 days
 > Its certificate expires, and today it cannot renew itself. Add the host again with a new join token.
 
-The planned change is that a host can renew for up to 90 days after expiry by proving it holds its key, unless it was removed.
+The planned change is that a host can still renew after expiry, for the time [Renewal Grace Period](#renewal-grace-period) sets, by proving it holds its key, unless it was removed.
+
+### Renewal Grace Period
+
+> [!FACTS]
+> Default 90 days after a host certificate runs out. In that time the host renews itself by proving it holds its key, unless it was removed. After it, the host must be added again.
+
+> [!WARNING] Planned
+> Today a host that stays offline for more than 7 days must be added again.
 
 ### Machine CA root
 
@@ -149,19 +187,29 @@ If two nodes cannot reach each other, they have no session. A new one starts as 
 
 ### WireGuard static key
 
-Each mesh node has a long-lived WireGuard key that other nodes know it by. The decision is to replace it every 7 days (adjustable in Settings under Security), with an overlap of at least 2 minutes in which the old and the new key both work, so no connection drops.
+Each mesh node has a long-lived WireGuard key that other nodes know it by. The decision is to replace it automatically, on the schedule [Connection Keys](#connection-keys) sets, with an overlap of at least 2 minutes in which the old and the new key both work, so no connection drops.
 
 This happens only while the host is online and can reach the server, and a key that may be compromised is replaced at once.
 
 > [!WARNING] Under review
 > This automatic rotation is not wired up yet. Today a node creates a new key each time it starts, and the key stays in memory. A mesh keeps working on its last known rules, with no time limit, when the server is offline.
 
+### Connection Keys
+
+> [!FACTS]
+> Default every 7 days, with an overlap of at least 2 minutes in which the old and the new key both work. A key that may be compromised is replaced at once.
+
 ### Node identity key
 
-Each node also has an identity key. The decision is to replace it every 7 days, with the new key signed by the old one, and only while the node is online.
+Each node also has an identity key. The decision is to replace it automatically, on the schedule [Machine Identity](#machine-identity) sets, with the new key signed by the old one, and only while the node is online.
 
 > [!WARNING] Under review
 > Today the mesh has no separate identity key. A host's identity is its host certificate key, which stays the same when the certificate renews. The separate key is planned.
+
+### Machine Identity
+
+> [!FACTS]
+> Default every 7 days. The new key is signed by the old one, and only while the node is online.
 
 ### Mesh SSH person certificate
 

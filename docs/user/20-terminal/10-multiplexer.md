@@ -1,6 +1,6 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <!-- Former slugs: multiplexer -->
-<!-- Role: the page behind the ? in the "switch to the Infraternal Multiplexer" notice (D315, #251). Published at /docs/terminal/multiplexer/. Reading aids used here: GitHub-style alerts, [!WHY] reasoning blocks, [!FACTS] quick facts (the "?" preview), a quote, and [^n] citations (docs-extras.ts). -->
+<!-- Role: the page behind the ? in the "switch to the Infraternal Multiplexer" notice (D315, #251). Published at /docs/terminal/multiplexer/. A setting has its own heading, named like its Settings title (D317), with its default only in that heading's [!FACTS]. Reading aids used here: GitHub-style alerts, [!WHY] reasoning blocks, [!FACTS] quick facts (the "?" preview), a quote, and [^n] citations (docs-extras.ts). -->
 # The Infraternal Multiplexer
 
 Infraternal keeps every terminal alive on its host, so you rarely need tmux or Zellij on top of it.
@@ -42,7 +42,12 @@ When Infraternal sees tmux or Zellij start automatically in a new terminal, it a
 | ✗ | Keeps tmux or Zellij as it is, and does not ask again on this host. |
 | ? | Opens this page. |
 
-The question appears once per host. You can turn it off for everyone, or for one host, in Settings under Multiplexer.
+### Offer To Switch
+
+> [!FACTS]
+> On by default. Asks once per host when tmux or Zellij starts by itself in a new terminal. Turn it off for everyone, or for one host.
+
+You find it in Settings under Multiplexer.
 
 ## How switching works
 

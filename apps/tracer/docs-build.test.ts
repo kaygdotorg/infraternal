@@ -192,6 +192,19 @@ test("the real tree builds from the real folder, in the sections of D317", async
   }
 });
 
+test("a setting has one heading named like its Settings title, and its default and range are written only in that heading's quick facts", async () => {
+  const index = await (async () => {
+    const out = await mkdtemp(join(tmpdir(), "docs-settings-"));
+    try { return await buildDocs(resolve(out, "docs")); } finally { await rm(out, { recursive: true, force: true }); }
+  })();
+  const headings = index.flatMap((entry) => entry.headings.map((heading) => ({ page: entry.slug, ...heading })));
+  for (const title of ["Offer To Switch", "Keys Last", "Browsers Stay Signed In For", "Add Link Lasts", "Join Code Lasts", "Connection Keys", "Machine Identity", "Renewal Grace Period"]) {
+    const found = headings.filter((heading) => heading.text === title);
+    expect(found.length, `${title}: exactly one heading`).toBe(1);
+    expect(found[0]!.facts, `${title}: quick facts with the default`).toMatch(/\bdefault\b/i);
+  }
+});
+
 test("nested folders make section/page addresses; the section lists its pages and the front page lists the sections", async () => {
   const f = await fixture({
     "index.md": page("Welcome", "Start here.", "## Where to go\n\ntext\n"),

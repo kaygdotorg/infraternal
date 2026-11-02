@@ -88,7 +88,7 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
           };
         });
       });
-      expect(callouts.map((c) => c.kind).sort()).toEqual(["caution", "facts", "facts", "important", "note", "tip", "warning", "warning", "warning", "warning", "warning", "warning", "warning"]);
+      expect(callouts.map((c) => c.kind).sort()).toEqual(["caution", ...Array(9).fill("facts"), "important", "note", "tip", ...Array(10).fill("warning")]);
       const bodyBg = scheme === "dark" ? "rgb(16, 17, 19)" : "rgb(246, 246, 244)";
       for (const c of callouts) {
         expect(Math.abs(c.left), `${c.kind}: the panel starts on the text's left edge`).toBeLessThanOrEqual(0.5);
@@ -107,7 +107,7 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
       // ---- quick facts: the panel on the page says what index.json says (the "?" preview reads the index) ----------------------
       const index = await (await page.request.get("/docs/index.json")).json() as { pages: { slug: string; headings: { id: string; facts?: string }[] }[] };
       const fromIndex = index.pages.find((p) => p.slug === "reference/keys")!.headings.filter((h) => h.facts);
-      expect(fromIndex.map((h) => h.id)).toEqual(["browser-sign-in", "host-certificate"]);
+      expect(fromIndex.map((h) => h.id)).toEqual(["browser-sign-in", "browsers-stay-signed-in-for", "keys-last", "add-link-lasts", "join-code-lasts", "host-certificate", "renewal-grace-period", "connection-keys", "machine-identity"]);
       for (const h of fromIndex) {
         const shown = await page.evaluate((id) => { let n = document.getElementById(id)!.nextElementSibling; while (n && !n.matches(".callout-facts")) n = n.nextElementSibling; return n!.textContent!.replace(/^\s*Quick facts\s*/, "").replace(/\s+/g, " ").trim(); }, h.id);
         expect(shown).toBe(h.facts!);
