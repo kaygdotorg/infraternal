@@ -143,7 +143,11 @@ export function placeOverName(name: HTMLElement, container: HTMLElement, input: 
   const widened = name.style.minWidth;
   // The field's own type decides how wide its text is, so it is measured in the field's font, in the container (which
   // may be drawn at a zoom: the rect is divided by it).
-  input.style.cssText = "position:absolute;visibility:hidden";
+  // A fine pointer types in the name's own size, so the name keeps its size and position when it becomes a field; a touch device keeps
+  // the field's 16 px (below that, iOS zooms into the field).
+  const nameType = getComputedStyle(name);
+  const fontCss = matchMedia("(pointer: coarse)").matches ? "" : `font:${nameType.font};letter-spacing:${nameType.letterSpacing};`;
+  input.style.cssText = `position:absolute;visibility:hidden;${fontCss}`;
   container.append(input);
   const type = getComputedStyle(input);
   const probe = document.createElement("span");
@@ -166,7 +170,7 @@ export function placeOverName(name: HTMLElement, container: HTMLElement, input: 
   }
   // One pixel more than the name, so the caret at the end of a name that fills the box does not scroll the text.
   const width = (right - at.left) / scale + 2 * FIELD_PAD_PX + 1;
-  input.style.cssText = `position:absolute;z-index:2;left:${left}px;top:${(at.top - box.top + at.height / 2) / scale}px;transform:translateY(-50%);width:${width}px;padding:0 ${FIELD_PAD_PX}px;max-width:calc(100% - ${Math.max(left, 0)}px)`;
+  input.style.cssText = `${fontCss}position:absolute;z-index:2;left:${left}px;top:${(at.top - box.top + at.height / 2) / scale}px;transform:translateY(-50%);width:${width}px;padding:0 ${FIELD_PAD_PX}px;max-width:calc(100% - ${Math.max(left, 0)}px)`;
   const hidden = name.style.visibility;
   name.style.visibility = "hidden";
   return () => {
