@@ -96,6 +96,7 @@ Argon2 work at two simultaneous calls; exhausted capacity fails closed.
 | wraps | `{}` + session | `[{kind,key_id,wrap}]` for the session user |
 | recovery-start | `{username|user_id,verifier}` | `{token,delay_seconds,ready_at}` |
 | recovery-ready | `{token}` | replacement enrollment and old_recovery_wrap |
+| recovery-status | `{token}` | `{ready, delay_seconds, ready_at}` from the server elapsed clock |
 | recovery-rotate | `{recovery_wrap,recovery_verifier}` + fresh unlocked session | `{ok:true}` |
 | recovery-cancel | `{}` + any live session | `{ok:true}` |
 | device-start | `{device,scopes}` | `{poll_token,user_code,expires_in:600}` |
@@ -192,6 +193,12 @@ Username lookup is internal; unknown accounts and wrong verifiers return the sam
 only, shows the server's actual ready time, and asks for the words again after
 a reload. It never fabricates progress or persists recovery secrets. The server
 remains authoritative at `recovery-ready` even if the local clock is wrong.
+The waiting page reads `recovery-status` on visibility change, every 60 seconds
+while waiting and when its countdown reaches zero. Only a server-confirmed
+`ready:true` displays "Ready now" and enables continuation. Refresh errors clear
+readiness. Status uses the existing bearer without rotating it, creating a
+request, releasing an envelope or issuing a ceremony. Cancelled or expired
+bearers return 401.
 Replacement unwraps the original recovery envelope before creating the new
 passkey, wraps that same DEK and requires acknowledgement of the rotated words
 before finish. No existing cryptographic envelope or proof format changes.

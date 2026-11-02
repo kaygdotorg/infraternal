@@ -270,6 +270,25 @@ impl Auth {
         self.recovery_changes.subscribe(user)
     }
 
+    /// Read an existing capability without rotating it, starting recovery or issuing a ceremony.
+    pub async fn recovery_status(&self, token: &str, wall: i64) -> Result<Value> {
+        let mut tx = self.pool.begin().await?;
+        let elapsed = self.recovery_time(&mut tx, wall).await?;
+        let ready: Option<i64> =
+            sqlx::query_scalar("SELECT ready FROM recovery WHERE token_hash=? AND expires>?")
+                .bind(hash(token))
+                .bind(elapsed)
+                .fetch_optional(&mut *tx)
+                .await?;
+        tx.commit().await?;
+        let ready = ready.ok_or(Error::Denied)?;
+        Ok(serde_json::json!({
+            "ready": ready <= elapsed,
+            "delay_seconds": delay(ready, elapsed),
+            "ready_at": estimate(ready, elapsed, wall),
+        }))
+    }
+
     /// Release the old recovery envelope only after the delay, then enroll a replacement passkey.
     pub async fn recovery_ready(&self, token: &str, now: i64) -> Result<Value> {
         let mut tx = self.pool.begin().await?;

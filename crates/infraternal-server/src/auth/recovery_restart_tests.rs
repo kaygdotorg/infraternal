@@ -403,3 +403,50 @@ async fn recovery_elapsed_subsecond_start_never_rounds_the_wait_down() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn recovery_status_never_restarts_and_uses_only_server_elapsed_time() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture_v2().await;
+    f.auth
+        .test_recovery_elapsed
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    let request = attempt(&f, "recovery-start", NOW, false).await;
+    let token = str_field(&request, "token");
+    let app = router(f.auth.clone());
+    for (elapsed, ready, delay) in [(0, false, DAY), (DAY - 1, false, 1), (DAY, true, 0)] {
+        f.auth
+            .test_recovery_elapsed
+            .store(elapsed * SECOND, std::sync::atomic::Ordering::Relaxed);
+        f.auth.set_test_http_time(NOW + 2 * DAY);
+        let (status, _, body) =
+            http_post_json_with_cookie(&app, "recovery-status", json!({"token":token}), "").await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["ready"], ready);
+        assert_eq!(body["delay_seconds"], delay);
+    }
+    let audit: i64 = sqlx::query_scalar("SELECT count(*) FROM recovery_audit WHERE event='start'")
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(audit, 1, "status must never start a new request");
+    assert!(
+        f.auth.recovery_ready(token, NOW).await.is_ok(),
+        "status must preserve the bearer"
+    );
+    f.auth
+        .test_recovery_elapsed
+        .store(2 * DAY * SECOND, std::sync::atomic::Ordering::Relaxed);
+    let (status, _, _) =
+        http_post_json_with_cookie(&app, "recovery-status", json!({"token":token}), "").await;
+    assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+    f.auth.recovery_cancel(&f.session, NOW).await.unwrap();
+    let (status, _, _) =
+        http_post_json_with_cookie(&app, "recovery-status", json!({"token":token}), "").await;
+    assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM recovery")
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+}

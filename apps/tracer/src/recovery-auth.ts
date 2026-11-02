@@ -8,6 +8,23 @@ import { AuthError, recoveryAuth as auth, type AuthStart, type Wrap } from "./au
 const MAX_RECOVERY_WAIT_SECONDS = 48 * 60 * 60;
 
 export interface RecoveryRequest { token: string; delay_seconds: number; ready_at: number }
+export interface RecoveryStatus { ready: boolean; delay_seconds: number; ready_at: number }
+
+function validateWait(result: Pick<RecoveryRequest, "delay_seconds" | "ready_at">): void {
+  if (!Number.isSafeInteger(result.delay_seconds) || result.delay_seconds < 0 || result.delay_seconds > MAX_RECOVERY_WAIT_SECONDS || !Number.isSafeInteger(result.ready_at) || result.ready_at <= 0) {
+    throw new AuthError("The server's answer could not be used. Try again.");
+  }
+}
+
+/** Reads the existing capability; polling cannot start recovery or rotate its bearer. */
+export async function getRecoveryStatus(token: string): Promise<RecoveryStatus> {
+  const result = await auth.post<RecoveryStatus>("recovery-status", { token });
+  validateWait(result);
+  if (typeof result.ready !== "boolean" || result.ready !== (result.delay_seconds === 0)) {
+    throw new AuthError("The server's answer could not be used. Try again.");
+  }
+  return result;
+}
 
 /** Starts recovery with an optional HttpOnly session; the server alone chooses the delay. */
 export async function startRecovery(username: string, words: string): Promise<RecoveryRequest> {
@@ -17,9 +34,7 @@ export async function startRecovery(username: string, words: string): Promise<Re
     result = await auth.post<RecoveryRequest>("recovery-resume", { username, verifier: derived.verifier });
   } finally { derived.wrap.fill(0); }
   auth.requiredString(result.token, "recovery token");
-  if ((!Number.isSafeInteger(result.delay_seconds) || result.delay_seconds < 0 || result.delay_seconds > MAX_RECOVERY_WAIT_SECONDS) || !Number.isSafeInteger(result.ready_at) || result.ready_at <= 0) {
-    throw new AuthError("The server's answer could not be used. Try again.");
-  }
+  validateWait(result);
   return result;
 }
 
