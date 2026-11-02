@@ -14,6 +14,11 @@ export interface BranchLeaf {
    * as the leaf's marker in place of the text glyph, so every list of such items marks them the same way.
    */
   state?: "open" | "detached" | "exited";
+  /**
+   * A leaf that belongs to the leaf above it (Settings › Mesh › Keys: Keys under Mesh). It keeps its own branch and is indented
+   * under its parent; the section stays one list, so selection, the lit branch and the marker work as for any other leaf.
+   */
+  depth?: 1;
   /** A caption between groups of leaves inside one section (a host's name above its sessions): not selectable, no branch. */
   heading?: boolean;
   /** A quiet note after the label: new output (a dot), or the result of a finished command. */
@@ -147,6 +152,7 @@ function makeSection(section: BranchSection): HTMLElement {
     button.type = "button";
     button.dataset.id = leaf.id;
     if (leaf.renamable) { button.dataset.renamable = ""; if (leaf.renameLabel) button.dataset.renameLabel = leaf.renameLabel; }
+    if (leaf.depth) button.dataset.depth = String(leaf.depth);
     button.disabled = Boolean(leaf.disabled);
     const spoken = [leaf.label, leaf.state, leaf.mark ? MARK_NAME[leaf.mark] : "", leaf.meta].filter(Boolean);
     button.setAttribute("aria-label", spoken.join(", "));
