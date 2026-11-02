@@ -306,7 +306,7 @@ impl Service {
         .map_err(|_| Denied)?;
         if let Some(existing) = existing
             && let Some(response) = self
-                .resume_challenge(&mut *transaction, input, &identity, existing)
+                .resume_challenge(&mut transaction, input, &identity, existing)
                 .await?
         {
             return Ok(response);
@@ -619,7 +619,7 @@ impl Service {
         }
         if let Some(certificate_der) = operation.certificate_der {
             let fingerprint = operation.certificate_fingerprint.ok_or(Denied)?;
-            require_recorded_certificate(&mut *transaction, request, &fingerprint).await?;
+            require_recorded_certificate(&mut transaction, request, &fingerprint).await?;
             return Ok(RecoveryResponse::Certificate { certificate_der });
         }
         if operation.expires_at <= now {
