@@ -15,6 +15,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 const DOMAIN: &[u8] = b"infraternal/1 host-key-rotation\0";
 const MAX_CSR_DER: usize = 4096;
@@ -91,7 +92,7 @@ pub struct PendingRotation {
     /// Server challenge this candidate answers.
     pub challenge: Challenge,
     /// Candidate Ed25519 PKCS#8 bytes; callers must keep them local.
-    pub candidate_key_pkcs8: Vec<u8>,
+    pub candidate_key_pkcs8: Zeroizing<Vec<u8>>,
     /// Certificate DER after issuance; absent before the server's certificate action.
     pub candidate_certificate_der: Option<Vec<u8>>,
 }
@@ -295,7 +296,7 @@ impl IdentityRotation {
                 return Err(denied());
             }
             let candidate = PKey::generate_ed25519().map_err(|_| denied())?;
-            let encoded = candidate.private_key_to_pkcs8().map_err(|_| denied())?;
+            let encoded = candidate_pkcs8(&candidate)?;
             self.publisher.store_candidate(&challenge, &encoded)?;
             state.pending = Some(Pending {
                 challenge: challenge.clone(),
@@ -587,6 +588,13 @@ fn host_id(certificate: &openssl::x509::X509) -> io::Result<Uuid> {
     .map_err(|_| denied())
 }
 
+/// Encode a candidate only into storage whose drop wipes its contents.
+fn candidate_pkcs8(key: &PKey<Private>) -> io::Result<Zeroizing<Vec<u8>>> {
+    key.private_key_to_pkcs8()
+        .map(Zeroizing::new)
+        .map_err(|_| denied())
+}
+
 fn denied() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
 }
@@ -759,5 +767,19 @@ mod tests {
 
         assert!(validate_initial_predecessor(&predecessor, &challenge).is_ok());
         assert!(validate_initial_predecessor(&renewed, &challenge).is_err());
+    }
+
+    #[test]
+    fn candidate_pkcs8_is_held_in_a_zeroizing_buffer() {
+        fn assert_zeroizing(_: &zeroize::Zeroizing<Vec<u8>>) {}
+
+        let key = PKey::generate_ed25519().unwrap();
+        let encoded = candidate_pkcs8(&key).unwrap();
+        assert_zeroizing(&encoded);
+        assert!(
+            PKey::private_key_from_pkcs8(&encoded)
+                .unwrap()
+                .public_eq(&key)
+        );
     }
 }

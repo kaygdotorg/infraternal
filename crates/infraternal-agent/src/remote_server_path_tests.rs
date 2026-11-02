@@ -636,7 +636,9 @@ async fn candidate_mtls_refusal_retries_the_pending_predecessor() {
     let stored = RotationStorage {
         pending: Some(PendingRotation {
             challenge,
-            candidate_key_pkcs8: candidate_key.private_key_to_pkcs8().unwrap(),
+            candidate_key_pkcs8: zeroize::Zeroizing::new(
+                candidate_key.private_key_to_pkcs8().unwrap(),
+            ),
             candidate_certificate_der: Some(candidate.certificate.to_der().unwrap()),
         }),
         completed: None,

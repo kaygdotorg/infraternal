@@ -503,6 +503,68 @@ async fn join_re_enrolls_the_same_hosts_identity_and_refuses_another_host() {
     assert_eq!(std::fs::read_dir(&data).unwrap().count(), 1);
 }
 
+#[test]
+fn candidate_identity_buffers_are_zeroizing_without_an_intermediate_json_vec() {
+    fn assert_zeroizing_string(_: &Zeroizing<String>) {}
+    fn assert_zeroizing_bytes(_: &Zeroizing<Vec<u8>>) {}
+
+    let key = PKey::generate_ed25519().unwrap();
+    let pkcs8 = Zeroizing::new(key.private_key_to_pkcs8().unwrap());
+    let encoded = encode_candidate_key(&pkcs8);
+    assert_zeroizing_string(&encoded);
+
+    let decoded = decode_candidate_key(&encoded).unwrap();
+    assert_zeroizing_bytes(&decoded);
+    assert_eq!(decoded.as_slice(), pkcs8.as_slice());
+
+    let stored = StoredIdentity {
+        host_id: uuid::Uuid::new_v4(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+        endpoint: None,
+        server_name: "localhost".into(),
+        public_origin: None,
+        https_der: None,
+        https_system_roots: false,
+        ca_der: "public issuer".into(),
+        certificate_der: "public certificate".into(),
+        key_der: "active identity".into(),
+        identity_rotation: Some(StoredRotation {
+            challenge: infraternal_plugin_remote::identity_rotation::Challenge {
+                host_id: uuid::Uuid::new_v4(),
+                operation_id: uuid::Uuid::new_v4(),
+                sequence: 1,
+                challenge: [1; 32],
+                predecessor_fingerprint: [2; 32],
+                issuer_fingerprint: [3; 32],
+                issuer_generation: 1,
+            },
+            candidate_key_der: encoded.clone(),
+            certificate_der: None,
+        }),
+        completed_identity_rotation: None,
+    };
+    let document = serialize_identity_document(&stored).unwrap();
+    assert_zeroizing_bytes(&document);
+    let directory = Directory::new();
+    let identity_path = directory.0.join("identity.json");
+    std::fs::write(&identity_path, document.as_slice()).unwrap();
+    std::fs::set_permissions(
+        &identity_path,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    )
+    .unwrap();
+    let (restored, snapshot) = load_snapshot(&directory.0).unwrap();
+    assert_zeroizing_bytes(&snapshot.bytes);
+    assert_eq!(
+        restored
+            .identity_rotation
+            .unwrap()
+            .candidate_key_der
+            .as_str(),
+        encoded.as_str(),
+    );
+}
+
 /// Break-it (#230): the host id alone does not name a host. Another server
 /// (a staging copy of the database, or any server that issues the same id)
 /// must not take over an identity enrolled with this one: its invitation has
