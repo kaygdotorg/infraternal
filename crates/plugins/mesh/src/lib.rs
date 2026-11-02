@@ -32,6 +32,12 @@ pub mod netlink;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod wireguard;
 
+#[cfg(all(feature = "relay", target_os = "linux"))]
+pub mod seam;
+
+#[cfg(all(feature = "relay", target_os = "linux"))]
+pub mod relay_path;
+
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod connection_state;
 

@@ -904,8 +904,9 @@ mod peer_page_tests {
                             handshake_secs: 1_800_000_000,
                             received_bytes: 925_000,
                             sent_bytes: 925_000,
-                            #[cfg(feature = "test-support")]
+                            #[cfg(feature = "relay")]
                             handshake_nanos: 0,
+                            endpoint: None,
                         },
                     )
                 })

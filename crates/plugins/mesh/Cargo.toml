@@ -12,8 +12,10 @@ ee = []
 # Diagnostic stage logging is removable and never enabled by a shipping role.
 cutoff-measure = ["nix?/time"]
 agent = ["dep:nix", "dep:openssl", "dep:zeroize"]
-# Kernel timestamp precision is used by opt-in transport measurement fixtures only.
-test-support = ["agent"]
+# Relayed pairs through the seam C shim and relay address observation [313].
+relay = ["agent", "dep:socket2", "dep:infraternal-plugin-relay", "infraternal-plugin-relay/runtime", "infraternal-mesh/relay"]
+# In-memory relay credentials are used by isolated protocol and namespace fixtures.
+test-support = ["agent", "infraternal-plugin-relay?/test-support"]
 # Default-off resolver prototype until DNS integration is enabled [#266].
 mesh-dns-spike = ["agent", "server", "dep:hickory-proto", "dep:url"]
 
@@ -21,6 +23,7 @@ mesh-dns-spike = ["agent", "server", "dep:hickory-proto", "dep:url"]
 infraternal-plugin-api = { workspace = true, features = ["socket-host"] }
 infraternal-protocol.workspace = true
 infraternal-mesh = { version = "0.1.0", path = "../../infraternal-mesh" }
+infraternal-plugin-relay = { version = "0.1.0", path = "../relay", optional = true }
 bytes.workspace = true
 futures-util.workspace = true
 serde.workspace = true
@@ -30,6 +33,9 @@ tokio.workspace = true
 tracing = { workspace = true, optional = true }
 
 nix = { workspace = true, optional = true, features = ["net"] }
+# Already in the binary through tokio with these features; used for the seam's
+# raw send socket and its classic BPF packet tap [313].
+socket2 = { version = "0.6", optional = true, features = ["all"] }
 openssl = { workspace = true, optional = true }
 zeroize = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
@@ -43,3 +49,8 @@ workspace = true
 [[example]]
 name = "coordinator_fixture"
 required-features = ["server"]
+
+# Namespace fixture for the seam C relay proof (scripts/mesh-relay-proof.py).
+[[example]]
+name = "relay_fixture"
+required-features = ["relay", "test-support"]

@@ -1492,11 +1492,13 @@ dependencies = [
  "hickory-proto",
  "infraternal-mesh",
  "infraternal-plugin-api",
+ "infraternal-plugin-relay",
  "infraternal-protocol",
  "nix",
  "openssl",
  "serde",
  "serde_json",
+ "socket2",
  "sqlx",
  "tokio",
  "tracing",
@@ -1509,7 +1511,13 @@ dependencies = [
 name = "infraternal-plugin-relay"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "infraternal-plugin-api",
+ "openssl",
+ "quinn",
+ "ring",
+ "rustls",
+ "tokio",
 ]
 
 [[package]]

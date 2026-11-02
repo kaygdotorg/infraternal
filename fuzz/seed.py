@@ -42,8 +42,31 @@ def seed_mesh():
             payload = json.dumps(null_policy, separators=(',', ':'), sort_keys=True).encode()
             (corpus / 'grant-null-policy').write_bytes(bytes([selector]) + payload)
 
+def seed_relay():
+    corpus = root / 'corpus' / 'relay_wire_decode'
+    corpus.mkdir(parents=True, exist_ok=True)
+    host = bytes(range(16))
+    for name, frame in [
+        ('link', bytes([0x01]) + host),
+        ('unlink', bytes([0x02]) + host),
+        ('linked', bytes([0x81]) + host + (1).to_bytes(4, 'big')),
+        ('linked-zero-id', bytes([0x81]) + host + bytes(4)),
+        ('unlinked', bytes([0x82]) + host),
+        ('link-trailing-byte', bytes([0x01]) + host + b'\x00'),
+        ('datagram', (1).to_bytes(4, 'big') + b'\x01\x00\x00\x00ciphertext'),
+        ('datagram-empty-payload', (1).to_bytes(4, 'big')),
+        ('datagram-zero-id', bytes(4) + b'ciphertext'),
+        ('datagram-short-id', b'\x00\x00\x01'),
+        ('host-uri', b'urn:infraternal:host:01234567-89ab-cdef-0123-456789abcdef'),
+    ]:
+        (corpus / name).write_bytes(frame)
+
 if sys.argv[1:] == ['--mesh-only']:
     seed_mesh()
+    raise SystemExit(0)
+
+if sys.argv[1:] == ['--relay-only']:
+    seed_relay()
     raise SystemExit(0)
 
 def varint(value):
@@ -101,3 +124,4 @@ for flags in [0, 1, 2, 255]:
             (shim / f'cap2-snapshot-{flags}-{length}-{suffix}').write_bytes(value)
 
 seed_mesh()
+seed_relay()
