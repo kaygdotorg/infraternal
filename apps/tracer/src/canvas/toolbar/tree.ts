@@ -17,6 +17,7 @@ import { coarse } from "../dom";
 import { isFreeView } from "../layout/stops";
 import { onDemand, whenIdle } from "../../on-demand";
 import { createRowActions } from "./row-actions";
+import { createRowPill } from "./row-pill";
 
 export interface TreeModule {
   /** Rebuilds the sidebar tree from the views (coalesced). */
@@ -138,15 +139,15 @@ export function createTree(cx: Ctx): TreeModule {
     if (id && views.has(id)) cx.nav.flyView(id);
   }, { signal });
   // The row menu and swipes (D309): one shared component, with this list's items; its actions are palette rows for the focused row.
-  const rowMenu = tree ? createRowActions(cx, tree, {
-    closeSidebar: () => { stage.querySelector<HTMLButtonElement>("#sidebar-toggle[aria-expanded='true']")?.click(); },
-    rename: (id) => treeMenu?.rename(id) ?? false,
-  }) : undefined;
+  const closeSidebar = (): void => { stage.querySelector<HTMLButtonElement>("#sidebar-toggle[aria-expanded='true']")?.click(); };
+  const rowMenu = tree ? createRowActions(cx, tree, { closeSidebar, rename: (id) => treeMenu?.rename(id) ?? false }) : undefined;
+  // The hover pill and the F2 / Delete keys (#215): the pointer's and keyboard's shortcuts to the same row actions.
+  const offPill = tree && rowMenu ? createRowPill(cx, tree, rowMenu.menu, rowMenu.actionsOf, closeSidebar) : undefined;
   const offRows = rowMenu ? core.addPaletteProvider(() => rowMenu.rowEntries()) : undefined;
   const markDivider = (): void => { stage.querySelector('#tree .bm-sec[data-id="view:settings"]')?.classList.add("cl-divided"); };
   const observer = tree ? new MutationObserver(markDivider) : undefined;
   if (tree) observer!.observe(tree, { childList: true });
   const sideTitle = stage.querySelector<HTMLElement>(".sidebar-title");
   if (sideTitle) sideTitle.textContent = "Views";
-  return { render, dispose() { observer?.disconnect(); shown?.disconnect(); offRows?.(); rowMenu?.dispose(); } };
+  return { render, dispose() { observer?.disconnect(); shown?.disconnect(); offRows?.(); offPill?.(); rowMenu?.dispose(); } };
 }
