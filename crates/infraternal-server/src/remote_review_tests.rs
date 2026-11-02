@@ -19,7 +19,13 @@ async fn review_admitted_tcp() -> (
     let instant = now().unwrap();
     let key_digest = openssl::sha::sha256(&host.key.raw_public_key().unwrap());
     let token = store
-        .issue("owner", host_id, crate::enrollment::Mode::Rootless, instant, &key_digest)
+        .issue(
+            "owner",
+            host_id,
+            crate::enrollment::Mode::Rootless,
+            instant,
+            &key_digest,
+        )
         .await
         .unwrap();
     store

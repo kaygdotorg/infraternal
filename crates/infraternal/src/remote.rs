@@ -267,7 +267,8 @@ fn read_pending_key(data: &Path) -> io::Result<Option<PKey<openssl::pkey::Privat
     {
         return Err(refused());
     }
-    let mut bytes = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
+    let capacity = usize::try_from(metadata.len()).map_err(|_| refused())?;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
     file.take(4097).read_to_end(&mut bytes)?;
     if bytes.is_empty() || bytes.len() > 4096 {
         return Err(refused());

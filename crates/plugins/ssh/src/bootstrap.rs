@@ -26,6 +26,12 @@ pub struct Resolved {
     pub mesh: MeshEvidence,
 }
 
+/// Public host identity prepared by the installed infraternal agent over authenticated SSH.
+pub struct PreparedHostKey {
+    pub host: uuid::Uuid,
+    pub digest: [u8; 32],
+}
+
 /// Trusted request authority stays in memory and is never Debug or serialized.
 /// Browser enrollment must recheck this exact session atomically, not owner id alone.
 pub struct Authority {
@@ -161,8 +167,7 @@ pub trait Backend: Send + Sync {
         _target: &'a Target,
         _check: &'a Check,
         _lookup: Option<String>,
-        _host: uuid::Uuid,
-        _key_digest: [u8; 32],
+        _binding: PreparedHostKey,
         _register: &'a mut (dyn FnMut(uuid::Uuid) -> Result<(), Failure> + Send),
     ) -> Operation<'a, JoinMaterial> {
         Box::pin(async { Err(Failure::install("SSH host-key proof is unavailable.")) })
@@ -1111,18 +1116,14 @@ impl Bootstrap {
                     .clone()
                     .unwrap_or_else(|| session_binary.clone());
                 let host = uuid::Uuid::new_v4();
-                resources.installation = Some(Installation::new_pending(
-                    session.clone(),
-                    target,
-                    host,
-                )?);
-                let transaction = resources
-                    .installation
-                    .as_ref()
-                    .ok_or_else(|| Failure::install("The installation transaction is unavailable."))?;
+                resources.installation =
+                    Some(Installation::new_pending(session.clone(), target, host)?);
+                let transaction = resources.installation.as_ref().ok_or_else(|| {
+                    Failure::install("The installation transaction is unavailable.")
+                })?;
                 let digest = transaction.prepare_join_key(&binary, origin).await?;
                 staged_payload = Some((session_binary, full_binary));
-                Some((host, digest))
+                Some(PreparedHostKey { host, digest })
             } else {
                 None
             };
@@ -1132,15 +1133,14 @@ impl Bootstrap {
                 resources.host = Some(host);
                 Ok(())
             };
-            let join = if let Some((host, digest)) = key_binding {
+            let join = if let Some(binding) = key_binding {
                 self.backend
                     .invitation_registered_with_key(
                         &batch.authority,
                         target,
                         &check,
                         session.trust_lookup(),
-                        host,
-                        digest,
+                        binding,
                         &mut register,
                     )
                     .await?

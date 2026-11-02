@@ -59,10 +59,7 @@ impl<S: CaKeySource + ?Sized + 'static> RemoteEnrollment<S> {
             .as_ref()
             .is_some_and(|expected| memcmp::eq(expected, actual_key_digest.as_slice()));
         if !matches {
-            let _ = self
-                .store
-                .consume_refused(token, host, mode, now)
-                .await;
+            let _ = self.store.consume_refused(token, host, mode, now).await;
             return Err(RemoteEnrollmentError);
         }
         #[cfg(test)]
@@ -156,11 +153,11 @@ mod tests {
 
     fn csr_for(key: &PKey<Private>) -> Vec<u8> {
         let mut builder = X509Req::builder().unwrap();
-        builder.set_pubkey(&key).unwrap();
+        builder.set_pubkey(key).unwrap();
         builder
             .set_subject_name(&X509NameBuilder::new().unwrap().build())
             .unwrap();
-        builder.sign(&key, MessageDigest::null()).unwrap();
+        builder.sign(key, MessageDigest::null()).unwrap();
         builder.build().to_der().unwrap()
     }
 
@@ -234,7 +231,10 @@ mod tests {
         );
         assert_eq!(committed, 1, "refusal must not commit a certificate");
         assert_eq!(loads.load(Ordering::Relaxed), 0, "refusal precedes signing");
-        assert!(consumed, "a definitive key mismatch consumes its capability");
+        assert!(
+            consumed,
+            "a definitive key mismatch consumes its capability"
+        );
     }
 
     #[tokio::test]
@@ -243,10 +243,8 @@ mod tests {
         let now = 1_800_000_000;
         let key = PKey::generate_ed25519().unwrap();
         let token = issue_bound_key(&store, host, &key, now).await;
-        let service = RemoteEnrollment::new(
-            Arc::new(crate::ca::tests::source(true)),
-            store.clone(),
-        );
+        let service =
+            RemoteEnrollment::new(Arc::new(crate::ca::tests::source(true)), store.clone());
 
         let signed = service
             .join(host, Mode::Rootless, token.secret(), &csr_for(&key), now)
@@ -259,7 +257,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(admitted.host, host);
-        assert_eq!(committed, 2, "the matching CSR commits exactly one certificate");
+        assert_eq!(
+            committed, 2,
+            "the matching CSR commits exactly one certificate"
+        );
     }
 
     #[tokio::test]
@@ -268,10 +269,8 @@ mod tests {
         let now = 1_800_000_000;
         let key = PKey::generate_ed25519().unwrap();
         let token = issue_bound_key(&store, host, &key, now).await;
-        let service = RemoteEnrollment::new(
-            Arc::new(crate::ca::tests::source(true)),
-            store.clone(),
-        );
+        let service =
+            RemoteEnrollment::new(Arc::new(crate::ca::tests::source(true)), store.clone());
         let request = csr_for(&key);
 
         service

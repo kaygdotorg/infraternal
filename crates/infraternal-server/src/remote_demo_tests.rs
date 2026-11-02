@@ -162,10 +162,7 @@ async fn invitation_for_uid(
 
 /// Model the verified-SSH key preparation before issuing the integration invitation.
 fn prepare_pending_join_key(data: &Path) -> [u8; 32] {
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(data)
-        .unwrap();
+    std::fs::DirBuilder::new().mode(0o700).create(data).unwrap();
     let key = PKey::generate_ed25519().unwrap();
     let mut private = std::fs::OpenOptions::new()
         .write(true)
@@ -840,15 +837,7 @@ async fn remote_cli_enrollment_and_browser_terminal_at(
     std::fs::set_permissions(&owner_marker, std::fs::Permissions::from_mode(0o600)).unwrap();
     let data = directory.0.join("data");
     let expected_key_digest = prepare_pending_join_key(&data);
-    let invitation = invitation(
-        address,
-        &root,
-        &origin,
-        &cookie,
-        host,
-        expected_key_digest,
-    )
-    .await;
+    let invitation = invitation(address, &root, &origin, &cookie, host, expected_key_digest).await;
     let started = Instant::now();
     let mut child = cli(binary, &directory, true, &origin);
     child

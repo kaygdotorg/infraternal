@@ -56,6 +56,12 @@ pub enum EnrollmentError {
     Storage(#[from] sqlx::Error),
 }
 
+/// Session authority and the SSH-proved public key bound to one invitation.
+pub(crate) struct IssueConstraints<'a> {
+    pub(crate) session_hash: Option<&'a str>,
+    pub(crate) expected_key_digest: Option<&'a [u8; 32]>,
+}
+
 /// Storage using the server's existing bounded SQLite pool; no idle worker.
 /// Construct once per configured runtime and pass clones to authority writers
 /// and transports so committed revocation reaches their shared event scope.
@@ -178,15 +184,8 @@ impl EnrollmentStore {
         now: i64,
         expected_key_digest: &[u8; 32],
     ) -> Result<JoinToken, EnrollmentError> {
-        self.issue_authorized(
-            owner,
-            host,
-            mode,
-            now,
-            None,
-            Some(expected_key_digest),
-        )
-        .await
+        self.issue_authorized(owner, host, mode, now, None, Some(expected_key_digest))
+            .await
     }
 
     /// Return the invitation's bound key, falling back to a legacy certificate key.
@@ -201,24 +200,22 @@ impl EnrollmentStore {
         .bind(host.as_bytes().as_slice())
         .fetch_optional(&self.0)
         .await?;
-        match stored {
-            Some(Some(bytes)) => bytes
+        if let Some(Some(bytes)) = stored {
+            return bytes
                 .try_into()
                 .map(Some)
-                .map_err(|_| EnrollmentError::Denied),
-            None | Some(None) => {
-                let public_key: Option<Vec<u8>> = sqlx::query_scalar(
-                    "SELECT public_key FROM remote_certificates WHERE host_id=? ORDER BY not_after DESC LIMIT 1",
-                )
-                .bind(host.as_bytes().as_slice())
-                .fetch_optional(&self.0)
-                .await?;
-                public_key
-                    .map(|key| <[u8; 32]>::try_from(key).map_err(|_| EnrollmentError::Denied))
-                    .transpose()
-                    .map(|key| key.map(|public| Sha256::digest(public).into()))
-            }
+                .map_err(|_| EnrollmentError::Denied);
         }
+        let public_key: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT public_key FROM remote_certificates WHERE host_id=? ORDER BY not_after DESC LIMIT 1",
+        )
+        .bind(host.as_bytes().as_slice())
+        .fetch_optional(&self.0)
+        .await?;
+        public_key
+            .map(|key| <[u8; 32]>::try_from(key).map_err(|_| EnrollmentError::Denied))
+            .transpose()
+            .map(|key| key.map(|public| Sha256::digest(public).into()))
     }
 
     async fn issue_authorized(
@@ -236,8 +233,10 @@ impl EnrollmentStore {
             host,
             mode,
             now,
-            session_hash,
-            expected_key_digest,
+            IssueConstraints {
+                session_hash,
+                expected_key_digest,
+            },
             &mut connection,
         )
         .await
@@ -251,8 +250,7 @@ impl EnrollmentStore {
         host: Uuid,
         mode: Mode,
         now: i64,
-        session_hash: Option<&str>,
-        expected_key_digest: Option<&[u8; 32]>,
+        constraints: IssueConstraints<'_>,
         connection: &mut sqlx::SqliteConnection,
     ) -> Result<JoinToken, EnrollmentError> {
         let expires = now
@@ -277,12 +275,12 @@ impl EnrollmentStore {
         .bind(digest.as_slice())
         .bind(now)
         .bind(expires)
-        .bind(expected_key_digest.map(|value| value.as_slice()))
+        .bind(constraints.expected_key_digest.map(<[u8; 32]>::as_slice))
         .bind(host.as_bytes().as_slice())
         .bind(owner)
         .bind(mode.as_str())
-        .bind(session_hash)
-        .bind(session_hash)
+        .bind(constraints.session_hash)
+        .bind(constraints.session_hash)
         .execute(connection)
         .await?
         .rows_affected();

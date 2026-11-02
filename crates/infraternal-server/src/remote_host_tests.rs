@@ -333,9 +333,8 @@ async fn o1_rootless_join_terminal_and_cleanup() {
     let key = openssl::pkey::PKey::generate_ed25519().unwrap();
     let expected_key_digest = openssl::sha::sha256(&key.raw_public_key().unwrap());
     let key_data = format!("{}/identity", installation.data);
-    let key_upload = format!(
-        "umask 077; mkdir -m 700 '{key_data}' && cat > '{key_data}/join-key.pk8'"
-    );
+    let key_upload =
+        format!("umask 077; mkdir -m 700 '{key_data}' && cat > '{key_data}/join-key.pk8'");
     let private_key = key.private_key_to_pkcs8().unwrap();
     let seeded = ssh(&installation.pin, &key_upload)
         .stdin(Stdio::piped())
@@ -343,11 +342,7 @@ async fn o1_rootless_join_terminal_and_cleanup() {
         .stderr(Stdio::null())
         .spawn()
         .and_then(|mut process| {
-            process
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(&private_key)?;
+            process.stdin.take().unwrap().write_all(&private_key)?;
             process.wait()
         })
         .unwrap();

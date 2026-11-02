@@ -617,7 +617,13 @@ async fn root_store(host: &Identity, root: &X509) -> (EnrollmentStore, sqlx::Sql
     let public_key: [u8; 32] = host.key.raw_public_key().unwrap().try_into().unwrap();
     let key_digest = openssl::sha::sha256(&public_key);
     let token = store
-        .issue("owner", id, crate::enrollment::Mode::Rootful, instant, &key_digest)
+        .issue(
+            "owner",
+            id,
+            crate::enrollment::Mode::Rootful,
+            instant,
+            &key_digest,
+        )
         .await
         .unwrap();
     store

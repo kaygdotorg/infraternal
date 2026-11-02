@@ -118,7 +118,10 @@ pub fn agent_actions() -> Vec<ActionDefinition> {
             "Internal command used by the server during verified SSH setup.",
             ["Check the HTTPS origin before creating or returning the host key digest."],
             JsonSchema::object(
-                [("origin".to_owned(), JsonSchema::string("Public HTTPS origin."))],
+                [(
+                    "origin".to_owned(),
+                    JsonSchema::string("Public HTTPS origin."),
+                )],
                 ["origin".to_owned()],
             ),
             JsonSchema::command_result(),

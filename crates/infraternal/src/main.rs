@@ -1926,7 +1926,15 @@ fn run_remote_agent(
             .and_then(|runtime| runtime.block_on(remote::prepare_join_key(origin, &data)));
         match result {
             Ok(digest) => {
-                let encoded: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+                let encoded = digest
+                    .iter()
+                    .fold(String::with_capacity(64), |mut hex, byte| {
+                        const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+                        for digit in [*byte >> 4, *byte & 0x0f] {
+                            hex.push(char::from(HEX_DIGITS[usize::from(digit)]));
+                        }
+                        hex
+                    });
                 println!("KEY-DIGEST {encoded}");
             }
             Err(error) => {

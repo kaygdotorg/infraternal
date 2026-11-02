@@ -3,7 +3,7 @@
 use crate::{
     auth::Auth,
     ca::CaKeySource,
-    enrollment::{EnrollmentStore, Mode},
+    enrollment::{EnrollmentStore, IssueConstraints, Mode},
     remote_enrollment::RemoteEnrollment,
 };
 use axum::{
@@ -333,8 +333,10 @@ async fn issue_invitation(
             request.host_id,
             request.mode,
             now,
-            Some(&session_hash),
-            request.expected_key_digest.as_ref(),
+            IssueConstraints {
+                session_hash: Some(&session_hash),
+                expected_key_digest: request.expected_key_digest.as_ref(),
+            },
             &mut transaction,
         )
         .await

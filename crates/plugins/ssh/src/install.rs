@@ -412,11 +412,7 @@ impl Installation {
     /// The returned digest is safe to bind to the invitation issued after this SSH proof.
     /// # Errors
     /// Names DNS, TCP, TLS and proxy-upgrade failures without returning private key material.
-    pub async fn prepare_join_key(
-        &self,
-        binary: &Path,
-        origin: &str,
-    ) -> Result<[u8; 32], Failure> {
+    pub async fn prepare_join_key(&self, binary: &Path, origin: &str) -> Result<[u8; 32], Failure> {
         let payload = self.prepare_payload(binary, false).await?;
         self.session
             .run(&self.script(&payload.body), payload.input())
@@ -1677,18 +1673,30 @@ fn parse_join_key_receipt(bytes: &[u8]) -> Result<[u8; 32], Failure> {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         let mut decoded = [0u8; 32];
-        for (index, pair) in digest.as_bytes().chunks_exact(2).enumerate() {
+        for (index, pair) in digest.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             decoded[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
         }
         return Ok(decoded);
     }
     let message = match text {
-        "PREPARE-REFUSED DNS\n" => "The infraternal agent on this host cannot resolve the server's HTTPS origin. Check DNS and allow outbound TCP 443.",
-        "PREPARE-REFUSED CONNECT\n" => "The infraternal agent on this host cannot reach the server over HTTPS. Allow outbound TCP 443 to the server's public origin.",
-        "PREPARE-REFUSED TLS\n" => "The infraternal agent on this host cannot verify the server's public HTTPS certificate. Check the public certificate chain and server name.",
-        "PREPARE-REFUSED UPGRADE\n" => "The infraternal agent on this host reached the server over HTTPS, but the WebSocket upgrade failed. Allow WebSocket upgrades through the HTTPS proxy.",
-        "PREPARE-REFUSED CHALLENGE\n" => "The infraternal agent reached the server over HTTPS, but the server did not return a valid challenge. Deploy a compatible server build.",
-        "PREPARE-REFUSED REFUSED\n" => "The infraternal agent could not prepare its host key. Check its private state directory and try again.",
+        "PREPARE-REFUSED DNS\n" => {
+            "The infraternal agent on this host cannot resolve the server's HTTPS origin. Check DNS and allow outbound TCP 443."
+        }
+        "PREPARE-REFUSED CONNECT\n" => {
+            "The infraternal agent on this host cannot reach the server over HTTPS. Allow outbound TCP 443 to the server's public origin."
+        }
+        "PREPARE-REFUSED TLS\n" => {
+            "The infraternal agent on this host cannot verify the server's public HTTPS certificate. Check the public certificate chain and server name."
+        }
+        "PREPARE-REFUSED UPGRADE\n" => {
+            "The infraternal agent on this host reached the server over HTTPS, but the WebSocket upgrade failed. Allow WebSocket upgrades through the HTTPS proxy."
+        }
+        "PREPARE-REFUSED CHALLENGE\n" => {
+            "The infraternal agent reached the server over HTTPS, but the server did not return a valid challenge. Deploy a compatible server build."
+        }
+        "PREPARE-REFUSED REFUSED\n" => {
+            "The infraternal agent could not prepare its host key. Check its private state directory and try again."
+        }
         _ => return Err(invalid_setup()),
     };
     Err(Failure::install(message).at(InstallStep::Connect))

@@ -261,8 +261,15 @@ async fn public_origin_preflight_fails_before_preparing_a_host_key() {
     let directory = Directory::new();
     let data = directory.0.join("data");
 
-    assert!(prepare_join_key("https://127.0.0.1:1", &data).await.is_err());
-    assert!(!data.exists(), "unreachable origins must fail before key creation");
+    assert!(
+        prepare_join_key("https://127.0.0.1:1", &data)
+            .await
+            .is_err()
+    );
+    assert!(
+        !data.exists(),
+        "unreachable origins must fail before key creation"
+    );
 }
 
 #[test]
