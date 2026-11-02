@@ -134,7 +134,8 @@ test("the Views tree renames a Mesh host the same way, and a single click still 
   const leaf = page.locator('#tree .bm-leaf[data-id="n-build-01"]');
   await expect(leaf).toBeVisible();
   // Tags and the other views' windows are not renamable here.
-  await expect(page.locator("#tree .bm-leaf[data-renamable]")).toHaveCount(await page.locator('#tree .bm-sec[data-id="view:mesh"] .bm-leaf[data-renamable]').count());
+  // Mesh hosts are renamable here, and so are the Console's sessions (#215); no other view's row is.
+  await expect(page.locator('#tree .bm-sec:not([data-id="view:console"]) .bm-leaf[data-renamable]')).toHaveCount(await page.locator('#tree .bm-sec[data-id="view:mesh"] .bm-leaf[data-renamable]').count());
   await leaf.locator(".bm-label").dblclick();
   await expect(field(page)).toBeVisible();
   await expect(field(page)).toHaveValue("build-01");
@@ -265,7 +266,7 @@ const boxOf = (locator: ReturnType<Page["locator"]>): Promise<Box> =>
  * not part of the header actions (those are empty on a Mesh card): the owner's screenshot showed the field's tinted box
  * running under it, which a check of the header actions cannot see.
  */
-const CARD_NEIGHBOURS = [".ui-window-mark", ".ui-window-dot", ".ui-window-session", ".ui-window-actions .ui-window-action", ".cl-port"];
+const CARD_NEIGHBOURS = [".ui-window-mark", ".ui-window-conn", ".ui-window-session", ".ui-window-actions .ui-window-action", ".cl-port"];
 
 /** The field is open on this host's card: it stays inside the pill and clear of each neighbour that is drawn; its text is whole. */
 async function expectFieldClearOnCard(page: Page, host: string, what: string): Promise<void> {
@@ -275,8 +276,8 @@ async function expectFieldClearOnCard(page: Page, host: string, what: string): P
   const pill = await boxOf(card(page, host).locator(".ui-window-pill"));
   expect(f.x, `${what}: field starts inside the pill`).toBeGreaterThanOrEqual(pill.x - 0.5);
   expect(f.x + f.w, `${what}: field ends inside the pill`).toBeLessThanOrEqual(pill.x + pill.w + 0.5);
-  const dot = await boxOf(card(page, host).locator(".ui-window-dot"));
-  expect(dot.w, `${what}: the status dot is drawn (the check is meaningful)`).toBeGreaterThan(1);
+  const dot = await boxOf(card(page, host).locator(".ui-window-conn"));
+  expect(dot.w, `${what}: the connection icon is drawn (the check is meaningful)`).toBeGreaterThan(1);
   // The name pill may widen while the field is open (a short name gets room to type in), but its neighbour, the → pill,
   // must move aside with it: the two pills never share area, and both stay inside the card.
   const actions = await boxOf(card(page, host).locator(".cl-port"));
