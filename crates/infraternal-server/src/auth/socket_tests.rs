@@ -1025,3 +1025,71 @@ mod per_account_revocation;
 
 #[path = "socket_tests/review_account_scope.rs"]
 mod review_account_scope;
+
+#[tokio::test(start_paused = true)]
+async fn recovery_completion_notice_precedes_signed_out_socket() {
+    let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
+    for subscribed in [false, true] {
+        let (f, address, server) = socket_fixture().await;
+        let now = crate::websocket::now_seconds().unwrap();
+        let cookie = format!("__Host-infraternal={}", f.session);
+        let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
+            .await
+            .unwrap();
+        assert_server_hello(&mut socket).await;
+        client_ws_send(
+            &mut socket,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                client_info: "recovery-completion",
+            },
+        )
+        .await;
+        read_welcome(&mut socket).await;
+        if subscribed {
+            client_ws_send(
+                &mut socket,
+                0,
+                &Frame::Subscribe {
+                    sub_id: 45,
+                    filter_json: br#"{"topic":"auth.recovery"}"#,
+                },
+            )
+            .await;
+            read_client_frame(&mut socket).await;
+        }
+        let (token, now) = f
+            .auth
+            .recovery_start_with_session(&f.user, f.words.clone(), Some(&f.session), now)
+            .await
+            .unwrap();
+        if subscribed {
+            read_client_frame(&mut socket).await;
+        }
+        let start = f.auth.legacy_ready(&token, now).await.unwrap();
+        finish_replacement(&f, &start, &Software::new(), now).await;
+        let close = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(Message::Close(frame))) => break frame,
+                    Some(Ok(Message::Ping(data))) => {
+                        socket.send(Message::Pong(data)).await.unwrap();
+                    }
+                    Some(Ok(_)) => {}
+                    other => panic!("socket ended before completion notice: {other:?}"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            close.as_ref().map(|frame| frame.reason.as_ref()),
+            Some("recovery completed")
+        );
+        assert!(f.auth.session(&f.session, now).await.is_err());
+        server.abort();
+    }
+}

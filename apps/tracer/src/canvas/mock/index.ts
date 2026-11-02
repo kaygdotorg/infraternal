@@ -175,7 +175,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       enter() { world.role = "operator"; world.omit = []; build(); cx.nav.flyView("containers", true); } },
     { name: "Who sees what", hint: "The views a person sees come from the access they have. Palette: Mockup, sign in as viewer, operator or new user.",
       enter() { world.omit = []; if (world.role === "operator" && !world.forcedRole) world.role = "viewer"; build(); if (world.role === "operator") { free(); overview(true); } else cx.nav.flyView("console", true); } },
-    { name: "Structure", hint: "Drag a window by its pill: the others reflow and it lands with a bounce. Drag a view by its label: it snaps to the grid and pushes a neighbour aside. Snap is off here.",
+    { name: "Structure", hint: "Drag a window by its pill: the others reflow and it settles into its slot. Drag a view by its label: it snaps to the grid and pushes a neighbour aside. Snap is off here.",
       enter() {
         world.role = "operator"; world.omit = []; build(); free();
         const r = cx.view.contentRect(cx.views.get("console")!);

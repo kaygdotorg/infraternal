@@ -121,6 +121,8 @@ export interface ConnectionConfig {
   traceMockServer?: boolean;
   /** The account's recovery notice changed (`undefined`: none pending). */
   onRecoveryPending?: (readyAt: number | undefined) => void;
+  /** A committed recovery revoked this device; retain the notice on the sign-in screen. */
+  onRecoveryCompleted?: (message: string) => void;
   /** Connection state: true once a stream attached, false when the socket closes. */
   onConnectionChange?: (connected: boolean) => void;
   /**
@@ -544,6 +546,9 @@ export class MuxConnection {
       this.forgetRefusedResume(event?.code, event?.reason);
       this.disconnect(socket);
       if (!internalRotation) this.status(plainCloseReason(event?.reason || "connection ended"));
+      if (event?.code === 1008 && event.reason === "recovery completed") {
+        this.config.onRecoveryCompleted?.(plainCloseReason(event.reason));
+      }
     };
   }
 

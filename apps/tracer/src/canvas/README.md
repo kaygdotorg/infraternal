@@ -28,7 +28,7 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 | `layout/droplet.on-demand.ts`, `droplet-handle.ts` | the droplet split (short-lived WebGL, only while it plays; loaded on demand, warmed when idle) | `loadDroplet` `endSplit` |
 | `views/world.ts` | building a view, sizing it on the grid, settle, hover card, dragging a view | `ViewsModule` (`cx.view`) |
 | `views/body.ts`, `settings*.ts`, `icons.ts` | what is inside a window by kind; Settings panels; icons | `makeBody`, `SettingsSource` |
-| `windows/frame.ts`, `move.ts` | window card, activation, pill grab and move, resize | `makeWindow`, `setActive`, `beginMove` |
+| `windows/frame.ts`, `move.on-demand.ts` | window card, activation, pill grab and move, resize | `makeWindow`, `setActive`, `beginMove` |
 | `windows/visibility.ts` | which windows are live: near the screen, live level of detail, view not far, page not hidden; tells each binding `setVisible` (the only caller) | `Visibility` |
 | `memory.ts` | views far from the camera are not painted; a hidden page releases big surfaces | `Memory` (reports far views and a paused page to `visibility`) |
 | `windows/lifecycle.ts` | open, close (never ends the session), split | `WindowsModule` (`cx.win`) |
@@ -42,7 +42,7 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 | `status.ts` | a terminal's status text to the one shared toast | `createStatusRelay` |
 | `addhost/` | the add-host wizard: detect-first sign-in (D183), progress from provisioning events, host key and credential pages | `createAddHost`, adapter `ProvisioningService`, hook `AddHostSink`, `FlowHost` (window kind `flow`, `cx.win.openFlow`) |
 | `appwin/` | app windows and whole screens streamed from a machine (D200, D207, D208), behind a flag that is off by default: `create.ts` dynamically loads `hook.on-demand.ts` only while wanted and supported; `appwin.on-demand.ts` owns machines, picker, palette rows and making a window; `body.on-demand.ts` mounts its stream body; `window-body.ts` owns picture, states and control; `shape.ts` and `shape-math.ts` fit remote dimensions through the shared resize host; `stream.ts` owns one stream's session, viewer, worker and control; `decode.worker.on-demand.ts` decodes and draws off the main thread; `status.ts` owns honest states; `inventory.ts` `input.ts` `size.ts` stay pure | The runtime loaded by `cx.appWindows.load()` exposes picker, palette, binding and disposal; window kinds `app` and `screen` |
-| `docs/`, `views/docs.ts` | the Docs view: a window of kind `docs` per page of `docs/user/`, offered once `/docs/index.json` loads (never saved), and the ⌘K rows for pages and headings; the reader loads on demand | `installDocsSource` |
+| `docs/`, `views/docs.ts` | the Docs view: a window of kind `docs` per page of `docs/user/` (sections, then their pages), offered once `/docs/index.json` loads (never saved), and the ⌘K rows for sections, pages and headings; the reader loads on demand | `installDocsSource` |
 | `backdrop.ts` | the dotted canvas behind the views | `createBackdrop` |
 | `mock/` | everything fake: scenes, roles, fake hosts, a fake Mesh server (`mesh-server.ts`: large meshes, slow, refusing, lossy), devices, probe | `mountMockup` |
 

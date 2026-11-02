@@ -2,7 +2,7 @@
 /**
  * The docs on the canvas (#302): a Docs view with a window for each page, and a source for the command palette (⌘K).
  *
- * Both come from one file, `/docs/index.json`, written by the docs build (docs-build.ts): every page's title, one-line summary and
+ * Both come from one file, `/docs/index.json`, written by the docs build (docs-build.ts): every page's address (`<section>/<page>`), title, one-line summary and
  * headings, a few hundred bytes per page. There is no list of pages in the app. A page added to `docs/user/` appears in the Docs
  * view and in ⌘K with no change here.
  *
@@ -17,7 +17,7 @@ import { onDemand } from "../../on-demand";
 import type { Ctx } from "../context";
 
 /** The shape of `index.json` (docs-build.ts `DocsIndexPage`). */
-export interface DocsIndexPage { slug: string; title: string; summary: string; headings: { id: string; text: string }[] }
+export interface DocsIndexPage { slug: string; title: string; summary: string; section?: true; parent?: string; facts?: string; headings: { id: string; text: string; facts?: string }[] }
 
 export interface DocsSource { dispose(): void }
 

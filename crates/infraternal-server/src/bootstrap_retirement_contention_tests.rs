@@ -13,23 +13,28 @@ async fn cancelled_invitation_retires_after_sqlite_busy_timeout() {
     let f = fixture_with_store(true, store, pool, prior).await;
     let paused = Arc::new(PausedInvitation { inner: f.backend.clone(), committed: tokio::sync::Notify::new(), release: tokio::sync::Notify::new() });
     let batch = start_backend(&f, "owner", paused.clone());
-    tokio::time::timeout(Duration::from_secs(5), paused.committed.notified()).await.unwrap();
+    super::wait_invitation_committed(&batch, &paused).await;
     let mut writer = f.pool.begin().await.unwrap();
     sqlx::query("UPDATE remote_hosts SET created_at=created_at").execute(&mut *writer).await.unwrap();
     let mut changed = batch.subscribe();
     drop(batch);
     // The short storage timeout forces BUSY before the writer is released. The
     // caller may stop waiting; the exact retirement operation must remain owned.
-    tokio::time::timeout(Duration::from_secs(12), async { while changed.changed().await.is_ok() {} }).await.unwrap();
+    tokio::time::timeout(super::TEST_HANG_BOUND, async {
+        while changed.changed().await.is_ok() {}
+    })
+    .await
+    .expect("cancelled bootstrap batch did not close its event stream");
     writer.rollback().await.unwrap();
-    let retired = tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(super::TEST_HANG_BOUND, async {
         loop {
             let live: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_hosts WHERE revoked_at IS NULL").fetch_one(&f.pool).await.unwrap();
-            if live == 1 { return; }
+            if live == 1 { break; }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await;
-    assert!(retired.is_ok(), "retirement stopped after SQLite BUSY instead of taking the next writer slot");
+    })
+    .await
+    .expect("retirement did not complete after the SQLite writer was released");
     assert!(f.backend.attempts.lock().unwrap().is_empty());
     f.pool.close().await;
     std::fs::remove_dir_all(root).unwrap();

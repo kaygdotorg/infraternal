@@ -2,7 +2,7 @@
 import { validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 import { AuthError } from "./auth";
-import { startRecovery, replacePasskey, type RecoveryRequest } from "./recovery-auth";
+import { startRecovery, getRecoveryStatus, replacePasskey, type RecoveryRequest } from "./recovery-auth";
 import { recoveryWords } from "./recovery-words";
 import { recoveryUiEnabled } from "./recovery-ui";
 import { swapCard } from "./auth-motion";
@@ -30,7 +30,7 @@ export function mountRecovery(host: HTMLElement, back: () => void,
   let request: RecoveryRequest | undefined;
   let finish: (() => Promise<void>) | undefined, acknowledged: (() => void) | undefined;
   let rejectAcknowledgement: ((failure: unknown) => void) | undefined;
-  let readyTimer = 0, readyClock = 0;
+  let readyTimer = 0, readyClock = 0, serverReady = false, refreshing = false;
   const lifecycle = new AbortController();
   let renderedStep = -1;
   let paneObserver: ResizeObserver | undefined;
@@ -48,16 +48,16 @@ export function mountRecovery(host: HTMLElement, back: () => void,
     if (busy || finish) return;
     lifecycle.abort(); window.clearTimeout(readyTimer); paneObserver?.disconnect(); words.fill(""); request = undefined; back();
   });
-  // Relative monotonic time is calibrated from server duration; wall-clock skew
-  // cannot turn a waiting request into Ready now. Foreground resync covers sleep.
+  // This local estimate schedules status reads only. Readiness comes exclusively
+  // from a server reply, since its measured uptime can pause across restarts.
   function remainingMs(): number { return Math.max(0, readyClock - performance.now()); }
   function ready(): boolean {
     if (step === 0) return /^[a-z0-9_-]{2,32}$/.test(username) && validWords();
-    if (step === 1) return request !== undefined && remainingMs() === 0;
+    if (step === 1) return request !== undefined && serverReady;
     return step !== 3 || saved;
   }
   function validWords(): boolean { return words.every((word) => dictionary.has(word)) && validateMnemonic(words.join(" "), wordlist); }
-  function update(): void { button.disabled = busy || !ready(); }
+  function update(): void { button.disabled = busy || refreshing || !ready(); }
   function render(): void {
     markMotion(instant);
     const viewport = card.querySelector<HTMLElement>(".auth-viewport")!;
@@ -84,14 +84,14 @@ export function mountRecovery(host: HTMLElement, back: () => void,
     pane.querySelector<HTMLElement>("h1")!.textContent = titles[step]!;
     pane.querySelector<HTMLElement>(".auth-lede")!.textContent = [
       "Enter your username and the 24 words you saved. You can paste the whole key into any word field.",
-      request?.delay_seconds === 0 ? "Recovery is ready. You can now create a replacement passkey." : "Recovery waits 24 hours. A signed-in device can cancel it. You can close this page and resume with your words in any browser. The original deadline stays the same.",
+      serverReady ? "Recovery is ready. You can now create a replacement passkey." : "Recovery waits 24 hours. A signed-in device can cancel it. You can close this page and resume with your words in any browser. The original deadline stays the same.",
       "Your new passkey will protect the same account key. Your saved SSH keys stay accessible.",
       "Your old recovery key will stop working. Store these new words somewhere safe and offline.",
     ][step]!;
     if (step === 0) renderEntry();
     else if (step === 1) {
       body.innerHTML = '<p id="recovery-ready-time" role="status"></p>';
-      body.querySelector<HTMLElement>("p")!.textContent = request?.delay_seconds === 0 ? "Ready now" : `Available ${new Date(request!.ready_at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })} · ${Math.ceil(remainingMs() / 60_000)} minutes remaining`;
+      paintWait();
     } else if (step === 2) body.replaceChildren();
     else recoveryWords(body, nextWords, saved, (value) => { saved = value; update(); }, markMotion);
     button.querySelector<HTMLElement>("span")!.textContent = ["Start recovery", "Continue recovery", "Create passkey", "Open infraternal"][step]!;
@@ -104,16 +104,39 @@ export function mountRecovery(host: HTMLElement, back: () => void,
     paneObserver.observe(pane);
     renderedStep = step;
     update();
+    scheduleStatus();
+  }
+  function paintWait(): void {
+    const remaining = body.querySelector<HTMLElement>("#recovery-ready-time");
+    if (remaining) remaining.textContent = serverReady ? "Ready now" : remainingMs() === 0
+      ? "Checking recovery time…"
+      : `Available ${new Date(request!.ready_at * 1000).toLocaleString()} · ${Math.ceil(remainingMs() / 60_000)} minutes remaining`;
+    update();
+  }
+  function scheduleStatus(): void {
     window.clearTimeout(readyTimer);
-    if (step === 1 && !ready()) {
-      const checkReady = (): void => {
-        if (!card.isConnected || step !== 1) return;
-        const remaining = body.querySelector<HTMLElement>("#recovery-ready-time");
-        if (remaining) remaining.textContent = ready() ? "Ready now" : `${Math.ceil(remainingMs() / 60_000)} minutes remaining · Available ${new Date(request!.ready_at * 1000).toLocaleString()}`;
-        update();
-        if (!ready()) readyTimer = window.setTimeout(checkReady, Math.min(60_000, Math.max(1, remainingMs())));
-      };
-      readyTimer = window.setTimeout(checkReady, Math.min(60_000, Math.max(1, remainingMs())));
+    if (step !== 1 || serverReady || !card.isConnected) return;
+    readyTimer = window.setTimeout(() => { void refreshStatus(); },
+      remainingMs() > 0 ? Math.min(60_000, remainingMs()) : 60_000);
+  }
+  async function refreshStatus(): Promise<void> {
+    if (!card.isConnected || step !== 1 || busy || refreshing || !request) return;
+    const previous = request;
+    refreshing = true; serverReady = false; paintWait();
+    // An earlier ready reply must not survive a failed foreground refresh.
+    card.querySelector<HTMLElement>(".auth-lede")!.textContent = "Checking recovery time with the server.";
+    try {
+      const status = await getRecoveryStatus(previous.token);
+      if (!card.isConnected || step !== 1 || request !== previous) return;
+      request = { ...previous, delay_seconds: status.delay_seconds, ready_at: status.ready_at };
+      serverReady = status.ready;
+      readyClock = performance.now() + status.delay_seconds * 1000;
+      error.textContent = "";
+    } catch {
+      if (card.isConnected) error.textContent = "The recovery time could not be refreshed. We will check again shortly.";
+    } finally {
+      refreshing = false;
+      if (card.isConnected && step === 1) render();
     }
   }
   function renderEntry(): void {
@@ -167,7 +190,7 @@ export function mountRecovery(host: HTMLElement, back: () => void,
     busy = true; update(); markMotion(true); error.textContent = "";
     const waiting = loading(button.querySelector<HTMLElement>(".busy-count")!, 400);
     try {
-      if (step === 0) { request = await startRecovery(username, words.join(" ")); readyClock = performance.now() + request.delay_seconds * 1000; step = 1; }
+      if (step === 0) { request = await startRecovery(username, words.join(" ")); readyClock = performance.now() + request.delay_seconds * 1000; serverReady = request.delay_seconds === 0; step = 1; }
       else if (step === 1) { step = 2; }
       else if (step === 2) {
         const result = await replacePasskey(request!.token, words.join(" "), async (rotated, commit) => {
@@ -197,17 +220,7 @@ export function mountRecovery(host: HTMLElement, back: () => void,
   }
   document.addEventListener("visibilitychange", () => {
     if (!card.isConnected) { lifecycle.abort(); words.fill(""); return; }
-    if (document.hidden || step !== 1 || busy || !request) return;
-    const previous = request;
-    busy = true; update();
-    const waiting = loading(button.querySelector<HTMLElement>(".busy-count")!, 400);
-    void startRecovery(username, words.join(" ")).then((resumed) => {
-      if (!card.isConnected || step !== 1 || request !== previous) return;
-      request = resumed;
-      readyClock = performance.now() + resumed.delay_seconds * 1000;
-    }).catch(() => {
-      if (card.isConnected) error.textContent = "The recovery time could not be refreshed. Reopen recovery to check it.";
-    }).finally(() => { waiting.done(); busy = false; if (card.isConnected) render(); });
+    if (!document.hidden) void refreshStatus();
   }, { signal: lifecycle.signal });
   render();
 }

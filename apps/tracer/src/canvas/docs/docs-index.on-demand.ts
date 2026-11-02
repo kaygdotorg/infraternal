@@ -3,9 +3,10 @@
  * The docs index and everything made from it (#302). Loaded when the browser is idle after start-up or at the first ⌘K
  * (docs-source.ts), so none of it is part of the canvas.
  *
- * - The palette rows: a row per page, and a query-only row per heading. Heading rows show only when something is typed. The
- *   palette finds a page by its title and a heading by its text, never by a summary. Action ids are `canvas:docs:<slug>` and
- *   `canvas:docs:<slug>#<heading>`.
+ * - The palette rows: a row per section, a row per page and a query-only row per heading (D317). Heading rows show only when something
+ *   is typed. The palette finds a section or page by its title and a heading by its text, never by a summary. A page's row reads
+ *   `Section › Page`, so typing a section's name lists its pages too. Action ids are `canvas:docs:<section>/<page>` and
+ *   `canvas:docs:<section>/<page>#<heading>`.
  * - The Docs view (views/docs.ts), offered next to the others once the index is known and the canvas has views, and put back when
  *   a scene replaced every view (the canvas says so with `tracer:canvas-views`).
  * - A palette action flies to the page's window in the Docs view (docs-body.on-demand.ts), at the heading when one was chosen.
@@ -19,7 +20,7 @@ import type { DocsIndexPage } from "./docs-source";
 
 export const DOCS_ACTION = "canvas:docs:";
 
-/** Splits `canvas:docs:<slug>#<heading>`; anything else is not ours. */
+/** Splits `canvas:docs:<section>/<page>#<heading>`; anything else is not ours. */
 export function parseDocsAction(action: string | undefined): { slug: string; heading?: string } | undefined {
   if (!action?.startsWith(DOCS_ACTION)) return undefined;
   const [slug, heading] = action.slice(DOCS_ACTION.length).split("#", 2);
@@ -28,11 +29,18 @@ export function parseDocsAction(action: string | undefined): { slug: string; hea
 
 /** The rows for an index. Pure, so it is tested without a browser. */
 export function docsRows(pages: readonly DocsIndexPage[]): PaletteEntry[] {
-  return pages.flatMap((page) => [
-    // The summary is for reading; only the title is searched.
-    { group: "Docs", glyph: "i", icon: viewIcon("docs"), label: page.title, hint: page.summary, search: "", action: `${DOCS_ACTION}${page.slug}` },
-    ...page.headings.map((heading): PaletteEntry => ({ group: "Docs", glyph: "§", icon: viewIcon("docs"), label: heading.text, hint: page.title, search: "", queryOnly: true, action: `${DOCS_ACTION}${page.slug}#${heading.id}` })),
-  ]);
+  const titles = new Map(pages.map((page) => [page.slug, page.title]));
+  return pages.flatMap((page) => {
+    const parent = page.parent ? titles.get(page.parent) : undefined;
+    const trail = parent ? `${parent} › ${page.title}` : page.title;
+    const members = page.section ? pages.filter((member) => member.parent === page.slug).length : 0;
+    // A section says how many pages it holds; one with none yet says what it is about. The summary is for reading; only titles are searched.
+    const hint = members > 0 ? `${members} ${members === 1 ? "page" : "pages"}` : page.summary;
+    return [
+      { group: "Docs", glyph: "i", icon: viewIcon("docs"), label: trail, hint, search: "", action: `${DOCS_ACTION}${page.slug}` },
+      ...page.headings.map((heading): PaletteEntry => ({ group: "Docs", glyph: "§", icon: viewIcon("docs"), label: heading.text, hint: trail, search: "", queryOnly: true, action: `${DOCS_ACTION}${page.slug}#${heading.id}` })),
+    ];
+  });
 }
 
 /** Fetches `/docs/index.json` (docs-build.ts); rejects when there is no docs tree or it is not an index. */

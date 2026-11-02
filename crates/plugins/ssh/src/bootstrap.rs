@@ -113,6 +113,16 @@ pub trait Backend: Send + Sync {
     fn enrollment_origin(&self) -> Option<String> {
         None
     }
+    /// Reject a persisted duplicate before staging a payload on the SSH host.
+    /// The later invitation reservation still serializes concurrent attempts.
+    fn preflight_existing_host<'a>(
+        &'a self,
+        _authority: &'a Authority,
+        _target: &'a Target,
+        _lookup: Option<String>,
+    ) -> Operation<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
     fn invitation<'a>(
         &'a self,
         authority: &'a Authority,
@@ -1080,6 +1090,7 @@ impl Bootstrap {
                 }
                 result => result?,
             }
+            let lookup = session.trust_lookup();
             if let Some(previous) = previous {
                 // Only this server's durable failed-host binding finishes the
                 // earlier setup without asking; anything else still asks (#230).
@@ -1090,7 +1101,7 @@ impl Bootstrap {
                         target,
                         &check,
                         previous.host,
-                        session.trust_lookup(),
+                        lookup.clone(),
                     )
                     .await?;
                 self.await_start_fresh(
@@ -1103,6 +1114,13 @@ impl Bootstrap {
                     automatic,
                 )
                 .await?;
+            }
+            // Existing remote identities must be reported before the first
+            // payload is staged, even if the replacement binary is unavailable.
+            if server_origin.is_some() {
+                self.backend
+                    .preflight_existing_host(&batch.authority, target, lookup.clone())
+                    .await?;
             }
             // Public HTTPS must be reachable and the host key prepared before the
             // backend creates the one-use invitation. The staged transaction remains
@@ -1139,20 +1157,14 @@ impl Bootstrap {
                         &batch.authority,
                         target,
                         &check,
-                        session.trust_lookup(),
+                        lookup.clone(),
                         binding,
                         &mut register,
                     )
                     .await?
             } else {
                 self.backend
-                    .invitation_registered(
-                        &batch.authority,
-                        target,
-                        &check,
-                        session.trust_lookup(),
-                        &mut register,
-                    )
+                    .invitation_registered(&batch.authority, target, &check, lookup, &mut register)
                     .await?
             };
             let key_prepared = server_origin.is_some();

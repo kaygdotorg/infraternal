@@ -3138,7 +3138,7 @@ async fn audit_recovery_after_page_discard_can_resume_at_original_deadline() {
         "AUDIT discarded page: retry_at_24h_denied={denied_at_day}; retry_at_48h_ready_offset_hours={}",
         (ready - NOW) / 3600
     );
-    assert_eq!(ready, NOW + DAY);
+    assert_eq!(ready, NOW + 3 * DAY);
     assert!(
         !denied_at_day,
         "re-entering correct words after 24h cannot recover the pending capability; denied until 48h then another 24h wait"
@@ -3184,10 +3184,10 @@ async fn recovery_audit_commits_once_with_start_cancel_and_complete() {
         .await
         .unwrap();
     assert_eq!(ready, again);
-    assert!(f.auth.legacy_ready(&token, NOW + DAY).await.is_err());
+    assert!(f.auth.legacy_ready(&token, NOW + 1).await.is_err());
     f.auth.recovery_cancel(&f.session, NOW + 2).await.unwrap();
     f.auth.recovery_cancel(&f.session, NOW + 3).await.unwrap();
-    assert!(f.auth.legacy_ready(&next, NOW + DAY).await.is_err());
+    assert!(f.auth.legacy_ready(&next, NOW + 3).await.is_err());
     let (token, _) = f
         .auth
         .recovery_resume(&f.user, f.words.clone(), NOW + 4)
@@ -3388,6 +3388,9 @@ mod reviewer_tests;
 #[path = "rotation_tests.rs"]
 mod rotation_tests;
 
+#[path = "recovery_restart_tests.rs"]
+mod recovery_restart_tests;
+
 #[cfg(feature = "remote")]
 #[path = "ca_membership_tests.rs"]
 mod ca_membership_tests;
@@ -3455,3 +3458,6 @@ async fn account_logout_does_not_notify_another_account() {
 
 #[path = "logout_commit_tests.rs"]
 mod logout_commit;
+
+#[path = "api_expiry_tests.rs"]
+mod api_expiry;

@@ -4,7 +4,7 @@
  *
  * - Activation: a press on a window makes it the active one (accent hairline) without focusing input, so no
  *   on-screen keyboard appears; the second press types. The binding is told, so the session can take focus.
- * - The pill moves the window (`move.ts`); it opens nothing. A touch long-press on a terminal's pill shows where
+ * - The pill moves the window (`move.on-demand.ts`); it opens nothing. A touch long-press on a terminal's pill shows where
  *   its host can reach (the mesh module, when there is one).
  * - Resizing is the shared engine in packages/ui (`window-resize.ts`); here it sets the column width and the
  *   window height. Split windows share their column and are not resizable on their own.
@@ -17,7 +17,7 @@ import type { Ctx, ViewRec, WinRec } from "../context";
 import type { WindowModel } from "../model/types";
 import { ICON, SESSION_ICON, iconFor } from "../views/icons";
 import { isInteractive, isTerminal, makeBody } from "../views/body";
-import { beginMove } from "./move";
+import { onDemand, whenIdle } from "../../on-demand";
 import { coarse } from "../dom";
 import { scrollerOf } from "../layout/columns";
 import { drawnWidthOf, setColumnWidth } from "../layout/column-els";
@@ -25,9 +25,17 @@ import { maxColumnWidth } from "../window-sizes";
 import { currentUiScale } from "../../../../../packages/ui/src/ui-scale";
 import { RecentList } from "../recency";
 
+/**
+ * Moving a window is not part of the first screen: its code is its own chunk (D188). It is fetched as soon as the page is idle after the
+ * first window is made (within 200 ms), and again (a no-op once it is there) on the first press of a pill, so a drag finds it loaded.
+ */
+let moveChunk: Promise<typeof import("./move.on-demand")> | undefined;
+const loadMove = (): Promise<typeof import("./move.on-demand")> => (moveChunk ??= onDemand(() => import("./move.on-demand")));
+
 export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   const actions: WindowAction[] = [];
   const rec: WinRec = {} as WinRec;
+  if (!moveChunk) whenIdle(() => void loadMove(), 200);
   // The window's kind decides what it can do: only a terminal has a split control.
   const readOnly = Boolean(c.view.team);
   // On a touch device the header keeps only Close (TASTE: phone headers carry two actions at most); splits and the
@@ -137,14 +145,20 @@ function wireWindow(cx: Ctx, rec: WinRec): void {
     const touch = e.pointerType !== "mouse";
     press = { id: e.pointerId, x: e.clientX, y: e.clientY, touch, timer: 0 };
     pill.setPointerCapture(e.pointerId);
+    void loadMove(); // the drag code is fetched while the finger is down, so it is there by the time the pill has moved 6 px
   }, { signal });
+  let latest: PointerEvent | undefined;
   pill.addEventListener("pointermove", (e) => {
+    if (!press && latest && e.pointerId === latest.pointerId) latest = e; // a drag waiting for its chunk follows the pointer
     if (!press || e.pointerId !== press.id) return;
     if (Math.hypot(e.clientX - press.x, e.clientY - press.y) < 6) return;
     window.clearTimeout(press.timer);
     const start = press;
     press = undefined;
-    beginMove(cx, rec, e, start);
+    // A finger lifted before the chunk arrived has ended the press: starting a drag then would leave a window stuck to nothing.
+    // The drag starts from where the pointer is when the chunk arrives, not from where it was at 6 px.
+    latest = e;
+    void loadMove().then((m) => { if (pill.hasPointerCapture(start.id)) m.beginMove(cx, rec, latest!, start); });
   }, { signal });
   const release = (e: PointerEvent): void => {
     if (!press || e.pointerId !== press.id) return;

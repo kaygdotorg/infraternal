@@ -92,6 +92,8 @@ export interface CoreScreen {
   registerTerminal(client: TerminalClient): () => void;
   /** The terminal the key tray and the paste button talk to; none while no terminal window is active. */
   setActiveTerminal(client: TerminalClient | undefined): void;
+  /** Whether a vertical wheel of this sign is the active terminal's to take (D275). */
+  wheelUse(deltaY: number): boolean;
   /** Frees every terminal canvas's pixels (a page that is hidden); `restoreSurface` draws them again from the terminal state. */
   releaseSurface(): void;
   restoreSurface(): void;
@@ -1050,7 +1052,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const rowHeight = (): number => keysRowEl.offsetHeight || 46;
   const paintRow = (v: number): void => { rowsEl.style.transform = v === 0 ? "" : `translateY(${-v * rowHeight()}px)`; };
   // A row is one 46 px step: the spring rests under a quarter of a device pixel of it (canvas/springs.ts).
-  const rowSpring = restAt(new Spring(1, (v) => { if (canvasRowEl.hidden) { rowsEl.style.transform = ""; return; } paintRow(v); }, { visualDuration: 0.38, bounce: 0.12 }), quarterDevicePx() / 46);
+  const rowSpring = restAt(new Spring(1, (v) => { if (canvasRowEl.hidden) { rowsEl.style.transform = ""; return; } paintRow(v); }, { visualDuration: 0.38 }), quarterDevicePx() / 46);
   const settleRow = (index: number, instant = false): void => {
     rowIndex = index;
     stage.dataset.row = index === 0 ? "canvas" : "keys";
@@ -1178,9 +1180,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
         if (b.hidden) continue;
         const now = b.getBoundingClientRect().left;
         const dx = was === undefined ? 0 : was - now;
-        if (was === undefined) { new Spring(1, (p) => { b.style.opacity = p === 0 ? "" : String(1 - p); b.style.transform = p === 0 ? "" : `scale(${1 - 0.4 * p})`; }, { visualDuration: 0.3, bounce: 0.2 }).set(0); continue; }
+        if (was === undefined) { new Spring(1, (p) => { b.style.opacity = p === 0 ? "" : String(1 - p); b.style.transform = p === 0 ? "" : `scale(${1 - 0.4 * p})`; }, { visualDuration: 0.3 }).set(0); continue; }
         if (Math.abs(dx) < 1) continue;
-        new Spring(1, (p) => { b.style.transform = p === 0 ? "" : `translateX(${dx * p}px)`; }, { visualDuration: 0.36, bounce: 0.18 }).set(0);
+        new Spring(1, (p) => { b.style.transform = p === 0 ? "" : `translateX(${dx * p}px)`; }, { visualDuration: 0.36 }).set(0);
       }
     }
   };
@@ -1219,7 +1221,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   applyPrefs(false);
 
   // ---- long-press the toolbar: edit it in place ---------------------------------------------------------------
-  // Controls wiggle, a drag reorders them (the neighbours part, the drop bounces) within a row or across
+  // Controls wiggle, a drag reorders them (the neighbours part, the drop settles) within a row or across
   // rows (drag up for the canvas row, down for the key row), a badge hides one, and a tray of hidden
   // controls slides up with a plus on each. Done, or a tap outside, ends it. It edits the same layout as
   // Settings, Toolbar (account layout, or this device's override).
@@ -1274,7 +1276,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     editTray = undefined;
     if (tray) {
       if (matchMedia("(prefers-reduced-motion: reduce)").matches) tray.remove();
-      else new Spring(0, (v) => { tray.style.transform = `translateY(${v * 24}px)`; tray.style.opacity = String(1 - v); if (v >= 1) tray.remove(); }, { visualDuration: 0.25, bounce: 0 }).set(1);
+      else new Spring(0, (v) => { tray.style.transform = `translateY(${v * 24}px)`; tray.style.opacity = String(1 - v); if (v >= 1) tray.remove(); }, { visualDuration: 0.25 }).set(1);
     }
     buzz(6);
   };
@@ -1292,7 +1294,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     editTray = tray;
     paintEditTray();
     paintBadges();
-    if (!matchMedia("(prefers-reduced-motion: reduce)").matches) new Spring(1, (v) => { tray.style.transform = v === 0 ? "" : `translateY(${v * 28}px)`; tray.style.opacity = String(1 - v); }, { visualDuration: 0.4, bounce: 0.2 }).set(0);
+    if (!matchMedia("(prefers-reduced-motion: reduce)").matches) new Spring(1, (v) => { tray.style.transform = v === 0 ? "" : `translateY(${v * 28}px)`; tray.style.opacity = String(1 - v); }, { visualDuration: 0.4 }).set(0);
     document.addEventListener("pointerdown", outsideEdit, true);
   };
   // Long press (touch) starts it.
@@ -1360,7 +1362,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
         if (!reducedMotion) for (const [c, left] of before) {
           if (c === b) continue;
           const dx = left - c.getBoundingClientRect().left;
-          if (Math.abs(dx) > 1) new Spring(1, (p) => { c.style.transform = p === 0 ? "" : `translateX(${dx * p}px)`; }, { visualDuration: 0.3, bounce: 0.18 }).set(0);
+          if (Math.abs(dx) > 1) new Spring(1, (p) => { c.style.transform = p === 0 ? "" : `translateX(${dx * p}px)`; }, { visualDuration: 0.3 }).set(0);
         }
       }
     };
@@ -1378,7 +1380,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       const base = g.style.transform;
       const m = /translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(base);
       const sx = m ? Number(m[1]) : 0, sy = m ? Number(m[2]) : 0;
-      new Spring(0, (v) => { g.style.transform = `translate(${sx + dx * v}px, ${sy + dy * v}px) scale(${1.14 - 0.14 * Math.min(1, v)})`; if (v === 1) land(); }, { visualDuration: 0.34, bounce: 0.3 }).set(1);
+      new Spring(0, (v) => { g.style.transform = `translate(${sx + dx * v}px, ${sy + dy * v}px) scale(${1.14 - 0.14 * Math.min(1, v)})`; if (v === 1) land(); }, { visualDuration: 0.34 }).set(1);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", end);
@@ -1498,6 +1500,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     },
     releaseSurface() { for (const c of clients) c.releaseSurface(); },
     restoreSurface() { for (const c of clients) c.restoreSurface(); },
+    wheelUse: (deltaY) => !!client?.wheelUse(deltaY),
     setActiveTerminal(value) {
       client = value;
       if (value) for (const name of MODIFIER_KEYS) value.setInputModifier(name, modifiers[name]);

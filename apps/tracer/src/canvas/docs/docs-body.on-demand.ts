@@ -3,7 +3,7 @@
  * The body of a window in the Docs view (#302): one docs page, read inside the canvas.
  *
  * The Docs view (views/docs.ts) has a window of kind `docs` for each page, tiled like Settings. This file is what goes inside such a
- * window. The body is `/docs/<slug>/fragment.html`, the page the docs build rendered without its chrome (docs-build.ts: summary,
+ * window. The body is `/docs/<section>/<page>/fragment.html`, the page the docs build rendered without its chrome (docs-build.ts: summary,
  * table of contents, text, footer), set in `docs-reader.css` and `doc.css` with the app's own colours and type scale, so it follows
  * the theme the person picked. The window scrolls by itself. The table of contents is a sticky column when the window is wide and a
  * folded row when it is not (doc.css decides by the window's width).
@@ -15,6 +15,7 @@
  * of the canvas chunk. The page itself is fetched when its window is drawn, so a Docs view nobody visits costs nothing.
  */
 import type { Ctx } from "../context";
+import { enhanceDoc } from "./doc-enhance";
 
 interface Mounted { scroller: HTMLElement; article: HTMLElement; ready: Promise<void> }
 const mounted = new Map<string, Mounted>();
@@ -63,10 +64,11 @@ function keepInCanvas(cx: Ctx, slug: string, page: Mounted, event: MouseEvent): 
   if (!link || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
   const href = link.getAttribute("href") ?? "";
   if (href.startsWith("#")) { event.preventDefault(); goTo(page, decodeURIComponent(href.slice(1))); return; }
-  const docs = /^\/docs\/([^/#?]+)\/?(?:#(.+))?$/.exec(href);
-  if (docs && docs[1] !== slug && cx.views.get("docs")?.wins.has(`d-${docs[1]}`)) {
+  const docs = /^\/docs\/([a-z0-9/-]*?)\/?(?:#(.+))?$/.exec(href);
+  const target = docs ? docs[1] || "index" : undefined;
+  if (docs && target && target !== slug && cx.views.get("docs")?.wins.has(`d-${target}`)) {
     event.preventDefault();
-    openDocsPage(cx, docs[1]!, docs[2] ? decodeURIComponent(docs[2]) : undefined);
+    openDocsPage(cx, target, docs[2] ? decodeURIComponent(docs[2]) : undefined);
     return;
   }
   link.target = "_blank";
@@ -84,7 +86,7 @@ export function mountDocsBody(cx: Ctx, slug: string, body: HTMLElement): () => v
   let gone = false;
   const ready = (async () => {
     try {
-      const [, response] = await Promise.all([loadStyle(), fetch(`/docs/${encodeURIComponent(slug)}/fragment.html`)]);
+      const [, response] = await Promise.all([loadStyle(), fetch(`/docs/${slug.split("/").map(encodeURIComponent).join("/")}/fragment.html`)]);
       if (!response.ok) throw new Error(String(response.status));
       const html = await response.text();
       if (gone) return;
@@ -96,11 +98,15 @@ export function mountDocsBody(cx: Ctx, slug: string, body: HTMLElement): () => v
   })();
   const page: Mounted = { scroller, article, ready };
   mounted.set(slug, page);
+  // The section being read in the contents, and copying code (doc-enhance.ts); started when the page is in the window.
+  let stopEnhancing = (): void => {};
+  void ready.then(() => { if (!gone) stopEnhancing = enhanceDoc(article, scroller); });
   const onClick = (event: MouseEvent): void => keepInCanvas(cx, slug, page, event);
   article.addEventListener("click", onClick);
   if (wanted.has(slug)) { const id = wanted.get(slug); wanted.delete(slug); showHeading(slug, id); }
   return () => {
     gone = true;
+    stopEnhancing();
     article.removeEventListener("click", onClick);
     if (mounted.get(slug) === page) mounted.delete(slug);
     scroller.remove();

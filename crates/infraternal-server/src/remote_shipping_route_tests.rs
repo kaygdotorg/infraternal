@@ -20,7 +20,7 @@ async fn review_default_server_must_register_remote_join() {
         behind_proxy: false,
         trusted_proxies: Vec::new(),
     };
-    let (app, _, _, _) = build_router_core(
+    let (app, _, _, _, _) = build_router_core(
         config,
         Some(EmbeddedAgent::unavailable()),
         None,
@@ -123,7 +123,7 @@ async fn independent_review_configured_server_mounts_ca_unlock_routes() {
         identity: Some(identity),
         roots: vec![issuer],
     };
-    let (app, _, listeners, _) = build_router_core(
+    let (app, _, listeners, _, _) = build_router_core(
         config,
         Some(EmbeddedAgent::unavailable()),
         Some(remote.enrollment.clone()),

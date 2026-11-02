@@ -13,6 +13,8 @@ mkdir -m 700 "$control/runtime"
 export INFRATERNAL_TEST_STATE_ROOT="$control/test-state"
 export XDG_RUNTIME_DIR="$control/runtime"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$control/no-bus"
+export INFRATERNAL_REMOTE_LINK_TRACE=1
+export PATH="/sbin:/usr/sbin:$PATH"
 fixture_uid="$(id -u)"
 fixture_gid="$(id -g)"
 trap 'rm -rf -- "$control"' EXIT
@@ -31,7 +33,7 @@ ip rule add pref 100 lookup local
 sysctl -w net.ipv4.ip_unprivileged_port_start=0 >/dev/null
 printf 'namespace_network app_listener=tcp443 blocked_agent_port=tcp_udp7443\n'
 unshare --user --map-user="$1" --map-group="$2" \
-    "$3" --exact \
-    runtime::remote_demo_tests::remote_cli_enrollment_and_browser_terminal_443_without_agent_port \
-    --ignored --nocapture
+    "$3" \
+    runtime::remote_demo_tests::remote_cli_enrollment_and_browser_terminal_443 \
+    --ignored --nocapture --test-threads=1
 NAMESPACE

@@ -32,7 +32,9 @@ const classes = JSON.parse(await readFile(`${dist}/chunks.json`, "utf8")) as { c
 const onDemandChunks = new Map<string, { gzip: number; brotli: number }>();
 const totals = { critical: { identity: 0, gzip: 0, brotli: 0 }, deferred: { identity: 0, gzip: 0, brotli: 0 }, onDemand: { identity: 0, gzip: 0, brotli: 0 } };
 for (const name of await readdir(dist, { recursive: true })) {
-  if (!name.endsWith(".js")) continue;
+  // The docs pages' own script (docs/doc.js, docs-build.ts) is a file of its own, loaded only by a standalone docs page: it is not
+  // part of the app's bundle and has no chunk class. (The canvas reader runs the same code from an on-demand chunk, which is counted.)
+  if (!name.endsWith(".js") || name.startsWith("docs/")) continue;
   const klass = classes.critical.includes(name) ? "critical" : classes.deferred.includes(name) ? "deferred" : classes.onDemand.includes(name) ? "onDemand" : undefined;
   if (!klass) throw new Error(`${name} is in no chunk class: chunks.json is stale, rebuild`);
   // The server gives a year-long immutable cache only to `chunk-<8 alphanumerics>.js` (web_assets.rs). Every split

@@ -84,12 +84,15 @@ impl Auth {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query("DELETE FROM approvals WHERE token_hash=? AND expires>? AND user_id IS NOT NULL RETURNING user_id,device,scopes")
             .bind(hash(token)).bind(now).fetch_optional(&mut *tx).await?.ok_or(Error::Denied)?;
+        let now = api_key_time(&mut tx, now).await?;
         let key = random();
-        sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes) VALUES (?,?,?,?)")
+        sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at) VALUES (?,?,?,?,?,?+(SELECT api_key_lifetime_days*86400 FROM server_settings WHERE id=1))")
             .bind(hash(&key))
             .bind(row.get::<String, _>("user_id"))
             .bind(row.get::<String, _>("device"))
             .bind(row.get::<String, _>("scopes"))
+            .bind(now)
+            .bind(now)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -98,13 +101,54 @@ impl Auth {
 
     /// Validate a CLI/MCP key for one explicit scope; no browser session or fresh-tap privilege.
     pub async fn api_authorize(&self, token: &str, scope: &str) -> Result<String> {
-        let row = sqlx::query("SELECT user_id,scopes FROM api_keys WHERE token_hash=?")
-            .bind(hash(token))
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or(Error::Denied)?;
+        let token_hash = hash(token);
+        // Serialize expiry, policy clamping, renewal and revocation. A dead row
+        // remains dead even if the owner subsequently lengthens the policy.
+        let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool).await?;
+        let row = sqlx::query("SELECT user_id,scopes,renewed_at,expires_at,dead,api_key_lifetime_days FROM api_keys CROSS JOIN server_settings WHERE server_settings.id=1 AND token_hash=?")
+            .bind(&token_hash).fetch_optional(&mut *tx).await?;
+        // Sample only after acquiring the writer and reading the key: pool or
+        // lock waits must not carry a pre-expiry timestamp into renewal.
+        let now = api_key_time(&mut tx, super::http::current_time(self)?).await?;
+        let Some(row) = row else {
+            tx.commit().await?;
+            return Err(Error::Denied);
+        };
+        let renewed_at: i64 = row.get("renewed_at");
+        let stored_expiry: i64 = row.get("expires_at");
+        let lifetime = row.get::<i64, _>("api_key_lifetime_days") * 86400;
+        let deadline = stored_expiry.min(renewed_at + lifetime);
+        if row.get::<bool, _>("dead") || deadline <= now {
+            sqlx::query("UPDATE api_keys SET dead=1,expires_at=? WHERE token_hash=? AND dead=0")
+                .bind(deadline)
+                .bind(&token_hash)
+                .execute(&mut *tx)
+                .await?;
+            // Denial must commit the tombstone, rather than roll it back.
+            tx.commit().await?;
+            return Err(Error::Denied);
+        }
         let scopes: Vec<String> = serde_json::from_str(row.get("scopes"))?;
-        if !scopes.iter().any(|s| s == scope) {
+        let allowed = scopes.iter().any(|s| s == scope);
+        if allowed && now.saturating_sub(renewed_at) >= 3600 {
+            sqlx::query(
+                "UPDATE api_keys SET renewed_at=?,expires_at=? WHERE token_hash=? AND dead=0",
+            )
+            .bind(now)
+            .bind(now + lifetime)
+            .bind(&token_hash)
+            .execute(&mut *tx)
+            .await?;
+        } else if deadline < stored_expiry {
+            // A shorter policy is permanent for this key until a valid renewal.
+            sqlx::query("UPDATE api_keys SET expires_at=? WHERE token_hash=? AND dead=0")
+                .bind(deadline)
+                .bind(&token_hash)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        if !allowed {
             return Err(Error::Denied);
         }
         Ok(row.get("user_id"))
@@ -132,4 +176,23 @@ impl Auth {
         let keys: Vec<Value> = rows.iter().map(|r| Ok(json!({"id":r.get::<String,_>("token_hash"),"device":r.get::<String,_>("device"),"scopes":serde_json::from_str::<Value>(r.get("scopes"))?}))).collect::<Result<_>>()?;
         Ok(json!(keys))
     }
+}
+
+/// The writer transaction serializes the persisted high-water mark with expiry.
+/// Only a new maximum writes; rollback and restart cannot make expiry time regress.
+pub(super) async fn api_key_time(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    wall: i64,
+) -> Result<i64> {
+    let recorded: i64 =
+        sqlx::query_scalar("SELECT api_key_time_high_water FROM server_settings WHERE id=1")
+            .fetch_one(&mut **tx)
+            .await?;
+    if wall > recorded {
+        sqlx::query("UPDATE server_settings SET api_key_time_high_water=? WHERE id=1")
+            .bind(wall)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(wall.max(recorded))
 }

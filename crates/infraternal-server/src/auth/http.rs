@@ -192,7 +192,7 @@ async fn dispatch(
 }
 
 // Recovery authority needs a new sample after expensive verification and writer-lock waits.
-fn current_time(auth: &Auth) -> super::Result<i64> {
+pub(super) fn current_time(auth: &Auth) -> super::Result<i64> {
     #[cfg(test)]
     if let Some(now) = auth.test_http_time() {
         return Ok(now);
@@ -321,6 +321,10 @@ async fn execute(
             .await?;
             json!({"ok":true})
         }
+        "recovery-status" => {
+            let b: Token = body(value)?;
+            auth.recovery_status(&b.token, now).await?
+        }
         "recovery-ready" => {
             let b: Token = body(value)?;
             auth.recovery_ready(&b.token, now).await?
@@ -345,6 +349,15 @@ async fn execute(
         "device-redeem" => {
             let b: Token = body(value)?;
             json!({"api_key":auth.device_redeem(&b.token, now).await?})
+        }
+        "security-settings" => {
+            let _: Empty = body(value)?;
+            auth.security_settings(cookie(headers)?, now).await?
+        }
+        "security-settings-update" => {
+            let b: super::security_settings::SecuritySettings = body(value)?;
+            auth.update_security_settings(cookie(headers)?, b, now)
+                .await?
         }
         "api-list" => auth.api_list(cookie(headers)?, now).await?,
         "api-revoke" => {

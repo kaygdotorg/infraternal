@@ -3,35 +3,38 @@
  * moved animates from where it was to where it is with the spring's curve. Only `transform` is animated, in world
  * units (the camera zoom is divided out), and as a Web Animation: the browser runs it on the compositor, so a reflow
  * costs the main thread nothing per frame (a per-frame style write per element was 80-100 ms of Layerize and Commit for
- * one close). The spring is sampled once per configuration into a `linear()` easing that overshoots like the spring
- * does. The caller measures first, changes the layout, then plays; a new measure of an element that is still animating
- * cancels it so the "first" position is always the true one. Reduced motion skips the animation.
+ * one close). The spring is sampled once per configuration into a `linear()` easing that settles like the spring
+ * does: critically damped, no value passes its end (TASTE §3, no overshoot). The caller measures first, changes the
+ * layout, then plays; a new measure of an element that is still animating cancels it so the "first" position is always the true one. Reduced motion skips the animation.
  */
-import { zetaOf } from "../../../../../packages/ui/src/spring";
+import type { SpringConfig } from "../../../../../packages/ui/src/spring";
+
+/** The duration-based spring config: critically damped, so it has no bounce to set. */
+type FlipSpring = Extract<SpringConfig, { visualDuration: number }>;
 
 export interface Flip {
   /** Records where the elements are now. */
   measure(nodes: Iterable<HTMLElement>): Map<HTMLElement, DOMRect>;
   /** Animates every element of `first` from its recorded box to its current one. `scale` also animates size. */
-  play(first: Map<HTMLElement, DOMRect>, scale?: boolean, cfg?: { visualDuration: number; bounce: number }): void;
+  play(first: Map<HTMLElement, DOMRect>, scale?: boolean, cfg?: FlipSpring): void;
   /** The elements of a view that take part in a reflow. */
   targets(colsEl: HTMLElement): HTMLElement[];
 }
 
 /** A spring's progress from 1 (where the element was) to 0 (where it is), sampled into a CSS easing. */
 const easings = new Map<string, { css: string; duration: number }>();
-function springEasing(cfg: { visualDuration: number; bounce: number }): { css: string; duration: number } {
-  const key = `${cfg.visualDuration}/${cfg.bounce}`;
+export function springEasing(cfg: FlipSpring): { css: string; duration: number } {
+  const key = String(cfg.visualDuration);
   const hit = easings.get(key);
   if (hit) return hit;
-  // The same physics as `Spring`: omega from the visual duration, damping from the bounce.
-  const omega = (2 * Math.PI) / (cfg.visualDuration * 1.2), k = omega * omega, c = 2 * zetaOf(cfg.bounce) * omega;
+  // The same physics as `Spring`: omega from the visual duration, damping ratio 1.
+  const omega = (2 * Math.PI) / (cfg.visualDuration * 1.2), k = omega * omega, c = 2 * omega;
   const h = 1 / 240, every = 4; // a sample every 1/60 s
   let x = 1, v = 0, t = 0;
   const points = [0];
   while (t < 3) {
     for (let i = 0; i < every; i++) { v += (-k * x - c * v) * h; x += v * h; t += h; }
-    points.push(1 - x);
+    points.push(Math.min(1, 1 - x)); // the explicit Euler steps must not nudge a sample past the end
     if (Math.abs(x) < 0.0005 && Math.abs(v) < 0.03) break;
   }
   points[points.length - 1] = 1;
@@ -58,7 +61,7 @@ export function createFlip(zoom: () => number, tick: () => void): Flip {
       }
       return out;
     },
-    play(first, scale = false, cfg = { visualDuration: 0.5, bounce: 0.22 }) {
+    play(first, scale = false, cfg = { visualDuration: 0.5 }) {
       if (reduced.matches) return;
       const z = zoom();
       const { css, duration } = springEasing(cfg);

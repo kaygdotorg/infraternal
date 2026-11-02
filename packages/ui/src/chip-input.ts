@@ -86,7 +86,7 @@ export function mountChipInput(host: HTMLElement, options: ChipInputOptions): Ch
     if (!gliding) return;
     field.style.height = `${value}px`;
     if (value === goal) { gliding = false; field.style.height = ""; }
-  }, { visualDuration: 0.3, bounce: 0.12 });
+  }, { visualDuration: 0.3 });
   const glide = (change: () => void): void => {
     const from = field.getBoundingClientRect().height;
     change();
@@ -119,7 +119,7 @@ export function mountChipInput(host: HTMLElement, options: ChipInputOptions): Ch
         if (value === 1) { element.style.transform = ""; element.style.opacity = ""; return; }
         element.style.transform = `scale(${0.86 + 0.14 * value})`;
         element.style.opacity = String(Math.min(1, Math.max(0, value)));
-      }, { visualDuration: 0.26, bounce: 0.22 });
+      }, { visualDuration: 0.26 });
       requestAnimationFrame(() => spring.set(1));
     }
     emit();

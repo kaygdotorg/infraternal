@@ -130,6 +130,26 @@ Ghostty instance and captures pending and confirmed glyphs in both themes at
 `$HOME/.cache/codex-scratch/tracer-<pid>/evidence/playwright/terminal-first-run-passkey-29742-esume-and-the-latency-probe/`;
 measured results and the 50 MB throughput comparison are recorded on issue #50.
 
+## User docs and their figures (#302)
+
+The pages under `docs/user/` are built into `<dist>/docs` by `build.ts` (`docs-build.ts`); `bun run docs` writes the same tree alone.
+A folder is a section (`20-terminal/`), its `index.md` is the section's overview and its other files are pages, so
+`20-terminal/10-multiplexer.md` is `/docs/terminal/multiplexer/` (the `NN-` only orders; folders nest one level only). A page that moved
+says where it used to be on one line, `<!-- Former slugs: multiplexer -->`, and the build writes a redirect page there. The build also
+fails when a string in the app source, a Settings catalog entry (`docs: { page, heading }`) or a link between pages names a page or heading
+that does not exist (`docs-anchors.ts`).
+Beyond plain Markdown a page may use GitHub-style alerts (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`), a folded
+reasoning block (`> [!WHY] Title`), a quick-facts block under a heading (`> [!FACTS]`, which the "?" preview reads from `index.json`),
+`[^name]` citations, quotes with a `> — Name` caption, and figures (`![Alt](figure:name "Caption")`, or `figure:name+clip`).
+`docs-extras.ts` and `docs-figure.ts` say what each becomes and what fails the build.
+
+The figures are captured from the product, not drawn. `bun run docs:figures` builds the preview build with the demo dataset (plain names:
+`docs-dataset.ts`), plays each entry of `figures/figures.ts` through the product's own UI at the desktop (2x) and phone (3x) sizes in ink
+and paper, refuses to take a picture while an internal name is on the page, and writes WebP stills, WebM clips and `manifest.json` into
+`docs/user/figures/`, which is git-ignored: the pictures are not committed (where the docs' media lives is undecided), and a page whose pictures
+are not there shows its caption under a "Figure pending" placeholder. Run it to see the figures in a local docs build. It needs a browser, so run it on a build VM
+through the build slots, never on the control host. `FIGURES_ONLY=name` re-captures one figure; `FIGURES_PREVIEW=<dir>` also writes PNGs.
+
 ## Browser test
 
 ```sh

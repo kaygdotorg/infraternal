@@ -161,6 +161,7 @@ export interface TerminalConfig {
   onScroll?: (scrolled: boolean) => void;
   onInputActivity?: () => void;
   onRecoveryPending?: (readyAt: number | undefined) => void;
+  onRecoveryCompleted?: (message: string) => void;
   traceMockServer?: boolean;
   /**
    * The connection this terminal's stream rides on. Terminals of one page share one (D183); without it the
@@ -498,6 +499,7 @@ export class TerminalClient {
     this.conn = config.connection ?? new MuxConnection({
       ...(config.traceMockServer ? { traceMockServer: true } : {}),
       ...(config.onRecoveryPending ? { onRecoveryPending: config.onRecoveryPending } : {}),
+      ...(config.onRecoveryCompleted ? { onRecoveryCompleted: config.onRecoveryCompleted } : {}),
       ...(config.onConnectionChange ? { onConnectionChange: config.onConnectionChange } : {}),
     });
     // The round trip is the connection's; every terminal on it reads it (prediction needs it, the pill shows it).
@@ -1228,6 +1230,19 @@ export class TerminalClient {
   /** A full host inventory retired this session; stop stream retries and retain any saved exit status. */
   markSessionGone(status?: number): void {
     this.endSession(status);
+  }
+
+  /**
+   * Whether a vertical wheel of this sign is the terminal's to take (D275): its scrollback can move that way, or a program
+   * owns the alternate screen and gets the arrows. Two reads from the renderer, no layout: it runs per wheel gesture.
+   */
+  wheelUse(deltaY: number): boolean {
+    const wasm = this.terminal.wasmTerm;
+    if (!wasm) return false;
+    if (wasm.isAlternateScreen()) return true;
+    // viewportY counts rows scrolled up from the live screen: a wheel up (negative deltaY) raises it.
+    const y = this.terminal.viewportY;
+    return deltaY < 0 ? y < wasm.getScrollbackLength() - 0.01 : y > 0.01;
   }
 
   /** The renderer's canvas, for a caller that keeps a picture of the last screen (the switch's ghost). */

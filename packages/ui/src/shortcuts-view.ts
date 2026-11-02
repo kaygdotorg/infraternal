@@ -3,7 +3,7 @@
  * no separate page or modal.
  *
  * The morph is one continuous shape. The panel is laid out once at its final size and a spring
- * (about 400 ms, a hair of bounce) opens a `clip-path: inset(... round r)` from the pill's
+ * (about 400 ms, critically damped) opens a `clip-path: inset(... round r)` from the pill's
  * rectangle to the whole panel, so width, height and corner radius move together and nothing
  * reflows. The pill underneath fades out over the first third (the panel has the same material,
  * so the shape reads as one), and the content fades in only after the shape has settled. Close
@@ -71,7 +71,7 @@ export function mountShortcutsView(options: ShortcutsViewOptions): ShortcutsView
     for (const node of content) node.style.opacity = show;
     pill.style.opacity = String(1 - smooth(0, 0.35, k));
   };
-  const spring = new Spring(0, apply, { visualDuration: 0.4, bounce: 0.1 });
+  const spring = new Spring(0, apply, { visualDuration: 0.4 });
 
   const build = (): HTMLElement => {
     const root = document.createElement("section");

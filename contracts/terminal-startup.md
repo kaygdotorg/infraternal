@@ -56,7 +56,7 @@ The notice is one question with three icon buttons, never the word "guard":
 Infraternal Multiplexer instead?" ✓ switches (the `apply` flow above: shared
 confirmation first, then a "Restore <file>" undo), ✗ keeps the other
 multiplexer (no write: the host's notice is already claimed), ? opens
-`docs/user/multiplexer.md` on the docs site. When no startup line can be edited,
+`docs/user/20-terminal/10-multiplexer.md` on the docs site (`/docs/terminal/multiplexer/`). When no startup line can be edited,
 ✓ copies the line instead. Each button has a tooltip and the same accessible
 name. The switches stay in Settings under Multiplexer.
 
