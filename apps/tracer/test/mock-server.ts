@@ -13,7 +13,14 @@ import { handleBootstrapHttp, serveProvisioning } from "./provisioning-double";
 import { serveSetup } from "./setup-double";
 import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
 import { sessionDevices, sessionHosts } from "./session-fixtures";
+import { renameDataset } from "../docs-dataset";
 import { createPerfSink } from "./perf-sink";
+
+/**
+ * Run for the docs' figures (`TRACER_DATASET=docs`, #302): every JSON answer carries the plain names of docs-dataset.ts, and the
+ * hosts and sessions are the docs' own (docs-fixtures.ts). Off everywhere else; the capture's server is the only one that sets it.
+ */
+const DOCS_DATASET = process.env.TRACER_DATASET === "docs";
 
 // Loopback unless a preview must be reachable on a private address (`TRACER_BIND_HOST`, e.g. a VM's mesh IP).
 const HOST = process.env.TRACER_BIND_HOST ?? "localhost";
@@ -734,7 +741,7 @@ async function authAction(
       if (unlockPending) return sendJson(response, 401, { error: "authorization failed" });
     case "unlock-session":
       if (!isAuthenticated(request) || !owner) return sendJson(response, 401, { error: "authorization failed" });
-      return sendJson(response, 200, { user_id: owner.userId, username: owner.username, display_name: owner.displayName, device: "test-double", fresh: 1, hostname: hostname() });
+      return sendJson(response, 200, { user_id: owner.userId, username: owner.username, display_name: owner.displayName, device: "test-double", fresh: 1, hostname: DOCS_DATASET ? "home-server" : hostname() });
     case "setup-start": {
       const username = body.username;
       const suppliedDisplayName = body.display_name;
@@ -1260,7 +1267,8 @@ function sendJson(response: ServerResponse, status: number, value: unknown): voi
   response.statusCode = status;
   response.setHeader("Content-Type", "application/json; charset=utf-8");
   response.setHeader("Cache-Control", "no-store");
-  response.end(JSON.stringify(value));
+  const text = JSON.stringify(value);
+  response.end(DOCS_DATASET ? renameDataset(text) : text);
 }
 
 function sameOrigin(request: IncomingMessage): boolean {
@@ -1311,8 +1319,8 @@ function setPreviewAuthCookie(response: ServerResponse, value: string): void {
 function makeMockOwner(): MockOwner {
   return {
     userId: randomUuid(),
-    username: "renderer_test",
-    displayName: "Renderer test",
+    username: DOCS_DATASET ? "maya" : "renderer_test",
+    displayName: DOCS_DATASET ? "Maya Patel" : "Renderer test",
     credentialId: newToken(),
     passkeyWrap: {},
     prfInput: newToken(),

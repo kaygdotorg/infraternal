@@ -165,7 +165,8 @@ async function linkTooltipLayout(
         labelRect.top >= tooltipRect.top && labelRect.bottom <= tooltipRect.bottom,
       tooltipIntersectsLinkRows: intersects(tooltipRect, linkRows),
       tooltipIntersectsPointer: intersects(tooltipRect, pointerRect),
-      tooltipArrowAligned: Math.abs(Number.parseFloat(arrow.style.top) - (position.dataset.side === "top" ? tooltipRect.height - 4 : -4)) < 0.75,
+      // The arrow's centre sits on the surface's edge facing the anchor (read from the boxes, not from a pixel constant in its style).
+      tooltipArrowAligned: Math.abs((arrow.getBoundingClientRect().top + arrow.getBoundingClientRect().height / 2) - (position.dataset.side === "top" ? tooltipRect.bottom : tooltipRect.top)) < 0.75,
     };
   }, { expected: target, pointer: point });
 }
@@ -472,7 +473,7 @@ test("touch tap opens a recognized terminal link", async ({ browser }) => {
   }
 });
 
-test("a plain tooltip keeps its one-line layout after a link tooltip", async ({ browser }) => {
+test("a plain tooltip keeps its wrapped layout after a link tooltip", async ({ browser }) => {
   test.setTimeout(90_000);
   const context = await browser.newContext({ baseURL, viewport: { width: 390, height: 844 } });
   try {
@@ -526,11 +527,14 @@ test("a plain tooltip keeps its one-line layout after a link tooltip", async ({ 
     await expect(page.locator(".tip-label:not(.is-leaving)")).toHaveText(`https://plain.example.test/${"x".repeat(420)}`);
     const afterLink = await measurePlainTooltip();
 
+    // The link preview's two-line clamp must not leak: a plain label is laid out the same as before it, and (#310, TASTE "A tooltip
+    // is as wide as its text") it wraps at the cap and shows all of its text instead of ending in an ellipsis.
     expect(afterLink).toEqual(beforeLink);
-    expect(afterLink.whiteSpace).toBe("nowrap");
-    expect(afterLink.textOverflow).toBe("ellipsis");
-    expect(afterLink.labelHeight).toBeLessThanOrEqual(afterLink.lineHeight + 1);
-    expect(afterLink.scrollWidth).toBeGreaterThan(afterLink.clientWidth);
+    expect(afterLink.whiteSpace).toBe("normal");
+    expect(afterLink.overflowWrap).toBe("anywhere");
+    expect(afterLink.textOverflow).not.toBe("ellipsis");
+    expect(afterLink.labelHeight).toBeGreaterThan(afterLink.lineHeight * 2);
+    expect(afterLink.scrollWidth).toBeLessThanOrEqual(afterLink.clientWidth + 1);
   } finally {
     await context.close();
   }

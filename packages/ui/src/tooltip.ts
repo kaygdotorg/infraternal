@@ -18,6 +18,10 @@
  * - Components can request a timed confirmation label with flashTip(); its temporary
  *   data-tip is restored when the label expires.
  * - Point-anchored calls can opt into two lines and a side for that call only.
+ * - Size: the surface is as wide as its label up to a cap (17.5rem, never wider than the viewport minus its margins) and
+ *   wraps beyond it; a label is never cut off with an ellipsis (only the opt-in two-line link preview is clamped). The
+ *   size is read back from a hidden copy of the surface, so it holds at every UI size. It flips to the other side when
+ *   its side does not fit, and shifts (arrow included) to stay inside the viewport.
  *
  * Which elements: anything with `data-tip`, plus every button or link that has an
  * aria-label and no visible text. The rule is therefore enforced automatically.
@@ -34,7 +38,7 @@ const GAP = 8, MARGIN = 8;
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 
 type Side = "top" | "bottom";
-/** Optional layout for one point-anchored tooltip; trigger tooltips keep their single-line layout. */
+/** Optional layout for one point-anchored tooltip: a clamped two-line preview (a long link). Every other tooltip shows its whole label. */
 export interface PointTooltipOptions {
   /** Permit a two-line label with the shared content-width rule. */
   lines?: 2;
@@ -43,7 +47,7 @@ export interface PointTooltipOptions {
 }
 const reduced = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-let pos: HTMLDivElement, surface: HTMLDivElement, arrow: HTMLDivElement, measure: HTMLSpanElement;
+let pos: HTMLDivElement, surface: HTMLDivElement, arrow: HTMLDivElement, measure: HTMLDivElement, measureSurface: HTMLDivElement;
 let current: HTMLElement | null = null;
 let openTimer = 0, closeTimer = 0, pressTimer = 0, warmUntil = 0, shown = false;
 let swallowClick = false, press0: { x: number; y: number } | null = null;
@@ -52,13 +56,14 @@ const temporaryTips = new WeakMap<HTMLElement, { previous: string | undefined; t
 
 const STYLE = `
 .tip-pos { position: fixed; left: 0; top: 0; z-index: 1002; pointer-events: none; will-change: transform; }
-.tip { position: relative; box-sizing: border-box; padding: 0.375rem 0.625rem; border-radius: 0.5rem; max-width: 17.5rem; overflow: hidden;
+.tip, .tip-sizer { position: relative; box-sizing: border-box; padding: 0.375rem 0.625rem; border-radius: 0.5rem; width: max-content; max-width: min(17.5rem, calc(100vw - 2 * ${MARGIN}px)); overflow: hidden;
   font: var(--fw-label, 500) var(--text-secondary, 0.75rem)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; }
-.tip-label.is-leaving { position: absolute; left: 0.625rem; top: 0.375rem; }
+.tip-label.is-leaving { position: absolute; left: 0.625rem; top: 0.375rem; white-space: nowrap; }
 .tip-arrow { position: absolute; left: 0; width: 0.5rem; height: 0.5rem; margin-left: -0.25rem; transform-origin: center;
   background: var(--overlay, var(--fg)); border-radius: 1.5px; }
-.tip-measure { position: fixed; visibility: hidden; width: max-content; max-width: 16.25rem; pointer-events: none;
-  font: var(--fw-label, 500) var(--text-secondary, 0.75rem)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
+/* The measuring copy of the surface (see place) takes the same rules as .tip under a hidden host, so padding, border, font
+   and cap are never restated as pixel constants that drift when a token changes. Its own class keeps the .tip element unique in the page. */
+.tip-pos.tip-measure { visibility: hidden; will-change: auto; }
 [data-tip], button[aria-label], a[aria-label] { -webkit-touch-callout: none; }
 .ui-confirm-tip { position: fixed; z-index: 1001; display: grid; width: max-content; max-width: min(21.25rem, calc(100vw - 1.5rem)); gap: 0.75rem; padding: 0.875rem 0.875rem 0.75rem;
   border-radius: 0.875rem; opacity: 0; transform: scale(0.96); pointer-events: none;
@@ -118,9 +123,15 @@ function build() {
   surface = pos.querySelector(".tip")!;
   surface.classList.add("ui-overlay-surface");
   arrow = pos.querySelector(".tip-arrow")!;
-  measure = document.createElement("span");
-  measure.className = "tip-measure";
+  measure = document.createElement("div");
+  measure.className = "tip-pos tip-measure";
+  measure.setAttribute("aria-hidden", "true");
+  // Its label has its own class: `.tip-label` is how callers (and tests) find the visible label, and must stay unique.
+  measure.innerHTML = `<div class="tip-sizer ui-overlay-surface"><span class="tip-measure-label"></span></div>`;
+  measureSurface = measure.firstElementChild as HTMLDivElement;
   document.body.append(pos, measure);
+  // The width is measured once per show; a face that arrives later changes every glyph, so an open tooltip re-measures.
+  document.fonts?.addEventListener("loadingdone", () => { if (shown && current) place(current, false); });
 }
 
 export interface ConfirmTipOptions {
@@ -339,37 +350,50 @@ function triggerOf(target: EventTarget | null): HTMLElement | null {
   return text ? null : el;
 }
 
+/**
+ * The side the surface opens on: the one asked for (a point call's option, `data-tip-side`) or above by default, flipped
+ * to the other side when the first does not fit in the viewport and the other does.
+ */
 function sideOf(el: HTMLElement, r: DOMRect, h: number): Side {
-  const pointSide = pointAnchor === el ? pointOptions?.side : undefined;
-  if (pointSide) return pointSide;
-  const want = el.dataset.tipSide as Side | undefined;
-  if (want) return want;
-  return r.top - GAP - h < MARGIN ? "bottom" : "top";
+  const want = (pointAnchor === el ? pointOptions?.side : undefined) ?? (el.dataset.tipSide as Side | undefined) ?? "top";
+  const fitsTop = r.top - GAP - h >= MARGIN, fitsBottom = r.bottom + GAP + h <= innerHeight - MARGIN;
+  if (want === "top") return fitsTop || !fitsBottom ? "top" : "bottom";
+  return fitsBottom || !fitsTop ? "bottom" : "top";
 }
 
-/** Places the surface for `el`; returns the travel direction (−1 left, 1 right). */
+/**
+ * Places the surface for `el`; returns the travel direction (−1 left, 1 right).
+ *
+ * The size is never computed from constants: a hidden copy of the surface (same CSS, so the real padding, border, font
+ * and cap) is given the label and read back, and the visible surface gets exactly that width. A tooltip therefore fits
+ * its text at every root font size and wraps at its cap instead of cutting the text off (an earlier `+ 22` pixel
+ * allowance went stale when the padding became rem-based and the UI scale 110 %, and every label lost its last letters
+ * to an ellipsis).
+ */
 function place(el: HTMLElement, animateMove: boolean): number {
   const text = labelOf(el);
   const twoLines = pointAnchor === el && pointOptions?.lines === 2;
   if (twoLines) { pos.dataset.tipLines = "2"; measure.dataset.tipLines = "2"; }
   else { delete pos.dataset.tipLines; delete measure.dataset.tipLines; }
-  measure.textContent = text;
-  // The shared measurement node gets the same CSS width as the surface, so its height also positions the arrow.
-  const measured = measure.getBoundingClientRect();
-  const w = Math.ceil(measured.width) + 22, h = twoLines ? measured.height + 14 : 27;
+  measureSurface.firstElementChild!.textContent = text;
+  const measured = measureSurface.getBoundingClientRect();
+  // The width is rounded up so sub-pixel text never wraps; the height is exact, so the arrow sits on the real edge.
+  const w = Math.ceil(measured.width), h = measured.height;
   const r = pointAnchor === el && pointRect ? pointRect : el.getBoundingClientRect();
   const side = sideOf(el, r, h);
   const cx = r.left + r.width / 2;
-  const x = Math.min(Math.max(MARGIN, cx - w / 2), innerWidth - MARGIN - w);
-  const y = side === "top" ? r.top - GAP - h : r.bottom + GAP;
+  const x = Math.max(MARGIN, Math.min(cx - w / 2, innerWidth - MARGIN - w));
+  const y = Math.max(MARGIN, Math.min(side === "top" ? r.top - GAP - h : r.bottom + GAP, innerHeight - MARGIN - h));
   const prev = new DOMMatrix(getComputedStyle(pos).transform).m41;
   pos.style.transition = animateMove && !reduced() ? `transform ${TRAVEL}ms ${EASE}` : "none";
   pos.style.transform = `translate(${x}px, ${y}px)`;
   surface.style.width = `${w}px`;
+  // The arrow follows the anchor, but never leaves the surface when a shift moved the surface off-centre.
+  const tail = Math.max(12, Math.min(w - 12, cx - x));
   arrow.style.transition = pos.style.transition;
-  arrow.style.top = side === "top" ? `${h - 4}px` : "-4px";
-  arrow.style.transform = `translateX(${cx - x}px) rotate(45deg)`;
-  surface.style.transformOrigin = `${cx - x}px ${side === "top" ? "100%" : "0%"}`;
+  arrow.style.top = side === "top" ? `calc(${h}px - 0.25rem)` : "-0.25rem";
+  arrow.style.transform = `translateX(${tail}px) rotate(45deg)`;
+  surface.style.transformOrigin = `${tail}px ${side === "top" ? "100%" : "0%"}`;
   pos.dataset.side = side;
   return x >= prev ? 1 : -1;
 }

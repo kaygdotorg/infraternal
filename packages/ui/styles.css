@@ -55,13 +55,14 @@
 /* Form controls reset text-shadow in the browser's own styles; they take the halo too. */
 .ui-overlay-surface :is(button, input, textarea, select) { text-shadow: inherit; }
 .ui-overlay-surface[data-overlay-size="large"] { --ui-overlay-shadow: var(--overlay-shadow-large, var(--shadow)); }
-/* Trigger labels stay one line; only point previews carrying this per-call attribute may wrap. */
-.tip-label { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tip-pos[data-tip-lines="2"], .tip-measure[data-tip-lines="2"] { --tip-content-max: min(16.125rem, calc(100vw - 2.375rem)); }
-.tip-pos[data-tip-lines="2"] .tip { max-width: calc(var(--tip-content-max) + 1.375rem); }
-.tip-pos[data-tip-lines="2"] .tip-label:not(.is-leaving) { display: -webkit-box; max-height: 2.4em; overflow: hidden; overflow-wrap: anywhere;
+/* A tooltip is as wide as its text up to the cap set on .tip (tooltip.ts) and wraps beyond it, never an ellipsis: the
+   owner reads the whole label or the tooltip is wrong. Only point previews carrying the per-call two-line attribute
+   (a long link) are clamped, and they say so with their own rules below. */
+.tip-label, .tip-measure-label { display: block; white-space: normal; overflow-wrap: anywhere; }
+.tip-pos[data-tip-lines="2"] { --tip-content-max: min(16.125rem, calc(100vw - 2.375rem)); }
+.tip-pos[data-tip-lines="2"] :is(.tip, .tip-sizer) { max-width: calc(var(--tip-content-max) + 1.25rem + 2px); }
+.tip-pos[data-tip-lines="2"] :is(.tip-label:not(.is-leaving), .tip-measure-label) { display: -webkit-box; max-height: 2.4em; overflow: hidden; overflow-wrap: anywhere;
   -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; text-overflow: ellipsis; white-space: normal; }
-.tip-measure[data-tip-lines="2"] { box-sizing: border-box; max-width: var(--tip-content-max); line-height: 1.2; overflow-wrap: anywhere; white-space: normal; }
 .ui-button {
   min-height: var(--ui-button-height, 2.75rem);
   padding: var(--ui-button-padding, 0 0.75rem);

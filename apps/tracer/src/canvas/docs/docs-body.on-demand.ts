@@ -15,6 +15,7 @@
  * of the canvas chunk. The page itself is fetched when its window is drawn, so a Docs view nobody visits costs nothing.
  */
 import type { Ctx } from "../context";
+import { enhanceDoc } from "./doc-enhance";
 
 interface Mounted { scroller: HTMLElement; article: HTMLElement; ready: Promise<void> }
 const mounted = new Map<string, Mounted>();
@@ -96,11 +97,15 @@ export function mountDocsBody(cx: Ctx, slug: string, body: HTMLElement): () => v
   })();
   const page: Mounted = { scroller, article, ready };
   mounted.set(slug, page);
+  // The section being read in the contents, and copying code (doc-enhance.ts); started when the page is in the window.
+  let stopEnhancing = (): void => {};
+  void ready.then(() => { if (!gone) stopEnhancing = enhanceDoc(article, scroller); });
   const onClick = (event: MouseEvent): void => keepInCanvas(cx, slug, page, event);
   article.addEventListener("click", onClick);
   if (wanted.has(slug)) { const id = wanted.get(slug); wanted.delete(slug); showHeading(slug, id); }
   return () => {
     gone = true;
+    stopEnhancing();
     article.removeEventListener("click", onClick);
     if (mounted.get(slug) === page) mounted.delete(slug);
     scroller.remove();

@@ -9,7 +9,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildDocs, checkOutline, INDEX_SLUG, readUserDocs, renderDoc, splitPage, tocFor, USER_DOCS_DIR, type DocsIndexPage } from "./docs-build";
+import { buildDocs, checkOutline, figureOptionsFor, INDEX_SLUG, readUserDocs, renderDoc, splitPage, tocFor, USER_DOCS_DIR, type DocsIndexPage } from "./docs-build";
 
 const page = (title: string, summary: string, body: string, footer = ""): string => `# ${title}\n\n${summary}\n\n${body}${footer ? `\n---\n\n${footer}\n` : ""}`;
 
@@ -93,6 +93,22 @@ test("a Markdown file placed in the folder is built, indexed and given its conte
   }
 });
 
+test("quick facts reach index.json, per page and per heading, for the \"?\" preview (#304)", async () => {
+  const f = await fixture({
+    "facts.md": page("Facts", "A page with facts.", "> [!FACTS]\n> The page in one line.\n\n## With\n\n> [!FACTS]\n> This section in one line.\n\ntext\n\n## Without\n\ntext\n"),
+  });
+  try {
+    await buildDocs(f.out, f.dir);
+    const json = JSON.parse(await readFile(join(f.out, "index.json"), "utf8")) as { pages: DocsIndexPage[] };
+    expect(json.pages.find((entry) => entry.slug === "facts")).toEqual({
+      slug: "facts", title: "Facts", summary: "A page with facts.", facts: "The page in one line.",
+      headings: [{ id: "with", text: "With", facts: "This section in one line." }, { id: "without", text: "Without" }],
+    });
+  } finally {
+    await f.done();
+  }
+});
+
 test("a file name that cannot be a web address, or that repeats another page, is refused", async () => {
   const f = await fixture({ "Bad Name.md": page("A", "B.", "## C\n\ntext\n") });
   try {
@@ -110,7 +126,8 @@ test("a file name that cannot be a web address, or that repeats another page, is
 
 const shipped = async () => {
   const { index, pages } = await readUserDocs(USER_DOCS_DIR);
-  return [{ slug: INDEX_SLUG, text: index ?? "" }, ...pages].map(({ slug, text }) => ({ slug, doc: renderDoc(slug, text) }));
+  const figures = await figureOptionsFor(USER_DOCS_DIR);
+  return [{ slug: INDEX_SLUG, text: index ?? "" }, ...pages].map(({ slug, text }) => ({ slug, doc: renderDoc(slug, text, undefined, figures) }));
 };
 
 test("every shipped page has a one-sentence summary, a table of contents and a hierarchy that does not skip", async () => {
@@ -151,6 +168,11 @@ test("the real tree builds from the real folder", async () => {
     // The front page has its own text and the list of pages, so it has contents like every other page.
     expect(index.find((entry) => entry.slug === INDEX_SLUG)!.headings.map((heading) => heading.id)).toEqual(["finding-your-way", "all-pages"]);
     expect(await readFile(resolve(out, "docs", "index.html"), "utf8")).toContain('<nav class="toc"');
+    // The page script is a file of its own: small, and referenced (deferred) by every standalone page.
+    const script = await readFile(resolve(out, "docs", "doc.js"), "utf8");
+    expect(script.length, "doc.js stays small").toBeLessThan(12_000);
+    expect(await readFile(resolve(out, "docs", "keys", "index.html"), "utf8")).toContain('<script src="/docs/doc.js" defer></script>');
+    expect(await readFile(resolve(out, "docs", "keys", "fragment.html"), "utf8"), "the canvas fragment carries no script of its own").not.toContain("<script");
   } finally {
     await rm(out, { recursive: true, force: true });
   }

@@ -1,5 +1,7 @@
 /** Test-double host and terminal data for the gated windows and add-host prototypes. */
 import type { AddHostFixture } from "../src/add-host-contract";
+import { forDocs } from "../docs-dataset";
+import { docsPrototypeHosts } from "./docs-fixtures";
 
 export interface PrototypeSessionFixture {
   id: string;
@@ -52,7 +54,7 @@ export interface PrototypeHostFixture {
 }
 
 /** Static install snapshots and plausible host-local terminal output stay in the test double. */
-export const prototypeHosts: PrototypeHostFixture[] = [
+const plainPrototypeHosts: PrototypeHostFixture[] = [
   {
     id: "build-01", user: "kayg", name: "build-01", os: "ubuntu", osName: "Ubuntu",
     version: "24.04.2 LTS", architecture: "x86_64", model: "ThinkCentre M90q Gen 3",
@@ -108,7 +110,7 @@ export const prototypeHosts: PrototypeHostFixture[] = [
 ];
 
 /** Discovery and SSH-only probe outcomes used by the add-host mock, with no login attempt. */
-export const addHostFixtures: AddHostFixture[] = [
+const plainAddHostFixtures: AddHostFixture[] = [
   {
     id: "build-01", user: "ops", address: "10.69.69.71", operatingSystem: "Ubuntu 24.04",
     architecture: "x86_64", sources: ["netbird", "ssh-config"], reachability: "ready",
@@ -182,3 +184,7 @@ export const addHostFixtures: AddHostFixture[] = [
     alreadyAdded: false, rootAvailable: false, credentialRequired: false, authentication: "accepted",
   },
 ];
+
+/** What the double serves: these fixtures, or the docs' own when the double runs for the docs' figures (docs-dataset.ts). */
+export const prototypeHosts: PrototypeHostFixture[] = process.env.TRACER_DATASET === "docs" ? forDocs(docsPrototypeHosts(plainPrototypeHosts)) : plainPrototypeHosts;
+export const addHostFixtures: AddHostFixture[] = forDocs(plainAddHostFixtures);

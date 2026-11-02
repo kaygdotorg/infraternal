@@ -3,10 +3,12 @@
  * The shapes are in `src/sessions-contract.ts`. This table never touches a PTY.
  */
 import type { DeviceInfo, SessionRecord } from "../src/canvas/sessions/inventory";
+import { forDocs } from "../docs-dataset";
+import { docsSessionHosts } from "./docs-fixtures";
 
 const prompt = (user: string, host: string, path = "~"): string => `${user}@${host}:${path}$`;
 
-export const sessionHosts: Array<{ id: string; sessions: SessionRecord[] }> = [
+const plainSessionHosts: Array<{ id: string; sessions: SessionRecord[] }> = [
   {
     id: "live",
     sessions: [
@@ -60,3 +62,6 @@ export const sessionDevices: DeviceInfo[] = [
   { id: "mbp", name: "MacBook Pro", kind: "laptop" },
   { id: "phone", name: "iPhone", kind: "phone" },
 ];
+
+/** What the double serves: these sessions, or the docs' own when the double runs for the docs' figures (docs-dataset.ts). */
+export const sessionHosts: Array<{ id: string; sessions: SessionRecord[] }> = process.env.TRACER_DATASET === "docs" ? forDocs(docsSessionHosts(plainSessionHosts)) : plainSessionHosts;
