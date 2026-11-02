@@ -196,13 +196,15 @@ export function placeOverName(name: HTMLElement, container: HTMLElement, input: 
   };
 }
 
-/** A second tap this soon after the first, and this close to it, is a double tap. */
+/** A second tap this soon after the first, and this close to it, is a double tap (a mouse gets the system's double-click time). */
 const DOUBLE_TAP_MS = 320;
+const DOUBLE_CLICK_MS = 500;
 const DOUBLE_TAP_SLOP = 24;
 
 /**
  * Calls `handler` on a double click (mouse) or a double tap (touch, pen). A tap that moved is a drag or a scroll and
- * does not count. The element opts out of the browser's double-tap zoom, so the second tap is ours. `keyOf` names the
+ * does not count. Both are found from the pointer events by `keyOf`'s key, not from the browser's `dblclick` alone: that
+ * one is not sent when the first click rebuilt the list and the second landed on a new button (opening a session does). The element opts out of the browser's double-tap zoom, so the second tap is ours. `keyOf` names the
  * thing under the finger (a row of a list that one listener serves; `undefined`: nothing to rename here): both taps
  * must land on the same one.
  */
@@ -213,15 +215,15 @@ export function onDoubleActivate(target: HTMLElement, handler: (event: Event) =>
   target.style.touchAction ||= "manipulation";
   target.addEventListener("dblclick", (event) => { if (keyOf(event) === undefined) return; event.preventDefault(); handler(event); }, { signal });
   let down: { x: number; y: number } | undefined;
-  target.addEventListener("pointerdown", (event) => { down = event.pointerType === "mouse" ? undefined : { x: event.clientX, y: event.clientY }; }, { signal });
+  target.addEventListener("pointerdown", (event) => { down = event.button === 0 ? { x: event.clientX, y: event.clientY } : undefined; }, { signal });
   target.addEventListener("pointerup", (event) => {
-    if (!down || event.pointerType === "mouse") return;
+    if (!down) return;
     const moved = Math.hypot(event.clientX - down.x, event.clientY - down.y) > DOUBLE_TAP_SLOP / 2;
     down = undefined;
     if (moved) { lastTaps.delete(target); return; }
     const now = event.timeStamp, key = keyOf(event), last = lastTaps.get(target);
     if (key === undefined) { lastTaps.delete(target); return; }
-    if (last && last.key === key && now - last.at <= DOUBLE_TAP_MS && Math.hypot(event.clientX - last.x, event.clientY - last.y) <= DOUBLE_TAP_SLOP) {
+    if (last && last.key === key && now - last.at <= (event.pointerType === "mouse" ? DOUBLE_CLICK_MS : DOUBLE_TAP_MS) && Math.hypot(event.clientX - last.x, event.clientY - last.y) <= DOUBLE_TAP_SLOP) {
       lastTaps.delete(target);
       handler(event);
     } else lastTaps.set(target, { x: event.clientX, y: event.clientY, at: now, key });
