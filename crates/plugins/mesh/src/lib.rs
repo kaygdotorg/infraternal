@@ -59,13 +59,25 @@ pub mod node_state;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod node;
 
+#[cfg(all(feature = "agent", target_os = "macos"))]
+pub use macos_node as node;
+
 #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
 pub mod dns;
 
-#[cfg(all(feature = "agent", target_os = "linux"))]
+#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 pub mod node_actions;
-#[cfg(all(feature = "agent", target_os = "linux"))]
+#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 mod node_presentation;
+
+#[cfg(all(feature = "agent", target_os = "macos"))]
+pub mod macos_service;
+
+#[cfg(all(feature = "agent", target_os = "macos"))]
+pub mod macos_keychain;
+
+#[cfg(all(feature = "agent", target_os = "macos"))]
+pub mod macos_node;
 
 #[cfg(feature = "server")]
 pub mod settings;

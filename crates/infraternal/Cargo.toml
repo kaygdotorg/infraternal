@@ -31,7 +31,7 @@ bytes.workspace = true
 http-body-util = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true, optional = true }
-nix.workspace = true
+nix = { workspace = true, features = ["resource"] }
 openssl = { workspace = true, optional = true }
 tokio-openssl = { workspace = true, optional = true }
 url = { workspace = true, optional = true }

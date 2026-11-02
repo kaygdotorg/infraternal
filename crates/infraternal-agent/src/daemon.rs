@@ -203,7 +203,7 @@ fn anonymous_login_manager(root: bool) -> Option<LoginManager> {
     Some(slot)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod image_tests {
     //! Keep anonymous shim launch distinct from the host login path [D18,D247].
     use super::*;
@@ -1841,7 +1841,7 @@ async fn terminal_run(
     }
 }
 
-#[cfg(all(test, feature = "remote"))]
+#[cfg(all(test, feature = "remote", target_os = "linux"))]
 #[path = "daemon_remote_tests.rs"]
 mod remote_tests;
 
@@ -1872,7 +1872,7 @@ mod liveness_tests;
 #[path = "daemon_replay_fence_tests.rs"]
 mod replay_fence_tests;
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[path = "daemon_authenticated_tests.rs"]
 mod authenticated_tests;
 

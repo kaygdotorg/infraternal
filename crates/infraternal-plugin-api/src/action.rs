@@ -371,6 +371,8 @@ pub enum CliHandler {
     Unavailable,
     /// Dispatch a declared node action over its local same-uid socket.
     NodeComponent,
+    /// Control the macOS system Mesh service through its fixed launchd job.
+    MeshService,
     /// Run saved-session automation with caller-session authority.
     Sessions,
     /// Inspect the local node and registered components.

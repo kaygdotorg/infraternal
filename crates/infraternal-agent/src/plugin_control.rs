@@ -557,6 +557,11 @@ impl Service {
             } else {
                 None
             };
+            #[cfg(all(feature = "remote", target_os = "macos"))]
+            if matches!(mode, crate::plugins::ExecutionMode::Remote) {
+                // launchd is the sole supported daemon owner on macOS and serializes starts.
+                crate::sessions::state(Some(state.to_owned()))?;
+            }
             // Compiled metadata is validated by registry tests; construct its
             // process-owned instances only when a caller needs an action.
             #[cfg(all(feature = "remote", target_os = "linux"))]
@@ -575,6 +580,15 @@ impl Service {
                 lifetime,
                 ..registry
             };
+            #[cfg(all(feature = "remote", feature = "mesh", target_os = "macos"))]
+            {
+                // Restore the local utun and root-only identity before dialing, so startup
+                // remains independent of coordinator availability.
+                registry
+                    .initialize_paths()
+                    .await
+                    .map_err(|_| io::Error::other("local Mesh registry initialization failed"))?;
+            }
             let local = Local::bind(state, registry.clone()).await?;
             Ok(Self {
                 registry,
@@ -595,6 +609,7 @@ impl Service {
         .await
     }
 }
+
 /// The dispatcher queues a byte-bound action, never waits for kernel work or the CLI.
 #[cfg(any(test, not(feature = "native-streams")))]
 pub(crate) struct Request {
@@ -1422,7 +1437,42 @@ mod tests {
             std::fs::remove_dir_all(&self.0).unwrap();
         }
     }
-    #[cfg(feature = "remote")]
+    #[cfg(all(feature = "remote", feature = "mesh", target_os = "macos"))]
+    #[tokio::test]
+    async fn macos_remote_service_constructs_mesh_registry_before_returning() {
+        let directory = Directory::new();
+        let constructed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = std::sync::Arc::clone(&constructed);
+        let factory: std::sync::Arc<dyn Fn() -> Result<PluginRegistry, PluginError> + Send + Sync> =
+            std::sync::Arc::new(move || {
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(PluginRegistry::default())
+            });
+
+        TEST_FACTORY
+            .scope(factory, async {
+                let service =
+                    Service::start(&directory.0, crate::plugins::ExecutionMode::Remote, None)
+                        .await
+                        .expect("start the macOS remote service");
+                assert!(
+                    constructed.load(std::sync::atomic::Ordering::SeqCst),
+                    "the mesh registry must restore the local node before remote dialing"
+                );
+                drop(service);
+            })
+            .await;
+    }
+    #[cfg(all(feature = "remote", feature = "mesh", target_os = "macos"))]
+    #[test]
+    fn macos_remote_registry_contains_the_mesh_node_descriptor() {
+        assert!(
+            crate::plugins::descriptors()
+                .iter()
+                .any(|descriptor| descriptor.id == "mesh")
+        );
+    }
+    #[cfg(all(feature = "remote", target_os = "linux"))]
     #[tokio::test]
     #[allow(
         clippy::used_underscore_binding,

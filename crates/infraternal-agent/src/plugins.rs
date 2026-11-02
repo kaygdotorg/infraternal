@@ -13,7 +13,7 @@ const DESCRIPTORS: &[&PluginDescriptor] = &[
     &infraternal_plugin_proxy::agent::DESCRIPTOR,
     #[cfg(feature = "remote")]
     &infraternal_plugin_remote::DESCRIPTOR,
-    #[cfg(all(feature = "mesh", target_os = "linux"))]
+    #[cfg(all(feature = "mesh", any(target_os = "linux", target_os = "macos")))]
     &infraternal_plugin_mesh::node_actions::DESCRIPTOR,
     #[cfg(all(feature = "desktop", target_os = "macos"))]
     &infraternal_plugin_desktop::source_manifest::DESCRIPTOR,
@@ -52,7 +52,7 @@ pub fn registry(mode: ExecutionMode) -> Result<PluginRegistry, PluginError> {
         feature = "plugin-host-facts",
         feature = "proxy",
         feature = "remote",
-        all(feature = "mesh", target_os = "linux")
+        all(feature = "mesh", any(target_os = "linux", target_os = "macos"))
     )),
     allow(
         clippy::unnecessary_wraps,
@@ -68,7 +68,7 @@ pub(crate) fn registry_at(
         feature = "plugin-host-facts",
         feature = "proxy",
         feature = "remote",
-        all(feature = "mesh", target_os = "linux"),
+        all(feature = "mesh", any(target_os = "linux", target_os = "macos")),
         all(feature = "desktop", target_os = "macos")
     ))]
     let mut registry = PluginRegistry::default();
@@ -76,7 +76,7 @@ pub(crate) fn registry_at(
         feature = "plugin-host-facts",
         feature = "proxy",
         feature = "remote",
-        all(feature = "mesh", target_os = "linux"),
+        all(feature = "mesh", any(target_os = "linux", target_os = "macos")),
         all(feature = "desktop", target_os = "macos")
     )))]
     let registry = PluginRegistry::default();
@@ -141,9 +141,38 @@ pub(crate) fn registry_at(
     let _ = installation;
     #[cfg(all(feature = "mesh", target_os = "linux"))]
     registry.register(Box::new(mesh_plugin))?;
-    #[cfg(not(all(feature = "mesh", target_os = "linux")))]
+    #[cfg(all(feature = "mesh", target_os = "macos"))]
+    registry.register(Box::new(darwin_mesh_plugin(state)?))?;
+    #[cfg(not(all(feature = "mesh", any(target_os = "linux", target_os = "macos"))))]
     let _ = state;
     Ok(registry)
+}
+
+/// The Darwin Mesh node, restored before registration so its utun is back
+/// before the coordinator is dialed. The proxy's firewall ingress hook is
+/// Linux-only (nftables), so it is not connected here.
+#[cfg(all(feature = "mesh", target_os = "macos"))]
+fn darwin_mesh_plugin(
+    state: Option<&std::path::Path>,
+) -> Result<infraternal_plugin_mesh::node_actions::MeshNodePlugin, PluginError> {
+    eprintln!("Infraternal Mesh daemon restoring local node");
+    let node = state
+        .map_or_else(
+            || Ok(infraternal_plugin_mesh::node::Node::default()),
+            infraternal_plugin_mesh::node::Node::restore,
+        )
+        .map_err(|error| {
+            eprintln!(
+                "Infraternal Mesh daemon restore failed kind={:?}: {error}",
+                error.kind()
+            );
+            PluginError::Rejected
+        })?;
+    eprintln!(
+        "Infraternal Mesh daemon restore complete active={}",
+        node.active()
+    );
+    Ok(infraternal_plugin_mesh::node_actions::MeshNodePlugin::from_node(node))
 }
 
 /// Node-state-backed proxy plugin, or the stateless one used by registry tests.

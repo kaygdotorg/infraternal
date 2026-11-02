@@ -10,10 +10,11 @@
 //! later ACL metadata update: it can require interaction and is not needed for
 //! creation. Ad-hoc builds have no stable Team ID and their requirement is
 //! build-specific; after access is still denied, the daemon deletes only this
-//! service/account item, creates a replacement, and logs that its new public
-//! identity must be registered with the coordinator. Neither the CLI nor a UI
-//! process reads the private key. This path never changes the keychain search
-//! list or lock policy.
+//! service/account item, creates a replacement, and records a root-only event
+//! in `/private/var/lib/infraternal/state/mesh-key-rotation.log` so the new
+//! public identity can be registered with the coordinator. Neither the CLI nor
+//! a UI process reads the private key. This path never changes the keychain
+//! search list or lock policy.
 
 use crate::policy::model::PublicKey;
 use gotatun::x25519::{PublicKey as X25519PublicKey, StaticSecret};
@@ -25,8 +26,12 @@ use security_framework::{
     random::SecRandom,
 };
 use std::{
-    io,
+    fs::OpenOptions,
+    io::{self, Write},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::Path,
     process::{Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use zeroize::Zeroizing;
 
@@ -34,6 +39,7 @@ const SYSTEM_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
 const SERVICE: &str = "org.infraternal.mesh";
 const ACCOUNT: &str = "wireguard-private-key";
 const LAUNCHD_SERVICE_LABEL: &str = "org.infraternal.mesh";
+const ROTATION_LOG: &str = "/private/var/lib/infraternal/state/mesh-key-rotation.log";
 #[cfg(test)]
 const TEST_LAUNCHD_SERVICE_LABEL: &str = "org.infraternal.mesh.keychain-upgrade-test";
 const ERR_SEC_AUTH_FAILED: i32 = -25293;
@@ -46,6 +52,21 @@ enum CodeSigningIdentity {
     Stable { identifier: String, team_id: String },
     AdHoc,
     Unknown,
+}
+
+#[derive(Clone, Copy)]
+enum RotationPhase {
+    Started,
+    Completed,
+}
+
+impl RotationPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Completed => "completed",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -104,13 +125,16 @@ pub(crate) fn load_or_create() -> io::Result<(StaticSecret, PublicKey)> {
         Err(KeychainOperationError::Security(error))
             if should_rotate_after_access_denied(error.code(), &current_signing_identity()) =>
         {
+            record_rotation_event(RotationPhase::Started)?;
             tracing::warn!(
                 service = SERVICE,
                 account = ACCOUNT,
                 "System Keychain access was denied for an ad-hoc daemon; rotating its WireGuard identity for coordinator registration"
             );
             delete_exact_item(&keychain)?;
-            create_key(&keychain).map_err(KeychainOperationError::into_io)
+            let identity = create_key(&keychain).map_err(KeychainOperationError::into_io)?;
+            record_rotation_event(RotationPhase::Completed)?;
+            Ok(identity)
         }
         Err(KeychainOperationError::Security(error)) => Err(map_keychain_error(error)),
         Err(KeychainOperationError::Io(error)) => Err(error),
@@ -249,6 +273,50 @@ fn should_rotate_after_access_denied(code: i32, identity: &CodeSigningIdentity) 
     needs_unlock_retry(code) && matches!(identity, CodeSigningIdentity::AdHoc)
 }
 
+fn record_rotation_event(phase: RotationPhase) -> io::Result<()> {
+    append_rotation_event(Path::new(ROTATION_LOG), phase)
+}
+
+fn append_rotation_event(path: &Path, phase: RotationPhase) -> io::Result<()> {
+    let uid = Uid::effective().as_raw();
+    let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let parent_metadata = std::fs::symlink_metadata(parent)?;
+    if !parent_metadata.is_dir()
+        || parent_metadata.uid() != uid
+        || parent_metadata.mode() & 0o777 != 0o700
+    {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata)
+            if metadata.is_file() && metadata.uid() == uid && metadata.mode() & 0o777 == 0o600 => {}
+        Ok(_) => return Err(io::ErrorKind::PermissionDenied.into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != uid || metadata.mode() & 0o777 != 0o600 {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    let unix_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    writeln!(
+        file,
+        "unix_time={unix_time} event=mesh_key_rotation phase={} service={SERVICE} account={ACCOUNT} reason=ad_hoc_access_denied action=register_with_coordinator",
+        phase.as_str()
+    )?;
+    file.sync_data()
+}
+
 fn delete_exact_item(keychain: &SecKeychain) -> io::Result<()> {
     delete_exact_item_from_keychain(keychain, unlock_system_keychain)
 }
@@ -293,8 +361,9 @@ fn public_identity(secret: StaticSecret) -> (StaticSecret, PublicKey) {
 mod tests {
     use super::{
         ACCOUNT, CodeSigningIdentity, ERR_SEC_AUTH_FAILED, ERR_SEC_INTERACTION_NOT_ALLOWED,
-        ERR_SEC_ITEM_NOT_FOUND, SERVICE, parse_signing_identity, should_rotate_after_access_denied,
-        system_service_context, with_unlocked_keychain,
+        ERR_SEC_ITEM_NOT_FOUND, RotationPhase, SERVICE, append_rotation_event,
+        parse_signing_identity, should_rotate_after_access_denied, system_service_context,
+        with_unlocked_keychain,
     };
     use security_framework::{base::Error as SecurityError, os::macos::keychain::CreateOptions};
 
@@ -481,6 +550,51 @@ mod tests {
             .expect("unrelated item remains");
         assert_eq!(preserved.as_ref(), OTHER_VALUE);
         unrelated.delete();
+    }
+
+    #[test]
+    fn ad_hoc_identity_rotation_is_recorded_without_key_material() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after UNIX epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "infraternal-mesh-key-rotation-log-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("create private temporary directory");
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("restrict temporary directory permissions");
+        struct RemoveTemporaryDirectory(std::path::PathBuf);
+        impl Drop for RemoveTemporaryDirectory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _remove_directory = RemoveTemporaryDirectory(directory.clone());
+        let path = directory.join("mesh-key-rotation.log");
+
+        append_rotation_event(&path, RotationPhase::Started).expect("record rotation start");
+        append_rotation_event(&path, RotationPhase::Completed).expect("record rotation completion");
+
+        let log = std::fs::read_to_string(&path).expect("read rotation event");
+        assert!(log.contains("event=mesh_key_rotation"));
+        assert!(log.contains("phase=started"));
+        assert!(log.contains("phase=completed"));
+        assert!(log.contains("service=org.infraternal.mesh"));
+        assert!(log.contains("account=wireguard-private-key"));
+        assert!(log.contains("reason=ad_hoc_access_denied"));
+        assert!(!log.contains("private_key"));
+        assert!(!log.contains("public_key"));
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("rotation log metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
 
     #[test]
