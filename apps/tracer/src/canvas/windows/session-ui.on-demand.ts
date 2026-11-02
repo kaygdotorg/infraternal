@@ -204,7 +204,10 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
   window.addEventListener("keydown", (event) => {
     const rec = cx.state.activeWin;
     if (!rec || event.metaKey || event.ctrlKey || event.altKey || (event.key.length > 1 && event.key !== "Enter")) return;
-    if ((event.target as Element | null)?.closest?.("input, textarea")) return;
+    // A terminal's own input (the renderer's textarea, which holds focus whenever someone types into a session) is exactly the
+    // typing that takes the size over. Any other field (a rename, the palette) is not typing to the session.
+    const field = (event.target as Element | null)?.closest?.("input, textarea");
+    if (field && !field.closest(".terminal-host")) return;
     const s = recordOf(rec);
     if (s && inventory.sizedFor(rec.model.host, s.id)) takeOver(rec);
   }, { signal });
