@@ -243,7 +243,7 @@ fn a_dead_peer_expires_at_session_end_without_inferring_a_sending_promise() {
         assert!(tracker.live(None, start + at).contains_key(&NodeId(3)));
     }
     let mut gone = None;
-    for at in (105..=185).step_by(5) {
+    for at in (105..=285).step_by(5) {
         tracker.record(Some((true, vec![row(start, received)])), start + at);
         if gone.is_none() && !tracker.live(None, start + at).contains_key(&NodeId(3)) {
             gone = Some(at - 100);
@@ -254,7 +254,7 @@ fn a_dead_peer_expires_at_session_end_without_inferring_a_sending_promise() {
     tracker.record(Some((true, vec![row(start, 32)])), start);
     tracker.record(Some((true, vec![row(start, 64)])), start + 5);
     let mut fresh_gone = None;
-    for at in (10..=185).step_by(5) {
+    for at in (10..=190).step_by(5) {
         tracker.record(Some((true, vec![row(start, 64)])), start + at);
         if fresh_gone.is_none() && !tracker.live(None, start + at).contains_key(&NodeId(3)) {
             fresh_gone = Some(at - 5);
@@ -262,10 +262,14 @@ fn a_dead_peer_expires_at_session_end_without_inferring_a_sending_promise() {
     }
     let fresh_gone = fresh_gone.expect("never went offline");
     assert_eq!(
-        fresh_gone, 180,
+        fresh_gone, 185,
         "fresh session: expiry after the last received byte"
     );
-    assert_eq!(gone, Some(85), "late session: the same handshake expiry");
+    assert_eq!(
+        gone,
+        Some(185),
+        "late session: expiry after the last received byte"
+    );
 }
 
 /// The gap the module docs accept: an idle peer without its own keepalive that started the session. As responder

@@ -357,6 +357,7 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
     use crate::policy::model::PublicKey;
+    use infraternal_mesh::model::NodeId;
     use infraternal_plugin_api::PluginOperation;
     use sqlx::Row;
     use std::sync::{
@@ -1291,5 +1292,133 @@ mod tests {
         );
         worker.abort();
         let _ = worker.await;
+    }
+
+    fn live_with_relay_activity(
+        rotating: NodeId,
+        relay_peer: NodeId,
+        offline_peer: NodeId,
+        server: NodeId,
+    ) -> crate::presence::Live {
+        let now = 1_800_000_000;
+        let mut tracker = crate::presence::Tracker::default();
+        let rows = vec![
+            crate::presence::PeerRow {
+                node: rotating,
+                handshake: now - 10,
+                received: 100,
+                keepalive: 0,
+            },
+            crate::presence::PeerRow {
+                node: relay_peer,
+                handshake: 0,
+                received: 200,
+                keepalive: 0,
+            },
+            crate::presence::PeerRow {
+                node: offline_peer,
+                handshake: 0,
+                received: 0,
+                keepalive: 0,
+            },
+        ];
+        tracker.record(Some((true, rows.clone())), now);
+        let active_rows = rows
+            .into_iter()
+            .map(|mut row| {
+                if row.node == relay_peer {
+                    row.received += 1;
+                }
+                row
+            })
+            .collect();
+        tracker.record(Some((true, active_rows)), now + 5);
+        let live = tracker.live(Some(server), now + 5);
+        assert_eq!(
+            live.get(&relay_peer),
+            Some(&Some(crate::presence::NodePath::Relay)),
+            "relayed packet activity counts without a direct handshake"
+        );
+        live
+    }
+
+    #[tokio::test]
+    async fn relay_only_peer_without_candidate_ack_blocks_rotation_retirement() {
+        let service = service().await;
+        let store = service.dataplane();
+        let (rotating, _) = store
+            .attach(
+                "00000000-0000-4000-8000-000000000001",
+                PublicKey([2; 32]),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        let (relay_peer, _) = store
+            .attach(
+                "00000000-0000-4000-8000-000000000002",
+                PublicKey([4; 32]),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        let (offline_peer, _) = store
+            .attach(
+                "00000000-0000-4000-8000-000000000003",
+                PublicKey([5; 32]),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        let server = store.node_for_host("server").await.unwrap();
+        let pool = service.pool_for_tests();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1 WHERE id=?")
+            .bind(i64::try_from(rotating.0).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id=?,sequence=1 WHERE node_id=?",
+        )
+        .bind(&operation_id)
+        .bind(i64::try_from(rotating.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let revision = store
+            .start_rotation_overlap(
+                rotating,
+                &operation_id,
+                PublicKey([3; 32]),
+                1_800_000_000,
+                "test-boot",
+                1_000,
+            )
+            .await
+            .unwrap();
+
+        let live = live_with_relay_activity(rotating, relay_peer, offline_peer, server);
+        let reachable = store
+            .rotation_reachable_peers(rotating, &live.keys().copied().collect())
+            .await
+            .unwrap();
+        assert!(reachable.contains(&relay_peer));
+        assert!(
+            !reachable.contains(&offline_peer),
+            "D166 keeps offline peers exempt"
+        );
+        store.acknowledge_applied(server, revision).await.unwrap();
+        store.acknowledge_applied(rotating, revision).await.unwrap();
+        assert!(
+            !store
+                .rotation_acks_ready(revision, &reachable)
+                .await
+                .unwrap(),
+            "the active relay-only peer has not applied the candidate view"
+        );
     }
 }

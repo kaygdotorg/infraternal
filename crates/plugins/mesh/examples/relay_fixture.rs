@@ -166,6 +166,10 @@ struct RelayConfig {
 struct PeerConfig {
     host: String,
     key: String,
+    #[serde(default)]
+    previous_key: Option<String>,
+    #[serde(default)]
+    previous_active: bool,
     addresses: Addresses,
     endpoint: Option<SocketAddr>,
 }
@@ -185,6 +189,10 @@ enum Command {
     Relay {
         host: String,
     },
+    /// Prepare a new local WireGuard identity without publishing it.
+    PrepareRotation,
+    /// Switch the local WireGuard identity to the prepared candidate.
+    CommitRotation,
     /// Probe relay `index` from the `WireGuard` port; record it in the book.
     Observe {
         relay: usize,
@@ -252,6 +260,7 @@ async fn node() {
     let mut wg = Client::new().unwrap();
     let started = Instant::now();
     let since_start = || started.elapsed();
+    let mut candidate_key: Option<(Key, PublicKey)> = None;
 
     while let Some(line) = input.recv().await {
         if line.trim() == "quit" {
@@ -270,6 +279,8 @@ async fn node() {
                     .iter()
                     .map(|peer| Peer {
                         key: key(&peer.key),
+                        previous_key: peer.previous_key.as_deref().map(key),
+                        previous_active: peer.previous_active,
                         addresses: peer.addresses,
                         endpoint: peer.endpoint,
                     })
@@ -304,6 +315,23 @@ async fn node() {
                 let (kernel, _) = peers[&name].clone();
                 let shim = paths.relay(host(&name), &kernel).await.unwrap();
                 say(json!({"event": "relayed", "peer": name, "shim": shim}));
+            }
+            Command::PrepareRotation => {
+                if candidate_key.is_some() {
+                    say(json!({"event": "rotation_refused"}));
+                    continue;
+                }
+                let (candidate, public_key) = Key::generate().unwrap();
+                candidate_key = Some((candidate, public_key));
+                say(json!({"event": "rotation_prepared", "public_key": hex(&public_key.0)}));
+            }
+            Command::CommitRotation => {
+                let Some((candidate, public_key)) = candidate_key.take() else {
+                    say(json!({"event": "rotation_refused"}));
+                    continue;
+                };
+                Device::configure(&candidate, port).unwrap();
+                say(json!({"event": "rotation_committed", "public_key": hex(&public_key.0)}));
             }
             Command::Observe {
                 relay,

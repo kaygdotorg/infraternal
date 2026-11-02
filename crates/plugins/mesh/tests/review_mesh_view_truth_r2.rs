@@ -458,8 +458,8 @@ fn an_idle_healthy_peer_without_its_own_keepalive_stays_online() {
     );
 }
 
-/// Keep the lost-keepalive no-flapping control. R4 proved later silence indistinguishable from a healthy
-/// peer whose sends the server suppresses, so expiration follows the full session rather than 55–60 seconds.
+/// Keep the lost-keepalive no-flapping control. A received packet refreshes relay activity for the full session
+/// window, even when the direct handshake is older.
 #[test]
 fn evidence_a_silent_peer_expires_with_its_session_without_flapping() {
     let start = 1_800_000_000;
@@ -476,14 +476,14 @@ fn evidence_a_silent_peer_expires_with_its_session_without_flapping() {
             "healthy at {at}"
         );
     }
-    // Dead from 100 on: the handshake is only 100 s old, but nothing arrives.
+    // Dead from 100 on: that final receive refreshes the session even though the handshake is already 100 s old.
     let mut gone = None;
-    for at in (105..=185).step_by(5) {
+    for at in (105..=285).step_by(5) {
         tracker.record(Some((true, vec![row(start, received)])), start + at);
         if gone.is_none() && !tracker.live(None, start + at).contains_key(&NodeId(3)) {
             gone = Some(at - 100);
         }
     }
     let gone = gone.expect("never went offline");
-    assert_eq!(gone, 85, "expiry after the last received byte");
+    assert_eq!(gone, 185, "expiry after the last received byte");
 }

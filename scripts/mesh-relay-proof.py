@@ -191,10 +191,14 @@ SENDER = r"""
 import hashlib, json, random, socket, sys, time
 total = int(sys.argv[3]); rng = random.Random(220)
 c = socket.create_connection((sys.argv[1], int(sys.argv[2])), 10); c.settimeout(60)
-h = hashlib.sha256(); sent = 0; start = time.monotonic()
+h = hashlib.sha256(); sent = 0; start = time.monotonic(); pause_for_rotation = len(sys.argv) > 4
 while sent < total:
     block = rng.randbytes(min(65536, total - sent))
     c.sendall(block); h.update(block); sent += len(block)
+    if pause_for_rotation:
+        print("ready", flush=True)
+        if sys.stdin.read(1) != "g": sys.exit(2)
+        pause_for_rotation = False
 c.shutdown(socket.SHUT_WR); c.recv(1)
 print(json.dumps({"bytes": sent, "sha256": h.hexdigest(), "seconds": time.monotonic() - start}), flush=True)
 """
@@ -206,10 +210,19 @@ def stream(sender_ns, receiver_ns, address, port, size, during=None):
                                 stdout=subprocess.PIPE, text=True)
     if receiver.stdout.readline().strip() != "ready":
         raise RuntimeError("receiver failed")
-    sender = subprocess.Popen(["ip", "netns", "exec", sender_ns, sys.executable, "-c", SENDER, address, str(port), str(size)],
-                              stdout=subprocess.PIPE, text=True)
+    sender = subprocess.Popen(
+        ["ip", "netns", "exec", sender_ns, sys.executable, "-c", SENDER, address, str(port), str(size),
+         *(["rotate"] if during else [])],
+        stdin=subprocess.PIPE if during else None,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
     if during:
+        if sender.stdout.readline().strip() != "ready":
+            raise RuntimeError("sender did not pause after starting the stream")
         during()
+        sender.stdin.write("g")
+        sender.stdin.flush()
     out, _ = sender.communicate(timeout=180)
     got, _ = receiver.communicate(timeout=30)
     return json.loads(out), json.loads(got)
@@ -333,9 +346,13 @@ def inner(binary):
         results["tap_delivered_after_probes"] = {"A": 2, "B": 2}
 
         # 3. Peers. A and B only know each other's private address: no direct path.
-        def peer(node, endpoint):
-            return {"host": HOSTS[node], "key": identity[node]["public_key"],
-                    "addresses": {"ipv4": MESH[node][0], "ipv6": MESH[node][1]}, "endpoint": endpoint}
+        def peer(node, endpoint, *, current_key=None, previous_key=None, previous_active=False):
+            value = {"host": HOSTS[node], "key": current_key or identity[node]["public_key"],
+                     "addresses": {"ipv4": MESH[node][0], "ipv6": MESH[node][1]}, "endpoint": endpoint,
+                     "previous_active": previous_active}
+            if previous_key is not None:
+                value["previous_key"] = previous_key
+            return value
         a.ask({"peers": [peer("B", f"10.2.0.2:{identity['B']['port']}"),
                          peer("C", f"198.51.100.31:{identity['C']['port']}")]}, "peers")
         b.ask({"peers": [peer("A", f"10.1.0.2:{identity['A']['port']}")]}, "peers")
@@ -391,6 +408,33 @@ def inner(binary):
             "too_large_A": after_relayed["too_large"], "unlinked_A": after_relayed["unlinked"],
             "too_large_B": b_stats["too_large"],
         }
+
+        # 4b. Keep a relayed TCP stream byte-exact while one endpoint rotates its local key.
+        old_key = identity["A"]["public_key"]
+        candidate_key = a.ask("\"prepare_rotation\"", "rotation_prepared")["public_key"]
+        b.ask({"peers": [peer("A", None, current_key=old_key,
+                              previous_key=candidate_key, previous_active=False)]}, "peers")
+
+        def rotate_key_during_stream():
+            committed = a.ask("\"commit_rotation\"", "rotation_committed")
+            assert committed["public_key"] == candidate_key, committed
+            b.ask({"peers": [peer("A", None, current_key=candidate_key,
+                                  previous_key=old_key, previous_active=False)]}, "peers")
+
+        sent, got = stream("nodeA", "nodeB", MESH["B"][0], 5205, 128 << 20,
+                           during=rotate_key_during_stream)
+        assert sent["sha256"] == got["sha256"] and got["bytes"] == 128 << 20, (sent, got)
+        identity["A"]["public_key"] = candidate_key
+        c.ask({"peers": [peer("A", f"198.51.100.21:{identity['A']['port']}")]}, "peers")
+        b_stats = b.ask("\"stats\"", "stats")
+        rotated_peer = next(row for row in b_stats["peers"] if row["peer"] == HOSTS["A"])
+        assert rotated_peer["active_relay"] == 0 and rotated_peer["handshake_secs"] > 0, b_stats
+        results["rotation_relayed"] = {
+            "bytes": got["bytes"], "sha256_equal": True,
+            "active_relay": rotated_peer["active_relay"],
+            "candidate_handshake_secs": rotated_peer["handshake_secs"],
+        }
+        after_relayed = a.ask("\"stats\"", "stats")
         sent, got = stream("nodeA", "nodeC", MESH["C"][0], 5202, 32 << 20)
         after_direct = a.ask("\"stats\"", "stats")
         assert sent["sha256"] == got["sha256"] and got["bytes"] == 32 << 20
