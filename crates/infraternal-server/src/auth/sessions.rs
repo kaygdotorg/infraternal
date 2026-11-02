@@ -18,7 +18,7 @@ pub struct Session {
     #[serde(skip)]
     pub(crate) owner: bool,
 }
-/// Pending recovery discloses only its original deadline, including after bearer expiry.
+/// Pending recovery discloses an estimated deadline, including after bearer expiry.
 #[derive(Serialize)]
 pub struct RecoveryPending {
     pub ready_at: i64,
@@ -59,13 +59,19 @@ impl Auth {
                 .await?;
             return Err(Error::Denied);
         };
+        let user_id: String = row.get("user_id");
+        let recovery_pending = if row.get::<Option<i64>, _>("recovery_ready").is_some() {
+            self.pending_recovery(&user_id, now)
+                .await?
+                .map(|ready_at| RecoveryPending { ready_at })
+        } else {
+            None
+        };
         Ok(Session {
             session_incarnation: super::session_incarnation(token),
             recovery_words_need_replacing: row.get("recovery_words_need_replacing"),
-            recovery_pending: row
-                .get::<Option<i64>, _>("recovery_ready")
-                .map(|ready_at| RecoveryPending { ready_at }),
-            user_id: row.get("user_id"),
+            recovery_pending,
+            user_id,
             username: row.get("username"),
             display_name: row.get("display_name"),
             device: row.get("device"),

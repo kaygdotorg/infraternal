@@ -158,6 +158,7 @@ pub struct Auth {
     pending: Arc<Mutex<Pending>>,
     ingress: Arc<Mutex<http::Ingress>>,
     recovery_changes: Arc<account_events::AccountEvents>,
+    recovery_clock: Arc<recovery::Clock>,
     revocations: Arc<account_events::AccountEvents>,
     setup_consumed: Arc<watch::Sender<()>>,
     #[cfg(test)]
@@ -167,6 +168,9 @@ pub struct Auth {
     // i64::MIN leaves HTTP on wall time; tests opt into a shared, advanceable clock.
     #[cfg(test)]
     test_http_time: Arc<AtomicI64>,
+    // MIN retains explicit legacy fixture clocks; otherwise independent elapsed nanoseconds.
+    #[cfg(test)]
+    test_recovery_elapsed: Arc<AtomicI64>,
 }
 
 // Public entry points share one error contract, documented here instead of repeating it:
@@ -225,6 +229,7 @@ impl Auth {
             .map_err(|_| Error::Invalid)?;
         migration_compat::normalize_production_index(&pool).await?;
         migration_compat::MIGRATIONS.run(&pool).await?;
+        let recovery_clock = Arc::new(recovery::Clock::load(&pool).await?);
         let (setup_consumed, _) = watch::channel(());
         Ok(Self {
             pool,
@@ -234,6 +239,7 @@ impl Auth {
             pending: Arc::default(),
             ingress: Arc::default(),
             recovery_changes: Arc::default(),
+            recovery_clock,
             revocations: Arc::default(),
             setup_consumed: Arc::new(setup_consumed),
             #[cfg(test)]
@@ -242,6 +248,8 @@ impl Auth {
             authority_reads: Arc::default(),
             #[cfg(test)]
             test_http_time: Arc::new(AtomicI64::new(i64::MIN)),
+            #[cfg(test)]
+            test_recovery_elapsed: Arc::new(AtomicI64::new(i64::MIN)),
         })
     }
 

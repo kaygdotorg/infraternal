@@ -1180,7 +1180,11 @@ async fn send_recovery_snapshot<K>(
 where
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
-    let pending = state.auth.pending_recovery(user).await.map_err(|_| ())?;
+    let pending = state
+        .auth
+        .pending_recovery(user, now_seconds()?)
+        .await
+        .map_err(|_| ())?;
     // A global wake must never reveal another account's recovery timing.
     if *last == RecoverySnapshot::Read(pending) {
         return Ok(());

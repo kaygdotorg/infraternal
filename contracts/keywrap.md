@@ -340,14 +340,24 @@ private CLI socket; runtime logs do not disclose it. Enrollment consumes it once
 Additive `recovery-resume` accepts the same identity and authentication fields
 as recovery-start. It verifies the key on every call and takes the writer lock
 before inspecting pending state. While a request is unexpired, it reissues a
-capability and retains **exactly** its stored ready time and expiry. It neither
+capability and retains **exactly** its stored elapsed ready time and expiry. It neither
 resets the wait nor extends the lifetime. At the exclusive expiry, the request
 is finished; starting or resuming creates a new attempt with ready time 24 hours
 and expiry 48 hours from the new server time (D113's live same-account session
 exemption still applies). A cancelled request is also finished permanently.
-Creation uses the maximum of the live SQLite statement clock, the supplied server
-clock and the persisted API-key time high-water mark, updated under the writer
-lock. Clock rollback and process restart cannot backdate a fresh wait (#309).
+Recovery authority uses a persisted logical clock advanced only by elapsed monotonic
+process uptime, under the database writer lock. Start, resume, readiness, completion
+and signed-in status all use that clock. Wall-clock steps in either direction credit
+no elapsed time and add no waiting time. On process restart, only committed progress
+survives: unrecorded uptime and downtime are not credited. Each restart can discard up to 24 hours of
+unrecorded wait progress and up to 48 hours of unrecorded lifetime progress,
+in addition to the downtime itself. There is no background timer.
+On upgrade from wall-based recovery, existing requests end because prior elapsed
+time and continued validity cannot be proven. Re-entering the words starts a fresh
+request with a full elapsed wait and lifetime; old bearers remain invalid. Unix dates in replies are
+estimates projected from the remaining elapsed duration onto current server wall
+time; they may move after a clock correction. Only the elapsed clock grants authority
+(#309). Session exemption and five-minute ceremony expiry retain their own policies.
 The previous capability and any replacement ceremony bound to it become invalid.
 Cancellation and successful replacement delete the row. Verifier start/resume
 both preserve pending deadlines and replace expired ones.
@@ -360,7 +370,8 @@ server authority. No key or capability is persisted by the browser.
 
 ## Signed-in recovery visibility and audit (#45, D25)
 
-Authenticated `session` adds `recovery_pending: {ready_at} | null`. It includes
+Authenticated `session` adds `recovery_pending: {ready_at} | null`. The deadline is
+an estimate from the same elapsed clock as recovery authority. It includes
 the last stored ready time until cancellation or replacement, including an expired
 row. This notice grants no recovery authority; a new attempt replaces that deadline.
 No words, verifier, capability or requesting-device identity are disclosed.
@@ -467,9 +478,9 @@ The client exposes a callable function for that future screen.
 
 ### Remaining wait bounds (R3, #45)
 
-Resumption reports the stored deadline's remaining seconds against the maximum
-of live statement time and the persisted server time high-water mark. A backward
-clock adjustment does not move that time backward or alter the deadline.
+Resumption reports the stored deadline's remaining seconds against the persisted
+monotonic elapsed clock described above, rounded up. Wall-clock corrections do
+not advance or extend the remaining wait; restarts retain only recorded progress.
 The client continues to accept nonnegative safe integer
 waits through the recovery capability policy maximum of 48 hours (172800 seconds)
 and rejects larger or malformed durations; it does not change the deadline.

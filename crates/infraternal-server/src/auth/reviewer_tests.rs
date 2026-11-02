@@ -180,9 +180,13 @@ async fn reviewer_http_expired_ceremony_cannot_complete_after_writer_wait() {
     expired_finish_after_writer_wait(true).await;
 }
 
+#[allow(clippy::too_many_lines)] // Keep writer contention and final authority assertions together.
 async fn expired_finish_after_writer_wait(ceremony_expires: bool) {
     let _guard = SERIAL.lock().await;
     let (f, path) = disk_fixture().await;
+    f.auth
+        .test_recovery_elapsed
+        .store(0, std::sync::atomic::Ordering::Relaxed);
     let (token, _, _) = v2_start(&f, NOW).await;
     // Keep test time ahead of SQLite's unixepoch; only explicit advances can cross expiry.
     let now = i64::try_from(
@@ -195,8 +199,12 @@ async fn expired_finish_after_writer_wait(ceremony_expires: bool) {
         + 30 * DAY;
     f.auth.set_test_http_time(now);
     sqlx::query("UPDATE recovery SET ready=?,expires=?")
-        .bind(now - 1)
-        .bind(now + if ceremony_expires { 60 } else { 1 })
+        .bind(0_i64)
+        .bind(if ceremony_expires {
+            60_000_000_000_i64
+        } else {
+            1_000_000_000
+        })
         .execute(&f.auth.pool)
         .await
         .unwrap();
@@ -254,6 +262,9 @@ async fn expired_finish_after_writer_wait(ceremony_expires: bool) {
     tokio::time::sleep(Duration::from_millis(2200)).await;
     // The writer stays blocked while logical time advances beyond the relevant expiry.
     f.auth.set_test_http_time(now + 2);
+    f.auth
+        .test_recovery_elapsed
+        .store(2_000_000_000, std::sync::atomic::Ordering::Relaxed);
     lock.commit().await.unwrap();
     let (status, _, _) = task.await.unwrap();
     println!("REVIEW finish after expired capability/writer wait: HTTP {status}");
@@ -284,12 +295,12 @@ async fn expired_finish_after_writer_wait(ceremony_expires: bool) {
 }
 
 #[tokio::test]
-async fn reviewer_server_clock_rollback_retains_deadline_and_uses_persisted_time() {
+async fn reviewer_server_clock_rollback_preserves_duration_and_projects_estimated_date() {
     let _guard = SERIAL.lock().await;
     let (f, path) = disk_fixture().await;
     let (_, ready, _) = v2_start(&f, NOW).await;
     let (_, again, delay) = v2_start(&f, NOW - 3600).await;
-    assert_eq!(again, ready);
+    assert_eq!(again, ready - 3600);
     assert_eq!(delay, DAY);
     assert!(
         f.auth
@@ -300,7 +311,7 @@ async fn reviewer_server_clock_rollback_retains_deadline_and_uses_persisted_time
     f.auth.pool.close().await;
     std::fs::remove_file(path).unwrap();
     println!(
-        "REVIEW server clock rollback: ready unchanged, persisted remaining duration = 86400 seconds"
+        "REVIEW server clock rollback: estimated date follows wall time, persisted remaining duration = 86400 seconds"
     );
 }
 

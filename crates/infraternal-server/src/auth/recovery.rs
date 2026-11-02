@@ -1,6 +1,44 @@
 //! Recovery delay, same-account live-session exemption and rotation isolation [25,D113].
 use super::{Auth, Authority, DAY, Error, Result, Row, Value, hash, random};
 
+const SECOND: i64 = 1_000_000_000;
+
+// The persisted epoch plus this process's uptime is a conservative elapsed clock.
+// Restart loads only committed progress: downtime and unrecorded uptime earn no
+// credit. MAX under the writer lock also supports overlapping Auth instances.
+pub(super) struct Clock {
+    epoch: i64,
+    started: std::time::Instant,
+}
+impl Clock {
+    pub(super) async fn load(pool: &sqlx::SqlitePool) -> Result<Self> {
+        let epoch = sqlx::query_scalar("SELECT elapsed FROM recovery_clock WHERE singleton=1")
+            .fetch_one(pool)
+            .await?;
+        Ok(Self {
+            epoch,
+            started: std::time::Instant::now(),
+        })
+    }
+
+    fn sample(&self) -> Result<i64> {
+        let elapsed =
+            i64::try_from(self.started.elapsed().as_nanos()).map_err(|_| Error::Invalid)?;
+        self.epoch.checked_add(elapsed).ok_or(Error::Invalid)
+    }
+}
+
+// Dates are presentation estimates only; every path derives them from the same
+// elapsed-clock remainder. A wall correction can move the date, never authority.
+fn estimate(ready: i64, elapsed: i64, wall: i64) -> i64 {
+    let ticks = ready.saturating_sub(elapsed);
+    wall.saturating_add(ticks.div_euclid(SECOND) + i64::from(ticks.rem_euclid(SECOND) != 0))
+}
+
+fn delay(ready: i64, elapsed: i64) -> i64 {
+    estimate(ready, elapsed, 0).max(0)
+}
+
 pub(super) enum RecoveryCredential {
     #[cfg(test)]
     Legacy(String),
@@ -9,6 +47,47 @@ pub(super) enum RecoveryCredential {
 
 #[allow(clippy::missing_errors_doc)]
 impl Auth {
+    // Obtain the writer lock before sampling uptime, including any database wait.
+    // No wall clock is used by production recovery authority.
+    async fn recovery_time(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        wall: i64,
+    ) -> Result<i64> {
+        sqlx::query("UPDATE recovery_clock SET elapsed=elapsed WHERE singleton=1")
+            .execute(&mut **tx)
+            .await?;
+        let candidate = self.recovery_clock.sample()?;
+        // Legacy fixtures explicitly simulate time with their supplied Unix clock.
+        // Clock-step regressions instead inject elapsed nanoseconds independently.
+        #[cfg(test)]
+        let candidate = {
+            let elapsed = self
+                .test_recovery_elapsed
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if elapsed == i64::MIN {
+                super::devices::api_key_time(tx, wall)
+                    .await?
+                    .checked_mul(SECOND)
+                    .ok_or(Error::Invalid)?
+                    .max(candidate)
+            } else {
+                self.recovery_clock
+                    .epoch
+                    .checked_add(elapsed.max(0))
+                    .ok_or(Error::Invalid)?
+            }
+        };
+        #[cfg(not(test))]
+        let _ = wall;
+        Ok(sqlx::query_scalar(
+            "UPDATE recovery_clock SET elapsed=MAX(elapsed,?) WHERE singleton=1 RETURNING elapsed",
+        )
+        .bind(candidate)
+        .fetch_one(&mut **tx)
+        .await?)
+    }
+
     /// Start a 24-hour delayed recovery; repeat requests do not reset or accelerate it.
     #[cfg(test)]
     pub async fn recovery_start(&self, user: &str, words: String, now: i64) -> Result<String> {
@@ -19,7 +98,7 @@ impl Auth {
     }
 
     /// Only an unlocked, unexpired session for this account may waive the delay [D113].
-    /// Returns the recovery capability and its authoritative Unix ready time.
+    /// Returns the recovery capability and its estimated Unix ready time.
     #[cfg(test)]
     pub async fn recovery_start_with_session(
         &self,
@@ -89,55 +168,46 @@ impl Auth {
         if current.as_ref() != Some(&(stored.clone(), version)) {
             return Err(Error::Denied);
         }
-        // Do not slide or check the cookie before Argon2: revocation/expiry can occur
-        // during verification. This recheck shares the writer lock with request creation.
-        // Share the persisted server high-water mark with API-key authorization:
-        // wall-clock rollback or a process restart must not backdate a fresh wait.
-        let now = super::devices::api_key_time(&mut tx, clock()?).await?;
-        let previous_expiry: Option<i64> =
-            sqlx::query_scalar("SELECT expires FROM recovery WHERE user_id=?")
+        // Session exemption retains wall-clock expiry; it cannot change an existing
+        // request. Recovery readiness and lifetime use only the elapsed clock.
+        let wall = clock()?;
+        let session_now = super::devices::api_key_time(&mut tx, wall).await?;
+        let elapsed = self.recovery_time(&mut tx, wall).await?;
+        let previous: Option<(i64, i64)> =
+            sqlx::query_as("SELECT ready,expires FROM recovery WHERE user_id=?")
                 .bind(user)
                 .fetch_optional(&mut *tx)
                 .await?;
-        let token = random();
-        let conflict = if resume {
-            "ON CONFLICT(user_id) DO UPDATE SET token_hash=excluded.token_hash,ready=CASE WHEN recovery.expires<=MAX(?,unixepoch()) THEN excluded.ready ELSE recovery.ready END,expires=CASE WHEN recovery.expires<=MAX(?,unixepoch()) THEN excluded.expires ELSE recovery.expires END"
-        } else {
-            "ON CONFLICT(user_id) DO UPDATE SET token_hash=excluded.token_hash,ready=excluded.ready,expires=excluded.expires WHERE recovery.expires<=MAX(?,unixepoch())"
-        };
-        // Evaluate session/account/expiry inside the very statement that grants the
-        // waiver. SQLite's statement clock covers executor delays after Rust sampled
-        // time; MAX also respects the explicit future clock used by library callers.
-        // Resumption rotates only the bearer while pending. Expiry is terminal:
-        // replacing an expired request starts both deadlines anew, including at equality.
-        let sql = format!(
-            "WITH clock(now) AS (SELECT MAX(?,unixepoch())) INSERT INTO recovery(user_id,token_hash,ready,expires) SELECT ?,?,CASE WHEN EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>clock.now) THEN clock.now ELSE clock.now+? END,clock.now+? FROM clock WHERE 1 {conflict} RETURNING ready,MAX(ready-MAX(?,unixepoch()),0),MAX(?,unixepoch())"
-        );
-        let mut query = sqlx::query_as::<_, (i64, i64, i64)>(&sql)
-            .bind(now)
-            .bind(user)
-            .bind(hash(&token))
-            .bind(session.map(hash).unwrap_or_default())
-            .bind(user)
-            .bind(DAY)
-            .bind(2 * DAY);
-        query = query.bind(now);
-        if resume {
-            query = query.bind(now);
+        let fresh = previous.is_none_or(|(_, expires)| expires <= elapsed);
+        if !fresh && !resume {
+            return Err(Error::Denied);
         }
-        let (ready, delay, authority_now) = query
-            .bind(now)
-            .bind(now)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(Error::Denied)?;
-        // Persist SQLite's statement-time observation too, not only the earlier sample.
-        super::devices::api_key_time(&mut tx, authority_now).await?;
-        if previous_expiry.is_none_or(|expires| expires <= authority_now) {
-            record(&mut tx, user, "start", authority_now).await?;
+        let (ready, expires) = if let Some(deadlines) = previous.filter(|_| !fresh) {
+            deadlines
+        } else {
+            // Verify the exemption only after Argon2 and while holding the writer
+            // lock. SQLite's statement clock covers executor delays in this check.
+            let waived: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>MAX(?,unixepoch()))")
+                .bind(session.map(hash).unwrap_or_default()).bind(user).bind(session_now)
+                .fetch_one(&mut *tx).await?;
+            (
+                elapsed
+                    .checked_add(if waived { 0 } else { DAY * SECOND })
+                    .ok_or(Error::Invalid)?,
+                elapsed
+                    .checked_add(2 * DAY * SECOND)
+                    .ok_or(Error::Invalid)?,
+            )
+        };
+        let token = random();
+        sqlx::query("INSERT INTO recovery(user_id,token_hash,ready,expires) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET token_hash=excluded.token_hash,ready=excluded.ready,expires=excluded.expires")
+            .bind(user).bind(hash(&token)).bind(ready).bind(expires)
+            .execute(&mut *tx).await?;
+        if fresh {
+            record(&mut tx, user, "start", wall).await?;
         }
         self.recovery_changes.commit(tx, user, None).await?;
-        Ok((token, ready, delay))
+        Ok((token, estimate(ready, elapsed, wall), delay(ready, elapsed)))
     }
 
     /// Any signed-in device may cancel recovery without a fresh tap [25].
@@ -175,13 +245,24 @@ impl Auth {
     }
 
     /// Current account-scoped recovery state; callers must already hold session authority.
-    pub(crate) async fn pending_recovery(&self, user: &str) -> Result<Option<i64>> {
-        Ok(
-            sqlx::query_scalar("SELECT ready FROM recovery WHERE user_id=?")
+    pub(crate) async fn pending_recovery(&self, user: &str, wall: i64) -> Result<Option<i64>> {
+        // Keep the usual no-recovery status read free of clock writes.
+        let present: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM recovery WHERE user_id=?)")
                 .bind(user)
-                .fetch_optional(&self.pool)
-                .await?,
-        )
+                .fetch_one(&self.pool)
+                .await?;
+        if !present {
+            return Ok(None);
+        }
+        let mut tx = self.pool.begin().await?;
+        let elapsed = self.recovery_time(&mut tx, wall).await?;
+        let ready: Option<i64> = sqlx::query_scalar("SELECT ready FROM recovery WHERE user_id=?")
+            .bind(user)
+            .fetch_optional(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(ready.map(|ready| estimate(ready, elapsed, wall)))
     }
 
     /// Coalesced account changes wake its authenticated sockets without idle polling.
@@ -191,8 +272,13 @@ impl Auth {
 
     /// Release the old recovery envelope only after the delay, then enroll a replacement passkey.
     pub async fn recovery_ready(&self, token: &str, now: i64) -> Result<Value> {
+        let mut tx = self.pool.begin().await?;
+        let elapsed = self.recovery_time(&mut tx, now).await?;
         let row = sqlx::query("SELECT users.id,users.username,users.display_name,users.recovery_wrap_version,wraps.blob FROM recovery JOIN users ON users.id=recovery.user_id JOIN wraps ON wraps.user_id=users.id AND wraps.kind='recovery' WHERE recovery.token_hash=? AND recovery.ready<=? AND recovery.expires>?")
-            .bind(hash(token)).bind(now).bind(now).fetch_optional(&self.pool).await?.ok_or(Error::Denied)?;
+            .bind(hash(token)).bind(elapsed).bind(elapsed).fetch_optional(&mut *tx).await?;
+        // Denied checks also record progress; a restart never invents elapsed time.
+        tx.commit().await?;
+        let row = row.ok_or(Error::Denied)?;
         let mut registration = self
             .registration(
                 row.get("id"),
@@ -226,9 +312,11 @@ pub(super) async fn record(
     Ok(())
 }
 
-// Consume recovery and ceremony authority at statement time inside the writer
-// transaction. MAX preserves explicit future clocks in deterministic library tests.
+// Recovery delay/lifetime use the same elapsed clock as admission and status.
+// The short, process-local ceremony separately retains its wall expiry policy.
+#[allow(clippy::too_many_arguments)] // Keep both capability policies inside the consuming writer transaction.
 pub(super) async fn complete(
+    auth: &Auth,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     user: &str,
     token: &str,
@@ -237,13 +325,14 @@ pub(super) async fn complete(
     now: i64,
     ceremony_expires: i64,
 ) -> Result<()> {
+    let elapsed = auth.recovery_time(tx, now).await?;
     if sqlx::query(
-        "DELETE FROM recovery WHERE user_id=? AND token_hash=? AND ready<=MAX(?,unixepoch()) AND expires>MAX(?,unixepoch()) AND ?>MAX(?,unixepoch())",
+        "DELETE FROM recovery WHERE user_id=? AND token_hash=? AND ready<=? AND expires>? AND ?>MAX(?,unixepoch())",
     )
     .bind(user)
     .bind(token)
-    .bind(now)
-    .bind(now)
+    .bind(elapsed)
+    .bind(elapsed)
     .bind(ceremony_expires)
     .bind(now)
     .execute(&mut **tx)

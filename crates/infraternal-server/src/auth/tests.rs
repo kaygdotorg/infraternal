@@ -3184,10 +3184,10 @@ async fn recovery_audit_commits_once_with_start_cancel_and_complete() {
         .await
         .unwrap();
     assert_eq!(ready, again);
-    assert!(f.auth.legacy_ready(&token, NOW + DAY).await.is_err());
+    assert!(f.auth.legacy_ready(&token, NOW + 1).await.is_err());
     f.auth.recovery_cancel(&f.session, NOW + 2).await.unwrap();
     f.auth.recovery_cancel(&f.session, NOW + 3).await.unwrap();
-    assert!(f.auth.legacy_ready(&next, NOW + DAY).await.is_err());
+    assert!(f.auth.legacy_ready(&next, NOW + 3).await.is_err());
     let (token, _) = f
         .auth
         .recovery_resume(&f.user, f.words.clone(), NOW + 4)

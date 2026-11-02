@@ -55,6 +55,13 @@ Starting a recovery from a device that is not signed in waits 24 hours, so that 
 
 Re-entering your words while a recovery is pending resumes that request, with the same wait and expiry. Once it expires or is cancelled, starting again creates a new request with a fresh 24-hour wait and 48-hour expiry (unless you are already signed in). Each new request notifies your signed-in devices.
 
+The wait and expiry count elapsed server uptime, so a clock correction cannot
+skip or lengthen the wait. A server restart keeps the progress already recorded,
+but does not count downtime or uptime since the last recorded check. Each restart
+can add at most 24 hours of extra waiting, plus downtime. The displayed date is
+an estimate and can move after a clock correction. An upgrade from the older
+clock-based recovery ends existing requests. Re-enter your words to start a fresh wait.
+
 A finished recovery signs out every session, removes every passkey and API key, and gives you new words. So each set of words works once.
 
 ### First-owner setup code

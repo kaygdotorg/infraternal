@@ -1,6 +1,8 @@
 //! Recovery attempt lifetimes through the production verifier and both HTTP entry points.
 use super::*;
 
+const SECOND: i64 = 1_000_000_000;
+
 async fn attempt(f: &Fixture, action: &str, now: i64, signed_in: bool) -> Value {
     f.auth.set_test_http_time(now);
     let cookie = if signed_in {
@@ -20,7 +22,7 @@ async fn attempt(f: &Fixture, action: &str, now: i64, signed_in: bool) -> Value 
 }
 
 async fn deadlines(f: &Fixture) -> (i64, i64) {
-    sqlx::query_as("SELECT ready,expires FROM recovery WHERE user_id=?")
+    sqlx::query_as("SELECT ready/1000000000,expires/1000000000 FROM recovery WHERE user_id=?")
         .bind(&f.user)
         .fetch_one(&f.auth.pool)
         .await
@@ -42,7 +44,7 @@ async fn recovery_restart_after_expiry_starts_a_new_wait_and_notifies() {
         assert_eq!(deadlines(&f).await, (NOW + 3 * DAY, NOW + 4 * DAY));
         assert!(
             f.auth
-                .recovery_ready(str_field(&old, "token"), NOW + 3 * DAY)
+                .recovery_ready(str_field(&old, "token"), NOW + 2 * DAY)
                 .await
                 .is_err()
         );
@@ -79,7 +81,7 @@ async fn recovery_restart_while_pending_preserves_both_deadlines_even_with_sessi
         assert_eq!(deadlines(&f).await, (NOW + DAY, NOW + 2 * DAY));
         assert!(
             f.auth
-                .recovery_ready(str_field(&old, "token"), NOW + DAY)
+                .recovery_ready(str_field(&old, "token"), NOW + 1)
                 .await
                 .is_err()
         );
@@ -126,7 +128,7 @@ async fn recovery_restart_after_cancel_starts_a_new_wait_and_notifies() {
     assert_eq!(deadlines(&f).await, (NOW + 2 * DAY + 1, NOW + 3 * DAY + 1));
     assert!(
         f.auth
-            .recovery_ready(str_field(&old, "token"), NOW + 2 * DAY + 1)
+            .recovery_ready(str_field(&old, "token"), NOW + DAY + 1)
             .await
             .is_err()
     );
@@ -165,4 +167,239 @@ async fn recovery_restart_uses_persisted_server_time_after_clock_rollback() {
     let next = attempt(&f, "recovery-resume", NOW + 1, false).await;
     assert_eq!(next["delay_seconds"], DAY);
     assert_eq!(deadlines(&f).await, (NOW + 3 * DAY, NOW + 4 * DAY));
+}
+
+// Separate elapsed time from wall time: advancing wall time must grant no authority.
+#[tokio::test]
+async fn recovery_elapsed_forward_step_cannot_release_the_envelope() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture_v2().await;
+    f.auth
+        .test_recovery_elapsed
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    let old = attempt(&f, "recovery-start", NOW, false).await;
+    assert!(
+        f.auth
+            .recovery_ready(str_field(&old, "token"), NOW + 1)
+            .await
+            .is_err(),
+        "a forward wall-clock step released the envelope before elapsed 24h"
+    );
+}
+
+#[tokio::test]
+async fn recovery_elapsed_status_and_boundaries_ignore_both_clock_steps() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture_v2().await;
+    let elapsed = |seconds| {
+        f.auth
+            .test_recovery_elapsed
+            .store(seconds * SECOND, std::sync::atomic::Ordering::Relaxed);
+    };
+    elapsed(0);
+    attempt(&f, "recovery-start", NOW, false).await;
+    elapsed(3600);
+    let next = attempt(&f, "recovery-resume", NOW + DAY, false).await;
+    assert_eq!(next["delay_seconds"], 82800);
+    assert_eq!(
+        f.auth
+            .session(&f.session, NOW + DAY)
+            .await
+            .unwrap()
+            .recovery_pending
+            .unwrap()
+            .ready_at,
+        next["ready_at"].as_i64().unwrap()
+    );
+    let next = attempt(&f, "recovery-resume", NOW - DAY, false).await;
+    assert_eq!(next["delay_seconds"], 82800);
+    elapsed(DAY - 1);
+    assert!(
+        f.auth
+            .recovery_ready(str_field(&next, "token"), NOW)
+            .await
+            .is_err()
+    );
+    elapsed(DAY);
+    assert!(
+        f.auth
+            .recovery_ready(str_field(&next, "token"), NOW)
+            .await
+            .is_ok()
+    );
+    elapsed(2 * DAY - 1);
+    assert!(
+        f.auth
+            .recovery_ready(str_field(&next, "token"), NOW)
+            .await
+            .is_ok()
+    );
+    elapsed(2 * DAY);
+    assert!(
+        f.auth
+            .recovery_ready(str_field(&next, "token"), NOW)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn recovery_elapsed_restart_retains_only_recorded_progress() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture_v2().await;
+    f.auth
+        .test_recovery_elapsed
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    attempt(&f, "recovery-start", NOW, false).await;
+    f.auth
+        .test_recovery_elapsed
+        .store(3600 * SECOND, std::sync::atomic::Ordering::Relaxed);
+    attempt(&f, "recovery-resume", NOW, false).await;
+    // A fresh Auth owns a new monotonic origin, loading only the committed progress.
+    let restarted = Auth::new(f.auth.pool.clone(), "auth.example.test", ORIGIN)
+        .await
+        .unwrap();
+    restarted
+        .test_recovery_elapsed
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    let f = Fixture {
+        auth: restarted,
+        ..f
+    };
+    let next = attempt(&f, "recovery-resume", NOW + DAY, false).await;
+    assert_eq!(next["delay_seconds"], 82800);
+    assert!(
+        f.auth
+            .recovery_ready(str_field(&next, "token"), NOW + DAY)
+            .await
+            .is_err()
+    );
+    f.auth
+        .test_recovery_elapsed
+        .store(82800 * SECOND, std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        f.auth
+            .recovery_ready(str_field(&next, "token"), NOW + DAY)
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn recovery_elapsed_completion_rechecks_delay_inside_writer_transaction() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture_v2().await;
+    f.auth
+        .test_recovery_elapsed
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    let request = attempt(&f, "recovery-start", NOW, false).await;
+    // Supply a valid ceremony independently of ready admission, so this probes the
+    // final authority check even if a challenge was issued by an earlier buggy path.
+    let start = f
+        .auth
+        .registration(
+            f.user.clone(),
+            "owner",
+            "Owner",
+            Authority::Recovery(hash(str_field(&request, "token"))),
+            true,
+            NOW + DAY,
+        )
+        .await
+        .unwrap();
+    let software = Software::new();
+    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let result = f
+        .auth
+        .registration_finish_with_verifier(
+            str_field(&start, "ceremony"),
+            software.registration(&start, ORIGIN, true),
+            browser_wrap(&software.prf(&start), &f.dek, &f.user, "passkey"),
+            Some(browser_wrap(
+                &recovery_material(&words, "wrap"),
+                &f.dek,
+                &f.user,
+                "recovery",
+            )),
+            Some(recovery_verifier(&words)),
+            NOW + DAY,
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "completion trusted a wall-clock step instead of elapsed time"
+    );
+    assert!(f.auth.session(&f.session, NOW + DAY).await.is_ok());
+    // After 24 elapsed hours, a backward wall step cannot extend the wait.
+    f.auth
+        .test_recovery_elapsed
+        .store(DAY * SECOND, std::sync::atomic::Ordering::Relaxed);
+    let start = f
+        .auth
+        .recovery_ready(str_field(&request, "token"), NOW - DAY)
+        .await
+        .unwrap();
+    let result = f
+        .auth
+        .registration_finish_with_verifier(
+            str_field(&start, "ceremony"),
+            software.registration(&start, ORIGIN, true),
+            browser_wrap(&software.prf(&start), &f.dek, &f.user, "passkey"),
+            Some(browser_wrap(
+                &recovery_material(&words, "wrap"),
+                &f.dek,
+                &f.user,
+                "recovery",
+            )),
+            Some(recovery_verifier(&words)),
+            NOW - DAY,
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "a backward wall-clock step extended the completed elapsed wait"
+    );
+    assert!(f.auth.session(&f.session, NOW - DAY).await.is_err());
+}
+
+#[tokio::test]
+async fn recovery_elapsed_subsecond_start_never_rounds_the_wait_down() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture_v2().await;
+    let elapsed = |ticks| {
+        f.auth
+            .test_recovery_elapsed
+            .store(ticks, std::sync::atomic::Ordering::Relaxed);
+    };
+    elapsed(500_000_000);
+    let request = attempt(&f, "recovery-start", NOW, false).await;
+    assert_eq!(request["delay_seconds"], DAY);
+    elapsed(DAY * SECOND + 499_999_999);
+    assert!(
+        f.auth
+            .recovery_ready(str_field(&request, "token"), NOW)
+            .await
+            .is_err()
+    );
+    elapsed(DAY * SECOND + 500_000_000);
+    assert!(
+        f.auth
+            .recovery_ready(str_field(&request, "token"), NOW)
+            .await
+            .is_ok()
+    );
+    elapsed(2 * DAY * SECOND + 499_999_999);
+    assert!(
+        f.auth
+            .recovery_ready(str_field(&request, "token"), NOW)
+            .await
+            .is_ok()
+    );
+    elapsed(2 * DAY * SECOND + 500_000_000);
+    assert!(
+        f.auth
+            .recovery_ready(str_field(&request, "token"), NOW)
+            .await
+            .is_err()
+    );
 }
