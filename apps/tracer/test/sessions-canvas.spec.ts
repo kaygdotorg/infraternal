@@ -16,7 +16,8 @@ async function open(browser: Browser, viewport: Viewport, scene = 0, theme = "in
   const context = await browser.newContext({ viewport: { width: viewport.width, height: viewport.height }, hasTouch: !!viewport.touch, isMobile: !!viewport.touch });
   await context.addInitScript(([n, block]) => {
     if (block) { Storage.prototype.getItem = () => { throw new Error("blocked"); }; Storage.prototype.setItem = () => { throw new Error("blocked"); }; return; }
-    if (!localStorage.getItem("tracer.hints.mock")) localStorage.setItem("tracer.hints.mock", JSON.stringify({ signIns: n, shown: {} }));
+    // The teaching counters are device-wide and carry no account in their key (D312, R250-03; src/hints.ts).
+    if (!localStorage.getItem("tracer.hints")) localStorage.setItem("tracer.hints", JSON.stringify({ signIns: n, shown: {} }));
   }, [signIns, blockStorage] as const);
   const page = await context.newPage();
   await page.goto(`/?mock=1&proto=clusters&scene=3&theme=${theme}&bg=none${scene ? `&sessions=${scene}` : ""}`);
