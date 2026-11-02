@@ -103,7 +103,7 @@ for (const theme of ["ink", "paper"]) {
       await shoot(page, `phone-${theme}-swipe-end-revealed`);
       await page.locator("#tree .ui-row-swipe-act[data-action='end']").tap();
       await expect(page.locator(".ui-row-ask")).toBeVisible();
-      await page.waitForTimeout(400);
+      await page.waitForTimeout(1000);
       await shoot(page, `phone-${theme}-end-asks-in-row`);
       await page.keyboard.press("Escape");
       await page.waitForTimeout(300);

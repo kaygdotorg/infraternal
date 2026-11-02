@@ -66,7 +66,8 @@ export function createRowPill(cx: Ctx, tree: HTMLElement, menu: RowMenu, actions
       button.dataset.tip = action ? action.label.replace(/…$/, "") : TIP[act];
       button.setAttribute("aria-label", `${button.dataset.tip} ${name}`);
       button.tabIndex = -1; // the row owns the keyboard (F2, Delete, the menu key); the pill is for the pointer
-      button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[act]}</svg>`;
+      // Ending a session is the stop square (as in the row menu); removing a host is the bin.
+      button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${act === "remove" && action?.id === "end" ? SESSION_ICON.end : ICON[act]}</svg>`;
       group.append(button);
     }
     wrap.append(group);
