@@ -461,11 +461,10 @@ mod rotation_action_tests {
 
     #[test]
     fn changing_rotation_interval_requires_fresh_confirmation() {
-        let action = ACTIONS
-            .iter()
-            .find(|action| action.id == "mesh.rotation.interval.set")
-            .expect("rotation interval action is registered");
-        assert_eq!(action.effect, Effect::Destructive);
-        assert_eq!(action.dry_run, infraternal_plugin_api::DryRun::Required);
+        assert!(ACTIONS.iter().any(|action| {
+            action.id == "mesh.rotation.interval.set"
+                && action.effect == Effect::Destructive
+                && action.dry_run == infraternal_plugin_api::DryRun::Required
+        }));
     }
 }
