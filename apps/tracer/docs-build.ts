@@ -248,6 +248,13 @@ function pageList(pages: readonly { slug: string; title: string; summary: string
   return `<h2>All pages</h2>\n<ul class="pages">\n${rows}\n</ul>`;
 }
 
+/** The figures of the pages in `source`: the capture's manifest and folder (docs-figure.ts). A tree with none has none, and its figures are pending. */
+export async function figureOptionsFor(source: string = USER_DOCS_DIR): Promise<Omit<FigureOptions, "page"> & { directory: string }> {
+  const directory = resolve(source, "figures");
+  const manifestFile = Bun.file(resolve(directory, "manifest.json"));
+  return { manifest: (await manifestFile.exists() ? await manifestFile.json() : {}) as FigureManifest, directory };
+}
+
 /** Writes the docs tree into `out` (for the app build, `<dist>/docs`), reading the pages of `source`. */
 export async function buildDocs(out: string, source: string = USER_DOCS_DIR): Promise<DocsIndexPage[]> {
   await mkdir(resolve(out, "fonts"), { recursive: true });
@@ -263,9 +270,8 @@ export async function buildDocs(out: string, source: string = USER_DOCS_DIR): Pr
   if (!script.success) throw new Error(`docs script: ${script.logs.map(String).join("; ")}`);
   const { index: frontText, pages } = await readUserDocs(source);
   // The figures the capture made (docs-figure.ts). A tree with no figures folder simply has none.
-  const figureDirectory = resolve(source, "figures");
-  const manifestFile = Bun.file(resolve(figureDirectory, "manifest.json"));
-  const figureOptions = { manifest: (await manifestFile.exists() ? await manifestFile.json() : {}) as FigureManifest, directory: figureDirectory, allowMissing: process.env.DOCS_FIGURES_ALLOW_MISSING === "1" };
+  const figureOptions = await figureOptionsFor(source);
+  const figureDirectory = figureOptions.directory;
   const rendered = pages.map(({ slug, text }) => renderDoc(slug, text, undefined, figureOptions));
   const entries = rendered.map(({ slug, title, summary }) => ({ slug, title, summary }));
   // The front page's text is optional: without one the list stands alone under a generic title.

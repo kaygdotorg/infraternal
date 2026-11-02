@@ -6,7 +6,7 @@
  * the test double running the same dataset, and for every entry of figures.ts, at each size (desktop 2x, phone 3x) and in each scheme
  * (ink, paper): opens the product, reaches the state through its own UI, checks that no internal name is on the page, and writes
  * the picture. A figure with a clip is then played again from the same state and recorded. Everything lands in `docs/user/figures/`
- * with `manifest.json`, which the docs build reads (docs-figure.ts). Run it again after the UI changes and the pictures follow.
+ * with `manifest.json`, which the docs build reads (docs-figure.ts). That folder is git-ignored: nothing it writes is committed (where the docs' media lives is undecided), and a page whose pictures are not there shows "Figure pending" under the caption. Run it again after the UI changes and the pictures follow.
  *
  * Deterministic. The clock is fixed (March 14, 09:41, UTC) and the locale is en-US; the cursor never blinks (its animation is held at
  * one opacity); stills are taken under reduced motion so every state is at rest; the demo dataset is the same every run. Clips are

@@ -11,11 +11,14 @@
  * build. `+clip` says the figure also has a clip; the still is then its poster.
  *
  * Where the pictures come from. They are captured from a production build of the app by `bun run docs:figures`
- * (figures/capture.ts), never drawn by hand, so they follow the UI whenever the command is run again. The capture writes, next to
- * the pages, `docs/user/figures/<name>.<size>.<scheme>.webp` for each size (`desktop` at 2x, `phone` at 3x) and scheme (`ink`,
- * `paper`), `<name>.<size>.<scheme>.webm` for a clip, and `manifest.json` with each figure's size in CSS pixels. This file reads
- * the manifest, so a picture is written with its width and height (no layout shift) and a figure the capture never made fails the
- * build with the command to run. (`DOCS_FIGURES_ALLOW_MISSING=1` lets the capture itself build the app before the figures exist.)
+ * (figures/capture.ts), never drawn by hand, so they follow the UI whenever the command is run again. The capture writes
+ * `docs/user/figures/<name>.<size>.<scheme>.webp` for each size (`desktop` at 2x, `phone` at 3x) and scheme (`ink`, `paper`),
+ * `<name>.<size>.<scheme>.webm` for a clip, and `manifest.json` with each figure's size in CSS pixels. That folder is git-ignored:
+ * where the media of the docs lives is not decided, so no picture is in the repository.
+ *
+ * Without the pictures a page still builds. A figure whose pictures are not there (no manifest entry, or a file missing) is shown as
+ * its caption under a "Figure pending" placeholder, so the page reads in full and the place of the picture is kept. With them, this
+ * file reads the manifest, so a picture is written with its width and height (no layout shift).
  *
  * Markup. A still is a `<picture>` that picks the size by window width and the scheme by the reader's setting, with the desktop
  * paper picture as the plain `<img>`. It is lazy and decodes off the main thread. A clip is not in the markup as a video: the figure
@@ -45,14 +48,10 @@ export const FIGURES_URL = "/docs/figures";
 
 export const figureFile = (name: string, size: FigureSize, scheme: FigureScheme, extension: "webp" | "webm"): string => `${name}.${size}.${scheme}.${extension}`;
 
-const escapeHtml = (text: string): string => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-
 export interface FigureOptions {
   manifest: FigureManifest;
-  /** The folder the pictures are in, checked for each file a figure uses. */
+  /** The folder the pictures are in, checked for each file a figure uses; a figure with a file missing is pending. */
   directory?: string;
-  /** Let a figure that was never captured stand as a note instead of failing (only the capture's own build does this). */
-  allowMissing?: boolean;
   page?: string;
 }
 
@@ -72,21 +71,16 @@ export function figures(html: string, options: FigureOptions): FiguresResult {
     if (!alt?.trim()) throw new Error(`docs page "${page}": figure "${name}" needs alt text for a screen reader (the text in the square brackets)`);
     if (!caption?.trim()) throw new Error(`docs page "${page}": figure "${name}" needs a caption (the text in quotes after the address)`);
     const entry = options.manifest[name];
-    if (!entry) {
-      if (options.allowMissing) return `<p class="figure-missing">Figure ${escapeHtml(name)} has not been captured yet.</p>`;
-      throw new Error(`docs page "${page}": figure "${name}" has not been captured; run "bun run docs:figures" in apps/tracer`);
+    const wantsClip = Boolean(clip) && Boolean(entry?.clip);
+    const needed = entry ? FIGURE_SIZES.flatMap((size) => FIGURE_SCHEMES.flatMap((scheme) => (wantsClip ? (["webp", "webm"] as const) : (["webp"] as const)).map((extension) => figureFile(name, size, scheme, extension)))) : [];
+    // Pending: the place of the picture and its caption, until the capture has been run where the docs are built.
+    if (!entry || (options.directory && needed.some((file) => !existsSync(resolve(options.directory!, file))))) {
+      return `<figure class="figure figure-pending" data-figure="${name}">
+<div class="figure-media figure-placeholder" role="img" aria-label="${alt}"><span>Figure pending</span></div>
+<figcaption>${caption}</figcaption>
+</figure>`;
     }
-    if (clip && !entry.clip) {
-      if (!options.allowMissing) throw new Error(`docs page "${page}": figure "${name}" is written with +clip but the capture made no clip for it`);
-    }
-    const wantsClip = Boolean(clip) && Boolean(entry.clip);
-    for (const size of FIGURE_SIZES) for (const scheme of FIGURE_SCHEMES) {
-      for (const extension of wantsClip ? (["webp", "webm"] as const) : (["webp"] as const)) {
-        const file = figureFile(name, size, scheme, extension);
-        if (options.directory && !existsSync(resolve(options.directory, file))) throw new Error(`docs page "${page}": figure "${name}" is missing ${file}; run "bun run docs:figures" in apps/tracer`);
-        files.push(file);
-      }
-    }
+    files.push(...needed);
     const src = (size: FigureSize, scheme: FigureScheme): string => `${FIGURES_URL}/${figureFile(name, size, scheme, "webp")}`;
     const source = (size: FigureSize, scheme: FigureScheme, media: string): string => `<source media="${media}" srcset="${src(size, scheme)}" width="${entry[size].width}" height="${entry[size].height}">`;
     const phone = `(max-width: ${PHONE_BREAKPOINT})`;

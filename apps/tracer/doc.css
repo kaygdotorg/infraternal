@@ -102,7 +102,8 @@
 .doc .figure-clip { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity 200ms ease; pointer-events: none; }
 .doc .figure-clip[data-playing] { opacity: 1; }
 .doc figcaption { margin-top: 0.5rem; color: var(--fg-2); font-size: var(--text-secondary); font-weight: var(--fw-secondary); line-height: 1.5; }
-.doc .figure-missing { color: var(--fg-2); font-style: italic; }
+/* A figure that has not been captured where the docs are built: its place, with the caption under it. */
+.doc .figure-placeholder { display: grid; place-items: center; width: 100%; aspect-ratio: 16 / 9; max-height: 14rem; box-sizing: border-box; background: rgb(from var(--fg) r g b / 0.03); color: var(--fg-2); font-size: var(--text-secondary); font-weight: var(--fw-secondary); line-height: 1.5; }
 @media (prefers-reduced-motion: reduce) { .doc .figure-clip { transition: none; } }
 
 /* ---- Tables ------------------------------------------------------------------------------------------------------------------

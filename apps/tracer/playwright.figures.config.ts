@@ -5,7 +5,6 @@
  * It is not part of the test suite (`playwright.config.ts` looks in test/ only). It builds the app's preview build into its own
  * folder with the demo dataset (TRACER_DATASET=docs: plain names, docs-dataset.ts), and serves it with the test double running the
  * same dataset behind the latency proxy the suite uses (no added delay is set, so a capture is as fast as the machine).
- * DOCS_FIGURES_ALLOW_MISSING lets that build run before the figures it is about to capture exist.
  */
 import { defineConfig } from "playwright/test";
 
@@ -34,7 +33,6 @@ export default defineConfig({
       TRACER_DIST: "dist-figures",
       TRACER_DATASET: "docs",
       INFRATERNAL_CLUSTERS_PREVIEW: "1",
-      DOCS_FIGURES_ALLOW_MISSING: "1",
     },
     url: `${origin}/health`,
     reuseExistingServer: false,

@@ -8,6 +8,8 @@ target/
 build/
 dist/
 dist-figures/
+# The docs figures (apps/tracer/figures, #302): captured on demand; where the docs media lives is not decided yet, so none is committed.
+docs/user/figures/
 __pycache__/
 .wrangler/
 .env*

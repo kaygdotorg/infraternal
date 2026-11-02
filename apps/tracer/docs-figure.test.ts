@@ -4,6 +4,7 @@
  * figure can be wrong failing the build with words for the person writing the page.
  */
 import { expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -42,16 +43,22 @@ test("+clip adds the address of the clip for the script, with the poster being t
   expect(doc.figureFiles).toHaveLength(8);
 });
 
-test("a figure needs alt text and a caption, and must have been captured", () => {
+test("a figure needs alt text and a caption", () => {
   expect(() => render('![](figure:startup-question "Caption.")')).toThrow('figure "startup-question" needs alt text');
   expect(() => render("![Alt text.](figure:startup-question)")).toThrow('figure "startup-question" needs a caption');
-  expect(() => render('![Alt text.](figure:never-made "Caption.")')).toThrow('figure "never-made" has not been captured; run "bun run docs:figures"');
-  expect(() => render('![Alt text.](figure:startup-question+clip "Caption.")')).toThrow("written with +clip but the capture made no clip");
 });
 
-test("the capture's own build lets a figure that does not exist yet stand as a note", () => {
-  const doc = render('![Alt text.](figure:never-made "Caption.")', { allowMissing: true });
-  expect(doc.html).toContain('<p class="figure-missing">Figure never-made has not been captured yet.</p>');
+test("a figure that was never captured is its caption under a placeholder, and the page still builds", () => {
+  const doc = render('![The question over a terminal.](figure:never-made "The caption stays.")');
+  expect(doc.html).toContain('<figure class="figure figure-pending" data-figure="never-made">');
+  expect(doc.html).toContain('<div class="figure-media figure-placeholder" role="img" aria-label="The question over a terminal."><span>Figure pending</span></div>');
+  expect(doc.html).toContain("<figcaption>The caption stays.</figcaption>");
+  expect(doc.html).not.toContain("<picture>");
+  expect(doc.figureFiles).toEqual([]);
+  // A clip asked for that the capture did not make leaves the still, with no clip.
+  const still = render('![Alt text.](figure:startup-question+clip "Caption.")');
+  expect(still.html).toContain("<picture>");
+  expect(still.html).not.toContain("data-clip");
 });
 
 test("an image that is not a figure, or sits inside a sentence, is left alone", () => {
@@ -59,7 +66,7 @@ test("an image that is not a figure, or sits inside a sentence, is left alone", 
   expect(figures(html, { manifest }).html).toBe(html);
 });
 
-test("every file a figure uses must exist, and only the used ones are copied into the docs tree", async () => {
+test("a figure with a picture missing is pending, and only the used files of a complete one are copied into the docs tree", async () => {
   const base = await mkdtemp(join(tmpdir(), "docs-figure-"));
   try {
     const source = join(base, "user");
@@ -68,15 +75,17 @@ test("every file a figure uses must exist, and only the used ones are copied int
     await writeFile(join(source, "index.md"), "# Docs\n\nStart here.\n\n## A\n\ntext\n\n## B\n\ntext\n");
     await writeFile(join(source, "page.md"), markdown('![Alt text.](figure:startup-question "Caption.")'));
     await writeFile(join(folder, "manifest.json"), JSON.stringify(manifest));
-    // One picture is missing: the build says which.
+    // One picture is missing: the figure is pending, nothing is copied, nothing fails.
     for (const size of FIGURE_SIZES) for (const scheme of FIGURE_SCHEMES) if (!(size === "phone" && scheme === "ink")) await writeFile(join(folder, figureFile("startup-question", size, scheme, "webp")), "x");
     await writeFile(join(folder, "retired.desktop.ink.webp"), "x");
-    await expect(buildDocs(join(base, "out"), source)).rejects.toThrow("startup-question.phone.ink.webp");
+    await buildDocs(join(base, "out"), source);
+    expect(await readFile(join(base, "out", "page", "fragment.html"), "utf8")).toContain("figure-pending");
+    expect(existsSync(join(base, "out", "figures"))).toBe(false);
+    // Complete: the four pictures of the figure are copied, and not the retired one.
     await writeFile(join(folder, figureFile("startup-question", "phone", "ink", "webp")), "x");
     await buildDocs(join(base, "out"), source);
-    const shipped = (await readdir(join(base, "out", "figures"))).sort();
-    expect(shipped).toEqual(["startup-question.desktop.ink.webp", "startup-question.desktop.paper.webp", "startup-question.phone.ink.webp", "startup-question.phone.paper.webp"]);
-    expect(await readFile(join(base, "out", "page", "fragment.html"), "utf8")).toContain('<figure class="figure"');
+    expect((await readdir(join(base, "out", "figures"))).sort()).toEqual(["startup-question.desktop.ink.webp", "startup-question.desktop.paper.webp", "startup-question.phone.ink.webp", "startup-question.phone.paper.webp"]);
+    expect(await readFile(join(base, "out", "page", "fragment.html"), "utf8")).toContain('<figure class="figure" data-figure="startup-question">');
   } finally {
     await rm(base, { recursive: true, force: true });
   }
