@@ -43,6 +43,26 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
     if (detail?.source === "keyboard") cx.camera.keyFlight(() => cx.nav.flyView("mesh")); else cx.nav.flyView("mesh");
     cx.mesh?.beginRename(host);
   }
+  else if (kind === "access" && value) {
+    // The machine's details open on the Host tab with the consent under "Access level": a window of the host comes into view,
+    // its popover opens, and the row is pressed once it has been drawn.
+    const host = decodeURIComponent(value);
+    const rec = [...views.values()].flatMap((c) => [...c.wins.values()]).find((w) => w.model.kind === "terminal" && w.model.host === host);
+    if (!rec) { core.toast.show({ message: `${host} has no window open. Open a shell on it first.` }); return; }
+    cx.win.setActive(rec);
+    cx.nav.focusWindow(rec);
+    cx.details?.close(true);
+    window.setTimeout(() => {
+      cx.details?.toggle(rec, "keyboard");
+      const t0 = performance.now();
+      const press = (): void => {
+        const row = [...document.querySelectorAll<HTMLElement>(".canvas-popover .ui-kv-row")].find((r) => r.textContent?.includes("Access level"));
+        const button = row?.querySelector<HTMLElement>(".ui-kv-press");
+        if (button) button.click(); else if (performance.now() - t0 < 2500) requestAnimationFrame(press);
+      };
+      press();
+    }, 350);
+  }
   else if (kind === "open" && value) cx.win.open(value);
   else if (kind === "session" && value) { const [host, sid] = value.split("/"); if (host && sid) cx.win.openSession(host, sid); }
   else if (kind === "sessions") {

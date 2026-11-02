@@ -139,6 +139,21 @@ test("the buttons' tooltips open below them and never cover the password field",
   }
 });
 
+test("the palette finds Allow full access on a host and opens its consent", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`${base}&privilege=sudo`);
+  await page.waitForFunction(() => (window as unknown as { __tracerClusters?: unknown }).__tracerClusters, null, { timeout: 30_000 });
+  await page.waitForTimeout(900);
+  await page.keyboard.press("Control+Shift+K");
+  await expect(page.locator("#palette-input")).toBeFocused();
+  expect(await page.locator("#palette-results .result", { hasText: "Allow full access" }).count(), "query-only: not in the empty list").toBe(0);
+  await page.keyboard.type("full access on build-01");
+  await page.waitForTimeout(400);
+  await expect(page.locator("#palette-results .result").first()).toContainText("Allow full access on build-01");
+  await page.keyboard.press("Enter");
+  await expect(pane(page)).toContainText("Allow full access?", { timeout: 6000 });
+});
+
 test.describe("phone 393×852", () => {
   test.use({ hasTouch: true, isMobile: true, deviceScaleFactor: 3 });
   test("the consent fits the popover and its buttons are 44 px targets", async ({ page }) => {

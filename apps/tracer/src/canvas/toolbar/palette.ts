@@ -7,7 +7,7 @@
  * this module handles. A row's `source` is "keyboard" when it was picked without the pointer, and keyboard
  * flights are the short version (camera.keyFlight).
  */
-import { ICONS, withLockBadge } from "../../../../../packages/ui/src/icons";
+import { ICONS, ICON_KEY, withLockBadge } from "../../../../../packages/ui/src/icons";
 import { shortcutLabel } from "../../../../../packages/ui/src/platform";
 import type { PaletteEntry } from "../../core-screen";
 import type { Ctx, ViewRec, WinRec } from "../context";
@@ -80,6 +80,8 @@ export function installPalette(cx: Ctx): () => void {
     // Any host's shell by name. Keywords ride in the hint so "ssh", "terminal" and "console" find them.
     for (const host of cx.adapters.sessions.hosts()) {
       if (host.id !== "embedded" && cx.adapters.hostRemoval?.label()) out.push({ group: "Hosts", glyph: "×", label: `${cx.adapters.hostRemoval.label()}: ${host.name}`, hint: "revoke access · uninstall", action: `canvas:removehost:${host.id}` });
+      // The consent for full access (#215): found by typing, like every action; it opens the machine's details on the row.
+      if (cx.adapters.privilege && !cx.adapters.privilege.isFull(host.name)) out.push({ group: "Hosts", glyph: "✓", icon: ICON_KEY, label: `Allow full access on ${host.name}`, hint: "host · privileged access", action: `canvas:access:${encodeURIComponent(host.name)}`, queryOnly: true });
       out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${host.name}`, hint: `terminal · ssh · console${host.online === false ? " · offline" : ""}`, action: `canvas:open:${host.id}` });
     }
     // Mesh hosts by name, so "rename build-01" finds the way to the host's name field (D-rule: the palette reaches
