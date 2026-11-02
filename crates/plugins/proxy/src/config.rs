@@ -1,8 +1,9 @@
-//! Renders mesh-bound static settings and exact-host dynamic routes atomically [#281].
-//! Mesh routes use the same accepted peer addresses as mesh DNS. When mesh and public exposures
-//! coexist, they use separate mesh-IP and wildcard listeners with disjoint ports. Certificate
-//! state remains node-local. A nonce-gated rawdata route on the loopback-only health entrypoint
-//! lets the supervisor acknowledge a dynamic snapshot only after Traefik has loaded that generation.
+//! Renders stable public and mesh listeners plus exact-host dynamic routes atomically [#281].
+//! Mesh routes use the same accepted peer addresses as mesh DNS. The public listener pair always
+//! binds wildcard addresses and the mesh pair always binds the mesh address, so audience changes
+//! only replace dynamic routes and preserve active connections. Certificate state remains node-local.
+//! A nonce-gated rawdata route on the loopback-only health entrypoint lets the supervisor acknowledge
+//! a dynamic snapshot only after Traefik has loaded that generation.
 
 use crate::names::CertificateName;
 use serde_json::{Map, json};
@@ -25,13 +26,13 @@ pub const DYNAMIC_CONFIG_FILENAME: &str = "services.yaml";
 /// Listener ports selected from node privilege and conventional-port availability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ListenerPorts {
-    /// HTTP port for the primary listener scope.
+    /// HTTP port for the stable wildcard public listener.
     pub http: u16,
-    /// HTTPS port for the primary listener scope.
+    /// HTTPS port for the stable wildcard public listener.
     pub https: u16,
-    /// HTTP port for mesh-only routes when public routes use the primary listeners.
+    /// HTTP port for the stable mesh-address listener.
     pub mesh_http: Option<u16>,
-    /// HTTPS port for mesh-only routes when public routes use the primary listeners.
+    /// HTTPS port for the stable mesh-address listener.
     pub mesh_https: Option<u16>,
 }
 
@@ -70,12 +71,10 @@ pub struct DnsChallenge {
 /// Inputs for rendering the static Traefik file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StaticConfig {
-    /// Node's mesh address used by mesh-only listeners.
+    /// Node's mesh address used by mesh listeners.
     pub mesh_address: IpAddr,
-    /// HTTP and HTTPS listener ports.
+    /// Public and mesh HTTP/HTTPS listener ports.
     pub ports: ListenerPorts,
-    /// Whether any explicitly public exposure needs wildcard interface binding.
-    pub public: bool,
     /// Loopback-only private ping port.
     pub private_ping_port: u16,
     /// Directory watched by the file provider.
@@ -138,7 +137,10 @@ pub fn detect_listener_ports(rootful: bool, mesh_address: IpAddr, public: bool) 
     select_listener_ports(rootful, available(80), available(443))
 }
 
-/// Select separate mesh-address ports when public and mesh-only routes share one process.
+/// Select stable public and mesh-address listener pairs for the lifetime of one proxy process.
+///
+/// The mesh pair stays configured even when no mesh route is active, so adding or removing routes
+/// changes only the watched dynamic snapshot and never requires an entrypoint restart.
 ///
 /// # Errors
 /// Returns an address-in-use error when no bounded pair of high ports is available.
@@ -236,25 +238,16 @@ pub fn render_static_config(config: &StaticConfig) -> io::Result<String> {
 }
 
 fn render_entry_points(config: &StaticConfig, rendered: &mut String) -> io::Result<()> {
-    let (plain_address, tls_address) = if config.public {
-        (
-            SocketAddr::new(
-                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                config.ports.http,
-            )
-            .to_string(),
-            SocketAddr::new(
-                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                config.ports.https,
-            )
-            .to_string(),
-        )
-    } else {
-        (
-            SocketAddr::new(config.mesh_address, config.ports.http).to_string(),
-            SocketAddr::new(config.mesh_address, config.ports.https).to_string(),
-        )
-    };
+    let plain_address = SocketAddr::new(
+        IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        config.ports.http,
+    )
+    .to_string();
+    let tls_address = SocketAddr::new(
+        IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        config.ports.https,
+    )
+    .to_string();
     writeln!(
         rendered,
         "[entryPoints.http]\naddress = {}",
@@ -267,20 +260,24 @@ fn render_entry_points(config: &StaticConfig, rendered: &mut String) -> io::Resu
         toml_string(&tls_address)?
     )
     .map_err(io::Error::other)?;
-    if let (Some(mesh_http), Some(mesh_https)) = (config.ports.mesh_http, config.ports.mesh_https) {
-        writeln!(
-            rendered,
-            "\n[entryPoints.mesh-http]\naddress = {}",
-            toml_string(&SocketAddr::new(config.mesh_address, mesh_http).to_string())?
-        )
-        .map_err(io::Error::other)?;
-        writeln!(
-            rendered,
-            "\n[entryPoints.mesh-https]\naddress = {}",
-            toml_string(&SocketAddr::new(config.mesh_address, mesh_https).to_string())?
-        )
-        .map_err(io::Error::other)?;
-    }
+    let (Some(mesh_http), Some(mesh_https)) = (config.ports.mesh_http, config.ports.mesh_https)
+    else {
+        return Err(invalid_input(
+            "stable proxy config requires a mesh listener pair",
+        ));
+    };
+    writeln!(
+        rendered,
+        "\n[entryPoints.mesh-http]\naddress = {}",
+        toml_string(&SocketAddr::new(config.mesh_address, mesh_http).to_string())?
+    )
+    .map_err(io::Error::other)?;
+    writeln!(
+        rendered,
+        "\n[entryPoints.mesh-https]\naddress = {}",
+        toml_string(&SocketAddr::new(config.mesh_address, mesh_https).to_string())?
+    )
+    .map_err(io::Error::other)?;
     let health_address = toml_string(&format!("127.0.0.1:{}", config.private_ping_port))?;
     writeln!(
         rendered,
@@ -331,17 +328,9 @@ pub(crate) fn render_dynamic_config_with_generation(
     let mut proxy_services = Map::new();
     let mut seen_ids = std::collections::BTreeSet::new();
     let mut seen_hosts = std::collections::BTreeSet::new();
-    let split_mesh_listeners = services.iter().any(|service| service.public)
-        && services.iter().any(|service| !service.public);
     for service in services {
         validate_published_service(service, &mut seen_ids, &mut seen_hosts)?;
-        render_published_service(
-            service,
-            split_mesh_listeners,
-            &mut routers,
-            &mut middlewares,
-            &mut proxy_services,
-        )?;
+        render_published_service(service, &mut routers, &mut middlewares, &mut proxy_services)?;
     }
     // The nonce makes a 200 response an exact generation acknowledgment. This route can only use
     // the private loopback health entrypoint and exposes one API path with the current nonce.
@@ -393,17 +382,16 @@ fn validate_published_service<'a>(
 
 fn render_published_service(
     service: &PublishedService,
-    split_mesh_listeners: bool,
     routers: &mut Map<String, serde_json::Value>,
     middlewares: &mut Map<String, serde_json::Value>,
     proxy_services: &mut Map<String, serde_json::Value>,
 ) -> io::Result<()> {
     let access_middleware = format!("{}-mesh-access", service.id);
     let redirect_middleware = format!("{}-https-redirect", service.id);
-    let (plain_entry_point, tls_entry_point) = if split_mesh_listeners && !service.public {
-        ("mesh-http", "mesh-https")
-    } else {
+    let (plain_entry_point, tls_entry_point) = if service.public {
         ("http", "https")
+    } else {
+        ("mesh-http", "mesh-https")
     };
     if !service.public {
         if service.allowed_sources.is_empty() {
@@ -516,10 +504,8 @@ pub fn write_config_atomic(destination: &Path, bytes: &[u8]) -> io::Result<()> {
 
 fn validate_static_config(config: &StaticConfig) -> io::Result<()> {
     let mesh_listener_valid = match (config.ports.mesh_http, config.ports.mesh_https) {
-        (None, None) => true,
         (Some(http), Some(https)) => {
-            config.public
-                && http != 0
+            http != 0
                 && https != 0
                 && http != https
                 && ![config.ports.http, config.ports.https].contains(&http)
@@ -527,7 +513,7 @@ fn validate_static_config(config: &StaticConfig) -> io::Result<()> {
                 && config.private_ping_port != http
                 && config.private_ping_port != https
         }
-        _ => false,
+        (None | Some(_), None) | (None, Some(_)) => false,
     };
     if config.mesh_address.is_unspecified()
         || config.mesh_address.is_loopback()

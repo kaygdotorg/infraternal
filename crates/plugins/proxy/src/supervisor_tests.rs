@@ -352,10 +352,9 @@ fn live_process_without_a_healthy_private_ping_is_reported_unhealthy() {
             ports: ListenerPorts {
                 http: 10080,
                 https: 10443,
-                mesh_http: None,
-                mesh_https: None,
+                mesh_http: Some(10081),
+                mesh_https: Some(10444),
             },
-            public: false,
             private_ping_port: health_address.port(),
             dynamic_directory: state,
             dns_challenge: DnsChallenge {
@@ -644,10 +643,9 @@ fn generation_probe_settings(
             ports: ListenerPorts {
                 http: 10_080,
                 https: 10_443,
-                mesh_http: None,
-                mesh_https: None,
+                mesh_http: Some(10_081),
+                mesh_https: Some(10_444),
             },
-            public: false,
             private_ping_port: address.port(),
             dynamic_directory: state.to_owned(),
             dns_challenge: DnsChallenge {
@@ -696,10 +694,9 @@ fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state(
             ports: ListenerPorts {
                 http: 10080,
                 https: 10443,
-                mesh_http: None,
-                mesh_https: None,
+                mesh_http: Some(10081),
+                mesh_https: Some(10444),
             },
-            public: false,
             private_ping_port: health_address.port(),
             dynamic_directory,
             dns_challenge: DnsChallenge {
@@ -739,8 +736,8 @@ fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state(
         ListenerPorts {
             http: 10_080,
             https: 10_443,
-            mesh_http: None,
-            mesh_https: None,
+            mesh_http: Some(10_081),
+            mesh_https: Some(10_444),
         }
     );
     assert!(supervisor.is_running().expect("process after first route"));
@@ -748,7 +745,7 @@ fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state(
     let dynamic = std::fs::read_to_string(&dynamic_path).expect("read published route");
     assert!(dynamic.contains("docs.n1.example.test"));
     assert!(
-        dynamic.contains("\"port\":\"10443\""),
+        dynamic.contains("\"port\":\"10444\""),
         "HTTP redirect must use the selected HTTPS listener port: {dynamic}"
     );
 

@@ -520,7 +520,6 @@ impl SupervisorFactory for DownloadedTraefikFactory {
                 mesh_http: None,
                 mesh_https: None,
             },
-            public: false,
             private_ping_port,
             dynamic_directory: dynamic_directory.clone(),
             dns_challenge: DnsChallenge {

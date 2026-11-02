@@ -23,21 +23,20 @@ fn mesh_service(sources: Vec<IpAddr>) -> PublishedService {
             .expect("backend socket"),
         allowed_sources: sources,
         public: false,
-        https_port: 10_443,
+        https_port: 10_444,
         certificate: CertificateName::Wildcard("*.build01.ssh.kayg.org".to_owned()),
     }
 }
 
-fn static_config(public: bool) -> StaticConfig {
+fn static_config() -> StaticConfig {
     StaticConfig {
         mesh_address: "100.64.0.2".parse().expect("mesh address"),
         ports: ListenerPorts {
             http: 10080,
             https: 10443,
-            mesh_http: None,
-            mesh_https: None,
+            mesh_http: Some(10081),
+            mesh_https: Some(10444),
         },
-        public,
         private_ping_port: 19999,
         dynamic_directory: PathBuf::from("/var/lib/infraternal/proxy/config/dynamic"),
         dns_challenge: DnsChallenge {
@@ -52,13 +51,14 @@ fn static_config(public: bool) -> StaticConfig {
 }
 
 #[test]
-fn mesh_listener_uses_the_mesh_ip_and_disables_admin_and_usage_surfaces() {
-    let rendered = render_static_config(&static_config(false)).expect("render static config");
-    assert!(rendered.contains("100.64.0.2:10080"));
-    assert!(rendered.contains("100.64.0.2:10443"));
+fn static_listeners_keep_public_and_mesh_bindings_stable() {
+    let rendered = render_static_config(&static_config()).expect("render static config");
+    assert!(rendered.contains("0.0.0.0:10080"));
+    assert!(rendered.contains("0.0.0.0:10443"));
+    assert!(rendered.contains("100.64.0.2:10081"));
+    assert!(rendered.contains("100.64.0.2:10444"));
     assert!(rendered.contains("127.0.0.1:19999"));
     assert!(rendered.contains("sendAnonymousUsage = false"));
-    assert!(!rendered.contains("0.0.0.0"));
     assert!(rendered.contains("[api]\ndashboard = false\ninsecure = false"));
     assert!(!rendered.contains("api@internal"));
 }
@@ -76,14 +76,14 @@ fn config_generation_probe_is_gated_on_the_loopback_health_entrypoint() {
     assert!(!rule.contains("Headers("));
 
     let rendered_static_config =
-        render_static_config(&static_config(false)).expect("private static config");
+        render_static_config(&static_config()).expect("private static config");
     assert!(rendered_static_config.contains("\n[api]\ndashboard = false\ninsecure = false"));
     assert!(rendered_static_config.contains("[entryPoints.health]\naddress = \"127.0.0.1:"));
 }
 
 #[test]
 fn private_ping_and_generation_probe_use_only_the_loopback_api_surface() {
-    let rendered = render_static_config(&static_config(false)).expect("render static config");
+    let rendered = render_static_config(&static_config()).expect("render static config");
     assert!(rendered.contains("[ping]"));
     assert!(rendered.contains("manualRouting = false"));
     assert!(rendered.contains("[api]\ndashboard = false\ninsecure = false"));
@@ -91,7 +91,7 @@ fn private_ping_and_generation_probe_use_only_the_loopback_api_surface() {
 }
 
 #[test]
-fn public_binding_is_explicit_and_root_and_rootless_ports_follow_the_owner_choice() {
+fn listener_port_selection_preserves_the_root_and_rootless_owner_choice() {
     let root_free = select_listener_ports(true, true, true);
     assert_eq!(
         root_free,
@@ -121,14 +121,13 @@ fn public_binding_is_explicit_and_root_and_rootless_ports_follow_the_owner_choic
         }
     );
 
-    let mesh_only = render_static_config(&static_config(false)).expect("mesh config");
-    let public = render_static_config(&static_config(true)).expect("public config");
-    assert!(mesh_only.contains("100.64.0.2:10443"));
-    assert!(public.contains("0.0.0.0:10443"));
+    let rendered = render_static_config(&static_config()).expect("stable static config");
+    assert!(rendered.contains("0.0.0.0:10080"));
+    assert!(rendered.contains("100.64.0.2:10081"));
 }
 
 #[test]
-fn mixed_public_and_mesh_routes_use_separate_listeners() {
+fn public_and_mesh_routes_keep_separate_stable_entrypoints() {
     let source = "100.64.0.5".parse().expect("mesh source");
     let mesh = mesh_service(vec![source]);
     let mut public = mesh_service(Vec::new());
@@ -157,17 +156,23 @@ fn mixed_public_and_mesh_routes_use_separate_listeners() {
     );
     assert_eq!(
         dynamic["http"]["middlewares"]["docs-https-redirect"]["redirectScheme"]["port"],
-        "10443"
+        "10444"
     );
     assert_eq!(
         dynamic["http"]["middlewares"]["status-https-redirect"]["redirectScheme"]["port"],
         "443"
     );
+    let mesh_only = render_dynamic_config(&[mesh_service(vec![source])]).expect("mesh-only route");
+    let mesh_only: Value = serde_json::from_slice(&mesh_only).expect("mesh-only dynamic JSON");
+    assert_eq!(
+        mesh_only["http"]["routers"]["docs"]["entryPoints"],
+        serde_json::json!(["mesh-https"])
+    );
 }
 
 #[test]
-fn mixed_public_static_config_keeps_mesh_listeners_bound_to_the_mesh_ip() {
-    let mut config = static_config(true);
+fn static_config_binds_public_wildcard_and_mesh_listeners_to_the_mesh_ip() {
+    let mut config = static_config();
     config.ports = ListenerPorts {
         http: 80,
         https: 443,
@@ -175,6 +180,8 @@ fn mixed_public_static_config_keeps_mesh_listeners_bound_to_the_mesh_ip() {
         mesh_https: Some(10443),
     };
     let rendered = render_static_config(&config).expect("mixed static config");
+    assert!(rendered.contains("0.0.0.0:80"));
+    assert!(rendered.contains("0.0.0.0:443"));
     assert!(rendered.contains("[entryPoints.mesh-http]"));
     assert!(rendered.contains("100.64.0.2:10080"));
     assert!(rendered.contains("[entryPoints.mesh-https]"));
@@ -221,7 +228,7 @@ fn every_mixed_listener_port_is_allowed_by_the_mesh_firewall_backends() {
 
 #[test]
 fn explicit_dns_resolver_is_rendered_for_staging_acme_validation() {
-    let mut config = static_config(false);
+    let mut config = static_config();
     config.dns_challenge.resolvers = vec!["127.0.0.1:8053".parse().expect("Pebble DNS resolver")];
 
     let rendered = render_static_config(&config).expect("render static config");
@@ -231,7 +238,7 @@ fn explicit_dns_resolver_is_rendered_for_staging_acme_validation() {
 
 #[test]
 fn synthetic_dns_validation_can_skip_authoritative_checks_and_keep_recursive_checks() {
-    let mut config = static_config(false);
+    let mut config = static_config();
     config.dns_challenge.resolvers = vec!["127.0.0.1:8053".parse().expect("test DNS resolver")];
     config.dns_challenge.disable_authoritative_ns_checks = true;
 
@@ -286,14 +293,17 @@ fn https_router_uses_the_exposure_id_and_http_redirect_uses_a_disjoint_key() {
     let bytes = render_dynamic_config(&[mesh_service(vec![source])]).expect("dynamic config");
     let config: Value = serde_json::from_slice(&bytes).expect("dynamic JSON");
 
-    assert_eq!(config["http"]["routers"]["docs"]["entryPoints"][0], "https");
+    assert_eq!(
+        config["http"]["routers"]["docs"]["entryPoints"][0],
+        "mesh-https"
+    );
     assert_eq!(
         config["http"]["routers"]["http.docs"]["entryPoints"][0],
-        "http"
+        "mesh-http"
     );
     assert_eq!(
         config["http"]["middlewares"]["docs-https-redirect"]["redirectScheme"]["port"],
-        "10443"
+        "10444"
     );
 }
 

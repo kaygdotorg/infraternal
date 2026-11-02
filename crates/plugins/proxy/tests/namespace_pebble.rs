@@ -6,6 +6,7 @@
     reason = "Integration fixture failures should identify the exact operation that failed."
 )]
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use infraternal_plugin_proxy::{
     config::{
         DYNAMIC_CONFIG_FILENAME, DnsChallenge, PublishedService, StaticConfig,
@@ -23,10 +24,11 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, ChildStdin, Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -161,7 +163,6 @@ fn run_namespace_case() {
             static_config: StaticConfig {
                 mesh_address,
                 ports: listener_ports,
-                public: false,
                 private_ping_port: health_port,
                 dynamic_directory: state.clone(),
                 dns_challenge: DnsChallenge {
@@ -189,19 +190,27 @@ fn run_namespace_case() {
     .expect("start the node-local Traefik owner");
 
     let hostname = "docs.node.example.org";
+    let mut route_a = PublishedService {
+        id: "docs".to_owned(),
+        hostname: hostname.to_owned(),
+        backend: backend.address,
+        allowed_sources: vec!["100.64.0.2".parse().expect("granted mesh peer")],
+        public: false,
+        https_port: listener_ports.https_for_publication(false),
+        certificate: CertificateName::Wildcard("*.node.example.org".to_owned()),
+    };
     let started_listener_ports = supervisor
-        .replace(vec![PublishedService {
-            id: "docs".to_owned(),
-            hostname: hostname.to_owned(),
-            backend: backend.address,
-            allowed_sources: vec!["100.64.0.2".parse().expect("granted mesh peer")],
-            public: false,
-            https_port: listener_ports.https_for_publication(false),
-            certificate: CertificateName::Wildcard("*.node.example.org".to_owned()),
-        }])
-        .expect("publish one granted mesh service")
+        .replace(vec![route_a.clone()])
+        .unwrap_or_else(|error| {
+            let log_lines = log_tail.lock().map_or_else(
+                |_| "Traefik log buffer was poisoned".to_owned(),
+                |lines| lines.iter().cloned().collect::<Vec<_>>().join("\n"),
+            );
+            panic!("publish one granted mesh service: {error}; Traefik logs:\n{log_lines}");
+        })
         .expect("published listener ports");
-    assert_eq!(started_listener_ports, listener_ports);
+    let listener_ports = started_listener_ports;
+    route_a.https_port = listener_ports.https_for_publication(false);
 
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut response = None;
@@ -211,7 +220,7 @@ fn run_namespace_case() {
             "100.64.0.2",
             hostname,
             &issued_certificate_root,
-            listener_ports.https,
+            listener_ports.https_for_publication(false),
             true,
         );
         if attempt.status.success() && response_status(&attempt.stdout) == Some(200) {
@@ -231,7 +240,7 @@ fn run_namespace_case() {
             "100.64.0.2",
             hostname,
             &issued_certificate_root,
-            listener_ports.https,
+            listener_ports.https_for_publication(false),
             false,
         );
         let unverified_curl = format!(
@@ -266,12 +275,49 @@ fn run_namespace_case() {
             > 2
     );
 
-    let redirect = http_redirect_request("100.64.0.2", hostname, listener_ports.http);
+    let mut websocket = WebSocketClient::connect(
+        "100.64.0.1",
+        "100.64.0.2",
+        hostname,
+        listener_ports.https_for_publication(false),
+        &issued_certificate_root,
+    );
+    websocket
+        .wait_for_tick_after(0, Duration::from_secs(5))
+        .expect("route A WebSocket starts sending frames");
+
+    let mut route_b = route_a.clone();
+    "status".clone_into(&mut route_b.id);
+    "status.node.example.org".clone_into(&mut route_b.hostname);
+    route_b.allowed_sources.clear();
+    route_b.public = true;
+    route_b.https_port = listener_ports.https_for_publication(true);
+    supervisor
+        .replace(vec![route_a.clone(), route_b])
+        .expect("publish route B alongside route A")
+        .expect("listener ports after publishing route B");
+    let after_publish_cutoff = backend.ticks.load(Ordering::Acquire);
+    websocket
+        .wait_for_tick_after(after_publish_cutoff, Duration::from_secs(5))
+        .expect("route A WebSocket survives publishing route B");
+
+    supervisor
+        .replace(vec![route_a])
+        .expect("unpublish route B")
+        .expect("listener ports after unpublishing route B");
+    let after_unpublish_cutoff = backend.ticks.load(Ordering::Acquire);
+    websocket
+        .wait_for_tick_after(after_unpublish_cutoff, Duration::from_secs(5))
+        .expect("route A WebSocket survives unpublishing route B");
+
+    let mesh_cleartext_port = listener_ports.mesh_http.unwrap_or(listener_ports.http);
+    let mesh_tls_port = listener_ports.https_for_publication(false);
+    let redirect = http_redirect_request("100.64.0.2", hostname, mesh_cleartext_port);
     assert_eq!(response_status(&redirect.stdout), Some(301));
-    let expected_redirect = if listener_ports.https == 443 {
+    let expected_redirect = if mesh_tls_port == 443 {
         format!("location: https://{hostname}/")
     } else {
-        format!("location: https://{hostname}:{}/", listener_ports.https)
+        format!("location: https://{hostname}:{mesh_tls_port}/")
     };
     assert!(
         String::from_utf8_lossy(&redirect.stdout)
@@ -285,7 +331,7 @@ fn run_namespace_case() {
         "100.64.0.3",
         hostname,
         &issued_certificate_root,
-        listener_ports.https,
+        mesh_tls_port,
         true,
     );
     assert_eq!(response_status(&denied.stdout), Some(403));
@@ -293,7 +339,7 @@ fn run_namespace_case() {
         "100.64.0.2",
         "other.node.example.org",
         &issued_certificate_root,
-        listener_ports.https,
+        mesh_tls_port,
         true,
     );
     assert_eq!(response_status(&unknown_host.stdout), Some(404));
@@ -437,6 +483,7 @@ impl Drop for Worker {
 
 struct Backend {
     address: SocketAddr,
+    ticks: Arc<AtomicUsize>,
     _worker: Worker,
 }
 
@@ -446,19 +493,18 @@ fn start_backend() -> Backend {
     listener.set_nonblocking(true).expect("nonblocking backend");
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = Arc::clone(&stop);
+    let ticks = Arc::new(AtomicUsize::new(1));
+    let worker_ticks = Arc::clone(&ticks);
     let join = thread::spawn(move || {
         while !worker_stop.load(Ordering::Acquire) {
             match listener.accept() {
-                Ok((mut stream, _)) => {
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                    let mut request = [0_u8; 2048];
-                    let _ = stream.read(&mut request);
-                    let _ = write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        BACKEND_BODY.len()
-                    );
-                    let _ = stream.write_all(BACKEND_BODY);
+                Ok((stream, _)) => {
+                    let connection_stop = Arc::clone(&worker_stop);
+                    let connection_ticks = Arc::clone(&worker_ticks);
+                    thread::spawn(move || {
+                        let _ =
+                            handle_backend_connection(stream, &connection_stop, &connection_ticks);
+                    });
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
@@ -469,11 +515,217 @@ fn start_backend() -> Backend {
     });
     Backend {
         address,
+        ticks,
         _worker: Worker {
             stop,
             join: Some(join),
         },
     }
+}
+
+fn handle_backend_connection(
+    mut stream: TcpStream,
+    stop: &AtomicBool,
+    ticks: &AtomicUsize,
+) -> io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 2048];
+    while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+        let count = stream.read(&mut chunk)?;
+        if count == 0 || request.len() + count > 16 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid backend request",
+            ));
+        }
+        request.extend_from_slice(&chunk[..count]);
+    }
+    if let Some(accept) = websocket_accept(&request) {
+        stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+        write!(
+            stream,
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+        )?;
+        while !stop.load(Ordering::Acquire) {
+            let payload = format!("tick-{}", ticks.fetch_add(1, Ordering::Relaxed));
+            let mut frame = Vec::with_capacity(payload.len() + 2);
+            let payload_length = u8::try_from(payload.len())
+                .expect("WebSocket test payload length fits the short header");
+            frame.extend_from_slice(&[0x81, payload_length]);
+            frame.extend_from_slice(payload.as_bytes());
+            stream.write_all(&frame)?;
+            thread::sleep(Duration::from_millis(100));
+        }
+        return Ok(());
+    }
+
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        BACKEND_BODY.len()
+    )?;
+    stream.write_all(BACKEND_BODY)
+}
+
+fn websocket_accept(request: &[u8]) -> Option<String> {
+    let request = std::str::from_utf8(request).ok()?;
+    if !request
+        .lines()
+        .any(|line| line.eq_ignore_ascii_case("upgrade: websocket"))
+    {
+        return None;
+    }
+    let key = request.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("sec-websocket-key")
+            .then(|| value.trim())
+    })?;
+    let mut material = key.to_owned();
+    material.push_str("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    Some(STANDARD.encode(openssl::sha::sha1(material.as_bytes())))
+}
+
+struct WebSocketClient {
+    child: Child,
+    input: ChildStdin,
+    output: mpsc::Receiver<Vec<u8>>,
+    reader: Option<JoinHandle<()>>,
+    received: Vec<u8>,
+}
+
+impl WebSocketClient {
+    fn connect(address: &str, source: &str, hostname: &str, port: u16, ca_file: &Path) -> Self {
+        let mut child = Command::new("openssl")
+            .args(["s_client", "-quiet", "-verify_return_error", "-CAfile"])
+            .arg(ca_file)
+            .args([
+                "-connect",
+                &format!("{address}:{port}"),
+                "-bind",
+                &format!("{source}:0"),
+                "-servername",
+                hostname,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start verified TLS WebSocket client");
+        let mut input = child.stdin.take().expect("WebSocket client stdin");
+        let mut stdout = child.stdout.take().expect("WebSocket client stdout");
+        let (sender, output) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let mut chunk = [0_u8; 2048];
+            loop {
+                match stdout.read(&mut chunk) {
+                    Ok(0) | Err(_) => return,
+                    Ok(count) if sender.send(chunk[..count].to_vec()).is_err() => return,
+                    Ok(_) => {}
+                }
+            }
+        });
+        let request = format!(
+            "GET /socket HTTP/1.1\r\nHost: {hostname}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        input
+            .write_all(request.as_bytes())
+            .expect("write WebSocket upgrade request");
+        let mut client = Self {
+            child,
+            input,
+            output,
+            reader: Some(reader),
+            received: Vec::new(),
+        };
+        client
+            .wait_for_bytes(b"HTTP/1.1 101 Switching Protocols", Duration::from_secs(5))
+            .expect("Traefik upgrades route A to WebSocket");
+        client
+    }
+
+    fn wait_for_tick_after(&mut self, previous: usize, timeout: Duration) -> io::Result<usize> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(tick) = websocket_tick(&self.received)
+                && tick > previous
+            {
+                return Ok(tick);
+            }
+            self.read_more(deadline)?;
+        }
+    }
+
+    fn wait_for_bytes(&mut self, expected: &[u8], timeout: Duration) -> io::Result<()> {
+        let deadline = Instant::now() + timeout;
+        while !self
+            .received
+            .windows(expected.len())
+            .any(|window| window == expected)
+        {
+            self.read_more(deadline)?;
+        }
+        Ok(())
+    }
+
+    fn read_more(&mut self, deadline: Instant) -> io::Result<()> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "WebSocket frame timed out",
+            ));
+        }
+        match self.output.recv_timeout(remaining) {
+            Ok(bytes) => {
+                self.received.extend_from_slice(&bytes);
+                Ok(())
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "WebSocket frame timed out",
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "WebSocket connection closed",
+            )),
+        }
+    }
+}
+
+impl Drop for WebSocketClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+        let _ = self.input.flush();
+    }
+}
+
+fn websocket_tick(bytes: &[u8]) -> Option<usize> {
+    let mut latest = None;
+    for (start, marker) in bytes.windows(5).enumerate() {
+        if marker != b"tick-" {
+            continue;
+        }
+        let number_start = start + marker.len();
+        let digit_count = bytes[number_start..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digit_count == 0 {
+            continue;
+        }
+        let end = number_start + digit_count;
+        if let Ok(number) = std::str::from_utf8(&bytes[number_start..end])
+            && let Ok(number) = number.parse::<usize>()
+        {
+            latest = Some(latest.map_or(number, |current: usize| current.max(number)));
+        }
+    }
+    latest
 }
 
 struct HttpReqAdapter {

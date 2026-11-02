@@ -773,27 +773,7 @@ struct SupervisorRuntime {
     lifecycle: Lifecycle,
     services: Vec<PublishedService>,
     child: Option<TraefikChild>,
-    listener_scope: Option<ExposureScope>,
     listener_ports: Option<ListenerPorts>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ExposureScope {
-    public: bool,
-    mesh: bool,
-}
-
-impl ExposureScope {
-    fn for_services(services: &[PublishedService]) -> Self {
-        Self {
-            public: services.iter().any(|service| service.public),
-            mesh: services.iter().any(|service| !service.public),
-        }
-    }
-
-    const fn needs_separate_mesh_listeners(self) -> bool {
-        self.public && self.mesh
-    }
 }
 
 fn run_supervisor(
@@ -844,7 +824,6 @@ fn replace_services(
 ) -> io::Result<Option<ListenerPorts>> {
     let previous_services = std::mem::replace(&mut runtime.services, services);
     let active_count = runtime.services.len();
-    let desired_scope = ExposureScope::for_services(&runtime.services);
     let revoked_routes = revoked_mesh_route_ids(&previous_services, &runtime.services);
     let action = runtime.lifecycle.update(active_count, Instant::now());
     let result = match action {
@@ -864,19 +843,6 @@ fn replace_services(
         LifecycleAction::Apply | LifecycleAction::Keep => {
             if runtime.services.is_empty() {
                 Ok(runtime.listener_ports)
-            } else if runtime.child.is_some() && runtime.listener_scope != Some(desired_scope) {
-                restart_for_listener_scope(
-                    settings,
-                    &mut runtime.services,
-                    Arc::clone(log),
-                    &mut runtime.lifecycle,
-                    &mut runtime.child,
-                    &mut runtime.listener_scope,
-                )
-                .map(|ports| {
-                    runtime.listener_ports = Some(ports);
-                    runtime.listener_ports
-                })
             } else if revoked_routes.is_empty() {
                 apply_dynamic_snapshot(settings, &runtime.services).map(|()| runtime.listener_ports)
             } else {
@@ -892,7 +858,6 @@ fn replace_services(
             }
         }
         LifecycleAction::Stop => {
-            runtime.listener_scope = None;
             runtime.listener_ports = None;
             Ok(None)
         }
@@ -917,10 +882,8 @@ fn start_runtime_child(
     log: &Arc<ProxyLog>,
     runtime: &mut SupervisorRuntime,
 ) -> io::Result<ListenerPorts> {
-    let (started, scope, ports) =
-        start_managed_child(settings, &mut runtime.services, Arc::clone(log))?;
+    let (started, ports) = start_managed_child(settings, &mut runtime.services, Arc::clone(log))?;
     runtime.child = Some(started);
-    runtime.listener_scope = Some(scope);
     runtime.listener_ports = Some(ports);
     let _ = runtime
         .lifecycle
@@ -949,7 +912,6 @@ fn handle_supervisor_timeout(
     {
         LifecycleAction::Stop => {
             let _ = stop_child(&mut runtime.child);
-            runtime.listener_scope = None;
             runtime.listener_ports = None;
         }
         LifecycleAction::Start if start_runtime_child(settings, log, runtime).is_err() => {
@@ -989,22 +951,14 @@ fn start_managed_child(
     settings: &SupervisorSettings,
     services: &mut [PublishedService],
     log: Arc<ProxyLog>,
-) -> io::Result<(TraefikChild, ExposureScope, ListenerPorts)> {
+) -> io::Result<(TraefikChild, ListenerPorts)> {
     let mut config = settings.static_config.clone();
-    let scope = ExposureScope::for_services(services);
-    config.public = scope.public;
-    config.ports = if scope.needs_separate_mesh_listeners() {
-        crate::config::detect_mixed_listener_ports(
+    if config.ports.mesh_http.is_none() && config.ports.mesh_https.is_none() {
+        config.ports = crate::config::detect_mixed_listener_ports(
             nix::unistd::Uid::effective().is_root(),
             config.mesh_address,
-        )?
-    } else {
-        crate::config::detect_listener_ports(
-            nix::unistd::Uid::effective().is_root(),
-            config.mesh_address,
-            config.public,
-        )
-    };
+        )?;
+    }
     for service in services.iter_mut() {
         service.https_port = config.ports.https_for_publication(service.public);
     }
@@ -1047,42 +1001,9 @@ fn start_managed_child(
                 &generation,
                 CONFIG_APPLY_TIMEOUT,
             )?;
-            return Ok((child, scope, config.ports));
+            return Ok((child, config.ports));
         }
         thread::sleep(remaining.min(Duration::from_millis(100)));
-    }
-}
-
-fn restart_for_listener_scope(
-    settings: &SupervisorSettings,
-    services: &mut [PublishedService],
-    log: Arc<ProxyLog>,
-    lifecycle: &mut Lifecycle,
-    child: &mut Option<TraefikChild>,
-    listener_scope: &mut Option<ExposureScope>,
-) -> io::Result<ListenerPorts> {
-    let stopped = stop_child(child);
-    let LifecycleAction::RetryAfter(delay) = lifecycle.child_exited(services.len(), Instant::now())
-    else {
-        stopped?;
-        return Err(io::Error::other("proxy listener restart was not scheduled"));
-    };
-    stopped?;
-    thread::sleep(delay);
-    if lifecycle.tick(services.len(), Instant::now()) != LifecycleAction::Start {
-        return Err(io::Error::other("proxy listener restart was not scheduled"));
-    }
-    match start_managed_child(settings, services, log) {
-        Ok((started, scope, ports)) => {
-            *child = Some(started);
-            *listener_scope = Some(scope);
-            let _ = lifecycle.child_started(services.len(), Instant::now());
-            Ok(ports)
-        }
-        Err(error) => {
-            let _ = lifecycle.child_exited(services.len(), Instant::now());
-            Err(error)
-        }
     }
 }
 
