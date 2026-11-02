@@ -70,11 +70,11 @@ rust_check_static_binary() {
     # Keep the last merged measurements for per-slice attribution, not approval.
     case "$target" in
         x86_64-unknown-linux-musl)
-            baseline_bytes=21443824
+            baseline_bytes=22418256
             expected_machine='Advanced Micro Devices X86-64'
             ;;
         aarch64-unknown-linux-musl)
-            baseline_bytes=19629240
+            baseline_bytes=20453280
             expected_machine='AArch64'
             ;;
         *)
