@@ -103,7 +103,7 @@ async fn api_key_upgrade_starts_thirty_days_at_migration_once() {
     let mut old = sqlx::migrate!("./migrations");
     old.migrations = old
         .iter()
-        .filter(|m| m.version <= 32)
+        .filter(|m| m.version <= 33)
         .cloned()
         .collect::<Vec<_>>()
         .into();
