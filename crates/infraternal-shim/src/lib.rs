@@ -4,6 +4,9 @@
 //! forbid it. Each boundary documents descriptor, pointer and fork invariants.
 #![deny(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+mod child;
+#[cfg(feature = "host-login")]
+mod cleanup;
 #[cfg(feature = "host-diagnostics")]
 mod host_trace;
 // All arguments disappear from normal builds, including timestamp calls.
@@ -26,10 +29,17 @@ macro_rules! trace_host {
 pub mod ended;
 pub mod frame;
 mod locale;
+#[cfg(feature = "host-login")]
+pub mod login;
+#[cfg(feature = "host-login")]
+pub mod login_handoff;
+#[cfg(feature = "host-login")]
+pub mod login_ready;
 mod pty;
 #[cfg(feature = "async-fd")]
 pub mod readiness;
 pub mod ring;
+mod shell_startup;
 pub mod startup;
 
 /// Resolve locale variables for a scrubbed login shell [#161].
@@ -54,6 +64,36 @@ pub fn startup_file_has_attributes(file: &std::fs::File) -> std::io::Result<bool
     pty::file_has_attributes(file)
 }
 
+/// Transfer a pinned process directory through an owned child descriptor.
+/// Return its child-local path, avoiding cross-process inspection of a
+/// nondumpable parent and collisions with Command's private exec-error pipe.
+/// # Errors
+/// Refuses an invalid pin or descriptor duplication failure.
+#[cfg(feature = "host-login")]
+pub fn inherit_login_process(
+    command: &mut std::process::Command,
+    process: &std::fs::File,
+) -> std::io::Result<std::path::PathBuf> {
+    pty::inherit_login_process(command, process)
+}
+
+/// Keep the inherited process pin private to this shim and explicit proxy execs.
+/// # Errors
+/// Returns a descriptor-policy error when reserved descriptor 5 is absent.
+#[cfg(feature = "host-login")]
+pub fn protect_login_process() -> std::io::Result<()> {
+    pty::protect_login_process()
+}
+
+/// Keep a dynamic inherited process pin private to the shim after startup.
+/// External controller-held paths require no child descriptor-policy change.
+/// # Errors
+/// Rejects malformed child-local descriptor paths or descriptor-policy errors.
+#[cfg(feature = "host-login")]
+pub fn protect_login_process_at(path: &std::path::Path) -> std::io::Result<()> {
+    pty::protect_login_process_at(path)
+}
+
 /// Apply child signal policy and close the trusted fd3 before direct exec.
 /// This avoids an intermediate shell changing `/proc/self/exe` for anonymous images.
 pub fn prepare_child_without_control(command: &mut std::process::Command) {
@@ -71,6 +111,20 @@ pub fn prepare_spawn(attributes: &mut nix::spawn::PosixSpawnAttr) -> nix::Result
             | nix::spawn::PosixSpawnFlags::POSIX_SPAWN_SETSIGMASK
             | nix::spawn::PosixSpawnFlags::POSIX_SPAWN_SETSIGDEF,
     )
+}
+
+/// Exclude the borrowed leg-B descriptor at exec and reset child signal state.
+/// Unlike closing fd3 before exec, CLOEXEC preserves a possible spawn-error
+/// pipe using that slot. The caller keeps ownership of its original descriptor.
+pub fn prepare_isolated_child(command: &mut std::process::Command) {
+    pty::prepare_isolated_child(command);
+}
+
+/// Establish a controller-owned child's independent session before fresh exec.
+/// Standard handles must be configured by the caller; no parent-death signal
+/// is installed. Only async-signal-safe syscalls run between fork and exec.
+pub fn prepare_independent_session(command: &mut std::process::Command) {
+    pty::prepare_independent_session(command);
 }
 
 /// Double-fork and setsid startup for hosts without an init scope.
@@ -112,10 +166,15 @@ mod terminal_limits;
 mod terminal_memory;
 mod terminal_native;
 pub use session::{Config, run, run_with_retention};
+#[cfg(feature = "host-login")]
+pub use session::{run_with_login_group, run_with_prestarted_login};
 
 #[cfg(feature = "ca-handoff")]
 pub mod locked_bytes;
 
+#[cfg(all(test, feature = "host-login"))]
+#[path = "../tests/unit/login_lifecycle.rs"]
+mod login_lifecycle;
 /// Open the kernel lifetime descriptor for an authenticated Linux shim [D81].
 /// No signals or ptrace permissions are requested. The caller owns registration
 /// and must revalidate process identity to exclude PID reuse during opening.

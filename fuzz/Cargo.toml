@@ -20,7 +20,7 @@ infraternal-server = { version = "0.1.0", path = "../crates/infraternal-server",
 axum.workspace = true
 libfuzzer-sys.workspace = true
 infraternal-plugin-api.workspace = true
-infraternal-shim.workspace = true
+infraternal-shim = { workspace = true, features = ["host-login"] }
 infraternal-protocol.workspace = true
 infraternal-plugin-host-facts = { version = "0.1.0", path = "../crates/plugins/host-facts" }
 infraternal-plugin-mesh = { version = "0.1.0", path = "../crates/plugins/mesh", default-features = false, features = ["server"] }
@@ -211,6 +211,13 @@ bench = false
 [[bin]]
 name = "release_channel"
 path = "fuzz_targets/release_channel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "login_request"
+path = "fuzz_targets/login_request.rs"
 test = false
 doc = false
 bench = false

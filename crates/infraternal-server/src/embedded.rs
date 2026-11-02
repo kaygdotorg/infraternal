@@ -31,6 +31,14 @@ use tokio::{
 const CONTROL_STREAM: u32 = 0;
 // Callers await bounded command capacity; output never waits on a browser receiver.
 const COMMAND_CAPACITY: usize = 64;
+// Trusted lifecycle requests have their own mailbox and never consume ordinary
+// command or pending-call quota. Only authorized host removal can produce them.
+// Call ids are opaque u32 values on the wire. Only opportunistic login
+// preparations use this bit, so late canceled replies can be discarded without
+// accepting an unknown result for an ordinary action or restarting terminals.
+const PREPARATION_CALL_BIT: u32 = 1 << 31;
+const RETIREMENT_CALL_BIT: u32 = 1 << 30;
+const BACKGROUND_CALL_BITS: u32 = PREPARATION_CALL_BIT | RETIREMENT_CALL_BIT;
 // A full output queue retires only that attachment; reconnect replays from its last offset.
 // A default 1MiB grant can arrive in 256 bulk PTY frames while forwarding awaits I/O.
 // Credits bound payload bytes; frame slots separately bound small outputs and notices.
@@ -40,6 +48,9 @@ const MAX_OUTPUT_CREDIT: u64 = 8 * 1024 * 1024;
 const INPUT_CAPACITY: usize = 4;
 const READ_CHUNK: usize = 16 * 1024;
 const MAX_BUFFERED_WIRE: usize = MAX_FRAME_LEN + READ_CHUNK + 10;
+#[cfg(all(test, feature = "remote"))]
+#[path = "login_limit_tests.rs"]
+mod login_limit_tests;
 /// Reconnect pauses for a lost infraternal agent link, and how long a link must
 /// live before a loss counts as fresh rather than as the same failure again.
 const RECONNECT_FLOOR: Duration = Duration::from_millis(200);
@@ -252,12 +263,49 @@ pub(crate) enum SessionInventoryState {
 #[derive(Clone)]
 pub(crate) struct EmbeddedAgent {
     commands: mpsc::Sender<Command>,
+    #[cfg(feature = "remote")]
+    cleanup: mpsc::UnboundedSender<Retirement>,
     changes: tokio::sync::watch::Receiver<()>,
     next_attachment_id: Arc<AtomicU64>,
     session_inventory: watch::Sender<SessionInventoryState>,
 }
 
+/// Weak retirement routing never keeps a remote infraternal agent actor alive.
+#[cfg(feature = "remote")]
+#[derive(Clone)]
+pub(crate) struct WeakEmbeddedAgent {
+    commands: mpsc::WeakSender<Command>,
+    cleanup: mpsc::WeakUnboundedSender<Retirement>,
+}
+
+#[cfg(feature = "remote")]
+struct Retirement {
+    person: uuid::Uuid,
+    reply: oneshot::Sender<Result<(), AgentError>>,
+}
+#[cfg(feature = "remote")]
+impl WeakEmbeddedAgent {
+    pub(crate) async fn revoke_login(&self, person: uuid::Uuid) -> Result<(), AgentError> {
+        // Retain actor lifetime, but never acquire ordinary queue capacity.
+        let _lifetime = self.commands.upgrade().ok_or(AgentError::Unavailable)?;
+        let sender = self.cleanup.upgrade().ok_or(AgentError::Unavailable)?;
+        let (reply, result) = oneshot::channel();
+        sender
+            .send(Retirement { person, reply })
+            .map_err(|_| AgentError::Unavailable)?;
+        result.await.map_err(|_| AgentError::Unavailable)?
+    }
+}
+
 impl EmbeddedAgent {
+    #[cfg(feature = "remote")]
+    pub(crate) fn downgrade(&self) -> WeakEmbeddedAgent {
+        WeakEmbeddedAgent {
+            commands: self.commands.downgrade(),
+            cleanup: self.cleanup.downgrade(),
+        }
+    }
+
     pub(crate) fn changes(&self) -> tokio::sync::watch::Receiver<()> {
         let mut changes = self.changes.clone();
         changes.borrow_and_update();
@@ -267,6 +315,8 @@ impl EmbeddedAgent {
     /// Start the on-demand agent supervisor for the server's own executable.
     pub fn spawn(executable: PathBuf) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        #[cfg(feature = "remote")]
+        let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
         let (changes, notice) = tokio::sync::watch::channel(());
         let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         tokio::spawn(run_actor(
@@ -275,11 +325,15 @@ impl EmbeddedAgent {
                 initial: None,
             },
             receiver,
+            #[cfg(feature = "remote")]
+            cleanup_rx,
             changes,
             session_inventory.clone(),
         ));
         Self {
             commands,
+            #[cfg(feature = "remote")]
+            cleanup,
             changes: notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
             session_inventory,
@@ -290,11 +344,17 @@ impl EmbeddedAgent {
     #[cfg(all(test, feature = "remote"))]
     pub(crate) fn unavailable() -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        #[cfg(feature = "remote")]
+        let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
         let (_changes, notice) = tokio::sync::watch::channel(());
         drop(receiver);
+        #[cfg(feature = "remote")]
+        drop(cleanup_rx);
         let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         Self {
             commands,
+            #[cfg(feature = "remote")]
+            cleanup,
             changes: notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
             session_inventory,
@@ -305,6 +365,8 @@ impl EmbeddedAgent {
     #[cfg(feature = "remote")]
     pub(crate) fn remote(uid: u32) -> (Self, mpsc::Sender<RemoteLink>) {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        #[cfg(feature = "remote")]
+        let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
         let (changes, notice) = tokio::sync::watch::channel(());
         let (accepts, incoming) = mpsc::channel(1);
         let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
@@ -315,12 +377,16 @@ impl EmbeddedAgent {
                 pending: None,
             },
             receiver,
+            #[cfg(feature = "remote")]
+            cleanup_rx,
             changes,
             session_inventory.clone(),
         ));
         (
             Self {
                 commands,
+                #[cfg(feature = "remote")]
+                cleanup,
                 changes: notice,
                 next_attachment_id: Arc::new(AtomicU64::new(1)),
                 session_inventory,
@@ -399,32 +465,81 @@ impl EmbeddedAgent {
         .map_err(|_| AgentError::Unavailable)?
     }
 
-    /// Open a terminal on the embedded infraternal agent's host.
+    /// Open a terminal on the embedded infraternal agent's host (legacy fixtures).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn open(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
-        self.open_with_readiness(size, false).await
+        self.open_metadata(size, None, None, false)
+            .await
+            .map(|opened| opened.session_id)
     }
 
-    /// Open a private fixed-command readiness PTY under the enrolled identity.
-    #[cfg(feature = "remote")]
-    pub(crate) async fn open_readiness(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
-        self.open_with_readiness(size, true).await
-    }
-
-    async fn open_with_readiness(
+    /// Open for the authenticated person using an account name resolved by the server.
+    #[allow(dead_code)] // Compatibility adapter for id-only trusted callers.
+    pub async fn open_for(
         &self,
         size: TerminalSize,
-        readiness: bool,
+        person: uuid::Uuid,
+        account: Option<String>,
     ) -> Result<[u8; 16], AgentError> {
+        self.open_for_with_metadata(size, person, account)
+            .await
+            .map(|opened| opened.session_id)
+    }
+
+    /// Preserve the host's resolved account and fallback note for the terminal window.
+    pub async fn open_for_with_metadata(
+        &self,
+        size: TerminalSize,
+        person: uuid::Uuid,
+        account: Option<String>,
+    ) -> Result<TerminalOpened, AgentError> {
+        self.open_metadata(size, Some(person), account, false).await
+    }
+    /// Open a private fixed readiness command under the enrolled account.
+    #[cfg(feature = "remote")]
+    pub(crate) async fn open_readiness(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
+        self.open_metadata(size, None, None, true)
+            .await
+            .map(|opened| opened.session_id)
+    }
+    async fn open_metadata(
+        &self,
+        size: TerminalSize,
+        person: Option<uuid::Uuid>,
+        account: Option<String>,
+        readiness: bool,
+    ) -> Result<TerminalOpened, AgentError> {
         let (reply, result) = oneshot::channel();
         self.commands
             .send(Command::Open {
                 size,
+                person,
+                account,
                 readiness,
                 reply,
             })
             .await
             .map_err(|_| AgentError::Unavailable)?;
         result.await.map_err(|_| AgentError::Unavailable)?
+    }
+    /// Prepare one person's host login in advance without starting a terminal.
+    #[cfg_attr(not(feature = "ssh"), allow(dead_code))]
+    pub async fn prepare_login(
+        &self,
+        person: uuid::Uuid,
+        account: Option<String>,
+    ) -> Result<(), AgentError> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(Command::PrepareLogin {
+                person,
+                account,
+                reply,
+            })
+            .await
+            .map_err(|_| AgentError::Unavailable)?;
+        result.await.map_err(|_| AgentError::Unavailable)??;
+        Ok(())
     }
 
     /// Calls one bounded action declared by the embedded agent's plugin registry.
@@ -529,6 +644,8 @@ impl EmbeddedAgent {
     #[cfg(test)]
     pub(crate) fn from_test_socket(stream: UnixStream) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        #[cfg(feature = "remote")]
+        let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
         let (changes, notice) = tokio::sync::watch::channel(());
         let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         tokio::spawn(run_actor(
@@ -537,11 +654,15 @@ impl EmbeddedAgent {
                 initial: Some(stream),
             },
             receiver,
+            #[cfg(feature = "remote")]
+            cleanup_rx,
             changes,
             session_inventory.clone(),
         ));
         Self {
             commands,
+            #[cfg(feature = "remote")]
+            cleanup,
             changes: notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
             session_inventory,
@@ -567,8 +688,20 @@ enum Command {
     },
     Open {
         size: TerminalSize,
+        person: Option<uuid::Uuid>,
+        account: Option<String>,
         readiness: bool,
-        reply: oneshot::Sender<Result<[u8; 16], AgentError>>,
+        reply: oneshot::Sender<Result<TerminalOpened, AgentError>>,
+    },
+    PrepareLogin {
+        person: uuid::Uuid,
+        account: Option<String>,
+        reply: oneshot::Sender<Result<Vec<u8>, AgentError>>,
+    },
+    #[cfg(feature = "remote")]
+    RevokeLogin {
+        person: uuid::Uuid,
+        reply: oneshot::Sender<Result<(), AgentError>>,
     },
     Call {
         action_id: String,
@@ -780,6 +913,8 @@ async fn connect_remote(link: RemoteLink, uid: u32) -> Result<AgentConnection, A
         next_call_id: 1,
         #[cfg(feature = "remote")]
         owned_control: None,
+        #[cfg(feature = "remote")]
+        owned_cleanup: None,
     })
 }
 
@@ -793,6 +928,8 @@ struct AgentConnection {
     next_call_id: u32,
     #[cfg(feature = "remote")]
     owned_control: Option<mpsc::Sender<Bytes>>,
+    #[cfg(feature = "remote")]
+    owned_cleanup: Option<mpsc::UnboundedSender<Bytes>>,
 }
 
 enum Incoming {
@@ -844,18 +981,25 @@ enum Incoming {
 }
 
 enum PendingCall {
+    #[cfg(feature = "remote")]
+    Revoke(oneshot::Sender<Result<(), AgentError>>),
+    Preparation(oneshot::Sender<Result<Vec<u8>, AgentError>>),
     Action(oneshot::Sender<Result<Vec<u8>, AgentError>>),
-    Open(oneshot::Sender<Result<[u8; 16], AgentError>>),
+    Open(oneshot::Sender<Result<TerminalOpened, AgentError>>),
     #[cfg(feature = "remote")]
     Control(oneshot::Sender<Result<Vec<u8>, AgentError>>),
 }
 impl PendingCall {
     fn refuse(self, error: AgentError) {
         match self {
+            #[cfg(feature = "remote")]
+            Self::Revoke(reply) => {
+                let _ = reply.send(Err(error));
+            }
             Self::Open(reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::Action(reply) => {
+            Self::Action(reply) | Self::Preparation(reply) => {
                 let _ = reply.send(Err(error));
             }
             #[cfg(feature = "remote")]
@@ -870,6 +1014,22 @@ impl PendingCall {
 #[serde(deny_unknown_fields)]
 struct OpenResult {
     session_id: String,
+    #[serde(default)]
+    account: Option<String>,
+    #[serde(default)]
+    requested_account: Option<String>,
+    #[serde(default)]
+    fallback: bool,
+    #[serde(default)]
+    note: Option<String>,
+}
+/// Trusted host open metadata; account fallback is visible without exposing uid selection to clients.
+pub struct TerminalOpened {
+    pub session_id: [u8; 16],
+    pub account: Option<String>,
+    pub requested_account: Option<String>,
+    pub fallback: bool,
+    pub note: Option<String>,
 }
 
 async fn forward_inputs(
@@ -906,6 +1066,7 @@ async fn forward_inputs(
 async fn run_actor(
     mut source: Source,
     mut commands: mpsc::Receiver<Command>,
+    #[cfg(feature = "remote")] mut cleanup: mpsc::UnboundedReceiver<Retirement>,
     changes: tokio::sync::watch::Sender<()>,
     session_inventory: watch::Sender<SessionInventoryState>,
 ) {
@@ -1095,7 +1256,7 @@ async fn run_actor(
                     session_inventory.send_replace(SessionInventoryState::Unavailable);
                 }
             }
-            command = commands.recv(), if control_ready => {
+            command = next_command(&mut commands, control_ready, #[cfg(feature = "remote")] &mut cleanup) => {
                 let Some(command) = command else { return; };
                 #[cfg(feature = "remote")]
                 if let Command::Prime { link: secondary, reply } = command {
@@ -1349,6 +1510,8 @@ async fn connect_agent(
         next_call_id: 1,
         #[cfg(feature = "remote")]
         owned_control: None,
+        #[cfg(feature = "remote")]
+        owned_cleanup: None,
     })
 }
 
@@ -1388,6 +1551,48 @@ async fn read_frame_from_socket(
     }
 }
 
+// A lifecycle request is produced only by the authorized internal finalizer;
+// neither the ordinary queue nor another person's outstanding work admits it.
+async fn next_command(
+    commands: &mut mpsc::Receiver<Command>,
+    control_ready: bool,
+    #[cfg(feature = "remote")] cleanup: &mut mpsc::UnboundedReceiver<Retirement>,
+) -> Option<Command> {
+    #[cfg(feature = "remote")]
+    {
+        tokio::select! {
+            biased;
+            Some(retirement) = cleanup.recv() => Some(Command::RevokeLogin { person: retirement.person, reply: retirement.reply }),
+            command = commands.recv(), if control_ready => command,
+        }
+    }
+    #[cfg(not(feature = "remote"))]
+    if control_ready {
+        commands.recv().await
+    } else {
+        std::future::pending().await
+    }
+}
+
+fn ordinary_pending(pending: &HashMap<u32, PendingCall>) -> usize {
+    #[cfg(not(feature = "remote"))]
+    {
+        pending.len()
+    }
+    #[cfg(feature = "remote")]
+    pending
+        .values()
+        .filter(|call| {
+            #[cfg(feature = "remote")]
+            if matches!(call, PendingCall::Revoke(_)) {
+                return false;
+            }
+            true
+        })
+        .count()
+}
+
+// The command variants mutate one shared route table, so they remain in one bounded actor turn.
 /// Reconciles the validated shadow cursor before owned primary replay resumes.
 #[cfg(feature = "remote")]
 async fn apply_cached_ack(
@@ -1652,6 +1857,7 @@ async fn process_command(
                 let _ = reply.send(Err(AgentError::Unsupported));
                 return true;
             }
+            prune_cancelled_preparations(pending);
             if json.len() > infraternal_plugin_api::channel::MAX_CONTROL_JSON
                 || pending
                     .values()
@@ -1660,7 +1866,7 @@ async fn process_command(
                 let _ = reply.send(Err(AgentError::Rejected));
                 return true;
             }
-            let Some(call_id) = allocate_call_id(connection, pending) else {
+            let Some(call_id) = allocate_call_id(connection, pending, 0) else {
                 let _ = reply.send(Err(AgentError::Unavailable));
                 return true;
             };
@@ -1678,6 +1884,8 @@ async fn process_command(
         }
         Command::Open {
             size,
+            person,
+            account,
             readiness,
             reply,
         } => {
@@ -1688,22 +1896,27 @@ async fn process_command(
                 let _ = reply.send(Err(AgentError::Unavailable));
                 return false;
             }
-            if pending.len() >= COMMAND_CAPACITY {
+            prune_cancelled_preparations(pending);
+            if ordinary_pending(pending) >= COMMAND_CAPACITY {
                 let _ = reply.send(Err(AgentError::Unavailable));
                 return true;
             }
-            let Some(call_id) = allocate_call_id(connection, pending) else {
+            let Some(call_id) = allocate_call_id(connection, pending, 0) else {
                 let _ = reply.send(Err(AgentError::Unavailable));
                 return true;
             };
-            // The trusted enrolled or local host identity never comes from browser JSON.
-            // Pixel geometry is sent later through Resize; the daemon opens a
-            // PTY using its approved {uid, cols, rows} action schema [9][13].
+            // Person, account and enrolled/local uid come from server authority.
+            // Pixel geometry follows through Resize; legacy fixtures keep the
+            // old size/uid input while real opens include login identity [229][231].
             let mut request = serde_json::json!({
                 "uid": connection.execution_uid,
                 "cols": size.cols,
                 "rows": size.rows,
             });
+            if let Some(person) = person {
+                request["person"] = serde_json::json!(person);
+                request["account"] = serde_json::json!(account);
+            }
             if readiness {
                 request["readiness"] = serde_json::Value::Bool(true);
             }
@@ -1723,16 +1936,94 @@ async fn process_command(
             pending.insert(call_id, PendingCall::Open(reply));
             true
         }
+        Command::PrepareLogin {
+            person,
+            account,
+            reply,
+        } => {
+            if reply.is_closed() {
+                return true;
+            }
+            #[cfg(feature = "remote")]
+            if let Peer::Remote(link) = &connection.peer
+                && link.admit_operation().await.is_err()
+            {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return false;
+            }
+            // A timeout may cancel this receiver during a remote ledger check.
+            if reply.is_closed() {
+                return true;
+            }
+            prune_cancelled_preparations(pending);
+            if ordinary_pending(pending) >= COMMAND_CAPACITY {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return true;
+            }
+            let Some(call_id) = allocate_call_id(connection, pending, PREPARATION_CALL_BIT) else {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return true;
+            };
+            let Ok(json) = serde_json::to_vec(
+                &serde_json::json!({"uid":connection.execution_uid,"person":person,"account":account,"cols":80,"rows":24}),
+            ) else {
+                let _ = reply.send(Err(AgentError::Protocol));
+                return true;
+            };
+            let frame = Frame::Call {
+                call_id,
+                action_id: "terminal.login.prepare",
+                input_json: &json,
+            };
+            if !write_frame(connection, CONTROL_STREAM, &frame).await {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return false;
+            }
+            pending.insert(call_id, PendingCall::Preparation(reply));
+            true
+        }
+        #[cfg(feature = "remote")]
+        Command::RevokeLogin { person, reply } => {
+            // Once queued, cleanup remains owned even if its caller times out.
+            prune_cancelled_preparations(pending);
+            // Pending ordinary calls and other people cannot fence lifecycle
+            // requests. Canceled recipients are pruned; host cleanup survives.
+            let Some(call_id) = allocate_call_id(connection, pending, RETIREMENT_CALL_BIT) else {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return true;
+            };
+            // Only the authorized host tombstone finalizer can submit this
+            // fixed action. Its writer transaction already owns authority;
+            // rereading the same pool here could wait behind that transaction.
+            let Ok(json) = serde_json::to_vec(&serde_json::json!({"person":person})) else {
+                let _ = reply.send(Err(AgentError::Protocol));
+                return true;
+            };
+            let frame = Frame::Call {
+                call_id,
+                action_id: "terminal.login.revoke",
+                input_json: &json,
+            };
+            if !write_frame(connection, CONTROL_STREAM, &frame).await {
+                let _ = reply.send(Err(AgentError::Unavailable));
+                return false;
+            }
+            if !reply.is_closed() {
+                pending.insert(call_id, PendingCall::Revoke(reply));
+            }
+            true
+        }
         Command::Call {
             action_id,
             mut input_json,
             reply,
         } => {
-            if pending.len() >= COMMAND_CAPACITY {
+            prune_cancelled_preparations(pending);
+            if ordinary_pending(pending) >= COMMAND_CAPACITY {
                 let _ = reply.send(Err(AgentError::Unavailable));
                 return true;
             }
-            let Some(call_id) = allocate_call_id(connection, pending) else {
+            let Some(call_id) = allocate_call_id(connection, pending, 0) else {
                 let _ = reply.send(Err(AgentError::Unavailable));
                 return true;
             };
@@ -2018,14 +2309,28 @@ async fn process_command(
     }
 }
 
+// Receiver cancellation frees bounded admission on the next control request.
+// The preparation namespace handles any later reply without retaining tombstones.
+fn prune_cancelled_preparations(pending: &mut HashMap<u32, PendingCall>) {
+    pending.retain(|_, call| {
+        #[cfg(feature = "remote")]
+        if let PendingCall::Revoke(reply) = call {
+            return !reply.is_closed();
+        }
+        !matches!(call, PendingCall::Preparation(reply) if reply.is_closed())
+    });
+}
+
 fn allocate_call_id(
     connection: &mut AgentConnection,
     pending: &HashMap<u32, PendingCall>,
+    purpose: u32,
 ) -> Option<u32> {
     let start = connection.next_call_id;
     loop {
-        let candidate = connection.next_call_id;
-        connection.next_call_id = connection.next_call_id.wrapping_add(1).max(1);
+        let candidate = connection.next_call_id | purpose;
+        connection.next_call_id =
+            (connection.next_call_id.wrapping_add(1) & !BACKGROUND_CALL_BITS).max(1);
         if !pending.contains_key(&candidate) {
             return Some(candidate);
         }
@@ -2202,10 +2507,16 @@ async fn process_incoming(
         Incoming::Activate => false,
         Incoming::Result { call_id, ok, json } => {
             let Some(call) = pending.remove(&call_id) else {
-                return false;
+                // A preparation or cleanup timeout can win before the node reply.
+                // Unknown ordinary results still fail closed as protocol errors.
+                return call_id & BACKGROUND_CALL_BITS != 0;
             };
             if !ok {
                 match call {
+                    #[cfg(feature = "remote")]
+                    PendingCall::Revoke(reply) => {
+                        let _ = reply.send(Err(AgentError::Rejected));
+                    }
                     PendingCall::Open(reply) => {
                         let error =
                             if json.len() <= infraternal_plugin_api::channel::MAX_CONTROL_JSON {
@@ -2216,7 +2527,7 @@ async fn process_incoming(
                             };
                         let _ = reply.send(Err(error));
                     }
-                    PendingCall::Action(reply) => {
+                    PendingCall::Action(reply) | PendingCall::Preparation(reply) => {
                         let _ = reply.send(Err(AgentError::Rejected));
                     }
                     #[cfg(feature = "remote")]
@@ -2227,11 +2538,44 @@ async fn process_incoming(
                 return true;
             }
             match call {
+                #[cfg(feature = "remote")]
+                PendingCall::Revoke(reply) => {
+                    #[derive(serde::Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct Revoked {
+                        revoked: bool,
+                    }
+                    // Serde structs also accept positional arrays. Cleanup
+                    // acknowledgements declare an object, so reject that shape.
+                    let outcome =
+                        if json.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{') {
+                            serde_json::from_slice::<Revoked>(&json)
+                                .map_err(|_| AgentError::Protocol)
+                                .and_then(|result| {
+                                    if result.revoked {
+                                        Ok(())
+                                    } else {
+                                        Err(AgentError::Rejected)
+                                    }
+                                })
+                        } else {
+                            Err(AgentError::Protocol)
+                        };
+                    let _ = reply.send(outcome);
+                }
                 PendingCall::Open(reply) => {
                     let session = serde_json::from_slice::<OpenResult>(&json);
                     let result = session
                         .ok()
-                        .and_then(|value| decode_session_id(&value.session_id))
+                        .and_then(|value| {
+                            decode_session_id(&value.session_id).map(|session_id| TerminalOpened {
+                                session_id,
+                                account: value.account,
+                                requested_account: value.requested_account,
+                                fallback: value.fallback,
+                                note: value.note,
+                            })
+                        })
                         .ok_or(AgentError::Protocol);
                     let _ = reply.send(result);
                 }
@@ -2239,7 +2583,7 @@ async fn process_incoming(
                 PendingCall::Control(reply) => {
                     let _ = reply.send(Ok(json));
                 }
-                PendingCall::Action(reply) => {
+                PendingCall::Action(reply) | PendingCall::Preparation(reply) => {
                     let result = if json.len() <= infraternal_plugin_api::MAX_ACTION_BYTES {
                         Ok(json)
                     } else {
@@ -2725,6 +3069,21 @@ async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &F
             || encoded.len() > writes::CONTROL_FLIGHT
         {
             return false;
+        }
+        // Only the trusted retirement finalizer produces this fixed action.
+        // Its dedicated mailbox stays available while ordinary control is full;
+        // the write owner drains it before admitting another ordinary flight.
+        if matches!(
+            frame,
+            Frame::Call {
+                action_id: "terminal.login.revoke",
+                ..
+            }
+        ) {
+            return connection
+                .owned_cleanup
+                .as_ref()
+                .is_some_and(|cleanup| cleanup.send(Bytes::from(encoded)).is_ok());
         }
         // Reliable control admission is guarded by readiness in the single
         // actor turn. A best-effort Pong may lose that slot to queued work;

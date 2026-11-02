@@ -31,6 +31,15 @@ impl Session {
         units: Option<(&str, &str)>,
         retention_ms: u64,
     ) -> Self {
+        Self::start_configured(ring, detach, units, retention_ms, false)
+    }
+    fn start_configured(
+        ring: usize,
+        detach: bool,
+        units: Option<(&str, &str)>,
+        retention_ms: u64,
+        readiness: bool,
+    ) -> Self {
         let counter = NEXT.fetch_add(1, Ordering::Relaxed);
         let id = format!("{:016x}{counter:016x}", std::process::id());
         // Socket names include the full state path; keep gate fixtures under its per-job root.
@@ -87,6 +96,9 @@ impl Session {
             .arg(retention_ms.to_string());
         if detach {
             command.arg("--detach");
+        }
+        if readiness {
+            command.arg("--readiness");
         }
         let child = command
             .stdin(Stdio::null())
@@ -837,6 +849,57 @@ fn delivered_exit_cannot_release_another_owning_window() {
     }
 }
 
+#[test]
+fn readiness_does_not_advertise_durable_ownership() {
+    let session = Session::start_configured(8192, false, None, 600_000, true);
+    let mut peer = session.connect();
+    let Frame::Hello { caps, .. } = read(&mut peer) else {
+        panic!("no readiness Hello");
+    };
+    // A private probe retires after output delivery without an ended record.
+    // Ownership EOF must not race its ordered output and exit notification.
+    assert_eq!(caps & infraternal_shim::frame::SESSION_OWNER, 0);
+}
+
+#[test]
+fn readiness_exit_waits_for_a_real_output_cursor() {
+    let session = Session::start_configured(8192, false, None, 600_000, true);
+    let mut control = session.connect();
+    assert!(matches!(read(&mut control), Frame::Hello { .. }));
+    send(
+        &mut control,
+        Frame::Attach(
+            infraternal_shim::frame::SEQUENCED_INPUT | infraternal_shim::frame::MULTI_WRITER,
+        ),
+    );
+    send(&mut control, Frame::SelectWriter(77));
+    send(&mut control, Frame::SequencedInput(0, b"\n".to_vec()));
+    // Wait for the actual child to be reaped while no output cursor exists.
+    // An input-capable control peer cannot prove the fixed output was delivered.
+    let children = format!("/proc/{}/task/{}/children", session.pid, session.pid);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fs::read_to_string(&children).is_ok_and(|value| !value.trim().is_empty()) {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+    let mut data = session.connect();
+    assert!(matches!(read(&mut data), Frame::Hello { .. }));
+    send(&mut data, Frame::Attach(0));
+    send(&mut data, Frame::ReadFrom(0));
+    let mut output = Vec::new();
+    loop {
+        match read(&mut data) {
+            Frame::Output(_, bytes) => output.extend_from_slice(&bytes),
+            Frame::Exited(_, _) => break,
+            _ => {}
+        }
+    }
+    assert!(
+        output
+            .windows(b"infraternal-ready".len())
+            .any(|bytes| bytes == b"infraternal-ready")
+    );
+}
 /// Raw additive selection keeps this regression runnable against older shims.
 fn shared_selector_frame(writer: u32) -> Vec<u8> {
     let mut wire = vec![5, 0, 0, 0, 0x1d];

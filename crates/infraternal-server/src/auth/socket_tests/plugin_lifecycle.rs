@@ -112,7 +112,12 @@ async fn mesh_plugin_discovery_disable_and_restart_preserve_control_socket() {
     assert!(!ok);
     assert_eq!(reply["error"], "plugin unavailable");
     assert_eq!(runtime.active_workers("mesh"), 0);
-    let descriptor = &discovery["plugins"][0]["descriptor"];
+    let descriptor = &discovery["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plugin| plugin["descriptor"]["id"] == "mesh")
+        .expect("compiled mesh feature is missing")["descriptor"];
     assert_eq!(descriptor["id"], "mesh");
     assert_eq!(descriptor["actions"].as_array().unwrap().len(), 19);
     assert_eq!(descriptor["roles"][0]["requires"], json!(["server"]));

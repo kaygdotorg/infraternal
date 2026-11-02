@@ -340,6 +340,9 @@ async fn uninstall_handoff_runs_only_after_a_successful_real_socket_write() {
     for healthy in [false, true] {
         let (writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
         let socket = Socket::inherited(writer.as_raw_fd()).unwrap();
+        // A concurrent fork can retain the peer briefly before exec closes its
+        // CLOEXEC descriptor. Keep an alias to reproduce that window reliably.
+        let _inherited_reader = reader.try_clone().unwrap();
         if !healthy {
             // Shut the socket itself down: a child that a concurrent test
             // forks holds a copy of `reader` until it execs, so dropping this

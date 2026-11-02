@@ -357,3 +357,12 @@ foreground job has a different group. Existing Signal semantics stay unchanged.
 An already reaped child is a no-op; the shim never signals a recycled PID.
 The request has no acknowledgement: delivery is not proof of process exit.
 Old shims must receive no such frame; callers report an upgrade/recreate fix.
+
+### Person-shell cleanup (#221)
+
+Capability bit 7 (`SHELL_CLEANUP`, value 128) permits a cleanup-only Attach.
+The infraternal agent selects it only to stop the target person's owned shell;
+the link cannot combine it with viewer, writer or other capability bits.
+`StopShell` (opcode `0x22`) asks the shim to stop and reap that shell, and
+`ShellStopped` (`0x23`) confirms reaping. The shim advertises this capability
+only for the host-login runtime, never for root or readiness sessions.

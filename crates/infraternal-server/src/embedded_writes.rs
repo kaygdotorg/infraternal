@@ -16,6 +16,7 @@ pub(super) struct State {
     test_peer: Option<std::net::SocketAddr>,
     enabled: bool,
     control: Option<mpsc::Receiver<Bytes>>,
+    cleanup: Option<mpsc::UnboundedReceiver<Bytes>>,
     control_busy: bool,
     sent: HashMap<u32, ([u8; 16], u64)>,
     busy: HashMap<u32, [u8; 16]>,
@@ -50,11 +51,26 @@ impl State {
             let (sender, receiver) = mpsc::channel(1);
             connection.owned_control = Some(sender);
             self.control = Some(receiver);
+            let (sender, receiver) = mpsc::unbounded_channel();
+            connection.owned_cleanup = Some(sender);
+            self.cleanup = Some(receiver);
             #[cfg(test)]
             if let Peer::Remote(link) = &connection.peer {
                 self.test_peer = link.test_native_peer_address();
             }
         }
+    }
+    // Retirement is already admitted by its trusted finalizer and cannot spend
+    // ordinary control capacity. One ordered write owner preserves stream order.
+    fn next_control(&mut self) -> Option<Bytes> {
+        self.cleanup
+            .as_mut()
+            .and_then(|queue| queue.try_recv().ok())
+            .or_else(|| {
+                self.control
+                    .as_mut()
+                    .and_then(|queue| queue.try_recv().ok())
+            })
     }
     pub(super) fn can_admit(&self) -> bool {
         #[cfg(test)]
@@ -106,6 +122,7 @@ impl State {
         self.tasks.abort_all();
         while self.tasks.join_next().await.is_some() {}
         self.control = None;
+        self.cleanup = None;
         self.control_busy = false;
         self.busy.clear();
         self.blocked.clear();
@@ -188,10 +205,7 @@ impl State {
             return;
         }
         if !self.control_busy
-            && let Some(encoded) = self
-                .control
-                .as_mut()
-                .and_then(|queue| queue.try_recv().ok())
+            && let Some(encoded) = self.next_control()
         {
             let link = link.clone();
             self.control_busy = true;
@@ -465,6 +479,8 @@ mod tests {
             encode: Vec::new(),
             next_call_id: 1,
             owned_control: None,
+            #[cfg(feature = "remote")]
+            owned_cleanup: None,
         };
         let mut retained = retained_writer();
         let (output, mut observed) = mpsc::channel(16);
@@ -494,6 +510,60 @@ mod tests {
         ));
         assert_eq!(attachments[&1].unacknowledged.len(), 4 * 1024 * 1024);
         assert!(!attachments[&1].replaying);
+    }
+
+    #[tokio::test]
+    async fn person_cleanup_is_admitted_when_native_control_lane_is_full() {
+        use super::super::{BytesMut, write_frame};
+        let (link, _control, _listener, _endpoint, _peer) =
+            crate::remote_runtime::tests::native_link_pair().await;
+        let mut connection = AgentConnection {
+            peer: Peer::Remote(link),
+            execution_uid: 0,
+            pid: None,
+            receive: BytesMut::new(),
+            scratch: vec![0; 4096],
+            encode: Vec::new(),
+            next_call_id: 1,
+            owned_control: None,
+            #[cfg(feature = "remote")]
+            owned_cleanup: None,
+        };
+        let mut state = State::default();
+        state.enable(&HashMap::new());
+        state.install(&mut connection);
+        connection
+            .owned_control
+            .as_ref()
+            .unwrap()
+            .try_send(Bytes::from_static(b"held"))
+            .unwrap();
+        assert!(!state.can_admit());
+        // One active flight and a full queued slot cannot reserve retirement.
+        state.control_busy = true;
+        for call_id in 1..=96 {
+            let cleanup = Frame::Call {
+                call_id: 0x4000_0000 | call_id,
+                action_id: "terminal.login.revoke",
+                input_json: br#"{"person":"00000000-0000-0000-0000-000000000001"}"#,
+            };
+            assert!(
+                write_frame(&mut connection, 0, &cleanup).await,
+                "ordinary native control capacity must not refuse person cleanup"
+            );
+        }
+        // When the active flight ends, cleanup precedes the ordinary queued frame.
+        state.control_busy = false;
+        for expected in 1..=96 {
+            let encoded = state.next_control().unwrap();
+            assert!(
+                matches!(infraternal_protocol::decode_frame(&encoded).unwrap().frame,
+                Frame::Call { call_id, action_id: "terminal.login.revoke", .. }
+                    if call_id == 0x4000_0000 | expected)
+            );
+        }
+        assert_eq!(state.next_control().unwrap(), b"held"[..]);
+        assert!(state.next_control().is_none());
     }
 
     #[tokio::test]
@@ -558,6 +628,8 @@ mod tests {
             encode: Vec::new(),
             next_call_id: 1,
             owned_control: None,
+            #[cfg(feature = "remote")]
+            owned_cleanup: None,
         };
         let mut state = State::default();
         state.enable(&HashMap::new());

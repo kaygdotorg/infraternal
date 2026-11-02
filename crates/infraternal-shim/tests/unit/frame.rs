@@ -73,6 +73,8 @@ mod tests {
             ),
             (Frame::CloseSession, vec![1, 0, 0, 0, 0x1f]),
             (Frame::ExitAck, vec![1, 0, 0, 0, 0x21]),
+            (Frame::StopShell, vec![1, 0, 0, 0, 0x22]),
+            (Frame::ShellStopped, vec![1, 0, 0, 0, 0x23]),
         ];
         for (frame, wire) in fixtures {
             assert_eq!(frame.encode().unwrap(), wire);
@@ -378,6 +380,15 @@ fn approximate_snapshot_codec_is_bounded_and_canonical() {
 }
 
 #[test]
+fn cleanup_frames_reject_payloads_and_preserve_borrowed_decode() {
+    for (kind, frame) in [(0x22, Frame::StopShell), (0x23, Frame::ShellStopped)] {
+        assert_eq!(Frame::decode(&[kind]).unwrap(), frame);
+        assert_eq!(FrameRef::decode(&[kind]).unwrap().into_owned(), frame);
+        assert!(Frame::decode(&[kind, 0]).is_err());
+    }
+}
+
+#[test]
 fn shared_writer_selector_is_fixed_length_and_fragment_safe() {
     let wire = [5, 0, 0, 0, 0x1d, 4, 3, 2, 1];
     let frame = Frame::decode(&wire[4..]).expect("additive shared writer selection");
@@ -412,4 +423,32 @@ fn query_reply_extension_is_bounded_and_fragment_safe() {
     assert!(Frame::decode(&[0x1e]).is_err());
     assert!(FrameRef::decode(&[vec![0x1e], vec![0; 1025]].concat()).is_err());
     assert!(Frame::QueryReply(vec![0; 1024]).encode().is_ok());
+}
+
+#[test]
+fn capability_bits_are_distinct() {
+    use crate::frame::{
+        APPROXIMATE_SNAPSHOT, CLOSE_SESSION, MULTI_WRITER, QUERY_REPLIES, SEQUENCED_INPUT,
+        SESSION_OWNER, SHARED_WRITER, SHELL_CLEANUP,
+    };
+    let capabilities = [
+        SEQUENCED_INPUT,
+        MULTI_WRITER,
+        APPROXIMATE_SNAPSHOT,
+        SESSION_OWNER,
+        SHARED_WRITER,
+        QUERY_REPLIES,
+        CLOSE_SESSION,
+        SHELL_CLEANUP,
+    ];
+    for (index, capability) in capabilities.iter().enumerate() {
+        assert_eq!((*capability).count_ones(), 1, "capability must use one bit");
+        for other in &capabilities[index + 1..] {
+            assert_eq!(*capability & *other, 0, "capability bits must not overlap");
+        }
+    }
+    assert_eq!(SHARED_WRITER, 16, "preserve the shipped shared-writer bit");
+    assert_eq!(QUERY_REPLIES, 32, "preserve the shipped query-reply bit");
+    assert_eq!(CLOSE_SESSION, 64, "preserve the shipped close-session bit");
+    assert_eq!(SHELL_CLEANUP, 128, "keep cleanup on the next free bit");
 }

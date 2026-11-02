@@ -52,6 +52,9 @@ pub(crate) fn publish_revocation(auth: &Auth, user: &str) {
 #[path = "socket_clock.rs"]
 pub(crate) mod socket_clock;
 use socket_clock::FrozenSocketTime;
+#[path = "socket_backend.rs"]
+mod socket_backend;
+use socket_backend::read_terminal_open;
 const NOW: i64 = 1_800_000_000;
 const ORIGIN: &str = "https://auth.example.test";
 

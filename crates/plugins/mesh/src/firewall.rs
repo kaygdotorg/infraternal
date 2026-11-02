@@ -390,9 +390,19 @@ fn render_with_aliases(
             for (family, suffix) in [("ip", "4"), ("ip6", "6")] {
                 let _ = writeln!(script, "  {family} {field} @{direction}{suffix}_all accept");
                 for protocol in ["tcp", "udp"] {
+                    // Input filtering runs after destination NAT. Keep the mesh
+                    // grant tied to the service the peer addressed, not a
+                    // redirect's private listener port [#221].
+                    let selector = if inbound {
+                        format!(
+                            "ct original protocol {protocol} ct original {family} {field} . ct original proto-dst"
+                        )
+                    } else {
+                        format!("{family} {field} . {protocol} dport")
+                    };
                     let _ = writeln!(
                         script,
-                        "  {family} {field} . {protocol} dport @{direction}{suffix}_{protocol} accept"
+                        "  {selector} @{direction}{suffix}_{protocol} accept"
                     );
                 }
             }
@@ -572,6 +582,30 @@ mod tests {
         let rules = render(&config, true);
         assert!(rules.contains("10.254.0.2 . 5432"));
         assert!(rules.starts_with("delete table inet infraternal_mesh\n"));
+    }
+    #[test]
+    fn incoming_port_rules_match_the_original_service_after_translation() {
+        let mut config = config();
+        let peer = config.peers.get_mut(&NodeId(2)).expect("peer");
+        peer.inbound = TrafficPolicy::Ports(std::collections::BTreeSet::from([
+            crate::policy::rules::Port {
+                protocol: Protocol::Tcp,
+                number: 22,
+            },
+        ]));
+        peer.outbound = TrafficPolicy::Ports(std::collections::BTreeSet::from([
+            crate::policy::rules::Port {
+                protocol: Protocol::Tcp,
+                number: 443,
+            },
+        ]));
+
+        let rules = render(&config, false);
+        assert!(rules.contains(
+            "ct original protocol tcp ct original ip saddr . ct original proto-dst @incoming4_tcp accept"
+        ));
+        assert!(!rules.contains("ip saddr . tcp dport @incoming4_tcp accept"));
+        assert!(rules.contains("ip daddr . tcp dport @outgoing4_tcp accept"));
     }
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]

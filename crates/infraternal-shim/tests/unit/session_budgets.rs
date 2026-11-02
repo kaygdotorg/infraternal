@@ -25,6 +25,7 @@ mod budgets {
             pending: Vec::new(),
             written: 0,
             exited_sent: false,
+            stopping: false,
             request: None,
         };
         let frame = Frame::Output(13, vec![b'x'; 4096]);
@@ -70,6 +71,7 @@ mod budgets {
             pending: Vec::new(),
             written: 0,
             exited_sent: true,
+            stopping: false,
             request: None,
         };
         let mut terminal = Terminal::new(20, 4).unwrap();
@@ -159,6 +161,7 @@ mod budgets {
             pending: Vec::new(),
             written: 0,
             exited_sent: false,
+            stopping: false,
             request: None,
         };
         let mut terminal = Terminal::new(200, 60).unwrap();
@@ -236,4 +239,25 @@ fn poll_storage_measurement() {
             start.elapsed().as_secs_f64() * 1e9 / f64::from(n)
         );
     }
+}
+
+#[cfg(feature = "host-login")]
+#[test]
+fn host_group_rejects_local_startup_and_readiness_before_opening_placement() {
+    let local = super::Config::new([0x71; 16], nix::unistd::Uid::effective().as_raw());
+    let mut readiness = local.clone();
+    readiness.login_socket = Some(std::path::PathBuf::from("uncontacted-login-endpoint"));
+    readiness.readiness = true;
+    // An invalid path must not hide the invalid startup mode. Neither call
+    // may open placement coordinates or create a local child in this API.
+    let failures = [local, readiness].map(|config| {
+        super::run_with_login_group(
+            config,
+            std::time::Duration::from_secs(1),
+            std::path::Path::new("/not-a-host-login-group"),
+        )
+        .unwrap_err()
+        .kind()
+    });
+    assert_eq!(failures, [std::io::ErrorKind::InvalidInput; 2]);
 }

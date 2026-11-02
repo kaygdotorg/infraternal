@@ -24,7 +24,10 @@ use std::{
     collections::HashMap,
     io,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
@@ -83,10 +86,382 @@ enum Message {
 #[serde(deny_unknown_fields)]
 struct Open {
     #[serde(default)]
+    person: Option<uuid::Uuid>,
+    #[serde(default)]
+    account: Option<String>,
+    #[serde(default)]
     readiness: bool,
     uid: u32,
     cols: u16,
     rows: u16,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevokeLogin {
+    person: uuid::Uuid,
+}
+
+struct Opened {
+    session: Option<Session>,
+    json: Vec<u8>,
+}
+
+// Preserve absent legacy fields versus the explicit null requested account of
+// a person login. Serialize directly, avoiding a per-open dynamic object map.
+#[derive(Default)]
+struct OpenReply {
+    account: Option<String>,
+    fallback: Option<bool>,
+    note: Option<String>,
+    #[allow(clippy::option_option)] // The wire distinguishes missing from explicit null.
+    requested_account: Option<Option<String>>,
+    prepared: Option<bool>,
+    session_id: Option<uuid::Uuid>,
+}
+
+// Unknown map length avoids computing the same optional-field predicates once
+// for a derived struct length and again for its contents. The existing map
+// serializer still owns all escaping and preserves explicit null values.
+impl serde::Serialize for OpenReply {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        if let Some(value) = &self.account {
+            map.serialize_entry("account", value)?;
+        }
+        if let Some(value) = self.fallback {
+            map.serialize_entry("fallback", &value)?;
+        }
+        if let Some(value) = &self.note {
+            map.serialize_entry("note", value)?;
+        }
+        if let Some(value) = self.prepared {
+            map.serialize_entry("prepared", &value)?;
+        }
+        if let Some(value) = &self.requested_account {
+            map.serialize_entry("requested_account", value)?;
+        }
+        if let Some(value) = self.session_id {
+            map.serialize_entry("session_id", &value)?;
+        }
+        map.end()
+    }
+}
+
+#[cfg(test)]
+mod open_reply_tests {
+    //! Keep person metadata and legacy field absence identical after direct serialization.
+    use super::OpenReply;
+
+    #[test]
+    fn legacy_and_person_fields_preserve_exact_json_shape() {
+        let id = uuid::Uuid::from_u128(1);
+        let legacy = OpenReply {
+            session_id: Some(id),
+            ..OpenReply::default()
+        };
+        assert_eq!(
+            serde_json::to_vec(&legacy).unwrap(),
+            serde_json::to_vec(&serde_json::json!({"session_id": id})).unwrap()
+        );
+        let prepared = OpenReply {
+            account: Some("root".into()),
+            fallback: Some(false),
+            note: Some(String::new()),
+            prepared: Some(true),
+            session_id: None,
+            requested_account: Some(None),
+        };
+        assert_eq!(
+            serde_json::to_vec(&prepared).unwrap(),
+            serde_json::to_vec(
+                &serde_json::json!({"account":"root", "fallback":false, "note":"",
+                "prepared":true, "requested_account":null})
+            )
+            .unwrap()
+        );
+        let terminal = OpenReply {
+            prepared: None,
+            requested_account: Some(Some("absent".into())),
+            fallback: Some(true),
+            note: Some("No user absent here, opened as root".into()),
+            session_id: Some(id),
+            ..prepared
+        };
+        assert_eq!(
+            serde_json::to_vec(&terminal).unwrap(),
+            serde_json::to_vec(&serde_json::json!({"account":"root", "fallback":true,
+                "note":"No user absent here, opened as root", "requested_account":"absent",
+                "session_id":id}))
+            .unwrap()
+        );
+    }
+}
+
+type OpenResult = Result<Opened, infraternal_plugin_api::admission::OpenRefusal>;
+type OpenTasks = JoinSet<(u32, u32, OpenResult)>;
+// Backend detection belongs to the first admitted login operation. The shared
+// cell serializes concurrent first requests without an idle task or probe;
+// cancellation leaves an unfinished initialization retryable by another call.
+type LoginManager = Arc<tokio::sync::OnceCell<Manager>>;
+
+// Even the shared synchronization state belongs to first use: its constructors
+// must not populate executable pages or allocate while the host has no logins.
+#[cold]
+#[inline(never)]
+fn login_manager(slot: &mut Option<LoginManager>) -> LoginManager {
+    slot.get_or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
+        .clone()
+}
+
+// Anonymous own-account shims can reuse their inherited context. A root host
+// must retain first-use detection of its real login backend.
+#[inline]
+fn anonymous_login_manager(root: bool) -> Option<LoginManager> {
+    if root {
+        return None;
+    }
+    let slot = Arc::new(tokio::sync::OnceCell::new());
+    let _ = slot.set(Manager::Detached);
+    Some(slot)
+}
+
+#[cfg(test)]
+mod image_tests {
+    //! Keep anonymous shim launch distinct from the host login path [D18,D247].
+    use super::*;
+    use std::path::Path;
+
+    #[tokio::test]
+    async fn anonymous_image_retains_root_login_backend() {
+        let mut initial = anonymous_login_manager(true);
+        let manager = login_manager(&mut initial);
+        let backend = *manager.get_or_init(|| async { Manager::System }).await;
+        assert!(
+            matches!(backend, Manager::System),
+            "anonymous root image replaced the host login backend"
+        );
+        assert!(matches!(
+            backend.for_shim(Path::new("/proc/self/exe"), false),
+            Manager::Detached
+        ));
+        assert!(matches!(*manager.get().unwrap(), Manager::System));
+    }
+
+    #[tokio::test]
+    async fn anonymous_image_reuses_rootless_context_without_backend_probe() {
+        let mut initial = anonymous_login_manager(false);
+        let manager = login_manager(&mut initial);
+        let backend = *manager
+            .get_or_init(|| async { panic!("anonymous own-account image probed a login backend") })
+            .await;
+        assert!(matches!(backend, Manager::Detached));
+    }
+
+    #[test]
+    fn anonymous_image_uses_direct_shim_launch_without_changing_named_launches() {
+        let anonymous = Path::new("/proc/self/exe");
+        let named = Path::new("/installed/infraternal");
+        assert!(matches!(
+            Manager::System.for_shim(anonymous, false),
+            Manager::Detached
+        ));
+        assert!(matches!(
+            Manager::User.for_shim(anonymous, false),
+            Manager::Detached
+        ));
+        assert!(matches!(
+            Manager::System.for_shim(named, false),
+            Manager::System
+        ));
+        assert!(matches!(
+            Manager::User.for_shim(named, false),
+            Manager::User
+        ));
+        assert!(matches!(
+            Manager::System.for_shim(named, true),
+            Manager::Detached
+        ));
+    }
+}
+
+struct OpenTask {
+    exe: PathBuf,
+    state: PathBuf,
+    manager: LoginManager,
+    input: Open,
+    prepare: bool,
+    plugins: crate::plugin_control::Registry,
+    context: infraternal_plugin_api::admission::NodeContext,
+}
+
+// Construct cold login futures only when requested. Keeping their creation
+// outside the dispatcher poll function avoids touching their much larger code
+// working set on every idle greeting/receive, without an eager heap allocation.
+#[cold]
+#[inline(never)]
+fn spawn_open(opens: &mut OpenTasks, stream: u32, call_id: u32, task: OpenTask) {
+    use infraternal_plugin_api::admission::OpenRefusal;
+    opens.spawn(async move {
+        let result = async {
+            task.plugins.admit("terminal.open", task.context).await?;
+            let manager = *task.manager.get_or_init(Manager::detect).await;
+            open_requested(&task.exe, &task.state, manager, task.input, task.prepare)
+                .await
+                .map_err(|error| match error.kind() {
+                    io::ErrorKind::InvalidInput
+                    | io::ErrorKind::InvalidData
+                    | io::ErrorKind::PermissionDenied => OpenRefusal::Invalid,
+                    _ => OpenRefusal::ResourceUnavailable,
+                })
+        }
+        .await;
+        (stream, call_id, result)
+    });
+}
+
+#[cold]
+#[inline(never)]
+fn spawn_revocation(
+    state: PathBuf,
+    manager: LoginManager,
+    person: uuid::Uuid,
+    restore: bool,
+    finished: oneshot::Sender<OpenResult>,
+) -> tokio::task::JoinHandle<()> {
+    use infraternal_plugin_api::admission::OpenRefusal;
+    tokio::spawn(async move {
+        let manager = *manager.get_or_init(Manager::detect).await;
+        let result = if restore {
+            crate::logins::restore(&state, person).await
+        } else {
+            crate::logins::revoke(&state, manager, person).await
+        }
+        .map(|()| Opened {
+            session: None,
+            json: if restore {
+                b"{\"restored\":true}".to_vec()
+            } else {
+                b"{\"revoked\":true}".to_vec()
+            },
+        })
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput => OpenRefusal::Invalid,
+            _ => OpenRefusal::ResourceUnavailable,
+        });
+        let _ = finished.send(result);
+    })
+}
+
+// Account resolution, login fencing and shell creation form one ordered admission path.
+#[allow(clippy::too_many_lines)]
+async fn open_requested(
+    exe: &std::path::Path,
+    state: &std::path::Path,
+    manager: Manager,
+    input: Open,
+    prepare: bool,
+) -> io::Result<Opened> {
+    if input.readiness {
+        if prepare || input.person.is_some() || input.account.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "readiness cannot select a person login",
+            ));
+        }
+        let session = sessions::launch_with_readiness(
+            exe, state, manager, input.uid, input.cols, input.rows, true,
+        )
+        .await?;
+        return Ok(Opened {
+            json: serde_json::to_vec(&OpenReply {
+                session_id: Some(uuid::Uuid::from_bytes(session.id)),
+                ..OpenReply::default()
+            })?,
+            session: Some(session),
+        });
+    }
+    let mut json = OpenReply::default();
+    let (uid, endpoint) = if let Some(person) = input.person {
+        let (user, fallback) = if let Some(account) = input.account.as_deref() {
+            crate::logins::account(account)?
+        } else {
+            (
+                nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(input.uid))
+                    .map_err(io::Error::from)?
+                    .ok_or_else(|| io::Error::other("login account absent"))?,
+                false,
+            )
+        };
+        let endpoint = crate::logins::ensure(exe, state, manager, person, &user).await?;
+        json.account = Some(user.name);
+        json.fallback = Some(fallback);
+        json.note = Some(if fallback {
+            let mut note = String::from("No user ");
+            note.push_str(input.account.as_deref().unwrap_or_default());
+            note.push_str(" here, opened as root");
+            note
+        } else {
+            String::new()
+        });
+        json.requested_account = Some(input.account);
+        (user.uid.as_raw(), endpoint)
+    } else {
+        if prepare {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "login preparation requires a person",
+            ));
+        }
+        (input.uid, None)
+    };
+    let group = match (endpoint.as_deref(), input.person) {
+        (Some(endpoint), Some(person)) => {
+            crate::logins::cgroup(endpoint, manager, person, uid).await?
+        }
+        _ => None,
+    };
+    let session = if prepare {
+        json.prepared = Some(true);
+        None
+    } else {
+        let session = if let Some(person) = input.person
+            && endpoint.is_none()
+            && !nix::unistd::Uid::effective().is_root()
+        {
+            crate::rootless_sessions::launch(
+                exe, state, manager, person, uid, input.cols, input.rows,
+            )
+            .await?
+        } else {
+            sessions::launch_with_login(
+                exe,
+                state,
+                manager,
+                uid,
+                input.cols,
+                input.rows,
+                endpoint.as_deref(),
+                group
+                    .as_ref()
+                    .filter(|identity| !identity.group.as_os_str().is_empty())
+                    .map(|identity| identity.group.as_path()),
+                group.as_ref().map(|identity| identity.pid),
+                group
+                    .as_ref()
+                    .and_then(|identity| identity.parent.as_ref().map(|parent| parent.pid)),
+                group.as_ref().map(|identity| identity.process.as_ref()),
+            )
+            .await?
+        };
+        json.session_id = Some(uuid::Uuid::from_bytes(session.id));
+        Some(session)
+    };
+    Ok(Opened {
+        session,
+        json: serde_json::to_vec(&json)?,
+    })
 }
 
 // A failed or cancelled write drops the continuation without starting its effect.
@@ -504,15 +879,15 @@ async fn run_channel<const SESSION_ONLY: bool>(
         (None, None, None, None)
     };
     let running = std::env::current_exe()?;
-    // A sealed/deleted image has no install pathname for an indirect init
-    // launcher. Use the existing detached shim mode and direct kernel image.
+    // An anonymous shim must execute directly. Root retains first-use host
+    // backend detection; an inherited own-account context needs no probe.
     let anonymous = running
         .as_os_str()
         .as_encoded_bytes()
         .ends_with(b" (deleted)");
     // Detection is warmed in the background; only terminal.open awaits the
     // single result, so the authenticated greeting and census can proceed first.
-    let manager = std::sync::Arc::new(tokio::sync::OnceCell::<Manager>::new());
+    let manager = Arc::new(tokio::sync::OnceCell::<Manager>::new());
     let exe = if anonymous {
         manager
             .set(Manager::Detached)
@@ -526,6 +901,11 @@ async fn run_channel<const SESSION_ONLY: bool>(
             });
         }
         running
+    };
+    let mut login_manager_slot = if anonymous {
+        anonymous_login_manager(nix::unistd::Uid::effective().is_root())
+    } else {
+        Some(manager.clone())
     };
     let retirements = sessions::SessionEvents::new(&state)?;
     let mut registry = crate::lifecycle::Registry::default();
@@ -549,6 +929,11 @@ async fn run_channel<const SESSION_ONLY: bool>(
     let (control, control_rx) = mpsc::channel(8);
     #[cfg(test)]
     let control_observer = census_retry_tests::observer(&state);
+
+    // Accepted access revocations own their cleanup independently of a leg-B
+    // connection. Normal EOF drains them before an embedded reactor can exit;
+    // cancellation drops join handles without aborting remote-service tasks.
+    let mut revocations: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     let dispatch = async {
         let mut published_sessions = None;
         let mut census_pending =
@@ -573,7 +958,7 @@ async fn run_channel<const SESSION_ONLY: bool>(
         let mut opens: JoinSet<(
             u32,
             u32,
-            Result<Session, infraternal_plugin_api::admission::OpenRefusal>,
+            Result<Opened, infraternal_plugin_api::admission::OpenRefusal>,
         )> = JoinSet::new();
         loop {
             // One selected source emits at most two replies. The sole producer
@@ -655,17 +1040,15 @@ async fn run_channel<const SESSION_ONLY: bool>(
                     if SESSION_ONLY { return Err(sessions::invalid("session image cannot complete session launch")); }
                     let (stream, call_id, result) = result.ok_or_else(|| sessions::invalid("missing launch task"))?.map_err(io::Error::other)?;
                     match result {
-                        Ok(session) => {
-                            let json = serde_json::to_vec(&serde_json::json!({"session_id": uuid::Uuid::from_bytes(session.id)}))?;
-                            registry.insert(&session)?;
-                            // The new-ID census must enter the same FIFO before its Result.
-                            // A full queue cannot publish success without this fence, even
-                            // if the writer drains capacity between these two try_sends.
-                            if !publish_session_snapshot(&control, &registry, &mut published_sessions)? {
-                                return Err(io::Error::new(io::ErrorKind::WouldBlock, "census reply queue full"));
+                        Ok(opened) => {
+                            if let Some(session) = opened.session {
+                                registry.insert(&session)?;
+                                if !publish_session_snapshot(&control, &registry, &mut published_sessions)? {
+                                    return Err(io::Error::new(io::ErrorKind::WouldBlock, "census reply queue full"));
+                                }
+                                census_pending = false;
                             }
-                            census_pending = false;
-                            reply(&control, Message::Result(stream, call_id, true, json))?;
+                            reply(&control, Message::Result(stream, call_id, true, opened.json))?;
                         }
                         Err(reason) => reply(&control, Message::Result(stream, call_id, false, reason.json()?))?,
                     }
@@ -693,7 +1076,26 @@ async fn run_channel<const SESSION_ONLY: bool>(
                                 renewals.spawn_blocking(move || (call_id, renewal.action(&action, &input)));
                             }
                         }
-                        Frame::Call {call_id, action_id: "terminal.open", input_json} if !SESSION_ONLY && plugins.is_some() && (execution_uid.is_none() || stream == 0) => {
+                        Frame::Call {call_id, action_id: action @ ("terminal.login.revoke" | "terminal.login.restore"), input_json} if stream == 0 => {
+                            use infraternal_plugin_api::admission::OpenRefusal;
+                            let input = if input_json.len() <= infraternal_plugin_api::channel::MAX_CONTROL_JSON {
+                                serde_json::from_slice::<RevokeLogin>(input_json).ok()
+                            } else { None };
+                            if let Some(input) = input {
+                                // This action comes only from the trusted server control
+                                // stream. Revocation must not depend on open admission or
+                                // remaining resource quota, and keeps terminal dispatch live.
+                                revocations.retain(|task| !task.is_finished());
+                                let (finished, result) = tokio::sync::oneshot::channel();
+                                revocations.push(spawn_revocation(state.clone(), login_manager(&mut login_manager_slot), input.person, action == "terminal.login.restore", finished));
+                                opens.spawn(async move {
+                                    (stream, call_id, result.await.unwrap_or(Err(OpenRefusal::ResourceUnavailable)))
+                                });
+                            } else {
+                                reply(&control, Message::Result(stream, call_id, false, OpenRefusal::Invalid.json()?))?;
+                            }
+                        }
+                        Frame::Call {call_id, action_id: action @ ("terminal.open" | "terminal.login.prepare"), input_json} if !SESSION_ONLY && plugins.is_some() && (execution_uid.is_none() || stream == 0) => {
                             use infraternal_plugin_api::admission::OpenRefusal;
                             registry.refresh();
                             census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
@@ -701,21 +1103,17 @@ async fn run_channel<const SESSION_ONLY: bool>(
                             if let Some(input) = input && execution_uid.is_none_or(|uid| input.uid == uid)
                                 && (nix::unistd::Uid::effective().is_root() || input.uid == nix::unistd::Uid::effective().as_raw())
                                 && input.cols > 0 && input.rows > 0 && usize::from(input.cols) * usize::from(input.rows) <= 200_000 {
-                                let exe = exe.clone(); let state = state.clone();
-                                let manager = manager.clone();
-                                let plugins = plugins.as_ref().ok_or_else(|| sessions::invalid("missing node registry"))?.clone(); let context = registry.context();
-                                // Admission shares mutable plugin settings with actions, but
-                                // waiting for its worker never parks terminal dispatch.
-                                opens.spawn(async move {
-                                    let result = async {
-                                        plugins.admit("terminal.open", context).await?;
-                                        let manager = *manager.get_or_init(Manager::detect).await;
-                                        sessions::launch_with_readiness(&exe, &state, manager, input.uid, input.cols, input.rows, input.readiness).await.map_err(|error| match error.kind() {
-                                            io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData | io::ErrorKind::PermissionDenied => OpenRefusal::Invalid,
-                                            _ => OpenRefusal::ResourceUnavailable,
-                                        })
-                                    }.await;
-                                    (stream, call_id, result)
+                                // Waiting for plugin admission never parks terminal dispatch.
+                                let manager = if input.person.is_some() || action == "terminal.login.prepare" {
+                                    login_manager(&mut login_manager_slot)
+                                } else {
+                                    manager.clone()
+                                };
+                                spawn_open(&mut opens, stream, call_id, OpenTask {
+                                    exe: exe.clone(), state: state.clone(), manager, input,
+                                    prepare: action == "terminal.login.prepare",
+                                    plugins: plugins.clone().ok_or_else(|| sessions::invalid("missing node registry"))?,
+                                    context: registry.context(),
                                 });
                             } else {
                                 reply(&control, Message::Result(stream, call_id, false, OpenRefusal::Invalid.json()?))?;
@@ -806,7 +1204,11 @@ async fn run_channel<const SESSION_ONLY: bool>(
     } else {
         infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
     };
-    tokio::select! { result = dispatch => result, result = writer(socket, rx, Some(control_rx), true, renewal.is_some(), node_caps) => result }
+    let result = tokio::select! { result = dispatch => result, result = writer(socket, rx, Some(control_rx), true, renewal.is_some(), node_caps) => result };
+    for revocation in revocations {
+        let _ = revocation.await;
+    }
+    result
 }
 
 /// Run one authenticated, capability-bound native terminal using the common shim relay.

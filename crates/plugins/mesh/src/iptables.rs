@@ -397,15 +397,21 @@ fn render_with_aliases(
                     )
                 };
                 let service = port.map_or_else(String::new, |port| {
-                    format!(
-                        " -p {} --dport {}",
-                        if port.protocol == Protocol::Tcp {
-                            "tcp"
-                        } else {
-                            "udp"
-                        },
-                        port.number
-                    )
+                    let protocol = if port.protocol == Protocol::Tcp {
+                        "tcp"
+                    } else {
+                        "udp"
+                    };
+                    if direction == 0 {
+                        // The IFM_IN hook runs after DNAT; enforce the original
+                        // service rather than its translated listener [#221].
+                        format!(
+                            " -p {protocol} -m conntrack --ctorigdstport {}",
+                            port.number
+                        )
+                    } else {
+                        format!(" -p {protocol} --dport {}", port.number)
+                    }
                 });
                 let _ = writeln!(script, "-A {chain} {selector}{service} -j ACCEPT");
             }
@@ -578,6 +584,32 @@ mod tests {
         assert!(gaps.contains("10.254.0.2-10.254.0.3"));
         assert!(gaps.contains("10.254.0.5-10.254.0.6"));
         assert!(!gaps.contains("10.254.0.2-10.254.0.6"));
+    }
+    #[test]
+    fn incoming_port_rules_match_original_destination_and_keep_outbound_match() {
+        let mut config = config(&[2]);
+        let peer = config.peers.get_mut(&NodeId(2)).expect("peer");
+        peer.inbound = TrafficPolicy::Ports(std::collections::BTreeSet::from([
+            crate::policy::rules::Port {
+                protocol: Protocol::Tcp,
+                number: 22,
+            },
+        ]));
+        peer.outbound = TrafficPolicy::Ports(std::collections::BTreeSet::from([
+            crate::policy::rules::Port {
+                protocol: Protocol::Tcp,
+                number: 443,
+            },
+        ]));
+
+        let rules = render(&config, false, Ownership::default());
+        assert!(
+            rules.contains(
+                "-A IFM_IN -s 10.254.0.2 -p tcp -m conntrack --ctorigdstport 22 -j ACCEPT"
+            )
+        );
+        assert!(!rules.contains("-A IFM_IN -s 10.254.0.2 -p tcp --dport 22 -j ACCEPT"));
+        assert!(rules.contains("-A IFM_OUT -d 10.254.0.2 -p tcp --dport 443 -j ACCEPT"));
     }
     #[test]
     fn replacement_retains_established_rules_and_does_not_duplicate_hooks() {

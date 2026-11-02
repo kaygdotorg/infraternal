@@ -151,11 +151,27 @@ impl EnrollmentStore {
     /// Process exit also retires its transports; no detached polling worker exists.
     pub(crate) async fn commit_revocation(
         &self,
-        transaction: sqlx::Transaction<'static, sqlx::Sqlite>,
+        mut transaction: sqlx::Transaction<'static, sqlx::Sqlite>,
         host: Uuid,
     ) -> Result<(), EnrollmentError> {
         let store = self.clone();
         tokio::spawn(async move {
+            // Person selection comes from the already-authorized host row,
+            // never request JSON. Legacy non-UUID fixtures have no PAM context.
+            let owner: Option<String> = sqlx::query_scalar(
+                "SELECT owner_id FROM remote_hosts WHERE id=? AND revoked_at IS NOT NULL",
+            )
+            .bind(host.as_bytes().as_slice())
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if let Some(person) = owner.and_then(|owner| Uuid::parse_str(&owner).ok()) {
+                let confirmed = store.1.revoke_login(host, person).await;
+                if !confirmed {
+                    tracing::warn!(
+                        "host login cleanup unconfirmed; authority retirement continues"
+                    );
+                }
+            }
             // The authorized writer transaction is prepared. Cut and drain
             // frame writes before COMMIT; keeping the signal alive fences a new
             // registration until the durable tombstone is visible. Storage
