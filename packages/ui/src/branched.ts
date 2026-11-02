@@ -329,7 +329,11 @@ export function branchedMenu(
     return true;
   };
   if (opts.rename) {
-    onDoubleActivate(host, (event) => { const row = leafOf(event); if (row) beginRename(row); }, abort.signal, (event) => leafOf(event)?.dataset.id); // by id: the tree is rebuilt between the two taps, its buttons are new
+    // The key is the first press's row id: the tree is rebuilt, and re-sorted, between the two presses.
+    onDoubleActivate(host, (event, key) => {
+      const row = typeof key === "string" ? [...host.querySelectorAll<HTMLElement>("[data-renamable][data-id]")].find((n) => n.dataset.id === key) : leafOf(event);
+      if (row) beginRename(row);
+    }, abort.signal, (event) => leafOf(event)?.dataset.id); // by id: the tree is rebuilt between the two taps, its buttons are new
   }
 
   // Observe folds as well as the host so branch geometry stays aligned after a fold toggles.

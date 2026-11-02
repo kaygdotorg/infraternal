@@ -199,6 +199,8 @@ export function placeOverName(name: HTMLElement, container: HTMLElement, input: 
 /** A second tap this soon after the first, and this close to it, is a double tap (a mouse gets the system's double-click time). */
 const DOUBLE_TAP_MS = 320;
 const DOUBLE_CLICK_MS = 500;
+/** A second press this close to the first is on the same spot even if the list moved a different row under it. */
+const SAME_SPOT = 6;
 const DOUBLE_TAP_SLOP = 24;
 
 /**
@@ -211,9 +213,9 @@ const DOUBLE_TAP_SLOP = 24;
 /** The last tap per element, kept outside the listeners: a list that is rebuilt after the first tap re-attaches them. */
 const lastTaps = new WeakMap<HTMLElement, { x: number; y: number; at: number; key: unknown } | undefined>();
 
-export function onDoubleActivate(target: HTMLElement, handler: (event: Event) => void, signal: AbortSignal, keyOf: (event: Event) => unknown = () => target): void {
+export function onDoubleActivate(target: HTMLElement, handler: (event: Event, key: unknown) => void, signal: AbortSignal, keyOf: (event: Event) => unknown = () => target): void {
   target.style.touchAction ||= "manipulation";
-  target.addEventListener("dblclick", (event) => { if (keyOf(event) === undefined) return; event.preventDefault(); handler(event); }, { signal });
+  target.addEventListener("dblclick", (event) => { if (keyOf(event) === undefined) return; event.preventDefault(); handler(event, keyOf(event)); }, { signal });
   let down: { x: number; y: number } | undefined;
   target.addEventListener("pointerdown", (event) => { down = event.button === 0 ? { x: event.clientX, y: event.clientY } : undefined; }, { signal });
   target.addEventListener("pointerup", (event) => {
@@ -223,9 +225,12 @@ export function onDoubleActivate(target: HTMLElement, handler: (event: Event) =>
     if (moved) { lastTaps.delete(target); return; }
     const now = event.timeStamp, key = keyOf(event), last = lastTaps.get(target);
     if (key === undefined) { lastTaps.delete(target); return; }
-    if (last && last.key === key && now - last.at <= (event.pointerType === "mouse" ? DOUBLE_CLICK_MS : DOUBLE_TAP_MS) && Math.hypot(event.clientX - last.x, event.clientY - last.y) <= DOUBLE_TAP_SLOP) {
+    const apart = last ? Math.hypot(event.clientX - last.x, event.clientY - last.y) : Infinity;
+    // The same thing twice, or (a list that re-sorted under a pointer that did not move: opening a session moves it to the top)
+    // another thing at the same spot: the first one is the one meant, and `handler` gets its key.
+    if (last && now - last.at <= (event.pointerType === "mouse" ? DOUBLE_CLICK_MS : DOUBLE_TAP_MS) && (last.key === key ? apart <= DOUBLE_TAP_SLOP : apart <= SAME_SPOT)) {
       lastTaps.delete(target);
-      handler(event);
+      handler(event, last.key);
     } else lastTaps.set(target, { x: event.clientX, y: event.clientY, at: now, key });
   }, { signal });
   target.addEventListener("pointercancel", () => { down = undefined; }, { signal });
