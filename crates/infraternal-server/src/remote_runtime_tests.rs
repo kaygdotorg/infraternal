@@ -479,7 +479,7 @@ pub(crate) async fn native_link_pair() -> (
     };
     Transmit::default().send(&control, 0, &hello).await.unwrap();
     let link = Arc::new(RemoteLink::quic(admitted).await.unwrap());
-    link.hello(&hello).await.unwrap();
+    link.hello(&hello).unwrap();
     let mut wire = Vec::new();
     infraternal_protocol::encode_muxed_frame_into(0, &hello, &mut wire).unwrap();
     link.write(0, &hello, &wire).await.unwrap();
@@ -537,7 +537,7 @@ async fn retired_native_writer_frames_cannot_close_or_ack_its_replacement() {
     });
     let connection = listener.accept().await.unwrap().await.unwrap();
     let link = RemoteLink::quic(connection).await.unwrap();
-    link.hello(&adapter_hello()).await.unwrap();
+    link.hello(&adapter_hello()).unwrap();
     let mut muxed = Vec::new();
     let greeting = adapter_hello();
     infraternal_protocol::encode_muxed_frame_into(0, &greeting, &mut muxed).unwrap();

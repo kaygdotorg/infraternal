@@ -4,6 +4,26 @@
 The bounded host-facts request decoder and OS release parser, shim framing,
 and wire codec have fuzz targets in this one harness crate.
 
+## Desktop source action JSON
+
+`desktop_source_json` calls the same pure typed decoder as `SourceBridge.execute`,
+before any authority, helper process, runtime directory or native capture work.
+The selector byte chooses a declared source action. Accepted requests must obey
+the frozen 8 KiB action limit, survive canonical JSON encoding, and reject added
+foreign fields. Seeds cover all action shapes, duplicate fields, positional
+arrays, and both sides of the size boundary. Deterministic tests additionally
+check invalid source UUIDs, target identities and geometry.
+
+```sh
+python3 fuzz/seed.py --desktop-source-only target/desktop-source-corpus
+CARGO_PROFILE_RELEASE_LTO=false cargo +nightly fuzz run desktop_source_json \
+  target/desktop-source-corpus -- \
+  -max_total_time=60 -max_len=16384 -rss_limit_mb=2048
+```
+
+This target does not substitute for the real mTLS QUIC Source integration tests
+or macOS capture/input/restoration measurements.
+
 ## Host facts
 
 The host-facts target exercises strict read/configure JSON decoding, the

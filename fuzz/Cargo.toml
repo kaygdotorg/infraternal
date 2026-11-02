@@ -13,6 +13,7 @@ cargo-fuzz = true
 infraternal-plugin-canvas = { version = "0.1.0", path = "../crates/plugins/canvas" }
 infraternal-plugin-remote = { version = "0.1.0", path = "../crates/plugins/remote", default-features = false, features = ["agent", "test-support"] }
 infraternal-plugin-release = { version = "0.1.0", path = "../crates/plugins/release", default-features = false }
+infraternal-plugin-desktop = { version = "0.1.0", path = "../crates/plugins/desktop", features = ["source", "server"] }
 serde_json.workspace = true
 infraternal-plugin-ssh = { version = "0.1.0", path = "../crates/plugins/ssh", features = ["session-bridge"] }
 infraternal-agent = { version = "0.1.0", path = "../crates/infraternal-agent", default-features = false, features = ["remote"] }
@@ -244,8 +245,36 @@ doc = false
 bench = false
 
 [[bin]]
+name = "desktop_helper_decode"
+path = "fuzz_targets/desktop_helper_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "shim_spawn_args"
 path = "fuzz_targets/shim_spawn_args.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "desktop_wire_decode"
+path = "fuzz_targets/desktop_wire_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "desktop_source_json"
+path = "fuzz_targets/desktop_source_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "desktop_parameter_sets"
+path = "fuzz_targets/desktop_parameter_sets.rs"
 test = false
 doc = false
 bench = false

@@ -1,0 +1,55 @@
+/**
+ * App windows and screens on the canvas (appwin/*.ts; D200, D207, D208). Loaded with the feature's code, not with the
+ * page. Only layout lives here: the card, the pill, the strip, the badge, the popover, the rows, the spinner and the
+ * tile are the product's own (packages/ui, sessions.css, clusters.css). Type uses the shared role tokens. Nothing keeps
+ * a transform or `will-change` at rest, so text stays crisp (TASTE section 5); the picture is only ever shown or dimmed
+ * with opacity.
+ */
+
+/* ---- inside the window ------------------------------------------------------------------------------------------ */
+.aw { position: absolute; inset: 0; }
+/* The stage is the box the machine's window follows (D208 A2). The picture sits letterboxed in it only while the
+   machine is catching up with a resize, or when an app refuses a size. */
+.aw-stage { position: absolute; inset: 0; display: grid; outline: none; cursor: default; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.aw-stage:focus, .aw-stage:focus-visible { outline: none; }
+.aw-surface { grid-area: 1 / 1; width: 100%; height: 100%; object-fit: contain; transition: opacity 200ms var(--ease-out, ease-out); }
+/* Nothing true to show: the picture goes. Only a memory of one (paused, reconnecting): it stays, dimmed. */
+.aw-stage[data-picture="none"] .aw-surface { opacity: 0; }
+.aw-stage[data-picture="dim"] .aw-surface { opacity: 0.45; }
+
+/* The state card is the "No access" card's twin: same position, same type, same rhythm (message, 24 px, action). */
+.aw-card { z-index: 1; transition: opacity 200ms var(--ease-out, ease-out); }
+.aw-card[data-shown="false"] { opacity: 0; pointer-events: none; }
+.aw-card .cl-noaccess-hint { max-width: 38ch; }
+.aw-mark { display: grid; place-items: center; width: 22px; height: 22px; margin-bottom: 4px; color: var(--fg-3); }
+.aw-mark .ui-spinner { width: 18px; height: 18px; }
+.aw-action { margin-top: 18px; }
+
+/* The strip and the badge sit over the picture; neither blocks the machine's own pixels outside its small box. */
+.aw > .cl-sx-strip { z-index: 2; }
+/* "Controlled from infraternal": the badge mirrors the machine's own menu-bar indicator. Quiet, and a button only to let go. */
+.aw-control { z-index: 2; animation: aw-in 180ms var(--ease-out, ease-out); transition: opacity 160ms ease, transform 140ms var(--ease-out, ease-out), background-color 140ms ease; }
+.aw-control[data-leaving] { opacity: 0; pointer-events: none; }
+.aw-control[data-kind="controlled"] { color: var(--fg); }
+.aw-control[data-kind="paused"], .aw-control[data-kind="view"] { color: var(--fg-2); cursor: default; }
+.aw-control:disabled { opacity: 1; }
+@keyframes aw-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .aw-control { animation: none; } .aw-surface, .aw-card { transition: opacity 120ms linear; } }
+
+/* ---- the picker (the session manager's card, with a field) ------------------------------------------------------ */
+.aw-head { padding-bottom: 8px; }
+.aw-head .cl-sx-logo { width: 18px; height: 18px; color: var(--fg-3); }
+.aw-head .cl-sx-logo svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.aw-search { flex: 1; min-width: 0; height: 28px; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--fg); font: var(--ui-type-body); letter-spacing: var(--ui-tracking); outline: none; caret-color: var(--fg); }
+.aw-search::placeholder { color: var(--fg-3); }
+@media (pointer: coarse) { .aw-head .cl-sx-logo { width: 22px; height: 22px; } .aw-search { height: 36px; } }
+.aw-list { padding: 8px; }
+.aw-eyebrow { display: flex; align-items: center; gap: 6px; }
+.aw-eyebrow .ui-host-mark { width: 12px; height: 12px; flex: none; }
+.aw-row { cursor: default; }
+.aw-row[data-kbd] { background: var(--hover); }
+.aw-rowmark { display: grid; place-items: center; width: 18px; height: 18px; color: var(--fg-2); font-size: 12px; }
+.aw-rowmark svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.aw-note { display: flex; align-items: flex-start; gap: 8px; margin: 6px 8px 2px; }
+.aw-note.cl-sx-state { justify-content: center; padding: 14px 8px; }
+.aw-perm svg { flex: none; width: 14px; height: 14px; margin-top: 2px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }

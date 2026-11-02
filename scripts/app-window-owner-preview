@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Role: open an isolated desktop-enabled owner test using the hash-pinned signed companion and normal authenticated canvas (#146).
+set -euo pipefail
+export PATH="${HOME}/.nix-profile/bin:$PATH"
+if [[ $# -lt 1 || $# -gt 2 || "$1" != /* || ! -x "$1" ]]; then
+    printf 'Usage: scripts/app-window-owner-preview /absolute/path/to/desktop-enabled-infraternal [--demo]\n' >&2
+    exit 2
+fi
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+export APP_WINDOW_BINARY="$1"
+export APP_WINDOW_JOB=app-windows-latency-r3b
+export APP_WINDOW_BENCH_DIR="${HOME}/.cache/codex-scratch/app-windows-latency-r3b"
+export APP_WINDOW_OWNER_PREVIEW=1 APP_WINDOW_OWNER_PREVIEW_SECONDS=900 APP_WINDOW_DEMO_ONLY=0 APP_WINDOW_RESOURCES_ONLY=1
+case "${2:-}" in
+    "") ;;
+    --demo) export APP_WINDOW_OWNER_PREVIEW=0 APP_WINDOW_DEMO_ONLY=1 APP_WINDOW_RESOURCES_ONLY=0 ;;
+    *) printf 'Expected --demo or no second argument\n' >&2; exit 2 ;;
+esac
+# Owner trials use the retained configuration even after an experiment in this shell.
+export APP_WINDOW_PIPELINE=default APP_WINDOW_CODEC=h264 APP_WINDOW_HARDWARE_HINT=''
+export APP_WINDOW_DESYNCHRONIZED=0 APP_WINDOW_SOAK=0 APP_WINDOW_DIAGNOSTIC_ONLY=0
+export APP_WINDOW_PIPELINE_DIAGNOSTICS=0 TRACER_TEST_PORT=4347
+unset APP_WINDOW_WORKER INFRATERNAL_DESKTOP_MEASURE INFRATERNAL_DESKTOP_SURFACE INFRATERNAL_DESKTOP_OWNED
+export APP_WINDOW_RUN_LABEL="owner-$(date +%Y%m%d-%H%M%S)"
+# The retained signed companion already has permission; no installed app changes.
+export APP_WINDOW_NATIVE=/Users/kayg/infraternal-bench/app-windows-latency/native-diagnostic/r3-stages.app/Contents/MacOS/InfraternalCaptureHelper
+export APP_WINDOW_NATIVE_HASH=d528101fbbe8f94291de75d0c8679af9451572a4d44cf0483c82dbec4dd28bf3
+cd -- "$repo_root/apps/tracer"
+exec "${HOME}/.local/state/codex-jobs/infraternal/orchestrator/build-slot" bun test/appwin/measure.ts

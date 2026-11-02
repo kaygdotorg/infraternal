@@ -68,6 +68,10 @@
    standard shadow reached 20 px below the card, was cut flat at 14 px and showed as a square backing at the corners. */
 .cl-col > .ui-window, .cl-group > .cl-col > .ui-window { box-shadow: var(--shadow-column, var(--shadow)); }
 .cl-col > .ui-window[style*="height"] { flex: none; }
+/* A streamed window settling into its remote window's shape (windows/frame.ts shapeWindow): the frame eases, never jumps. */
+.cl-col.is-shaping { transition: width 180ms var(--ease-out, ease-out); }
+.cl-col > .ui-window.is-shaping { transition: height 180ms var(--ease-out, ease-out); }
+@media (prefers-reduced-motion: reduce) { .cl-col.is-shaping, .cl-col > .ui-window.is-shaping { transition: none; } }
 /* A group (D212): columns that a spanning window links share one grid. The group is the scroller, sized and padded as a
    column is, so its tracks line up with plain columns; its columns have no box, so their windows are grid items. */
 .cl-group {

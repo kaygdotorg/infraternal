@@ -1,6 +1,6 @@
 /**
  * Direct resizing for a window card (D160): the one gesture engine every window on the canvas
- * shares. It owns the handles and the pointer maths; the consumer owns the geometry.
+ * shares. It owns the handles and pointer maths; the consumer owns the geometry.
  *
  * - Desktop (mouse, pen): eight invisible hit strips along the edges and corners of the card
  *   carry the platform's resize cursors. Dragging any of them resizes the window.

@@ -1,0 +1,50 @@
+# Native desktop plugin; the per-user helper is absent unless explicitly selected [D198,D203].
+[package]
+name = "infraternal-plugin-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+autobins = false
+
+[features]
+default = []
+# Native source admission is opt-in and does not pull in the server runtime.
+source = ["infraternal-protocol/desktop", "infraternal-plugin-api/native-streams", "desktop", "dep:infraternal-protocol", "dep:bytes", "dep:uuid"]
+# Reuse the authenticated transport engines already selected by the owner [D198,D232].
+server = ["infraternal-protocol/desktop", "infraternal-plugin-api/native-streams", "infraternal-plugin-api/socket-host", "dep:infraternal-plugin-api", "dep:infraternal-protocol", "dep:tokio", "dep:quinn", "dep:bytes", "dep:uuid"]
+# The standalone helper binary uses Tokio's default multi-thread runtime; without
+# naming it here the crate only builds when another workspace member unifies it.
+desktop = ["dep:infraternal-plugin-api", "dep:nix", "dep:tokio", "tokio/rt-multi-thread", "dep:screencapturekit"]
+
+[dependencies]
+uuid = { workspace = true, optional = true }
+infraternal-protocol = { workspace = true, optional = true }
+quinn = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+infraternal-plugin-api = { workspace = true, optional = true }
+nix = { workspace = true, optional = true, features = ["event"] }
+tokio = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = { version = "=11.0.0", default-features = false, features = ["macos_14_2"], optional = true }
+
+[[bin]]
+name = "infraternal-desktop-helper"
+path = "src/bin/helper.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "infraternal-desktop-client"
+path = "src/bin/client.rs"
+required-features = ["desktop"]
+
+[dev-dependencies]
+infraternal-agent = { path = "../../infraternal-agent", version = "0.1.0", default-features = false, features = ["remote", "native-streams"] }
+quinn.workspace = true
+# Real mutual-TLS fixtures generate identities in memory; no test key is stored.
+infraternal-plugin-remote = { path = "../remote", version = "0.1.0", default-features = false, features = ["test-support"] }
+
+[lints]
+workspace = true

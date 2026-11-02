@@ -80,6 +80,23 @@ export function entityChip(ref: EntityRef): HTMLElement {
   return chip;
 }
 
+/**
+ * A tile for a named thing that has no picture of its own on the wire (an app on another machine): its first letter on
+ * the colour its name always gets (`entity-palette.ts`), so the same app looks the same in the picker, the palette and its
+ * window. Square, text-height, never animated, legible by the palette's contrast guarantee.
+ */
+export function entityTile(name: string): HTMLElement {
+  const tile = document.createElement("span");
+  tile.className = "ui-entity ui-entity-tile";
+  tile.dataset.kind = "tile";
+  tile.setAttribute("aria-hidden", "true");
+  tile.style.background = `var(--ui-ent-${entityColorIndex(name)})`;
+  tile.style.color = "var(--ui-ent-text)";
+  const letter = /[\p{L}\p{N}]/u.exec(name)?.[0] ?? "?";
+  tile.textContent = letter.toUpperCase();
+  return tile;
+}
+
 const PLACEHOLDER = /\{([a-z][\w-]*)\}/gi;
 
 /** The sentence with its placeholders written out, as plain text (labels, titles, tests). */

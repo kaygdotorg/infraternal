@@ -2,7 +2,10 @@
 use super::*;
 use std::{
     os::unix::fs::PermissionsExt,
-    sync::{Arc, Mutex, atomic::AtomicUsize},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 use tokio::sync::{Notify, Semaphore, watch};
 

@@ -66,8 +66,8 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
     const box = anchor.getBoundingClientRect();
     const host = anchor.closest(".ui-window");
     const screen = stage.getBoundingClientRect();
-    // An anchor outside any window (the sidebar's footer) is bounded by the screen it floats over.
-    const win = host?.getBoundingClientRect() ?? (above ? screen : box);
+    // An anchor outside any window (the sidebar's footer, the "+" beside the top pill) is bounded by the screen it floats over.
+    const win = host?.getBoundingClientRect() ?? screen;
     const frame = parseFloat(getComputedStyle(host ?? anchor).borderLeftWidth) || 0;
     const inset = INSET + frame;
     const room = Math.min((options.maxWidth ?? 400) * currentUiScale(), win.width - inset * 2);

@@ -48,7 +48,17 @@ fn trace_attempt<T>(phase: &'static str, result: io::Result<T>) -> io::Result<T>
 /// # Errors
 /// Refuses local uid mismatch or invalid credentials before contacting the server.
 pub async fn run(identity: &RemoteIdentity, state: Option<PathBuf>) -> io::Result<()> {
-    run_inner(identity, state, None, None).await
+    run_inner(
+        identity,
+        state,
+        None,
+        None,
+        #[cfg(any(test, feature = "native-streams"))]
+        None,
+        #[cfg(any(test, feature = "native-streams"))]
+        None,
+    )
+    .await
 }
 
 /// Keep atomic publication and reconnect identity in sync throughout live renewal.
@@ -69,18 +79,138 @@ pub async fn run_with_installation(
     identity: &RemoteIdentity,
     state: Option<PathBuf>,
     publisher: std::sync::Arc<dyn crate::remote_renewal::CertificatePublisher>,
-    installation: Option<&infraternal_plugin_remote::uninstall::Context>,
+    installation: Option<&crate::plugins::Installation>,
 ) -> io::Result<()> {
     let renewal =
         crate::remote_renewal::RenewalIdentity::new(&identity.identity, &identity.roots, publisher);
-    run_inner(identity, state, Some(&renewal), installation).await
+    run_inner(
+        identity,
+        state,
+        Some(&renewal),
+        installation,
+        #[cfg(any(test, feature = "native-streams"))]
+        None,
+        #[cfg(any(test, feature = "native-streams"))]
+        None,
+    )
+    .await
+}
+
+/// Run with trusted compiled node providers, retaining prepared identities across reconnect.
+/// # Errors
+/// Refuses enrolled UID mismatch and invalid registry or transport configuration.
+#[cfg(any(test, feature = "native-streams"))]
+pub async fn run_with_registry(
+    identity: &RemoteIdentity,
+    state: Option<PathBuf>,
+    registry: crate::plugins::SharedRegistry,
+) -> io::Result<()> {
+    run_inner(
+        identity,
+        state,
+        None,
+        None,
+        Some(crate::plugin_control::Registry::from_shared(registry)),
+        None,
+    )
+    .await
+}
+
+/// Observe discarded connection failures using fixed stage names and error kinds
+/// only. The observer receives no transport payload or credential material and
+/// must return promptly; retries and transport selection remain unchanged.
+/// # Errors
+/// Refuses the same identity, registry and transport configuration as `run_with_registry`.
+#[cfg(any(test, feature = "native-streams"))]
+pub async fn run_with_registry_observed(
+    identity: &RemoteIdentity,
+    state: Option<PathBuf>,
+    registry: crate::plugins::SharedRegistry,
+    observer: impl Fn(&'static str, io::ErrorKind) + Send + Sync,
+) -> io::Result<()> {
+    run_inner(
+        identity,
+        state,
+        None,
+        None,
+        Some(crate::plugin_control::Registry::from_shared(registry)),
+        Some(&observer),
+    )
+    .await
+}
+
+#[cfg(any(test, feature = "native-streams"))]
+type FailureObserver<'a> = dyn Fn(&'static str, io::ErrorKind) + Send + Sync + 'a;
+
+// Inspection stays inside rare failure branches. Ordinary supervisors do not
+// allocate a callback, format errors, or invoke diagnostics on control traffic.
+#[cfg(any(test, feature = "native-streams"))]
+fn observe_failure(observer: Option<&FailureObserver<'_>>, stage: &'static str, error: &io::Error) {
+    if let Some(observer) = observer {
+        observer(stage, error.kind());
+    }
+}
+
+async fn ensure_service(
+    service: &Mutex<Option<crate::plugin_control::Service>>,
+    state: &std::path::Path,
+    installation: Option<&crate::plugins::Installation>,
+    #[cfg(target_os = "linux")] lifetime: &Mutex<Option<std::sync::Arc<std::fs::File>>>,
+    #[cfg(any(test, feature = "native-streams"))] supplied: Option<crate::plugin_control::Registry>,
+) -> io::Result<crate::plugin_control::Registry> {
+    let mut local = service.lock().await;
+    if local.as_ref().is_some_and(|local| local.registry.ended()) {
+        local.take();
+    }
+    if local.is_none() {
+        #[cfg(any(test, feature = "native-streams"))]
+        let supplied_service = match supplied {
+            Some(registry) => {
+                Some(crate::plugin_control::Service::with_registry(state, registry).await?)
+            }
+            None => None,
+        };
+        #[cfg(not(any(test, feature = "native-streams")))]
+        let supplied_service = None;
+        *local = Some(if let Some(service) = supplied_service {
+            service
+        } else {
+            #[cfg(target_os = "linux")]
+            let service = trace_attempt(
+                "plugin-service-start",
+                crate::plugin_control::Service::start_retained(
+                    state,
+                    installation,
+                    &mut *lifetime.lock().await,
+                )
+                .await,
+            )?;
+            #[cfg(not(target_os = "linux"))]
+            let service = trace_attempt(
+                "plugin-service-start",
+                crate::plugin_control::Service::start(
+                    state,
+                    crate::plugins::ExecutionMode::Remote,
+                    installation,
+                )
+                .await,
+            )?;
+            service
+        });
+    }
+    local
+        .as_ref()
+        .map(|local| local.registry.clone())
+        .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))
 }
 
 async fn run_inner(
     identity: &RemoteIdentity,
     state: Option<PathBuf>,
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
-    installation: Option<&infraternal_plugin_remote::uninstall::Context>,
+    installation: Option<&crate::plugins::Installation>,
+    #[cfg(any(test, feature = "native-streams"))] supplied: Option<crate::plugin_control::Registry>,
+    #[cfg(any(test, feature = "native-streams"))] observer: Option<&FailureObserver<'_>>,
 ) -> io::Result<()> {
     if identity.execution_uid != nix::unistd::Uid::effective().as_raw() {
         return Err(io::ErrorKind::PermissionDenied.into());
@@ -91,11 +221,15 @@ async fn run_inner(
     let service = Mutex::new(None::<crate::plugin_control::Service>);
     // Keep lifetime ownership even when a failed worker is being replaced or
     // credentials temporarily prevent another connection attempt.
+    #[cfg(target_os = "linux")]
     let lifetime = Mutex::new(None::<std::sync::Arc<std::fs::File>>);
     supervisor::run(|connected| {
         let service = &service;
+        #[cfg(target_os = "linux")]
         let lifetime = &lifetime;
         let state = state.clone();
+        #[cfg(any(test, feature = "native-streams"))]
+        let supplied = supplied.clone();
         async move {
             // Invalid enrollment creates no local state or plugin work. A clock or
             // credential failure still leaves the retry owner alive for recovery.
@@ -111,28 +245,37 @@ async fn run_inner(
                     crate::remote_renewal::require_current(&identity.identity),
                 )?;
             }
+            #[cfg(target_os = "linux")]
             let state = trace_attempt("state-path", crate::sessions::state_path(state.clone()))?;
-            let mut local = service.lock().await;
-            if local.as_ref().is_some_and(|local| local.registry.ended()) {
-                local.take();
-            }
-            if local.is_none() {
-                *local = Some(trace_attempt(
-                    "plugin-service-start",
-                    crate::plugin_control::Service::start_retained(
-                        &state,
-                        installation,
-                        &mut *lifetime.lock().await,
+            #[cfg(not(target_os = "linux"))]
+            let state = trace_attempt("state-path", crate::control::runtime_state(state))?;
+            let plugins = ensure_service(
+                service,
+                &state,
+                installation,
+                #[cfg(target_os = "linux")]
+                lifetime,
+                #[cfg(any(test, feature = "native-streams"))]
+                supplied,
+            )
+            .await?;
+            #[cfg(any(test, feature = "native-streams"))]
+            let _availability = Availability(plugins.clone());
+            #[cfg(any(test, feature = "native-streams"))]
+            if let Some(observer) = observer {
+                return trace_attempt(
+                    "server-path",
+                    server_path::run_observed(
+                        identity,
+                        state,
+                        renewal,
+                        plugins,
+                        connected,
+                        Some(observer),
                     )
                     .await,
-                )?);
+                );
             }
-            let plugins = local
-                .as_ref()
-                .ok_or(io::ErrorKind::NotConnected)?
-                .registry
-                .clone();
-            drop(local);
             trace_attempt(
                 "server-path",
                 server_path::run(identity, state, renewal, plugins, connected).await,
@@ -292,7 +435,7 @@ struct ProvedControl {
     receive: Receive,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn quic_session_on(
     connection: quinn::Connection,
     identity: &RemoteIdentity,
@@ -302,6 +445,8 @@ async fn quic_session_on(
     proof: Option<ProvedControl>,
     publish: impl FnOnce(u64),
 ) -> io::Result<()> {
+    #[cfg(any(test, feature = "native-streams"))]
+    let providers = native_routes(&plugins).await?;
     let result = async {
         let ProvedControl {
             control,
@@ -318,7 +463,14 @@ async fn quic_session_on(
         // Opening a QUIC stream emits no packet until there is data. Send the
         // greeting once, then let common dispatch consume the server's greeting.
         let mut tx = crate::transport::Transmit::default();
-        let greeting = client_greeting(renewal.is_some());
+        let mut greeting = client_greeting(renewal.is_some());
+        #[cfg(not(any(test, feature = "native-streams")))]
+        let native_caps = 0;
+        #[cfg(any(test, feature = "native-streams"))]
+        let native_caps = providers.capabilities();
+        if let infraternal_protocol::Frame::Hello { caps, .. } = &mut greeting {
+            *caps |= native_caps;
+        }
         tx.send(&control, 0, &greeting).await?;
         let mut sent_greeting = Vec::new();
         encode_frame_into(&greeting, &mut sent_greeting).map_err(io::Error::other)?;
@@ -351,6 +503,12 @@ async fn quic_session_on(
             &binding,
             state,
             caps & infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS != 0,
+            #[cfg(any(test, feature = "native-streams"))]
+            providers.clone(),
+            #[cfg(any(test, feature = "native-streams"))]
+            caps,
+            #[cfg(any(test, feature = "native-streams"))]
+            infraternal_plugin_remote::wire_datagrams::NativeDatagrams::new(connection.clone()),
         );
         tokio::select! {
             result = dispatch => result,
@@ -378,3 +536,25 @@ mod supervisor;
 
 #[path = "remote_primed_native.rs"]
 mod primed_native;
+
+#[cfg(any(test, feature = "native-streams"))]
+async fn native_routes(
+    registry: &crate::plugin_control::Registry,
+) -> io::Result<std::sync::Arc<crate::native_dispatch::Routes>> {
+    let entries = registry
+        .wire_providers()
+        .await
+        .map_err(|_| io::Error::other("Native providers are invalid."))?;
+    Ok(std::sync::Arc::new(crate::native_dispatch::Routes::new(
+        entries,
+    )?))
+}
+
+#[cfg(any(test, feature = "native-streams"))]
+struct Availability(crate::plugin_control::Registry);
+#[cfg(any(test, feature = "native-streams"))]
+impl Drop for Availability {
+    fn drop(&mut self) {
+        self.0.capabilities(0);
+    }
+}

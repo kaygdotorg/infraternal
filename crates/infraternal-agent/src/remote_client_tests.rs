@@ -694,6 +694,131 @@ async fn server_path_capability_is_advertised_on_native_and_fallback_transports(
     }
 }
 
+#[cfg(target_os = "linux")]
+struct CapabilityProbe(std::sync::Arc<std::sync::atomic::AtomicU64>);
+#[cfg(target_os = "linux")]
+static PROBE_DESCRIPTOR: infraternal_plugin_api::PluginDescriptor =
+    infraternal_plugin_api::PluginDescriptor {
+        id: "example",
+        api: infraternal_plugin_api::API_VERSION,
+        actions: &[],
+        topics: &[],
+        settings: None,
+        events: &[],
+        defaults: &[],
+        dependencies: &[],
+        can_enable_components: &[],
+        roles: &[infraternal_plugin_api::RoleDef {
+            id: "node",
+            requires: &[],
+            default_enabled: true,
+        }],
+        streams: &[infraternal_plugin_api::StreamDef {
+            id: "example.native",
+            schema: infraternal_plugin_api::SchemaRef("example.wire"),
+            resumable: false,
+            wire: Some(crate::remote_native_tests::PLUGIN_WIRE),
+        }],
+        max_frame_len: 8192,
+        unavailable: b"{}",
+        unavailable_event: b"{}",
+    };
+#[cfg(target_os = "linux")]
+impl infraternal_plugin_api::AgentPlugin for CapabilityProbe {
+    fn descriptor(&self) -> &'static infraternal_plugin_api::PluginDescriptor {
+        &PROBE_DESCRIPTOR
+    }
+    fn call(&mut self, _: &str, _: &[u8]) -> Result<Vec<u8>, infraternal_plugin_api::PluginError> {
+        Err(infraternal_plugin_api::PluginError::UnknownAction)
+    }
+    fn wire_provider(
+        &self,
+    ) -> Option<std::sync::Arc<dyn infraternal_plugin_api::streams::WireProvider>> {
+        Some(std::sync::Arc::new(Self(self.0.clone())))
+    }
+    fn transport_capabilities(&mut self, caps: u64) {
+        self.0.store(caps, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+#[cfg(target_os = "linux")]
+impl infraternal_plugin_api::streams::WireProvider for CapabilityProbe {
+    fn serve(
+        &self,
+        _: &'static infraternal_plugin_api::streams::WireStreamDef,
+        _: bytes::Bytes,
+        _: std::sync::Arc<dyn infraternal_plugin_api::streams::WireLane>,
+    ) -> infraternal_plugin_api::Operation<'static, Result<(), ()>> {
+        Box::pin(async { Err(()) })
+    }
+}
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn cancelled_connection_withdraws_retained_registry_capabilities() {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    };
+    let ca = root();
+    let server = quinn::Endpoint::server(
+        remote_quic::server_config(&leaf(&ca, true), std::slice::from_ref(&ca.certificate))
+            .unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let identity = supervisor_identity(&ca, &leaf(&ca, false), server.local_addr().unwrap());
+    let caps = Arc::new(AtomicU64::new(0));
+    let mut registry = infraternal_plugin_api::PluginRegistry::default();
+    registry
+        .register(Box::new(CapabilityProbe(caps.clone())))
+        .unwrap();
+    let registry = Arc::new(Mutex::new(registry));
+    let runner_registry = registry.clone();
+    let state = StateDirectory::new();
+    let state_path = state.0.clone();
+    let runner = tokio::spawn(async move {
+        run_with_registry(&identity, Some(state_path), runner_registry).await
+    });
+    let connection = tokio::time::timeout(Duration::from_secs(5), async {
+        server.accept().await.unwrap().await.unwrap()
+    })
+    .await
+    .unwrap();
+    let (send, receive) = connection.accept_bi().await.unwrap();
+    let channel = NativeChannel::control(send, receive).unwrap();
+    let mut receive = Receive::default();
+    assert!(
+        matches!(receive.next(&channel).await.unwrap().frame,Frame::Hello{caps,..} if caps&infraternal_protocol::desktop::NATIVE_CAPABILITY!=0)
+    );
+    crate::transport::Transmit::default()
+        .send(
+            &channel,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: infraternal_protocol::desktop::NATIVE_CAPABILITY | 2,
+                client_info: "test",
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while caps.load(Ordering::SeqCst) != infraternal_protocol::desktop::NATIVE_CAPABILITY {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    runner.abort();
+    let _ = runner.await;
+    assert_eq!(
+        caps.load(Ordering::SeqCst),
+        0,
+        "cancelled native connection retained provider availability"
+    );
+    drop(registry);
+    server.close(0u32.into(), b"");
+}
+
 /// Reserve both protocols before either supervisor path can start.
 async fn bind_capability_test_transports(
     config: quinn::ServerConfig,

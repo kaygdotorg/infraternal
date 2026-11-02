@@ -7,9 +7,14 @@ license.workspace = true
 
 [features]
 default = []
+# Owned plugin operations and providers are opt-in above the terminal channel API.
+native-streams = ["native-wire", "global-work"]
+# Plugins retaining work beyond a socket opt in to synchronous withdrawal and joining.
+global-work = []
+native-wire = ["dep:bytes", "dep:tokio"]
+socket-host = ["native-wire", "dep:sqlx"]
 # Also compile commands for components that are not built yet (hidden, D299 C5).
 placeholders = []
-socket-host = ["dep:bytes", "dep:sqlx", "dep:tokio"]
 
 [dependencies]
 bytes = { workspace = true, optional = true }
@@ -20,3 +25,7 @@ tokio = { workspace = true, optional = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+bytes.workspace = true
+tokio.workspace = true

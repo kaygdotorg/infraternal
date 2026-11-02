@@ -5,6 +5,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# The negotiated app-window extension is absent from terminal-only production images.
+desktop = []
+
+[[example]]
+name = "stream_oracle"
+required-features = ["desktop"]
+
 [dev-dependencies]
 criterion.workspace = true
 serde_json.workspace = true

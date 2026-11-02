@@ -11,6 +11,12 @@ workspace = true
 [features]
 # Development-only bounded parser corpus entrypoint; absent from shipping builds.
 parser-checks = []
+# A host without global plugin workers keeps socket-scoped lifecycle only.
+global-work = ["infraternal-plugin-api/global-work"]
+# Generic plugin media lanes stay absent from terminal-only builds (#146).
+native-streams = ["global-work", "remote", "infraternal-agent/native-streams", "infraternal-plugin-remote/native-streams"]
+# App-window routing reuses the enrolled-host transport [D198,D232].
+desktop = ["native-streams", "remote", "dep:infraternal-plugin-desktop", "infraternal-plugin-desktop/server"]
 staging-trust = []
 default = ["mesh", "cli-plugin", "ssh", "release", "canvas"]
 canvas = ["dep:infraternal-plugin-canvas"]
@@ -26,6 +32,7 @@ ssh = ["dep:infraternal-plugin-ssh", "dep:hyper", "dep:hyper-util", "dep:tokio-o
 release = ["dep:infraternal-plugin-release", "dep:hyper", "dep:hyper-util", "dep:tokio-openssl", "dep:http-body-util"]
 
 [dependencies]
+infraternal-plugin-desktop = { path = "../plugins/desktop", version = "0.1.0", default-features = false, optional = true }
 infraternal-plugin-canvas = { path = "../plugins/canvas", version = "0.1.0", optional = true }
 infraternal-shim = { path = "../infraternal-shim", version = "0.1.0", default-features = false }
 infraternal-plugin-release = { path = "../plugins/release", version = "0.1.0", optional = true, default-features = false, features = ["server"] }
@@ -71,6 +78,10 @@ quinn = { workspace = true, optional = true }
 sha2.workspace = true
 
 [dev-dependencies]
+# Frozen extension vectors remain covered without adding them to shipping terminals.
+infraternal-protocol = { workspace = true, features = ["desktop"] }
+# Native-lane regressions opt in explicitly; shipping remote terminals do not.
+infraternal-agent = { path = "../infraternal-agent", version = "0.1.0", default-features = false, features = ["native-streams"] }
 hyper.workspace = true
 hyper-util.workspace = true
 tokio-openssl.workspace = true

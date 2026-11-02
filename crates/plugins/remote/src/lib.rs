@@ -33,6 +33,8 @@ pub mod remote_quic;
 pub mod remote_renewal;
 #[cfg(feature = "transport")]
 pub mod remote_tls;
+#[cfg(feature = "native-streams")]
+pub mod wire_datagrams;
 
 /// Remove one enrolled host under a purpose-bound fresh owner passkey proof.
 pub const REMOVE: ActionDef = ActionDef {
@@ -69,9 +71,9 @@ pub const UNINSTALL: ActionDef = ActionDef {
     dry_run: DryRun::Required,
     opens: None,
 };
-#[cfg(feature = "agent")]
+#[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod runtime_lock;
-#[cfg(feature = "agent")]
+#[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod uninstall;
 
 /// Enroll one node; this action cannot create a server.

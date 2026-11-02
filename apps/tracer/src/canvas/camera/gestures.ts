@@ -142,7 +142,7 @@ export function installGestures(cx: Ctx): void {
     const rec = first ? [...views.values()].flatMap((cl) => [...cl.wins.values()]).find((w) => w.card.root === first) : undefined;
     if (rec) { e.stopPropagation(); e.preventDefault(); cx.win.setActive(rec); cx.nav.focusWindow(rec); }
   }, { capture: true, signal });
-  // While input is locked to a terminal, the wheel belongs to that terminal and to nothing else (D177, #113): its
+  // While input is locked to a terminal (or to an app window or a screen, D208: its stage takes the wheel the same way), the wheel belongs to that terminal and to nothing else (D177, #113): its
   // scrollback, or the running program (mouse reporting, alternate screen: the terminal decides). The strip and the
   // canvas never move, on a wheel or on trackpad momentum. This runs in the capture phase, before any terminal or
   // column sees the event. Over the locked terminal the event goes on untouched (the terminal always consumes a
@@ -151,7 +151,7 @@ export function installGestures(cx: Ctx): void {
   viewport.addEventListener("wheel", (e) => {
     const locked = cx.inputLock.state;
     if (!locked) return;
-    const host = locked.win.card.body.querySelector<HTMLElement>(".terminal-host");
+    const host = locked.win.card.body.querySelector<HTMLElement>(".terminal-host, .aw-stage");
     if (host && host.contains(e.target as Node)) return;
     e.preventDefault();
     e.stopPropagation();

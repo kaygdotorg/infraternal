@@ -40,7 +40,8 @@ export interface WindowsModule {
   setActive(rec: WinRec | undefined): void;
   /** Adds a window in a new column at `index` of a tiled view; the others glide aside. */
   addColumn(c: ViewRec, m: WindowModel, index: number, w?: number, silent?: boolean, opaque?: boolean): WinRec;
-  close(rec: WinRec): void;
+  /** Immediate closure uses the same cleanup when a feature withdraws its windows. */
+  close(rec: WinRec, instant?: boolean): void;
   /**
    * The keyboard close (D212 shortcuts): the window closes at once, with no motion, through the same path as the close
    * button (its session keeps running, detached). Focus and the active window move to the next window in reading order
@@ -157,6 +158,10 @@ export function createWindows(cx: Ctx): WindowsModule {
   };
 
   const close = (rec: WinRec, instant = false): void => {
+    if (rec.closing && !instant) return;
+    // The card stays in the view until its exit animation finishes. Withdraw it
+    // from target reuse immediately, so a quick reopen creates a fresh window.
+    rec.closing = true;
     const c = rec.owner;
     // Closing never ends the session (D178): it keeps running, detached. The toast says so once, early on (TASTE: teach once).
     const inv = cx.adapters.inventory;
@@ -169,6 +174,9 @@ export function createWindows(cx: Ctx): WindowsModule {
     if (state.activeWin === rec) setActive(cx, undefined);
     const root = rec.card.root;
     const finish = (): void => {
+      // Immediate withdrawal may finish while the original exit spring still
+      // owns a callback. Binding retirement belongs to the retained record once.
+      if (c.wins.get(rec.model.id) !== rec) return;
       // The model as it stands with this window in it: a window in a group (or one that spans) re-tiles through the grid.
       const colEl = root.parentElement as HTMLElement | null;
       // A plain window (no group, no span) closes exactly as before; only a grouped one reads the view (D212).

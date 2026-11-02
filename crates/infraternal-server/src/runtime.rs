@@ -827,6 +827,11 @@ async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerE
         .busy_timeout(Duration::from_secs(5));
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
+        // SQLite's acquire-time ping only queues a worker acknowledgement. An
+        // idle connection was already checked on release, and its actual query
+        // remains authoritative. Avoid the extra cancellable worker roundtrip:
+        // a deadline during that ping discards a healthy idle connection.
+        .test_before_acquire(false)
         // Local SQLite has no remote connection lifetime. Keep the bounded
         // eight-connection pool until shutdown instead of waking a reaper
         // every 600s while idle; request failures still surface normally [41].
@@ -1100,6 +1105,77 @@ mod tests {
             behind_proxy: false,
             trusted_proxies: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn idle_sqlite_checkout_does_not_wait_for_a_worker_health_probe() {
+        const CHILD: &str = "INFRATERNAL_SQLITE_CHECKOUT_CHILD";
+        if let Some(directory) = std::env::var_os(CHILD) {
+            let source = super::open_database(std::path::Path::new(&directory))
+                .await
+                .expect("production pool");
+            let connect = source.connect_options();
+            let options = source
+                .options()
+                .clone()
+                .max_connections(1)
+                .min_connections(1)
+                .after_connect(|connection, _| {
+                    Box::pin(async move {
+                        // Freeze the worker before its new connection enters the
+                        // idle queue. This deliberate lock leak is confined to a
+                        // child process, whose exit releases every fixture resource.
+                        std::mem::forget(connection.lock_handle().await?);
+                        Ok(())
+                    })
+                });
+            source.close().await;
+            let pool = options.connect_lazy_with((*connect).clone());
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while pool.num_idle() != 1 {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("fixture worker entered the idle queue");
+            let mut connection =
+                tokio::time::timeout(std::time::Duration::from_millis(100), pool.acquire())
+                    .await
+                    .expect("idle checkout must not wait for a redundant worker ping")
+                    .expect("idle connection");
+            // Avoiding the probe never converts an unavailable database into
+            // authority. The real query still waits for the worker and times out.
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(&mut *connection),
+                )
+                .await
+                .is_err()
+            );
+            println!("PASS idle checkout completed; blocked real query refused");
+            std::process::exit(0);
+        }
+        let directory = temp_dir();
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "runtime::tests::idle_sqlite_checkout_does_not_wait_for_a_worker_health_probe",
+                "--nocapture",
+            ])
+            .env(CHILD, &directory)
+            .output()
+            .expect("isolated worker fixture");
+        if directory.exists() {
+            std::fs::remove_dir_all(directory).expect("remove child fixture");
+        }
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .contains("PASS idle checkout completed; blocked real query refused"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

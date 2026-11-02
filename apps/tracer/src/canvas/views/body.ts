@@ -9,9 +9,11 @@ import { el } from "../dom";
 import { onDemand } from "../../on-demand";
 import { paintLink } from "../windows/link";
 
-/** True for kinds whose window is a terminal session: the only kind that can split or take input. */
+/** True for kinds whose window is a terminal session: the only kind that can split. */
 export const isTerminal = (rec: WinRec): boolean => rec.model.kind === "terminal" && !rec.model.noAccess;
 
+/** True for windows that take the person's keys and pointer: a terminal, and an app window or a screen (D208). The input lock can hold only these. */
+export const isInteractive = (rec: WinRec): boolean => isTerminal(rec) || rec.model.kind === "app" || rec.model.kind === "screen";
 /** Policy for the view's terminal-exit callback, extracted so clean exits can be tested without a browser canvas. */
 export function shouldCloseWindowAfterExit(status: number, setupPending: boolean): boolean {
   return status === 0 && !setupPending;
@@ -47,6 +49,12 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
     rec.binding = binding;
     if (binding.connected === false) paintLink(rec, false, undefined);
     binding.mount(body);
+    return;
+  }
+  if (m.kind === "app" || m.kind === "screen") {
+    void onDemand(() => import("../appwin/body.on-demand")).then((module) => {
+      module.mountAppWindowBody(cx, rec);
+    }).catch(() => { if (!rec.closing) body.textContent = "Could not load app windows. Try again."; });
     return;
   }
   if (m.kind === "settings") {

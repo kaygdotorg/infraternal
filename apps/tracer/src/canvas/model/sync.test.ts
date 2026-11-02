@@ -39,9 +39,9 @@ test("inventory includes shared memberships that this device cannot render", asy
   expect(inventory!.views[0]!.cell.x).toBe(3); sync.dispose();
 });
 
-test("temporary flow windows are never treated as unsubmitted shared windows", () => {
+for (const kind of ["flow", "app", "screen"] as const) test(`temporary ${kind} windows are never treated as unsubmitted shared windows`, () => {
   const metrics = metricsFor(1440, 900, false);
   const view: ViewModel = { id: "console", name: "Console", layout: "tiled", x: 0, y: 0, nodes: [], cols: [] };
-  const cx = { views: new Map([[view.id, { view, wins: new Map([["flow", { model: { id: "flow", kind: "flow", host: "local" } }]]) }]]), state: { metrics }, adapters: { store: {} } } as unknown as Ctx;
+  const cx = { views: new Map([[view.id, { view, wins: new Map([["flow", { model: { id: "flow", kind, host: "local" } }]]) }]]), state: { metrics }, adapters: { store: {} } } as unknown as Ctx;
   const sync = createDocumentSync(cx); sync.reset(); expect(sync.uncommittedWindows().size).toBe(0); sync.dispose();
 });

@@ -5,6 +5,8 @@
 //! operation is nonblocking regardless of the spawning server's fd flags.
 
 use crate::channel::Channel;
+#[cfg(any(test, feature = "native-streams"))]
+use bytes::{Buf, Bytes, BytesMut};
 use infraternal_protocol::{
     DecodeError, DecodedMuxedFrame, Frame, MAX_FRAME_LEN, decode_frame, decode_muxed_frame,
     encode_frame_into, encode_muxed_frame_into,
@@ -105,28 +107,105 @@ fn decode_channel<'a>(
     }
 }
 
-/// One retained raw or mux frame plus at most one 16 KiB read of coalesced suffixes.
-pub struct Receive {
-    bytes: Vec<u8>,
+// Static buffer specialization preserves the existing borrowed terminal reader's
+// bulk throughput. Owned video opts into immutable shared storage on first use;
+// both storage modes execute the same parser, bounds and deadline implementation.
+trait WireBuffer: std::ops::Deref<Target = [u8]> {
+    fn release(&mut self, count: usize);
+    fn append(&mut self, bytes: &[u8]);
+}
+impl WireBuffer for Vec<u8> {
+    fn release(&mut self, count: usize) {
+        self.drain(..count);
+    }
+    fn append(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+}
+#[cfg(any(test, feature = "native-streams"))]
+impl WireBuffer for BytesMut {
+    fn release(&mut self, count: usize) {
+        self.advance(count);
+    }
+    fn append(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+}
+
+struct ReadState<B> {
+    bytes: B,
     consumed: usize,
     chunk: Box<[u8]>,
     deadline: Option<tokio::time::Instant>,
     last_arrival: Option<tokio::time::Instant>,
 }
+enum Storage {
+    Borrowed(ReadState<Vec<u8>>),
+    #[cfg(any(test, feature = "native-streams"))]
+    Shared(ReadState<BytesMut>),
+    // First owned use moves the state synchronously, before any await/cancellation.
+    #[cfg(any(test, feature = "native-streams"))]
+    Moving,
+}
+/// One retained raw or mux frame plus at most one 16 KiB read of coalesced suffixes.
+/// Borrowed reads retain their original storage; owned packets share allocations.
+pub struct Receive {
+    storage: Storage,
+}
 impl Default for Receive {
     fn default() -> Self {
-        // Keep scratch out of the async future. One allocation per connection
-        // avoids both a 16 KiB future and Box::pin allocation on every message.
         Self {
-            bytes: Vec::new(),
-            consumed: 0,
-            deadline: None,
-            last_arrival: None,
-            chunk: vec![0; 16 * 1024].into_boxed_slice(),
+            storage: Storage::Borrowed(ReadState {
+                bytes: Vec::new(),
+                consumed: 0,
+                deadline: None,
+                last_arrival: None,
+                chunk: vec![0; 16 * 1024].into_boxed_slice(),
+            }),
         }
     }
 }
 impl Receive {
+    /// Read until a complete borrowed frame is available.
+    /// # Errors
+    /// Rejects invalid codec data, EOF inside a frame, and excessive storage.
+    pub async fn next(&mut self, socket: &impl Channel) -> io::Result<DecodedMuxedFrame<'_>> {
+        match &mut self.storage {
+            Storage::Borrowed(state) => state.next(socket).await,
+            #[cfg(any(test, feature = "native-streams"))]
+            Storage::Shared(state) => state.next(socket).await,
+            #[cfg(any(test, feature = "native-streams"))]
+            Storage::Moving => Err(io::ErrorKind::Other.into()),
+        }
+    }
+    /// Transfer exactly one validated packet without copying its access unit.
+    /// Raw/mux envelopes and partial-read deadlines are preserved. First owned use
+    /// migrates any borrowed buffer once; native lanes start with an empty buffer.
+    /// # Errors
+    /// Returns the same bounded codec, channel and incomplete-frame failures as `next`.
+    #[cfg(any(test, feature = "native-streams"))]
+    pub async fn next_wire(&mut self, socket: &impl Channel) -> io::Result<Bytes> {
+        if matches!(self.storage, Storage::Borrowed(_))
+            && let Storage::Borrowed(state) = std::mem::replace(&mut self.storage, Storage::Moving)
+        {
+            self.storage = Storage::Shared(ReadState {
+                bytes: BytesMut::from(state.bytes.as_slice()),
+                consumed: state.consumed,
+                chunk: state.chunk,
+                deadline: state.deadline,
+                last_arrival: state.last_arrival,
+            });
+        }
+        let Storage::Shared(state) = &mut self.storage else {
+            return Err(io::ErrorKind::Other.into());
+        };
+        let count = state.next(socket).await?.wire_len;
+        let packet = state.bytes.split_to(count).freeze();
+        state.consumed = 0;
+        Ok(packet)
+    }
+}
+impl<B: WireBuffer> ReadState<B> {
     fn reject_expired(&self, socket: &impl Channel) -> io::Result<()> {
         if self
             .deadline
@@ -142,9 +221,10 @@ impl Receive {
     /// # Errors
     /// Rejects invalid codec data, EOF inside a frame, and excessive storage.
     pub async fn next(&mut self, socket: &impl Channel) -> io::Result<DecodedMuxedFrame<'_>> {
-        // Compact once between messages, never once per fragmented read.
+        // Release the prior borrow without shifting every coalesced suffix.
+        // Owned packets share storage; reserve may reclaim only an unshared prefix.
         if self.consumed != 0 {
-            self.bytes.drain(..self.consumed);
+            self.bytes.release(self.consumed);
             self.consumed = 0;
         }
         loop {
@@ -191,7 +271,7 @@ impl Receive {
                     .zip(timeout)
                     .map(|(arrival, timeout)| arrival + timeout);
             }
-            self.bytes.extend_from_slice(&self.chunk[..n]);
+            self.bytes.append(&self.chunk[..n]);
         }
         let decoded = decode_channel(&self.bytes, socket)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -286,6 +366,46 @@ mod remote_deadline_tests {
         wire
     }
     #[tokio::test]
+    async fn owned_and_borrowed_packets_preserve_coalesced_retained_bytes() {
+        let (_owned, mut peer, channel) = pair();
+        let mut wire = ping(7);
+        wire.extend_from_slice(&ping(8));
+        wire.extend_from_slice(&ping(9));
+        peer.write_all(&wire).await.unwrap();
+        let mut receive = Receive::default();
+        let retained = receive.next_wire(&channel).await.unwrap();
+        assert!(matches!(
+            receive.next(&channel).await.unwrap().frame,
+            Frame::Ping { nonce: 8, .. }
+        ));
+        let last = receive.next_wire(&channel).await.unwrap();
+        assert!(matches!(
+            decode_muxed_frame(&last).unwrap().frame,
+            Frame::Ping { nonce: 9, .. }
+        ));
+        assert_eq!(retained.as_ref(), ping(7));
+    }
+
+    #[tokio::test]
+    async fn owned_packet_does_not_refresh_a_coalesced_partial_suffix_deadline() {
+        let (_owned, mut peer, channel) = pair();
+        let mut wire = ping(7);
+        let next = ping(8);
+        wire.extend_from_slice(&next[..1]);
+        peer.write_all(&wire).await.unwrap();
+        let mut receive = Receive::default();
+        let retained = receive.next_wire(&channel).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        peer.write_all(&next[1..]).await.unwrap();
+        assert_eq!(
+            receive.next_wire(&channel).await.unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(channel.retired.load(Ordering::Relaxed));
+        assert_eq!(retained.as_ref(), ping(7));
+    }
+
+    #[tokio::test]
     async fn remote_partial_frame_deadline_survives_receive_cancellation() {
         let (_owned, mut peer, channel) = pair();
         peer.write_all(&ping(7)[..1]).await.unwrap();
@@ -320,8 +440,11 @@ mod remote_deadline_tests {
             })
             .await;
         }
-        assert_eq!(receive.bytes, wire[..1]);
-        assert!(receive.deadline.is_some());
+        let Storage::Borrowed(state) = &receive.storage else {
+            panic!("borrowed read must retain its storage");
+        };
+        assert_eq!(state.bytes, wire[..1]);
+        assert!(state.deadline.is_some());
         tokio::time::advance(Duration::from_millis(150)).await;
         // Tokio polls a ready inner read before its timeout. Supplying the
         // suffix before resuming proves an expired frame cannot use that order.

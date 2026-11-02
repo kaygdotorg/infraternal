@@ -1370,12 +1370,12 @@ async fn server_setup_terminal_echo_and_resume_preserve_offsets_once() {
     )
     .await;
     let attached = read_client_frame(&mut first).await;
-    assert!(matches!(
-        decode_muxed_frame(&attached)
-            .expect("attach acknowledgement")
-            .frame,
-        Frame::Ack { in_seq_acked: 0 }
-    ));
+    let decoded = decode_muxed_frame(&attached).expect("attach acknowledgement");
+    assert!(
+        matches!(decoded.frame, Frame::Ack { in_seq_acked: 0 }),
+        "unexpected attach frame variant: {:?}",
+        std::mem::discriminant(&decoded.frame)
+    );
     client_ws_send(&mut first, 1, &Frame::Credit { bytes: 4 }).await;
     client_ws_send(
         &mut first,

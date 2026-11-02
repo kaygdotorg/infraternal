@@ -900,6 +900,9 @@ mod session_gone;
 
 #[path = "socket_tests/authority_stall_soak.rs"]
 mod authority_stall_soak;
+#[cfg(feature = "desktop")]
+#[path = "socket_tests/native_plugin.rs"]
+mod native_plugin;
 
 #[cfg(feature = "ssh")]
 #[tokio::test]

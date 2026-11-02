@@ -205,6 +205,12 @@ impl AuthorityGuard {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn expire_for_test(&self) {
+        self.certificate
+            .send_modify(|admission| admission.expires = Instant::now());
+    }
+
     /// SSH publication is admitted by exact pending host ownership, never by
     /// a fabricated certificate. Only the trusted bootstrap backend calls this.
     #[cfg(feature = "ssh")]

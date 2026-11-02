@@ -322,6 +322,17 @@ impl WebSocketState {
 
     /// Bind this socket to the generic host authority bridge without starting features.
     pub(crate) fn plugin_socket(self: &Arc<Self>, user: &str, token: &str) -> SocketPlugins {
+        #[cfg(any(test, feature = "native-streams"))]
+        let host: Arc<dyn SocketHost> =
+            Arc::new_cyclic(|weak: &std::sync::Weak<PluginHost>| PluginHost {
+                authority: crate::socket_authority::SocketAuthority::admitted(weak.clone()),
+                state: Arc::clone(self),
+                user: user.to_owned(),
+                hash: crate::auth::hash(token),
+                incarnation: crate::auth::session_incarnation(token),
+                token: token.to_owned(),
+            });
+        #[cfg(not(any(test, feature = "native-streams")))]
         let host: Arc<dyn SocketHost> = Arc::new(PluginHost {
             state: Arc::clone(self),
             user: user.to_owned(),
@@ -556,7 +567,9 @@ async fn run_socket(
                     CONTROL_STREAM,
                     &Frame::Hello {
                         version: 1,
-                        caps: VIEWER_VISIBILITY | TERMINAL_QUERY_REPLIES,
+                        caps: state.plugins.wire_capabilities()
+                            | VIEWER_VISIBILITY
+                            | TERMINAL_QUERY_REPLIES,
                         client_info: "infraternal-server/0.1",
                     },
                     &mut encode,
@@ -592,7 +605,13 @@ async fn run_socket(
         ),
     )
     .await;
-    let Ok(Ok((connection_id, proof_authority, link_doubt_notices, viewer_visibility))) = handshake
+    let Ok(Ok((
+        connection_id,
+        proof_authority,
+        link_doubt_notices,
+        peer_capabilities,
+        viewer_visibility,
+    ))) = handshake
     else {
         let reason = if resume_attempt.is_some() {
             RESUME_REFUSED
@@ -678,6 +697,7 @@ async fn run_socket(
     // Shutdown below aborts and joins every call before releasing socket state.
     let mut pending_plugin_calls = tokio::task::JoinSet::<PendingPluginCall>::new();
     let mut plugins = state.plugin_socket(&user_id, &session_token);
+    plugins.set_peer_capabilities(peer_capabilities);
     let mut output_open = true;
     // Welcome certifies that the non-renewing proof lease and initial expiry
     // are ready. No initial authority query may race the peer's first idle period.
@@ -703,245 +723,283 @@ async fn run_socket(
     // Set when teardown already read the session's authority, so the final Close
     // decision reuses that answer instead of reading a second time (#227).
     let mut session_live_at_teardown = None;
-    loop {
-        transport.active(!attachments.is_empty());
-        tokio::select! {
-            Some(_) = login_preparation.join_next(), if !login_preparation.is_empty() => {}
-            Some(reply) = plugins.recv() => {
-                let Some(wire) = plugins.accept(reply, &mut encode) else {continue;};
-                if while_authorized(&state, &user_id, &session_token, true,
-                    send_message(&mut sink, Message::Binary(wire))
-                ).await.is_err() {break;}
-            }
-            changed = recovery_events.changed(), if recovery_subscribed => {
-                if changed.is_err() { break; }
-                if while_authorized(&state, &user_id, &session_token, false,
-                    send_recovery_snapshot(&state, &user_id, &mut sink, &mut encode, &mut recovery_snapshot)
-                ).await.is_err() { break; }
-            }
-            changed = session_changes.changed(), if terminal_sessions_subscribed.is_some() => {
-                if changed.is_err() { break; }
-                if let Some(sub_id) = terminal_sessions_subscribed
-                    && while_authorized(&state, &user_id, &session_token, false,
-                        send_terminal_sessions_snapshot(&state, &user_id, sub_id, &mut sink, &mut encode)
+    #[cfg(any(test, feature = "native-streams"))]
+    let socket_authority = plugins.authority();
+    let application = async {
+        loop {
+            transport.active(!attachments.is_empty());
+            tokio::select! {
+                Some(_) = login_preparation.join_next(), if !login_preparation.is_empty() => {}
+                Some(reply) = plugins.recv() => {
+                    let Some(wire) = plugins.accept(reply, &mut encode) else {continue;};
+                    #[cfg(any(test, feature = "native-streams"))]
+                    {
+                        let authority = plugins.take_delivery_authority();
+                        let sending = async {
+                            let write = send_message(&mut sink, Message::Binary(wire));
+                            let send = while_authorized(&state, &user_id, &session_token, true, write);
+                            match authority {
+                                Some(authority) => authority.authorized(Box::pin(send)).await,
+                                None => send.await,
+                            }
+                        };
+                        if sending.await.is_err() { break; }
+                    }
+                    #[cfg(not(any(test, feature = "native-streams")))]
+                    if while_authorized(&state, &user_id, &session_token, true,
+                        send_message(&mut sink, Message::Binary(wire))
                     ).await.is_err() { break; }
-            }
-            changed = revocations.changed() => {
-                if changed.is_err() { break; }
-                let completion = revocations.completion_generation();
-                match authority_deadline(&state, &user_id, &session_token, false).await {
-                    Ok(deadline) => {
-                        expiry = deadline;
-                        // This session survived the observed completion (for example,
-                        // it is the replacement session). Do not mislabel a later logout.
-                        revocations.acknowledge_completion(completion);
-                    }
-                    Err(miss) => {
-                        // Unproven authority after the bounded retry is server
-                        // unavailability; only a known deletion/expiry is refusal.
-                        teardown_reason = match miss {
-                            AuthorityMiss::Refused => RESUME_REFUSED,
-                            AuthorityMiss::Unavailable => {
-                                authority_unavailable_known = true;
-                                AUTHORITY_UNAVAILABLE
-                            }
-                        };
-                        loop_result = Err(());
-                        break;
-                    }
                 }
-            }
-            () = tokio::time::sleep_until(expiry) => {
-                match authority_deadline(&state, &user_id, &session_token, false).await {
-                    Ok(deadline) => expiry = deadline,
-                    Err(miss) => {
-                        // Unproven authority after the bounded retry is server
-                        // unavailability; only a known deletion/expiry is refusal.
-                        teardown_reason = match miss {
-                            AuthorityMiss::Refused => RESUME_REFUSED,
-                            AuthorityMiss::Unavailable => {
-                                authority_unavailable_known = true;
-                                AUTHORITY_UNAVAILABLE
-                            }
-                        };
-                        loop_result = Err(());
-                        break;
-                    }
+                changed = recovery_events.changed(), if recovery_subscribed => {
+                    if changed.is_err() { break; }
+                    if while_authorized(&state, &user_id, &session_token, false,
+                        send_recovery_snapshot(&state, &user_id, &mut sink, &mut encode, &mut recovery_snapshot)
+                    ).await.is_err() { break; }
                 }
-            }
-            input = transport.recv() => {
-                let Ok(Some(input)) = input else {
-                        let end = transport.end_reason();
-                        let socket_close = transport.socket_close();
-                        let who = if end == crate::websocket_transport::EndReason::ClientWentAway {
-                            CloseWho::Browser
-                        } else {
-                            CloseWho::Server
-                        };
-                        record_socket_close(
-                            &state,
-                            &attachments,
-                            who,
-                            end.close_reason(),
-                            socket_close.code,
-                            socket_close.reason,
-                        );
-                        close_already_logged = true;
-                        if end != crate::websocket_transport::EndReason::ClientWentAway
-                            && end != crate::websocket_transport::EndReason::ServerWriteFailed
-                        {
-                            let code = match end {
-                                crate::websocket_transport::EndReason::SizeLimit => 1009,
-                                crate::websocket_transport::EndReason::IdleTimeout => 1001,
-                                crate::websocket_transport::EndReason::AuthorizationRefused => 1008,
-                                crate::websocket_transport::EndReason::FlowControlRefused
-                                | crate::websocket_transport::EndReason::AuthorityUnavailable => 1013,
-                                _ => 1002,
-                            };
-                            let _ = tokio::time::timeout(
-                                CLOSE_TIMEOUT,
-                                send_frame(
-                                    &mut sink,
-                                    CONTROL_STREAM,
-                                    &Frame::Close {
-                                        code,
-                                        reason: end.close_reason().client_text,
-                                    },
-                                    &mut encode,
-                                ),
-                            )
-                            .await;
-                        }
-                        break;
-                };
-                match input {
-                    Inbound::TransportPing(payload) => {
-                        if while_authorized(&state, &user_id, &session_token, true, send_message(&mut sink, Message::Pong(payload))).await.is_err() { break; }
-                    }
-                    // The transport's read task consumes socket ends and receive
-                    // failures itself (it retires the context, logged above); only
-                    // frames reach this queue.
-                    Inbound::SocketClose { .. } | Inbound::Failure(_) => {}
-                    Inbound::Frame(wire) => {
-                    if let Ok(decoded) = decode_muxed_frame(&wire)
-                        && decoded.stream_id == CONTROL_STREAM
-                        && let Frame::Subscribe { sub_id: 45, filter_json } = decoded.frame
-                        && serde_json::from_slice::<serde_json::Value>(filter_json).ok()
-                            == Some(json!({"topic":"auth.recovery"})) {
-                        // Subscribe before reading the snapshot. A concurrent commit
-                        // remains visible in the watch generation and cannot be lost.
-                        recovery_subscribed = true;
-                        recovery_snapshot = RecoverySnapshot::Unread;
-                        if while_authorized(&state, &user_id, &session_token, true,
-                            send_recovery_snapshot(&state, &user_id, &mut sink, &mut encode, &mut recovery_snapshot)
-                        ).await.is_err() { break; }
-                        continue;
-                    }
-                    if let Ok(decoded) = decode_muxed_frame(&wire)
-                        && decoded.stream_id == CONTROL_STREAM
-                        && let Frame::Subscribe { sub_id, filter_json } = decoded.frame
-                        && serde_json::from_slice::<serde_json::Value>(filter_json).ok()
-                            == Some(json!({"topic":"terminal.sessions"})) {
-                        // Install the watch before reading the snapshot so an intervening update is sent too.
-                        terminal_sessions_subscribed = Some(sub_id);
-                        if while_authorized(&state, &user_id, &session_token, true,
+                changed = session_changes.changed(), if terminal_sessions_subscribed.is_some() => {
+                    if changed.is_err() { break; }
+                    if let Some(sub_id) = terminal_sessions_subscribed
+                        && while_authorized(&state, &user_id, &session_token, false,
                             send_terminal_sessions_snapshot(&state, &user_id, sub_id, &mut sink, &mut encode)
                         ).await.is_err() { break; }
-                        continue;
-                    }
-                    if let Ok(decoded) = decode_muxed_frame(&wire)
-                        && decoded.stream_id == CONTROL_STREAM
-                        && let Frame::Close { code, reason } = decoded.frame {
-                        record_control_close(
-                            &state,
-                            &attachments,
-                            code,
-                            reason,
-                        );
-                        close_already_logged = true;
-                        let _ = while_authorized(&state, &user_id, &session_token, true, async {
-                            send_frame(&mut sink, CONTROL_STREAM,
-                                &Frame::Close { code, reason: "connection closed" }, &mut encode).await?;
-                            send_message(&mut sink, Message::Close(None)).await
-                        }).await;
-                        break;
-                    }
-                    match plugins.dispatch(&wire, &mut encode) {
-                        Dispatch::Queued => continue,
-                        Dispatch::Refused(wire) => {
-                            if while_authorized(&state, &user_id, &session_token, true,
-                                send_message(&mut sink,Message::Binary(wire))).await.is_err() {break;}
-                            continue;
+                }
+                changed = revocations.changed() => {
+                    if changed.is_err() { break; }
+                    let completion = revocations.completion_generation();
+                    match authority_deadline(&state, &user_id, &session_token, false).await {
+                        Ok(deadline) => {
+                            expiry = deadline;
+                            // This session survived the observed completion (for example,
+                            // it is the replacement session). Do not mislabel a later logout.
+                            revocations.acknowledge_completion(completion);
                         }
-                        Dispatch::Unhandled => {}
-                    }
-                    // Set only when the frame handler itself fails, so a failure of the
-                    // wrapper's own authority reads is never blamed on the frame.
-                    let mut frame_failed = false;
-                    let handled = while_authorized(&state, &user_id, &session_token, true, async {
-                        let handled = handle_client_frame(
-                            wire,
-                            &state,
-                            &user_id,
-                            &session_token,
-                            owner,
-                            &mut pending_plugin_calls,
-                            &connection_id,
-                            &mut attachments,
-                            &mut ended,
-                            &output_tx,
-                            &mut sink,
-                            &mut encode,
-                        ).await;
-                        frame_failed = handled.is_err();
-                        handled
-                    }).await;
-                    if handled.is_err() {
-                        // Provisional: a failed frame or a missed wrapper read. Teardown
-                        // confirms it with one read, so a refusal or a busy store is
-                        // never logged as a bad frame.
-                        teardown_reason = if frame_failed { PROTOCOL_ERROR } else { AUTHORITY_UNAVAILABLE };
+                        Err(miss) => {
+                            // Unproven authority after the bounded retry is server
+                            // unavailability; only a known deletion/expiry is refusal.
+                            teardown_reason = match miss {
+                                AuthorityMiss::Refused => RESUME_REFUSED,
+                                AuthorityMiss::Unavailable => {
+                                    authority_unavailable_known = true;
+                                    AUTHORITY_UNAVAILABLE
+                                }
+                            };
                             loop_result = Err(());
                             break;
                         }
                     }
                 }
-            }
-            output = output_rx.recv(), if output_open => {
-                let Some((stream_id, output)) = output else {
-                    output_open = false;
-                    continue;
-                };
-                // Proof replies stay in the host actor. A failed route returns here
-                // for two authority gates: the browser notice, then backend rebind.
-                let reconnect = matches!(output, TerminalOutput::RouteExpired)
-                    .then(|| attachments.get(&stream_id).map(|a| a.handle.clone())).flatten();
-                if while_authorized(&state, &user_id, &session_token, true, handle_terminal_output(
-                    &state, &user_id, &session_token, &connection_id, stream_id, output,
-                    link_doubt_notices, &mut attachments, &mut ended, &mut sink, &mut encode,
-                )).await.is_err() { break; }
-                if let Some(handle) = reconnect
-                    && while_authorized(&state, &user_id, &session_token, true,
-                        async { handle.reconnect().await.map_err(|_| ()) }).await.is_err() { break; }
-
-            }
-            plugin_call = pending_plugin_calls.join_next(), if !pending_plugin_calls.is_empty() => {
-                let Some(Ok((call_id, result))) = plugin_call else { loop_result = Err(()); break; };
-                let (ok, json) = match result {
-                    Ok(json) => (true, json),
-                    Err(AgentError::OpenRefused(reason)) => {
-                        let Ok(json) = reason.json() else { break; };
-                        (false, json)
+                () = tokio::time::sleep_until(expiry) => {
+                    match authority_deadline(&state, &user_id, &session_token, false).await {
+                        Ok(deadline) => expiry = deadline,
+                        Err(miss) => {
+                            // Unproven authority after the bounded retry is server
+                            // unavailability; only a known deletion/expiry is refusal.
+                            teardown_reason = match miss {
+                                AuthorityMiss::Refused => RESUME_REFUSED,
+                                AuthorityMiss::Unavailable => {
+                                    authority_unavailable_known = true;
+                                    AUTHORITY_UNAVAILABLE
+                                }
+                            };
+                            loop_result = Err(());
+                            break;
+                        }
                     }
-                    Err(_) => (false, br#"{"error":"action unavailable"}"#.to_vec()),
-                };
-                if while_authorized(&state, &user_id, &session_token, true,
-                    send_frame(&mut sink, CONTROL_STREAM,
-                        &Frame::Result { call_id, ok, json: &json }, &mut encode)
-                ).await.is_err() { break; }
+                }
+                input = transport.recv() => {
+                    let Ok(Some(input)) = input else {
+                            let end = transport.end_reason();
+                            let socket_close = transport.socket_close();
+                            let who = if end == crate::websocket_transport::EndReason::ClientWentAway {
+                                CloseWho::Browser
+                            } else {
+                                CloseWho::Server
+                            };
+                            record_socket_close(
+                                &state,
+                                &attachments,
+                                who,
+                                end.close_reason(),
+                                socket_close.code,
+                                socket_close.reason,
+                            );
+                            close_already_logged = true;
+                            if end != crate::websocket_transport::EndReason::ClientWentAway
+                                && end != crate::websocket_transport::EndReason::ServerWriteFailed
+                            {
+                                let code = match end {
+                                    crate::websocket_transport::EndReason::SizeLimit => 1009,
+                                    crate::websocket_transport::EndReason::IdleTimeout => 1001,
+                                    crate::websocket_transport::EndReason::AuthorizationRefused => 1008,
+                                    crate::websocket_transport::EndReason::FlowControlRefused
+                                    | crate::websocket_transport::EndReason::AuthorityUnavailable => 1013,
+                                    _ => 1002,
+                                };
+                                let _ = tokio::time::timeout(
+                                    CLOSE_TIMEOUT,
+                                    send_frame(
+                                        &mut sink,
+                                        CONTROL_STREAM,
+                                        &Frame::Close {
+                                            code,
+                                            reason: end.close_reason().client_text,
+                                        },
+                                        &mut encode,
+                                    ),
+                                )
+                                .await;
+                            }
+                            break;
+                    };
+                    match input {
+                        Inbound::TransportPing(payload) => {
+                            if while_authorized(&state, &user_id, &session_token, true, send_message(&mut sink, Message::Pong(payload))).await.is_err() { break; }
+                        }
+                        // The transport's read task consumes socket ends and receive
+                        // failures itself (it retires the context, logged above); only
+                        // frames reach this queue.
+                        Inbound::SocketClose { .. } | Inbound::Failure(_) => {}
+                        Inbound::Frame(wire) => {
+                        if let Ok(decoded) = decode_muxed_frame(&wire)
+                            && decoded.stream_id == CONTROL_STREAM
+                            && let Frame::Subscribe { sub_id: 45, filter_json } = decoded.frame
+                            && serde_json::from_slice::<serde_json::Value>(filter_json).ok()
+                                == Some(json!({"topic":"auth.recovery"})) {
+                            // Subscribe before reading the snapshot. A concurrent commit
+                            // remains visible in the watch generation and cannot be lost.
+                            recovery_subscribed = true;
+                            recovery_snapshot = RecoverySnapshot::Unread;
+                            if while_authorized(&state, &user_id, &session_token, true,
+                                send_recovery_snapshot(&state, &user_id, &mut sink, &mut encode, &mut recovery_snapshot)
+                            ).await.is_err() { break; }
+                            continue;
+                        }
+                        if let Ok(decoded) = decode_muxed_frame(&wire)
+                            && decoded.stream_id == CONTROL_STREAM
+                            && let Frame::Subscribe { sub_id, filter_json } = decoded.frame
+                            && serde_json::from_slice::<serde_json::Value>(filter_json).ok()
+                                == Some(json!({"topic":"terminal.sessions"})) {
+                            // Install the watch before reading the snapshot so an intervening update is sent too.
+                            terminal_sessions_subscribed = Some(sub_id);
+                            if while_authorized(&state, &user_id, &session_token, true,
+                                send_terminal_sessions_snapshot(&state, &user_id, sub_id, &mut sink, &mut encode)
+                            ).await.is_err() { break; }
+                            continue;
+                        }
+                        if let Ok(decoded) = decode_muxed_frame(&wire)
+                            && decoded.stream_id == CONTROL_STREAM
+                            && let Frame::Close { code, reason } = decoded.frame {
+                            record_control_close(
+                                &state,
+                                &attachments,
+                                code,
+                                reason,
+                            );
+                            close_already_logged = true;
+                            let _ = while_authorized(&state, &user_id, &session_token, true, async {
+                                send_frame(&mut sink, CONTROL_STREAM,
+                                    &Frame::Close { code, reason: "connection closed" }, &mut encode).await?;
+                                send_message(&mut sink, Message::Close(None)).await
+                            }).await;
+                            break;
+                        }
+                        if let Ok(decoded) = decode_muxed_frame(&wire)
+                            && !attachments.contains_key(&decoded.stream_id)
+                            && !plugins.owns_stream(decoded.stream_id)
+                            && (plugins.opens_native_stream(&decoded.frame) || matches!(decoded.frame, Frame::AttachTerm { .. }))
+                            && attachments.len() + plugins.active_streams() >= MAX_ATTACHMENTS {
+                            if while_authorized(&state, &user_id, &session_token, true,
+                                send_frame(&mut sink, decoded.stream_id, &Frame::Close { code: 1013, reason: "stream limit" }, &mut encode)
+                            ).await.is_err() { break; }
+                            continue;
+                        }
+                        match plugins.dispatch(&wire, &mut encode) {
+                            Dispatch::Queued => continue,
+                            Dispatch::Refused(wire) => {
+                                if while_authorized(&state, &user_id, &session_token, true,
+                                    send_message(&mut sink,Message::Binary(wire))).await.is_err() {break;}
+                                continue;
+                            }
+                            Dispatch::Unhandled => {}
+                        }
+                        // Set only when the frame handler itself fails, so a failure of the
+                        // wrapper's own authority reads is never blamed on the frame.
+                        let mut frame_failed = false;
+                        let handled = while_authorized(&state, &user_id, &session_token, true, async {
+                            let handled = handle_client_frame(
+                                wire,
+                                &state,
+                                &user_id,
+                                &session_token,
+                                owner,
+                                &mut pending_plugin_calls,
+                                &connection_id,
+                                &mut attachments,
+                                &mut ended,
+                                &output_tx,
+                                &mut sink,
+                                &mut encode,
+                            ).await;
+                            frame_failed = handled.is_err();
+                            handled
+                        }).await;
+                        if handled.is_err() {
+                            // Provisional: a failed frame or a missed wrapper read. Teardown
+                            // confirms it with one read, so a refusal or a busy store is
+                            // never logged as a bad frame.
+                            teardown_reason = if frame_failed { PROTOCOL_ERROR } else { AUTHORITY_UNAVAILABLE };
+                                loop_result = Err(());
+                                break;
+                            }
+                        }
+                    }
+                }
+                output = output_rx.recv(), if output_open => {
+                    let Some((stream_id, output)) = output else {
+                        output_open = false;
+                        continue;
+                    };
+                    // Proof replies stay in the host actor. A failed route returns here
+                    // for two authority gates: the browser notice, then backend rebind.
+                    let reconnect = matches!(output, TerminalOutput::RouteExpired)
+                        .then(|| attachments.get(&stream_id).map(|a| a.handle.clone())).flatten();
+                    if while_authorized(&state, &user_id, &session_token, true, handle_terminal_output(
+                        &state, &user_id, &session_token, &connection_id, stream_id, output,
+                        link_doubt_notices, &mut attachments, &mut ended, &mut sink, &mut encode,
+                    )).await.is_err() { break; }
+                    if let Some(handle) = reconnect
+                        && while_authorized(&state, &user_id, &session_token, true,
+                            async { handle.reconnect().await.map_err(|_| ()) }).await.is_err() { break; }
+
+                }
+                plugin_call = pending_plugin_calls.join_next(), if !pending_plugin_calls.is_empty() => {
+                    let Some(Ok((call_id, result))) = plugin_call else { loop_result = Err(()); break; };
+                    let (ok, json) = match result {
+                        Ok(json) => (true, json),
+                        Err(AgentError::OpenRefused(reason)) => {
+                            let Ok(json) = reason.json() else { break; };
+                            (false, json)
+                        }
+                        Err(_) => (false, br#"{"error":"action unavailable"}"#.to_vec()),
+                    };
+                    if while_authorized(&state, &user_id, &session_token, true,
+                        send_frame(&mut sink, CONTROL_STREAM,
+                            &Frame::Result { call_id, ok, json: &json }, &mut encode)
+                    ).await.is_err() { break; }
+                }
             }
         }
+    };
+    #[cfg(any(test, feature = "native-streams"))]
+    {
+        tokio::pin!(application);
+        tokio::select! { biased;
+            () = socket_authority.cancelled() => {},
+            () = &mut application => {},
+        }
     }
+    #[cfg(not(any(test, feature = "native-streams")))]
+    application.await;
     // A closed account cursor stays closed even if its registry entry is replaced.
     // Share the known-unavailable teardown for recovery, revocation and guarded
     // work exits: source loss must report 1013 without another authority read,
@@ -1061,7 +1119,16 @@ pub(super) async fn while_authorized(
     // Sharing the watchdog across operation future types bounds transport code
     // size as compiled plugins grow. One short-lived allocation replaces each
     // separate watchdog state machine; operation cancellation stays unchanged.
-    while_authorized_operation(state, user, token, renew, operation.boxed()).await
+    while_authorized_operation(
+        state,
+        user,
+        token,
+        renew,
+        operation.boxed(),
+        #[cfg(any(test, feature = "native-streams"))]
+        None,
+    )
+    .await
 }
 
 #[cfg(feature = "ssh")]
@@ -1109,6 +1176,7 @@ async fn while_authorized_operation(
     token: &str,
     renew: bool,
     operation: infraternal_plugin_api::Operation<'_, Result<(), ()>>,
+    #[cfg(any(test, feature = "native-streams"))] completed: Option<&mut bool>,
 ) -> Result<(), ()> {
     let mut revocations = state.auth.revocation_events(user);
     let mut expiry = authority_deadline(state, user, token, renew)
@@ -1174,6 +1242,10 @@ async fn while_authorized_operation(
     // Backend/persistence boundaries still read actual authority and predicate SQL.
     if revocations.has_changed().map_err(|_| ())? || tokio::time::Instant::now() >= expiry {
         socket_deadline(state, user, token).await?;
+    }
+    #[cfg(any(test, feature = "native-streams"))]
+    if let Some(completed) = completed {
+        *completed = true;
     }
     result
 }
@@ -1573,7 +1645,7 @@ async fn handshake<S, K>(
     session_token: &str,
     pending_welcome: &mut Option<Welcome>,
     resume_attempt: &mut Option<[u8; 16]>,
-) -> Result<([u8; 16], probe_authority::Lease, bool, bool), ()>
+) -> Result<([u8; 16], probe_authority::Lease, bool, u64, bool), ()>
 where
     S: Stream<Item = Result<Message, axum::Error>> + Unpin,
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
@@ -1581,6 +1653,11 @@ where
     let hello = next_wire(source, sink, receive).await?.ok_or(())?;
     socket_deadline(state, user_id, session_token).await?;
     let decoded = decode_muxed_frame(&hello).map_err(|_| ())?;
+    let capabilities = if let Frame::Hello { caps, .. } = &decoded.frame {
+        *caps
+    } else {
+        return Err(());
+    };
     let (resume, link_doubt_notices, viewer_visibility, layout_session) =
         match (decoded.stream_id, decoded.frame) {
             (
@@ -1592,7 +1669,7 @@ where
                 caps & RESUME_NEXT != 0,
                 caps & LINK_DOUBT_NOTICES != 0,
                 caps & VIEWER_VISIBILITY != 0,
-                caps & 16 != 0,
+                caps & infraternal_protocol::LAYOUT_SESSION_INCARNATION_CAPABILITY != 0,
             ),
             _ => return Err(()),
         };
@@ -1660,6 +1737,7 @@ where
         welcome.connection_id,
         proof_authority,
         link_doubt_notices,
+        capabilities,
         viewer_visibility,
     ))
 }
@@ -3116,9 +3194,16 @@ async fn owned_writer(
     if !existing && count >= i64::try_from(MAX_ATTACHMENTS).map_err(|_| ())? {
         return Err(());
     }
-    sqlx::query("INSERT INTO terminal_writers(connection_id,client_stream,session_id) SELECT ?,?,t.id FROM terminal_sessions t JOIN websocket_connections c ON c.connection_id=? AND c.user_id=t.user_id AND c.active=1 WHERE t.id=? AND t.user_id=? AND t.closed_at IS NULL ON CONFLICT(connection_id,client_stream) DO NOTHING")
-        .bind(connection.as_slice()).bind(stream).bind(connection.as_slice()).bind(session.as_slice()).bind(user)
-        .execute(&mut *tx).await.map_err(|_| ())?;
+    if !existing {
+        // SQLite serializes this transaction. AUTOINCREMENT retains deleted
+        // terminal identities; the plugin clock covers reservations with no
+        // terminal row. Advancing either high-water mark is sufficient because
+        // native reservation also reads sqlite_sequence. Exhaustion inserts no
+        // row, so the ownership lookup below refuses before publishing an ID.
+        sqlx::query("INSERT INTO terminal_writers(writer_id,connection_id,client_stream,session_id) SELECT MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='terminal_writers'),0),w.value)+1,?,?,t.id FROM terminal_sessions t JOIN websocket_connections c ON c.connection_id=? AND c.user_id=t.user_id AND c.active=1 JOIN wire_writer_clock w ON w.singleton=1 WHERE t.id=? AND t.user_id=? AND t.closed_at IS NULL AND MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='terminal_writers'),0),w.value)<2147483647")
+            .bind(connection.as_slice()).bind(stream).bind(connection.as_slice()).bind(session.as_slice()).bind(user)
+            .execute(&mut *tx).await.map_err(|_| ())?;
+    }
     let row = sqlx::query("SELECT w.writer_id,w.input_acked FROM terminal_writers w JOIN terminal_sessions t ON t.id=w.session_id JOIN websocket_connections c ON c.connection_id=w.connection_id WHERE w.connection_id=? AND w.client_stream=? AND w.session_id=? AND t.user_id=? AND c.user_id=? AND c.active=1 AND t.closed_at IS NULL")
         .bind(connection.as_slice()).bind(stream).bind(session.as_slice()).bind(user).bind(user)
         .fetch_optional(&mut *tx).await.map_err(|_| ())?.ok_or(())?;
@@ -3369,6 +3454,8 @@ mod recovery_notification_bench;
 
 /// The host retains session secrets and authority interruption independently of feature work.
 struct PluginHost {
+    #[cfg(any(test, feature = "native-streams"))]
+    authority: Arc<crate::socket_authority::SocketAuthority>,
     state: Arc<WebSocketState>,
     user: String,
     token: String,
@@ -3382,6 +3469,38 @@ impl SocketHost for PluginHost {
     fn node_action_declared(&self, id: &str) -> bool {
         self.state.action(id).is_some()
     }
+    #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+    fn node<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> Operation<'a, Option<Arc<dyn infraternal_plugin_api::streams::NodeHost>>> {
+        Box::pin(async move {
+            use infraternal_plugin_api::streams::Authority;
+            let id = uuid::Uuid::parse_str(id).ok()?;
+            if !self.authority.permits() {
+                return None;
+            }
+            // Resolve both the current login and host owner at selection. The
+            // returned host lease deliberately contains no browser credential.
+            let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts h JOIN sessions s ON s.user_id=h.owner_id WHERE h.id=? AND h.owner_id=? AND h.revoked_at IS NULL AND s.token_hash=? AND s.unlocked=1 AND s.expires>unixepoch())")
+                .bind(id.as_bytes().as_slice()).bind(&self.user).bind(&self.hash).fetch_one(&self.state.pool).await.ok()?;
+            if !allowed || !self.authority.permits() {
+                return None;
+            }
+            self.state
+                .remote_hosts
+                .node(id, self.user.clone(), self.state.pool.clone())
+                .await
+        })
+    }
+    #[cfg(any(test, feature = "native-streams"))]
+    fn authority(&self) -> Arc<dyn infraternal_plugin_api::streams::Authority> {
+        self.authority.clone()
+    }
+    #[cfg(any(test, feature = "native-streams"))]
+    fn retire(&self) {
+        self.authority.withdraw();
+    }
     fn user_id(&self) -> &str {
         &self.user
     }
@@ -3392,13 +3511,38 @@ impl SocketHost for PluginHost {
         &'a self,
         operation: Operation<'a, Result<(), ()>>,
     ) -> Operation<'a, Result<(), ()>> {
-        Box::pin(while_authorized_operation(
-            &self.state,
-            &self.user,
-            &self.token,
-            true,
-            operation,
-        ))
+        #[cfg(any(test, feature = "native-streams"))]
+        {
+            Box::pin(async move {
+                use infraternal_plugin_api::streams::Authority;
+                if !self.authority.permits() {
+                    return Err(());
+                }
+                // Distinguish a failed backend operation from an authorization
+                // scope that could not complete its required read. The latter
+                // invalidates this whole connection before a worker can disappear;
+                // ordinary per-operation failures stay isolated to their caller.
+                let mut completed = false;
+                let result = tokio::select! { biased;
+                    () = self.authority.cancelled() => Err(()),
+                    result = while_authorized_operation(&self.state, &self.user, &self.token, true, operation, Some(&mut completed)) => result,
+                };
+                if result.is_err() && !completed {
+                    self.authority.withdraw();
+                }
+                result
+            })
+        }
+        #[cfg(not(any(test, feature = "native-streams")))]
+        {
+            Box::pin(while_authorized_operation(
+                &self.state,
+                &self.user,
+                &self.token,
+                true,
+                operation,
+            ))
+        }
     }
     fn fresh(&self, now: i64) -> Operation<'_, bool> {
         Box::pin(async move {

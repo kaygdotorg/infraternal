@@ -52,7 +52,7 @@ export function createDocumentSync(cx: Ctx, persisted: (id: string) => boolean =
     },
     uncommittedWindows() {
       const saved = new Set(before ? documentWindows(before).map((w) => w.id) : []);
-      return new Set([...cx.views.values()].filter((v) => persisted(v.view.id) && v.view.layout === "tiled").flatMap((v) => [...v.wins.values()].filter((w) => w.model.kind !== "flow" && w.model.kind !== "node" && !saved.has(w.model.id)).map((w) => w.model.id)));
+      return new Set([...cx.views.values()].filter((v) => persisted(v.view.id) && v.view.layout === "tiled").flatMap((v) => [...v.wins.values()].filter((w) => w.model.kind !== "flow" && w.model.kind !== "node" && w.model.kind !== "app" && w.model.kind !== "screen" && !saved.has(w.model.id)).map((w) => w.model.id)));
     },
     flush() { if (queued) save(); cx.adapters.store.flush?.(); },
     /** After this nothing is written again: sign-out removes the document right after (D245). */

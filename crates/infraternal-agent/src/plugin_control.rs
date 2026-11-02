@@ -20,11 +20,20 @@ pub(crate) struct Registry {
     #[cfg(feature = "remote")]
     lifetime: Option<std::sync::Arc<std::fs::File>>,
     sender: mpsc::Sender<Job>,
+    #[cfg(any(test, feature = "native-streams"))]
+    capabilities: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(any(test, feature = "native-streams"))]
+    wire_caps: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(any(test, feature = "native-streams"))]
+    shared: std::sync::Arc<std::sync::OnceLock<crate::plugins::SharedRegistry>>,
     events: tokio::sync::broadcast::Sender<Vec<u8>>,
     pending: std::sync::Arc<std::sync::Mutex<Option<PendingWorker>>>,
     paths: tokio::sync::watch::Sender<Option<std::net::IpAddr>>,
     link: std::sync::Arc<std::sync::Mutex<infraternal_plugin_api::server_path::ServerLink>>,
 }
+#[cfg(any(test, feature = "native-streams"))]
+type Factory = Box<dyn FnOnce() -> Result<crate::plugins::SharedRegistry, PluginError> + Send>;
+#[cfg(not(any(test, feature = "native-streams")))]
 type Factory = Box<dyn FnOnce() -> Result<PluginRegistry, PluginError> + Send>;
 #[cfg(test)]
 tokio::task_local! {
@@ -35,15 +44,30 @@ struct PendingWorker {
     factory: Factory,
     incoming: mpsc::Receiver<Job>,
 }
+#[cfg(any(test, feature = "native-streams"))]
+type PreparedReply = infraternal_plugin_api::Operation<
+    'static,
+    Result<infraternal_plugin_api::ActionReply, PluginError>,
+>;
+#[cfg(not(any(test, feature = "native-streams")))]
+type PreparedReply = infraternal_plugin_api::ActionReply;
 enum Job {
+    #[cfg(any(test, feature = "native-streams"))]
+    Capabilities,
+    #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+    Providers {
+        result: tokio::sync::oneshot::Sender<
+            Result<Vec<infraternal_plugin_api::streams::WireProviderEntry>, PluginError>,
+        >,
+    },
     Call {
         public: bool,
         action: String,
         input: Vec<u8>,
         context: Option<infraternal_plugin_api::admission::NodeContext>,
-        result:
-            tokio::sync::oneshot::Sender<Result<infraternal_plugin_api::ActionReply, PluginError>>,
+        result: tokio::sync::oneshot::Sender<Result<PreparedReply, PluginError>>,
     },
+    #[cfg(any(test, target_os = "linux"))]
     Admit {
         action: String,
         context: infraternal_plugin_api::admission::NodeContext,
@@ -71,7 +95,95 @@ fn publish_paths(
     });
 }
 
+// Only the opted-in native build transfers an owned future out of registry admission.
+// Terminal builds preserve the synchronous reply and deferred-after-write contract.
+fn prepare_call(
+    registry: &mut PluginRegistry,
+    public: bool,
+    action: &str,
+    input: &[u8],
+) -> Result<PreparedReply, PluginError> {
+    #[cfg(any(test, feature = "native-streams"))]
+    let response = if public {
+        registry.call_public(action, input).map(|json| {
+            let reply = infraternal_plugin_api::ActionReply {
+                json,
+                after_write: None,
+            };
+            Box::pin(async move { Ok(reply) })
+                as infraternal_plugin_api::Operation<
+                    'static,
+                    Result<infraternal_plugin_api::ActionReply, PluginError>,
+                >
+        })
+    } else {
+        registry.begin_call(action, input)
+    };
+    #[cfg(not(any(test, feature = "native-streams")))]
+    let response = if public {
+        registry
+            .call_public(action, input)
+            .map(|json| infraternal_plugin_api::ActionReply {
+                json,
+                after_write: None,
+            })
+    } else {
+        registry.call_with_reply(action, input)
+    };
+    response
+}
+
 impl Registry {
+    #[cfg(not(any(test, feature = "native-streams")))]
+    #[allow(clippy::unused_self)]
+    pub(crate) fn capabilities(&self, _: u64) {}
+    #[cfg(any(test, feature = "native-streams"))]
+    pub(crate) fn capabilities(&self, caps: u64) {
+        self.capabilities
+            .store(caps, std::sync::atomic::Ordering::Release);
+        // Withdrawal cannot wait on an in-flight kernel transaction. If that
+        // owner holds the map, its bounded queue applies the latest atomic value.
+        if let Some(shared) = self.shared.get() {
+            if let Ok(mut registry) = shared.try_lock() {
+                registry.transport_capabilities(caps);
+            } else {
+                let _ = self.sender.try_send(Job::Capabilities);
+            }
+        }
+    }
+    #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+    pub(crate) async fn wire_providers(
+        &self,
+    ) -> Result<Vec<infraternal_plugin_api::streams::WireProviderEntry>, PluginError> {
+        self.start()?;
+        let (result, receive) = tokio::sync::oneshot::channel();
+        self.sender
+            .try_send(Job::Providers { result })
+            .map_err(|_| PluginError::Rejected)?;
+        let entries = receive.await.map_err(|_| PluginError::Rejected)??;
+        self.wire_caps.store(
+            entries
+                .iter()
+                .fold(0, |caps, entry| caps | entry.definition.capability),
+            std::sync::atomic::Ordering::Release,
+        );
+        Ok(entries)
+    }
+    #[cfg(not(any(test, feature = "native-streams")))]
+    #[allow(clippy::unused_self)] // This build has no provider projection to inspect.
+    pub(crate) fn wire_capabilities(&self, _: &impl crate::channel::Channel) -> u64 {
+        0
+    }
+    #[cfg(any(test, feature = "native-streams"))]
+    pub(crate) fn wire_capabilities(&self, channel: &impl crate::channel::Channel) -> u64 {
+        // Provider discovery is process-owned; availability belongs to this
+        // connection. A TCP replacement cannot inherit native QUIC admission.
+        if channel.native_stream_id().is_some() {
+            self.wire_caps.load(std::sync::atomic::Ordering::Acquire)
+        } else {
+            0
+        }
+    }
     #[cfg(test)]
     pub(crate) fn new(registry: PluginRegistry) -> Self {
         Self::from_factory(Some(Box::new(move || Ok(registry))))
@@ -109,7 +221,29 @@ impl Registry {
         }
         registry
     }
-    fn from_factory(factory: Option<Factory>) -> Self {
+    fn from_factory(
+        factory: Option<Box<dyn FnOnce() -> Result<PluginRegistry, PluginError> + Send>>,
+    ) -> Self {
+        #[cfg(any(test, feature = "native-streams"))]
+        let factory: Option<Factory> = factory.map(|factory| {
+            Box::new(move || {
+                factory().map(|registry| std::sync::Arc::new(std::sync::Mutex::new(registry)))
+            }) as Factory
+        });
+        // Terminal builds keep sole ownership in the sleeping worker. A shared
+        // mutable registry is needed only for native provider injection.
+        Self::from_shared_factory(factory)
+    }
+    #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+    pub(crate) fn from_shared(registry: crate::plugins::SharedRegistry) -> Self {
+        #[cfg(any(test, feature = "native-streams"))]
+        let shared = registry.clone();
+        let instance = Self::from_shared_factory(Some(Box::new(move || Ok(registry))));
+        #[cfg(any(test, feature = "native-streams"))]
+        let _ = instance.shared.set(shared);
+        instance
+    }
+    fn from_shared_factory(factory: Option<Factory>) -> Self {
         #[cfg(test)]
         let empty = factory.is_none();
         let (sender, incoming) = mpsc::channel::<Job>(8);
@@ -120,6 +254,12 @@ impl Registry {
             #[cfg(feature = "remote")]
             lifetime: None,
             sender,
+            #[cfg(any(test, feature = "native-streams"))]
+            capabilities: std::sync::Arc::default(),
+            #[cfg(any(test, feature = "native-streams"))]
+            wire_caps: std::sync::Arc::default(),
+            #[cfg(any(test, feature = "native-streams"))]
+            shared: std::sync::Arc::default(),
             events,
             paths: tokio::sync::watch::channel(None).0,
             link: std::sync::Arc::default(),
@@ -162,6 +302,10 @@ impl Registry {
             let notifications = self.events.clone();
             let paths = self.paths.clone();
             let link = self.link.clone();
+            #[cfg(any(test, feature = "native-streams"))]
+            let capabilities = self.capabilities.clone();
+            #[cfg(any(test, feature = "native-streams"))]
+            let shared = self.shared.clone();
             #[cfg(feature = "remote")]
             let lifetime = self.lifetime.clone();
             std::thread::Builder::new()
@@ -169,21 +313,40 @@ impl Registry {
                 .spawn(move || {
                     #[cfg(feature = "remote")]
                     let _lifetime = lifetime;
-                    let Ok(mut registry) = factory() else {
+                    let Ok(owner) = factory() else {
                         return;
                     };
                     // Drop the registry before the captured receiver. Never
                     // close it early: ended() uses that as its replacement fence.
+                    #[cfg(any(test, feature = "native-streams"))]
+                    let _ = shared.set(owner.clone());
+                    #[cfg(not(any(test, feature = "native-streams")))]
+                    let mut registry = owner;
                     while let Some(job) = incoming.blocking_recv() {
+                        #[cfg(any(test, feature = "native-streams"))]
+                        let Ok(mut registry) = owner.lock() else {
+                            return;
+                        };
                         if let Ok(link) = link.lock() {
                             registry.set_server_link(&link);
                         }
+                        #[cfg(any(test, feature = "native-streams"))]
+                        registry.transport_capabilities(
+                            capabilities.load(std::sync::atomic::Ordering::Acquire),
+                        );
                         match job {
+                            #[cfg(any(test, feature = "native-streams"))]
+                            Job::Capabilities => {}
+                            #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+                            Job::Providers { result } => {
+                                let _ = result.send(registry.wire_providers());
+                            }
                             #[cfg(any(test, feature = "remote"))]
                             Job::Paths { result } => {
                                 publish_paths(&registry, &paths);
                                 let _ = result.send(());
                             }
+                            #[cfg(any(test, target_os = "linux"))]
                             Job::Admit {
                                 action,
                                 context,
@@ -201,16 +364,7 @@ impl Registry {
                                 if let Some(context) = context {
                                     registry.update_context(context);
                                 }
-                                let response = if public {
-                                    registry.call_public(&action, &input).map(|json| {
-                                        infraternal_plugin_api::ActionReply {
-                                            json,
-                                            after_write: None,
-                                        }
-                                    })
-                                } else {
-                                    registry.call_with_reply(&action, &input)
-                                };
+                                let response = prepare_call(&mut registry, public, &action, &input);
                                 if response.is_ok()
                                     && let Ok(events) = registry.events()
                                 {
@@ -228,6 +382,7 @@ impl Registry {
         }
         Ok(())
     }
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) async fn admit(
         &self,
         action: &str,
@@ -276,6 +431,7 @@ impl Registry {
     pub(crate) fn server_paths(&self) -> tokio::sync::watch::Receiver<Option<std::net::IpAddr>> {
         self.paths.subscribe()
     }
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Vec<u8>> {
         self.events.subscribe()
     }
@@ -318,7 +474,15 @@ impl Registry {
                 result,
             })
             .map_err(|_| PluginError::Rejected)?;
-        receive.await.map_err(|_| PluginError::Rejected)?
+        let reply = receive.await.map_err(|_| PluginError::Rejected)?;
+        #[cfg(any(test, feature = "native-streams"))]
+        {
+            reply?.await
+        }
+        #[cfg(not(any(test, feature = "native-streams")))]
+        {
+            reply
+        }
     }
 }
 /// A process-owned control surface survives remote channel replacement and outages.
@@ -336,12 +500,14 @@ impl Service {
             state,
             mode,
             installation,
-            #[cfg(feature = "remote")]
+            #[cfg(all(feature = "remote", target_os = "linux"))]
+            None,
+            #[cfg(any(test, feature = "native-streams"))]
             None,
         )
         .await
     }
-    #[cfg(feature = "remote")]
+    #[cfg(all(feature = "remote", target_os = "linux"))]
     pub(crate) async fn start_retained(
         state: &Path,
         installation: Option<&crate::plugins::Installation>,
@@ -352,6 +518,8 @@ impl Service {
             crate::plugins::ExecutionMode::Remote,
             installation,
             lifetime.clone(),
+            #[cfg(any(test, feature = "native-streams"))]
+            None,
         )
         .await?;
         lifetime.clone_from(&service.registry.lifetime);
@@ -361,12 +529,15 @@ impl Service {
         state: &'a Path,
         mode: crate::plugins::ExecutionMode,
         installation: Option<&'a crate::plugins::Installation>,
-        #[cfg(feature = "remote")] lifetime: Option<std::sync::Arc<std::fs::File>>,
+        #[cfg(all(feature = "remote", target_os = "linux"))] lifetime: Option<
+            std::sync::Arc<std::fs::File>,
+        >,
+        #[cfg(any(test, feature = "native-streams"))] supplied: Option<Registry>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<Self>> + Send + 'a>> {
         // Startup has one temporary allocation rather than repeating its state
         // machine in embedded and remote dispatch. It is released after startup [243].
         Box::pin(async move {
-            #[cfg(feature = "remote")]
+            #[cfg(all(feature = "remote", target_os = "linux"))]
             let lifetime = if matches!(mode, crate::plugins::ExecutionMode::Remote) {
                 let guard = if let Some(guard) = lifetime {
                     infraternal_plugin_remote::runtime_lock::validate(&guard, state)?;
@@ -388,14 +559,18 @@ impl Service {
             };
             // Compiled metadata is validated by registry tests; construct its
             // process-owned instances only when a caller needs an action.
-            #[cfg(feature = "remote")]
+            #[cfg(all(feature = "remote", target_os = "linux"))]
             let installation = installation.cloned();
-            #[cfg(not(feature = "remote"))]
+            #[cfg(not(all(feature = "remote", target_os = "linux")))]
             let installation = installation.copied();
+            #[cfg(any(test, feature = "native-streams"))]
+            let registry = supplied
+                .unwrap_or_else(|| Registry::for_mode(state.to_owned(), mode, installation));
+            #[cfg(not(any(test, feature = "native-streams")))]
             let registry = Registry::for_mode(state.to_owned(), mode, installation);
             // Listener tasks and synchronous workers retain the same ownership even
             // when cancellation has been requested but their work has not stopped.
-            #[cfg(feature = "remote")]
+            #[cfg(all(feature = "remote", target_os = "linux"))]
             let registry = Registry {
                 lifetime,
                 ..registry
@@ -407,8 +582,21 @@ impl Service {
             })
         })
     }
+    #[cfg(any(test, feature = "native-streams"))]
+    pub(crate) async fn with_registry(state: &Path, registry: Registry) -> io::Result<Self> {
+        Self::start_inner(
+            state,
+            crate::plugins::ExecutionMode::Remote,
+            None,
+            #[cfg(all(feature = "remote", target_os = "linux"))]
+            None,
+            Some(registry),
+        )
+        .await
+    }
 }
 /// The dispatcher queues a byte-bound action, never waits for kernel work or the CLI.
+#[cfg(any(test, not(feature = "native-streams")))]
 pub(crate) struct Request {
     pub call_id: u32,
     pub action: String,
@@ -416,10 +604,12 @@ pub(crate) struct Request {
     pub context: infraternal_plugin_api::admission::NodeContext,
 }
 /// Aborting the owner stops accepting work; an already-entered bounded kernel transaction may finish.
+#[cfg(any(test, not(feature = "native-streams")))]
 pub(crate) struct Worker {
     pub sender: mpsc::Sender<Request>,
     task: JoinHandle<()>,
 }
+#[cfg(any(test, not(feature = "native-streams")))]
 impl Worker {
     pub(crate) fn start(
         registry: Registry,
@@ -443,6 +633,7 @@ impl Worker {
         Self { sender, task }
     }
 }
+#[cfg(any(test, not(feature = "native-streams")))]
 impl Drop for Worker {
     fn drop(&mut self) {
         self.task.abort();
@@ -662,6 +853,143 @@ pub async fn call(state: &Path, action: &str, input: &[u8]) -> io::Result<Vec<u8
     }
 }
 
+const MAX_PENDING: usize = 32;
+#[cfg(any(test, feature = "native-streams"))]
+pub(crate) struct Control {
+    registry: Registry,
+    jobs: tokio::task::JoinSet<(
+        u32,
+        Result<infraternal_plugin_api::ActionReply, PluginError>,
+    )>,
+}
+#[cfg(any(test, feature = "native-streams"))]
+impl Control {
+    pub(crate) fn new(registry: Registry) -> Self {
+        Self {
+            registry,
+            jobs: tokio::task::JoinSet::new(),
+        }
+    }
+    #[cfg(not(any(test, feature = "native-streams")))]
+    #[allow(clippy::unused_self)]
+    pub(crate) fn capabilities(&self, _: u64) {}
+    #[cfg(any(test, feature = "native-streams"))]
+    pub(crate) fn capabilities(&self, caps: u64) {
+        self.registry.capabilities(caps);
+    }
+    pub(crate) fn pending(&self) -> bool {
+        !self.jobs.is_empty()
+    }
+    pub(crate) fn start(
+        &mut self,
+        id: u32,
+        action: &str,
+        input: &[u8],
+        context: infraternal_plugin_api::admission::NodeContext,
+    ) -> Result<Option<infraternal_plugin_api::ActionReply>, PluginError> {
+        // Validate borrowed framing before copying into the bounded task queue.
+        if action.len() > 128 || input.len() > MAX_ACTION_BYTES {
+            return Err(PluginError::MessageTooLarge);
+        }
+        if self.jobs.len() >= MAX_PENDING {
+            return Err(PluginError::Rejected);
+        }
+        let registry = self.registry.clone();
+        let action = action.to_owned();
+        let input = input.to_owned();
+        // Kernel work stays with the process worker; owned native I/O runs off dispatch.
+        self.jobs.spawn(async move {
+            (
+                id,
+                registry.execute(false, action, input, Some(context)).await,
+            )
+        });
+        Ok(None)
+    }
+    pub(crate) async fn completed(
+        &mut self,
+    ) -> io::Result<(
+        u32,
+        Result<infraternal_plugin_api::ActionReply, PluginError>,
+    )> {
+        self.jobs
+            .join_next()
+            .await
+            .ok_or_else(|| io::Error::other("Plugin control work is unavailable."))?
+            .map_err(io::Error::other)
+    }
+}
+
+#[cfg(not(any(test, feature = "native-streams")))]
+pub(crate) type Control = TerminalControl;
+
+/// Terminal-only dispatch retains the original bounded sleeping worker and reply channel.
+#[cfg(any(test, not(feature = "native-streams")))]
+pub(crate) struct TerminalControl {
+    worker: Worker,
+    replies: mpsc::Receiver<(
+        u32,
+        Result<infraternal_plugin_api::ActionReply, PluginError>,
+    )>,
+    pending: usize,
+}
+#[cfg(any(test, not(feature = "native-streams")))]
+impl TerminalControl {
+    pub(crate) fn new(registry: Registry) -> Self {
+        let (send, replies) = mpsc::channel(8);
+        Self {
+            worker: Worker::start(registry, send),
+            replies,
+            pending: 0,
+        }
+    }
+    // No native provider exists in this build, so capability changes carry no work.
+    #[allow(clippy::unused_self)]
+    pub(crate) fn capabilities(&self, _: u64) {}
+    pub(crate) fn pending(&self) -> bool {
+        self.pending != 0
+    }
+    pub(crate) fn start(
+        &mut self,
+        call_id: u32,
+        action: &str,
+        input: &[u8],
+        context: infraternal_plugin_api::admission::NodeContext,
+    ) -> Result<Option<infraternal_plugin_api::ActionReply>, PluginError> {
+        if action.len() > 128 || input.len() > MAX_ACTION_BYTES {
+            return Err(PluginError::MessageTooLarge);
+        }
+        if self.pending >= MAX_PENDING {
+            return Err(PluginError::Rejected);
+        }
+        self.worker
+            .sender
+            .try_send(Request {
+                call_id,
+                action: action.to_owned(),
+                input: input.to_owned(),
+                context,
+            })
+            .map_err(|_| PluginError::Rejected)?;
+        self.pending += 1;
+        Ok(None)
+    }
+    pub(crate) async fn completed(
+        &mut self,
+    ) -> io::Result<(
+        u32,
+        Result<infraternal_plugin_api::ActionReply, PluginError>,
+    )> {
+        let reply = self
+            .replies
+            .recv()
+            .await
+            .ok_or_else(|| io::Error::other("Plugin control work is unavailable."))?;
+        self.pending -= 1;
+        Ok(reply)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Exercises worker isolation, public call bounds and reply-owned effects.
@@ -699,6 +1027,69 @@ mod tests {
         unavailable: b"{}",
         unavailable_event: b"{}",
     };
+    #[tokio::test]
+    async fn control_rejects_oversized_calls_before_starting_jobs() {
+        let (registry, _, _) = registry();
+        let mut control = Control::new(registry);
+        let context = infraternal_plugin_api::admission::NodeContext::default();
+        for (action, input) in [
+            ("x".repeat(129), b"{}".to_vec()),
+            ("fixture.read".to_owned(), vec![b' '; MAX_ACTION_BYTES + 1]),
+        ] {
+            assert!(matches!(
+                control.start(1, &action, &input, context),
+                Err(PluginError::MessageTooLarge)
+            ));
+            assert!(
+                !control.pending(),
+                "invalid framing must not retain task-owned input"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn terminal_control_bounds_work_and_drains_fifo_without_native_tasks() {
+        let (registry, started, release) = registry();
+        let mut control = TerminalControl::new(registry);
+        control.capabilities(0);
+        let context = infraternal_plugin_api::admission::NodeContext::default();
+        assert!(
+            control
+                .start(1, "fixture.control", br#"{"hold":true}"#, context)
+                .unwrap()
+                .is_none()
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(3), started.notified())
+            .await
+            .unwrap();
+        for id in 2..=9 {
+            assert!(
+                control
+                    .start(id, "fixture.control", b"{}", context)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(matches!(
+            control.start(10, "fixture.control", b"{}", context),
+            Err(PluginError::Rejected)
+        ));
+        assert!(matches!(
+            control.start(11, &"x".repeat(129), b"{}", context),
+            Err(PluginError::MessageTooLarge)
+        ));
+        release.send(()).unwrap();
+        for id in 1..=9 {
+            assert!(control.pending());
+            let (received, reply) =
+                tokio::time::timeout(std::time::Duration::from_secs(3), control.completed())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(received, id);
+            assert!(reply.is_ok());
+        }
+        assert!(!control.pending());
+    }
     struct Echo {
         started: std::sync::Arc<tokio::sync::Notify>,
         release: std::sync::mpsc::Receiver<()>,
@@ -1065,7 +1456,16 @@ mod tests {
             }
         })
         .await
-        .expect("runtime owner did not release its lifetime lock");
+        .unwrap();
+        // Listener cancellation joins only its async owner. The synchronous
+        // worker also retains ownership until its receiver and registry retire.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while probe.try_lock().is_err() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
     #[tokio::test]
     async fn synchronous_plugin_work_does_not_park_the_current_thread_reactor() {

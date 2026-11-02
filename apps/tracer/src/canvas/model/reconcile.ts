@@ -40,8 +40,9 @@ export async function reconcile(cx: Ctx, read: () => SharedPaint, resolve: (targ
       c = cx.view.build(viewFromDocument(view, columns));
       cx.views.set(view.id, c); continue;
     }
-    // New shells have not acquired a stable reference yet; do not discard them when another device edits.
-    for (const col of c.view.cols) for (const w of col.wins) if (w.kind === "flow" || protectedIds.has(w.id) || (w.kind === "terminal" && !w.sessionId)) {
+    // App streams and guided tasks belong to this device, and new shells have
+    // not acquired a stable reference yet. Keep their bindings across shared edits.
+    for (const col of c.view.cols) for (const w of col.wins) if (w.kind === "flow" || w.kind === "app" || w.kind === "screen" || protectedIds.has(w.id) || (w.kind === "terminal" && !w.sessionId)) {
       if (columns.some((column) => column.wins.some((window) => window.id === w.id))) continue;
       const destination = columns.find((n) => n.id === col.id);
       if (destination) destination.wins.push(w); else columns.push({ ...col, wins: [w] });

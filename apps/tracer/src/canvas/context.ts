@@ -43,9 +43,13 @@ import type { ToolbarModule } from "./toolbar/row";
 import type { SessionUi } from "./windows/session-hooks";
 import type { SettingsSource } from "./views/settings-body.on-demand";
 import type { RecentList } from "./recency";
+import type { AppWindowsAdapter } from "./appwin/adapter";
+import type { AppWindowsHook } from "./appwin/hook.on-demand";
 
 /** One window on the canvas: its card, its model and the things that must be undone when it goes. */
 export interface WinRec {
+  /** Closing animation may retain the card, but it must no longer be reused. */
+  closing?: boolean;
   model: WindowModel;
   card: WindowCard;
   /** The view this window sits in. */
@@ -135,7 +139,15 @@ export interface Adapters {
   addHost?: () => void;
   /** The lock on host connections (D168, D217): its state, the palette row and Settings → Hosts; absent when the server has none. */
   authority?: import("./addhost/authority-unlock").AuthorityControl;
+  /** Streams of app windows and screens from machines (D207, D208); absent in mockups, and the feature is then not offered at all. */
+  appWindows?: AppWindowsAdapter;
   startupHints?: import("./sessions/startup-hints").StartupHints;
+}
+
+/** Loads the app-window runtime only after the desktop stream is wanted and supported. */
+export interface AppWindowsLoader {
+  load(): Promise<AppWindowsHook | undefined>;
+  dispose(): void;
 }
 
 export interface Ctx {
@@ -182,4 +194,6 @@ export interface Ctx {
   toolbar: ToolbarModule;
   mesh?: MeshModule;
   sharing?: SharingModule;
+  /** Deferred loader for app-window and screen behavior; absent in mockups. */
+  appWindows?: AppWindowsLoader;
 }

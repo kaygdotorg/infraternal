@@ -1,5 +1,9 @@
 //! Adapts authenticated remote transports to the existing server terminal actor, retaining durable writer ids and raw native frames [64][130], #78.
 
+#[cfg(any(test, feature = "native-streams"))]
+use crate::embedded::AgentError;
+#[cfg(any(test, feature = "native-streams"))]
+use crate::remote_guard::AuthorityGuard;
 use axum::extract::ws::{Message as WebSocketMessage, WebSocket};
 use bytes::{Bytes, BytesMut};
 use futures_util::{
@@ -13,8 +17,25 @@ use infraternal_agent::{
     remote_tls::TcpTls,
     transport::{Receive, Transmit},
 };
+#[cfg(any(test, feature = "native-streams"))]
+use infraternal_plugin_api::{
+    Operation,
+    streams::{DatagramLane, WireLane, WireStreamDef},
+};
+#[cfg(any(test, feature = "native-streams"))]
+use infraternal_plugin_remote::wire_datagrams::NativeDatagrams;
 use infraternal_protocol::{Frame, encode_muxed_frame_into};
-use std::{collections::HashMap, io, sync::Arc, time::Duration};
+#[cfg(any(test, feature = "native-streams"))]
+use std::sync::{Weak, atomic::AtomicBool};
+use std::{
+    collections::HashMap,
+    io,
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 use tokio::{
     sync::{Mutex, mpsc, watch},
     task::JoinSet,
@@ -225,7 +246,7 @@ pub(crate) struct RemoteLink {
     transport: LinkTransport,
     authority: Option<crate::remote_guard::AuthorityGuard>,
     renewal: std::sync::atomic::AtomicBool,
-    peer_caps: u64,
+    peer_caps: AtomicU64,
     greeting_sent: bool,
     priming: Arc<std::sync::Mutex<Option<crate::remote_standby::Priming>>>,
 }
@@ -257,13 +278,24 @@ impl Drop for PrimingAdmission {
 
 pub(crate) struct QuicLink {
     connection: quinn::Connection,
-    binding: Mutex<Option<BindingConnection>>,
-    streams: Mutex<HashMap<u32, Arc<NativeChannel>>>,
+    binding: StdMutex<Option<Arc<BindingConnection>>>,
+    #[cfg(any(test, feature = "native-streams"))]
+    streams: Arc<StdMutex<Streams>>,
+    #[cfg(not(any(test, feature = "native-streams")))]
+    streams: StdMutex<Streams>,
+    // Terminal-only opens retain the serialized binding admission; only native
+    // builds need caller-owned concurrent reservations and shared metadata.
+    #[cfg(not(any(test, feature = "native-streams")))]
+    terminal_open: Mutex<()>,
+    #[cfg(any(test, feature = "native-streams"))]
+    datagrams: Arc<NativeDatagrams>,
     incoming: Mutex<Incoming>,
     _control: mpsc::Sender<Packet>,
     output: mpsc::Sender<Packet>,
     pumps: Mutex<JoinSet<()>>,
     control_reads: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    delivery_validation: Mutex<()>,
 }
 
 // Native delivery retains channel identity so queued old frames cannot affect
@@ -271,6 +303,222 @@ pub(crate) struct QuicLink {
 struct Packet {
     bytes: Bytes,
     source: Arc<NativeChannel>,
+}
+
+// Reliable terminal and plugin lanes share one metadata reserve. Weak plugin
+// entries cannot retain a caller-owned lane or its datagram admission.
+#[derive(Default)]
+struct Streams {
+    terminal: HashMap<u32, Arc<NativeChannel>>,
+    #[cfg(any(test, feature = "native-streams"))]
+    native: HashMap<u32, NativeLease>,
+    #[cfg(any(test, feature = "native-streams"))]
+    pending: HashMap<u32, u64>,
+    closed: bool,
+}
+#[cfg(any(test, feature = "native-streams"))]
+struct NativeLease {
+    lane: Weak<dyn WireLane>,
+    retired: Arc<AtomicBool>,
+    capability: u64,
+}
+impl Streams {
+    #[cfg_attr(not(any(test, feature = "native-streams")), allow(clippy::unused_self))]
+    fn owns_native(&self, stream: u32) -> bool {
+        #[cfg(any(test, feature = "native-streams"))]
+        {
+            self.native.contains_key(&stream)
+        }
+        #[cfg(not(any(test, feature = "native-streams")))]
+        {
+            let _ = stream;
+            false
+        }
+    }
+    #[cfg(any(test, feature = "native-streams"))]
+    fn provider_full(&self, capability: u64, maximum: usize) -> bool {
+        capability != 0
+            && self
+                .native
+                .values()
+                .filter(|lease| lease.capability == capability)
+                .count()
+                + self
+                    .pending
+                    .values()
+                    .filter(|pending| **pending == capability)
+                    .count()
+                >= maximum
+    }
+    #[cfg(any(test, feature = "native-streams"))]
+    fn prune(&mut self) {
+        #[cfg(any(test, feature = "native-streams"))]
+        self.native.retain(|_, lease| {
+            lease.lane.strong_count() != 0 && !lease.retired.load(Ordering::Acquire)
+        });
+    }
+    fn full(&self) -> bool {
+        #[cfg(not(any(test, feature = "native-streams")))]
+        let native = 0;
+        #[cfg(any(test, feature = "native-streams"))]
+        let native = self.native.len();
+        #[cfg(any(test, feature = "native-streams"))]
+        let pending = self.pending.len();
+        #[cfg(not(any(test, feature = "native-streams")))]
+        let pending = 0;
+        self.terminal.len().saturating_sub(1) + native + pending
+            >= infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS
+    }
+    fn retire(&self) {
+        for channel in self.terminal.values() {
+            channel.retire();
+        }
+        #[cfg(any(test, feature = "native-streams"))]
+        for lease in self.native.values() {
+            if let Some(lane) = lease.lane.upgrade() {
+                lane.retire();
+            }
+        }
+    }
+}
+
+/// A slot is owned before the asynchronous opener begins. Cancellation releases
+/// the slot synchronously, without retaining the enclosing QUIC connection.
+#[cfg(any(test, feature = "native-streams"))]
+pub(crate) struct WireOpening {
+    definition: &'static WireStreamDef,
+    datagram_identity: Option<[u8; 16]>,
+    reservation: Reservation,
+}
+#[cfg(any(test, feature = "native-streams"))]
+struct Reservation {
+    streams: Arc<StdMutex<Streams>>,
+    stream_id: u32,
+}
+#[cfg(any(test, feature = "native-streams"))]
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending
+            .remove(&self.stream_id);
+    }
+}
+impl QuicLink {
+    fn streams(&self) -> std::sync::MutexGuard<'_, Streams> {
+        // This mutex protects ordinary Rust maps; unwind cannot corrupt their
+        // invariants. It is never held across transport I/O or an await.
+        self.streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    fn retire(&self) {
+        let mut streams = self.streams();
+        streams.closed = true;
+        streams.retire();
+        self.connection.close(0u32.into(), b"");
+    }
+    fn binding(&self) -> io::Result<Arc<BindingConnection>> {
+        self.binding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| io::ErrorKind::PermissionDenied.into())
+    }
+    #[cfg(any(test, feature = "native-streams"))]
+    fn reserve(
+        &self,
+        stream_id: u32,
+        capability: u64,
+        maximum: usize,
+    ) -> Result<Reservation, AgentError> {
+        let mut streams = self.streams();
+        #[cfg(any(test, feature = "native-streams"))]
+        streams.prune();
+        if streams.closed
+            || streams.full()
+            || streams.terminal.contains_key(&stream_id)
+            || streams.owns_native(stream_id)
+            || streams.pending.contains_key(&stream_id)
+            || streams.provider_full(capability, maximum)
+        {
+            return Err(AgentError::Rejected);
+        }
+        streams.pending.insert(stream_id, capability);
+        Ok(Reservation {
+            streams: self.streams.clone(),
+            stream_id,
+        })
+    }
+    async fn terminal_channel(
+        &self,
+        stream: u32,
+        frame: &Frame<'_>,
+        primed: bool,
+    ) -> io::Result<Arc<NativeChannel>> {
+        #[cfg(not(any(test, feature = "native-streams")))]
+        let _opening = self.terminal_open.lock().await;
+        let existing = self.streams().terminal.get(&stream).cloned();
+        if let Some(channel) = existing {
+            return Ok(channel);
+        }
+        if !matches!(frame, Frame::AttachTerm { .. }) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        #[cfg(not(any(test, feature = "native-streams")))]
+        {
+            let streams = self.streams();
+            if streams.closed || streams.full() {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+        }
+        #[cfg(any(test, feature = "native-streams"))]
+        let _reservation = self
+            .reserve(stream, 0, 0)
+            .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))?;
+        let binding = self.binding()?;
+        let bound = remote_quic::open_bound(&binding, stream).await?;
+        let channel = Arc::new(NativeChannel::terminal(bound)?);
+        if primed {
+            // Standby intent precedes Attach on this bound stream, including
+            // setup that was already admitted when promotion starts.
+            Transmit::default()
+                .send(
+                    channel.as_ref(),
+                    stream,
+                    &Frame::Call {
+                        call_id: 0,
+                        action_id: "transport.prime",
+                        input_json: b"{}",
+                    },
+                )
+                .await?;
+        }
+
+        let mut pumps = self.pumps.lock().await;
+        while pumps.try_join_next().is_some() {}
+        if pumps.len() > infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        {
+            let mut streams = self.streams();
+            if streams.closed {
+                channel.retire();
+                return Err(io::ErrorKind::ConnectionAborted.into());
+            }
+            #[cfg(any(test, feature = "native-streams"))]
+            streams.pending.remove(&stream);
+            streams.terminal.insert(stream, channel.clone());
+        }
+        pumps.spawn(pump(
+            channel.clone(),
+            self.output.clone(),
+            self.connection.clone(),
+            Receive::default(),
+        ));
+        Ok(channel)
+    }
 }
 
 struct Incoming {
@@ -286,7 +534,7 @@ struct Incoming {
 
 impl Drop for QuicLink {
     fn drop(&mut self) {
-        self.connection.close(0u32.into(), b"");
+        self.retire();
         // JoinSet aborts every reader; no child task retains an orphaned transport.
     }
 }
@@ -302,6 +550,150 @@ impl RemoteLink {
             LinkTransport::Ssh { .. } => None,
         }
     }
+    /// Capacity refusals precede terminal route mutation. Pending plugin opens
+    /// have already reserved their shared metadata slot in the actor turn.
+    pub(crate) fn admits_terminal(&self, stream_id: u32) -> bool {
+        let LinkTransport::Quic(link) = &self.transport else {
+            return true;
+        };
+        let streams = link.streams();
+        #[cfg(any(test, feature = "native-streams"))]
+        let mut streams = streams;
+        #[cfg(any(test, feature = "native-streams"))]
+        streams.prune();
+        #[cfg(any(test, feature = "native-streams"))]
+        let pending = streams.pending.contains_key(&stream_id);
+        #[cfg(not(any(test, feature = "native-streams")))]
+        let pending = false;
+        !streams.closed
+            && !streams.owns_native(stream_id)
+            && !pending
+            && (streams.terminal.contains_key(&stream_id) || !streams.full())
+    }
+    /// Validate and reserve before starting an opening task. No transport I/O
+    /// or ledger await can monopolize the actor or evade the shared lane bound.
+    #[cfg(any(test, feature = "native-streams"))]
+    pub(crate) fn prepare_wire(
+        &self,
+        definition: &'static WireStreamDef,
+        stream_id: u32,
+        opening: &[u8],
+    ) -> Result<WireOpening, AgentError> {
+        definition.validate().map_err(|_| AgentError::Rejected)?;
+        let canonical = compiled_wire_definitions()
+            .find(|compiled| same_definition(compiled, definition))
+            .ok_or(AgentError::Unsupported)?;
+        let LinkTransport::Quic(link) = &self.transport else {
+            return Err(AgentError::Unsupported);
+        };
+        if self.peer_caps.load(Ordering::Acquire) & canonical.capability == 0 {
+            return Err(AgentError::Unsupported);
+        }
+        let decoded =
+            infraternal_protocol::decode_frame(opening).map_err(|_| AgentError::Rejected)?;
+        let tag = opening
+            .iter()
+            .position(|byte| byte & 0x80 == 0)
+            .and_then(|last| opening.get(last + 1));
+        if decoded.wire_len != opening.len()
+            || tag != Some(&canonical.opening_tag)
+            || stream_id == 0
+            || stream_id & 1 != 0
+        {
+            return Err(AgentError::Rejected);
+        }
+        if !self.authority.as_ref().is_some_and(AuthorityGuard::permits) {
+            return Err(AgentError::Unavailable);
+        }
+        let datagram_identity =
+            if canonical.datagram_tag.is_some() && link.connection.max_datagram_size().is_some() {
+                Some(
+                    canonical
+                        .opening_identity
+                        .and_then(|decode| decode(opening))
+                        .ok_or(AgentError::Rejected)?,
+                )
+            } else {
+                None
+            };
+        let reservation = link.reserve(stream_id, canonical.capability, canonical.max_streams)?;
+        Ok(WireOpening {
+            definition: canonical,
+            datagram_identity,
+            reservation,
+        })
+    }
+    /// Finish one reserved opening off the actor's control loop. The returned
+    /// owned lane has already sent its complete opening under host authority.
+    #[cfg(any(test, feature = "native-streams"))]
+    pub(crate) async fn open_wire(
+        &self,
+        admission: WireOpening,
+        opening: &[u8],
+    ) -> Result<Arc<dyn WireLane>, AgentError> {
+        let LinkTransport::Quic(link) = &self.transport else {
+            return Err(AgentError::Unsupported);
+        };
+        let authority = self.authority.as_ref().ok_or(AgentError::Unavailable)?;
+        authority
+            .admit_operation()
+            .await
+            .map_err(|_| AgentError::Unavailable)?;
+        let canonical = admission.definition;
+        let stream_id = admission.reservation.stream_id;
+        let binding = link.binding().map_err(|_| AgentError::Unsupported)?;
+        let bound = tokio::select! { biased;
+            () = authority.cancelled() => return Err(AgentError::Unavailable),
+            bound = remote_quic::open_bound(&binding, stream_id) => bound.map_err(|_| AgentError::Unavailable)?,
+        };
+        let channel = NativeChannel::terminal(bound).map_err(|_| AgentError::Unavailable)?;
+        let datagrams = admission
+            .datagram_identity
+            .map(|identity| {
+                let inner = link
+                    .datagrams
+                    .admit(canonical, identity)
+                    .map_err(|_| AgentError::Rejected)?;
+                Ok::<Arc<dyn DatagramLane>, AgentError>(Arc::new(GuardedDatagrams {
+                    inner,
+                    authority: authority.clone(),
+                }))
+            })
+            .transpose()?;
+        let retired = Arc::new(AtomicBool::new(false));
+        let lane: Arc<dyn WireLane> = Arc::new(
+            infraternal_agent::wire::Lane::new(
+                GuardedChannel {
+                    channel,
+                    authority: authority.clone(),
+                    retired: retired.clone(),
+                },
+                canonical,
+                infraternal_agent::wire::Side::Requester,
+                datagrams,
+            )
+            .map_err(|_| AgentError::Rejected)?,
+        );
+        lane.send(opening)
+            .await
+            .map_err(|()| AgentError::Unavailable)?;
+        let mut streams = link.streams();
+        if streams.closed {
+            lane.retire();
+            return Err(AgentError::Unavailable);
+        }
+        streams.pending.remove(&stream_id);
+        streams.native.insert(
+            stream_id,
+            NativeLease {
+                lane: Arc::downgrade(&lane),
+                retired,
+                capability: canonical.capability,
+            },
+        );
+        Ok(lane)
+    }
+
     #[cfg(feature = "ssh")]
     pub(crate) fn ssh_backed(&self) -> bool {
         matches!(&self.transport, LinkTransport::Ssh { .. })
@@ -316,13 +708,13 @@ impl RemoteLink {
             None => Ok(()),
         }
     }
-    fn retire(&self) {
+    pub(crate) fn retire(&self) {
         match &self.transport {
             #[cfg(feature = "ssh")]
             LinkTransport::Ssh { .. } => {}
             LinkTransport::Tcp { channel, .. } => channel.retire(),
             LinkTransport::WebSocket { channel, .. } => channel.retire(),
-            LinkTransport::Quic(link) => link.connection.close(0u32.into(), b""),
+            LinkTransport::Quic(link) => link.retire(),
         }
     }
     pub(crate) async fn read(
@@ -426,7 +818,7 @@ impl RemoteLink {
             },
             authority: None,
             renewal: std::sync::atomic::AtomicBool::new(false),
-            peer_caps,
+            peer_caps: peer_caps.into(),
             greeting_sent: false,
             priming: Arc::new(std::sync::Mutex::new(None)),
         })
@@ -457,7 +849,7 @@ impl RemoteLink {
             },
             authority: None,
             renewal: std::sync::atomic::AtomicBool::new(false),
-            peer_caps,
+            peer_caps: AtomicU64::new(peer_caps),
             greeting_sent,
             priming: Arc::new(std::sync::Mutex::new(
                 admission.and_then(|admission| admission.priming.take()),
@@ -481,7 +873,7 @@ impl RemoteLink {
             },
             authority: None,
             renewal: std::sync::atomic::AtomicBool::new(false),
-            peer_caps,
+            peer_caps: AtomicU64::new(peer_caps),
             greeting_sent,
             priming: Arc::new(std::sync::Mutex::new(None)),
         })
@@ -531,18 +923,36 @@ impl RemoteLink {
             #[cfg(all(test, feature = "mesh-transport-proof"))]
             diagnostic_peer: None,
             transport: LinkTransport::Quic(QuicLink {
+                #[cfg(any(test, feature = "native-streams"))]
+                datagrams: NativeDatagrams::new(connection.clone()),
                 connection,
-                binding: Mutex::new(None),
-                streams: Mutex::new(HashMap::from([(0, control)])),
+                binding: StdMutex::new(None),
+                #[cfg(not(any(test, feature = "native-streams")))]
+                terminal_open: Mutex::new(()),
+                #[cfg(not(any(test, feature = "native-streams")))]
+                streams: StdMutex::new(Streams {
+                    terminal: HashMap::from([(0, control)]),
+                    ..Streams::default()
+                }),
+                #[cfg(any(test, feature = "native-streams"))]
+                streams: Arc::new(StdMutex::new(Streams {
+                    terminal: HashMap::from([(0, control)]),
+                    #[cfg(any(test, feature = "native-streams"))]
+                    native: HashMap::new(),
+                    pending: HashMap::new(),
+                    closed: false,
+                })),
                 incoming: Mutex::new(incoming),
                 _control: control_output,
                 output,
                 pumps: Mutex::new(pumps),
                 control_reads: std::sync::atomic::AtomicBool::new(true),
+                #[cfg(test)]
+                delivery_validation: Mutex::new(()),
             }),
             authority: None,
             renewal: std::sync::atomic::AtomicBool::new(false),
-            peer_caps,
+            peer_caps: AtomicU64::new(peer_caps),
             greeting_sent,
             priming: Arc::new(std::sync::Mutex::new(
                 admission.and_then(|admission| admission.priming.take()),
@@ -649,8 +1059,11 @@ impl RemoteLink {
                     return Ok(0);
                 };
                 let stream = message.source.native_stream_id().unwrap_or(0);
-                let mut streams = link.streams.lock().await;
+                #[cfg(test)]
+                let _validation = link.delivery_validation.lock().await;
+                let mut streams = link.streams();
                 if !streams
+                    .terminal
                     .get(&stream)
                     .is_some_and(|current| Arc::ptr_eq(current, &message.source))
                 {
@@ -659,7 +1072,7 @@ impl RemoteLink {
                 }
                 if stream != 0
                     && matches!(infraternal_protocol::decode_muxed_frame(&message.bytes), Ok(decoded) if matches!(decoded.frame, Frame::Close { .. }))
-                    && let Some(channel) = streams.remove(&stream)
+                    && let Some(channel) = streams.terminal.remove(&stream)
                 {
                     channel.retire();
                 }
@@ -690,7 +1103,7 @@ impl RemoteLink {
         release: tokio::sync::oneshot::Receiver<()>,
     ) {
         if let LinkTransport::Quic(link) = &self.transport {
-            let _guard = link.streams.lock().await;
+            let _guard = link.delivery_validation.lock().await;
             let _ = ready.send(());
             let _ = release.await;
         }
@@ -714,7 +1127,10 @@ impl RemoteLink {
         };
         let incoming = link.incoming.try_lock().ok();
         Some([
-            link.streams.try_lock().ok().map(|streams| streams.len()),
+            link.streams
+                .try_lock()
+                .ok()
+                .map(|streams| streams.terminal.len()),
             link.pumps.try_lock().ok().map(|pumps| pumps.len()),
             incoming.as_ref().map(|incoming| incoming.control.len()),
             incoming.as_ref().map(|incoming| incoming.bulk.len()),
@@ -852,7 +1268,7 @@ impl RemoteLink {
         let LinkTransport::Quic(link) = &self.transport else {
             return Err(io::ErrorKind::Unsupported.into());
         };
-        let channel = link.streams.lock().await.get(&stream).cloned();
+        let channel = link.streams().terminal.get(&stream).cloned();
         let write = async {
             if let Some(channel) = channel {
                 return channel.write(encoded).await;
@@ -881,18 +1297,19 @@ impl RemoteLink {
     }
 
     /// Cancellation may happen before binding, so this never creates a stream.
-    pub(crate) async fn retire_writer(&self, stream: u32) {
+    pub(crate) fn retire_writer(&self, stream: u32) -> std::future::Ready<()> {
         if let LinkTransport::Quic(link) = &self.transport
-            && let Some(channel) = link.streams.lock().await.remove(&stream)
+            && let Some(channel) = link.streams().terminal.remove(&stream)
         {
             channel.retire();
         }
+        std::future::ready(())
     }
 
     /// Promotion joins setup first, then removes bindings no cached-ready writer owns.
-    pub(crate) async fn retain_writers(&self, writers: &[u32]) {
+    pub(crate) fn retain_writers(&self, writers: &[u32]) -> std::future::Ready<()> {
         if let LinkTransport::Quic(link) = &self.transport {
-            link.streams.lock().await.retain(|stream, channel| {
+            link.streams().terminal.retain(|stream, channel| {
                 let keep = *stream == 0 || writers.contains(stream);
                 if !keep {
                     channel.retire();
@@ -900,29 +1317,35 @@ impl RemoteLink {
                 keep
             });
         }
+        std::future::ready(())
     }
 
     pub(crate) fn peer_capabilities(&self) -> u64 {
-        self.peer_caps
+        self.peer_caps.load(Ordering::Acquire)
     }
     #[cfg(test)]
     pub(crate) fn supports_server_paths(&self) -> bool {
-        self.peer_caps & infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS != 0
+        self.peer_capabilities() & infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS != 0
     }
 
     pub(crate) fn supports_renewal(&self) -> bool {
         self.renewal.load(std::sync::atomic::Ordering::Acquire)
     }
-    pub(crate) async fn hello(&self, frame: &Frame<'_>) -> io::Result<()> {
+    pub(crate) fn hello(&self, frame: &Frame<'_>) -> io::Result<()> {
         if let Frame::Hello { caps, .. } = frame {
+            self.peer_caps.store(*caps, Ordering::Release);
             self.renewal.store(
                 caps & infraternal_agent::remote_renewal::LIVE_RENEWAL != 0,
                 std::sync::atomic::Ordering::Release,
             );
         }
         if let LinkTransport::Quic(link) = &self.transport {
-            *link.binding.lock().await =
-                Some(remote_quic::negotiate_binding(&link.connection, frame)?);
+            *link
+                .binding
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
+                remote_quic::negotiate_binding(&link.connection, frame)?,
+            ));
         }
         Ok(())
     }
@@ -943,7 +1366,7 @@ impl RemoteLink {
             LinkTransport::WebSocket { channel, .. } => channel.write(muxed).await,
             LinkTransport::Quic(link) => {
                 let terminal_close = stream != 0 && matches!(frame, Frame::Close { .. });
-                let existing = link.streams.lock().await.get(&stream).cloned();
+                let existing = link.streams().terminal.get(&stream).cloned();
                 let channel = if let Some(channel) = existing {
                     channel
                 } else {
@@ -961,51 +1384,7 @@ impl RemoteLink {
                         }
                         return Ok(());
                     }
-                    if !matches!(frame, Frame::AttachTerm { .. }) {
-                        return Err(io::ErrorKind::InvalidData.into());
-                    }
-                    // Binding serializes channel creation, but never owns the
-                    // delivery map while QUIC flow control can suspend setup.
-                    let binding = link.binding.lock().await;
-                    let existing = link.streams.lock().await.get(&stream).cloned();
-                    if let Some(channel) = existing {
-                        channel
-                    } else {
-                        let bound = remote_quic::open_bound(
-                            binding.as_ref().ok_or(io::ErrorKind::PermissionDenied)?,
-                            stream,
-                        )
-                        .await?;
-                        let channel = Arc::new(NativeChannel::terminal(bound)?);
-                        if self.primed() {
-                            Transmit::default()
-                                .send(
-                                    channel.as_ref(),
-                                    stream,
-                                    &Frame::Call {
-                                        call_id: 0,
-                                        action_id: "transport.prime",
-                                        input_json: b"{}",
-                                    },
-                                )
-                                .await?;
-                        }
-                        let mut pumps = link.pumps.lock().await;
-                        while pumps.try_join_next().is_some() {}
-                        if pumps.len() >= 129 {
-                            return Err(io::ErrorKind::WouldBlock.into());
-                        }
-                        // Publish identity before its reader can deliver an Ack.
-                        let mut streams = link.streams.lock().await;
-                        streams.insert(stream, channel.clone());
-                        pumps.spawn(pump(
-                            channel.clone(),
-                            link.output.clone(),
-                            link.connection.clone(),
-                            Receive::default(),
-                        ));
-                        channel
-                    }
+                    link.terminal_channel(stream, frame, self.primed()).await?
                 };
                 let result = Transmit::default()
                     .send(channel.as_ref(), stream, frame)
@@ -1023,9 +1402,8 @@ impl RemoteLink {
                     // Retire this channel even after a partial/failed Close:
                     // no later frame may follow it, and its writer-local error
                     // must not make the actor discard the host connection.
-                    // Release any write error before waiting for the map lock.
                     drop(result);
-                    link.streams.lock().await.remove(&stream);
+                    link.streams().terminal.remove(&stream);
                     channel.retire();
                     Ok(())
                 } else {
@@ -1109,6 +1487,128 @@ async fn greeting<C: Channel>(
     Ok((admission.hello(channel, receive, prime).await?, true))
 }
 
+/// Advertise only validated compiled routes; packet-supplied capability bits
+/// cannot install a provider on either side of the host connection.
+#[cfg(not(any(test, feature = "native-streams")))]
+pub(crate) fn compiled_wire_capabilities() -> u64 {
+    0
+}
+#[cfg(any(test, feature = "native-streams"))]
+pub(crate) fn compiled_wire_capabilities() -> u64 {
+    compiled_wire_definitions()
+        .filter(|wire| wire.validate().is_ok())
+        .fold(0, |caps, wire| caps | wire.capability)
+}
+#[cfg(any(test, feature = "native-streams"))]
+fn compiled_wire_definitions() -> impl Iterator<Item = &'static WireStreamDef> {
+    crate::compiled_plugins()
+        .iter()
+        .flat_map(|descriptor| descriptor.streams)
+        .filter_map(|stream| stream.wire.as_ref())
+}
+#[cfg(any(test, feature = "native-streams"))]
+fn same_definition(left: &WireStreamDef, right: &WireStreamDef) -> bool {
+    left.capability == right.capability
+        && left.browser_capability == right.browser_capability
+        && left.opening_tag == right.opening_tag
+        && left.requests == right.requests
+        && left.replies == right.replies
+        && left.max_streams == right.max_streams
+        && left.datagram_tag == right.datagram_tag
+        && same_decoder(left.opening_identity, right.opening_identity)
+        && same_decoder(left.datagram_identity, right.datagram_identity)
+}
+#[cfg(any(test, feature = "native-streams"))]
+fn same_decoder(
+    left: Option<infraternal_plugin_api::streams::DatagramIdentity>,
+    right: Option<infraternal_plugin_api::streams::DatagramIdentity>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => std::ptr::fn_addr_eq(left, right),
+        _ => false,
+    }
+}
+
+// Authority remains attached to actual reads/writes after the actor transfers
+// lane ownership. A writer permit participates in durable revocation draining.
+#[cfg(any(test, feature = "native-streams"))]
+struct GuardedChannel {
+    channel: NativeChannel,
+    authority: AuthorityGuard,
+    retired: Arc<AtomicBool>,
+}
+#[cfg(any(test, feature = "native-streams"))]
+impl Channel for GuardedChannel {
+    fn native_stream_id(&self) -> Option<u32> {
+        self.channel.native_stream_id()
+    }
+    fn frame_timeout(&self) -> Option<Duration> {
+        self.channel.frame_timeout()
+    }
+    fn retire(&self) {
+        self.retired.store(true, Ordering::Release);
+        self.channel.retire();
+    }
+    async fn read(&self, bytes: &mut [u8]) -> io::Result<usize> {
+        if !self.authority.permits() {
+            self.retire();
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        tokio::select! { biased;
+            () = self.authority.cancelled() => { self.retire(); Err(io::ErrorKind::PermissionDenied.into()) },
+            result = self.channel.read(bytes) => {
+                if self.authority.permits() { result } else { self.retire(); Err(io::ErrorKind::PermissionDenied.into()) }
+            },
+        }
+    }
+    async fn write(&self, bytes: &[u8]) -> io::Result<()> {
+        let _permit = self.authority.write_permit().await?;
+        tokio::select! { biased;
+            () = self.authority.cancelled() => { self.retire(); Err(io::ErrorKind::PermissionDenied.into()) },
+            result = self.channel.write(bytes) => result,
+        }
+    }
+}
+#[cfg(any(test, feature = "native-streams"))]
+struct GuardedDatagrams {
+    inner: Arc<dyn DatagramLane>,
+    authority: AuthorityGuard,
+}
+#[cfg(any(test, feature = "native-streams"))]
+impl DatagramLane for GuardedDatagrams {
+    fn retire(&self) {
+        self.inner.retire();
+    }
+    fn receive(&self) -> Operation<'_, Result<Bytes, ()>> {
+        Box::pin(async {
+            if !self.authority.permits() {
+                return Err(());
+            }
+            tokio::select! { biased;
+                () = self.authority.cancelled() => Err(()),
+                result = self.inner.receive() => if self.authority.permits() { result } else { Err(()) },
+            }
+        })
+    }
+    fn send<'a>(&'a self, packet: &'a [u8]) -> Operation<'a, Result<(), ()>> {
+        Box::pin(async move {
+            let _permit = self.authority.write_permit().await.map_err(|_| ())?;
+            tokio::select! { biased;
+                () = self.authority.cancelled() => Err(()),
+                result = self.inner.send(packet) => result,
+            }
+        })
+    }
+    fn max_payload(&self) -> Option<usize> {
+        if self.authority.permits() {
+            self.inner.max_payload()
+        } else {
+            None
+        }
+    }
+}
+
 async fn pump(
     channel: Arc<NativeChannel>,
     output: mpsc::Sender<Packet>,
@@ -1166,6 +1666,10 @@ async fn pump(
         }
     }
 }
+
+#[cfg(all(test, feature = "desktop"))]
+#[path = "remote_wire_tests.rs"]
+mod wire_tests;
 
 #[cfg(test)]
 impl RemoteLink {

@@ -19,10 +19,14 @@ pub mod release_version;
 pub const VERSION: &str = env!("INFRATERNAL_VERSION");
 /// Static header avoids a per-download formatting allocation [226].
 pub const RELEASE_USER_AGENT: &str = concat!("infraternal/", env!("INFRATERNAL_VERSION"));
+#[cfg(any(test, feature = "native-wire"))]
+pub mod datagrams;
+pub mod path;
 pub mod routing;
 pub mod server_path;
 #[cfg(feature = "socket-host")]
 pub mod storage;
+pub mod streams;
 
 #[cfg(feature = "socket-host")]
 use bytes::Bytes;
@@ -111,6 +115,21 @@ pub trait SocketHost: Send + Sync {
     fn session_incarnation(&self) -> Option<&str> {
         None
     }
+    /// Each viewer retains this socket's own live authority, never another login
+    /// belonging to the same user. Unimplemented adapters fail closed.
+    #[cfg(feature = "native-streams")]
+    fn authority(&self) -> Arc<dyn streams::Authority> {
+        Arc::new(streams::Denied)
+    }
+    /// Withdraw the socket projection before aborting its workers.
+    #[cfg(feature = "native-streams")]
+    fn retire(&self) {}
+    /// Resolve only hosts accessible to this authenticated user. A disabled or
+    /// unsupported adapter opens no listener and returns no host lease.
+    #[cfg(any(test, feature = "native-streams"))]
+    fn node<'a>(&'a self, _id: &'a str) -> Operation<'a, Option<Arc<dyn streams::NodeHost>>> {
+        Box::pin(async { None })
+    }
     /// # Errors
     /// Refuses when socket authority ends or the supplied operation fails.
     fn authorized<'a>(
@@ -150,6 +169,23 @@ pub struct PluginReply {
     pub plugin_id: &'static str,
     pub epoch: u64,
     pub wire: Bytes,
+    /// Optional per-packet authority survives queueing and guards the actual write.
+    #[cfg(feature = "native-streams")]
+    pub authority: Option<Arc<dyn streams::Authority>>,
+}
+#[cfg(feature = "socket-host")]
+impl PluginReply {
+    /// Construct an ordinary reply independently of dependency feature unification.
+    #[must_use]
+    pub fn new(plugin_id: &'static str, epoch: u64, wire: Bytes) -> Self {
+        Self {
+            plugin_id,
+            epoch,
+            wire,
+            #[cfg(feature = "native-streams")]
+            authority: None,
+        }
+    }
 }
 /// The host stamps lifecycle identity; plugin code cannot replace it on the hosted queue.
 #[cfg(feature = "socket-host")]
@@ -158,6 +194,8 @@ pub struct ReplySender {
     tx: mpsc::Sender<PluginReply>,
     plugin_id: &'static str,
     epoch: u64,
+    #[cfg(feature = "native-streams")]
+    authority: Option<Arc<dyn streams::Authority>>,
 }
 #[cfg(feature = "socket-host")]
 impl ReplySender {
@@ -168,6 +206,19 @@ impl ReplySender {
             tx,
             plugin_id,
             epoch,
+            #[cfg(feature = "native-streams")]
+            authority: None,
+        }
+    }
+    /// Bind bulk delivery to its originating session and viewer lease.
+    #[must_use]
+    #[cfg(feature = "native-streams")]
+    pub fn with_authority(&self, authority: Arc<dyn streams::Authority>) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            plugin_id: self.plugin_id,
+            epoch: self.epoch,
+            authority: Some(authority),
         }
     }
     /// Send opaque encoded bytes with the host's lifecycle identity.
@@ -180,13 +231,59 @@ impl ReplySender {
                 plugin_id: self.plugin_id,
                 epoch: self.epoch,
                 wire,
+                #[cfg(feature = "native-streams")]
+                authority: self.authority.clone(),
             })
             .await
+    }
+    /// Retain at most one bulk packet until the transport releases its bytes.
+    /// Cancellation drops the completion lease; socket queues stay bounded.
+    /// # Errors
+    /// Refuses a closed queue or a retired packet lease.
+    #[allow(clippy::result_unit_err)] // A packet lease has only live/retired states, like WireLane.
+    #[cfg(feature = "native-streams")]
+    pub async fn send_and_wait(&self, wire: Bytes) -> Result<(), ()> {
+        struct Lease {
+            bytes: Bytes,
+            done: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+        impl AsRef<[u8]> for Lease {
+            fn as_ref(&self) -> &[u8] {
+                &self.bytes
+            }
+        }
+        impl Drop for Lease {
+            fn drop(&mut self) {
+                if let Some(done) = self.done.take() {
+                    let _ = done.send(());
+                }
+            }
+        }
+        let (done, completed) = tokio::sync::oneshot::channel();
+        self.send(Bytes::from_owner(Lease {
+            bytes: wire,
+            done: Some(done),
+        }))
+        .await
+        .map_err(|_| ())?;
+        completed.await.map_err(|_| ())
     }
 }
 /// Compiled implementations own their work and expose only declared entry points.
 #[cfg(feature = "socket-host")]
 pub trait Plugin: Send + Sync {
+    /// Change admission and withdraw retained resources synchronously before
+    /// the host awaits shutdown. Enabling must remain lazy: no task, timer or
+    /// listener starts here. Disabling is idempotent and cannot revive work.
+    #[cfg(any(test, feature = "global-work"))]
+    fn configure(&self, _enabled: bool) {}
+    /// Join plugin-owned work after admission and socket workers are withdrawn.
+    /// The synchronous hook must already have signalled retirement, so cancelling
+    /// this waiter cannot leave work admitted under a disabled feature.
+    #[cfg(any(test, feature = "global-work"))]
+    fn stopped(&self) -> Operation<'_, ()> {
+        Box::pin(async {})
+    }
     fn descriptor(&self) -> &'static PluginDescriptor;
     /// Publish committed host authority changes through existing plugin workers.
     /// The host calls this only after durable commit; it creates no idle work.
@@ -253,6 +350,23 @@ pub struct StreamDef {
     pub id: &'static str,
     pub schema: SchemaRef,
     pub resumable: bool,
+    /// Native binary lanes are additive; absent metadata preserves existing JSON.
+    #[cfg(any(test, feature = "native-streams"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wire: Option<streams::WireStreamDef>,
+}
+impl StreamDef {
+    /// Declare an existing JSON stream independently of native feature unification.
+    #[must_use]
+    pub const fn json(id: &'static str, schema: SchemaRef, resumable: bool) -> Self {
+        Self {
+            id,
+            schema,
+            resumable,
+            #[cfg(any(test, feature = "native-streams"))]
+            wire: None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, Serialize)]
 pub enum DefaultValue {
@@ -309,6 +423,34 @@ impl PluginDescriptor {
                 || action.effect == Effect::Destructive && action.dry_run != DryRun::Required
             {
                 return Err("The plugin action definition is unavailable.");
+            }
+        }
+        for (index, stream) in self.streams.iter().enumerate() {
+            if stream.id.is_empty()
+                || stream.schema.0.is_empty()
+                || self.streams[..index]
+                    .iter()
+                    .any(|other| other.id == stream.id)
+            {
+                return Err("The plugin stream definition is unavailable.");
+            }
+            #[cfg(any(test, feature = "native-streams"))]
+            if let Some(wire) = stream.wire {
+                wire.validate()?;
+                if self.streams[..index]
+                    .iter()
+                    .filter_map(|other| other.wire)
+                    .any(|other| {
+                        other.capability == wire.capability
+                            || wire.browser_capability.is_some()
+                                && other.browser_capability == wire.browser_capability
+                            || other.opening_tag == wire.opening_tag
+                            || wire.datagram_tag.is_some()
+                                && wire.datagram_tag == other.datagram_tag
+                    })
+                {
+                    return Err("The plugin stream ownership is ambiguous.");
+                }
             }
         }
         Ok(())
@@ -515,6 +657,27 @@ pub trait AgentPlugin: Send {
     /// # Errors
     /// Returns a bounded plugin error for a rejected action, unknown action, or oversized body.
     fn call(&mut self, action_id: &str, input: &[u8]) -> Result<Vec<u8>, PluginError>;
+    /// Optional owned asynchronous action. Returning a static future releases
+    /// registry admission before native I/O; existing synchronous plugins keep
+    /// their behavior and deferred-after-write contract.
+    #[cfg(any(test, feature = "native-streams"))]
+    fn call_async(
+        &mut self,
+        _action_id: &str,
+        _input: &[u8],
+    ) -> Option<Operation<'static, Result<ActionReply, PluginError>>> {
+        None
+    }
+    /// Compiled native dispatch is separate from runtime preparation. A disabled
+    /// provider advertises its declaration but refuses effects in its own state.
+    #[cfg(any(test, feature = "native-streams"))]
+    fn wire_provider(&self) -> Option<Arc<dyn streams::WireProvider>> {
+        None
+    }
+    /// Host-owned negotiated native capabilities, updated once per admitted
+    /// connection. Zero withdraws availability on mux-only transport or loss.
+    #[cfg(any(test, feature = "native-streams"))]
+    fn transport_capabilities(&mut self, _capabilities: u64) {}
     /// Prepare an effect that can interrupt the current transport after its reply.
     /// # Errors
     /// Returns the same bounded dispatch failures as `call`.
@@ -551,6 +714,96 @@ pub struct PluginRegistry {
 }
 
 impl PluginRegistry {
+    /// Publish current negotiated transport availability without packet-owned
+    /// routing or per-frame provider callbacks.
+    #[cfg(any(test, feature = "native-streams"))]
+    pub fn transport_capabilities(&mut self, capabilities: u64) {
+        for plugin in &mut self.plugins {
+            plugin.transport_capabilities(capabilities);
+        }
+    }
+    /// Collect immutable native handlers without retaining the mutable registry.
+    /// # Errors
+    /// Refuses undeclared providers and ambiguous capabilities/opening tags.
+    #[cfg(any(test, feature = "native-streams"))]
+    pub fn wire_providers(&self) -> Result<Vec<streams::WireProviderEntry>, PluginError> {
+        let mut entries: Vec<streams::WireProviderEntry> = Vec::new();
+        for plugin in &self.plugins {
+            let Some(provider) = plugin.wire_provider() else {
+                continue;
+            };
+            let descriptor = plugin.descriptor();
+            descriptor
+                .validate()
+                .map_err(|_| PluginError::InvalidDescriptor)?;
+            let mut declared = false;
+            for definition in descriptor
+                .streams
+                .iter()
+                .filter_map(|stream| stream.wire.as_ref())
+            {
+                if entries.iter().any(|entry| {
+                    entry.definition.capability == definition.capability
+                        || definition.browser_capability.is_some()
+                            && entry.definition.browser_capability == definition.browser_capability
+                        || entry.definition.opening_tag == definition.opening_tag
+                        || definition.datagram_tag.is_some()
+                            && definition.datagram_tag == entry.definition.datagram_tag
+                }) {
+                    return Err(PluginError::InvalidDescriptor);
+                }
+                entries.push(streams::WireProviderEntry {
+                    definition,
+                    provider: provider.clone(),
+                });
+                declared = true;
+            }
+            if !declared {
+                return Err(PluginError::InvalidDescriptor);
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Prepare a bounded owned operation, leaving the registry free for other
+    /// control traffic while the provider waits on native I/O.
+    /// # Errors
+    /// Refuses undeclared actions and oversized inputs before provider dispatch.
+    #[cfg(any(test, feature = "native-streams"))]
+    pub fn begin_call(
+        &mut self,
+        action_id: &str,
+        input: &[u8],
+    ) -> Result<Operation<'static, Result<ActionReply, PluginError>>, PluginError> {
+        if input.len() > MAX_ACTION_BYTES {
+            return Err(PluginError::MessageTooLarge);
+        }
+        let plugin = self
+            .plugins
+            .iter_mut()
+            .find(|plugin| {
+                plugin
+                    .descriptor()
+                    .actions
+                    .iter()
+                    .chain(plugin.control_actions())
+                    .any(|action| action.id == action_id)
+            })
+            .ok_or(PluginError::UnknownAction)?;
+        let operation = if let Some(operation) = plugin.call_async(action_id, input) {
+            operation
+        } else {
+            let reply = plugin.call_with_reply(action_id, input)?;
+            Box::pin(async move { Ok(reply) })
+        };
+        Ok(Box::pin(async move {
+            let reply = operation.await?;
+            if reply.json.len() > MAX_ACTION_BYTES {
+                return Err(PluginError::MessageTooLarge);
+            }
+            Ok(reply)
+        }))
+    }
     /// Consult resource policies without selecting a feature in core dispatch.
     /// # Errors
     /// Returns the first policy refusal.

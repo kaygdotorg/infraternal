@@ -7,9 +7,13 @@ use infraternal_plugin_api::{
     ActionDef, Effect, Permission, Plugin, PluginReply, ReplySender, SocketHost,
     SubscriptionRegistry, subscription_current, subscription_withdraw,
 };
+#[cfg(any(test, feature = "native-streams"))]
+use infraternal_protocol::frame_type;
 use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
 use serde::Deserialize;
 use serde_json::{Value, json};
+#[cfg(any(test, feature = "native-streams"))]
+use std::collections::HashMap;
 // Serde structs also accept positional arrays. Control actions declare objects,
 // so reject that alternate representation before deserializing bounded input.
 fn parse_control<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, ()> {
@@ -84,6 +88,16 @@ struct Runtime {
     nodes: tokio::sync::Mutex<node_lifecycle::Nodes>,
     changed: watch::Sender<()>,
 }
+#[cfg(any(test, feature = "global-work"))]
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        // Global sessions outlive sockets, but never their feature runtime.
+        // Plugin-owned handles retire their workers when the plugin drops.
+        for entry in &self.entries {
+            entry.plugin.configure(false);
+        }
+    }
+}
 struct Entry {
     plugin: Arc<dyn Plugin>,
     enabled: AtomicBool,
@@ -132,6 +146,23 @@ impl PluginRuntime {
     pub(crate) fn downgrade(&self) -> WeakRuntime {
         WeakRuntime(Arc::downgrade(&self.inner))
     }
+    /// Advertise compiled browser identities without enabling work or aliasing leg-B core bits.
+    #[must_use]
+    #[cfg(not(any(test, feature = "native-streams")))]
+    pub fn wire_capabilities(&self) -> u64 {
+        0
+    }
+    #[cfg(any(test, feature = "native-streams"))]
+    #[must_use]
+    pub fn wire_capabilities(&self) -> u64 {
+        self.inner
+            .entries
+            .iter()
+            .flat_map(|entry| entry.plugin.descriptor().streams)
+            .filter_map(|stream| stream.wire)
+            .filter(|wire| wire.validate().is_ok())
+            .fold(0, |caps, wire| caps | wire.browser_capability.unwrap_or(0))
+    }
 
     /// Assemble pure declarations; no worker, timer or listener starts here.
     #[must_use]
@@ -148,6 +179,8 @@ impl PluginRuntime {
                         part.default_enabled
                             && part.requires.iter().all(|required| *required == role)
                     });
+                #[cfg(any(test, feature = "global-work"))]
+                plugin.configure(enabled);
                 Arc::new(Entry {
                     plugin,
                     enabled: AtomicBool::new(enabled),
@@ -197,6 +230,12 @@ impl PluginRuntime {
                 }
                 entry.enabled.store(enabled, Ordering::Release);
             }
+        }
+        #[cfg(any(test, feature = "global-work"))]
+        for entry in &inner.entries {
+            entry
+                .plugin
+                .configure(entry.enabled.load(Ordering::Acquire));
         }
         inner.store = Some(pool);
         Ok(self)
@@ -288,6 +327,12 @@ impl PluginRuntime {
             return Err(PluginError::RoleUnavailable);
         }
         if entry.enabled.load(Ordering::Acquire) == enabled {
+            // A prior switch may have been cancelled while joining global work.
+            // Repeated disable must finish that join before acknowledging off.
+            #[cfg(any(test, feature = "global-work"))]
+            if !enabled {
+                entry.plugin.stopped().await;
+            }
             return self.persist_setting(id, enabled, host).await;
         }
         let next_epoch = entry
@@ -312,6 +357,8 @@ impl PluginRuntime {
             }
             entry.epoch.store(next_epoch, Ordering::Release);
             entry.enabled.store(enabled, Ordering::Release);
+            #[cfg(any(test, feature = "global-work"))]
+            entry.plugin.configure(enabled);
             if enabled {
                 Vec::new()
             } else {
@@ -334,11 +381,17 @@ impl PluginRuntime {
         for handle in handles {
             let _ = handle.await;
         }
+        #[cfg(any(test, feature = "global-work"))]
+        if !enabled {
+            entry.plugin.stopped().await;
+        }
         if !enabled && let Err(error) = self.persist_setting(id, enabled, host).await {
             // A failed save must retain the previous durable state. Old workers
             // stay stopped; restoring enabled state remains lazy.
             entry.epoch.store(restore_epoch, Ordering::Release);
             entry.enabled.store(true, Ordering::Release);
+            #[cfg(any(test, feature = "global-work"))]
+            entry.plugin.configure(true);
             self.inner.changed.send_replace(());
             self.start_nodes(entry).await?;
             return Err(error);
@@ -414,6 +467,27 @@ pub struct SocketPlugins {
     replies: mpsc::Sender<PluginReply>,
     receiver: mpsc::Receiver<PluginReply>,
     generation: u32,
+    #[cfg(any(test, feature = "native-streams"))]
+    native: HashMap<u32, NativeStream>,
+    #[cfg(any(test, feature = "native-streams"))]
+    capabilities: u64,
+    #[cfg(any(test, feature = "native-streams"))]
+    delivery_authority: Option<Arc<dyn infraternal_plugin_api::streams::Authority>>,
+}
+#[cfg(any(test, feature = "native-streams"))]
+struct NativeStream {
+    plugin: &'static str,
+    epoch: u64,
+    definition: infraternal_plugin_api::streams::WireStreamDef,
+    closed: bool,
+}
+#[cfg(any(test, feature = "native-streams"))]
+impl Drop for SocketPlugins {
+    fn drop(&mut self) {
+        // Withdraw before member drops abort workers: retained host references
+        // must not keep a disconnected viewer authorized.
+        self.host.retire();
+    }
 }
 impl SocketPlugins {
     /// Bind one browser socket without starting plugin workers.
@@ -430,6 +504,12 @@ impl SocketPlugins {
             replies,
             receiver,
             generation: 0,
+            #[cfg(any(test, feature = "native-streams"))]
+            native: HashMap::new(),
+            #[cfg(any(test, feature = "native-streams"))]
+            capabilities: 0,
+            #[cfg(any(test, feature = "native-streams"))]
+            delivery_authority: None,
         }
     }
     /// Wait on queued work and lifecycle changes; disabled views end without polling.
@@ -442,6 +522,10 @@ impl SocketPlugins {
             }) && let Ok(reply) = self.receiver.try_recv()
             {
                 return Some(SocketReply::Plugin(reply));
+            }
+            #[cfg(any(test, feature = "native-streams"))]
+            if let Some(reply) = self.native_withdrawal() {
+                return Some(reply);
             }
             for socket in &mut self.entries {
                 let expired = socket.entry.epoch.load(Ordering::Acquire) != socket.epoch
@@ -466,11 +550,11 @@ impl SocketPlugins {
                     )
                     .is_ok()
                     {
-                        return Some(SocketReply::Withdrawal(PluginReply {
-                            plugin_id: socket.entry.plugin.descriptor().id,
-                            epoch: socket.epoch,
-                            wire: Bytes::from(wire),
-                        }));
+                        return Some(SocketReply::Withdrawal(PluginReply::new(
+                            socket.entry.plugin.descriptor().id,
+                            socket.epoch,
+                            Bytes::from(wire),
+                        )));
                     }
                 }
                 if !expired && socket.withdraw_before == 0 {
@@ -496,11 +580,11 @@ impl SocketPlugins {
                     )
                     .is_ok()
                     {
-                        return Some(SocketReply::Withdrawal(PluginReply {
-                            plugin_id: socket.entry.plugin.descriptor().id,
-                            epoch: socket.epoch,
-                            wire: Bytes::from(wire),
-                        }));
+                        return Some(SocketReply::Withdrawal(PluginReply::new(
+                            socket.entry.plugin.descriptor().id,
+                            socket.epoch,
+                            Bytes::from(wire),
+                        )));
                     }
                 }
             }
@@ -510,13 +594,66 @@ impl SocketPlugins {
             }
         }
     }
+    #[cfg(any(test, feature = "native-streams"))]
+    fn native_withdrawal(&self) -> Option<SocketReply> {
+        for (&stream, native) in &self.native {
+            if !native.closed
+                && self.entries.iter().any(|socket| {
+                    socket.entry.plugin.descriptor().id == native.plugin
+                        && (socket.reply_epoch != native.epoch
+                            || socket.entry.epoch.load(Ordering::Acquire) != socket.epoch
+                            || socket.requests.is_closed())
+                })
+            {
+                if std::env::var_os("INFRATERNAL_NATIVE_DIAGNOSTICS").is_some() {
+                    eprintln!("native_withdrawal stream={stream} reason=worker-or-feature-ended");
+                }
+                let mut wire = Vec::new();
+                if encode_muxed_frame_into(
+                    stream,
+                    &Frame::Close {
+                        code: 4403,
+                        reason: "stream unavailable",
+                    },
+                    &mut wire,
+                )
+                .is_ok()
+                {
+                    return Some(SocketReply::Withdrawal(PluginReply::new(
+                        native.plugin,
+                        native.epoch,
+                        Bytes::from(wire),
+                    )));
+                }
+            }
+        }
+        None
+    }
     /// Generation and lifecycle checks run before the public header is restored.
     #[must_use]
     pub fn accept(&mut self, reply: SocketReply, encode: &mut Vec<u8>) -> Option<Bytes> {
+        #[cfg(any(test, feature = "native-streams"))]
+        {
+            self.delivery_authority = None;
+        }
         let (reply, withdrawal) = match reply {
             SocketReply::Plugin(reply) => (reply, false),
             SocketReply::Withdrawal(reply) => (reply, true),
         };
+        #[cfg(any(test, feature = "native-streams"))]
+        let mut reply = reply;
+        #[cfg(any(test, feature = "native-streams"))]
+        if reply
+            .authority
+            .as_ref()
+            .is_some_and(|authority| !authority.permits())
+        {
+            return None;
+        }
+        #[cfg(any(test, feature = "native-streams"))]
+        {
+            self.delivery_authority = reply.authority.take();
+        }
         if reply.plugin_id.is_empty() && reply.epoch == 0 && !withdrawal {
             return Some(reply.wire);
         }
@@ -524,9 +661,7 @@ impl SocketPlugins {
             .entries
             .iter_mut()
             .find(|entry| entry.entry.plugin.descriptor().id == reply.plugin_id)?;
-        if (!withdrawal && entry.reply_epoch != reply.epoch)
-            || reply.wire.len() > entry.entry.plugin.descriptor().max_frame_len
-        {
+        if !withdrawal && entry.reply_epoch != reply.epoch {
             return None;
         }
         if !withdrawal
@@ -536,6 +671,41 @@ impl SocketPlugins {
             return None;
         }
         let decoded = decode_muxed_frame(&reply.wire).ok()?;
+        #[cfg(any(test, feature = "native-streams"))]
+        if decoded.stream_id != 0
+            && !matches!(decoded.frame, Frame::Event { .. })
+            && let Some(native) = self.native.get_mut(&decoded.stream_id)
+        {
+            if native.closed || native.plugin != reply.plugin_id || native.epoch != reply.epoch {
+                return None;
+            }
+            // The frozen parser permits a 4MiB body; each canonical mux/length
+            // varint adds at most five bytes. Control JSON retains its own cap.
+            if reply.wire.len() > infraternal_protocol::MAX_FRAME_LEN + 10
+                || decoded.wire_len != reply.wire.len()
+                || !(native
+                    .definition
+                    .replies
+                    .contains(&frame_type(&decoded.frame))
+                    || matches!(decoded.frame, Frame::Close { .. }))
+            {
+                #[cfg(any(test, feature = "native-streams"))]
+                {
+                    self.delivery_authority = None;
+                }
+                return match self.refuse_native(decoded.stream_id, encode) {
+                    Dispatch::Refused(wire) => Some(wire),
+                    Dispatch::Queued | Dispatch::Unhandled => None,
+                };
+            }
+            if matches!(decoded.frame, Frame::Close { .. }) {
+                native.closed = true;
+            }
+            return Some(reply.wire);
+        }
+        if reply.wire.len() > entry.entry.plugin.descriptor().max_frame_len {
+            return None;
+        }
         if decoded.stream_id == 0 {
             if let Frame::Result { call_id, .. } = decoded.frame {
                 let index = entry
@@ -557,6 +727,210 @@ impl SocketPlugins {
         }
         encode_muxed_frame_into(0, &decoded.frame, encode).ok()?;
         Some(Bytes::copy_from_slice(encode))
+    }
+    /// The transport watches the same lifetime projection as plugin workers.
+    /// An uncertain authorization scope must end the connection, allowing a
+    /// fresh handshake instead of leaving its native viewers permanently closed.
+    #[cfg(any(test, feature = "native-streams"))]
+    pub(crate) fn authority(&self) -> Arc<dyn infraternal_plugin_api::streams::Authority> {
+        self.host.authority()
+    }
+    /// Transfer the admitted packet's authority to the actual transport write.
+    /// A check at queue delivery alone cannot fence cancellation during a stalled sink.
+    #[cfg(any(test, feature = "native-streams"))]
+    pub fn take_delivery_authority(
+        &mut self,
+    ) -> Option<Arc<dyn infraternal_plugin_api::streams::Authority>> {
+        self.delivery_authority.take()
+    }
+    /// Record the authenticated peer's connection-scoped capability projection.
+    #[cfg(not(any(test, feature = "native-streams")))]
+    pub fn set_peer_capabilities(&mut self, _capabilities: u64) {}
+    #[cfg(any(test, feature = "native-streams"))]
+    pub fn set_peer_capabilities(&mut self, capabilities: u64) {
+        self.capabilities = capabilities & self.runtime.wire_capabilities();
+    }
+    /// A reserved native identity cannot be repurposed as a terminal on this socket.
+    #[must_use]
+    #[cfg(not(any(test, feature = "native-streams")))]
+    pub fn owns_stream(&self, _stream: u32) -> bool {
+        false
+    }
+    #[cfg(any(test, feature = "native-streams"))]
+    #[must_use]
+    pub fn owns_stream(&self, stream: u32) -> bool {
+        self.native.contains_key(&stream)
+    }
+    /// Count active native reservations for the socket's shared terminal/native bound.
+    #[must_use]
+    #[cfg(not(any(test, feature = "native-streams")))]
+    pub fn active_streams(&self) -> usize {
+        0
+    }
+    #[cfg(any(test, feature = "native-streams"))]
+    #[must_use]
+    pub fn active_streams(&self) -> usize {
+        self.native.values().filter(|stream| !stream.closed).count()
+    }
+    /// Classify only opening tags compiled into this server build.
+    #[must_use]
+    #[cfg(not(any(test, feature = "native-streams")))]
+    pub fn opens_native_stream(&self, _frame: &Frame<'_>) -> bool {
+        false
+    }
+    #[cfg(any(test, feature = "native-streams"))]
+    #[must_use]
+    pub fn opens_native_stream(&self, frame: &Frame<'_>) -> bool {
+        let tag = frame_type(frame);
+        self.runtime
+            .inner
+            .entries
+            .iter()
+            .flat_map(|entry| entry.plugin.descriptor().streams)
+            .filter_map(|stream| stream.wire)
+            .any(|wire| wire.opening_tag == tag)
+    }
+    #[cfg(any(test, feature = "native-streams"))]
+    fn refuse_native(&mut self, stream: u32, encode: &mut Vec<u8>) -> Dispatch {
+        if std::env::var_os("INFRATERNAL_NATIVE_DIAGNOSTICS").is_some() {
+            let native = self.native.get(&stream);
+            let closed = native.is_some_and(|native| native.closed);
+            let worker = native.and_then(|native| {
+                self.entries
+                    .iter()
+                    .find(|entry| entry.entry.plugin.descriptor().id == native.plugin)
+            });
+            eprintln!(
+                "native_refusal stream={stream} reserved={} closed={closed} worker_closed={} ingress_capacity={}",
+                native.is_some(),
+                worker.is_some_and(|worker| worker.requests.is_closed()),
+                worker.map_or(0, |worker| worker.requests.capacity())
+            );
+        }
+        let reply = native_refusal(stream, encode);
+        if let Some(native) = self.native.get_mut(&stream) {
+            native.closed = true;
+            if let Some(socket) = self.entries.iter().find(|socket| {
+                socket.entry.plugin.descriptor().id == native.plugin
+                    && socket.reply_epoch == native.epoch
+            }) {
+                // A refused reuse also releases the original viewer; keeping its
+                // producer alive after sending Close would leak control authority.
+                if socket
+                    .requests
+                    .try_send(Bytes::copy_from_slice(encode))
+                    .is_err()
+                {
+                    self.host.retire();
+                }
+            }
+        }
+        reply
+    }
+    #[cfg(any(test, feature = "native-streams"))]
+    fn dispatch_native(
+        &mut self,
+        wire: &Bytes,
+        stream: u32,
+        frame: &Frame<'_>,
+        encode: &mut Vec<u8>,
+    ) -> Dispatch {
+        let tag = frame_type(frame);
+        let existing = self.native.get(&stream);
+        let entry = if let Some(native) = existing {
+            if native.closed
+                || tag == native.definition.opening_tag
+                || !(native.definition.requests.contains(&tag)
+                    || matches!(frame, Frame::Close { .. }))
+            {
+                return self.refuse_native(stream, encode);
+            }
+            self.runtime
+                .inner
+                .entries
+                .iter()
+                .find(|entry| entry.plugin.descriptor().id == native.plugin)
+                .cloned()
+        } else {
+            self.runtime
+                .inner
+                .entries
+                .iter()
+                .find(|entry| {
+                    entry.plugin.descriptor().streams.iter().any(|definition| {
+                        definition.wire.is_some_and(|wire| wire.opening_tag == tag)
+                    })
+                })
+                .cloned()
+        };
+        let Some(entry) = entry else {
+            return Dispatch::Unhandled;
+        };
+        if stream & 1 == 0 || wire.len() > 64 * 1024 || !entry.enabled.load(Ordering::Acquire) {
+            return self.refuse_native(stream, encode);
+        }
+        if existing.is_none()
+            && !entry
+                .plugin
+                .descriptor()
+                .streams
+                .iter()
+                .filter_map(|stream| stream.wire)
+                .any(|definition| {
+                    definition.opening_tag == tag
+                        && self.capabilities & definition.browser_capability.unwrap_or(0) != 0
+                })
+        {
+            return self.refuse_native(stream, encode);
+        }
+        let Some(index) = self.start(entry.clone()) else {
+            return self.refuse_native(stream, encode);
+        };
+        let socket = &mut self.entries[index];
+        if let Some(native) = self.native.get(&stream) {
+            if native.epoch != socket.reply_epoch {
+                return self.refuse_native(stream, encode);
+            }
+        } else {
+            let Some(definition) = entry
+                .plugin
+                .descriptor()
+                .streams
+                .iter()
+                .filter_map(|definition| definition.wire)
+                .find(|definition| definition.opening_tag == tag)
+            else {
+                return self.refuse_native(stream, encode);
+            };
+            if self.capabilities & definition.browser_capability.unwrap_or(0) == 0
+                || definition.validate().is_err()
+                || self.native.len() >= 128
+                || self
+                    .native
+                    .values()
+                    .filter(|native| {
+                        native.plugin == entry.plugin.descriptor().id && !native.closed
+                    })
+                    .count()
+                    >= definition.max_streams
+            {
+                return self.refuse_native(stream, encode);
+            }
+            self.native.insert(
+                stream,
+                NativeStream {
+                    plugin: entry.plugin.descriptor().id,
+                    epoch: socket.reply_epoch,
+                    definition,
+                    closed: false,
+                },
+            );
+        }
+        if socket.requests.try_send(wire.clone()).is_ok() {
+            Dispatch::Queued
+        } else {
+            self.refuse_native(stream, encode)
+        }
     }
     fn start(&mut self, entry: Arc<Entry>) -> Option<usize> {
         let epoch = entry.epoch.load(Ordering::Acquire);
@@ -599,7 +973,22 @@ impl SocketPlugins {
         // Result from an exited worker cannot answer a retry with the same id.
         self.generation = generation;
         let reply_epoch = u64::from(generation);
-        let (requests, receiver) = mpsc::channel(4);
+        let request_slots = 4;
+        #[cfg(any(test, feature = "native-streams"))]
+        let request_slots = entry
+            .plugin
+            .descriptor()
+            .streams
+            .iter()
+            .filter_map(|stream| stream.wire)
+            .map(|wire| wire.max_streams)
+            .fold(request_slots, usize::max)
+            .min(infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS);
+        // One socket read can contain a control for every declared native
+        // viewer before this worker is polled. Four RPC slots silently retired
+        // valid small native bursts. Native declarations bound this ingress;
+        // ordinary RPC-only plugins retain four slots and the RPC admission cap.
+        let (requests, receiver) = mpsc::channel(request_slots);
         tasks.retain(|task| {
             task.handle
                 .lock()
@@ -689,6 +1078,9 @@ impl SocketPlugins {
             return Dispatch::Unhandled;
         };
         if decoded.stream_id != 0 {
+            #[cfg(any(test, feature = "native-streams"))]
+            return self.dispatch_native(wire, decoded.stream_id, &decoded.frame, encode);
+            #[cfg(not(any(test, feature = "native-streams")))]
             return Dispatch::Unhandled;
         }
         if let Frame::Subscribe { sub_id, .. } = decoded.frame {
@@ -962,8 +1354,37 @@ pub(crate) async fn compiled_with_hosts(
         Arc::new(infraternal_plugin_canvas::socket::CanvasPlugin(Arc::new(
             crate::canvas_store::Store::new(pool.clone()),
         ))),
+        #[cfg(feature = "desktop")]
+        Arc::new(infraternal_plugin_desktop::server::DesktopServer::new(50)),
     ];
     PluginRuntime::new(plugins, "server")
         .with_store(pool.clone())
         .await
+}
+
+#[cfg(test)]
+#[path = "plugin_retirement_tests.rs"]
+pub(crate) mod retirement_tests;
+
+#[cfg(test)]
+#[path = "plugin_global_lifecycle_tests.rs"]
+mod global_lifecycle_tests;
+
+// A protocol close retires a refused identity without feature-specific payloads.
+#[cfg(any(test, feature = "native-streams"))]
+fn native_refusal(stream: u32, encode: &mut Vec<u8>) -> Dispatch {
+    if encode_muxed_frame_into(
+        stream,
+        &Frame::Close {
+            code: 4403,
+            reason: "stream unavailable",
+        },
+        encode,
+    )
+    .is_ok()
+    {
+        Dispatch::Refused(Bytes::copy_from_slice(encode))
+    } else {
+        Dispatch::Unhandled
+    }
 }

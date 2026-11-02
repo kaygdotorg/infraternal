@@ -10,7 +10,7 @@ import { refreshTip } from "../../../../../packages/ui/src/tooltip";
 import type { ToolbarItem, ToolbarRow } from "../../core-screen";
 import type { Ctx, WinRec } from "../context";
 import { el } from "../dom";
-import { isTerminal } from "../views/body";
+import { isInteractive, isTerminal } from "../views/body";
 import { SESSION_ICON } from "../views/icons";
 import { bindingText } from "./shortcuts";
 
@@ -43,7 +43,17 @@ export function createToolbar(cx: Ctx): ToolbarModule {
     add.disabled = false;
     add.setAttribute("aria-label", "New window");
     add.dataset.tip = "New window";
-    add.addEventListener("click", () => { const host = cx.adapters.sessions.hosts()[0]; if (host) cx.win.open(host.name); }, { signal });
+    // With app windows on, "+" opens the picker: the shells, screens and app windows of every machine behind one field (D208).
+    // Without them it opens a shell on the first host, as it always did.
+    add.addEventListener("click", (e) => {
+      const appWindows = cx.adapters.appWindows;
+      if (appWindows?.available()) {
+        const loading = cx.appWindows?.load();
+        if (loading) { const source = e.detail === 0 ? "keyboard" : "pointer"; void loading.then((runtime) => { if (runtime && add.isConnected) runtime.togglePicker(add, source); }); }
+        return;
+      }
+      const host = cx.adapters.sessions.hosts()[0]; if (host) cx.win.open(host.name);
+    }, { signal });
   }
 
   const windowAction = (run: (w: WinRec) => unknown): void => { const w = state.activeWin; if (w && isTerminal(w)) void run(w); };
@@ -74,6 +84,7 @@ export function createToolbar(cx: Ctx): ToolbarModule {
   const update = (): void => {
     const locked = Boolean(cx.inputLock.state);
     const terminal = Boolean(state.activeWin && isTerminal(state.activeWin));
+    const interactive = Boolean(state.activeWin && isInteractive(state.activeWin));
     lockBtn.setAttribute("aria-pressed", String(state.canvasLock));
     lockBtn.dataset.tip = `${state.canvasLock ? "Canvas lock on" : "Canvas lock off"} (${bindingText("canvas-lock")})`;
     lockBtn.setAttribute("aria-label", lockBtn.dataset.tip);
@@ -83,7 +94,7 @@ export function createToolbar(cx: Ctx): ToolbarModule {
     row.update("previous", { disabled: locked });
     row.update("next", { disabled: locked });
     row.update("overview", { disabled: locked });
-    row.update("input-lock", { pressed: locked, disabled: !terminal && !locked, label: locked ? "Input lock on" : "Input lock off", icon: locked ? withLockBadge(ICONS.terminal) : ICONS.terminal });
+    row.update("input-lock", { pressed: locked, disabled: !interactive && !locked, label: locked ? "Input lock on" : "Input lock off", icon: locked ? withLockBadge(ICONS.terminal) : ICONS.terminal });
     row.update("split-right", { disabled: !terminal });
     row.update("split-down", { disabled: !terminal });
     row.update("new-window-right", { disabled: !terminal });

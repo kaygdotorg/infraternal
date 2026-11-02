@@ -69,6 +69,50 @@ if sys.argv[1:] == ['--relay-only']:
     seed_relay()
     raise SystemExit(0)
 
+def seed_desktop_source(corpus):
+    """Select the declared source action, then exercise its strict JSON body."""
+    corpus.mkdir(parents=True, exist_ok=True)
+    session_id = '00000000-0000-0000-0000-000000000001'
+    start = {'session_id': session_id, 'start': {
+        'target': {'type': 'screen', 'display_id': 1},
+        'size': {'width': 960, 'height': 600, 'canvas_width': 960.0,
+                 'canvas_height': 600.0, 'backing_scale': 1.0},
+    }}
+    cases = [
+        ('up', 0, {}), ('down', 1, {}), ('component-status', 2, {}),
+        ('start', 3, start), ('stop', 4, {'session_id': session_id}),
+        ('inventory', 5, {}), ('cursor', 5, {'cursor': 'snapshot:17'}),
+        ('source-status', 6, {'session_id': session_id}),
+        ('clock', 7, {}), ('session-clock', 7, {'session_id': session_id}),
+    ]
+    for name, selector, value in cases:
+        payload = json.dumps(value, separators=(',', ':')).encode()
+        (corpus / name).write_bytes(bytes([selector]) + payload)
+        if name == 'start':
+            payload = payload.replace(b'"width":960', b'"width":960,"width":960')
+            (corpus / 'duplicate-size').write_bytes(bytes([selector]) + payload)
+    window_start = {'session_id': session_id, 'start': {
+        'target': {'type': 'window', 'window_id': 17, 'owner_pid': 123},
+        'size': {'width': 1280, 'height': 720, 'canvas_width': 640.0,
+                 'canvas_height': 360.0, 'backing_scale': 2.0},
+    }}
+    payload = json.dumps(window_start, separators=(',', ':')).encode()
+    (corpus / 'window-retina-start').write_bytes(b'\x03' + payload)
+    (corpus / 'invalid-window-owner').write_bytes(b'\x03' + payload.replace(b'"owner_pid":123', b'"owner_pid":0'))
+    for name, floor in [('sequence-floor', 41), ('exhausted-floor', 2**64 - 1), ('overflow-floor', 2**64)]:
+        floored = dict(start, sequence_floor=floor)
+        (corpus / name).write_bytes(b'\x03' + json.dumps(floored, separators=(',', ':')).encode())
+    (corpus / 'duplicate-null').write_bytes(b'\x06{"session_id":null,"session_id":null}')
+    (corpus / 'non-object').write_bytes(b'\x00[]')
+    (corpus / 'foreign-runtime').write_bytes(b'\x00{"runtime":"untrusted"}')
+    (corpus / 'exact-bound').write_bytes(b'\x00{}' + b' ' * (8192 - 2))
+    (corpus / 'over-bound').write_bytes(b'\x00{}' + b' ' * (8193 - 2))
+
+if sys.argv[1:2] == ['--desktop-source-only']:
+    corpus = Path(sys.argv[2]) if len(sys.argv) == 3 else root / 'corpus' / 'desktop_source_json'
+    seed_desktop_source(corpus)
+    raise SystemExit(0)
+
 def varint(value):
     result = bytearray()
     while value >= 128:

@@ -38,6 +38,8 @@ import { createLazyMeshApi } from "./mesh/lazy";
 import { connectionTransport } from "./mesh/transport";
 import { offerMeshView } from "./mesh/offer";
 import { createLiveSessions, type LiveSessions } from "./sessions/live";
+import { createAppWindowsAdapter } from "./appwin/adapter";
+import { appWindowsWanted } from "./appwin/flag";
 import { createStartupHints } from "./sessions/startup-hints";
 import { createLiveInventory } from "./sessions/live-inventory";
 import { teachOnce } from "../hints";
@@ -85,6 +87,8 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   let canvasReady: (() => void) | undefined, osAsked = false;
   const connection: MuxConnection = new MuxConnection({
     ...(options.sessionIncarnation ? { sessionIncarnation: options.sessionIncarnation } : {}),
+    // Declared in the Hello of each socket, only while app windows are wanted (D208; off by default).
+    desktop: appWindowsWanted,
     ...(options.onRecoveryPending ? { onRecoveryPending: options.onRecoveryPending } : {}),
     ...(options.onRecoveryCompleted ? { onRecoveryCompleted: options.onRecoveryCompleted } : {}),
     onConnectionChange: (connected) => {
@@ -220,7 +224,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   // fetch in createCanvas and does not wait for it.
   if (saved && docHasGroups(saved)) await loadGroups();
   const canvas = createCanvas(core, {
-    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => { warmSetup(); addHost.open(); }, authority, startupHints },
+    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => { warmSetup(); addHost.open(); }, authority, appWindows: createAppWindowsAdapter(connection), startupHints },
     float: false,
     persisted: (id) => id !== "settings",
   });

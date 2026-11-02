@@ -45,7 +45,7 @@ export function createTree(cx: Ctx): TreeModule {
       // DOM. The section still flies to the view, where the clusters are.
       leaves: graph
         ? (isFreeView(c.view) ? [] : c.view.nodes).map((n) => ({ id: `n-${n.id}`, label: n.label, glyph: n.kind === "tag" ? "#" : "◦" }))
-        : [...c.wins.values()].map((w) => ({ id: w.model.id, label: w.model.kind === "terminal" ? `${w.model.host}${w.model.session ? ` · ${w.model.session}` : ""}` : w.model.kind === "settings" || w.model.kind === "docs" ? w.model.host : (w.model.session ?? w.model.kind), glyph: w.model.kind === "terminal" ? "›_" : "▤" })),
+        : [...c.wins.values()].map((w) => ({ id: w.model.id, label: w.model.kind === "terminal" || w.model.kind === "app" || w.model.kind === "screen" ? `${w.model.host}${w.model.session ? ` · ${w.model.session}` : ""}` : w.model.kind === "settings" || w.model.kind === "docs" ? w.model.host : (w.model.session ?? w.model.kind), glyph: w.model.kind === "terminal" ? "›_" : w.model.kind === "app" || w.model.kind === "screen" ? "▢" : "▤" })),
     };
   });
   // Warmed at idle too, so the first time the sidebar opens its sessions are there at once (#128).

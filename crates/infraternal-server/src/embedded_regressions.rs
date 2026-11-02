@@ -6,6 +6,8 @@ fn connection() -> (AgentConnection, UnixStream) {
     let (reader, writer) = socket.into_split();
     (
         AgentConnection {
+            #[cfg(feature = "remote")]
+            wire_jobs: tokio::task::JoinSet::new(),
             peer: Peer::Local { reader, writer },
             execution_uid: nix::unistd::Uid::effective().as_raw(),
             pid: None,

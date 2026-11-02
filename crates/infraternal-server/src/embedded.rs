@@ -72,8 +72,8 @@ pub(crate) enum AgentError {
     /// A public terminal admission refusal; transport failures remain generic.
     #[error("terminal open refused")]
     OpenRefused(infraternal_plugin_api::admission::OpenRefusal),
-    /// The remote peer did not negotiate live renewal.
-    #[error("remote infraternal agent lacks live renewal")]
+    /// The remote peer did not negotiate a required transport capability.
+    #[error("remote infraternal agent lacks a required capability")]
     #[cfg(feature = "remote")]
     Unsupported,
 }
@@ -465,6 +465,32 @@ impl EmbeddedAgent {
         .map_err(|_| AgentError::Unavailable)?
     }
 
+    /// Open one compiled native lane on the current admitted remote host. The
+    /// caller has already committed its never-reused, even writer reservation.
+    #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+    pub(crate) async fn open_wire(
+        &self,
+        definition: &'static infraternal_plugin_api::streams::WireStreamDef,
+        stream_id: u32,
+        opening: Bytes,
+    ) -> Result<Arc<dyn infraternal_plugin_api::streams::WireLane>, AgentError> {
+        let (reply, result) = oneshot::channel();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            self.commands
+                .send(Command::Wire {
+                    definition,
+                    stream_id,
+                    opening,
+                    reply,
+                })
+                .await
+                .map_err(|_| AgentError::Unavailable)?;
+            result.await.map_err(|_| AgentError::Unavailable)?
+        })
+        .await
+        .map_err(|_| AgentError::Unavailable)?
+    }
+
     /// Open a terminal on the embedded infraternal agent's host (legacy fixtures).
     #[cfg_attr(not(test), allow(dead_code))]
     pub async fn open(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
@@ -680,6 +706,14 @@ enum Command {
         link: Box<RemoteLink>,
         reply: oneshot::Sender<Result<(), AgentError>>,
     },
+    #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+    Wire {
+        definition: &'static infraternal_plugin_api::streams::WireStreamDef,
+        stream_id: u32,
+        opening: Bytes,
+        reply:
+            oneshot::Sender<Result<Arc<dyn infraternal_plugin_api::streams::WireLane>, AgentError>>,
+    },
     #[cfg(feature = "remote")]
     Control {
         action: &'static str,
@@ -853,7 +887,8 @@ async fn connect_remote(link: RemoteLink, uid: u32) -> Result<AgentConnection, A
     let mut scratch = vec![0; READ_CHUNK];
     let hello = Frame::Hello {
         version: 1,
-        caps: infraternal_agent::remote_quic::REMOTE_WRITER_BINDING
+        caps: crate::remote_link::compiled_wire_capabilities()
+            | infraternal_agent::remote_quic::REMOTE_WRITER_BINDING
             | infraternal_plugin_api::channel::REMOTE_STANDBY
             | if link.native() {
                 infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS
@@ -879,7 +914,6 @@ async fn connect_remote(link: RemoteLink, uid: u32) -> Result<AgentConnection, A
                         return Err(AgentError::Protocol);
                     }
                     link.hello(&decoded.frame)
-                        .await
                         .map_err(|_| AgentError::Protocol)?;
                     receive.advance(decoded.wire_len);
                     return Ok(());
@@ -904,6 +938,8 @@ async fn connect_remote(link: RemoteLink, uid: u32) -> Result<AgentConnection, A
     #[cfg(test)]
     RemoteLink::register_test_probe(&link);
     Ok(AgentConnection {
+        #[cfg(any(test, feature = "native-streams"))]
+        wire_jobs: tokio::task::JoinSet::new(),
         peer: Peer::Remote(link),
         execution_uid: uid,
         pid: None,
@@ -920,6 +956,8 @@ async fn connect_remote(link: RemoteLink, uid: u32) -> Result<AgentConnection, A
 
 struct AgentConnection {
     peer: Peer,
+    #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+    wire_jobs: tokio::task::JoinSet<()>,
     execution_uid: u32,
     pid: Option<nix::unistd::Pid>,
     receive: BytesMut,
@@ -930,6 +968,48 @@ struct AgentConnection {
     owned_control: Option<mpsc::Sender<Bytes>>,
     #[cfg(feature = "remote")]
     owned_cleanup: Option<mpsc::UnboundedSender<Bytes>>,
+}
+
+// Actor exit must fence the connection immediately even when an opening task
+// still owns an Arc. The JoinSet aborts those futures and their reservations.
+impl Drop for AgentConnection {
+    fn drop(&mut self) {
+        #[cfg(feature = "remote")]
+        {
+            #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+            self.wire_jobs.abort_all();
+            if let Peer::Remote(link) = &self.peer {
+                link.retire();
+            }
+        }
+    }
+}
+#[cfg(feature = "remote")]
+impl AgentConnection {
+    // Terminal retirement is synchronous in every build; only optional opens need joining.
+    fn retire_wire_jobs(&mut self) -> impl std::future::Future<Output = ()> {
+        #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+        self.wire_jobs.abort_all();
+        if let Peer::Remote(link) = &self.peer {
+            link.retire();
+        }
+        async move {
+            #[cfg(any(test, feature = "native-streams"))]
+            while self.wire_jobs.join_next().await.is_some() {}
+        }
+    }
+}
+
+impl AgentConnection {
+    /// Fence transport authority synchronously; joining jobs belongs to background cleanup.
+    fn interrupt(&mut self) {
+        #[cfg(feature = "remote")]
+        if let Peer::Remote(link) = &self.peer {
+            link.retire();
+            #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+            self.wire_jobs.abort_all();
+        }
+    }
 }
 
 enum Incoming {
@@ -1502,6 +1582,8 @@ async fn connect_agent(
     let (reader, writer) = socket.into_split();
     Ok(AgentConnection {
         peer: Peer::Local { reader, writer },
+        #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+        wire_jobs: tokio::task::JoinSet::new(),
         execution_uid: nix::unistd::Uid::effective().as_raw(),
         pid,
         receive,
@@ -1844,6 +1926,46 @@ async fn process_command(
             let _ = reply.send(Err(AgentError::Unavailable));
             true
         }
+        #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+        Command::Wire {
+            definition,
+            stream_id,
+            opening,
+            mut reply,
+        } => {
+            if reply.is_closed() {
+                return true;
+            }
+            let Peer::Remote(link) = &connection.peer else {
+                let _ = reply.send(Err(AgentError::Unsupported));
+                return true;
+            };
+            let link = link.clone();
+            while connection.wire_jobs.try_join_next().is_some() {}
+            if connection.wire_jobs.len() >= COMMAND_CAPACITY {
+                let _ = reply.send(Err(AgentError::Rejected));
+                return true;
+            }
+            let admission = match link.prepare_wire(definition, stream_id, &opening) {
+                Ok(admission) => admission,
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return true;
+                }
+            };
+            // Each task owns an already-counted reservation. Connection cleanup
+            // closes the link and aborts these opens before a replacement starts.
+            connection.wire_jobs.spawn(async move {
+                let result = tokio::select! { biased;
+                    () = reply.closed() => return,
+                    result = link.open_wire(admission, &opening) => result,
+                };
+                if let Err(Ok(lane)) = reply.send(result) {
+                    lane.retire();
+                }
+            });
+            true
+        }
         #[cfg(feature = "remote")]
         Command::Control {
             action,
@@ -2076,6 +2198,13 @@ async fn process_command(
             }
             if stream_id == 0 || stream_id % 2 != 0 {
                 let _ = reply.send(Err(AgentError::Protocol));
+                return true;
+            }
+            #[cfg(feature = "remote")]
+            if let Peer::Remote(link) = &connection.peer
+                && !link.admits_terminal(stream_id)
+            {
+                let _ = reply.send(Err(AgentError::Rejected));
                 return true;
             }
             if let Some(previous) = routes.get(&stream_id).copied() {
@@ -3113,11 +3242,12 @@ async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &F
 
 #[cfg_attr(test, track_caller)]
 fn connection_lost(
-    connection: AgentConnection,
+    mut connection: AgentConnection,
     attachments: &mut HashMap<u64, AttachmentState>,
     routes: &mut HashMap<u32, u64>,
     pending: &mut HashMap<u32, PendingCall>,
 ) {
+    connection.interrupt();
     // Measurement fixtures name the actor branch that retired a primary.
     #[cfg(test)]
     TEST_CLOSE_LINES
@@ -3198,6 +3328,8 @@ fn notify_reconnecting(attachments: &mut HashMap<u64, AttachmentState>) {
 }
 
 async fn cleanup_connection(mut connection: AgentConnection) {
+    #[cfg(feature = "remote")]
+    connection.retire_wire_jobs().await;
     if let Some(pid) = connection.pid.take() {
         stop_child(pid).await;
     }

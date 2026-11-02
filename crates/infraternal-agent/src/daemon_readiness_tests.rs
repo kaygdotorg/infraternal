@@ -1,6 +1,7 @@
 //! Reproduces a blocked fallback writer filling the shared reply queue; dispatcher admission must remain bounded [130], #78.
 
 use super::*;
+use std::sync::atomic::Ordering;
 #[cfg(feature = "remote")]
 use std::sync::{Mutex, atomic::AtomicBool};
 
@@ -219,6 +220,22 @@ impl Channel for Capture {
                 .map_err(|_| io::ErrorKind::BrokenPipe.into()),
         )
     }
+}
+
+#[tokio::test]
+async fn mux_greeting_omits_cached_native_provider_capabilities() {
+    let (bulk, bulk_rx) = mpsc::channel(1);
+    drop(bulk);
+    let (written, mut frames) = mpsc::unbounded_channel();
+    writer(&Capture(written), bulk_rx, None, true, false, 64)
+        .await
+        .unwrap();
+    let bytes = frames.recv().await.unwrap();
+    let greeting = infraternal_protocol::decode_muxed_frame(&bytes).unwrap();
+    assert!(
+        matches!(greeting.frame, Frame::Hello { caps, .. } if caps & 64 == 0),
+        "TCP/inherited channels cannot open native provider lanes"
+    );
 }
 
 #[tokio::test]

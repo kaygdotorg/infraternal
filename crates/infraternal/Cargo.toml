@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+infraternal-plugin-desktop = { path = "../plugins/desktop", version = "0.1.0", default-features = false, optional = true }
 infraternal-plugin-release = { path = "../plugins/release", version = "0.1.0", optional = true, default-features = false, features = ["server"] }
 sqlx = { workspace = true, optional = true }
 clap = { workspace = true, features = ["string"] }
@@ -41,6 +42,8 @@ infraternal-plugin-host-facts = { path = "../plugins/host-facts", version = "0.1
 infraternal-plugin-mesh = { path = "../plugins/mesh", version = "0.1.0", optional = true }
 
 [features]
+# App windows are compiled only for an explicit desktop build (#146).
+desktop = ["plugin-agent", "infraternal-agent/desktop", "plugin-server", "dep:infraternal-plugin-desktop", "infraternal-plugin-desktop/desktop", "infraternal-server/desktop"]
 # Opt-in research host; production still launches one shim per session.
 process-per-user = ["infraternal-shim/process-per-user"]
 # Numeric-only reactor instrumentation; excluded from uninstrumented measurements.

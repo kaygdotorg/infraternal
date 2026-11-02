@@ -7,8 +7,10 @@ for (const caps of [0n, 4n, 8n, 12n]) test(`query replies negotiate independentl
   const connection = Object.create(MuxConnection.prototype) as {
     terminalQueryReplies: boolean;
     serverVisibility: boolean;
+    capListeners: Set<(caps: bigint) => void>;
     control(frame: WireFrame): void;
   };
+  connection.capListeners = new Set();
   connection.control({ type: "Hello", version: 1, caps, clientInfo: "capability-test" });
   expect(connection.terminalQueryReplies).toBe((caps & 8n) !== 0n);
   expect(connection.serverVisibility).toBe((caps & 4n) !== 0n);

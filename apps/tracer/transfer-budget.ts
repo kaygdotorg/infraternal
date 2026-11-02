@@ -40,7 +40,7 @@ for (const name of await readdir(dist, { recursive: true })) {
   // The server gives a year-long immutable cache only to `chunk-<8 alphanumerics>.js` (web_assets.rs). Every split
   // chunk must have such a content-hashed name, or a returning visit would revalidate (or miss) it. The entries
   // (the app and the two workers) are named for their role and revalidate with a conditional request.
-  const entry = name === "main.js" || name.endsWith(".worker.js");
+  const entry = name === "main.js" || name.endsWith(".worker.js") || name.endsWith(".worker.on-demand.js");
   if (!entry && !/^chunk-[0-9a-z]{8}\.js$/.test(name)) throw new Error(`${name} has no content-hashed chunk name`);
   const identity = (await stat(`${dist}/${name}`)).size;
   const gzip = await stat(`${dist}/${name}.gz`).then((file) => file.size).catch(() => identity);

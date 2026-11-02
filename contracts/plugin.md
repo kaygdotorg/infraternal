@@ -142,6 +142,17 @@ tail, live metrics. A `StreamDef` declares its frame types and whether it is
 resumable. Terminal streams are resumable by byte offset (contracts/shim.md
 §4, contracts/wire.md).
 
+Native `WireStreamDef.capability` is the leg-B capability and must not alias its
+reserved core bits 0–7 (bits 6 and 7 are path backup and path proof). The additive optional `browser_capability` declares a
+different leg-A bit when the browser extension already has one. If absent, the
+browser uses the native bit and descriptor JSON is unchanged. A declared browser
+bit is a single extension bit (at least bit3); browser advertisement and admission
+use that same projection. Native provider/transport negotiation always uses the
+native field. Both identities must be unambiguous within a descriptor/provider
+set. This metadata starts no work and does not identify a particular feature in
+core dispatch [D16,D198]. For desktop, the frozen values remain browser8/native64
+(contracts/wire.md §9); enabling a feature never changes its wire numbers.
+
 ## 7. Settings and tree
 
 - `settings` is a JSON Schema. The UI renders it as a form, so each plugin is

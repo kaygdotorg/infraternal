@@ -81,10 +81,17 @@ fn identity(
 /// MTU minus the 20-byte IPv4 and 8-byte UDP headers. A larger datagram would
 /// be dropped locally (EMSGSIZE) and stall until black-hole detection.
 pub const PATH_SAFE_UDP_PAYLOAD: u16 = 1352;
-/// Received QUIC DATAGRAM bytes the server buffers per connection. Hosts send
-/// only one-byte liveness probes while on the mesh and nothing reads them;
-/// the bound keeps that buffer at a few entries instead of Quinn's default.
+/// Received QUIC DATAGRAM bytes buffered per connection. This is also the
+/// largest DATAGRAM the peer may send. Terminal-only builds receive only
+/// one-byte liveness probes while on the mesh and nothing reads them; the bound
+/// keeps that buffer at a few entries instead of Quinn's default.
+#[cfg(not(feature = "native-streams"))]
 const DATAGRAM_BUFFER: usize = 64;
+/// Native plugin lanes (desktop video, #146) send 1 KiB fragments over the same
+/// connection and read them as they arrive, so builds with them accept a full
+/// fragment and a short burst of a keyframe. A cap, not an allocation.
+#[cfg(feature = "native-streams")]
+const DATAGRAM_BUFFER: usize = 128 * 1024;
 
 fn transport(incoming_streams: u32) -> std::sync::Arc<quinn::TransportConfig> {
     transport_with_liveness(

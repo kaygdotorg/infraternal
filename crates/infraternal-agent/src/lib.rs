@@ -2,14 +2,25 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 pub mod channel;
 pub mod cli;
+#[cfg(target_os = "linux")]
 pub mod daemon;
+#[cfg(not(target_os = "linux"))]
+pub use control as daemon;
+#[path = "daemon_portable.rs"]
+pub mod control;
+mod daemon_writer;
+#[cfg(target_os = "linux")]
 mod lifecycle;
 mod login_auth;
 mod login_binary;
 mod login_records;
 pub mod logins;
+#[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+mod native_dispatch;
 pub mod plugin_control;
 pub mod plugins;
+// Shim census exists only on the local terminal platform; portable control has no PTYs.
+#[cfg(target_os = "linux")]
 mod process_exits;
 pub mod relay;
 #[cfg(feature = "remote")]
@@ -32,6 +43,8 @@ pub mod automation;
 pub mod sessions;
 pub mod startup_guard;
 pub mod transport;
+#[cfg(any(test, feature = "native-streams"))]
+pub mod wire;
 
 /// Resolve the per-job root used by tests that bind local socket fixtures.
 /// The configured root keeps socket names short while `HOME` stays absolute
@@ -74,10 +87,10 @@ pub fn block_on_io(
     runtime.block_on(operation)
 }
 
-#[cfg(all(test, feature = "remote"))]
+#[cfg(all(test, feature = "remote", target_os = "linux"))]
 mod transport_diagnostics;
 
-#[cfg(all(test, feature = "remote"))]
+#[cfg(all(test, feature = "remote", target_os = "linux"))]
 #[path = "remote_native_tests.rs"]
 mod remote_native_tests;
 

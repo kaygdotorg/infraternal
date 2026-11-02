@@ -216,7 +216,8 @@ async fn interrupted_authority_operation(interruption: Interruption) {
             transaction.rollback().await.map_err(|_| ())?;
             Ok(())
         };
-        let guarded = while_authorized_operation(&state, &user, token, false, operation.boxed());
+        let guarded =
+            while_authorized_operation(&state, &user, token, false, operation.boxed(), None);
         tokio::pin!(guarded);
         let entered = tokio::select! {
             result = &mut acquired => { result.unwrap(); true },

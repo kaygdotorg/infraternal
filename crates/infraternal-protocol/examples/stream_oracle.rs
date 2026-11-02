@@ -1,12 +1,88 @@
 //! Line-oriented test bridge comparing Rust stream fields with the browser codec.
 //! Scalar u64 fields are decimal strings so JSON preserves every wire bit.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use infraternal_protocol::{Frame, MuxStreamDecoder, decode_muxed_frame, encode_muxed_frame_into};
+use infraternal_protocol::{
+    Frame, MuxStreamDecoder, decode_frame, decode_muxed_frame, encode_muxed_frame_into,
+};
 use serde_json::{Value, json};
 use std::io::{self, BufRead};
 
+#[allow(clippy::too_many_lines)] // Exhaustive reference fields for the cross-codec oracle.
 fn fields(frame: &Frame<'_>) -> Value {
     match frame {
+        Frame::Desktop(message) => {
+            use infraternal_protocol::desktop::{Input, Message};
+            let message = match message {
+                Message::Attach {
+                    session_id,
+                    delivery,
+                } => json!({"kind":"attach","sessionId":session_id,"delivery":*delivery as u8}),
+                Message::Video {
+                    sequence,
+                    capture_ns,
+                    keyframe,
+                    bytes,
+                } => {
+                    json!({"kind":"video","sequence":sequence.to_string(),"captureNs":capture_ns.to_string(),"keyframe":keyframe,"bytes":bytes})
+                }
+                Message::Size {
+                    width,
+                    height,
+                    density_milli,
+                } => {
+                    json!({"kind":"size","width":width,"height":height,"densityMilli":density_milli})
+                }
+                Message::Input(input) => {
+                    let input = match input {
+                        Input::Release => json!({"kind":"release"}),
+                        Input::Control { active } => json!({"kind":"control","active":active}),
+                        Input::Text { scalar } => json!({"kind":"text","scalar":scalar}),
+                        Input::Mouse {
+                            x,
+                            y,
+                            button,
+                            state,
+                            modifiers,
+                        } => {
+                            json!({"kind":"mouse","x":x,"y":y,"button":button,"state":state,"modifiers":modifiers})
+                        }
+                        Input::Scroll {
+                            x,
+                            y,
+                            dx,
+                            dy,
+                            modifiers,
+                        } => {
+                            json!({"kind":"scroll","x":x,"y":y,"dx":dx,"dy":dy,"modifiers":modifiers})
+                        }
+                        Input::Key {
+                            keycode,
+                            down,
+                            modifiers,
+                        } => {
+                            json!({"kind":"key","keycode":keycode,"down":down,"modifiers":modifiers})
+                        }
+                    };
+                    json!({"kind":"input","input":input})
+                }
+                Message::Repair { last_sequence } => {
+                    json!({"kind":"repair","lastSequence":last_sequence.to_string()})
+                }
+                Message::Fragment {
+                    session_id,
+                    sequence,
+                    capture_ns,
+                    keyframe,
+                    total,
+                    offset,
+                    bytes,
+                } => {
+                    json!({"kind":"fragment","sessionId":session_id,"sequence":sequence.to_string(),"captureNs":capture_ns.to_string(),"keyframe":keyframe,"total":total,"offset":offset,"bytes":bytes})
+                }
+            };
+            json!({"type":"Desktop","message":message})
+        }
+
         Frame::InputReply { query_seq, bytes } => {
             json!({ "type": "Input", "inSeq": "0", "replyTo": query_seq.to_string(), "bytes": bytes })
         }
@@ -92,6 +168,10 @@ fn main() {
     for line in io::stdin().lock().lines() {
         let request: Value = serde_json::from_str(&line.unwrap()).unwrap();
         let bytes: Vec<u8> = serde_json::from_value(request["bytes"].clone()).unwrap();
+        if request["probe"].as_bool().unwrap_or(false) {
+            println!("{}", json!({"accepted": decode_frame(&bytes).is_ok()}));
+            continue;
+        }
         let chunks: Vec<usize> = serde_json::from_value(request["chunks"].clone()).unwrap();
         let mut expected = Vec::new();
         let mut offset = 0;

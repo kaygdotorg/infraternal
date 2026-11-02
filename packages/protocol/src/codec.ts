@@ -1,5 +1,8 @@
 /** Implements the borrowed browser codec, mux envelope, and WebSocket stream decoder from contracts/wire.md. */
 
+import { decodeDesktop, measureDesktop, writeDesktop, type DesktopMessage } from "./desktop";
+export { DESKTOP_VIDEO, type DesktopMessage, type VideoInput } from "./desktop";
+
 export const MAX_FRAME_LEN = 4 * 1024 * 1024;
 /**
  * `Close` code on a terminal stream: the session no longer exists on its host. The answer is final, so the viewer
@@ -15,6 +18,7 @@ const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 export type WireFrame =
+  | { type: "Desktop"; message: DesktopMessage }
   | { type: "Hello"; version: number; caps: bigint; clientInfo: string }
   | {
       type: "Welcome";
@@ -278,6 +282,10 @@ interface FrameMeasure {
 function decodeBody(type: number, body: Uint8Array): WireFrame {
   const reader = new BodyReader(type, body);
   switch (type) {
+    case 0x40: case 0x41: case 0x42: case 0x43: case 0x44: case 0x45:
+          try { return { type: "Desktop", message: decodeDesktop(type, body) }; }
+          catch { throw decodeError("invalid-body", "invalid desktop fields"); }
+
     case 0x00: {
       const version = reader.u16();
       const caps = reader.u64();
@@ -476,6 +484,12 @@ function measureFrame(frame: WireFrame): FrameMeasure {
   let type: number;
   let bodyLength: number;
   switch (frame.type) {
+    case "Desktop": {
+          try { const measured = measureDesktop(frame.message); type = measured.tag; bodyLength = measured.length; }
+          catch { throw new WireEncodeError("length-overflow", "invalid desktop fields"); }
+          break;
+        }
+
     case "Hello":
       checkedU16(frame.version, "version");
       checkedU64(frame.caps, "caps");
@@ -589,6 +603,7 @@ function writeFrameAt(frame: WireFrame, output: Uint8Array, offset: number, meas
   cursor += 1;
   const view = new DataView(output.buffer, output.byteOffset, output.byteLength);
   switch (frame.type) {
+    case "Desktop": writeDesktop(frame.message, output, cursor); break;
     case "Hello":
       view.setUint16(cursor, frame.version, true);
       cursor += 2;

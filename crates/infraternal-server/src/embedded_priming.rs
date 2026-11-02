@@ -832,6 +832,7 @@ mod tests {
         let (reader, writer) = socket.into_split();
         Shadow {
             connection: AgentConnection {
+                wire_jobs: tokio::task::JoinSet::new(),
                 peer: Peer::Local { reader, writer },
                 execution_uid: 0,
                 pid: None,

@@ -120,9 +120,35 @@ export interface RealServer {
   retainBrowserRoutes(): void;
   /** Pause only the selected private upstream, preserving the browser/server connection. */
   pauseUpstream(component: "daemon" | "shim", whilePaused: () => Promise<void>, selectedSession?: string): Promise<void>;
+  /** Interrupt only this fixture's browser routes; fresh upgrades fail during the bounded drop. */
+  interruptBrowserRoutes(durationMs: number): Promise<void>;
   dispose(): Promise<void>;
 }
 
+/** Content-free timing of the fixture TLS bridge, separate from production server work. */
+export interface DesktopStage {
+  stage: "fixture_receive" | "fixture_send_begin" | "fixture_send_end";
+  at: number;
+  sequence: string;
+  captureNs: string;
+  bytes: number;
+}
+
+/** Content-free control probes isolate server handling from browser/network waits (#146). */
+export interface ProbeStage {
+  phase: "browser_ping" | "server_pong";
+  socket: number;
+  nonce: string;
+  sentUs: string;
+  at: number;
+}
+
+/** Project matching control probes only; action bodies and bootstrap sockets are excluded. */
+export function probeStage(phase: ProbeStage["phase"], socket: number, stream: number, frame: WireFrame, at: number): ProbeStage | undefined {
+  if (stream !== 0 || (phase === "browser_ping" ? frame.type !== "Ping" : frame.type !== "Pong")) return undefined;
+  if (frame.type !== "Ping" && frame.type !== "Pong") return undefined;
+  return { phase, socket, nonce: frame.nonce.toString(), sentUs: frame.sentUs.toString(), at };
+}
 const text = new TextDecoder();
 
 /**
@@ -135,6 +161,10 @@ export async function startRealServer(options: {
   upgradeDelayMs?: number;
   /** Record public control timestamps only for an explicitly enabled VM measurement. */
   timedControls?: boolean;
+  /** Explicit native-window measurement only; bootstrap messages never enter it. */
+  onDesktopStage?: (receipt: DesktopStage) => void;
+  /** Explicit reconnect diagnosis only; these are same-host handling intervals. */
+  onProbeStage?: (receipt: ProbeStage) => void;
   /** Retain every stream Close for functional ordering assertions without timing traces. */
   recordCloses?: boolean;
   /** Decode attachment metadata but retain no terminal output (busy-terminal measurements). */
@@ -249,7 +279,9 @@ export async function startRealServer(options: {
   const retainedBrowsers = new Set<WebSocket>();
   const activeBrowsers = new Set<WebSocket>();
   const front = new WebSocketServer({ noServer: true });
+  let browserOfflineUntil = 0;
   tls.on("upgrade", async (request, socket, head) => {
+    if (Date.now() < browserOfflineUntil) { socket.destroy(); return; }
     // Frame delay starts after open. This separate fixture control models the handshake ordering;
     // every subsequent byte still travels through the real server and PTY unchanged.
     if (request.url === "/v1/ws" && options.upgradeDelayMs) {
@@ -278,6 +310,7 @@ export async function startRealServer(options: {
       if (protocol) bridges.push(bridge);
       const inbound = new WebSocketFrameDecoder();
       const outbound = new WebSocketFrameDecoder();
+      const desktopDecoder = (options.onDesktopStage || options.onProbeStage) && protocol ? new WebSocketFrameDecoder() : undefined;
       const queued: Array<{ bytes: Buffer; binary: boolean }> = [];
       let pendingUpstreamMessages = 0;
       let closeBrowserWhenDrained = false;
@@ -289,6 +322,10 @@ export async function startRealServer(options: {
       browser.on("message", (data, binary) => {
         const bytes = Buffer.from(data as Buffer);
         if (protocol && binary) inbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
+          if (options.onProbeStage) {
+            const probe = probeStage("browser_ping", bridge.id, stream, f, performance.timeOrigin + performance.now());
+            if (probe) options.onProbeStage(probe);
+          }
           if (process.env.REAL_FRAME_LOG === "1") {
             // Input bytes can contain private terminal input; record only frame type and bounded metadata.
             const detail = f.type === "Input" ? ` bytes=${f.bytes.byteLength}`
@@ -311,8 +348,20 @@ export async function startRealServer(options: {
       });
       upstream.on("open", () => { for (const q of queued.splice(0)) { if (!bridge.closed) upstream.send(q.bytes, { binary: q.binary }); } });
       upstream.on("message", (data, binary) => {
+        const receivedAt = desktopDecoder ? performance.timeOrigin + performance.now() : 0;
         pendingUpstreamMessages++;
         const bytes = Buffer.from(data as Buffer);
+        const desktop: Omit<DesktopStage, "stage" | "at">[] | undefined = desktopDecoder ? [] : undefined;
+        if (desktopDecoder && binary && desktop) desktopDecoder.feed(new Uint8Array(bytes), (_stream, frame) => {
+          if (options.onProbeStage) {
+            const probe = probeStage("server_pong", bridge.id, _stream, frame, receivedAt);
+            if (probe) options.onProbeStage(probe);
+          }
+          if (frame.type !== "Desktop" || frame.message.kind !== "video" || desktop.length === 128) return;
+          const video = frame.message;
+          const identity = { sequence: video.sequence.toString(), captureNs: video.captureNs.toString(), bytes: video.bytes.length };
+          desktop.push(identity); options.onDesktopStage?.({ ...identity, stage: "fixture_receive", at: receivedAt });
+        });
         if (protocol && binary) outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
           recordAttachment(bridge.attached, stream, f);
           if (lean) return;
@@ -358,9 +407,18 @@ export async function startRealServer(options: {
         });
         // Drain messages already received before closing the browser side of a failed upstream route.
         later(() => {
-          if (browser.readyState === WebSocket.OPEN) browser.send(bytes, { binary });
           pendingUpstreamMessages--;
-          closeBrowserAfterDrain();
+          try {
+            if (browser.readyState !== WebSocket.OPEN) return;
+            if (!desktop?.length) { browser.send(bytes, { binary }); return; }
+            const began = performance.timeOrigin + performance.now();
+            for (const identity of desktop) options.onDesktopStage?.({ ...identity, stage: "fixture_send_begin", at: began });
+            browser.send(bytes, { binary }, (error) => {
+              if (error) return;
+              const ended = performance.timeOrigin + performance.now();
+              for (const identity of desktop) options.onDesktopStage?.({ ...identity, stage: "fixture_send_end", at: ended });
+            });
+          } finally { closeBrowserAfterDrain(); }
         });
       });
       const eraseQueue = (): void => { for (const entry of queued.splice(0)) entry.bytes.fill(0); };
@@ -392,116 +450,134 @@ export async function startRealServer(options: {
     });
   });
 
-  const deadline = Date.now() + 20_000;
-  for (;;) {
-    try { if ((await fetch(backend + "/healthz", { headers: { Connection: "close" } })).ok) break; } catch { /* starting */ }
-    if (Date.now() > deadline) throw new Error("server startup failed");
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  await options.prepareData?.(state);
-  const setup = spawn(binary, ["server", "setup-token", "--data", state, "--json"], { cwd: root, stdio: ["ignore", "pipe", "ignore"] });
-  let token = "";
-  setup.stdout.on("data", (b) => { token += b; });
-  const [setupCode] = await once(setup, "exit");
-  // The CLI is human-oriented by default; machine callers use the D202 envelope.
-  // Keep the one-time setup capability in memory, and never echo a bad response.
-  if (setupCode !== 0) throw new Error("setup capability unavailable");
-  let setupResult: unknown;
-  try { setupResult = JSON.parse(token); }
-  catch { throw new Error("invalid setup capability response"); }
-  const setupData = typeof setupResult === "object" && setupResult !== null && "data" in setupResult
-    ? setupResult.data : undefined;
-  const setupToken = typeof setupData === "object" && setupData !== null && "token" in setupData
-    ? setupData.token : undefined;
-  if (typeof setupToken !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(setupToken)) {
-    throw new Error("invalid setup capability response");
-  }
-  token = "";
+  // The TLS front is already listening before the backend becomes ready. A
+  // rejected startup must join the same owned cleanup as a successful fixture,
+  // or retries retain its port and private processes without a returned owner.
+  let disposal: Promise<void> | undefined;
+  const dispose = (): Promise<void> => disposal ??= (async () => {
+    front.close();
+    tls.close();
+    await stop();
+    // Reuse authenticated fixture teardown so detached shims cannot outlive
+    // the runtime directory that identifies them. Never scan unrelated PIDs.
+    // Root measurements run in a private mount namespace whose /run and passwd
+    // belong to this fixture; ordinary jobs always use their XDG runtime directory.
+    const shimState = process.env.REAL_ROOT_NAMESPACE === "1" ? "/run/infraternal" : resolve(runtime, "infraternal");
+    const cleanup = spawn("python3", ["-c", "import sys;sys.path.insert(0,'scripts');from pathlib import Path;from agent_fixture import cleanup;cleanup(Path(sys.argv[1]))", shimState], { cwd: root, stdio: "ignore" });
+    await once(cleanup, "exit");
+    await rm(runtime, { recursive: true, force: true });
+    await rm(state, { recursive: true, force: true });
+  })();
 
-  const fixture: RealServer = {
-    origin, backend, bridges, token: setupToken, binary, dataDir: state, get pid() { return child.pid!; },
-    retainBrowserRoutes() { for (const browser of activeBrowsers) retainedBrowsers.add(browser); },
-    async restart(whileStopped) {
-      await stop();
-      await whileStopped?.();
-      child = launch();
-      if (process.env.REAL_SERVER_LOG === "1") {
-        child.stderr?.on("data", (bytes) => process.stderr.write(`RESTART ${bytes}`));
-        child.stdout?.on("data", (bytes) => process.stderr.write(`RESTART ${bytes}`));
-      } else child.stderr?.resume();
-      const deadline = Date.now() + 20_000;
-      for (;;) {
-        // The successful probe's start is a conservative availability boundary;
-        // a delayed health response must not subtract an RTT from recovery.
-        const candidateAt = performance.timeOrigin + performance.now();
-        try { if ((await fetch(backend + "/healthz", { headers: { Connection: "close" } })).ok) { fixture.recoveredAt = candidateAt; break; } } catch { /* starting */ }
-        if (Date.now() > deadline) throw new Error("server restart failed");
-        await new Promise((r) => setTimeout(r, 25));
-      }
-    },
-    async pauseUpstream(component, whilePaused, selectedSession) {
-      let serverPid = child.pid!;
-      if (unit) {
-        const show = spawn("systemctl", ["--user", "show", "-p", "MainPID", "--value", unit], { stdio: ["ignore", "pipe", "ignore"] });
-        let result = "";
-        show.stdout.on("data", (bytes) => { result += bytes; });
-        const [code] = await once(show, "exit");
-        serverPid = Number(result.trim());
-        if (code !== 0 || !Number.isInteger(serverPid) || serverPid < 1) throw new Error("fixture server identity unavailable");
-      }
-      // Arrival order can differ from canvas order. Multi-window callers select
-      // the session whose executed marker identifies the focused window.
-      const sessionId = (selectedSession ?? bridges.flatMap((bridge) => [...bridge.attached.values()].flat())[0])?.replaceAll("-", "");
-      if (!sessionId || !/^[0-9a-f]{32}$/.test(sessionId)) throw new Error("fixture session identity unavailable");
-      const shimState = process.env.REAL_ROOT_NAMESPACE === "1" ? "/run/infraternal" : resolve(runtime, "infraternal");
-      const pause = spawn("python3", [resolve(import.meta.dirname, "pause-upstream.py"), component, String(serverPid), shimState, sessionId], { stdio: ["pipe", "pipe", "pipe"] });
-      const exited = once(pause, "exit");
-      // This helper opens a pidfd, never signals a reused PID and resumes on stdin EOF.
-      const ready = once(pause.stdout, "data");
-      pause.stderr.resume();
-      let watchReplacement = true;
-      let replacement: Promise<void> | undefined;
-      try {
-        const status = await Promise.race([ready.then(([bytes]) => String(bytes).trim()), exited.then(() => "ended")]);
-        if (!/^paused [1-9][0-9]*$/.test(status)) throw new Error("private upstream pause failed");
-        const pausedPid = Number(status.split(" ")[1]);
-        if (component === "daemon" && process.env.RESTART_MEASURE === "1") replacement = (async () => {
-          // The server replaces a stalled daemon without waiting for SIGCONT. Observe its own
-          // child before it becomes ready, rather than subtracting an artificially late resume.
-          while (watchReplacement) {
-            const candidateAt = performance.timeOrigin + performance.now();
-            const tasks = await readdir(`/proc/${serverPid}/task`);
-            const children = await Promise.all(tasks.map((task) => readFile(`/proc/${serverPid}/task/${task}/children`, "utf8").catch(() => "")));
-            if (children.some((ids) => ids.trim().split(/\s+/).some((pid) => Number(pid) > 0 && Number(pid) !== pausedPid))) {
-              fixture.recoveredAt = candidateAt;
-              return;
+  try {
+    const deadline = Date.now() + 20_000;
+    for (;;) {
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error("server startup failed");
+      try { if ((await fetch(backend + "/healthz", { headers: { Connection: "close" } })).ok) break; } catch { /* starting */ }
+      if (Date.now() > deadline) throw new Error("server startup failed");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    await options.prepareData?.(state);
+    const setup = spawn(binary, ["server", "setup-token", "--data", state, "--json"], { cwd: root, stdio: ["ignore", "pipe", "ignore"] });
+    let token = "";
+    setup.stdout.on("data", (b) => { token += b; });
+    const [setupCode] = await once(setup, "exit");
+    // The CLI is human-oriented by default; machine callers use the D202 envelope.
+    // Keep the one-time setup capability in memory, and never echo a bad response.
+    if (setupCode !== 0) throw new Error("setup capability unavailable");
+    let setupResult: unknown;
+    try { setupResult = JSON.parse(token); }
+    catch { throw new Error("invalid setup capability response"); }
+    const setupData = typeof setupResult === "object" && setupResult !== null && "data" in setupResult
+      ? setupResult.data : undefined;
+    const setupToken = typeof setupData === "object" && setupData !== null && "token" in setupData
+      ? setupData.token : undefined;
+    if (typeof setupToken !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(setupToken)) {
+      throw new Error("invalid setup capability response");
+    }
+    token = "";
+
+    const fixture: RealServer = {
+      origin, backend, bridges, token: setupToken, binary, dataDir: state, get pid() { return child.pid!; },
+      retainBrowserRoutes() { for (const browser of activeBrowsers) retainedBrowsers.add(browser); },
+      async restart(whileStopped) {
+        await stop();
+        await whileStopped?.();
+        child = launch();
+        if (process.env.REAL_SERVER_LOG === "1") {
+          child.stderr?.on("data", (bytes) => process.stderr.write(`RESTART ${bytes}`));
+          child.stdout?.on("data", (bytes) => process.stderr.write(`RESTART ${bytes}`));
+        } else child.stderr?.resume();
+        const deadline = Date.now() + 20_000;
+        for (;;) {
+          // The successful probe's start is a conservative availability boundary;
+          // a delayed health response must not subtract an RTT from recovery.
+          const candidateAt = performance.timeOrigin + performance.now();
+          try { if ((await fetch(backend + "/healthz", { headers: { Connection: "close" } })).ok) { fixture.recoveredAt = candidateAt; break; } } catch { /* starting */ }
+          if (Date.now() > deadline) throw new Error("server restart failed");
+          await new Promise((r) => setTimeout(r, 25));
+        }
+      },
+      async pauseUpstream(component, whilePaused, selectedSession) {
+        let serverPid = child.pid!;
+        if (unit) {
+          const show = spawn("systemctl", ["--user", "show", "-p", "MainPID", "--value", unit], { stdio: ["ignore", "pipe", "ignore"] });
+          let result = "";
+          show.stdout.on("data", (bytes) => { result += bytes; });
+          const [code] = await once(show, "exit");
+          serverPid = Number(result.trim());
+          if (code !== 0 || !Number.isInteger(serverPid) || serverPid < 1) throw new Error("fixture server identity unavailable");
+        }
+        // Arrival order can differ from canvas order. Multi-window callers select
+        // the session whose executed marker identifies the focused window.
+        const sessionId = (selectedSession ?? bridges.flatMap((bridge) => [...bridge.attached.values()].flat())[0])?.replaceAll("-", "");
+        if (!sessionId || !/^[0-9a-f]{32}$/.test(sessionId)) throw new Error("fixture session identity unavailable");
+        const shimState = process.env.REAL_ROOT_NAMESPACE === "1" ? "/run/infraternal" : resolve(runtime, "infraternal");
+        const pause = spawn("python3", [resolve(import.meta.dirname, "pause-upstream.py"), component, String(serverPid), shimState, sessionId], { stdio: ["pipe", "pipe", "pipe"] });
+        const exited = once(pause, "exit");
+        // This helper opens a pidfd, never signals a reused PID and resumes on stdin EOF.
+        const ready = once(pause.stdout, "data");
+        pause.stderr.resume();
+        let watchReplacement = true;
+        let replacement: Promise<void> | undefined;
+        try {
+          const status = await Promise.race([ready.then(([bytes]) => String(bytes).trim()), exited.then(() => "ended")]);
+          if (!/^paused [1-9][0-9]*$/.test(status)) throw new Error("private upstream pause failed");
+          const pausedPid = Number(status.split(" ")[1]);
+          if (component === "daemon" && process.env.RESTART_MEASURE === "1") replacement = (async () => {
+            // The server replaces a stalled daemon without waiting for SIGCONT. Observe its own
+            // child before it becomes ready, rather than subtracting an artificially late resume.
+            while (watchReplacement) {
+              const candidateAt = performance.timeOrigin + performance.now();
+              const tasks = await readdir(`/proc/${serverPid}/task`);
+              const children = await Promise.all(tasks.map((task) => readFile(`/proc/${serverPid}/task/${task}/children`, "utf8").catch(() => "")));
+              if (children.some((ids) => ids.trim().split(/\s+/).some((pid) => Number(pid) > 0 && Number(pid) !== pausedPid))) {
+                fixture.recoveredAt = candidateAt;
+                return;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 5));
             }
-            await new Promise((resolve) => setTimeout(resolve, 5));
-          }
-        })();
-        await whilePaused();
-        fixture.recoveredAt ??= performance.timeOrigin + performance.now();
-      } finally {
-        watchReplacement = false;
-        pause.stdin.end("resume\n");
-        await exited;
-        await replacement;
-      }
-    },
-    async dispose() {
-      front.close();
-      tls.close();
-      await stop();
-      // Reuse authenticated fixture teardown so detached shims cannot outlive
-      // the runtime directory that identifies them. Never scan unrelated PIDs.
-      // Root measurements run in a private mount namespace whose /run and passwd
-      // belong to this fixture; ordinary jobs always use their XDG runtime directory.
-      const shimState = process.env.REAL_ROOT_NAMESPACE === "1" ? "/run/infraternal" : resolve(runtime, "infraternal");
-      const cleanup = spawn("python3", ["-c", "import sys;sys.path.insert(0,'scripts');from pathlib import Path;from agent_fixture import cleanup;cleanup(Path(sys.argv[1]))", shimState], { cwd: root, stdio: "ignore" });
-      await once(cleanup, "exit");
-      await rm(runtime, { recursive: true, force: true });
-      await rm(state, { recursive: true, force: true });
-    },
-  };
-  return fixture;
+          })();
+          await whilePaused();
+          fixture.recoveredAt ??= performance.timeOrigin + performance.now();
+        } finally {
+          watchReplacement = false;
+          pause.stdin.end("resume\n");
+          await exited;
+          await replacement;
+        }
+      },
+      async interruptBrowserRoutes(durationMs) {
+        if (!Number.isInteger(durationMs) || durationMs < 1 || durationMs > 10_000) throw new Error("invalid fixture drop duration");
+        browserOfflineUntil = Date.now() + durationMs;
+        for (const browser of activeBrowsers) browser.terminate();
+        await new Promise((resolve) => setTimeout(resolve, durationMs));
+      },
+      dispose,
+    };
+    return fixture;
+  } catch (error) {
+    await dispose();
+    throw error;
+  }
 }

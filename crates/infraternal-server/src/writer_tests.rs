@@ -179,6 +179,68 @@ async fn writer_admission_at_user_capacity() {
 }
 
 #[tokio::test]
+async fn reserved_plugin_writers_do_not_alias_later_terminals() {
+    let (pool, user, session) = database().await;
+    // A committed plugin reservation has no terminal row. AUTOINCREMENT alone
+    // would reuse its identity when the next terminal attaches.
+    sqlx::query("UPDATE wire_writer_clock SET value=1000")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let connection = new_connection(&pool, &user, 0, None, None).await.unwrap();
+    let (_, writer) = owned_writer(&pool, &user, &connection.connection_id, 1, &session, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        writer, 2002,
+        "terminal ignored committed plugin reservations"
+    );
+    let (_, resumed) = owned_writer(&pool, &user, &connection.connection_id, 1, &session, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        resumed, writer,
+        "resume replaced a published terminal identity"
+    );
+}
+
+#[tokio::test]
+async fn terminal_sequence_survives_deletion_and_native_build_transitions() {
+    let (pool, user, session) = database().await;
+    let connection = new_connection(&pool, &user, 0, None, None).await.unwrap();
+    let (_, first) = owned_writer(&pool, &user, &connection.connection_id, 1, &session, None)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM terminal_writers")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let native = crate::wire_identity::reserve(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+    let (_, next) = owned_writer(&pool, &user, &connection.connection_id, 1, &session, None)
+        .await
+        .unwrap();
+    assert_eq!((first, native, next), (2, 4, 6));
+    sqlx::query("UPDATE wire_writer_clock SET value=2147483647")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        owned_writer(&pool, &user, &connection.connection_id, 3, &session, None)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        owned_writer(&pool, &user, &connection.connection_id, 1, &session, None)
+            .await
+            .unwrap()
+            .1,
+        next
+    );
+}
+
+#[tokio::test]
 async fn resume_refusals_distinguish_connection_state_and_lost_token_rotation() {
     let (pool, user, _) = database().await;
     let welcome = new_connection(&pool, &user, 0, None, None).await.unwrap();

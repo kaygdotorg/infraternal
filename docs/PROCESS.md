@@ -199,6 +199,16 @@ Reviews and fixes run at the same time as the next lane's build.
   Both target receipts, paired perf-VM measurements and the final gate output
   are recorded on #237.
 
+  Historical #146 flag-off measurements on the earlier dev base `42ab33035`
+  were 21,444,656 bytes on native x86_64, 21,445,296 bytes for an
+  aarch64-hosted x86_64 cross-build, and 19,604,184 bytes on aarch64. Against
+  the then-recorded x86_64 baseline of 21,431,472 bytes, the x86_64 deltas were
+  +13,184 and +13,824 bytes. The two build hosts produced x86_64 artifacts that
+  differed by 640 bytes. These are historical receipts; the refreshed
+  measurements for the current dev base are recorded on #146. The desktop
+  backend is optional, production ignores the `?appwin=1` preview flag, and the
+  Settings preference starts off and requires the server capability.
+
   Replay geometry and stale-note repairs (#257, R257-01/R257-02) measure
   21,431,472 / 19,605,896 bytes (x86_64 / aarch64), using the pinned
   `scripts/static-cargo` recipe on 8by64-compute02, one target at a time.

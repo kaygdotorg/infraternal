@@ -1356,7 +1356,8 @@ async fn component_down_proves_tcp_fallback_when_enrolled_udp_is_unavailable() {
                     .await
                     .unwrap();
                 notices.send(()).await.unwrap();
-                let _ = receive.next(&connection.channel).await;
+                // Initial census and later control frames do not end a live TCP link.
+                while receive.next(&connection.channel).await.is_ok() {}
             });
             while sessions.try_join_next().is_some() {}
         }

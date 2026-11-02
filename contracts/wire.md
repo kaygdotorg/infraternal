@@ -607,6 +607,83 @@ reused/resumed paths against RTT + 50 ms, and fresh TCP/TLS/upgrade paths agains
 keep input typed during recovery. Logs, screenshots and measurements belong on
 the issue [D262].
 
+## 9. Desktop video extension [D104,D200,D208,D232; #146]
+
+Leg A advertises `DESKTOP_VIDEO` (caps bit 4) before desktop messages. Leg B
+advertises the desktop native lane on bit 8; bits 0–7 remain reserved for core
+transport capabilities (writer binding, renewal, server paths, standby,
+priming, path backup and path proof). The extension
+is additive; v1, terminal framing and frozen upgrade messages are unchanged.
+Leg A remains WebSocket; the two QUIC delivery candidates apply to leg B.
+Neither delivery mode has a default: opening selects it explicitly for measurement.
+
+| type | name | body (little endian) |
+| ---: | --- | --- |
+| 0x40 | AttachDesktop | 16-byte session UUID, u8 delivery (0 reliable, 1 datagram) |
+| 0x41 | Video | u64 sequence, u64 capture_ns, u8 keyframe (0/1), Annex-B access unit |
+| 0x42 | VideoSize | u16 width, u16 height, u16 density_milli |
+| 0x43 | VideoInput | u8 input kind, binary fields below |
+| 0x44 | VideoRepair | u64 last_sequence |
+| 0x45 | VideoFragment | 16-byte session UUID, u64 sequence, u64 capture_ns, u8 keyframe, u32 total, u32 offset, fragment bytes |
+
+Video sequence starts at 1 and never decreases within a session. `capture_ns`
+is the Mac host's monotonic capture-request clock, converted to nanoseconds;
+it is not the server clock. Cross-machine latency measurements must record
+clock-offset estimation and uncertainty; subtracting unrelated clocks is invalid.
+Keyframes include SPS/PPS and IDR. Access units are nonempty and at most
+4 MiB minus 42 bytes, reserving room for the fragment header inside §2.
+Size is even, 2–4096 per side, at most 4 megapixels, density 1000–4000.
+
+Input coordinates are unsigned millionths of the current output frame (including letterbox bands),
+0–1,000,000 inclusive; the host maps to its verified geometry. Modifiers use
+helper-contract bits 0–3. Mouse (kind 0): u32 x, u32 y, u8 button (0–2),
+u8 state (0–2), u8 modifiers. Scroll (kind 1): u32 x, u32 y, i32 dx,
+i32 dy, u8 modifiers. Key (kind 2): u16 keycode (0–127), u8 down (0/1),
+u8 modifiers. Release (kind 3) has no additional fields and releases held
+remote inputs in order on the reliable control lane. Text (kind 4): u32 Unicode
+scalar, at least U+0020, excluding U+007F–U+009F, surrogates and values above
+U+10FFFF. Printable keyboard input uses the source layout text; shortcuts
+retain physical key codes and release the key selected at keydown. Control
+(kind 5): u8 active (exactly 0/1), originated only by server control-lease
+transitions; browser-origin control visibility messages are refused. Taking
+control shows the native indicator before input, and retirement hides it.
+The native helper remains
+the authority on D208's local input
+pause. Input is never replayed after a connection drop. Only one authorized
+viewer controls a session; taking control is an explicit handover.
+
+The server holds the session independently of viewers and checks live grants
+for view and control. At most five viewers attach. It retains the latest IDR
+and one pending access unit, sharing immutable bytes between viewers. A new
+viewer receives the cached IDR immediately, requests a fresh IDR and waits for
+it before consuming current deltas. Replaying a stale IDR followed by a current
+P-frame is forbidden. A viewer that misses a sequence discards deltas until IDR.
+
+Reliable mode has one pending frame at the sender and a bounded in-flight
+write. A stale pending frame is dropped; its dependent deltas are discarded
+until IDR. Once any bytes of a reliable frame are written it must be completed
+or its dedicated video stream reset: partial-frame cancellation cannot splice
+the next frame into it. Control and input use an independently driven reliable
+control direction; they are never queued behind video writes.
+
+Datagrams contain one complete §2 VideoFragment frame without mux. Fragment
+payload is exactly 1024 bytes except the final tail; offsets are multiples of
+1024. Each encoded fragment also fits the negotiated QUIC datagram size.
+All offsets are validated before allocation. A receiver binds the UUID to the
+already authorized session and retains one bounded assembly. A newer sequence
+or a 250 ms active assembly deadline drops an incomplete frame and coalesces
+VideoRepair on the reliable control stream. Duplicate identical fragments are
+idempotent; conflicting fragments and metadata are errors. Idle
+receivers have no repair timer. A skipped delta forces IDR recovery; an IDR
+supersedes prior incomplete frames. No unbounded retransmission backlog.
+
+Path selection consumes the same measured relay/direct observations as terminals.
+The server session and grant authority remain stable across path changes.
+This production base lacks terminal direct transport/signalling; the desktop
+relay and path interface must not advertise working direct delivery until that
+integration exists. The canvas view is outside this slice and needs an approved
+mockup before product UI work.
+
 ## Account canvas layout [178,180,183,245,248] (#243)
 
 The `canvas` server plugin uses control stream 0 only. Account identity always
@@ -777,7 +854,7 @@ Ordinary legacy Input remains available. No session is automatically ended.
 
 ### Layout session incarnation (#250, D312)
 
-Hello capability bit 4 (`16`) requests an additive Welcome suffix: a length-prefixed
+Hello capability bit 5 (`32`) requests an additive Welcome suffix: a length-prefixed
 43-byte base64url `session_incarnation`. The label is opaque and non-secret; it is
 stable only for the authenticated browser session, including reconnects and server
 restarts. Authenticated HTTP session responses include the same label so the tab

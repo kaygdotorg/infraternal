@@ -285,6 +285,20 @@ mod tests {
         Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn server_migrations_have_unique_versions() {
+        let migrations = sqlx::migrate!("../../infraternal-server/migrations");
+        let mut versions = std::collections::HashSet::new();
+        for migration in migrations.iter() {
+            assert!(
+                versions.insert(migration.version),
+                "duplicate server migration version {}",
+                migration.version
+            );
+        }
+    }
+
     struct Lease(Arc<AtomicUsize>);
     impl Drop for Lease {
         fn drop(&mut self) {

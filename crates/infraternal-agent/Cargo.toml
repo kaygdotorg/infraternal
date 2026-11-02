@@ -6,7 +6,10 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-remote = ["dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:tokio-tungstenite", "dep:futures-util", "dep:base64", "dep:url"]
+# Generic plugin media lanes stay absent from terminal-only builds (#146).
+native-streams = ["infraternal-plugin-api/native-streams", "remote", "infraternal-plugin-remote/native-streams"]
+desktop = ["native-streams", "dep:infraternal-plugin-desktop"]
+remote = ["infraternal-plugin-api/native-wire", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:tokio-tungstenite", "dep:futures-util", "dep:base64", "dep:url"]
 default = ["plugin-host-facts"]
 plugin-host-facts = ["dep:infraternal-plugin-host-facts"]
 
@@ -14,9 +17,11 @@ ee = ["infraternal-plugin-mesh?/ee"]
 mesh = ["dep:infraternal-plugin-mesh"]
 
 [dependencies]
+infraternal-plugin-desktop = { path = "../plugins/desktop", version = "0.1.0", default-features = false, features = ["source"], optional = true }
 infraternal-plugin-host-facts = { path = "../plugins/host-facts", version = "0.1.0", default-features = false, features = ["agent"], optional = true }
 
 infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", optional = true, default-features = false }
+bytes.workspace = true
 infraternal-protocol.workspace = true
 infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
 infraternal-shim = { workspace = true, features = ["async-fd", "host-login"] }
@@ -29,7 +34,6 @@ sha2.workspace = true
 
 openssl = { workspace = true, optional = true }
 tokio-openssl = { workspace = true, optional = true }
-bytes = { workspace = true }
 quinn = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
@@ -39,10 +43,17 @@ url = { workspace = true, optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 infraternal-plugin-mesh = { path = "../plugins/mesh", version = "0.1.0", optional = true, default-features = false, features = ["agent"] }
 
+# The latency fixture needs the opt-in native desktop source [D203, D204].
+[[example]]
+name = "desktop-latency-source"
+required-features = ["desktop"]
+
 [lints]
 workspace = true
 
 [dev-dependencies]
+# Frozen extension vectors remain covered without adding them to shipping terminals.
+infraternal-protocol = { workspace = true, features = ["desktop"] }
 # Safe monotonic timestamps align opt-in test diagnostics with external profiles.
 nix = { workspace = true, features = ["time"] }
 # Paused test time controls frame-expiry ordering without changing runtime timers.

@@ -74,8 +74,10 @@ const RESUME_NEXT = 1n;
 const LINK_DOUBT_NOTICES = 2n;
 /** Hello bit 2: control Event 0 reports page visibility (#244). */
 const VIEWER_VISIBILITY = 4n;
-/** Hello caps bit 4: request the layout session-incarnation Welcome suffix (contracts/wire.md, D312). */
-export const LAYOUT_SESSION_INCARNATION = 1n << 4n;
+/** Hello caps bit 3 advertises reply-marked terminal Input support [D307]. */
+const TERMINAL_QUERY_REPLIES = 8n;
+/** Hello caps bit 5: request the layout session-incarnation Welcome suffix (contracts/wire.md, D312). */
+export const LAYOUT_SESSION_INCARNATION = 1n << 5n;
 const SEND_BUFFER_SIZE = 32 * 1024;
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const RECOVERY_SUBSCRIPTION = 45;
@@ -123,7 +125,16 @@ export interface ConnectionConfig {
   onRecoveryCompleted?: (message: string) => void;
   /** Connection state: true once a stream attached, false when the socket closes. */
   onConnectionChange?: (connected: boolean) => void;
+  /**
+   * Asked at every socket open: true advertises the desktop video capability (bit 4, contracts/wire.md §9) in the
+   * client's Hello, so the server may open app-window and screen streams on this socket. It is read at connect time,
+   * so a person who turns the feature on needs the next connection for it to take effect; the flag is off by default.
+   */
+  desktop?: () => boolean;
 }
+
+/** Capability bit the server advertises (and a client echoes) for desktop video streams. */
+export const DESKTOP_VIDEO_CAP = 16n;
 
 interface ResumeCredentials { connectionId: Uint8Array; resumeToken: Uint8Array; deadline: number; windowMs: number }
 
@@ -161,6 +172,8 @@ export class MuxConnection {
   private readonly subscriptions = new Map<number, Subscription>();
   private readonly welcomeListeners = new Set<() => void>();
   private readonly attachListeners = new Set<() => void>();
+  private readonly capListeners = new Set<(caps: bigint) => void>();
+  private serverCapsValue: bigint | undefined;
   private nextSubscription = FIRST_FEATURE_SUBSCRIPTION;
   private readonly sendScratch = new Uint8Array(SEND_BUFFER_SIZE);
   private nextStream = 1;
@@ -190,7 +203,7 @@ export class MuxConnection {
   private attachedCount = 0;
   /** Streams that attached on this server-side connection: the server keeps a writer row for each, up to its cap. */
   private readonly writersUsed = new Set<number>();
-  /** Streams that sent AttachTerm on the current WebSocket; resume retains writers but replaces attachments. */
+  /** Streams attached on the current WebSocket; resume retains terminal writers but replaces their attachments. */
   private readonly attachedOnSocket = new Set<number>();
 
   private readonly onVisibility = (): void => this.pageVisibilityChanged();
@@ -249,7 +262,7 @@ export class MuxConnection {
   closeStream(id: number): void {
     if (!this.streams.delete(id)) return;
     this.unacknowledgedInput.delete(id);
-    // A retained writer can belong to the resumed connection's old socket; Close requires a new AttachTerm first.
+    // Close is valid only after this stream attached on the current socket; an old attachment cannot be closed here.
     if (this.attachedOnSocket.delete(id)) this.send(id, { type: "Close", code: 1000, reason: "window closed" });
   }
 
@@ -271,8 +284,8 @@ export class MuxConnection {
       }
       onEncoded?.(performance.now());
       socket.send(this.sendScratch.subarray(0, length));
-      // Server writer identity survives resume, but the attached route is recreated on each WebSocket.
-      if (frame.type === "AttachTerm") this.attachedOnSocket.add(streamId);
+      // Terminal and desktop viewer attachments both need a Close to retire their server-side route.
+      if (frame.type === "AttachTerm" || (frame.type === "Desktop" && frame.message.kind === "attach")) this.attachedOnSocket.add(streamId);
       onSent?.(performance.now());
     } catch {
       this.fail("could not encode an infraternal wire frame");
@@ -312,7 +325,20 @@ export class MuxConnection {
   onWelcome(listener: () => void): () => void {
     this.welcomeListeners.add(listener);
     if (this.isWelcomed) listener();
+    // Control-only features need a transport before they can create a stream.
+    // An existing reconnect timer already owns the next attempt.
+    else if (!this.socket && !this.retryTimer && !this.closed) this.connect();
     return () => { this.welcomeListeners.delete(listener); };
+  }
+
+  /** The capability bits the server last advertised, or undefined before its Hello arrives. */
+  get serverCaps(): bigint | undefined { return this.serverCapsValue; }
+
+  /** Runs `listener` now when the server's capabilities are known, and again whenever a Hello states them. */
+  onServerCaps(listener: (caps: bigint) => void): () => void {
+    this.capListeners.add(listener);
+    if (this.serverCapsValue !== undefined) listener(this.serverCapsValue);
+    return () => { this.capListeners.delete(listener); };
   }
 
   /**
@@ -439,6 +465,7 @@ export class MuxConnection {
   dispose(): void {
     if (this.closed) return;
     this.closed = true;
+    this.capListeners.clear();
     this.clearRetryTimer();
     globalThis.clearTimeout(this.closeNoteTimer);
     this.closeNoteTimer = undefined;
@@ -480,7 +507,8 @@ export class MuxConnection {
       const resumable = sessionsToResume && credentials !== undefined && Date.now() < credentials.deadline;
       this.resumeSent = resumable;
       // RESUME_NEXT tells the server to wait for the adjacent Resume before issuing Welcome.
-      const hello: WireFrame = { type: "Hello", version: VERSION, caps: (resumable ? RESUME_NEXT : 0n) | LINK_DOUBT_NOTICES | VIEWER_VISIBILITY | LAYOUT_SESSION_INCARNATION, clientInfo: "infraternal-tracer/0.1" };
+      const wantsDesktop = this.config.desktop?.() === true;
+      const hello: WireFrame = { type: "Hello", version: VERSION, caps: (resumable ? RESUME_NEXT : 0n) | LINK_DOUBT_NOTICES | VIEWER_VISIBILITY | LAYOUT_SESSION_INCARNATION | (wantsDesktop ? DESKTOP_VIDEO_CAP : 0n), clientInfo: "infraternal-tracer/0.1" };
       let length = encodeMuxedFrameInto(CONTROL_STREAM, hello, this.sendScratch);
       if (resumable && credentials) {
         length += encodeMuxedFrameInto(CONTROL_STREAM, { type: "Resume", connectionId: credentials.connectionId, resumeToken: credentials.resumeToken }, this.sendScratch, length);
@@ -582,8 +610,10 @@ export class MuxConnection {
     this.forcedDrop = false;
     for (const s of [...this.streams.values()]) s.onDisconnected(forced);
     this.status("Connection lost. Reconnecting…");
-    // With no stream left there is nothing to restore; the next `openStream` connects again.
-    if (this.streams.size > 0 || this.subscriptions.size > 0) this.scheduleReconnect();
+    // Welcome waiters include inventory and native capture retirement before a
+    // replacement viewer exists. Their pending work also needs a fresh route;
+    // calls already sent on the retired route were rejected above, never replayed.
+    if (this.streams.size > 0 || this.welcomeListeners.size > 0 || this.subscriptions.size > 0) this.scheduleReconnect();
   }
 
   /** One D300 miss interval; correlated RTT and jitter do not change probe frequency. */
@@ -714,9 +744,12 @@ export class MuxConnection {
   private control(frame: WireFrame): void {
     switch (frame.type) {
       case "Hello":
+        if (frame.version !== VERSION) { this.fail("server uses an unsupported wire version"); return; }
         this.serverVisibility = (frame.caps & VIEWER_VISIBILITY) !== 0n;
-        this.terminalQueryReplies = (frame.caps & 8n) !== 0n;
-        if (frame.version !== VERSION) this.fail("server uses an unsupported wire version");
+        // Server capabilities govern feature visibility independently of the client's request.
+        this.serverCapsValue = frame.caps;
+        for (const l of [...this.capListeners]) l(frame.caps);
+        this.terminalQueryReplies = (frame.caps & TERMINAL_QUERY_REPLIES) !== 0n;
         return;
       case "Welcome":
         this.sessionIncarnation = frame.sessionIncarnation;

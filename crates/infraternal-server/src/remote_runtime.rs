@@ -95,6 +95,8 @@ struct Host {
     uid: u32,
     caps: u64,
     authority: AuthorityGuard,
+    #[cfg(any(test, feature = "native-streams"))]
+    admission: Arc<std::sync::RwLock<AuthorityGuard>>,
     actor: EmbeddedAgent,
     accepts: mpsc::Sender<RemoteLink>,
     generation: Uuid,
@@ -112,6 +114,23 @@ impl Drop for Retirement {
     }
 }
 impl RemoteHosts {
+    #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+    pub(crate) async fn node(
+        &self,
+        id: Uuid,
+        owner: String,
+        pool: sqlx::SqlitePool,
+    ) -> Option<Arc<dyn infraternal_plugin_api::streams::NodeHost>> {
+        let hosts = self.0.lock().await;
+        let host = hosts.get(&id).filter(|host| host.authority.permits())?;
+        Some(Arc::new(crate::node_host::EnrolledNode::new(
+            id,
+            owner,
+            pool,
+            host.actor.clone(),
+            host.admission.clone(),
+        )))
+    }
     pub(crate) fn from_source(source: Option<Arc<dyn crate::ca::CaKeySource>>) -> Self {
         Self(
             Arc::default(),
@@ -344,6 +363,13 @@ impl RemoteHosts {
             host.caps = caps;
             host.retirement =
                 self.retirement(id, generation, authority.clone(), host.actor.clone());
+            #[cfg(any(test, feature = "native-streams"))]
+            {
+                *host
+                    .admission
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = authority.clone();
+            }
             host.authority = authority;
             // Tunnel source addresses are not underlay discovery. Preserve the
             // existing address, including its canonical IPv4 representation.
@@ -375,6 +401,8 @@ impl RemoteHosts {
                     channel: None,
                     uid,
                     caps,
+                    #[cfg(any(test, feature = "native-streams"))]
+                    admission: Arc::new(std::sync::RwLock::new(authority.clone())),
                     authority,
                     actor,
                     accepts,
@@ -440,6 +468,15 @@ impl RemoteHosts {
         host.generation = generation;
         host.caps = caps;
         host.retirement = self.retirement(id, generation, authority.clone(), actor);
+        // Retained NodeHost handles follow the promoted certificate and its
+        // subsequent renewals, rather than the retired connection's expiry.
+        #[cfg(any(test, feature = "native-streams"))]
+        {
+            *host
+                .admission
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = authority.clone();
+        }
         host.authority = authority;
         self.5.publish();
         // A parked underlay is a path replacement, not a new discovery source.

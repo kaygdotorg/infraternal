@@ -180,6 +180,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "apple-cf"
+version = "0.11.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a47effd5b5e7afd1c51ef8d1bacf86060565461c1fb6cf67aae433417c4048c"
+dependencies = [
+ "doom-fish-utils",
+]
+
+[[package]]
+name = "apple-metal"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e5ecd43c9a8443c6ea515108326330313d6390a0383152e6c2db7b776123974"
+dependencies = [
+ "doom-fish-utils",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1050,6 +1068,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "doom-fish-utils"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b17b6b508be066ed1f17547113c170b9105d9b7d9ba0a9c86b6dc767167ec0f3"
+
+[[package]]
 name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1886,6 +1910,7 @@ dependencies = [
  "infraternal-mesh",
  "infraternal-plugin-api",
  "infraternal-plugin-backup",
+ "infraternal-plugin-desktop",
  "infraternal-plugin-host-facts",
  "infraternal-plugin-mesh",
  "infraternal-plugin-relay",
@@ -1918,6 +1943,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "infraternal-plugin-api",
+ "infraternal-plugin-desktop",
  "infraternal-plugin-host-facts",
  "infraternal-plugin-mesh",
  "infraternal-plugin-remote",
@@ -1944,6 +1970,7 @@ dependencies = [
  "infraternal-agent",
  "infraternal-plugin-api",
  "infraternal-plugin-canvas",
+ "infraternal-plugin-desktop",
  "infraternal-plugin-host-facts",
  "infraternal-plugin-mesh",
  "infraternal-plugin-release",
@@ -1992,6 +2019,24 @@ dependencies = [
  "bytes",
  "infraternal-plugin-api",
  "infraternal-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "infraternal-plugin-desktop"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "infraternal-agent",
+ "infraternal-plugin-api",
+ "infraternal-plugin-remote",
+ "infraternal-protocol",
+ "nix 0.30.1",
+ "quinn",
+ "screencapturekit",
  "serde",
  "serde_json",
  "tokio",
@@ -2132,6 +2177,7 @@ dependencies = [
  "infraternal-agent",
  "infraternal-plugin-api",
  "infraternal-plugin-canvas",
+ "infraternal-plugin-desktop",
  "infraternal-plugin-mesh",
  "infraternal-plugin-release",
  "infraternal-plugin-remote",
@@ -3654,6 +3700,16 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "screencapturekit"
+version = "11.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe1b2061926d42d24cf1736407c9d7bc3e7d45dbba841e5ac8807c662998967e"
+dependencies = [
+ "apple-cf",
+ "apple-metal",
+]
 
 [[package]]
 name = "scrypt"
