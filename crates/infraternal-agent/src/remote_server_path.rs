@@ -155,7 +155,7 @@ async fn connect(
             {
                 recovery_attempted = true;
                 if renewal
-                    .recover(identity.endpoint, &identity.server_name)
+                    .recover(enrolled_address, &identity.server_name)
                     .await
                     .is_err()
                 {
