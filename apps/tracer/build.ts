@@ -4,6 +4,7 @@ import { precompress } from "./precompress";
 import { browserFileLoader } from "./browser-build";
 import { classifyChunks, type MetaOutput } from "./chunk-classes";
 import { buildDocs } from "./docs-build";
+import type { BunPlugin, PluginBuilder } from "bun";
 import { docsDatasetPlugin } from "./docs-dataset";
 
 // TRACER_DIST builds elsewhere (a build next to a running preview server must not replace its files).
@@ -26,6 +27,14 @@ if (docsDataset && !clustersPreview) throw new Error("TRACER_DATASET=docs needs 
 // without git history reports nothing, and the UI then says "dev". Reproducible
 // package builds supply the source revision and timestamp explicitly.
 const commit = process.env.INFRATERNAL_BUILD_COMMIT ?? Bun.spawnSync(["git", "rev-parse", "HEAD"], { stderr: "ignore" }).stdout.toString().trim();
+const plugins: BunPlugin[] = [...(docsDataset ? [docsDatasetPlugin] : []), ...(clustersPreview ? [browserFileLoader] : [browserFileLoader, {
+    // Without the preview flag the mockups resolve to empty modules (their calls are unreachable: the define is false).
+    name: "leave-out-mockups",
+    setup(builder: PluginBuilder) {
+      builder.onResolve({ filter: /^\.\/(canvas\/mock(\/windows-proto\/canvas)?|canvas\/model\/layout-review-double|add-host-prototype|perf-hud\.on-demand)$/ }, (args) => ({ path: args.path, namespace: "left-out" }));
+      builder.onLoad({ filter: /.*/, namespace: "left-out" }, () => ({ contents: "export const mountMockup = undefined; export const mountAddHostPrototype = undefined; export const mountCanvas = undefined; export const mountPerfHud = undefined; export const createLayoutReviewDouble = undefined;", loader: "js" }));
+    },
+  }])];
 const build = await Bun.build({
   entrypoints: ["src/main.ts", "src/offline.worker.ts", "../../packages/ui/src/backdrop.worker.ts", "../../packages/ui/src/faulty-terminal.worker.ts"],
   outdir: dist,
@@ -36,14 +45,7 @@ const build = await Bun.build({
   splitting: true, // the terminal chunk loads after sign-in (see src/main.ts)
   define: { __CLUSTERS_PREVIEW__: JSON.stringify(clustersPreview), __RECOVERY_UI_MODE__: JSON.stringify(recoveryUiMode), __BUILD_DATE__: JSON.stringify(process.env.INFRATERNAL_BUILD_DATE ?? new Date().toISOString()), __BUILD_COMMIT__: JSON.stringify(/^[0-9a-f]{40}$/.test(commit) ? commit : "") },
   metafile: true,
-  plugins: [...(docsDataset ? [docsDatasetPlugin] : []), ...(clustersPreview ? [browserFileLoader] : [browserFileLoader, {
-    // Without the preview flag the mockups resolve to empty modules (their calls are unreachable: the define is false).
-    name: "leave-out-mockups",
-    setup(builder) {
-      builder.onResolve({ filter: /^\.\/(canvas\/mock(\/windows-proto\/canvas)?|canvas\/model\/layout-review-double|add-host-prototype|perf-hud\.on-demand)$/ }, (args) => ({ path: args.path, namespace: "left-out" }));
-      builder.onLoad({ filter: /.*/, namespace: "left-out" }, () => ({ contents: "export const mountMockup = undefined; export const mountAddHostPrototype = undefined; export const mountCanvas = undefined; export const mountPerfHud = undefined; export const createLayoutReviewDouble = undefined;", loader: "js" }));
-    },
-  }])],
+  plugins,
 });
 if (!build.success) {
   throw new Error(build.logs.map((log) => log.message).join("\n"));

@@ -27,7 +27,7 @@ export const DOCS_HOSTS: ReadonlyArray<readonly [string, string]> = [
 /** People, longest first so "Kay G" is not caught by a shorter rule. */
 export const DOCS_PEOPLE: ReadonlyArray<readonly [string, string]> = [
   ["Kay G", "Maya Patel"], ["Asha Verma", "Sam Lee"], ["Ravi Menon", "Alex Kim"],
-  ["kayg", "maya"], ["asha", "sam"], ["ravi", "alex"], ["mira", "jo"],
+  ["kayg", "maya"], ["asha", "sam"], ["ravi", "alex"], ["mira", "sam"],
 ];
 
 const WORD = (name: string): RegExp => new RegExp(`(?<![\\w-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`, "g");
@@ -60,6 +60,15 @@ export const LEAKS: ReadonlyArray<RegExp> = [
 /** Names found in `text` that must not appear in a figure; empty when it is clean. */
 export function findLeaks(text: string): string[] {
   return [...new Set(LEAKS.flatMap((pattern) => [...text.matchAll(new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`))].map((match) => match[0])))];
+}
+
+/**
+ * A fixture as the test double serves it: unchanged normally, with the docs' names when the double runs for the docs
+ * (`TRACER_DATASET=docs`). It is applied where the fixtures are defined, not where they are sent, so every lookup the double
+ * makes by id (a host the person picks, a session they open) finds what the page was told.
+ */
+export function forDocs<T>(fixture: T): T {
+  return process.env.TRACER_DATASET === "docs" ? JSON.parse(renameDataset(JSON.stringify(fixture))) as T : fixture;
 }
 
 /** Where the mock world lives in the app's source: the only files the transform touches. */

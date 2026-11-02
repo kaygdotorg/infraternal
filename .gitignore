@@ -7,6 +7,7 @@ target/
 .svelte-kit/
 build/
 dist/
+dist-figures/
 __pycache__/
 .wrangler/
 .env*

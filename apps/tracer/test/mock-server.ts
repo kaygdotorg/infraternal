@@ -14,7 +14,6 @@ import { serveSetup } from "./setup-double";
 import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
 import { sessionDevices, sessionHosts } from "./session-fixtures";
 import { renameDataset } from "../docs-dataset";
-import { docsPrototypeHosts, docsSessionHosts } from "./docs-fixtures";
 import { createPerfSink } from "./perf-sink";
 
 /**
@@ -259,14 +258,14 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   if (url.pathname === "/__perf") return perfSink(request, response);
   if (await handleBootstrapHttp(request, response, url.pathname, sameOrigin(request) || request.method === "GET" ? isAuthenticated(request) : false)) return;
   if (request.method === "GET" && url.pathname === "/__mock/proto/windows") {
-    return sendJson(response, 200, { hosts: DOCS_DATASET ? docsPrototypeHosts(prototypeHosts) : prototypeHosts });
+    return sendJson(response, 200, { hosts: prototypeHosts });
   }
   if (request.method === "GET" && url.pathname === "/__mock/proto/sessions") {
     // The session inventory (D178). `?delay=<ms>` and `?fail=1` let the mockup show its slow and failed states.
     const delay = Math.min(5000, Math.max(0, Number(url.searchParams.get("delay")) || 0));
     if (delay) await new Promise((done) => setTimeout(done, delay));
     if (url.searchParams.get("fail") === "1") return sendJson(response, 503, { error: "session list unavailable" });
-    return sendJson(response, 200, { hosts: DOCS_DATASET ? docsSessionHosts(sessionHosts) : sessionHosts, devices: sessionDevices });
+    return sendJson(response, 200, { hosts: sessionHosts, devices: sessionDevices });
   }
   if (request.method === "GET" && url.pathname === "/__mock/proto/addhost") {
     return sendJson(response, 200, { hosts: addHostFixtures });
