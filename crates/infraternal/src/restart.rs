@@ -33,6 +33,7 @@ pub(crate) struct Control {
     clock_health: std::sync::Arc<infraternal_server::clock_health::ClockHealth>,
 }
 impl Control {
+    #[cfg(test)]
     pub(crate) fn start(data: &Path) -> io::Result<Self> {
         Self::start_with_clock(
             data,
@@ -147,26 +148,7 @@ impl Control {
                 continue;
             };
             let ControlRequest::Restart { binary, reload } = request else {
-                let status =
-                    infraternal_server::ca_status::from_source(source, Some(&self.clock_health))
-                        .unwrap_or_else(|_| infraternal_server::ca_status::CaStatus::unavailable());
-                let result = serde_json::to_vec(&status).map_err(io::Error::other);
-                let sent = match result {
-                    Ok(payload) if payload.len() <= 16 * 1024 => {
-                        match u16::try_from(payload.len()) {
-                            Ok(length) => {
-                                async {
-                                    socket.write_u16(length).await?;
-                                    socket.write_all(&payload).await
-                                }
-                                .await
-                            }
-                            Err(_) => Err(io::Error::other("status response too large")),
-                        }
-                    }
-                    Ok(_) => Err(io::Error::other("status response too large")),
-                    Err(error) => Err(error),
-                };
+                let sent = send_status(&mut socket, source, &self.clock_health).await;
                 if sent.is_ok() {
                     record_request("status", peer.as_ref(), None, "replied");
                 } else {
@@ -218,6 +200,24 @@ impl Drop for Control {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// Send the clock-aware trust snapshot through the private owner socket.
+async fn send_status(
+    socket: &mut UnixStream,
+    source: Option<&dyn infraternal_server::ca::CaKeySource>,
+    clock_health: &infraternal_server::clock_health::ClockHealth,
+) -> io::Result<()> {
+    let status = infraternal_server::ca_status::from_source(source, Some(clock_health))
+        .unwrap_or_else(|_| infraternal_server::ca_status::CaStatus::unavailable());
+    let payload = serde_json::to_vec(&status).map_err(io::Error::other)?;
+    if payload.len() > 16 * 1024 {
+        return Err(io::Error::other("status response too large"));
+    }
+    let length =
+        u16::try_from(payload.len()).map_err(|_| io::Error::other("status response too large"))?;
+    socket.write_u16(length).await?;
+    socket.write_all(&payload).await
 }
 
 enum ControlRequest {
