@@ -811,13 +811,7 @@ async fn launch_configured(
             loop {
                 let mut ready = peer.writable().await?;
                 if let Ok(result) = ready.try_io(|connection| {
-                    prepared.request(
-                        connection,
-                        id.as_bytes(),
-                        pid,
-                        &pin,
-                        login_worker_parent,
-                    )
+                    prepared.request(connection, id.as_bytes(), pid, &pin, login_worker_parent)
                 }) {
                     return result;
                 }

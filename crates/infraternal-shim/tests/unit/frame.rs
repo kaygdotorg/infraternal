@@ -442,11 +442,7 @@ fn capability_bits_are_distinct() {
         SHELL_CLEANUP,
     ];
     for (index, capability) in capabilities.iter().enumerate() {
-        assert_eq!(
-            (*capability).count_ones(),
-            1,
-            "capability must use one bit"
-        );
+        assert_eq!((*capability).count_ones(), 1, "capability must use one bit");
         for other in &capabilities[index + 1..] {
             assert_eq!(*capability & *other, 0, "capability bits must not overlap");
         }

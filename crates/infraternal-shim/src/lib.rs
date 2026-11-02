@@ -35,11 +35,11 @@ pub mod login;
 pub mod login_handoff;
 #[cfg(feature = "host-login")]
 pub mod login_ready;
-mod shell_startup;
 mod pty;
 #[cfg(feature = "async-fd")]
 pub mod readiness;
 pub mod ring;
+mod shell_startup;
 pub mod startup;
 
 /// Resolve locale variables for a scrubbed login shell [#161].
