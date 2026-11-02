@@ -73,9 +73,7 @@ impl ClockHealth {
             .samples
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some((old_wall, old_monotonic)) = samples.previous else {
-            return None;
-        };
+        let (old_wall, old_monotonic) = samples.previous?;
         let wall_delta = wall.duration_since(old_wall);
         let monotonic_delta = monotonic.checked_duration_since(old_monotonic);
         let valid = match (wall_delta, monotonic_delta) {
@@ -127,11 +125,7 @@ impl ClockHealth {
 }
 
 fn duration_difference(left: Duration, right: Duration) -> Duration {
-    if left >= right {
-        left - right
-    } else {
-        right - left
-    }
+    left.abs_diff(right)
 }
 
 #[cfg(test)]
@@ -141,7 +135,7 @@ mod tests {
     #[test]
     fn clock_starts_unknown_and_needs_three_stable_samples() {
         let health = ClockHealth::default();
-        let wall = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let wall = UNIX_EPOCH + Duration::from_hours(500_000);
         let monotonic = Instant::now();
         assert!(!health.is_healthy());
         for second in 0..4 {
@@ -156,7 +150,7 @@ mod tests {
     #[test]
     fn backwards_wall_time_and_long_sample_gaps_return_to_unknown() {
         let health = ClockHealth::default();
-        let wall = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let wall = UNIX_EPOCH + Duration::from_hours(500_000);
         let monotonic = Instant::now();
         for second in 0..4 {
             health.observe(

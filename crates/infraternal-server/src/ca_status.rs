@@ -55,6 +55,9 @@ impl CaStatus {
 }
 
 /// Read only public roots and the lock watch; a missing watch remains unknown.
+///
+/// # Errors
+/// Returns an error if the public root set is ambiguous or certificate metadata is malformed.
 pub fn from_source(
     source: Option<&dyn CaKeySource>,
     clock: Option<&ClockHealth>,
@@ -67,6 +70,9 @@ pub fn from_source(
 }
 
 /// Build an authenticated status response from one legacy public issuer.
+///
+/// # Errors
+/// Returns an error if the issuer certificate metadata is malformed.
 pub fn from_issuer(
     issuer: Option<X509>,
     locked: Option<bool>,
@@ -118,10 +124,7 @@ fn root_status(
     let digest = issuer
         .digest(MessageDigest::sha256())
         .map_err(|_| crate::ca::CaError)?;
-    let fingerprint = digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let fingerprint = hex_fingerprint(&digest);
     let not_after = epoch_seconds(issuer)?;
     let remaining_seconds = now.and_then(|now| not_after.checked_sub(now));
     let warning_level = remaining_seconds.map_or("unknown", warning_level);
@@ -133,6 +136,16 @@ fn root_status(
         remaining_seconds,
         warning_level: warning_level.to_owned(),
     })
+}
+
+fn hex_fingerprint(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes.iter().copied() {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn epoch_seconds(issuer: &X509) -> Result<i64, crate::ca::CaError> {
@@ -229,7 +242,7 @@ mod tests {
         assert_eq!(status.roots[0].warning_level, "unknown");
         assert_eq!(status.roots[0].remaining_seconds, None);
         assert_eq!(status.roots[0].not_after, 1_900_000_000);
-        assert!(!status.roots[0].certificate_der.is_empty());
+        assert_ne!(status.roots[0].certificate_der, "");
     }
 
     #[test]

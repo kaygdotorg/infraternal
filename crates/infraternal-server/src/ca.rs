@@ -109,7 +109,7 @@ pub trait CaKeySource: Send + Sync {
     }
     /// Ordered public roots that clients may trust during an overlap.
     ///
-    /// Existing sources expose one root through public_issuer. A rollover
+    /// Existing sources expose one root through `public_issuer`. A rollover
     /// source can override this with the current and next generations while
     /// keeping the signing key locked.
     fn public_roots(&self) -> Vec<(u64, X509)> {

@@ -2,8 +2,10 @@
 use infraternal_agent::remote_native::NativeChannel;
 
 use super::*;
+use crate::{ca::CertificateAuthority, enrollment::EnrollmentStore};
 use infraternal_agent::{
     channel::Channel,
+    remote_tls,
     transport::{Receive, Transmit},
 };
 use infraternal_protocol::Frame;
@@ -156,27 +158,22 @@ fn identities_for_name(server_dns: &str) -> (Identity, Identity, X509, crate::ca
     )
 }
 
-/// A real TCP/TLS exchange proves expired leaves cannot enter host control and
-/// can recover only over the server-authenticated, proof-bound ALPN (#285).
-#[tokio::test]
-async fn expired_host_leaf_is_rejected_by_mtls_and_recovers_with_registered_key_proof() {
-    use crate::{ca::CertificateAuthority, enrollment::EnrollmentStore};
-    use infraternal_agent::remote_tls;
-    use openssl::{
-        hash::MessageDigest,
-        pkey::PKey,
-        x509::{X509NameBuilder, X509Req},
-    };
+/// Inputs shared by the real-TLS recovery exchange and replay checks.
+struct RecoveryTlsFixture {
+    address: std::net::SocketAddr,
+    host: Uuid,
+    root: X509,
+    expired: Identity,
+    csr_der: Vec<u8>,
+    pool: sqlx::SqlitePool,
+}
 
-    let (server, _, root, material) = identities();
-    let signer = Arc::new(crate::ca_memory::MemoryCaSource::cold_start(root.clone()));
-    signer
-        .unlock_from(&RecoveryUnlock(material.clone()))
-        .unwrap();
-    let source: Arc<dyn crate::ca::CaKeySource> = signer;
-    let source_for_hosts = source.clone();
-    let (_store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
-    let now = now().unwrap();
+async fn expired_identity(
+    pool: &sqlx::SqlitePool,
+    host: Uuid,
+    material: crate::ca::CaMaterial,
+    now: i64,
+) -> (Identity, Vec<u8>) {
     let key = PKey::generate_ed25519().unwrap();
     let mut request = X509Req::builder().unwrap();
     request
@@ -192,7 +189,7 @@ async fn expired_host_leaf_is_rejected_by_mtls_and_recovers_with_registered_key_
         .unwrap();
     sqlx::query("DELETE FROM remote_certificates WHERE host_id=?")
         .bind(host.as_bytes().as_slice())
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
     sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(?,?,?,?,?,?)")
@@ -202,14 +199,198 @@ async fn expired_host_leaf_is_rejected_by_mtls_and_recovers_with_registered_key_
         .bind(previous.record.public_key.as_slice())
         .bind(previous.record.not_before)
         .bind(previous.record.not_after)
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
-    let expired = Identity {
-        certificate: X509::from_der(&previous.der).unwrap(),
-        key,
+    Ok((
+        Identity {
+            certificate: X509::from_der(&previous.der).unwrap(),
+            key,
+        },
+        csr_der,
+    ))
+}
+
+fn recovery_challenge_request(
+    fixture: &RecoveryTlsFixture,
+) -> infraternal_plugin_remote::remote_recovery::RecoveryRequest {
+    let predecessor: [u8; 32] = fixture
+        .expired
+        .certificate
+        .digest(MessageDigest::sha256())
+        .unwrap()
+        .as_ref()
+        .try_into()
+        .unwrap();
+    let digest = infraternal_plugin_remote::remote_recovery::csr_digest(&fixture.csr_der);
+    infraternal_plugin_remote::remote_recovery::RecoveryRequest::Challenge {
+        host_id: fixture.host,
+        predecessor_fingerprint: predecessor,
+        request_id: infraternal_plugin_remote::remote_recovery::request_id(
+            fixture.host,
+            &predecessor,
+            &digest,
+        ),
+        csr_digest: digest,
+    }
+}
+
+async fn recover_over_tls_with_registered_key(fixture: &RecoveryTlsFixture) -> X509 {
+    let recovery_tls =
+        remote_tls::recovery_client_config(std::slice::from_ref(&fixture.root)).unwrap();
+    let recovery = remote_tls::dial_recovery(fixture.address, "localhost", &recovery_tls)
+        .await
+        .unwrap();
+    let challenge_request = recovery_challenge_request(fixture);
+    write_recovery_request(&recovery.channel, &challenge_request).await;
+    let response = infraternal_plugin_remote::remote_recovery::read_response(&recovery.channel)
+        .await
+        .unwrap();
+    let infraternal_plugin_remote::remote_recovery::RecoveryResponse::Challenge {
+        challenge, ..
+    } = response
+    else {
+        panic!("eligible host did not receive a proof challenge");
     };
-    let clock = Arc::new(crate::clock_health::ClockHealth::default());
+    let infraternal_plugin_remote::remote_recovery::RecoveryRequest::Challenge {
+        predecessor_fingerprint,
+        request_id,
+        ..
+    } = challenge_request
+    else {
+        unreachable!();
+    };
+    let proof = infraternal_plugin_remote::remote_recovery::RecoveryRequest::Prove {
+        host_id: fixture.host,
+        predecessor_fingerprint,
+        request_id,
+        challenge,
+        csr_der: fixture.csr_der.clone(),
+        signature: vec![0; 64],
+    };
+    write_recovery_request(&recovery.channel, &proof).await;
+    assert!(matches!(
+        infraternal_plugin_remote::remote_recovery::read_response(&recovery.channel)
+            .await
+            .unwrap(),
+        infraternal_plugin_remote::remote_recovery::RecoveryResponse::Denied
+    ));
+
+    let publisher = std::sync::Arc::new(RecoveryPublisher::default());
+    let renewal = infraternal_agent::remote_renewal::RenewalIdentity::new(
+        &fixture.expired,
+        std::slice::from_ref(&fixture.root),
+        publisher.clone(),
+    );
+    renewal.recover(fixture.address, "localhost").await.unwrap();
+    let recovered = renewal.current().unwrap();
+    assert!(recovered.key.public_eq(&fixture.expired.key));
+    let saved_certificate = publisher.0.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        saved_certificate.to_der().unwrap(),
+        recovered.certificate.to_der().unwrap()
+    );
+    assert!(recovered.certificate.not_after() > fixture.expired.certificate.not_after());
+    recovered.certificate
+}
+
+async fn verify_completed_recovery_retries(fixture: &RecoveryTlsFixture, recovered: &X509) {
+    let challenge_request = recovery_challenge_request(fixture);
+    let recovery_tls =
+        remote_tls::recovery_client_config(std::slice::from_ref(&fixture.root)).unwrap();
+    // A duplicate start request is not proof of the old key. Even after a
+    // completed issuance, the cached leaf stays behind the signed challenge.
+    let retry = remote_tls::dial_recovery(fixture.address, "localhost", &recovery_tls)
+        .await
+        .unwrap();
+    write_recovery_request(&retry.channel, &challenge_request).await;
+    assert!(
+        matches!(
+            infraternal_plugin_remote::remote_recovery::read_response(&retry.channel)
+                .await
+                .unwrap(),
+            infraternal_plugin_remote::remote_recovery::RecoveryResponse::Challenge { .. }
+        ),
+        "a recovery start must not disclose an issued leaf without proof of possession"
+    );
+
+    let infraternal_plugin_remote::remote_recovery::RecoveryRequest::Challenge {
+        predecessor_fingerprint,
+        request_id,
+        ..
+    } = challenge_request
+    else {
+        unreachable!();
+    };
+    let altered_replay = infraternal_plugin_remote::remote_recovery::RecoveryRequest::Prove {
+        host_id: fixture.host,
+        predecessor_fingerprint,
+        request_id,
+        challenge: [9; 32],
+        csr_der: fixture.csr_der.clone(),
+        signature: vec![0; 64],
+    };
+    let recovery = remote_tls::dial_recovery(fixture.address, "localhost", &recovery_tls)
+        .await
+        .unwrap();
+    write_recovery_request(&recovery.channel, &altered_replay).await;
+    assert!(matches!(
+        infraternal_plugin_remote::remote_recovery::read_response(&recovery.channel)
+            .await
+            .unwrap(),
+        infraternal_plugin_remote::remote_recovery::RecoveryResponse::Denied
+    ));
+
+    let repeated = infraternal_plugin_remote::remote_recovery::exchange(
+        fixture.address,
+        "localhost",
+        &fixture.expired,
+        std::slice::from_ref(&fixture.root),
+    )
+    .await
+    .unwrap();
+    assert_eq!(repeated.to_der().unwrap(), recovered.to_der().unwrap());
+    let certificates: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM remote_certificates WHERE host_id=?")
+            .bind(fixture.host.as_bytes().as_slice())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert_eq!(certificates, 2);
+    sqlx::query("UPDATE remote_hosts SET revoked_at=? WHERE id=?")
+        .bind(now().unwrap() + 10)
+        .bind(fixture.host.as_bytes().as_slice())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    assert!(
+        infraternal_plugin_remote::remote_recovery::exchange(
+            fixture.address,
+            "localhost",
+            &fixture.expired,
+            std::slice::from_ref(&fixture.root),
+        )
+        .await
+        .is_err(),
+        "a cached recovery result cannot restore a revoked host"
+    );
+}
+
+/// A real TCP/TLS exchange proves expired leaves cannot enter host control and
+/// can recover only over the server-authenticated, proof-bound ALPN (#285).
+#[tokio::test]
+async fn expired_host_leaf_is_rejected_by_mtls_and_recovers_with_registered_key_proof() {
+    let (server, _, root, material) = identities();
+    let signer = std::sync::Arc::new(crate::ca_memory::MemoryCaSource::cold_start(root.clone()));
+    signer
+        .unlock_from(&RecoveryUnlock(material.clone()))
+        .unwrap();
+    let source: std::sync::Arc<dyn crate::ca::CaKeySource> = signer;
+    let source_for_hosts = source.clone();
+    let (_store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+    let current_time = now().unwrap();
+    let (expired, csr_der) = expired_identity(&pool, host, material, current_time).await;
+    let clock = std::sync::Arc::new(crate::clock_health::ClockHealth::default());
     clock.start_monitor();
     tokio::time::sleep(Duration::from_secs(4)).await;
     assert!(clock.is_healthy());
@@ -225,154 +406,27 @@ async fn expired_host_leaf_is_rejected_by_mtls_and_recovers_with_registered_key_
     )
     .await
     .unwrap();
-    let address = listeners.local_addr().unwrap();
+    let fixture = RecoveryTlsFixture {
+        address: listeners.local_addr().unwrap(),
+        host,
+        root,
+        expired,
+        csr_der,
+        pool,
+    };
 
-    let ordinary = remote_tls::client_config(&expired, std::slice::from_ref(&root)).unwrap();
-    if let Ok(connection) = remote_tls::dial(address, "localhost", &ordinary).await {
+    let ordinary =
+        remote_tls::client_config(&fixture.expired, std::slice::from_ref(&fixture.root)).unwrap();
+    if let Ok(connection) = remote_tls::dial(fixture.address, "localhost", &ordinary).await {
         let mut byte = [0];
         let result =
             tokio::time::timeout(Duration::from_secs(1), connection.channel.read(&mut byte)).await;
-        assert!(matches!(result, Ok(Err(_)) | Ok(Ok(0))));
+        assert!(matches!(result, Ok(Err(_) | Ok(0))));
     }
     assert!(!hosts.online(host).await);
 
-    let predecessor: [u8; 32] = expired
-        .certificate
-        .digest(MessageDigest::sha256())
-        .unwrap()
-        .as_ref()
-        .try_into()
-        .unwrap();
-    let digest = infraternal_plugin_remote::remote_recovery::csr_digest(&csr_der);
-    let operation =
-        infraternal_plugin_remote::remote_recovery::request_id(host, &predecessor, &digest);
-    let recovery_tls = remote_tls::recovery_client_config(std::slice::from_ref(&root)).unwrap();
-    let recovery = remote_tls::dial_recovery(address, "localhost", &recovery_tls)
-        .await
-        .unwrap();
-    let challenge_request =
-        infraternal_plugin_remote::remote_recovery::RecoveryRequest::Challenge {
-            host_id: host,
-            predecessor_fingerprint: predecessor,
-            request_id: operation,
-            csr_digest: digest,
-        };
-    write_recovery_request(&recovery.channel, &challenge_request).await;
-    let response = infraternal_plugin_remote::remote_recovery::read_response(&recovery.channel)
-        .await
-        .unwrap();
-    let challenge = match response {
-        infraternal_plugin_remote::remote_recovery::RecoveryResponse::Challenge {
-            challenge,
-            ..
-        } => challenge,
-        _ => panic!("eligible host did not receive a proof challenge"),
-    };
-    let proof = infraternal_plugin_remote::remote_recovery::RecoveryRequest::Prove {
-        host_id: host,
-        predecessor_fingerprint: predecessor,
-        request_id: operation,
-        challenge,
-        csr_der: csr_der.clone(),
-        signature: vec![0; 64],
-    };
-    write_recovery_request(&recovery.channel, &proof).await;
-    assert!(matches!(
-        infraternal_plugin_remote::remote_recovery::read_response(&recovery.channel)
-            .await
-            .unwrap(),
-        infraternal_plugin_remote::remote_recovery::RecoveryResponse::Denied
-    ));
-
-    let publisher = Arc::new(RecoveryPublisher::default());
-    let renewal = infraternal_agent::remote_renewal::RenewalIdentity::new(
-        &expired,
-        std::slice::from_ref(&root),
-        publisher.clone(),
-    );
-    renewal.recover(address, "localhost").await.unwrap();
-    let recovered = renewal.current().unwrap();
-    assert!(recovered.key.public_eq(&expired.key));
-    let published = publisher.0.lock().unwrap().clone().unwrap();
-    assert_eq!(
-        published.to_der().unwrap(),
-        recovered.certificate.to_der().unwrap()
-    );
-    assert!(recovered.certificate.not_after() > expired.certificate.not_after());
-
-    // A duplicate start request is not proof of the old key. Even after a
-    // completed issuance, the cached leaf stays behind the signed challenge.
-    let retry = remote_tls::dial_recovery(address, "localhost", &recovery_tls)
-        .await
-        .unwrap();
-    write_recovery_request(&retry.channel, &challenge_request).await;
-    assert!(
-        matches!(
-            infraternal_plugin_remote::remote_recovery::read_response(&retry.channel)
-                .await
-                .unwrap(),
-            infraternal_plugin_remote::remote_recovery::RecoveryResponse::Challenge { .. }
-        ),
-        "a recovery start must not disclose an issued leaf without proof of possession"
-    );
-
-    let altered_replay = infraternal_plugin_remote::remote_recovery::RecoveryRequest::Prove {
-        host_id: host,
-        predecessor_fingerprint: predecessor,
-        request_id: operation,
-        challenge: [9; 32],
-        csr_der: csr_der.clone(),
-        signature: vec![0; 64],
-    };
-    let recovery = remote_tls::dial_recovery(address, "localhost", &recovery_tls)
-        .await
-        .unwrap();
-    write_recovery_request(&recovery.channel, &altered_replay).await;
-    assert!(matches!(
-        infraternal_plugin_remote::remote_recovery::read_response(&recovery.channel)
-            .await
-            .unwrap(),
-        infraternal_plugin_remote::remote_recovery::RecoveryResponse::Denied
-    ));
-
-    // Repeating the same old-leaf/CSR operation after losing the response gets
-    // the committed certificate rather than issuing or registering another one.
-    let repeated = infraternal_plugin_remote::remote_recovery::exchange(
-        address,
-        "localhost",
-        &expired,
-        std::slice::from_ref(&root),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        repeated.to_der().unwrap(),
-        recovered.certificate.to_der().unwrap()
-    );
-    let certificates: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM remote_certificates WHERE host_id=?")
-            .bind(host.as_bytes().as_slice())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(certificates, 2);
-    sqlx::query("UPDATE remote_hosts SET revoked_at=? WHERE id=?")
-        .bind(now + 10)
-        .bind(host.as_bytes().as_slice())
-        .execute(&pool)
-        .await
-        .unwrap();
-    assert!(
-        infraternal_plugin_remote::remote_recovery::exchange(
-            address,
-            "localhost",
-            &expired,
-            std::slice::from_ref(&root),
-        )
-        .await
-        .is_err(),
-        "a cached recovery result cannot restore a revoked host"
-    );
+    let recovered = recover_over_tls_with_registered_key(&fixture).await;
+    verify_completed_recovery_retries(&fixture, &recovered).await;
 }
 
 async fn respond(channel: &impl Channel) -> u64 {
