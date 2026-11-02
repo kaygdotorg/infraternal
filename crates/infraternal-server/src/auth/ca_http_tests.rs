@@ -103,7 +103,7 @@ async fn ca_http_status_includes_public_root_expiry_and_unknown_clock_state() {
             .unwrap()
             .starts_with("sha256:")
     );
-    assert!(roots[0]["not_after"].as_str().is_some());
+    assert!(roots[0]["not_after"].as_i64().is_some());
     assert_eq!(roots[0]["remaining_seconds"], Value::Null);
     assert_eq!(roots[0]["warning_level"], "unknown");
     assert!(status.get("private_key").is_none());
