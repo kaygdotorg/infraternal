@@ -39,6 +39,8 @@ test("right-click opens our menu, selects no text, and Shift leaves the browser'
     return [shifted.defaultPrevented, plain.defaultPrevented];
   });
   expect(prevented).toEqual([false, true]);
+  // The menu's code loads on its first use: Escape goes to the menu once it is up (before that it would close the sidebar).
+  await expect(page.locator(".ui-window-menu")).toBeVisible();
   await page.keyboard.press("Escape");
   await row(page, "s:build-01/release").click({ button: "right" });
   const items = page.locator(".ui-window-menu-item");
