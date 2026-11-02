@@ -1230,6 +1230,19 @@ export class TerminalClient {
     this.endSession(status);
   }
 
+  /**
+   * Whether a vertical wheel of this sign is the terminal's to take (D275): its scrollback can move that way, or a program
+   * owns the alternate screen and gets the arrows. Two reads from the renderer, no layout: it runs per wheel gesture.
+   */
+  wheelUse(deltaY: number): boolean {
+    const wasm = this.terminal.wasmTerm;
+    if (!wasm) return false;
+    if (wasm.isAlternateScreen()) return true;
+    // viewportY counts rows scrolled up from the live screen: a wheel up (negative deltaY) raises it.
+    const y = this.terminal.viewportY;
+    return deltaY < 0 ? y < wasm.getScrollbackLength() - 0.01 : y > 0.01;
+  }
+
   /** The renderer's canvas, for a caller that keeps a picture of the last screen (the switch's ghost). */
   get canvas(): HTMLCanvasElement | undefined {
     return this.config.host.querySelector<HTMLCanvasElement>("canvas:not(.cl-ghost)") ?? undefined;

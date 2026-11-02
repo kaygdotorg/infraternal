@@ -10,15 +10,16 @@
  * Canvas lock off (free): wheel and drag pan, pinch and ctrl-wheel zoom, around the pointer; a tap on a view's
  * region flies in when zoomed out. The input lock freezes all of it.
  *
- * Scroll routing follows D118: a terminal under the pointer scrolls first; only a gesture it cannot use moves the
- * canvas. Everything goes through `camera.drive` so the springs always agree with what the fingers did.
+ * Scroll routing follows D275 (see `wheelRoute`): a vertical wheel gesture belongs to the content under the pointer
+ * when that content can scroll the way it goes; only a gesture it cannot use moves the canvas. Everything goes
+ * through `camera.drive` so the springs always agree with what the fingers did.
  */
-import { stepWindow } from "../layout/columns";
+import { columnEls, columnRect, stepWindow } from "../layout/columns";
 import type { Ctx, ViewRec } from "../context";
 import type { Pt } from "../layout/geometry";
 import type { ViewId } from "../model/types";
 import { clamp } from "./camera";
-import { pulseActivity, setActivity } from "../../perf-activity";
+import { setActivity } from "../../perf-activity";
 
 export function installGestures(cx: Ctx): void {
   const { viewport, world, signal, camera, state, views } = cx;
@@ -28,6 +29,14 @@ export function installGestures(cx: Ctx): void {
   let pan: { id: number; x: number; y: number; cx: number; cy: number; moved: boolean; target: Element } | undefined;
   const interactive = (t: EventTarget | null): boolean => !!(t as Element | null)?.closest?.(".ui-window, .cl-label, .cl-edge, .cl-port, .cl-empty-add, .cl-arrow-handle");
   // ---- snapped gestures: a wheel or trackpad gesture moves one column or window (a long flick, two) ------
+  /**
+   * The column a vertical swipe steps: the one under the pointer. Columns take no pointer events (their windows do), so a
+   * wheel over the 12 px gap between two stacked windows, or a window that moved under the pointer mid-step, lands on the
+   * canvas and `closest` finds nothing: that swipe used to be lost (TASTE: every swipe moves). The column's box is found
+   * from its geometry instead.
+   */
+  const columnAt = (e: WheelEvent): HTMLElement | undefined =>
+    (e.target as Element).closest<HTMLElement>(".cl-col") ?? columnEls(views.get(state.currentView)!.colsEl).find((col) => { const r = columnRect(col); return e.clientX >= r.left && e.clientX <= r.right; });
   const wheelG = { t: 0, x: 0, y: 0, fired: 0, axis: "", m: 0, fell: false, s: 0 };
   const snapWheel = (e: WheelEvent): void => {
     e.preventDefault();
@@ -54,14 +63,14 @@ export function installGestures(cx: Ctx): void {
     if (wheelG.axis === "x") {
       const c = views.get(state.currentView);
       if (c) {
-        // Within the current view only: past the first or last window the camera rubber-bands and comes back. It
-        // never crosses into another view (that is the pill swipe, the number keys, the switcher and the sidebar).
-        const last = cx.nav.stopsFor(c).lefts.length - 1, next = state.snapIdx + dir;
-        if (next < 0 || next > last) camera.drive({ cx: cam.cx + dir * 36 / cam.z });
-        cx.nav.goStop(c, next);
+        // Within the current view only: `goStop` clamps, so past the first or last window the camera re-aims at the stop it is
+        // on, which does not move. (It used to be nudged 36 px past the end and fly back; that elastic bump is the overshoot
+        // the owner asked to remove, TASTE section 3.) It never crosses into another view (that is the pill swipe, the number
+        // keys, the switcher and the sidebar).
+        cx.nav.goStop(c, state.snapIdx + dir);
       }
     } else {
-      const colEl = (e.target as Element).closest<HTMLElement>(".cl-col");
+      const colEl = columnAt(e);
       if (colEl) stepWindow(colEl, dir);
     }
   };
@@ -158,17 +167,49 @@ export function installGestures(cx: Ctx): void {
     });
     host.dispatchEvent(forwarded);
   }, { passive: false, capture: true, signal });
-  const onWheel = (e: WheelEvent): void => {
-    // A log view that can scroll the way the wheel goes scrolls itself (to read back); at its end the wheel is the canvas's.
-    const logs = (e.target as Element).closest<HTMLElement>(".cl-logs");
-    if (logs && !(e.ctrlKey || e.metaKey) && Math.abs(e.deltaY) > Math.abs(e.deltaX) && (e.deltaY < 0 ? logs.scrollTop > 0 : logs.scrollTop + logs.clientHeight < logs.scrollHeight - 1)) return;
-    if (state.canvasLock) { if (cx.inputLock.state) { e.preventDefault(); return; } snapWheel(e); return; }
-    const inCol = (e.target as Element).closest(".cl-col");
-    if (!(e.ctrlKey || e.metaKey) && inCol && Math.abs(e.deltaY) > Math.abs(e.deltaX) && camera.lod === "live") {
-      const colEl = inCol as HTMLElement;
-      const canScroll = colEl.scrollHeight > colEl.clientHeight + 1 && (e.deltaY < 0 ? colEl.scrollTop > 0 : colEl.scrollTop + colEl.clientHeight < colEl.scrollHeight - 1);
-      if (canScroll) { pulseActivity("scroll", 200); return; }
+  // ---- who a vertical wheel gesture belongs to: the content under the pointer, or the canvas (D275) ------------------
+  // The rule, per gesture (a run of wheel events less than 150 ms apart; momentum is part of its
+  // gesture), decided by the gesture's first event:
+  // - the content under the pointer can scroll the way the wheel goes (a docs page, a list, a log, the focused
+  //   terminal's scrollback or its running program): the whole gesture is the content's. It scrolls natively and the
+  //   canvas never moves. When it reaches its end the rest of the gesture, momentum included, is swallowed: it never
+  //   carries over to the canvas.
+  // - otherwise (the pointer is over nothing that scrolls that way, an unfocused terminal, a window with nothing to
+  //   scroll, or content already at its end when the gesture began): the canvas has it, as before. So at a page's end
+  //   a *new* gesture moves on to the neighbouring window, and the input lock is how a person prevents that handoff.
+  // Horizontal-dominant gestures (Shift+wheel arrives as one) and Ctrl/Cmd (zoom) are always the canvas's. Zoomed out to thumbnails there is
+  // no content to scroll, so the canvas has everything.
+  let lastWheel = 0, lastSign = 0, contentGesture = false;
+  /**
+   * Whether the content under `target` can scroll the way the wheel goes. While the canvas is locked to windows the column
+   * (or group) is the canvas's own scroller, moved by steps, so the walk stops there; a free canvas lets the column scroll.
+   */
+  const scrolls = (target: Element, dy: number): boolean => {
+    for (let el: Element | null = target; el && el !== viewport; el = el.parentElement) {
+      if (state.canvasLock && el.matches(".cl-col, .cl-group")) return false;
+      if (el.classList.contains("terminal-host")) {
+        // Only the focused terminal takes the wheel; an unfocused one is like any window with nothing to scroll.
+        const w = state.activeWin;
+        return !!(w?.card.body.contains(el) && w.binding?.wheelUse?.(dy));
+      }
+      // Cheap test first: most elements do not overflow, and the style read is for those that do.
+      if (el.scrollHeight > el.clientHeight + 1 && /auto|scroll/.test(getComputedStyle(el).overflowY)) return dy < 0 ? el.scrollTop > 0 : el.scrollTop + el.clientHeight < el.scrollHeight - 1;
     }
+    return false;
+  };
+  /** Routes one wheel event. False: it belongs to the content under the pointer and goes on untouched. */
+  const routeWheel = (e: WheelEvent): boolean => {
+    const now = performance.now(), sign = Math.sign(e.deltaY);
+    const can = camera.lod === "live" && !(e.ctrlKey || e.metaKey) && scrolls(e.target as Element, e.deltaY);
+    if (now - lastWheel > 150 || sign * lastSign < 0) contentGesture = can && Math.abs(e.deltaY) > Math.abs(e.deltaX);
+    lastWheel = now;
+    lastSign = sign || lastSign;
+    if (!contentGesture) { canvasWheel(e); return true; }
+    if (!can) e.preventDefault(); // the content's gesture has reached its end: the rest of it, momentum included, goes nowhere
+    return !can;
+  };
+  const canvasWheel = (e: WheelEvent): void => {
+    if (state.canvasLock) { if (cx.inputLock.state) { e.preventDefault(); return; } snapWheel(e); return; }
     e.preventDefault();
     camera.takeOver();
     if (e.ctrlKey || e.metaKey) { setActivity("zoom"); camera.zoomAt(e.clientX, e.clientY, cam.z * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0025))); return; }
@@ -176,17 +217,16 @@ export function installGestures(cx: Ctx): void {
     setActivity("pan");
     camera.drive({ cx: cam.cx + dx / cam.z, cy: cam.cy + dy / cam.z });
   };
-  viewport.addEventListener("wheel", onWheel, { passive: false, signal });
+  viewport.addEventListener("wheel", (e) => { routeWheel(e); }, { passive: false, signal });
   // The terminal's own wheel handler always consumes the event (scrollback, or the running program) and stops it, so a
-  // swipe that starts over a terminal never reached the bubble listener above: the canvas moved only when the pointer
-  // happened to be over something else, which looked like swipes that "stop working". Unless input is locked to a
-  // terminal (handled above), a wheel over a terminal belongs to the canvas, exactly as over any other window: the
-  // terminal's scrollback is reached through the input lock (D177). The event is handled here, in the capture phase,
-  // before the terminal sees it, and goes no further.
+  // swipe that starts over a terminal never reaches the bubble listener above: the canvas moved only when the pointer
+  // happened to be over something else, which looked like swipes that "stop working". So terminals are routed here, in
+  // the capture phase, before the terminal sees the event (input locked to a terminal is handled above). The focused
+  // terminal keeps the gestures it can use (its scrollback, or its program, D275); everything else over a terminal
+  // (unfocused, nothing to scroll, already at its end) is the canvas's and goes no further.
   viewport.addEventListener("wheel", (e) => {
     if (cx.inputLock.state || !(e.target as Element).closest?.(".terminal-host")) return;
-    e.stopPropagation();
-    onWheel(e);
+    if (routeWheel(e)) e.stopPropagation();
   }, { passive: false, capture: true, signal });
   viewport.addEventListener("pointerdown", (e) => {
     if (e.pointerType === "touch") touches.set(e.pointerId, { x: e.clientX, y: e.clientY });

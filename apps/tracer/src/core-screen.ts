@@ -92,6 +92,8 @@ export interface CoreScreen {
   registerTerminal(client: TerminalClient): () => void;
   /** The terminal the key tray and the paste button talk to; none while no terminal window is active. */
   setActiveTerminal(client: TerminalClient | undefined): void;
+  /** Whether a vertical wheel of this sign is the active terminal's to take (D275). */
+  wheelUse(deltaY: number): boolean;
   /** Frees every terminal canvas's pixels (a page that is hidden); `restoreSurface` draws them again from the terminal state. */
   releaseSurface(): void;
   restoreSurface(): void;
@@ -1498,6 +1500,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     },
     releaseSurface() { for (const c of clients) c.releaseSurface(); },
     restoreSurface() { for (const c of clients) c.restoreSurface(); },
+    wheelUse: (deltaY) => !!client?.wheelUse(deltaY),
     setActiveTerminal(value) {
       client = value;
       if (value) for (const name of MODIFIER_KEYS) value.setInputModifier(name, modifiers[name]);

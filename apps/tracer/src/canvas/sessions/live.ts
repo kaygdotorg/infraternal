@@ -320,6 +320,8 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
 
     refit(): void { this.client?.refit(); }
 
+    wheelUse(deltaY: number): boolean | undefined { return this.client?.wheelUse(deltaY); }
+
     openNew(): void {
       this.retired = undefined;
       this.setConnected(false);
