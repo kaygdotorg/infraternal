@@ -1914,6 +1914,9 @@ dependencies = [
 name = "infraternal-agent"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures-util",
  "infraternal-plugin-api",
  "infraternal-plugin-host-facts",
  "infraternal-plugin-mesh",
@@ -1928,6 +1931,8 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tokio-openssl",
+ "tokio-tungstenite",
+ "url",
  "uuid",
 ]
 

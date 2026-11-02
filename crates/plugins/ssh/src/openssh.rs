@@ -491,18 +491,69 @@ pub fn classify(stderr: &[u8], ssh_failure: bool, mesh: MeshEvidence) -> Failure
     });
     // Copy only canonical public error lines, never arbitrary remote bytes.
     // Even a compromised banner can select a category but cannot inject secrets.
-    for line in [
-        "Join DNS lookup failed: Temporary failure in name resolution.",
-        "Join DNS lookup failed: Name or service not known.",
-        "Join DNS lookup failed.",
-        "Join connection failed.",
-        "Join TLS verification failed.",
-        "Failed to connect to bus: No medium found",
-        "Failed to connect to bus: No such file or directory",
-    ] {
+    for line in crate::model::JOIN_DIAGNOSTICS.iter().copied() {
         if text.contains(line) && !failure.log_tail.iter().any(|known| known.contains(line)) {
             failure.log_tail.push(line);
         }
     }
     failure.at_ssh_boundary(!ssh_failure)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::InstallStep;
+
+    #[test]
+    fn join_keeps_only_authored_https_preflight_diagnostics() {
+        let cases = [
+            (
+                "The infraternal agent on this host cannot resolve the server's HTTPS origin. Check DNS for the public origin and allow outbound TCP 443.",
+                "The infraternal agent on this host cannot resolve the server's HTTPS origin. Check DNS for the public origin and allow outbound TCP 443.",
+            ),
+            (
+                "The infraternal agent on this host cannot reach the server over HTTPS. Allow outbound TCP 443 to the server's public origin, then try again.",
+                "The infraternal agent on this host cannot reach the server over HTTPS. Allow outbound TCP 443 to the server's public origin, then try again.",
+            ),
+            (
+                "The infraternal agent on this host could not verify the server's HTTPS certificate. Check the public certificate chain and server name, then try again.",
+                "The infraternal agent on this host could not verify the server's HTTPS certificate. Check the public certificate chain and server name, then try again.",
+            ),
+            (
+                "The infraternal agent on this host reached the server over HTTPS, but the server did not accept its WebSocket. Deploy a server with the /remote/agent route and allow WebSocket upgrades through the proxy, then try again.",
+                "The infraternal agent on this host reached the server over HTTPS, but the server did not accept its WebSocket. Deploy a server with the /remote/agent route and allow WebSocket upgrades through the proxy, then try again.",
+            ),
+            (
+                "The server opened the WebSocket but did not send a valid infraternal agent challenge. Deploy a compatible server build and try again.",
+                "The server opened the WebSocket but did not send a valid infraternal agent challenge. Deploy a compatible server build and try again.",
+            ),
+        ];
+        for (diagnostic, expected) in cases {
+            let mut failure = classify(
+                format!("setup failed: {diagnostic}\n").as_bytes(),
+                false,
+                MeshEvidence::default(),
+            );
+            failure = failure.at(InstallStep::Join);
+            assert_eq!(failure.message, expected);
+            assert!(failure.log_tail.contains(&expected));
+        }
+
+        let mut untrusted = classify(
+            b"setup failed: private path /home/kayg/.ssh/id_ed25519\n",
+            false,
+            MeshEvidence::default(),
+        );
+        untrusted = untrusted.at(InstallStep::Join);
+        assert_eq!(
+            untrusted.message,
+            "Joining the host to this server failed. Check the host can reach the server and resolve its address, then try again."
+        );
+        assert!(
+            untrusted
+                .log_tail
+                .iter()
+                .all(|line| !line.contains("id_ed25519"))
+        );
+    }
 }

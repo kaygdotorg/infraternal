@@ -3,7 +3,7 @@
 use crate::{
     auth::Auth,
     ca::CaKeySource,
-    enrollment::{EnrollmentStore, Mode},
+    enrollment::{EnrollmentStore, IssueConstraints, Mode},
     remote_enrollment::RemoteEnrollment,
 };
 use axum::{
@@ -64,6 +64,8 @@ pub(crate) struct InvitationRequest {
     pub(crate) host_id: Uuid,
     pub(crate) mode: Mode,
     pub(crate) execution_uid: u32,
+    #[serde(default)]
+    pub(crate) expected_key_digest: Option<[u8; 32]>,
 }
 
 /// SSH and HTTPS share the exact authority checks and transport revocation scope.
@@ -286,6 +288,9 @@ async fn issue_invitation(
     request: InvitationRequest,
     destination: Option<(&str, Option<&str>)>,
 ) -> Result<JoinInvitation, StatusCode> {
+    if request.expected_key_digest.is_none() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let now = now()?;
     let session_hash = crate::auth::hash(cookie);
     let session = api
@@ -328,7 +333,10 @@ async fn issue_invitation(
             request.host_id,
             request.mode,
             now,
-            Some(&session_hash),
+            IssueConstraints {
+                session_hash: Some(&session_hash),
+                expected_key_digest: request.expected_key_digest.as_ref(),
+            },
             &mut transaction,
         )
         .await
@@ -364,6 +372,7 @@ async fn issue_invitation(
         host_id: request.host_id,
         mode: request.mode,
         execution_uid: request.execution_uid,
+        public_origin: api.auth.origin().to_owned(),
         token: token.secret().to_owned(),
         ca_der: B64.encode(
             api.source
@@ -380,7 +389,7 @@ async fn issue_invitation(
             .map(|leaf| leaf.to_der().map(|der| B64.encode(der)))
             .transpose()
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
-        endpoint: api.endpoint.endpoint,
+        endpoint: Some(api.endpoint.endpoint),
         server_name: api.endpoint.server_name,
     };
     transaction

@@ -95,12 +95,12 @@ async fn remote_identity_and_sessions_upgrade_dev_v11_and_remain_idempotent() {
 #[tokio::test]
 async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_order() {
     let migrations = sqlx::migrate!("./migrations");
-    let expected: Vec<i64> = (1..=32).collect();
+    let expected: Vec<i64> = (1..=33).collect();
     let versions: Vec<i64> = migrations
         .iter()
         .map(|migration| migration.version)
         .collect();
-    assert_eq!(versions, expected, "fresh releases apply 0001 through 0032");
+    assert_eq!(versions, expected, "fresh releases apply 0001 through 0033");
 
     let production = SqlitePoolOptions::new()
         .max_connections(1)
@@ -130,7 +130,7 @@ async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_ord
             .fetch_one(&production)
             .await
             .unwrap();
-    assert_eq!((version, applied), (32, 32));
+    assert_eq!((version, applied), (33, 33));
     let mesh: (String, Option<String>, Option<String>) =
         sqlx::query_as("SELECT name, name_source, name_claim FROM mesh_nodes WHERE id=42")
             .fetch_one(&production)

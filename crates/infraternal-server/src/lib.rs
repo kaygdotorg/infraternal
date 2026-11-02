@@ -59,6 +59,8 @@ pub mod preferred_accounts;
 mod remote_accept;
 #[cfg(feature = "remote")]
 mod remote_admission;
+#[cfg(feature = "remote")]
+mod remote_agent_http;
 #[cfg(all(test, feature = "mesh-transport-proof"))]
 mod remote_autoswitch_probe;
 #[cfg(feature = "remote")]

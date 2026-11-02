@@ -15,16 +15,33 @@ use tokio::sync::Mutex;
 
 /// Local enrolled host credentials; no private material leaves the host.
 pub struct RemoteIdentity {
+    /// Enrolled host identifier bound to the D168 leaf and app-level proof.
+    pub host_id: uuid::Uuid,
     /// Locally generated host key and committed client certificate.
     pub identity: Identity,
     /// Pinned public issuers, including overlap generations.
     pub roots: Vec<X509>,
-    /// Trusted server transport address.
-    pub endpoint: SocketAddr,
+    /// Legacy direct transport address, absent for HTTPS WebSocket identities.
+    pub endpoint: Option<SocketAddr>,
     /// Server SAN, verified on both transports.
     pub server_name: String,
+    /// Public HTTPS origin used for enrollment and the resilient app-listener link.
+    pub public_origin: Option<String>,
+    /// Optional pinned HTTPS issuer/leaf used when the server does not use system roots.
+    pub https_root: Option<X509>,
+    /// Verify the HTTPS listener using ordinary operating-system roots.
+    pub https_system_roots: bool,
     /// Bound uid, checked against the running rootless infraternal agent.
     pub execution_uid: u32,
+}
+
+fn trace_attempt<T>(phase: &'static str, result: io::Result<T>) -> io::Result<T> {
+    if std::env::var_os("INFRATERNAL_REMOTE_LINK_TRACE").is_some()
+        && let Err(error) = &result
+    {
+        eprintln!("remote agent attempt phase={phase} kind={:?}", error.kind());
+    }
+    result
 }
 
 /// Run until cancelled. Fallback retries sleep; proven alternative paths own a freshness guard.
@@ -83,24 +100,32 @@ async fn run_inner(
             // Invalid enrollment creates no local state or plugin work. A clock or
             // credential failure still leaves the retry owner alive for recovery.
             if let Some(renewal) = renewal {
-                crate::remote_renewal::require_current(&renewal.current()?)?;
+                let current = trace_attempt("renewal-current", renewal.current())?;
+                trace_attempt(
+                    "certificate-valid",
+                    crate::remote_renewal::require_current(&current),
+                )?;
             } else {
-                crate::remote_renewal::require_current(&identity.identity)?;
+                trace_attempt(
+                    "certificate-valid",
+                    crate::remote_renewal::require_current(&identity.identity),
+                )?;
             }
-            let state = crate::sessions::state_path(state.clone())?;
+            let state = trace_attempt("state-path", crate::sessions::state_path(state.clone()))?;
             let mut local = service.lock().await;
             if local.as_ref().is_some_and(|local| local.registry.ended()) {
                 local.take();
             }
             if local.is_none() {
-                *local = Some(
+                *local = Some(trace_attempt(
+                    "plugin-service-start",
                     crate::plugin_control::Service::start_retained(
                         &state,
                         installation,
                         &mut *lifetime.lock().await,
                     )
-                    .await?,
-                );
+                    .await,
+                )?);
             }
             let plugins = local
                 .as_ref()
@@ -108,7 +133,10 @@ async fn run_inner(
                 .registry
                 .clone();
             drop(local);
-            server_path::run(identity, state, renewal, plugins, connected).await
+            trace_attempt(
+                "server-path",
+                server_path::run(identity, state, renewal, plugins, connected).await,
+            )
         }
     })
     .await
@@ -121,12 +149,15 @@ async fn dial_preferred(
     identity: &RemoteIdentity,
     tls: &openssl::ssl::SslConnector,
 ) -> io::Result<Connected> {
+    let address = identity
+        .endpoint
+        .ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))?;
     let quic = quic_connect(endpoint, identity);
     let fallback = async {
         // Start QUIC first, then race TCP after a short grace period. A
         // silent UDP path cannot add its full handshake timeout to TCP.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        remote_tls::dial(identity.endpoint, &identity.server_name, tls).await
+        remote_tls::dial(address, &identity.server_name, tls).await
     };
     tokio::pin!(quic, fallback);
     tokio::select! {
@@ -233,10 +264,13 @@ async fn quic_connect(
     endpoint: &quinn::Endpoint,
     identity: &RemoteIdentity,
 ) -> io::Result<quinn::Connection> {
+    let address = identity
+        .endpoint
+        .ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))?;
     tokio::time::timeout(
         Duration::from_secs(5),
         endpoint
-            .connect(identity.endpoint, &identity.server_name)
+            .connect(address, &identity.server_name)
             .map_err(io::Error::other)?,
     )
     .await

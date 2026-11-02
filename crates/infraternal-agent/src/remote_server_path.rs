@@ -105,16 +105,19 @@ async fn connect(
     kind: ServerLinkKind,
     prove: bool,
 ) -> io::Result<Link> {
+    let enrolled_address = identity
+        .endpoint
+        .ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))?;
     let refreshed = current_credentials(identity, renewal)?;
     let credentials = refreshed.as_ref().unwrap_or(&identity.identity);
     let driver = DialRuntime::new();
     let path = PathSocket::from_udp(
-        std::net::UdpSocket::bind(if identity.endpoint.is_ipv6() {
+        std::net::UdpSocket::bind(if enrolled_address.is_ipv6() {
             "[::]:0"
         } else {
             "0.0.0.0:0"
         })?,
-        identity.endpoint,
+        enrolled_address,
         driver.runtime().as_ref(),
     )?;
     if kind == ServerLinkKind::Mesh {
@@ -419,6 +422,9 @@ async fn steer(
     reason: &mut ServerLinkReason,
     mut active: std::pin::Pin<&mut impl std::future::Future<Output = io::Result<()>>>,
 ) -> Steered {
+    let Some(enrolled_address) = identity.endpoint else {
+        return Steered::Ended;
+    };
     let (Connected::Quic(connection), Some(path)) = (&link.connected, link.path.as_ref()) else {
         return Steered::Ended;
     };
@@ -428,8 +434,8 @@ async fn steer(
     let mut not_before = tokio::time::Instant::now() + if cooling { retry } else { Duration::ZERO };
     let mut retry_since = std::time::Instant::now();
     loop {
-        let proposed = (*proposals.borrow_and_update())
-            .map(|ip| SocketAddr::new(ip, identity.endpoint.port()));
+        let proposed =
+            (*proposals.borrow_and_update()).map(|ip| SocketAddr::new(ip, enrolled_address.port()));
         let Some(caps) = *capabilities.borrow_and_update() else {
             // A retained mesh dial is already authenticated, but its active
             // session must consume Hello before missing bits mean refusal.
@@ -547,7 +553,7 @@ async fn steer(
                 // ready in the same poll. The latest proposal owns the reason,
                 // even when select chose the deadline instead of the edit.
                 let proposed = (*proposals.borrow_and_update())
-                    .map(|ip| SocketAddr::new(ip, identity.endpoint.port()));
+                    .map(|ip| SocketAddr::new(ip, enrolled_address.port()));
                 *reason = if proposed.is_none() {
                     ServerLinkReason::MeshDisabled
                 } else {
@@ -590,6 +596,9 @@ async fn replacement(
     registry: &crate::plugin_control::Registry,
     cooling: bool,
 ) -> io::Result<(Link, ServerLinkReason)> {
+    let enrolled_address = identity
+        .endpoint
+        .ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))?;
     let mut paths = registry.server_paths();
     let mut retry = Duration::from_secs(1);
     if cooling {
@@ -604,7 +613,7 @@ async fn replacement(
             retry = Duration::from_secs(1);
             continue;
         };
-        let destination = SocketAddr::new(ip, identity.endpoint.port());
+        let destination = SocketAddr::new(ip, enrolled_address.port());
         // A changed preference cancels only this candidate's owned socket. In
         // particular, an explicit component down cannot leave a probe running.
         tokio::select! {
@@ -672,13 +681,16 @@ async fn available(
     registry: &crate::plugin_control::Registry,
     force_fallback: bool,
 ) -> io::Result<Link> {
+    let enrolled_address = identity
+        .endpoint
+        .ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))?;
     let mut paths = registry.server_paths();
     let proposed = *paths.borrow_and_update();
     let Some(ip) = proposed.filter(|_| !force_fallback) else {
         return connect(
             identity,
             renewal,
-            identity.endpoint,
+            enrolled_address,
             ServerLinkKind::Fallback,
             false,
         )
@@ -687,7 +699,7 @@ async fn available(
     let mesh = connect(
         identity,
         renewal,
-        SocketAddr::new(ip, identity.endpoint.port()),
+        SocketAddr::new(ip, enrolled_address.port()),
         ServerLinkKind::Mesh,
         true,
     );
@@ -696,7 +708,7 @@ async fn available(
         connect(
             identity,
             renewal,
-            identity.endpoint,
+            enrolled_address,
             ServerLinkKind::Fallback,
             false,
         )
@@ -719,6 +731,9 @@ pub(super) async fn run(
     registry: crate::plugin_control::Registry,
     connected: tokio::sync::watch::Sender<bool>,
 ) -> io::Result<()> {
+    if identity.endpoint.is_none() {
+        return run_https(identity, state, renewal, registry, connected).await;
+    }
     // No preference is valid; an error means the local worker is unavailable.
     // The retry owner replaces only a terminated worker before reconnecting.
     registry
@@ -849,6 +864,105 @@ pub(super) async fn run(
             }
         }
         drop(link);
+    }
+}
+
+/// Keep identities enrolled on the public app origin on the 443 fallback path [196,291].
+/// Mesh selection is deliberately separate; this link proves D168 key possession at the app.
+async fn run_https(
+    identity: &RemoteIdentity,
+    state: PathBuf,
+    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+    registry: crate::plugin_control::Registry,
+    connected: tokio::sync::watch::Sender<bool>,
+) -> io::Result<()> {
+    let public_origin = identity
+        .public_origin
+        .as_deref()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let mut backoff = Duration::from_millis(200);
+    let notes = LinkNotes::new();
+    loop {
+        let started = tokio::time::Instant::now();
+        let credentials = match current_credentials(identity, renewal) {
+            Ok(refreshed) => refreshed,
+            Err(error) => {
+                registry.set_server_link(ServerLink {
+                    kind: ServerLinkKind::Disconnected,
+                    endpoint: None,
+                    source_port: None,
+                    reason: ServerLinkReason::MeshUnavailable,
+                });
+                return Err(error);
+            }
+        };
+        let credentials = credentials.as_ref().unwrap_or(&identity.identity);
+        let channel = crate::remote_websocket::connect(
+            public_origin,
+            identity.host_id,
+            credentials,
+            identity.https_root.as_ref(),
+            identity.https_system_roots,
+        )
+        .await;
+        let channel = match channel {
+            Ok(channel) => channel,
+            Err(error) => {
+                if let Some(line) = notes.note(started, || {
+                    format!(
+                        "Infraternal agent HTTPS server link refused or unreachable (error {:?}); retrying",
+                        error.kind()
+                    )
+                }) {
+                    eprintln!("{line}");
+                }
+                registry.set_server_link(ServerLink {
+                    kind: ServerLinkKind::Disconnected,
+                    endpoint: None,
+                    source_port: None,
+                    reason: ServerLinkReason::MeshUnavailable,
+                });
+                tokio::time::sleep(retry_delay(backoff, started.elapsed())).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue;
+            }
+        };
+        registry.set_server_link(ServerLink {
+            kind: ServerLinkKind::Fallback,
+            endpoint: None,
+            source_port: None,
+            reason: ServerLinkReason::MeshUnavailable,
+        });
+        connected.send_replace(true);
+        let active = daemon::run_authenticated_with_plugins(
+            &channel,
+            state.clone(),
+            identity.execution_uid,
+            renewal,
+            registry.clone(),
+        )
+        .await;
+        connected.send_replace(false);
+        channel.retire();
+        registry.set_server_link(ServerLink {
+            kind: ServerLinkKind::Disconnected,
+            endpoint: None,
+            source_port: None,
+            reason: ServerLinkReason::MeshUnavailable,
+        });
+        if let Some(line) = notes.note(started, || {
+            format!(
+                "Infraternal agent HTTPS server link closed (error {:?}); reconnecting",
+                active.err().map(|error| error.kind())
+            )
+        }) {
+            eprintln!("{line}");
+        }
+        if started.elapsed() >= Duration::from_secs(10) {
+            backoff = Duration::from_millis(200);
+        }
+        tokio::time::sleep(retry_delay(backoff, started.elapsed())).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
 
