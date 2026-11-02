@@ -210,14 +210,14 @@ pinned browser Origin and a live owner session; changes additionally require
 fresh passkey authority, rechecked under the database writer lock. Unknown
 fields, missing values and values outside the range return 400. No UI is added.
 
-The effective deadline is the key's server-recorded last renewal plus the
-current configured lifetime. The boundary is exclusive: at the deadline the
-key fails with the same `Denied` error as an unknown key. An authenticated,
-scoped use renews the deadline at most once per hour per key; denied scopes do
-not renew. Concurrent uses cannot double-renew or recreate a revoked key.
-The stored `expires` field records the deadline at issuance or last renewal;
-policy changes take effect at check time without rewriting all keys. Existing
-keys receive a full default lifetime from the migration time, once only.
+Each key stores an absolute `expires_at` at issuance and renewal. Each check
+clamps it to the smaller of its stored deadline and last renewal plus the
+current lifetime. Lengthening the policy applies only on a successful renewal;
+it never extends an already expired key. At the exclusive deadline the server
+commits a permanent tombstone and returns the same `Denied` error as an unknown
+key. An authenticated, scoped use renews at most once per hour per key; denied
+scopes do not renew. Expiry checks, clamping and renewal are serialized with
+revocation. Existing keys receive the default lifetime from migration time once.
 
 Sign-in currently issues and stores keys but no CLI command reads or sends
 them and no production route calls `api_authorize` (#303). Future CLI callers

@@ -18,7 +18,7 @@ async fn key(f: &Fixture) -> String {
 }
 
 async fn expiry(auth: &Auth, key: &str) -> i64 {
-    sqlx::query_scalar("SELECT expires FROM api_keys WHERE token_hash=?")
+    sqlx::query_scalar("SELECT expires_at FROM api_keys WHERE token_hash=?")
         .bind(hash(key))
         .fetch_one(&auth.pool)
         .await
@@ -121,7 +121,7 @@ async fn api_key_upgrade_starts_thirty_days_at_migration_once() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    let deadline: i64 = sqlx::query_scalar("SELECT expires FROM api_keys")
+    let deadline: i64 = sqlx::query_scalar("SELECT expires_at FROM api_keys")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -130,7 +130,7 @@ async fn api_key_upgrade_starts_thirty_days_at_migration_once() {
         .await
         .unwrap();
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT expires FROM api_keys")
+        sqlx::query_scalar::<_, i64>("SELECT expires_at FROM api_keys")
             .fetch_one(&pool)
             .await
             .unwrap(),
@@ -194,8 +194,8 @@ async fn api_key_lifetime_settings_validate_and_apply_to_existing_keys() {
     ));
     assert_eq!(
         expiry(&f.auth, &key).await,
-        NOW + 2_592_000,
-        "denied key is not renewed"
+        NOW + 86_400,
+        "shortened deadline is persisted without renewal"
     );
 }
 
@@ -279,3 +279,71 @@ async fn api_key_concurrent_uses_renew_once() {
         1
     );
 }
+
+/// J97's exact day-31 / 30->365 and day-2 / 1->30 policy reproductions,
+/// exercised through authorization rather than a copied, potentially stale query.
+#[tokio::test]
+async fn api_key_policy_increase_cannot_resurrect_expired_keys() {
+    for (elapsed_days, shorter, longer) in [(31, 30, 365), (2, 1, 30)] {
+        let f = fixture().await;
+        let key = key(&f).await;
+        sqlx::query("UPDATE server_settings SET api_key_lifetime_days=?")
+            .bind(shorter)
+            .execute(&f.auth.pool)
+            .await
+            .unwrap();
+        f.auth.set_test_http_time(NOW + elapsed_days * 86400);
+        assert!(matches!(
+            f.auth.api_authorize(&key, "hosts:read").await,
+            Err(Error::Denied)
+        ));
+        sqlx::query("UPDATE server_settings SET api_key_lifetime_days=?")
+            .bind(longer)
+            .execute(&f.auth.pool)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                f.auth.api_authorize(&key, "hosts:read").await,
+                Err(Error::Denied)
+            ),
+            "policy increase must not resurrect a dead key"
+        );
+    }
+    // Even without an earlier denied check, lengthening cannot extend an old deadline.
+    let f = fixture().await;
+    let key = key(&f).await;
+    sqlx::query("UPDATE server_settings SET api_key_lifetime_days=365")
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    f.auth.set_test_http_time(NOW + 31 * 86400);
+    assert!(matches!(
+        f.auth.api_authorize(&key, "hosts:read").await,
+        Err(Error::Denied)
+    ));
+}
+
+#[tokio::test]
+async fn api_key_shortening_clamps_and_lengthening_requires_successful_renewal() {
+    let f = fixture().await;
+    let key = key(&f).await;
+    sqlx::query("UPDATE server_settings SET api_key_lifetime_days=1")
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    f.auth.set_test_http_time(NOW + 1);
+    f.auth.api_authorize(&key, "hosts:read").await.unwrap();
+    assert_eq!(expiry(&f.auth, &key).await, NOW + 86400);
+    sqlx::query("UPDATE server_settings SET api_key_lifetime_days=365")
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    f.auth.set_test_http_time(NOW + 3599);
+    f.auth.api_authorize(&key, "hosts:read").await.unwrap();
+    assert_eq!(expiry(&f.auth, &key).await, NOW + 86400);
+    f.auth.set_test_http_time(NOW + 3600);
+    f.auth.api_authorize(&key, "hosts:read").await.unwrap();
+    assert_eq!(expiry(&f.auth, &key).await, NOW + 3600 + 365 * 86400);
+}
+

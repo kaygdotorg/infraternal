@@ -3367,7 +3367,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        issued by `infraternal sign-in` expire after 30 days without use by
        default. The server setting `api_key_lifetime_days` accepts 1–365
        days and is read at each authorization check, so shortening it applies
-       to existing keys on their next use. Authenticated use renews silently,
+       to existing keys on their next use by clamping the stored absolute
+       deadline. Lengthening applies only at a successful renewal; expiry
+       permanently marks a key dead. Authenticated use renews silently,
        with renewal writes limited to once per hour per key. Expired keys
        fail exactly like unknown keys and require sign-in again; revocation
        stays immediate. At upgrade existing keys start their first lifetime

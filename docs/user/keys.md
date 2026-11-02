@@ -77,7 +77,8 @@ from **1 to 365 days** through the server's security settings API field
 The server renews a valid key silently when it is used, writing the renewal
 at most once per hour. The server's current lifetime setting applies on each
 check, including to existing keys, so shortening it can expire a key on its
-next use. A key that expires needs `infraternal sign-in <server>` again.
+next use. Lengthening applies at the next successful renewal; it cannot bring
+an expired key back. A key that expires needs `infraternal sign-in <server>` again.
 Revoking it in the app takes effect immediately; recovery removes all keys.
 Existing keys receive their first lifetime when the server is upgraded.
 Nothing renews while the CLI is offline or unused.
