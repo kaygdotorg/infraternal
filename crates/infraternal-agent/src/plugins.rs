@@ -93,17 +93,15 @@ pub(crate) fn registry_at(
     }
     #[cfg(not(feature = "plugin-host-facts"))]
     let _ = mode;
+    #[cfg(all(feature = "mesh", target_os = "linux"))]
+    let mesh_plugin = state.map_or_else(
+        infraternal_plugin_mesh::node_actions::MeshNodePlugin::default,
+        infraternal_plugin_mesh::node_actions::MeshNodePlugin::new,
+    );
     #[cfg(feature = "proxy")]
-    let proxy_plugin = if let Some(state) = state {
-        let log: std::sync::Arc<infraternal_plugin_proxy::supervisor::ProxyLog> =
-            std::sync::Arc::new(|line| tracing::info!(target: "infraternal::proxy", "{line}"));
-        infraternal_plugin_proxy::agent::ProxyAgentPlugin::for_agent(state, log)
-            .map_err(|_| PluginError::Rejected)?
-    } else {
-        infraternal_plugin_proxy::agent::ProxyAgentPlugin::default()
-    };
-    #[cfg(feature = "proxy")]
-    let proxy_controller = proxy_plugin.controller();
+    let proxy_plugin = proxy_plugin_at(state)?;
+    #[cfg(all(feature = "proxy", feature = "mesh", target_os = "linux"))]
+    let mesh_plugin = connect_proxy_and_mesh(&proxy_plugin, mesh_plugin)?;
     #[cfg(feature = "proxy")]
     registry.register(Box::new(proxy_plugin))?;
     #[cfg(all(feature = "remote", target_os = "linux"))]
@@ -142,26 +140,50 @@ pub(crate) fn registry_at(
     #[cfg(not(all(feature = "remote", target_os = "linux")))]
     let _ = installation;
     #[cfg(all(feature = "mesh", target_os = "linux"))]
-    {
-        let mesh_plugin = state.map_or_else(
-            infraternal_plugin_mesh::node_actions::MeshNodePlugin::default,
-            infraternal_plugin_mesh::node_actions::MeshNodePlugin::new,
-        );
-        #[cfg(feature = "proxy")]
-        let mesh_plugin = mesh_plugin.with_configuration_observer({
-            let proxy_controller = proxy_controller.clone();
-            std::sync::Arc::new(move |config| {
-                let context = config
-                    .as_ref()
-                    .and_then(|config| proxy_mesh_context(config).ok());
-                proxy_controller.set_mesh_context(context)
-            })
-        });
-        registry.register(Box::new(mesh_plugin))?;
-    }
+    registry.register(Box::new(mesh_plugin))?;
     #[cfg(not(all(feature = "mesh", target_os = "linux")))]
     let _ = state;
     Ok(registry)
+}
+
+/// Node-state-backed proxy plugin, or the stateless one used by registry tests.
+#[cfg(feature = "proxy")]
+fn proxy_plugin_at(
+    state: Option<&std::path::Path>,
+) -> Result<infraternal_plugin_proxy::agent::ProxyAgentPlugin, PluginError> {
+    let Some(state) = state else {
+        return Ok(infraternal_plugin_proxy::agent::ProxyAgentPlugin::default());
+    };
+    let log: std::sync::Arc<infraternal_plugin_proxy::supervisor::ProxyLog> =
+        std::sync::Arc::new(|line| tracing::info!(target: "infraternal::proxy", "{line}"));
+    infraternal_plugin_proxy::agent::ProxyAgentPlugin::for_agent(state, log)
+        .map_err(|_| PluginError::Rejected)
+}
+
+/// Wire both directions between the proxy and Mesh plugins [#281].
+///
+/// Mesh pushes each accepted configuration to the proxy controller, so a
+/// revoked grant removes its routes. The proxy controller pushes each applied
+/// route snapshot back to the Mesh firewall, so the ingress exception admits
+/// only peers granted a published backend port. Both hooks are plain setters
+/// that run only inside later plugin actions, so wiring order is irrelevant.
+#[cfg(all(feature = "proxy", feature = "mesh", target_os = "linux"))]
+fn connect_proxy_and_mesh(
+    proxy_plugin: &infraternal_plugin_proxy::agent::ProxyAgentPlugin,
+    mesh_plugin: infraternal_plugin_mesh::node_actions::MeshNodePlugin,
+) -> Result<infraternal_plugin_mesh::node_actions::MeshNodePlugin, PluginError> {
+    let proxy_controller = proxy_plugin.controller();
+    proxy_controller
+        .set_mesh_ingress_observer(mesh_plugin.proxy_ingress_observer())
+        .map_err(|_| PluginError::Rejected)?;
+    Ok(
+        mesh_plugin.with_configuration_observer(std::sync::Arc::new(move |config| {
+            let context = config
+                .as_ref()
+                .and_then(|config| proxy_mesh_context(config).ok());
+            proxy_controller.set_mesh_context(context)
+        })),
+    )
 }
 
 #[cfg(all(test, feature = "proxy"))]

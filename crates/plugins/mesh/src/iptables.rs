@@ -46,7 +46,15 @@ pub(crate) enum Update {
 /// # Errors
 /// Refuses missing `nf_tables` executables or failed restore batches.
 pub fn apply(config: &Config, installed: bool) -> io::Result<()> {
-    apply_with_aliases(config, installed, &[], false, config, Update::Full)
+    apply_with_aliases(
+        config,
+        installed,
+        &[],
+        false,
+        config,
+        &infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+        Update::Full,
+    )
 }
 pub(crate) fn apply_with_aliases(
     config: &Config,
@@ -54,6 +62,7 @@ pub(crate) fn apply_with_aliases(
     aliases: &[crate::policy::model::Addresses],
     fence: bool,
     connections: &Config,
+    proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
     update: Update,
 ) -> io::Result<()> {
     // Ownership and backend validation belong to first installation/adoption.
@@ -75,6 +84,7 @@ pub(crate) fn apply_with_aliases(
             aliases,
             fence,
             connections,
+            proxy_ingress,
         );
         if update == Update::Full {
             script
@@ -250,7 +260,15 @@ fn execute(tool: &str, script: &str, preflight: bool) -> io::Result<()> {
 // Keep the complete per-family atomic restore batch visible together.
 #[cfg(test)]
 fn render(config: &Config, ipv6: bool, installed: Ownership) -> String {
-    render_with_aliases(config, ipv6, installed, &[], false, config)
+    render_with_aliases(
+        config,
+        ipv6,
+        installed,
+        &[],
+        false,
+        config,
+        &infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+    )
 }
 // A rotation temporarily owns both local addresses; keep their ingress fences in one batch.
 #[allow(clippy::too_many_lines)]
@@ -261,6 +279,7 @@ fn render_with_aliases(
     aliases: &[crate::policy::model::Addresses],
     fence: bool,
     connections: &Config,
+    proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
 ) -> String {
     let connections = if fence { connections } else { config };
     let mut script = String::from("*raw\n");
@@ -330,7 +349,6 @@ fn render_with_aliases(
     // Compact contiguous equal grants. An open 1,000-node allocation becomes
     // one range match per direction/family, without granting a gap in membership.
     let mut groups = Groups::new();
-    let mut proxy_sources = std::collections::BTreeSet::new();
     for peer in connections.peers.values() {
         let address = if ipv6 {
             u128::from(peer.peer.addresses.ipv6)
@@ -349,11 +367,29 @@ fn render_with_aliases(
                             .or_default()
                             .insert(address);
                     }
-                    if direction == 0 && ports.iter().any(|port| port.protocol == Protocol::Tcp) {
-                        proxy_sources.insert(address);
-                    }
                 }
                 TrafficPolicy::None => {}
+            }
+        }
+    }
+    let mut proxy_sources = std::collections::BTreeSet::new();
+    if proxy_ingress.listener_pair.is_some() && !proxy_ingress.backend_ports.is_empty() {
+        for peer in connections.peers.values() {
+            let has_published_route_grant = match &peer.inbound {
+                TrafficPolicy::All => true,
+                TrafficPolicy::Ports(ports) => ports.iter().any(|port| {
+                    port.protocol == Protocol::Tcp
+                        && proxy_ingress.backend_ports.contains(&port.number)
+                }),
+                TrafficPolicy::None => false,
+            };
+            if has_published_route_grant {
+                let address = if ipv6 {
+                    u128::from(peer.peer.addresses.ipv6)
+                } else {
+                    u128::from(u32::from(peer.peer.addresses.ipv4))
+                };
+                proxy_sources.insert(address);
             }
         }
     }
@@ -429,15 +465,24 @@ fn render_with_aliases(
             } else {
                 format!("-m iprange --src-range {}-{}", display(start), display(end))
             };
-            for range in infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES {
-                let destination_ports = if range.start == range.end {
-                    range.start.to_string()
-                } else {
-                    format!("{}:{}", range.start, range.end)
-                };
+            let selected_ports = proxy_ingress
+                .listener_pair
+                .filter(|pair| {
+                    !proxy_ingress.backend_ports.is_empty()
+                        && pair.http != pair.https
+                        && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
+                            .iter()
+                            .any(|range| range.contains(pair.http))
+                        && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
+                            .iter()
+                            .any(|range| range.contains(pair.https))
+                })
+                .map(|pair| [pair.http, pair.https])
+                .unwrap_or_default();
+            for destination_port in selected_ports {
                 let _ = writeln!(
                     script,
-                    "-A {} {selector} -p tcp -m conntrack --ctorigdstport {destination_ports} -j ACCEPT",
+                    "-A {} {selector} -p tcp -m conntrack --ctorigdstport {destination_port} -j ACCEPT",
                     CHAINS[0]
                 );
             }
@@ -639,7 +684,7 @@ mod tests {
         assert!(rules.contains("-A IFM_OUT -d 10.254.0.2 -p tcp --dport 443 -j ACCEPT"));
     }
     #[test]
-    fn proxy_listener_ports_are_limited_to_peers_with_tcp_ingress_grants() {
+    fn proxy_listener_exception_is_closed_without_a_published_route() {
         let mut config = config(&[2, 3]);
         for peer in config.peers.values_mut() {
             peer.inbound = TrafficPolicy::None;
@@ -660,19 +705,55 @@ mod tests {
             ]));
 
         let rules = render(&config, false, Ownership::default());
-        for range in infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES {
-            let expected_port = if range.start == range.end {
-                range.start.to_string()
-            } else {
-                format!("{}:{}", range.start, range.end)
-            };
-            assert!(rules.contains(&format!(
-                "-A IFM_IN -s 10.254.0.2 -p tcp -m conntrack --ctorigdstport {expected_port} -j ACCEPT"
-            )));
-            assert!(!rules.contains(&format!(
-                "-A IFM_IN -s 10.254.0.3 -p tcp -m conntrack --ctorigdstport {expected_port} -j ACCEPT"
-            )));
+        assert!(!rules.contains("--ctorigdstport 10080:10335"));
+        assert!(!rules.contains("--ctorigdstport 10082"));
+        assert!(!rules.contains(
+            "-A IFM_IN -s 10.254.0.2 -p tcp -m conntrack --ctorigdstport 10082 -j ACCEPT"
+        ));
+    }
+    #[test]
+    fn proxy_exception_uses_only_selected_pair_and_a_published_route_grant() {
+        let mut config = config(&[2, 3]);
+        for peer in config.peers.values_mut() {
+            peer.inbound = TrafficPolicy::None;
         }
+        for (node, port) in [(2, 3000), (3, 8080)] {
+            config.peers.get_mut(&NodeId(node)).expect("peer").inbound =
+                TrafficPolicy::Ports(std::collections::BTreeSet::from([
+                    crate::policy::rules::Port {
+                        protocol: Protocol::Tcp,
+                        number: port,
+                    },
+                ]));
+        }
+        let selected = infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS[1];
+        let ingress = infraternal_mesh::proxy_ports::MeshProxyIngress {
+            listener_pair: Some(selected),
+            backend_ports: std::collections::BTreeSet::from([8080]),
+        };
+        let rules = super::render_with_aliases(
+            &config,
+            false,
+            Ownership::default(),
+            &[],
+            false,
+            &config,
+            &ingress,
+        );
+
+        assert!(rules.contains(&format!(
+            "-A IFM_IN -s 10.254.0.3 -p tcp -m conntrack --ctorigdstport {} -j ACCEPT",
+            selected.http
+        )));
+        assert!(rules.contains(&format!(
+            "-A IFM_IN -s 10.254.0.3 -p tcp -m conntrack --ctorigdstport {} -j ACCEPT",
+            selected.https
+        )));
+        assert!(!rules.contains(&format!(
+            "-A IFM_IN -s 10.254.0.2 -p tcp -m conntrack --ctorigdstport {} -j ACCEPT",
+            selected.http
+        )));
+        assert!(!rules.contains("--ctorigdstport 10082"));
     }
     #[test]
     fn replacement_retains_established_rules_and_does_not_duplicate_hooks() {

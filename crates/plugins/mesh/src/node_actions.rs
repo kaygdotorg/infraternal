@@ -164,6 +164,10 @@ pub struct MeshNodePlugin {
 type Counters =
     std::collections::BTreeMap<crate::policy::model::PublicKey, crate::wireguard::Counters>;
 type ConfigurationObserver = Arc<dyn Fn(Option<Config>) -> std::io::Result<()> + Send + Sync>;
+/// Synchronous return path used by the proxy controller after Traefik applies a route snapshot.
+pub type ProxyIngressObserver = Arc<
+    dyn Fn(infraternal_mesh::proxy_ports::MeshProxyIngress) -> std::io::Result<()> + Send + Sync,
+>;
 /// How long the following pages of one listing reuse the first page's kernel dump. A listing pages through in
 /// milliseconds; anything older is a new listing and reads the kernel again.
 const DUMP_REUSE: std::time::Duration = std::time::Duration::from_secs(2);
@@ -237,6 +241,21 @@ impl MeshNodePlugin {
     pub fn with_configuration_observer(mut self, observer: ConfigurationObserver) -> Self {
         self.configuration_observer = Some(observer);
         self
+    }
+
+    /// Give the proxy controller a way to update this node's firewall after route application.
+    #[must_use]
+    pub fn proxy_ingress_observer(&self) -> ProxyIngressObserver {
+        let owner = Arc::clone(&self.owner);
+        Arc::new(move |proxy_ingress| {
+            let mut owner = owner
+                .lock()
+                .map_err(|_| std::io::Error::other("Mesh owner is unavailable"))?;
+            owner
+                .node()
+                .map_err(|_| std::io::Error::other("Mesh state is unavailable"))?
+                .set_proxy_ingress(proxy_ingress)
+        })
     }
 }
 impl Default for MeshNodePlugin {
@@ -407,77 +426,86 @@ impl AgentPlugin for MeshNodePlugin {
     }
     fn call(&mut self, action: &str, input: &[u8]) -> Result<Vec<u8>, PluginError> {
         let request = parse_action(action, input)?;
-        let mut owner = self.owner.lock().map_err(|_| PluginError::Rejected)?;
-        let node = owner.node()?;
-        let result = match request {
-            Request::Identity {
-                compact_access,
-                #[cfg(feature = "mesh-dns-spike")]
-                dns_names,
-            } => {
-                #[cfg(feature = "mesh-dns-spike")]
-                let requested_dns_names = dns_names;
-                #[cfg(not(feature = "mesh-dns-spike"))]
-                let requested_dns_names = false;
-                json!(identity_response(
-                    node.ensure().map_err(|_| PluginError::Rejected)?,
+        // Proxy callbacks update this node's firewall, so release the Mesh owner lock before
+        // notifying the sibling component to preserve one-way lock ordering.
+        let (result, observed_config) = {
+            let mut owner = self.owner.lock().map_err(|_| PluginError::Rejected)?;
+            let node = owner.node()?;
+            let result = match request {
+                Request::Identity {
                     compact_access,
-                    requested_dns_names,
-                ))
-            }
-            Request::Up => {
-                json!(identity_response(
-                    Some(node.up().map_err(|_| PluginError::Rejected)?),
-                    false,
-                    false,
-                ))
-            }
-            Request::Down => {
-                node.down().map_err(|_| PluginError::Rejected)?;
-                json!({"state":"Off","version":null})
-            }
-            Request::Status => {
-                json!({"state":if node.stopping() {"Stopping"} else if !node.enabled() {"Off"} else if node.active() && node.config().is_some() {"On"} else {"Waiting"},"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link})
-            }
-            Request::Configure(chunk) => {
-                let applied = node.chunk(*chunk).map_err(|_| PluginError::Rejected)?;
-                json!({"applied":applied,"version":node.config().map(|c|c.version)})
-            }
-            Request::Peers(page) => {
-                if page.cursor.as_ref().is_some_and(|cursor| {
-                    node.config()
-                        .is_none_or(|config| config.version != cursor.version)
-                }) {
-                    return Err(PluginError::Rejected);
+                    #[cfg(feature = "mesh-dns-spike")]
+                    dns_names,
+                } => {
+                    #[cfg(feature = "mesh-dns-spike")]
+                    let requested_dns_names = dns_names;
+                    #[cfg(not(feature = "mesh-dns-spike"))]
+                    let requested_dns_names = false;
+                    json!(identity_response(
+                        node.ensure().map_err(|_| PluginError::Rejected)?,
+                        compact_access,
+                        requested_dns_names,
+                    ))
                 }
-                // One kernel dump per listing: the first page reads the device, the pages after it reuse that
-                // reading, so a listing of N pages costs one dump, not N.
-                let reuse = page.cursor.is_some()
-                    && self
-                        .dump
-                        .as_ref()
-                        .is_some_and(|(at, _)| at.elapsed() < DUMP_REUSE);
-                if !reuse {
-                    let counters = if node.active() {
-                        crate::wireguard::Device::counters().map_err(|_| PluginError::Rejected)?
-                    } else {
-                        Counters::default()
-                    };
-                    self.dump = Some((std::time::Instant::now(), counters));
+                Request::Up => {
+                    json!(identity_response(
+                        Some(node.up().map_err(|_| PluginError::Rejected)?),
+                        false,
+                        false,
+                    ))
                 }
-                let (_, counters) = self.dump.as_ref().ok_or(PluginError::Rejected)?;
-                peer_page(node.config(), counters, page.cursor.as_ref(), page.presence)?
-            }
+                Request::Down => {
+                    node.down().map_err(|_| PluginError::Rejected)?;
+                    json!({"state":"Off","version":null})
+                }
+                Request::Status => {
+                    json!({"state":if node.stopping() {"Stopping"} else if !node.enabled() {"Off"} else if node.active() && node.config().is_some() {"On"} else {"Waiting"},"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link})
+                }
+                Request::Configure(chunk) => {
+                    let applied = node.chunk(*chunk).map_err(|_| PluginError::Rejected)?;
+                    json!({"applied":applied,"version":node.config().map(|c|c.version)})
+                }
+                Request::Peers(page) => {
+                    if page.cursor.as_ref().is_some_and(|cursor| {
+                        node.config()
+                            .is_none_or(|config| config.version != cursor.version)
+                    }) {
+                        return Err(PluginError::Rejected);
+                    }
+                    // One kernel dump per listing: the first page reads the device, the pages after it reuse that
+                    // reading, so a listing of N pages costs one dump, not N.
+                    let reuse = page.cursor.is_some()
+                        && self
+                            .dump
+                            .as_ref()
+                            .is_some_and(|(at, _)| at.elapsed() < DUMP_REUSE);
+                    if !reuse {
+                        let counters = if node.active() {
+                            crate::wireguard::Device::counters()
+                                .map_err(|_| PluginError::Rejected)?
+                        } else {
+                            Counters::default()
+                        };
+                        self.dump = Some((std::time::Instant::now(), counters));
+                    }
+                    let (_, counters) = self.dump.as_ref().ok_or(PluginError::Rejected)?;
+                    peer_page(node.config(), counters, page.cursor.as_ref(), page.presence)?
+                }
+            };
+            let observed_config = matches!(
+                action,
+                "mesh.identity" | "mesh.up" | "mesh.down" | "mesh.status" | "mesh.configure"
+            )
+            .then(|| node.config().cloned());
+            (result, observed_config)
         };
         if matches!(action, "mesh.up" | "mesh.down") {
             self.changed.store(true, Ordering::Release);
         }
-        if matches!(
-            action,
-            "mesh.identity" | "mesh.up" | "mesh.down" | "mesh.status" | "mesh.configure"
-        ) && let Some(observer) = &self.configuration_observer
+        if let Some(config) = observed_config
+            && let Some(observer) = &self.configuration_observer
         {
-            observer(node.config().cloned()).map_err(|_| PluginError::Rejected)?;
+            observer(config).map_err(|_| PluginError::Rejected)?;
         }
         serde_json::to_vec(&result).map_err(|_| PluginError::Rejected)
     }
@@ -515,16 +543,18 @@ impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
             // Component adapters invoke this boundary off their dispatch reactor,
             // just as the synchronous action registry does. Down returns only
             // after kernel state and the owned idle socket have retired.
-            let mut owner = self.owner.lock().map_err(|_| "Mesh owner unavailable.")?;
-            let node = owner.node().map_err(|_| "Mesh state unavailable.")?;
-            if enabled {
-                node.up().map_err(|_| "Mesh start failed.")?;
-            } else {
-                node.down().map_err(|_| "Mesh stop failed.")?;
-            }
+            let config = {
+                let mut owner = self.owner.lock().map_err(|_| "Mesh owner unavailable.")?;
+                let node = owner.node().map_err(|_| "Mesh state unavailable.")?;
+                if enabled {
+                    node.up().map_err(|_| "Mesh start failed.")?;
+                } else {
+                    node.down().map_err(|_| "Mesh stop failed.")?;
+                }
+                node.config().cloned()
+            };
             if let Some(observer) = &self.configuration_observer {
-                observer(node.config().cloned())
-                    .map_err(|_| "Mesh publication routes could not be updated.")?;
+                observer(config).map_err(|_| "Mesh publication routes could not be updated.")?;
             }
             self.changed.store(true, Ordering::Release);
             Ok(())

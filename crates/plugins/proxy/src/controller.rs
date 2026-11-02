@@ -104,7 +104,13 @@ struct ControllerState {
     exposures: BTreeMap<u16, Exposure>,
     supervisor: Option<Box<dyn RouteSupervisor>>,
     listener_ports: ListenerPorts,
+    mesh_proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
+    mesh_ingress_observer: Option<MeshIngressObserver>,
 }
+
+/// Callback that synchronizes confirmed Mesh route grants with the packet filter.
+pub type MeshIngressObserver =
+    Arc<dyn Fn(infraternal_mesh::proxy_ports::MeshProxyIngress) -> io::Result<()> + Send + Sync>;
 
 /// Small replace-only boundary between desired publications and the process owner.
 pub trait RouteSupervisor: Send {
@@ -161,6 +167,8 @@ impl Default for ProxyController {
                     mesh_http: None,
                     mesh_https: None,
                 },
+                mesh_proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+                mesh_ingress_observer: None,
             })),
             factory: None,
         }
@@ -168,6 +176,18 @@ impl Default for ProxyController {
 }
 
 impl ProxyController {
+    /// Link accepted route application to the Mesh node's firewall owner.
+    ///
+    /// # Errors
+    /// Returns an error if proxy publication state is unavailable.
+    pub fn set_mesh_ingress_observer(&self, observer: MeshIngressObserver) -> io::Result<()> {
+        self.state
+            .lock()
+            .map_err(|_| io::Error::other("proxy publication state is unavailable"))?
+            .mesh_ingress_observer = Some(observer);
+        Ok(())
+    }
+
     /// Build the production node controller from non-secret provider settings and node state.
     ///
     /// DNS token bytes are loaded only by `DnsTokenCustody` when the first route starts. The
@@ -422,12 +442,14 @@ impl ProxyController {
     fn reconcile(&self, state: &mut ControllerState) -> io::Result<()> {
         let services = refresh_routes(state)?;
         if let Some(supervisor) = &state.supervisor {
-            if let Some(ports) = supervisor.replace(services)? {
+            if let Some(ports) = supervisor.replace(services.clone())? {
                 state.listener_ports = ports;
             }
+            self.update_mesh_ingress(state, &services)?;
             return Ok(());
         }
         if services.is_empty() {
+            self.update_mesh_ingress(state, &services)?;
             return Ok(());
         }
         let factory = self.factory.as_ref().ok_or_else(|| {
@@ -443,11 +465,47 @@ impl ProxyController {
             )
         })?;
         let supervisor = factory.start(context)?;
-        let listener_ports = supervisor.replace(services)?;
+        let listener_ports = supervisor.replace(services.clone())?;
         if let Some(ports) = listener_ports {
             state.listener_ports = ports;
         }
+        self.update_mesh_ingress(state, &services)?;
         state.supervisor = Some(supervisor);
+        Ok(())
+    }
+
+    fn update_mesh_ingress(
+        &self,
+        state: &mut ControllerState,
+        services: &[PublishedService],
+    ) -> io::Result<()> {
+        let backend_ports = services
+            .iter()
+            .filter(|service| !service.public)
+            .map(|service| service.backend.port())
+            .collect::<std::collections::BTreeSet<_>>();
+        let listener_pair = if backend_ports.is_empty() {
+            None
+        } else {
+            state
+                .listener_ports
+                .mesh_http
+                .zip(state.listener_ports.mesh_https)
+                .map(
+                    |(http, https)| infraternal_mesh::proxy_ports::ListenerPortPair { http, https },
+                )
+        };
+        let next = infraternal_mesh::proxy_ports::MeshProxyIngress {
+            listener_pair,
+            backend_ports,
+        };
+        if next == state.mesh_proxy_ingress {
+            return Ok(());
+        }
+        if let Some(observer) = &state.mesh_ingress_observer {
+            observer(next.clone())?;
+        }
+        state.mesh_proxy_ingress = next;
         Ok(())
     }
 }
@@ -881,6 +939,75 @@ mod tests {
             snapshots,
             started_addresses,
         )
+    }
+
+    #[test]
+    fn mesh_firewall_tracks_only_applied_non_public_routes() {
+        let selected = infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS[1];
+        let (controller, snapshots) = controller_with_ports(ListenerPorts {
+            http: 10_080,
+            https: 10_443,
+            mesh_http: Some(selected.http),
+            mesh_https: Some(selected.https),
+        });
+        let applied = Arc::new(Mutex::new(Vec::new()));
+        let observer: MeshIngressObserver = {
+            let applied = Arc::clone(&applied);
+            let snapshots = Arc::clone(&snapshots);
+            Arc::new(move |ingress| {
+                let snapshots = snapshots
+                    .lock()
+                    .map_err(|_| io::Error::other("applied route fixture is unavailable"))?;
+                assert_eq!(
+                    ingress.backend_ports,
+                    snapshots
+                        .last()
+                        .into_iter()
+                        .flatten()
+                        .filter(|route| !route.public)
+                        .map(|route| route.backend.port())
+                        .collect()
+                );
+                applied
+                    .lock()
+                    .map_err(|_| io::Error::other("ingress fixture is unavailable"))?
+                    .push(ingress);
+                Ok(())
+            })
+        };
+        controller
+            .set_mesh_ingress_observer(observer)
+            .expect("install firewall observer");
+        controller
+            .set_mesh_context(Some(context(&[
+                (3000, Ipv4Addr::new(10, 254, 0, 3)),
+                (4000, Ipv4Addr::new(10, 254, 0, 4)),
+            ])))
+            .expect("apply accepted Mesh grants");
+
+        controller
+            .call("proxy.publish", br#"{"port":3000}"#)
+            .expect("publish Mesh route");
+        controller
+            .call(
+                "proxy.publish",
+                br#"{"port":4000,"public":true,"confirm_public":true}"#,
+            )
+            .expect("publish public route");
+
+        let updates = applied.lock().expect("firewall updates");
+        assert_eq!(updates.len(), 1, "public route does not widen Mesh ingress");
+        assert_eq!(updates[0].listener_pair, Some(selected));
+        assert_eq!(updates[0].backend_ports, [3000].into_iter().collect());
+        drop(updates);
+
+        controller
+            .call("proxy.unpublish", br#"{"target":"3000"}"#)
+            .expect("unpublish Mesh route");
+        let updates = applied.lock().expect("firewall updates");
+        assert_eq!(updates.len(), 2);
+        assert!(updates[1].backend_ports.is_empty());
+        assert_eq!(updates[1].listener_pair, None);
     }
 
     #[test]

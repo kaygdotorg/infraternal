@@ -30,6 +30,7 @@ pub struct Node {
     pending: Option<Pending>,
     routes: BTreeSet<IpAddr>,
     firewall: Firewall,
+    proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
     owned: bool,
     // A committed revision remains restrictive until exact retirement succeeds.
     connection_cleanup_pending: bool,
@@ -50,6 +51,7 @@ impl Default for Node {
             pending: None,
             routes: BTreeSet::new(),
             firewall: Firewall::default(),
+            proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
             owned: false,
             connection_cleanup_pending: false,
             client: None,
@@ -258,6 +260,25 @@ impl Node {
     pub fn active(&self) -> bool {
         self.identity.is_some()
     }
+    /// Apply the proxy's confirmed Mesh routes to the owned firewall.
+    ///
+    /// # Errors
+    /// Returns a firewall or conntrack cleanup failure without accepting a new policy.
+    pub fn set_proxy_ingress(
+        &mut self,
+        proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
+    ) -> io::Result<()> {
+        if self.proxy_ingress == proxy_ingress {
+            return Ok(());
+        }
+        if self.active()
+            && let Some(config) = self.config.as_ref()
+        {
+            self.firewall.apply_proxy_ingress(config, &proxy_ingress)?;
+        }
+        self.proxy_ingress = proxy_ingress;
+        Ok(())
+    }
     /// Disabled intent is not Off until retained kernel/socket ownership is gone.
     #[must_use]
     pub fn stopping(&self) -> bool {
@@ -385,6 +406,7 @@ impl Node {
         self.firewall.remove()?;
         self.retire_routes()?;
         self.firewall = Firewall::default();
+        self.proxy_ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
         self.client = None;
         self.identity = None;
         self.config = None;

@@ -1,4 +1,6 @@
-//! Defines the proxy listener pairs admitted by the Mesh ingress firewalls.
+//! Defines the proxy listener pairs and active route grants admitted by Mesh ingress firewalls.
+
+use std::collections::BTreeSet;
 
 /// One HTTP and HTTPS listener pair for a proxy audience.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7,6 +9,18 @@ pub struct ListenerPortPair {
     pub http: u16,
     /// TLS listener port.
     pub https: u16,
+}
+
+/// Mesh-only listeners and local service ports for the currently applied route snapshot.
+///
+/// The firewall derives source addresses from the accepted Mesh grants, so a peer is admitted
+/// only when its grant matches a published backend port on this selected listener pair.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MeshProxyIngress {
+    /// The one listener pair Traefik selected for Mesh routes; absent when no Mesh route is live.
+    pub listener_pair: Option<ListenerPortPair>,
+    /// Backend ports of active, non-public Traefik routes.
+    pub backend_ports: BTreeSet<u16>,
 }
 
 /// One inclusive interval in the proxy listener port set.
