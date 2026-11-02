@@ -319,8 +319,8 @@ impl ProxyController {
                 NameShape::PerMachineWildcard
             },
         };
-        let route = route_for(spec, &context)
-            .map_err(|_| infraternal_plugin_api::PluginError::Rejected)?;
+        let route =
+            route_for(spec, &context).map_err(|_| infraternal_plugin_api::PluginError::Rejected)?;
         if !route.public && route.allowed_sources.is_empty() {
             return error_reply(
                 "not_allowed",

@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = ["server"]
-server = ["dep:uuid", "dep:tracing"]
+server = ["dep:uuid", "dep:tracing", "dep:url"]
 ee = []
 # Diagnostic stage logging is removable and never enabled by a shipping role.
 cutoff-measure = ["nix?/time"]

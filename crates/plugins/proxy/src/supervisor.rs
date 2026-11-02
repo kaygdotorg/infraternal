@@ -634,7 +634,7 @@ impl TraefikSupervisor {
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "proxy supervisor stopped"))?
     }
 
-    /// Observe whether the owner currently holds a live Traefik child.
+    /// Observe whether its Traefik child is live and passes the private health ping.
     ///
     /// # Errors
     /// Returns an error when the owner thread has stopped.
@@ -705,7 +705,14 @@ fn run_supervisor(
             }
             Inbox::Command(SupervisorCommand::IsRunning(reply)) => {
                 let running = match runtime.child.as_mut() {
-                    Some(owned) => owned.try_wait().is_ok_and(|status| status.is_none()),
+                    Some(owned) => {
+                        owned.try_wait().is_ok_and(|status| status.is_none())
+                            && check_private_ping(
+                                settings.private_ping_address,
+                                Duration::from_millis(250),
+                            )
+                            .is_ok()
+                    }
                     None => false,
                 };
                 let _ = reply.send(running);
@@ -767,8 +774,7 @@ fn replace_services(
                     runtime.listener_ports
                 })
             } else {
-                write_dynamic_snapshot(settings, &runtime.services)
-                    .map(|()| runtime.listener_ports)
+                write_dynamic_snapshot(settings, &runtime.services).map(|()| runtime.listener_ports)
             }
         }
         LifecycleAction::Stop => {
@@ -927,8 +933,7 @@ fn restart_for_listener_scope(
     listener_is_public: &mut bool,
 ) -> io::Result<ListenerPorts> {
     let stopped = stop_child(child);
-    let LifecycleAction::RetryAfter(delay) =
-        lifecycle.child_exited(services.len(), Instant::now())
+    let LifecycleAction::RetryAfter(delay) = lifecycle.child_exited(services.len(), Instant::now())
     else {
         stopped?;
         return Err(io::Error::other("proxy listener restart was not scheduled"));

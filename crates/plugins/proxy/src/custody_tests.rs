@@ -292,8 +292,15 @@ fn agent_start_removes_custody_files_for_a_removed_dns_provider() {
 fn agent_restart_retains_the_configured_dns_provider_files_for_renewal() {
     const CHILD_STATE: &str = "INFRATERAL_PROXY_CUSTODY_TEST_STATE";
     if let Some(state) = std::env::var_os(CHILD_STATE) {
-        let provider = std::env::var("INFRATERAL_DNS_PROVIDER")
+        let provider = std::env::var("INFRATERNAL_DNS_PROVIDER")
             .expect("configured provider identity is present in the child");
+        let email_present = std::env::var("INFRATERNAL_DNS_EMAIL").is_ok();
+        let credential_variables_present =
+            std::env::var("INFRATERNAL_DNS_CREDENTIAL_VARIABLES").is_ok();
+        assert!(
+            email_present && credential_variables_present,
+            "configured provider environment is incomplete: email={email_present}, credentials={credential_variables_present}"
+        );
         let profile = super::controller::DnsProviderProfile::from_environment()
             .expect("configured DNS provider profile is valid");
         assert_eq!(
@@ -339,9 +346,9 @@ fn agent_restart_retains_the_configured_dns_provider_files_for_renewal() {
         ])
         .env_clear()
         .env(CHILD_STATE, &state.0)
-        .env("INFRATERAL_DNS_PROVIDER", &provider)
-        .env("INFRATERAL_DNS_EMAIL", "proxy-test@example.org")
-        .env("INFRATERAL_DNS_CREDENTIAL_VARIABLES", "TEST_DNS_API_TOKEN")
+        .env("INFRATERNAL_DNS_PROVIDER", &provider)
+        .env("INFRATERNAL_DNS_EMAIL", "proxy-test@example.org")
+        .env("INFRATERNAL_DNS_CREDENTIAL_VARIABLES", "TEST_DNS_API_TOKEN")
         .output()
         .expect("start isolated configured agent");
     let child_output = format!(

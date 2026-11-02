@@ -163,8 +163,7 @@ pub struct MeshNodePlugin {
 }
 type Counters =
     std::collections::BTreeMap<crate::policy::model::PublicKey, crate::wireguard::Counters>;
-type ConfigurationObserver =
-    Arc<dyn Fn(Option<Config>) -> std::io::Result<()> + Send + Sync>;
+type ConfigurationObserver = Arc<dyn Fn(Option<Config>) -> std::io::Result<()> + Send + Sync>;
 /// How long the following pages of one listing reuse the first page's kernel dump. A listing pages through in
 /// milliseconds; anything older is a new listing and reads the kernel again.
 const DUMP_REUSE: std::time::Duration = std::time::Duration::from_secs(2);
@@ -235,10 +234,7 @@ impl MeshNodePlugin {
     ///
     /// The observer receives the retained configuration, never an incoming partial chunk.
     #[must_use]
-    pub fn with_configuration_observer(
-        mut self,
-        observer: ConfigurationObserver,
-    ) -> Self {
+    pub fn with_configuration_observer(mut self, observer: ConfigurationObserver) -> Self {
         self.configuration_observer = Some(observer);
         self
     }

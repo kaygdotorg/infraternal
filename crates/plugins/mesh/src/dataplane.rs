@@ -59,7 +59,8 @@ pub struct PeerPolicy {
 pub struct ExposureIdentity {
     /// Stable machine label assigned by the coordinator.
     pub machine_name: String,
-    /// Coordinator-selected DNS suffix; `.internal` is the compatibility default.
+    /// Coordinator-selected suffix for proxy naming; `.internal` is the compatibility default.
+    /// The optional DNS resolver remains a separate feature and does not follow from this field.
     pub dns_suffix: String,
 }
 /// All fields are public. Private key material has no representation on this boundary.
@@ -157,7 +158,6 @@ pub struct Chunk {
     pub access_updates: Vec<AccessUpdate>,
 }
 
-#[cfg(feature = "mesh-dns-spike")]
 pub(crate) const DEFAULT_DNS_SUFFIX: &str = "internal";
 
 #[cfg(feature = "mesh-dns-spike")]

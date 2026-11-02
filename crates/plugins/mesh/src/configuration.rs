@@ -11,9 +11,9 @@ use std::{collections::BTreeMap, net::SocketAddr};
 
 /// Compile one node's Access view into the same directional peer policy `WireGuard` installs.
 ///
-/// The server runtime supplies the default suffix. The persisted mesh suffix is used when
-/// explicitly selected; legacy non-`internal` values remain overrides. DNS clients also keep
-/// `.internal` as an alias.
+/// The server runtime supplies the public-host-derived default suffix. The persisted mesh suffix
+/// is used when explicitly selected; legacy non-`internal` values remain overrides. The ordinary
+/// mesh snapshot always carries this value for proxy naming; resolver fields stay feature-gated.
 /// # Errors
 /// Returns unknown membership or invalid persisted address allocation.
 pub fn compile_with_dns_suffix(
@@ -155,7 +155,7 @@ fn compile_inner(
 ///
 /// IP origins and localhost do not provide a public DNS suffix, so those retain `.internal`.
 /// This function is deliberately total: malformed or non-public origins fall back to `.internal`.
-#[cfg(feature = "mesh-dns-spike")]
+#[cfg(feature = "server")]
 pub(crate) fn default_dns_suffix_from_origin(public_origin: &str) -> String {
     let suffix = url::Url::parse(public_origin)
         .ok()

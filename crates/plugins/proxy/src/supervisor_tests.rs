@@ -17,16 +17,54 @@ use std::{
 };
 
 fn health_server(response: &'static [u8]) -> (SocketAddr, JoinHandle<()>) {
+    health_server_sequence(vec![response])
+}
+
+fn health_server_sequence(responses: Vec<&'static [u8]>) -> (SocketAddr, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind private health fixture");
+    listener
+        .set_nonblocking(true)
+        .expect("make private fixture interruptible");
     let address = listener.local_addr().expect("health fixture address");
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept health probe");
-        let mut request = [0_u8; 20];
-        stream
-            .read_exact(&mut request)
-            .expect("read health request");
-        assert_eq!(&request, b"GET /ping HTTP/1.1\r\n");
-        stream.write_all(response).expect("write health response");
+        let expected_responses = responses.len();
+        let mut served = 0;
+        for response in responses {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let accepted = loop {
+                match listener.accept() {
+                    Ok(accepted) => break Some(accepted),
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break None,
+                }
+            };
+            let Some((mut stream, _)) = accepted else {
+                eprintln!(
+                    "private health fixture accepted {served} of {expected_responses} expected requests"
+                );
+                break;
+            };
+            let mut request = [0_u8; 20];
+            if let Err(error) = stream.read_exact(&mut request) {
+                eprintln!("private health fixture could not read request: {error}");
+                break;
+            }
+            if &request != b"GET /ping HTTP/1.1\r\n" {
+                eprintln!("private health fixture received an unexpected request prefix");
+                break;
+            }
+            if let Err(error) = stream.write_all(response) {
+                eprintln!("private health fixture could not write response: {error}");
+                break;
+            }
+            served += 1;
+            eprintln!("private health fixture answered request {served}/{expected_responses}");
+        }
     });
     (address, server)
 }
@@ -165,6 +203,78 @@ fn private_health_ping_rejects_an_unhealthy_response() {
 }
 
 #[test]
+fn live_process_without_a_healthy_private_ping_is_reported_unhealthy() {
+    const HEALTHY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+    const UNHEALTHY: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
+    let root = std::env::temp_dir().join(format!("proxy-unhealthy-{}", uuid::Uuid::new_v4()));
+    let state = root.join("state");
+    std::fs::create_dir_all(&state).expect("create supervisor state");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .expect("private fixture root");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+        .expect("private fixture state");
+
+    let executable = root.join("fake-traefik");
+    std::fs::write(&executable, b"#!/bin/sh\nexec /bin/sleep 60\n").expect("write fake Traefik");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500))
+        .expect("private executable mode");
+    let acme_storage = state.join("acme.json");
+    std::fs::write(&acme_storage, b"{}").expect("write persistent ACME fixture");
+    std::fs::set_permissions(&acme_storage, std::fs::Permissions::from_mode(0o600))
+        .expect("private ACME mode");
+
+    let (health_address, health_server) = health_server_sequence(vec![HEALTHY, UNHEALTHY]);
+    let settings = SupervisorSettings {
+        executable,
+        static_config_path: state.join("static.toml"),
+        dynamic_config_path: state.join("dynamic.json"),
+        static_config: StaticConfig {
+            mesh_address: "10.77.0.1".parse().expect("mesh address"),
+            ports: ListenerPorts {
+                http: 10080,
+                https: 10443,
+            },
+            public: false,
+            private_ping_port: health_address.port(),
+            dynamic_directory: state,
+            dns_challenge: DnsChallenge {
+                provider: "httpreq".to_owned(),
+                email: "operator@example.test".to_owned(),
+                storage_path: acme_storage,
+                ca_server: Some("https://127.0.0.1:14000/dir".to_owned()),
+            },
+        },
+        provider_files: Vec::new(),
+        private_ping_address: health_address,
+        startup_timeout: Duration::from_secs(2),
+    };
+    let log = std::sync::Arc::new(|_: String| {});
+    let supervisor = TraefikSupervisor::start(settings, log).expect("start idle supervisor");
+    let service = PublishedService {
+        id: "docs".to_owned(),
+        hostname: "docs.n1.example.test".to_owned(),
+        backend: "127.0.0.1:3000".parse().expect("backend"),
+        allowed_sources: vec!["10.77.0.2".parse().expect("mesh peer")],
+        public: false,
+        certificate: CertificateName::Wildcard("*.n1.example.test".to_owned()),
+    };
+    supervisor
+        .replace(vec![service])
+        .expect("start one process for the route");
+    let healthy = supervisor
+        .is_running()
+        .expect("read process and private health state");
+    health_server.join().expect("join private health fixture");
+    drop(supervisor);
+    std::fs::remove_dir_all(root).expect("remove supervisor fixture");
+
+    assert!(
+        !healthy,
+        "a live child with a failed private ping is unhealthy"
+    );
+}
+
+#[test]
 fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state() {
     let root = std::env::temp_dir().join(format!("proxy-supervisor-{}", uuid::Uuid::new_v4()));
     let state = root.join("state");
@@ -183,8 +293,8 @@ fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state(
     std::fs::set_permissions(&acme_storage, std::fs::Permissions::from_mode(0o600))
         .expect("private ACME mode");
 
-    let (health_address, health_server) =
-        health_server(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
+    let response: &'static [u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+    let (health_address, health_server) = health_server_sequence(vec![response; 4]);
     let dynamic_directory = state.clone();
     let settings = SupervisorSettings {
         executable,
