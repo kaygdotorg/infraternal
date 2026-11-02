@@ -17,7 +17,11 @@ async fn node(
 ) {
     let (store, pool, id) = crate::enrollment::authority::tests::enrolled().await;
     let now = crate::websocket::now_seconds().unwrap();
-    let token = store.issue("owner", id, Mode::Rootless, now).await.unwrap();
+    let key_digest = openssl::sha::sha256(&[3u8; 32]);
+    let token = store
+        .issue("owner", id, Mode::Rootless, now, &key_digest)
+        .await
+        .unwrap();
     store
         .redeem(
             token.secret(),
