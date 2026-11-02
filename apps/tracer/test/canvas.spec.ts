@@ -302,7 +302,9 @@ test("desktop: the live terminal refits once on release, not on every frame, and
 test("touch: press and hold on a header reveals corner handles; a handle resizes; a tap outside ends it", async ({ browser }) => {
   const context = await browser.newContext({ hasTouch: true, isMobile: true, deviceScaleFactor: 3, viewport: { width: 393, height: 852 } });
   const page = await touchContext(context);
-  await openCanvas(page);
+  // The preview's frame meter rests in the bottom-right corner, which on a phone is where the first window's lower-right grip is,
+  // and takes the touch that is meant for the grip. This spec is about the grips, so it runs without the meter (`fps=0`).
+  await openCanvas(page, "&fps=0");
   const cdp = await context.newCDPSession(page);
   const touch = (type: "touchStart" | "touchMove" | "touchEnd", points: Array<{ x: number; y: number; id: number }>) =>
     cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points });
