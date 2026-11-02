@@ -334,13 +334,19 @@ mod proxy_mesh_context_tests {
         assert_eq!(
             context.allowed_sources(3000),
             [
-                "10.254.0.3".parse().expect("source address"),
-                "10.254.0.5".parse().expect("all inbound source"),
+                "10.254.0.3"
+                    .parse::<std::net::IpAddr>()
+                    .expect("source address"),
+                "10.254.0.5"
+                    .parse::<std::net::IpAddr>()
+                    .expect("all inbound source"),
             ]
         );
         assert_eq!(
             context.allowed_sources(8080),
-            ["10.254.0.5".parse().expect("all inbound source")]
+            ["10.254.0.5"
+                .parse::<std::net::IpAddr>()
+                .expect("all inbound source")]
         );
     }
 }
