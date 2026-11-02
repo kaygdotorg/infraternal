@@ -137,6 +137,7 @@ fn unpublish_accepts_a_port_or_exact_published_name() {
 #[test]
 fn missing_component_action_results_use_the_d303_not_found_exit() {
     assert_eq!(component_error_exit("missing").map(Exit::code), Some(4));
+    assert_eq!(component_error_exit("not_found").map(Exit::code), Some(4));
     assert_eq!(component_error_exit("invalid"), None);
 }
 
