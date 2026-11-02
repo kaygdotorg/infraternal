@@ -1624,7 +1624,7 @@ mod tests {
             let mut changed = batch.subscribe();
             loop {
                 tokio::select! {
-                    _ = paused.committed.notified() => return,
+                    () = paused.committed.notified() => return,
                     result = changed.changed() => {
                         result.expect("bootstrap batch closed before invitation publication");
                         if let Some(event) = batch.events(0).1.into_iter()

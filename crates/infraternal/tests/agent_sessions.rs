@@ -244,6 +244,10 @@ async fn restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill() 
     let clean_session_id = clean_exit.id;
     let clean_process_id = clean_exit.pid;
     cleanup.pids.push(clean_process_id);
+    let clean_exit_ready = infraternal_shim::readiness::Registration::new(
+        infraternal_shim::process_exit_descriptor(clean_process_id).unwrap(),
+    )
+    .unwrap();
     send(&mut clean_exit.peer, &Frame::ReadFrom(clean_exit.head))
         .await
         .unwrap();
@@ -251,7 +255,11 @@ async fn restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill() 
         .await
         .unwrap();
     let mut reader = Reader::default();
-    timeout(Duration::from_secs(10), async {
+    timeout(Duration::from_secs(60), clean_exit_ready.readable())
+        .await
+        .expect("the cleanly exited shim did not become readable")
+        .unwrap();
+    timeout(Duration::from_secs(60), async {
         loop {
             match reader.read(&mut clean_exit.peer).await.unwrap() {
                 Frame::Exited(status, _) => {
@@ -264,7 +272,7 @@ async fn restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill() 
         }
     })
     .await
-    .expect("the shim did not publish the clean shell exit");
+    .expect("the cleanly exited shim did not publish its exit event");
     let clean_socket = clean_exit.path.clone();
     drop(clean_exit);
     timeout(Duration::from_secs(5), async {
