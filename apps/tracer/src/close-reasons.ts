@@ -38,6 +38,7 @@ const KNOWN: Record<string, string> = {
   "the server could not write to the connection": "The server could not send to this browser.",
   "the server could not continue the terminal stream": "The server could not continue this terminal.",
   "the server was too busy to confirm the session": "The server was too busy to confirm your session.",
+  "recovery completed": "Recovery completed. This device has been signed out.",
   // Reasons this page sends itself; the server echoes some of them back.
   "window closed": "This window was closed.",
   "tracer connection rotation": "The connection is being refreshed.",

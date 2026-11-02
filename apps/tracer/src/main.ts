@@ -554,6 +554,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
           };
         } } : {}),
         onRecoveryPending: (readyAt) => { recoveryNoticeGeneration++; screen.setRecoveryPending(readyAt); },
+        onRecoveryCompleted: (message) => { if (generation === sessionGeneration) endSession(message); },
       });
       if (generation !== sessionGeneration) { mounted.dispose(); return; }
       productCanvas = mounted;
@@ -612,6 +613,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
       onScroll: (scrolled) => screen?.setScrolled(scrolled),
       onInputActivity: () => screen?.onInputActivity(),
       onRecoveryPending: (readyAt) => { recoveryNoticeGeneration++; screen?.setRecoveryPending(readyAt); },
+      onRecoveryCompleted: (message) => { if (generation === sessionGeneration) endSession(message); },
       traceMockServer: probeMode && mockMode,
       ...(scrollbackLimit === undefined ? {} : { scrollbackLimit }),
       ...(initialSessionId ? { initialSessionId } : {}),

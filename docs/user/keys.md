@@ -62,7 +62,7 @@ can add at most 24 hours of extra waiting, plus downtime. The displayed date is
 an estimate and can move after a clock correction. An upgrade from the older
 clock-based recovery ends existing requests. Re-enter your words to start a fresh wait.
 
-A finished recovery signs out every session, removes every passkey and API key, and gives you new words. So each set of words works once.
+A finished recovery tells signed-in devices "Recovery completed" as their connections close, signs out every session, removes every passkey and API key, and gives you new words. So each set of words works once.
 
 ### First-owner setup code
 

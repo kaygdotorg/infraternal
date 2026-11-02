@@ -4,7 +4,14 @@
 //! were overwritten. Never filter by the last session: an earlier coalesced logout may be ours.
 //! Subscribers register before reading SQLite, and mutations publish only after commit.
 
-use std::{cell::Cell, collections::HashMap, sync::Arc};
+use std::{
+    cell::Cell,
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 use tokio::sync::watch;
 
 /// The map key supplies the affected account; the value carries the session hash when known.
@@ -12,6 +19,8 @@ use tokio::sync::watch;
 #[derive(Default)]
 pub(crate) struct AccountEvents {
     accounts: std::sync::Mutex<Channels>,
+    // Serializes teardown observation with recovery commit and publication.
+    completion_commit: tokio::sync::Mutex<()>,
     #[cfg(test)]
     after_unsubscribe: std::sync::Mutex<Option<Arc<std::sync::Barrier>>>,
 }
@@ -23,6 +32,8 @@ struct Channel {
     // Count subscription lifetimes under the registry lock. Receiver fields drop after
     // their wrapper's Drop returns, so receiver_count can overcount concurrent final drops.
     subscribers: Cell<usize>,
+    // Completion survives coalesced logout hints, but not the last subscriber.
+    completions: Arc<AtomicU64>,
 }
 
 /// A socket-local cursor sharing only its authenticated account's generation.
@@ -30,6 +41,8 @@ pub(crate) struct AccountSubscription {
     receiver: watch::Receiver<Option<String>>,
     account: Arc<str>,
     registry: Arc<AccountEvents>,
+    completions: Arc<AtomicU64>,
+    completion_seen: u64,
 }
 
 impl AccountEvents {
@@ -45,9 +58,16 @@ impl AccountEvents {
         let changes = self.clone();
         let account = account.to_owned();
         super::committed::run(Box::pin(async move {
+            // A socket can see deletion as soon as SQLite commits, before this
+            // task resumes. Hold the barrier until the completion marker is published.
+            let _publication = if let Some(revocations) = revocations.as_ref() {
+                Some(revocations.completion_commit.lock().await)
+            } else {
+                None
+            };
             transaction.commit().await?;
-            if let Some(revocations) = revocations {
-                revocations.publish(&account, None);
+            if let Some(revocations) = revocations.as_ref() {
+                revocations.publish_recovery_complete(&account);
             }
             changes.publish(&account, None);
             Ok(())
@@ -66,26 +86,35 @@ impl AccountEvents {
     pub(super) fn subscribe(self: &Arc<Self>, account: &str) -> AccountSubscription {
         let mut accounts = self.accounts();
         // Operations on an already-connected account clone its key without allocating.
-        let (account, receiver) = if let Some((account, channel)) = accounts.get_key_value(account)
-        {
-            channel.subscribers.set(channel.subscribers.get() + 1);
-            (account.clone(), channel.sender.subscribe())
-        } else {
-            let account: Arc<str> = Arc::from(account);
-            let (sender, receiver) = watch::channel(None);
-            accounts.insert(
-                account.clone(),
-                Channel {
-                    sender,
-                    subscribers: Cell::new(1),
-                },
-            );
-            (account, receiver)
-        };
+        let (account, receiver, completions, completion_seen) =
+            if let Some((account, channel)) = accounts.get_key_value(account) {
+                channel.subscribers.set(channel.subscribers.get() + 1);
+                (
+                    account.clone(),
+                    channel.sender.subscribe(),
+                    channel.completions.clone(),
+                    channel.completions.load(Ordering::Acquire),
+                )
+            } else {
+                let account: Arc<str> = Arc::from(account);
+                let (sender, receiver) = watch::channel(None);
+                let completions = Arc::new(AtomicU64::new(0));
+                accounts.insert(
+                    account.clone(),
+                    Channel {
+                        sender,
+                        subscribers: Cell::new(1),
+                        completions: completions.clone(),
+                    },
+                );
+                (account, receiver, completions, 0)
+            };
         AccountSubscription {
             receiver,
             account,
             registry: self.clone(),
+            completions,
+            completion_seen,
         }
     }
 
@@ -99,6 +128,19 @@ impl AccountEvents {
             .map(|channel| channel.sender.clone());
         if let Some(sender) = sender {
             sender.send_replace(session_hash);
+        }
+    }
+
+    // Mark before waking any socket. Teardown may win through recovery events or
+    // another authority guard; it must still carry this committed completion.
+    fn publish_recovery_complete(&self, account: &str) {
+        let channel = self
+            .accounts()
+            .get(account)
+            .map(|channel| (channel.sender.clone(), channel.completions.clone()));
+        if let Some((sender, completions)) = channel {
+            completions.fetch_add(1, Ordering::Release);
+            sender.send_replace(None);
         }
     }
 
@@ -118,6 +160,25 @@ impl AccountEvents {
 }
 
 impl AccountSubscription {
+    pub(crate) fn completion_generation(&self) -> u64 {
+        self.completions.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn acknowledge_completion(&mut self, generation: u64) {
+        self.completion_seen = generation;
+    }
+
+    // A completion is account-scoped, content-free teardown information, not
+    // renewed authority. New subscribers do not inherit an older completion.
+    pub(crate) async fn committed_recovery_completed(&self) -> bool {
+        let _publication = self.registry.completion_commit.lock().await;
+        self.recovery_completed()
+    }
+
+    fn recovery_completed(&self) -> bool {
+        self.completion_generation() != self.completion_seen
+    }
+
     /// Model source loss without changing production channel ownership.
     #[cfg(test)]
     pub(crate) fn close_source_for_test(&self) {
@@ -167,6 +228,43 @@ impl Drop for AccountSubscription {
 mod tests {
     use super::*;
     use futures_util::FutureExt;
+
+    #[tokio::test]
+    async fn completion_teardown_waits_for_commit_publication() {
+        let events = Arc::new(AccountEvents::default());
+        let socket = events.subscribe("a");
+        // A socket can observe the committed session deletion before the
+        // committing task resumes to publish. Teardown must await that publication.
+        let committing = events.completion_commit.lock().await;
+        assert!(
+            socket
+                .committed_recovery_completed()
+                .now_or_never()
+                .is_none()
+        );
+        events.publish_recovery_complete("a");
+        drop(committing);
+        assert!(socket.committed_recovery_completed().await);
+    }
+
+    #[test]
+    fn completion_notice_survives_coalesced_logout_without_reaching_new_subscribers() {
+        let events = Arc::new(AccountEvents::default());
+        let old = events.subscribe("a");
+        let other = events.subscribe("b");
+        events.publish_recovery_complete("a");
+        events.publish("a", Some("synthetic-logout-hint".into()));
+        assert!(old.recovery_completed());
+        assert!(!other.recovery_completed());
+        let mut replacement = events.subscribe("a");
+        assert!(!replacement.recovery_completed());
+        events.publish_recovery_complete("a");
+        assert!(replacement.recovery_completed());
+        let generation = replacement.completion_generation();
+        replacement.acknowledge_completion(generation);
+        events.publish("a", None);
+        assert!(!replacement.recovery_completed());
+    }
 
     #[tokio::test]
     async fn cancelled_commit_waiter_still_commits_and_wakes_both_account_sources() {
@@ -234,6 +332,7 @@ mod tests {
         })
         .await
         .expect("cancelled waiter did not observe commit and account notifications");
+        assert!(revoked.recovery_completed());
         assert!(!other_change.has_changed().unwrap());
         assert!(!other_revocation.has_changed().unwrap());
         pool.close().await;
@@ -266,6 +365,7 @@ mod tests {
         assert!(changes.commit(tx, "a", Some(revocations)).await.is_err());
         assert!(!events.has_changed().unwrap());
         assert!(!revoked.has_changed().unwrap());
+        assert!(!revoked.recovery_completed());
         let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM dependent")
             .fetch_one(&pool)
             .await

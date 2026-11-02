@@ -411,6 +411,16 @@ notifications may model database changes whose account scope is unknown. Server
 shutdown and component disable retain their separate lifecycle signals. Ordinary
 account changes must never wake another account's sockets or pending operations.
 
+On recovery completion, signed-in WebSockets carry a content-free close frame
+(code 1008, reason `recovery completed`). The browser displays "Recovery completed.
+This device has been signed out." while clearing its account state, including
+when no terminal window is open. Session/key replacement remains atomic. A per-account completion
+generation survives coalesced logout hints, so whichever authority guard tears down
+the socket can carry the notice; new subscribers do not inherit an old completion.
+Teardown waits for any in-flight completion commit to publish its marker before
+choosing its close reason, covering the gap between SQLite commit and publication.
+No recovery snapshot or account data is sent after session revocation (#309).
+
 ## Browser-only recovery derivation v2 (#45, D151 owner task)
 
 This revision enforces browser-only words for all production paths. It reuses WebCrypto HKDF-SHA256/AES-256-GCM and the

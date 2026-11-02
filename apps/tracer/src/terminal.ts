@@ -161,6 +161,7 @@ export interface TerminalConfig {
   onScroll?: (scrolled: boolean) => void;
   onInputActivity?: () => void;
   onRecoveryPending?: (readyAt: number | undefined) => void;
+  onRecoveryCompleted?: (message: string) => void;
   traceMockServer?: boolean;
   /**
    * The connection this terminal's stream rides on. Terminals of one page share one (D183); without it the
@@ -498,6 +499,7 @@ export class TerminalClient {
     this.conn = config.connection ?? new MuxConnection({
       ...(config.traceMockServer ? { traceMockServer: true } : {}),
       ...(config.onRecoveryPending ? { onRecoveryPending: config.onRecoveryPending } : {}),
+      ...(config.onRecoveryCompleted ? { onRecoveryCompleted: config.onRecoveryCompleted } : {}),
       ...(config.onConnectionChange ? { onConnectionChange: config.onConnectionChange } : {}),
     });
     // The round trip is the connection's; every terminal on it reads it (prediction needs it, the pill shows it).
