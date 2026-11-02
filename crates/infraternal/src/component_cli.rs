@@ -5,7 +5,7 @@
 //! all come from that one presentation.
 use clap::ArgMatches;
 use infraternal_plugin_api::{
-    PluginRegistry,
+    ActionDefinition, JsonSchema, JsonSchemaType, PluginRegistry,
     present::{Presented, Tone},
 };
 use serde_json::{Value, json};
@@ -54,6 +54,7 @@ pub(crate) fn run_action(
         return ExitCode::FAILURE;
     };
     let result = (|| {
+        let mut action_exit = Exit::Ok;
         let mut input = if arguments.get_flag("input_stdin") {
             let mut bytes = Vec::new();
             io::stdin()
@@ -67,17 +68,7 @@ pub(crate) fn run_action(
         } else {
             json!({})
         };
-        for (name, schema) in &definition.input_schema.properties {
-            if name != "input_stdin"
-                && schema.schema_type == infraternal_plugin_api::JsonSchemaType::Boolean
-                && arguments.get_flag(name)
-            {
-                input
-                    .as_object_mut()
-                    .ok_or(io::ErrorKind::InvalidInput)?
-                    .insert(name.clone(), Value::Bool(true));
-            }
-        }
+        add_cli_values(definition, arguments, &mut input)?;
         let state = infraternal_agent::sessions::state_path(
             arguments.get_one::<String>("state").map(PathBuf::from),
         )
@@ -88,15 +79,13 @@ pub(crate) fn run_action(
         // Share the startup reactor instead of generating another poll loop [243].
         infraternal_agent::block_on_io(
             &runtime,
-            Box::pin(execute(
-                &state,
-                &registry,
-                &command,
-                action.id,
-                input,
-                json_output,
-            )),
-        )
+            Box::pin(async {
+                action_exit =
+                    execute(&state, &registry, &command, action.id, input, json_output).await?;
+                Ok(())
+            }),
+        )?;
+        Ok(action_exit)
     })();
     match result {
         Ok(exit) => ExitCode::from(exit.code()),
@@ -205,6 +194,76 @@ fn state_of(presented: &Presented) -> CommandState {
         Tone::Good => CommandState::Ready,
         Tone::Idle => CommandState::Stopped,
         Tone::Attention => CommandState::Pending,
+    }
+}
+
+/// Convert generated CLI matches into the action's typed JSON input. The action schema remains
+/// the single source for both argument parsing and serialization.
+pub(crate) fn add_cli_values(
+    action: &ActionDefinition,
+    matches: &ArgMatches,
+    input: &mut Value,
+) -> io::Result<()> {
+    let values = input.as_object_mut().ok_or(io::ErrorKind::InvalidData)?;
+    for (name, schema) in &action.input_schema.properties {
+        if name == "input_stdin" || name == "state" {
+            continue;
+        }
+        let value = match schema.schema_type {
+            JsonSchemaType::Boolean => matches.get_flag(name).then_some(Value::Bool(true)),
+            JsonSchemaType::Integer => matches.get_one::<i64>(name).map(|value| json!(value)),
+            JsonSchemaType::Number => matches
+                .get_one::<f64>(name)
+                .and_then(|value| serde_json::Number::from_f64(*value))
+                .map(Value::Number),
+            JsonSchemaType::String => matches.get_one::<String>(name).map(|value| json!(value)),
+            JsonSchemaType::Object => matches
+                .get_one::<String>(name)
+                .map(|value| parse_cli_value(schema, value))
+                .transpose()?,
+            JsonSchemaType::Array => {
+                let Some(arguments) = matches.get_many::<String>(name) else {
+                    continue;
+                };
+                let item_schema = schema.items.as_deref().ok_or(io::ErrorKind::InvalidData)?;
+                Some(Value::Array(
+                    arguments
+                        .map(|value| parse_cli_value(item_schema, value))
+                        .collect::<io::Result<Vec<_>>>()?,
+                ))
+            }
+        };
+        if let Some(value) = value {
+            values.insert(name.clone(), value);
+        }
+    }
+    Ok(())
+}
+
+fn parse_cli_value(schema: &JsonSchema, value: &str) -> io::Result<Value> {
+    let invalid = || io::Error::new(io::ErrorKind::InvalidInput, Cause::BadInput);
+    match schema.schema_type {
+        JsonSchemaType::String => Ok(json!(value)),
+        JsonSchemaType::Integer => value.parse::<i64>().map(Value::from).map_err(|_| invalid()),
+        JsonSchemaType::Number => value
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number)
+            .ok_or_else(invalid),
+        JsonSchemaType::Boolean => value
+            .parse::<bool>()
+            .map(Value::Bool)
+            .map_err(|_| invalid()),
+        JsonSchemaType::Object | JsonSchemaType::Array => {
+            let parsed: Value = serde_json::from_str(value).map_err(|_| invalid())?;
+            let has_expected_shape = match schema.schema_type {
+                JsonSchemaType::Object => parsed.is_object(),
+                JsonSchemaType::Array => parsed.is_array(),
+                _ => true,
+            };
+            has_expected_shape.then_some(parsed).ok_or_else(invalid)
+        }
     }
 }
 
