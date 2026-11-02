@@ -845,8 +845,9 @@ test("settings is a view: a gear after a divider, one window per section, admin 
   await page.locator("#sidebar-toggle").click();
   await expect(page.locator('#tree .bm-sec[data-id="view:settings"].cl-divided')).toHaveCount(1);
   await page.locator(".ui-sidebar-foot .ui-sidebar-settings").click();
-  await expect.poll(async () => (await probe(page, (p) => p.canvasLock())).view, { timeout: 4000 }).toBe("settings");
-  expect((await probe(page, (p) => p.canvasLock())).on).toBe(true);
+  // The mockup opens on the Settings view, so the view name alone is true before the gear has done anything; the fly that the gear
+  // starts turns the snap on a moment later (a probe sees on=false at the click and on=true 400 ms after). Wait for both together.
+  await expect.poll(async () => { const lock = await probe(page, (p) => p.canvasLock()); return `${lock.view}:${lock.on}`; }, { timeout: 4000 }).toBe("settings:true");
   await expect(page.locator(".ui-settings")).toHaveCount(0); // the overlay shell is gone
   // The palette goes straight to a section's window.
   await page.keyboard.press("Control+Shift+K");
