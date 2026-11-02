@@ -19,14 +19,14 @@ fn identity_admission_refusal_only_matches_tls_crypto_errors() {
             quinn::ConnectionClose {
                 error_code,
                 frame_type: None,
-                reason: Default::default(),
+                reason: String::new().into(),
             },
         ))
     };
     let crypto_close = quinn::ConnectionError::ConnectionClosed(quinn::ConnectionClose {
         error_code: quinn::TransportErrorCode::crypto(0x33),
         frame_type: None,
-        reason: Default::default(),
+        reason: String::new().into(),
     });
     assert!(identity_admission_refused(&io::Error::other(
         quinn::ReadError::ConnectionLost(crypto_close.clone())
@@ -602,6 +602,8 @@ fn supervise(
 }
 
 #[tokio::test]
+// Keep the real TLS refusal, fallback dial and admission proof in one fixture.
+#[allow(clippy::too_many_lines)]
 async fn candidate_mtls_refusal_retries_the_pending_predecessor() {
     use infraternal_plugin_remote::identity_rotation::{
         Challenge, PendingRotation, RotationStorage,
