@@ -530,7 +530,7 @@
 .ui-row-swipe-act::before { content: ""; position: absolute; inset: 0; background: var(--accent); opacity: calc(var(--arm, 0) * 0.34); pointer-events: none; }
 .ui-row-swipe-act[data-tone="danger"]::before { background: #000; opacity: calc(var(--arm, 0) * 0.18); }
 .ui-row-swipe-in { position: relative; }
-.ui-row-swipe-icon { display: grid; place-items: center; transition: transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1); }
+.ui-row-swipe-icon { display: grid; place-items: center; transition: transform 240ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
 .ui-row-swipe-icon svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ui-row-swipe-act[data-armed] .ui-row-swipe-icon { transform: scale(1.22); }
 @media (prefers-reduced-motion: reduce) { .ui-row-swipe-icon { transition: none; } }
