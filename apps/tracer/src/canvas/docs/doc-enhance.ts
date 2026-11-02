@@ -14,6 +14,13 @@
  * reads happen in it, so a page of any length stays cheap. A rail taller than the window follows the highlight by scrolling
  * itself: never `scrollIntoView`, which would move the canvas camera.
  *
+ * Figures. A figure (docs-figure.ts) is a picture of the product and, sometimes, a clip. In the standalone page the browser picks
+ * the picture by the window's width and the reader's colour scheme (the markup's `<source media>`); in a canvas window the page is
+ * as wide as the window and the scheme is the app theme's, so `chooseFigures` rewrites those `media` conditions to the matching
+ * size and scheme and follows the window and the theme as they change. A clip is a muted looping video laid over the picture,
+ * created when the figure first comes on screen, playing only while it is on screen, and never under reduced motion or a
+ * data-saving connection: the still is already there.
+ *
  * Copying. A click on a code block copies it when no text is selected (a drag selects, as always); on touch it takes a double tap,
  * because one tap is how a finger starts a scroll; Enter copies a focused block. The confirmation is the shared one for text that
  * copies (copy-feedback.ts `copyTextInPlace`): the code fades and "Copied" takes its place. There is no copy button (TASTE:
@@ -25,6 +32,14 @@ import { copyTextInPlace } from "../../../../../packages/ui/src/copy-feedback";
 const LINE = 64;
 /** Two taps this close (ms) on the same block are a double tap. */
 const DOUBLE_TAP = 350;
+/** A canvas window narrower than this (CSS px) gets the phone pictures. */
+const PHONE_WINDOW = 520;
+
+/** True when the page is drawn in a dark scheme: the app theme's, or the browser's when the page does not say. */
+function darkScheme(): boolean {
+  const scheme = getComputedStyle(document.documentElement).colorScheme;
+  return scheme === "dark" ? true : scheme === "light" ? false : window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
 
 export function enhanceDoc(root: HTMLElement, scroller: HTMLElement | null): () => void {
   const headings = [...root.querySelectorAll<HTMLElement>(".doc-body h2[id], .doc-body h3[id]")];
@@ -71,6 +86,57 @@ export function enhanceDoc(root: HTMLElement, scroller: HTMLElement | null): () 
   // Headings move when the page font arrives; read the position again then.
   void document.fonts?.ready.then(schedule);
 
+  // ---- figures ----
+  const figures = [...root.querySelectorAll<HTMLElement>(".figure")];
+  const inWindow = scroller !== null;
+  const phone = (): boolean => (inWindow ? root.clientWidth < PHONE_WINDOW : window.matchMedia("(max-width: 36rem)").matches);
+  const variant = (): { size: "phone" | "desktop"; scheme: "ink" | "paper" } => ({ size: phone() ? "phone" : "desktop", scheme: darkScheme() ? "ink" : "paper" });
+  const clips = new Map<HTMLElement, HTMLVideoElement>();
+  const motion = !window.matchMedia("(prefers-reduced-motion: reduce)").matches && !(navigator as { connection?: { saveData?: boolean } }).connection?.saveData;
+  const chooseFigures = (): void => {
+    const { size, scheme } = variant();
+    for (const figure of figures) {
+      if (inWindow) {
+        // The chosen source matches always, the others never; the browser takes the first match, as it does in a page.
+        for (const source of figure.querySelectorAll<HTMLSourceElement>("picture source")) source.media = source.srcset.includes(`.${size}.${scheme}.`) ? "all" : "not all";
+        const chosen = figure.querySelector<HTMLSourceElement>('picture source[media="all"]');
+        if (chosen) { const img = figure.querySelector("img")!; img.width = Number(chosen.getAttribute("width")); img.height = Number(chosen.getAttribute("height")); }
+      }
+      const video = clips.get(figure);
+      const template = figure.dataset.clip;
+      if (video && template) {
+        const src = template.replace("{size}", size).replace("{scheme}", scheme);
+        if (!video.src.endsWith(src)) { video.src = src; video.poster = figure.querySelector("img")?.currentSrc ?? ""; }
+      }
+    }
+  };
+  const startClip = (figure: HTMLElement): HTMLVideoElement => {
+    const video = document.createElement("video");
+    video.className = "figure-clip";
+    video.muted = true; video.loop = true; video.playsInline = true; video.preload = "auto"; video.setAttribute("aria-hidden", "true"); video.tabIndex = -1;
+    video.addEventListener("playing", () => { video.dataset.playing = ""; });
+    figure.querySelector(".figure-media")!.append(video);
+    clips.set(figure, video);
+    chooseFigures();
+    return video;
+  };
+  const watcher = motion && "IntersectionObserver" in window ? new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      const figure = entry.target as HTMLElement;
+      if (entry.isIntersecting) void (clips.get(figure) ?? startClip(figure)).play().catch(() => {});
+      else clips.get(figure)?.pause();
+    }
+  }, { threshold: 0.4 }) : undefined;
+  for (const figure of figures) if (figure.dataset.clip && watcher) watcher.observe(figure);
+  chooseFigures();
+  // The window and the theme change under the page: its width, and the colour scheme the app sets on the root.
+  const resize = inWindow && "ResizeObserver" in window ? new ResizeObserver(chooseFigures) : undefined;
+  resize?.observe(root);
+  const theme = new MutationObserver(chooseFigures);
+  theme.observe(document.documentElement, { attributes: true, attributeFilter: ["style", "data-theme"] });
+  const scheme = window.matchMedia("(prefers-color-scheme: dark)");
+  scheme.addEventListener("change", chooseFigures);
+
   // ---- copying ----
   let pointer = "mouse";
   let lastTap = 0;
@@ -106,6 +172,11 @@ export function enhanceDoc(root: HTMLElement, scroller: HTMLElement | null): () 
   root.addEventListener("keydown", onKey);
 
   return () => {
+    watcher?.disconnect();
+    resize?.disconnect();
+    theme.disconnect();
+    scheme.removeEventListener("change", chooseFigures);
+    for (const video of clips.values()) { video.pause(); video.removeAttribute("src"); video.load(); video.remove(); }
     if (frame) cancelAnimationFrame(frame);
     target.removeEventListener("scroll", schedule);
     window.removeEventListener("resize", schedule);

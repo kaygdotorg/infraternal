@@ -92,6 +92,19 @@
 .doc .references .back svg { width: 0.875rem; height: 0.875rem; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 @media (pointer: coarse) { .doc .references .back { width: 2.75rem; height: 2.75rem; margin: -0.75rem -0.5rem -0.75rem 0; vertical-align: middle; } }
 
+/* ---- Figures -----------------------------------------------------------------------------------------------------------------
+   A picture of the product with a caption under it, and sometimes a clip. The picture is as wide as it was captured (its width
+   attribute, in CSS pixels, so it is as sharp as the capture's 2x or 3x allows) and never wider than the text; its box starts on the
+   text's left edge. A clip is laid exactly over the still (same crop, same size) and fades in once it plays. */
+.doc .figure { margin: 1.5rem 0; }
+.doc .figure-media { position: relative; display: block; width: fit-content; max-width: 100%; overflow: hidden; border: 1px solid rgb(from var(--fg) r g b / 0.1); border-radius: 0.75rem; line-height: 0; }
+.doc .figure img { display: block; max-width: 100%; height: auto; }
+.doc .figure-clip { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity 200ms ease; pointer-events: none; }
+.doc .figure-clip[data-playing] { opacity: 1; }
+.doc figcaption { margin-top: 0.5rem; color: var(--fg-2); font-size: var(--text-secondary); font-weight: var(--fw-secondary); line-height: 1.5; }
+.doc .figure-missing { color: var(--fg-2); font-style: italic; }
+@media (prefers-reduced-motion: reduce) { .doc .figure-clip { transition: none; } }
+
 /* ---- Tables ------------------------------------------------------------------------------------------------------------------
    A table is a box with a header band and hairlines between rows; its first column names the row. The box scrolls by itself when
    a table is wider than the text. In a narrow canvas window each row stacks into a card instead (docs-reader.css). */

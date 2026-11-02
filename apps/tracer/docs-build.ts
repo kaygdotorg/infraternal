@@ -32,6 +32,7 @@
 import { cp, mkdir, readdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { citations, factsOf, readingAids, sourcesOf, type Facts } from "./docs-extras";
+import { figures, type FigureManifest, type FigureOptions } from "./docs-figure";
 
 const root = resolve(import.meta.dirname, "../..");
 
@@ -163,14 +164,14 @@ export function tocFor(headings: readonly OutlineHeading[]): string {
 }
 
 /** A page ready to be written: its parts as the index sees them, and the body markup both outputs share. */
-export interface RenderedDoc { slug: string; title: string; summary: string; headings: OutlineHeading[]; facts: Facts; html: string }
+export interface RenderedDoc { slug: string; title: string; summary: string; headings: OutlineHeading[]; facts: Facts; html: string; figureFiles: string[] }
 
 /**
  * Renders one page. `html` is the page without chrome (docs-reader.on-demand loads it into a canvas window; the standalone page
  * wraps it): a head (title and summary), the table of contents, the body, and the footer. `extra` is markup the build adds at
  * the end of the body (the front page's list of pages).
  */
-export function renderDoc(slug: string, markdown: string, extra = (_title: string): string => ""): RenderedDoc {
+export function renderDoc(slug: string, markdown: string, extra = (_title: string): string => "", figureOptions: Omit<FigureOptions, "page"> = { manifest: {} }): RenderedDoc {
   const renderer = (Bun as unknown as { markdown: { html(text: string): string } }).markdown;
   // The licence and role comments at the top of a source file are for the repository, not for readers.
   const commentFree = markdown.replace(/<!--[\s\S]*?-->\n?/g, "");
@@ -182,7 +183,9 @@ export function renderDoc(slug: string, markdown: string, extra = (_title: strin
   // Callouts, quotes and code blocks first; then the citations, whose list of references ends the body (and is a heading in the
   // contents); then whatever the build itself adds (the front page's list of pages).
   const cited = citations(readingAids(parts.body, slug), sources, slug);
-  const withExtra = `${cited.body}\n${cited.references}\n${extra(parts.title)}`;
+  // Figures (docs-figure.ts) are the page's pictures; the files they use are copied next to the page by buildDocs.
+  const pictured = figures(cited.body, { ...figureOptions, page: slug });
+  const withExtra = `${pictured.html}\n${cited.references}\n${extra(parts.title)}`;
   // A wide table scrolls by itself instead of widening the page.
   const wrapped = labelCells(withExtra).replace(/<table>/g, '<div class="table"><table>').replace(/<\/table>/g, "</table></div>");
   const { html: body, headings } = anchorHeadings(wrapped);
@@ -199,7 +202,7 @@ ${body}${notes}
 </div>
 </div>
 `;
-  return { slug, title: parts.title, summary: parts.summary, headings, facts, html };
+  return { slug, title: parts.title, summary: parts.summary, headings, facts, html, figureFiles: pictured.files };
 }
 
 /** Reads the pages of a folder: `index.md` is the front page, every other `*.md` is a page, ordered by file name. */
@@ -259,11 +262,21 @@ export async function buildDocs(out: string, source: string = USER_DOCS_DIR): Pr
   const script = await Bun.build({ entrypoints: [resolve(import.meta.dirname, "doc-page.ts")], target: "browser", minify: true, outdir: out, naming: { entry: "doc.js" } });
   if (!script.success) throw new Error(`docs script: ${script.logs.map(String).join("; ")}`);
   const { index: frontText, pages } = await readUserDocs(source);
-  const rendered = pages.map(({ slug, text }) => renderDoc(slug, text));
+  // The figures the capture made (docs-figure.ts). A tree with no figures folder simply has none.
+  const figureDirectory = resolve(source, "figures");
+  const manifestFile = Bun.file(resolve(figureDirectory, "manifest.json"));
+  const figureOptions = { manifest: (await manifestFile.exists() ? await manifestFile.json() : {}) as FigureManifest, directory: figureDirectory, allowMissing: process.env.DOCS_FIGURES_ALLOW_MISSING === "1" };
+  const rendered = pages.map(({ slug, text }) => renderDoc(slug, text, undefined, figureOptions));
   const entries = rendered.map(({ slug, title, summary }) => ({ slug, title, summary }));
   // The front page's text is optional: without one the list stands alone under a generic title.
-  const front = renderDoc(INDEX_SLUG, frontText ?? "# Documentation\n\nGuides for using Infraternal.\n", () => pageList(entries));
+  const front = renderDoc(INDEX_SLUG, frontText ?? "# Documentation\n\nGuides for using Infraternal.\n", () => pageList(entries), figureOptions);
   const all = [front, ...rendered];
+  // Only the pictures a page uses are copied, so a retired figure never ships.
+  const used = [...new Set(all.flatMap((doc) => doc.figureFiles))];
+  if (used.length > 0) {
+    await mkdir(resolve(out, "figures"), { recursive: true });
+    await Promise.all(used.map((file) => cp(resolve(figureDirectory, file), resolve(out, "figures", file))));
+  }
   for (const doc of all) {
     const directory = doc === front ? resolve(out, INDEX_SLUG) : resolve(out, doc.slug);
     await mkdir(directory, { recursive: true });
