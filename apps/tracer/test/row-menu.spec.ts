@@ -11,6 +11,7 @@ const open = async (page: Page): Promise<void> => {
   await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=none");
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await page.locator("#sidebar-toggle").click();
+  await expect(page.locator('#tree[data-rows="ready"]')).toHaveCount(1); // the row actions load with the sidebar
   await expect(page.locator('#tree [data-id="s:build-01/journal"]')).toBeVisible();
 };
 const row = (page: Page, id: string) => page.locator(`#tree [data-id="${id}"]`);

@@ -39,7 +39,13 @@ export function installPalette(cx: Ctx): () => void {
   const { core, signal, state, views } = cx;
   // The rows that act on a host (remove, rename, full access) come from an on-demand module that loads at idle (D188).
   let hostRows: ((cx: Ctx) => PaletteEntry[]) | undefined;
-  whenIdle(() => { void onDemand(() => import("./palette-hosts.on-demand")).then((m) => { if (!signal.aborted) hostRows = m.hostEntries; }, () => undefined); });
+  let hostRowsLoading = false;
+  const loadHostRows = (): void => {
+    if (hostRows || hostRowsLoading) return;
+    hostRowsLoading = true;
+    void onDemand(() => import("./palette-hosts.on-demand")).then((m) => { if (!signal.aborted) hostRows = m.hostEntries; }, () => { hostRowsLoading = false; });
+  };
+  whenIdle(loadHostRows, 300);
   const removeProvider = core.addPaletteProvider(() => {
     const out: PaletteEntry[] = [];
     [...views.values()].forEach((c, i) => {
@@ -84,7 +90,7 @@ export function installPalette(cx: Ctx): () => void {
       out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${host.name}`, hint: `terminal · ssh · console${host.online === false ? " · offline" : ""}`, action: `canvas:open:${host.id}` });
     }
     // Remove, rename and full-access rows for hosts: built by an on-demand module that loads at idle (D188).
-    if (hostRows) out.push(...hostRows(cx));
+    if (hostRows) out.push(...hostRows(cx)); else loadHostRows();
     for (const row of cx.adapters.containers?.rows() ?? []) out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${row.name}`, hint: "container · terminal · console", action: `canvas:ctr:${row.name}` });
     // Every session on every host (D178), by name, with its state in the hint so "detached" or "exited" finds them.
     const inv = cx.adapters.inventory;

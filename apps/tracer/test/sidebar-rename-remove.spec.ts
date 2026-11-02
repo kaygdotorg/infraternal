@@ -22,6 +22,7 @@ async function open(page: Page, width: number, height: number): Promise<void> {
   await page.evaluate(() => (window as unknown as { __tracerClusters: { flyView(v: string): void } }).__tracerClusters.flyView("console"));
   await page.waitForTimeout(900);
   await page.click("#sidebar-toggle");
+  await expect(page.locator('#tree[data-rows="ready"]')).toHaveCount(1); // the row actions load with the sidebar
   await expect(leaf(page, "journal")).toBeVisible();
   await page.waitForTimeout(700);
 }

@@ -15,6 +15,7 @@ async function open(page: Page, width: number, height: number): Promise<void> {
   await page.goto(URL);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await page.locator("#sidebar-toggle").click();
+  await expect(page.locator('#tree[data-rows="ready"]')).toHaveCount(1); // the row actions load with the sidebar
   await expect(leaf(page)).toBeVisible();
   await page.waitForTimeout(700);
 }

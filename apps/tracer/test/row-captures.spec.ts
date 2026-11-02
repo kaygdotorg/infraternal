@@ -30,7 +30,7 @@ async function open(page: Page, theme: string, privilege = false): Promise<void>
   await page.evaluate(() => (window as unknown as { __tracerClusters: { flyView(v: string): void } }).__tracerClusters.flyView("console"));
   await page.waitForTimeout(900);
 }
-const openSidebar = async (page: Page): Promise<void> => { await page.locator("#sidebar-toggle").click(); await expect(leaf(page)).toBeVisible(); await page.waitForTimeout(900); };
+const openSidebar = async (page: Page): Promise<void> => { await page.locator("#sidebar-toggle").click(); await expect(page.locator('#tree[data-rows="ready"]')).toHaveCount(1); await expect(leaf(page)).toBeVisible(); await page.waitForTimeout(900); };
 
 for (const theme of ["ink", "paper"]) {
   test.describe(`desktop 1440×900 @2x, ${theme}`, () => {

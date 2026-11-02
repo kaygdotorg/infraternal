@@ -160,5 +160,6 @@ export function createRowActions(cx: Ctx, tree: HTMLElement, hooks: RowActionsHo
   const offEntries = cx.core.addPaletteProvider(rowEntries);
   // The hover pill and the F2 / Delete keys (#215): the pointer's and keyboard's shortcuts to the same row actions.
   const offPill = createRowPill(cx, tree, menu, actions, closeSidebar);
-  return { menu, openRename, rowEntries, actionsOf: actions, dispose() { window.removeEventListener("tracer:canvas-action", onAction); offEntries(); offPill(); menu.dispose(); } };
+  tree.dataset.rows = "ready"; // the row menu, swipes and pill are attached (they load with the sidebar); specs wait for it
+  return { menu, openRename, rowEntries, actionsOf: actions, dispose() { window.removeEventListener("tracer:canvas-action", onAction); offEntries(); offPill(); delete tree.dataset.rows; menu.dispose(); } };
 }
