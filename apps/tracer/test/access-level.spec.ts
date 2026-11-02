@@ -143,7 +143,7 @@ test("the palette finds Allow full access on a host and opens its consent", asyn
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(`${base}&privilege=sudo`);
   await page.waitForFunction(() => (window as unknown as { __tracerClusters?: unknown }).__tracerClusters, null, { timeout: 30_000 });
-  await page.waitForTimeout(900);
+  await page.waitForTimeout(1800); // the palette's host rows are an on-demand chunk fetched as the canvas comes up
   await page.keyboard.press("Control+Shift+K");
   await expect(page.locator("#palette-input")).toBeFocused();
   expect(await page.locator("#palette-results .result", { hasText: "Allow full access" }).count(), "query-only: not in the empty list").toBe(0);

@@ -11,7 +11,7 @@ import { ICONS, withLockBadge } from "../../../../../packages/ui/src/icons";
 import { shortcutLabel } from "../../../../../packages/ui/src/platform";
 import type { PaletteEntry } from "../../core-screen";
 import type { Ctx, ViewRec, WinRec } from "../context";
-import { onDemand, whenIdle } from "../../on-demand";
+import { onDemand } from "../../on-demand";
 import { recentRows } from "../recency";
 import { windowLabel } from "../windows/label";
 import { SETTINGS_SECTIONS } from "../views/settings";
@@ -37,7 +37,7 @@ export function viewRecentWindows(cx: Ctx, c: ViewRec, n: number): WinRec[] {
 
 export function installPalette(cx: Ctx): () => void {
   const { core, signal, state, views } = cx;
-  // The rows that act on a host (remove, rename, full access) come from an on-demand module that loads at idle (D188).
+  // The rows that act on a host (remove, rename, full access) come from an on-demand module the palette fetches as it is installed (D188).
   let hostRows: ((cx: Ctx) => PaletteEntry[]) | undefined;
   let hostRowsLoading = false;
   const loadHostRows = (): void => {
@@ -45,7 +45,7 @@ export function installPalette(cx: Ctx): () => void {
     hostRowsLoading = true;
     void onDemand(() => import("./palette-hosts.on-demand")).then((m) => { if (!signal.aborted) hostRows = m.hostEntries; }, () => { hostRowsLoading = false; });
   };
-  whenIdle(loadHostRows, 300);
+  loadHostRows(); // a small chunk, fetched as the canvas comes up, so the rows are there by the time anyone presses ⌘K
   const removeProvider = core.addPaletteProvider(() => {
     const out: PaletteEntry[] = [];
     [...views.values()].forEach((c, i) => {
