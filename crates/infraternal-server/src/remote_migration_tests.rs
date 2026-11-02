@@ -1,5 +1,5 @@
 //! Proves deployed schema upgrades preserve remote identity and route data, and
-//! that the release migration chain stays contiguous through preferred account storage [9][19][64][133], #78, #243.
+//! that the release migration chain stays contiguous through API key inactivity policy [9][19][64][133][311], #78, #243, #269.
 
 use sqlx::sqlite::SqlitePoolOptions;
 
@@ -263,12 +263,13 @@ async fn hostname_migration_upgrades_release6_copy_without_changing_canvas_or_ch
             .fetch_all(&production)
             .await
             .unwrap();
-    assert_eq!(after.len(), 32);
+    assert_eq!(after.len(), 33);
     assert_eq!(&after[..28], before.as_slice());
     assert_eq!(after[28].0, 29);
     assert_eq!(after[29].0, 30);
     assert_eq!(after[30].0, 31);
     assert_eq!(after[31].0, 32);
+    assert_eq!(after[32].0, 33);
     let canvas: (i64, String, i64) = sqlx::query_as(
         "SELECT revision,document,initialized FROM canvas_heads WHERE account='owner'",
     )

@@ -85,11 +85,13 @@ impl Auth {
         let row = sqlx::query("DELETE FROM approvals WHERE token_hash=? AND expires>? AND user_id IS NOT NULL RETURNING user_id,device,scopes")
             .bind(hash(token)).bind(now).fetch_optional(&mut *tx).await?.ok_or(Error::Denied)?;
         let key = random();
-        sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes) VALUES (?,?,?,?)")
+        sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires) VALUES (?,?,?,?,?,?+(SELECT api_key_lifetime_days*86400 FROM server_settings WHERE id=1))")
             .bind(hash(&key))
             .bind(row.get::<String, _>("user_id"))
             .bind(row.get::<String, _>("device"))
             .bind(row.get::<String, _>("scopes"))
+            .bind(now)
+            .bind(now)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -98,14 +100,36 @@ impl Auth {
 
     /// Validate a CLI/MCP key for one explicit scope; no browser session or fresh-tap privilege.
     pub async fn api_authorize(&self, token: &str, scope: &str) -> Result<String> {
-        let row = sqlx::query("SELECT user_id,scopes FROM api_keys WHERE token_hash=?")
-            .bind(hash(token))
+        let now = super::http::current_time(self)?;
+        let token_hash = hash(token);
+        // The policy is read with the key, not cached at issuance. `expires` records
+        // the deadline at the last renewal; a policy edit changes the effective
+        // deadline immediately without rewriting every key or resetting inactivity.
+        let row = sqlx::query("SELECT user_id,scopes,renewed_at FROM api_keys CROSS JOIN server_settings WHERE server_settings.id=1 AND token_hash=? AND renewed_at+api_key_lifetime_days*86400>?")
+            .bind(&token_hash)
+            .bind(now)
             .fetch_optional(&self.pool)
             .await?
             .ok_or(Error::Denied)?;
         let scopes: Vec<String> = serde_json::from_str(row.get("scopes"))?;
         if !scopes.iter().any(|s| s == scope) {
             return Err(Error::Denied);
+        }
+        if now.saturating_sub(row.get::<i64, _>("renewed_at")) >= 3600 {
+            // Recheck the live deadline and hourly cutoff under SQLite's writer lock.
+            // Concurrent uses cannot double-renew, and deletion is never an upsert.
+            let changed = sqlx::query("UPDATE api_keys SET renewed_at=?,expires=?+(SELECT api_key_lifetime_days*86400 FROM server_settings WHERE id=1) WHERE token_hash=? AND renewed_at<=? AND renewed_at+(SELECT api_key_lifetime_days*86400 FROM server_settings WHERE id=1)>?")
+                .bind(now).bind(now).bind(&token_hash).bind(now - 3600).bind(now)
+                .execute(&self.pool).await?.rows_affected();
+            if changed == 0 {
+                // Another use may have renewed first, or revocation/policy change
+                // may have won. Only an existing, currently valid key can proceed.
+                let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_keys CROSS JOIN server_settings WHERE server_settings.id=1 AND token_hash=? AND renewed_at+api_key_lifetime_days*86400>?)")
+                    .bind(&token_hash).bind(now).fetch_one(&self.pool).await?;
+                if !live {
+                    return Err(Error::Denied);
+                }
+            }
         }
         Ok(row.get("user_id"))
     }

@@ -3455,3 +3455,6 @@ async fn account_logout_does_not_notify_another_account() {
 
 #[path = "logout_commit_tests.rs"]
 mod logout_commit;
+
+#[path = "api_expiry_tests.rs"]
+mod api_expiry;

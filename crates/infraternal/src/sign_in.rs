@@ -1,5 +1,15 @@
 //! Runs passkey-approved CLI device sign-in and stores each API credential privately [D303, D311].
 
+/// Shared invalid/expired API-key remedy. Takes no secret, so callers cannot echo one.
+// Remote CLI actions do not consume stored sign-in keys yet (#303).
+#[allow(dead_code)]
+pub(crate) fn invalid_api_key_diagnostic() -> (&'static str, crate::cli::output::Exit) {
+    (
+        "Signed out: your key expired. Run `infraternal sign-in <server>`.",
+        crate::cli::output::Exit::NotAllowed,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Failure, StoredCredential, approval_link, server_url, store_credential};
@@ -210,6 +220,17 @@ mod tests {
 
         assert_eq!(link, "https://mesh.example.org/?device_code=A_b-c123");
         assert!(!link.contains("poll_token"));
+    }
+
+    #[test]
+    fn invalid_api_key_diagnostic_names_fix_and_exits_not_allowed() {
+        let (message, exit) = super::invalid_api_key_diagnostic();
+        assert_eq!(
+            message,
+            "Signed out: your key expired. Run `infraternal sign-in <server>`."
+        );
+        assert_eq!(message.lines().count(), 1);
+        assert_eq!(exit.code(), 3);
     }
 
     #[test]

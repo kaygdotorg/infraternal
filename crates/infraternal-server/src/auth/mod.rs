@@ -16,6 +16,7 @@ mod devices;
 mod http;
 mod recovery;
 mod recovery_rotation;
+mod security_settings;
 mod sessions;
 mod setup;
 mod webauthn;
