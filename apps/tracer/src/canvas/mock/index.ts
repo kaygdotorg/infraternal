@@ -8,6 +8,7 @@
  * `window.__tracerClusters` probe the specs drive. The canvas itself is the product code in `create.ts`; this file
  * only gives it mock adapters and calls its public operations.
  */
+import { createPrivilegeDouble, isScenario, type Scenario } from "./privilege";
 import { teachOnce } from "../../hints";
 import type { WinRec } from "../context";
 import { isMacPlatform, shortcutLabel } from "../../../../../packages/ui/src/platform";
@@ -118,6 +119,8 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       ...(startupDemo ? { startupHints: startupDemo.hints } : {}),
       sessions, inventory, details: () => onDemand(() => import("./details.on-demand")).then((m) => m.createMockDetails(world, inventory)), mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
       containers: { host: "build-01", rows: () => (world.role === "operator" ? CONTAINERS : []) },
+      // `?privilege=<scenario>`: the machine details offer the privileged-access consent (the product has no service for it yet).
+      ...(isScenario(query.get("privilege")) ? { privilege: createPrivilegeDouble(query.get("privilege") as Scenario) } : {}),
       addHost: openAddHost,
       authority,
     },
