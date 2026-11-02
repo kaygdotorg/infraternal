@@ -49,7 +49,7 @@ export function createToolbar(cx: Ctx): ToolbarModule {
       const appWindows = cx.adapters.appWindows;
       if (appWindows?.available()) {
         const loading = cx.appWindows?.load();
-        if (loading) { const source = e.detail === 0 ? "keyboard" : "pointer"; void loading.then((runtime) => { if (runtime && appWindows.available() && add.isConnected) runtime.togglePicker(add, source); }); }
+        if (loading) { const source = e.detail === 0 ? "keyboard" : "pointer"; void loading.then((runtime) => { if (runtime && add.isConnected) runtime.togglePicker(add, source); }); }
         return;
       }
       const host = cx.adapters.sessions.hosts()[0]; if (host) cx.win.open(host.name);

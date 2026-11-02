@@ -75,11 +75,6 @@ export interface WindowsModule {
   /** Opens a shell on `host` as a window in Console (or flies to the one that is already there). */
   open(host: string, container?: string): WinRec | undefined;
   /**
-   * Opens a prepared window (an app window or a screen, D208) as a new column at the end of Console, makes it the active
-   * one and brings it into view. The caller has built the model; the window's body makes its own binding.
-   */
-  openModel(model: WindowModel): WinRec | undefined;
-  /**
    * Opens a flow window (a short guided task) in a new column right after the focused window's, in the view that
    * has focus (Console when none does). It is never saved. The caller fills `rec.card.body`, may set
    * `rec.cleanup` to hear that the window closed, and closes it with `close` when the task is done.
@@ -505,16 +500,6 @@ export function createWindows(cx: Ctx): WindowsModule {
     return rec;
   };
 
-  const openModel = (model: WindowModel): WinRec | undefined => {
-    const c = views.get("console" as ViewId);
-    if (!c) return undefined;
-    const here = state.currentView === "console" || camera.band === "out";
-    const rec = addColumn(c, model, c.view.cols.length, state.metrics.colW, !here, true);
-    setActive(cx, rec);
-    cx.nav.focusWindow(rec);
-    return rec;
-  };
-
   const openFlow = (title: string): WinRec | undefined => {
     const c = state.activeWin?.owner ?? views.get("console" as ViewId);
     if (!c || c.view.layout !== "tiled") return undefined;
@@ -552,7 +537,7 @@ export function createWindows(cx: Ctx): WindowsModule {
       }
       if (painted) cx.pill.paint();
     },
-    openSession, open, openModel, openFlow, pulse, flat,
+    openSession, open, openFlow, pulse, flat,
     step(dir, instant = false) {
       const list = flat();
       if (!list.length) return;

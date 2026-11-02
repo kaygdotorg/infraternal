@@ -86,7 +86,7 @@ function pillPress(cx: Ctx, rec: WinRec, how: "pointer" | "keyboard"): void {
   if (rec.setup?.handlePill(how)) return;
   if ((rec.model.kind === "app" || rec.model.kind === "screen") && cx.adapters.appWindows?.available()) {
     const loading = cx.appWindows?.load();
-    if (loading) { void loading.then((runtime) => { if (runtime && cx.adapters.appWindows?.available() && rec.card.pill.isConnected) runtime.togglePicker(rec.card.pill, how, rec.model.host); }); }
+    if (loading) { void loading.then((runtime) => { if (runtime && rec.card.pill.isConnected) runtime.togglePicker(rec.card.pill, how, rec.model.host); }); }
     return;
   }
   cx.details?.toggle(rec, how);

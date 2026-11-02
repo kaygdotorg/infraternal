@@ -52,11 +52,9 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
     return;
   }
   if (m.kind === "app" || m.kind === "screen") {
-    let gone = false;
-    rec.cleanup = () => { gone = true; };
     void onDemand(() => import("../appwin/body.on-demand")).then((module) => {
-      if (!gone && !rec.closing && rec.card.root.isConnected) module.mountAppWindowBody(cx, rec, () => gone);
-    }).catch(() => { if (!gone) body.textContent = "Could not load app windows. Try again."; });
+      module.mountAppWindowBody(cx, rec);
+    }).catch(() => { if (!rec.closing) body.textContent = "Could not load app windows. Try again."; });
     return;
   }
   if (m.kind === "settings") {

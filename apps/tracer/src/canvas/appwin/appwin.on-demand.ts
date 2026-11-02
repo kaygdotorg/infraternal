@@ -14,7 +14,7 @@ import type { PaletteEntry } from "../../core-screen";
 import type { Ctx, WinRec } from "../context";
 import type { SessionBinding } from "../sessions/adapter";
 import type { HostEntry } from "../sessions/adapter";
-import type { WindowModel } from "../model/types";
+import type { ViewId, WindowModel } from "../model/types";
 import type { AppWindowsAdapter } from "./adapter";
 import type { AppTarget, Entry } from "./inventory";
 import { Machines, STALE_MS } from "./machines";
@@ -84,6 +84,16 @@ export function createAppWindowsPart(cx: Ctx, adapter: AppWindowsAdapter): AppWi
     return size && size.width > 0 && size.height > 0 ? size.width / size.height : undefined;
   };
 
+  /** App-window-only window creation stays with the feature instead of enlarging the shared window lifecycle. */
+  const openModel = (model: WindowModel): void => {
+    const c = cx.views.get("console" as ViewId);
+    if (!c) return;
+    const here = cx.state.currentView === "console" || cx.camera.band === "out";
+    const rec = cx.win.addColumn(c, model, c.view.cols.length, cx.state.metrics.colW, !here, true);
+    cx.win.setActive(rec);
+    cx.nav.focusWindow(rec);
+  };
+
   const open = (machine: HostEntry, entry: Entry): void => {
     const there = existing(machine, entry);
     if (there) { cx.win.setActive(there); cx.nav.focusWindow(there); cx.win.pulse(there); return; }
@@ -94,7 +104,7 @@ export function createAppWindowsPart(cx: Ctx, adapter: AppWindowsAdapter): AppWi
       session: streamLabel(entry),
       stream: { target: entry.target, appName: entry.kind === "screen" ? entry.name : entry.appName, title: entry.kind === "screen" ? "" : entry.title, ...(entry.kind === "window" && entry.bundleId ? { bundleId: entry.bundleId } : {}), ...(aspect !== undefined ? { aspect } : {}) },
     };
-    cx.win.openModel(model);
+    openModel(model);
   };
 
   const choose = (choice: Choice, how: PopoverSource): void => {

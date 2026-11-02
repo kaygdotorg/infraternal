@@ -134,23 +134,17 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   if (options.adapters.mesh) cx.mesh = createMesh(cx, options.adapters.mesh);
   if (options.adapters.sharing) cx.sharing = createSharingHandle(cx, options.adapters.sharing);
   const appWindowsAdapter = options.adapters.appWindows;
-  let appWindowsRuntime: AppWindowsHook | undefined;
   let appWindowsLoading: Promise<AppWindowsHook | undefined> | undefined;
-  let appWindowsGeneration = 0;
-  let appWindowsDisposed = false;
   // Keep this bridge small in the deferred canvas; the picker, inventory, body and frame shaping stay on demand.
-  // The generation guard prevents a pending import from starting work after feature-off or canvas disposal.
   const loadAppWindows = (): Promise<AppWindowsHook | undefined> => {
-    if (!appWindowsAdapter || appWindowsDisposed || cx.signal.aborted || !appWindowsAdapter.available()) return Promise.resolve(undefined);
-    if (appWindowsRuntime) return Promise.resolve(appWindowsRuntime);
+    if (!appWindowsAdapter || cx.signal.aborted || !appWindowsAdapter.available()) return Promise.resolve(undefined);
     if (!appWindowsLoading) {
-      const epoch = appWindowsGeneration;
       appWindowsLoading = onDemand(() => import("./appwin/hook.on-demand")).then((module) => {
-        if (epoch !== appWindowsGeneration || appWindowsDisposed || cx.signal.aborted || !appWindowsAdapter.available()) return undefined;
-        return (appWindowsRuntime = module.installAppWindowsRuntime(cx, appWindowsAdapter));
+        if (cx.signal.aborted) return undefined;
+        return module.installAppWindowsRuntime(cx, appWindowsAdapter);
       }).catch(() => {
-        if (epoch === appWindowsGeneration && !appWindowsDisposed && appWindowsAdapter.available()) {
-          appWindowsLoading = undefined;
+        appWindowsLoading = undefined;
+        if (!cx.signal.aborted && appWindowsAdapter.available()) {
           cx.toast.show({ message: "Could not load app windows. Try again.", tone: "error", duration: 5000 });
         }
         return undefined;
@@ -162,20 +156,15 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     if (appWindowsAdapter?.available()) whenIdle(() => { void loadAppWindows(); });
   };
   const offAppWindows = appWindowsAdapter?.onChange(() => {
-    if (appWindowsDisposed || cx.signal.aborted) return;
+    if (cx.signal.aborted) return;
     if (appWindowsAdapter.available()) warmAppWindows();
-    else if (!appWindowsRuntime) { appWindowsGeneration++; appWindowsLoading = undefined; }
   });
   if (appWindowsAdapter) {
     cx.appWindows = {
       load: loadAppWindows,
       dispose() {
-        appWindowsDisposed = true;
-        appWindowsGeneration++;
         offAppWindows?.();
-        appWindowsRuntime?.dispose();
-        appWindowsRuntime = undefined;
-        appWindowsLoading = undefined;
+        void appWindowsLoading?.then((runtime) => runtime?.dispose());
       },
     };
     warmAppWindows();
