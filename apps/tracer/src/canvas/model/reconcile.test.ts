@@ -108,10 +108,6 @@ test("a remote negative pin and node update preserve the world position of an un
 });
 
 test("a canonical receipt keeps temporary streams without re-journaling them", async () => {
-  const prior = globalThis.matchMedia;
-  globalThis.matchMedia ??= (() => ({ matches: false })) as unknown as typeof matchMedia;
-  const { reconcile } = await import("./reconcile");
-  if (prior) globalThis.matchMedia = prior;
   let disposed = 0, changed = 0;
   const models: WindowModel[] = ["app", "screen", "flow"].map((kind) => ({ id: kind, kind: kind as WindowModel["kind"], host: "local" }));
   const metrics = metricsFor(1440, 900, false);
@@ -121,8 +117,8 @@ test("a canonical receipt keeps temporary streams without re-journaling them", a
   } as unknown as WinRec]));
   const record = { view, wins } as unknown as ViewRec;
   const cx = {
-    views: new Map([[view.id, record]]), state: { metrics, activeWin: wins.get("app") },
-    view: { geometry() {}, paintEmpty() {} }, win: { setActive() {} },
+    views: new Map([[view.id, record]]), state: { currentView: view.id, metrics, activeWin: wins.get("app") },
+    view: { geometry() {}, paintEmpty() {}, settle() {} }, win: { setActive() {} },
     visibility: { unwatch() {}, lodChanged() {} }, adapters: {},
     store: { reset() {}, changed: () => changed++ }, tree: { render() {} }, pill: { paint() {} }, toolbar: { update() {} },
   } as unknown as Ctx;
@@ -137,6 +133,5 @@ test("a canonical receipt keeps temporary streams without re-journaling them", a
     // Other suites may load the real grouped implementation after this test.
     const { groups } = await import("../layout/groups.on-demand");
     registerGroups(groups);
-    if (!prior) Reflect.deleteProperty(globalThis, "matchMedia");
   }
 });
