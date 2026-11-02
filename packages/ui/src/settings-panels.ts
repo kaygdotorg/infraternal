@@ -224,6 +224,8 @@ function paintChoice(block: HTMLElement, current: string): void {
 export function renderAppearance(container: HTMLElement, api: AppearanceApi): () => void {
   const root = document.createElement("div");
   root.className = "ui-sp";
+  // A window with option lists has a tick column: the rows that are not options end where the descriptions end (CSS: --ui-sp-end).
+  root.dataset.ticks = "";
   container.append(root);
 
   // Themes carry a swatch and fonts do not: the font list keeps the swatch's place so both lists' names share one left edge.
@@ -283,6 +285,7 @@ export interface WindowSizesApi {
 export function renderWindowSizes(container: HTMLElement, api: WindowSizesApi): () => void {
   const root = document.createElement("div");
   root.className = "ui-sp";
+  root.dataset.ticks = "";
   container.append(root);
   const blocks = api.groups.map((g) => ({ id: g.id, block: choiceBlock(g.title, g.options, `window-size-${g.id}`, () => api.get(g.id), (id) => api.set(g.id, id)) }));
   for (const b of blocks) root.append(b.block);
