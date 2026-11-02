@@ -22,6 +22,9 @@ export default defineConfig({
   workers: 1,
   forbidOnly: Boolean(process.env.CI),
   retries: 0,
+  // These are functional checks, not a timing gate (speed is measured on the perf VM). Several specs open pages with 20-45 s
+  // helper waits and one runs three scenes of 8-12 s each, so the 30 s default made a loaded build host fail them for being slow.
+  timeout: 90_000,
   reporter: "list",
   outputDir: tracerEvidencePath("playwright"),
   use: {
