@@ -1,10 +1,13 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
-<!-- Role: the page behind the ? in the "switch to the Infraternal Multiplexer" notice (D315, #251). Published at /docs/multiplexer. -->
+<!-- Role: the page behind the ? in the "switch to the Infraternal Multiplexer" notice (D315, #251). Published at /docs/multiplexer. Reading aids used here: GitHub-style alerts, [!WHY] reasoning blocks, [!FACTS] quick facts (the "?" preview), a quote, and [^n] citations (docs-extras.ts). -->
 # The Infraternal Multiplexer
 
 Infraternal keeps every terminal alive on its host, so you rarely need tmux or Zellij on top of it.
 
 ## What it does for you
+
+> [!FACTS]
+> Every terminal is a session that keeps running on its host. Close the tab, lose the connection or upgrade Infraternal: the shell goes on.
 
 Every terminal you open in Infraternal is a **session**. A session keeps your shell running on the host, whatever happens to the screen you are looking at. That is the job of a multiplexer, so Infraternal has one built in.
 
@@ -15,9 +18,12 @@ Every terminal you open in Infraternal is a **session**. A session keeps your sh
 
 ## Why you may want to switch
 
-If your shell starts tmux or Zellij by itself (a line in `~/.zshrc`, `~/.bashrc` or your fish config), every Infraternal terminal ends up as a multiplexer inside a session. That means two scrollbacks, two sets of keys and two things that can hold on to a screen.
+If your shell starts tmux[^tmux] or Zellij[^zellij] by itself (a line in `~/.zshrc`, `~/.bashrc` or your fish config), every Infraternal terminal ends up as a multiplexer inside a session. That means two scrollbacks, two sets of keys and two things that can hold on to a screen.
 
-Sessions already keep your shell alive, so most people do not need the second layer.
+> [!WHY] Why most people do not need the second layer
+> Sessions already keep your shell alive. What tmux or Zellij add on top is mostly what a session gives you without them: a shell that outlives the screen, and the same shell from another device.
+>
+> Running both costs you something every day (two scrollbacks, two sets of keys) and buys you little, so Infraternal offers to remove the second layer. It never does so on its own.
 
 ### The question Infraternal asks
 
@@ -35,6 +41,9 @@ The question appears once per host. You can turn it off for everyone, or for one
 
 ## How switching works
 
+> [!FACTS]
+> One line changes: a condition in front of the command that starts tmux or Zellij. You confirm it first, and you can restore the original line.
+
 Every Infraternal session sets the variable `INFRATERNAL_SESSION`. Switching adds one condition in front of the line that starts the multiplexer, so that line runs only when the variable is empty:
 
 ```sh
@@ -46,9 +55,13 @@ exec tmux new-session -s main
 
 Only Infraternal terminals change. An SSH login from another terminal, a console, or any shell without the variable still starts tmux or Zellij as before. You can also start either one by hand in any terminal, whenever you like.
 
+> [!WHY] Why a condition and not a rewrite
+> The line stays where you wrote it, with the same command, so everything else about your startup keeps working. Only the terminals that Infraternal started skip it. If you ever stop using Infraternal, the line still does what it did before.
+
 ### What stays untouched
 
-Infraternal never changes how your shell starts without asking: no wrappers, no hidden environment tricks. It changes the one line you confirmed, and it keeps the file's permissions and line endings.
+> [!IMPORTANT] Nothing changes without your say
+> Infraternal never changes how your shell starts without asking: no wrappers, no hidden environment tricks. It changes the one line you confirmed, and it keeps the file's permissions and line endings.
 
 ### Which files it can edit
 
@@ -58,15 +71,18 @@ Infraternal edits these startup files in your home directory, when the multiplex
 - zsh: `.zshenv`, `.zprofile`, `.zshrc`, `.zlogin`
 - fish: `config.fish` and `conf.d/*.fish`
 
-If your startup is more involved (several commands on one line, redirections, files that load other files), Infraternal does not guess. The ✓ button then copies the condition, and you place it yourself.
+> [!NOTE] More involved startup files
+> If your startup is more involved (several commands on one line, redirections, files that load other files), Infraternal does not guess. The ✓ button then copies the condition, and you place it yourself.
 
 ## Undoing a switch
 
 After a switch, the notice offers **Restore** with the file's name. It puts the original line back, and only that line, so other edits you made to the file since are kept.
 
-If that line is no longer there exactly as Infraternal wrote it, or appears more than once, nothing is changed and you are told. The switch itself is refused the same way when the file changed after Infraternal looked at it.
+> [!NOTE] When a restore is refused
+> If that line is no longer there exactly as Infraternal wrote it, or appears more than once, nothing is changed and you are told. The switch itself is refused the same way when the file changed after Infraternal looked at it.
 
-To undo by hand, delete `[ -n "$INFRATERNAL_SESSION" ] || ` from the front of the line.
+> [!TIP]
+> To undo by hand, delete `[ -n "$INFRATERNAL_SESSION" ] || ` from the front of the line.
 
 ## Sessions from the command line
 
@@ -83,7 +99,7 @@ The app is where you use sessions. The `infraternal` command is for automation: 
 | `infraternal sessions wait … --until-idle <d>` or `--match <re>` | Wait for a quiet moment or for text |
 | `infraternal sessions watch …` | Follow output, read-only |
 | `infraternal sessions rename …` and `close …` | Rename or end a session |
-| `infraternal sessions mcp` | Offer sessions to AI agents as an MCP server |
+| `infraternal sessions mcp` | Offer sessions to AI agents as an MCP server[^mcp] |
 
 Every command takes `--json`. To put a session on your screen, use `infraternal canvas open <machine>:<session>`.
 
@@ -93,11 +109,17 @@ AI agents already know tmux commands, so the same sessions answer to a small sub
 
 ### What needs approval
 
-Within your own sessions on the same host and account there are no prompts. Anything that reaches another host or account is refused unless an access rule allows it and it is approved.
+> [!IMPORTANT] Your own sessions only
+> Within your own sessions on the same host and account there are no prompts. Anything that reaches another host or account is refused unless an access rule allows it and it is approved.
 
 ### What works today
 
-A command appears in `infraternal --help` only once it works. The startup question and its ✓ ✗ ? buttons are live. The `sessions` and `canvas` commands are being built in the order of the list above, so this page describes where they are going. Run `infraternal --help` on your machine to see what is available today.
+> [!WARNING] Under review
+> A command appears in `infraternal --help` only once it works. The startup question and its ✓ ✗ ? buttons are live. The `sessions` and `canvas` commands are being built in the order of the list above, so this page describes where they are going. Run `infraternal --help` on your machine to see what is available today.
+
+[^tmux]: [tmux, a terminal multiplexer](https://github.com/tmux/tmux/wiki): the multiplexer many people start from their shell's startup file.
+[^zellij]: [Zellij, a terminal workspace](https://zellij.dev/): the other multiplexer the question looks for.
+[^mcp]: [Model Context Protocol](https://modelcontextprotocol.io/): how an AI agent is offered tools and data.
 
 ---
 
