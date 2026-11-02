@@ -5,7 +5,7 @@
  * a row never shows a button for something it cannot do (a host the Mesh does not know has no Rename; a session cannot
  * be ended until the inventory can, #100).
  *
- * - Hover only (`hover: hover` and a fine pointer). A phone has the long-press menu and the swipes, which are the same
+ * - Hover only (`hover: hover` and a fine pointer). The pill never covers the row's marks and notes (their tooltips are #259's). A phone has the long-press menu and the swipes, which are the same
  *   actions; a pill would only crowd a 44 px row.
  * - Made when the pointer or the keyboard enters a row, so a list of dozens of rows carries no hidden buttons
  *   at rest. It is the shared window action pill (`.ui-window-actions`, `.ui-window-action`) and the shared warm tooltips.
@@ -71,6 +71,15 @@ export function createRowPill(cx: Ctx, tree: HTMLElement, menu: RowMenu, actions
     }
     wrap.append(group);
     row.append(wrap);
+    // The row's quiet notes (the new-output dot, ✓ 0, the detached icon) keep their place and their tooltips: the pill sits to
+    // the left of them and covers the end of the name instead (a name that long is already cut by an ellipsis).
+    const edge = row.getBoundingClientRect().right;
+    let left = edge;
+    for (const note of row.querySelectorAll<HTMLElement>(".ui-mark, .bm-meta")) {
+      const r = note.getBoundingClientRect();
+      if (r.width >= 1 && r.height >= 1) left = Math.min(left, r.left);
+    }
+    if (left < edge) wrap.style.right = `${Math.round(edge - left + 4)}px`;
   };
   /** Made when the pointer or the focus enters a row (not on every move inside it), so it always reflects what the row can do now. */
   const reach = (event: Event): void => {

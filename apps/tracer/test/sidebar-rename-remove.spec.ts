@@ -69,6 +69,25 @@ test.describe("desktop 1440×900", () => {
     await page.keyboard.press("Escape");
   });
 
+  test("the pill sits left of the row's marks and notes, which keep their tooltips (#259)", async ({ page }) => {
+    for (const [id, expected] of [["journal", "New output"], ["bench", "Finished successfully, exit code 0"]] as const) {
+      const row = page.locator(`#tree .bm-row:has(.bm-leaf[data-id="s:build-01/${id}"])`);
+      const box = (await row.boundingBox())!;
+      await page.mouse.move(box.x + 40, box.y + box.height / 2);
+      await expect(row.locator(".cl-ha")).toHaveCSS("opacity", "1");
+      const pill = (await row.locator(".cl-ha .ui-window-actions").boundingBox())!;
+      for (const note of await row.locator(".ui-mark, .bm-meta").all()) {
+        const n = await note.boundingBox();
+        if (!n || n.width < 1) continue;
+        expect(pill.x + pill.width, "the pill ends before the note starts").toBeLessThanOrEqual(n.x + 0.5);
+      }
+      // The mark answers a hover with its tooltip even while the row is hovered.
+      await row.locator(".ui-mark").hover();
+      await expect(page.locator(".tip")).toHaveText(expected);
+      await page.mouse.move(700, 450);
+    }
+  });
+
   test("double-click renames in place at the label's x; Enter saves, Escape cancels and keeps the sidebar, no row moves", async ({ page }) => {
     const before = await boxes(page);
     const label = await textBox(page, '#tree .bm-leaf[data-id="s:build-01/bench"] .bm-label');
