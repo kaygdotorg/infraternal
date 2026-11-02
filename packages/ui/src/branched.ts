@@ -54,6 +54,9 @@ export interface BranchedMenu {
   dispose(): void;
 }
 
+/** The id a list row carries (a leaf's button, or a caption that names a thing), for the row menu. */
+export const branchRowId = (row: Element): string | undefined => (row as HTMLElement).dataset.id ?? row.querySelector<HTMLElement>(".bm-leaf")?.dataset.id;
+
 const DETACHED_NAME = "Detached";
 const MARK_TIP = { output: "New output", ok: "Finished successfully", fail: "Failed" } as const;
 const MARK_NAME ={ output: "new output", ok: "command finished", fail: "command failed" } as const;
@@ -119,8 +122,10 @@ function makeSection(section: BranchSection): HTMLElement {
   for (const leaf of section.leaves) {
     if (leaf.heading) {
       const caption = el("li", "bm-row bm-subhead");
-      caption.setAttribute("role", "presentation");
       caption.textContent = leaf.label;
+      // A caption that names a thing (a host) is a row of its own for the row menu (D309): focusable, so the menu key reaches it.
+      if (leaf.id) { caption.dataset.id = leaf.id; caption.setAttribute("role", "treeitem"); caption.tabIndex = 0; }
+      else caption.setAttribute("role", "presentation");
       list.append(caption);
       continue;
     }
