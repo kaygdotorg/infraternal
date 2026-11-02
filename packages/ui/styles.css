@@ -866,7 +866,7 @@
 }
 
 /* Settings, Toolbar (toolbar-settings.ts): rows of controls with a grip, an icon, a name and a switch. */
-.ui-toolbar-settings { display: grid; gap: 0.875rem; }
+.ui-toolbar-settings { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.875rem; }
 .ui-ts-title { margin: 0; padding: var(--ui-heading-pad); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-ts-list { display: grid; margin: 0; padding: 0; list-style: none; }
 .ui-ts-item { position: relative; display: flex; align-items: center; gap: 0.625rem; min-height: var(--ui-row-h, 2rem); border-bottom: 1px solid var(--line); background: transparent; }
@@ -883,7 +883,7 @@
 @media (hover: hover) and (pointer: fine) { .ui-ts-reset:hover, .ui-ts-grip:hover { background: var(--hover); } }
 
 /* Settings, Shortcuts (shortcuts-settings.ts): the registry's rows; a row is a button that listens for the new keys. */
-.ui-shortcuts-settings { display: grid; gap: 0.75rem; }
+.ui-shortcuts-settings { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.75rem; }
 .ui-ss-list { display: grid; margin: 0; padding: 0; list-style: none; }
 .ui-ss-row { position: relative; display: flex; flex-wrap: wrap; align-items: center; border-bottom: 1px solid var(--line); }
 .ui-ss-row:last-child { border-bottom: 0; }
@@ -898,7 +898,7 @@
 .ui-ss-actions { display: inline-flex; gap: 0.375rem; }
 .ui-ss-actions button { min-height: var(--ui-control-h, 1.875rem); padding: 0 0.75rem; border: 1px solid var(--overlay-line); border-radius: 999px; background: none; color: var(--fg); font: var(--ui-type-button); cursor: pointer; }
 @media (hover: hover) and (pointer: fine) { .ui-ss-reset:hover, .ui-ss-actions button:hover, .ui-ss-main:not(:disabled):hover { background: var(--hover); } }
-.ui-ts-source { display: flex; align-items: center; justify-content: space-between; gap: 0.625rem; }
+.ui-ts-source { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.625rem; }
 .ui-ts-tag { padding: 0.1875rem 0.5625rem; border-radius: 999px; background: var(--hover); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-ts-tag[data-device="true"] { background: var(--accent-soft); color: var(--accent); }
 .ui-ts-tag, .ui-ts-source .ui-ts-reset, .ui-ss-actions button { white-space: nowrap; }
@@ -929,24 +929,50 @@
 .ui-sp-row { display: flex; align-items: center; gap: 0.625rem; width: 100%; min-height: var(--ui-row-h, 2rem); padding: 0 0.5rem; border: 0; border-radius: 0.5rem; background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
 .ui-sp-row:active { transform: scale(var(--ui-press-scale, 0.97)); }
 @media (hover: hover) and (pointer: fine) { .ui-sp-row:hover { background: var(--hover); } }
-.ui-sp-swatch { position: relative; flex: none; width: 1.125rem; height: 1.125rem; border-radius: 50%; border: 1px solid var(--overlay-line); }
+.ui-sp-swatch, .ui-sp-slot { flex: none; width: 1.125rem; height: 1.125rem; }
+.ui-sp-swatch { position: relative; border-radius: 50%; border: 1px solid var(--overlay-line); }
 .ui-sp-swatch::after { content: ""; position: absolute; right: 2px; bottom: 2px; width: 0.375rem; height: 0.375rem; border-radius: 50%; background: var(--dot); }
-/* Name and hint share a line: the name is one unbreakable line and the hint sits right-aligned beside it. When the list's
-   widest row does not fit (decided per list in fitHints) the list is `data-stacked` and every hint sits under its name,
-   left-aligned, balanced and allowed two lines. The tick stays centred on the row. */
-.ui-sp-text { display: flex; flex: 1; align-items: baseline; column-gap: 0.625rem; min-width: 0; padding: 0.3125rem 0; }
-/* Beside its name, a hint starts where the list's widest name ends (fitHints sets --ui-sp-label-w), so a list's hints
-   share one left edge instead of following each name's length. */
-.ui-sp-text .ui-sp-label { flex: none; width: var(--ui-sp-label-w, auto); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-[data-stacked] > .ui-sp-row .ui-sp-label { width: auto; }
-.ui-sp-text .ui-sp-hint { flex: none; white-space: nowrap; color: var(--ui-text-secondary); }
+/* An option row (choice list): the name is left, the description is right-aligned at the end of the text column, and the
+   tick keeps its own fixed column after it (always laid out, only its opacity changes), so every description of a list
+   ends at one x whether or not its row is selected. The name is one unbreakable line and is never truncated. When the
+   list's widest row does not fit (decided per list in fitHints) the list is `data-stacked` and every description sits
+   under its name as a left-aligned subtitle, balanced and allowed two lines. The tick stays centred on the row. */
+.ui-sp-text { display: flex; flex: 1; align-items: baseline; justify-content: space-between; column-gap: 0.625rem; min-width: 0; padding: 0.3125rem 0; }
+.ui-sp-text .ui-sp-label { flex: none; white-space: nowrap; }
+.ui-sp-text .ui-sp-hint { flex: none; margin-left: auto; text-align: right; white-space: nowrap; color: var(--ui-text-secondary); }
 .ui-sp-text .ui-sp-hint:empty { display: none; }
-[data-stacked] > .ui-sp-row .ui-sp-text { flex-direction: column; align-items: flex-start; row-gap: 1px; }
-[data-stacked] > .ui-sp-row .ui-sp-hint { white-space: normal; text-wrap: balance; max-width: 100%; }
+[data-stacked] > .ui-sp-row .ui-sp-text { flex-direction: column; align-items: flex-start; justify-content: flex-start; row-gap: 1px; }
+[data-stacked] > .ui-sp-row .ui-sp-hint { margin-left: 0; text-align: left; white-space: normal; text-wrap: balance; max-width: 100%; }
+/* Every settings row (option, switch, status) starts at its heading's left edge: no indent, so the swatch, the name or
+   the first letter sits exactly under the heading's first letter. The hover fill still has room around the content: it
+   is a pseudo-element that bleeds 0.5rem to each side into the pane's own padding (the row's box, and so every
+   measurement of it, stays on the heading's edge). `--ui-sp-end` is how far the row's last mark stops short of the
+   far-right edge: nothing, except in a window with option lists (`data-ticks`), where it is the tick's column plus its
+   gap, so a switch, a button or a readout ends where the option descriptions end. */
+.ui-sp { --ui-sp-end: 0px; }
+.ui-sp[data-ticks] { --ui-sp-end: calc(var(--ui-sp-tick, 1.125rem) + 0.625rem); }
+.ui-sp .ui-sp-row { position: relative; isolation: isolate; padding: 0; }
+.ui-sp .ui-sp-row:is(.ui-sp-switch, .ui-sp-status) { padding-right: var(--ui-sp-end); }
+.ui-sp .ui-sp-row::before { content: ""; position: absolute; inset: 0 -0.5rem; z-index: -1; border-radius: 0.5rem; pointer-events: none; transition: background-color 140ms ease; }
+@media (hover: hover) and (pointer: fine) {
+  .ui-sp .ui-sp-row:hover { background: none; }
+  .ui-sp .ui-sp-row:hover::before { background: var(--hover); }
+  .ui-sp .ui-sp-status:hover::before { background: none; }
+}
+/* A switch's visible track is its ::before (content-box: 1px in, 2.875rem wide, 1px border either side), a hair wider than
+   the 3rem box that holds it. The row's right edge is the track's, not the box's: the box stops short by the difference. */
+.ui-sp .ui-switch, .ui-ts-item .ui-switch { margin-right: calc(3px - 0.125rem); }
+.ui-sp[data-ticks] .ui-slider { margin-right: var(--ui-sp-end); }
+/* Icons are aligned by what you see: a glyph sits on the edge, and its hit box reaches past it into the pane's padding. */
+.ui-sp-kind { margin-left: calc((var(--ui-icon, 1rem) - 1.75rem) / 2); }
+.ui-sp-actions .ui-window-action, .ui-sp-status .ui-window-action { width: var(--ui-control-h, 1.875rem); height: var(--ui-control-h, 1.875rem); margin-right: calc((var(--ui-icon, 1rem) - var(--ui-control-h, 1.875rem)) / 2); }
+.ui-sp-actions .ui-window-action::after, .ui-sp-status .ui-window-action::after { content: none; }
+.ui-ts-grip { margin-left: calc((var(--ui-icon, 1rem) - var(--ui-control-h, 1.875rem)) / 2); }
+
 .ui-sp-hint { color: var(--ui-text-secondary); }
 /* A destructive row (remove, sign out) names its action in the danger colour; the hint under it stays quiet. */
 .ui-sp-row[data-tone="danger"] .ui-sp-label { color: var(--danger); }
-.ui-sp-tick { width: var(--ui-icon, 1rem); height: var(--ui-icon, 1rem); flex: none; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(0.6); transition: opacity 150ms ease, transform 180ms var(--ease-out, ease-out); }
+.ui-sp-tick { width: var(--ui-sp-tick, 1.125rem); height: var(--ui-sp-tick, 1.125rem); flex: none; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(0.6); transition: opacity 150ms ease, transform 180ms var(--ease-out, ease-out); }
 .ui-sp-row[data-current] .ui-sp-tick { opacity: 1; transform: none; }
 .ui-sp-devices { display: grid; margin: 0; padding: 0; list-style: none; }
 .ui-sp-device { display: flex; align-items: center; gap: 0.625rem; min-height: 3.25rem; border-bottom: 1px solid var(--line); }
