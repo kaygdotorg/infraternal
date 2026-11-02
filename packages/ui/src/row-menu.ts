@@ -76,8 +76,8 @@ export interface RowMenu {
 }
 
 // Critically damped, never past the target (TASTE: no overshoot, ever; the row settles, it does not bounce).
-const OPEN = { visualDuration: 0.32 };
-const SHUT = { visualDuration: 0.32 };
+const OPEN = { visualDuration: 0.32, bounce: 0 };
+const SHUT = { visualDuration: 0.32, bounce: 0 };
 /** A swipe moves at most this far past the revealed button before the row stops following (never past its own width). */
 const MIN_REVEAL = 72;
 const LONG_PRESS = 480;
