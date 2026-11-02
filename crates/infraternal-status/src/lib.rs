@@ -74,6 +74,13 @@ use std::{
 /// Mesh interface created by the mesh component.
 const MESH_INTERFACE: &str = "infraternal0";
 
+/// Allow process startup and two local responses under CPU contention (#312).
+/// A 25 ms response exceeded 40 ms in 51/100 loaded-host samples (86 ms max).
+/// Half a second leaves scheduling margin for both observations; child-exit
+/// readiness still returns immediately. Admission uses the same bound, so a
+/// stalled manager cannot multiply the wait by the number of installed units.
+const MANAGER_QUERY_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Which service manager owns a unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -306,8 +313,8 @@ fn assemble(roots: &Roots, ids: &[String], mut units: Vec<(Unit, Activity)>) -> 
 
 /// Query with at most four 128 KiB workers and four manager children. Each
 /// scope reserves two workers, so a stalled system manager cannot exhaust the
-/// user's capacity. Admission ends after 40 ms; each admitted unit has its own
-/// 40 ms deadline (including any second observation). Unqueried/refused work
+/// user's capacity. Admission ends after 500 ms; each admitted unit has its own
+/// 500 ms deadline (including any second observation). Unqueried/refused work
 /// stays Unknown with a reason; neither spawn nor join is a panic path.
 #[must_use]
 pub fn probe_local(roots: &Roots, ids: &[String]) -> NodeStatus {
@@ -319,7 +326,7 @@ pub fn probe_local(roots: &Roots, ids: &[String]) -> NodeStatus {
             (unit, state)
         })
         .collect();
-    let admission = std::time::Instant::now() + std::time::Duration::from_millis(40);
+    let admission = std::time::Instant::now() + MANAGER_QUERY_BUDGET;
     // Discovery orders system units before user units. Keep observations in
     // that order, so component rows and diagnostics use the same first unit.
     let system = units.partition_point(|(unit, _)| unit.scope == Scope::System);
@@ -810,7 +817,7 @@ fn manager_activity_result(scope: Scope, unit: &str) -> Result<Activity, &'stati
     manager_activity_before(
         scope,
         unit,
-        std::time::Instant::now() + std::time::Duration::from_millis(40),
+        std::time::Instant::now() + MANAGER_QUERY_BUDGET,
     )
 }
 

@@ -63,6 +63,28 @@ fn service_states_are_truthful_in_text_and_json() {
             "restarting",
             5,
         ),
+        (
+            "busy",
+            "auto-restart",
+            45,
+            now,
+            1,
+            1,
+            "Restarting repeatedly",
+            "restarting",
+            5,
+        ),
+        (
+            "busy-active",
+            "running",
+            0,
+            now,
+            0,
+            0,
+            "Running",
+            "running",
+            0,
+        ),
         ("active", "running", 0, 1, 0, 0, "Running", "running", 0),
         ("active", "running", 46, 1, 0, 0, "Running", "running", 0),
         ("inactive", "dead", 0, 1, 0, 0, "Stopped", "stopped", 5),
@@ -88,22 +110,34 @@ fn service_states_are_truthful_in_text_and_json() {
             .unwrap();
             let manager = home.join("bin/systemctl");
             for (active, sub, restarts, started, code, status, label, state, exit) in cases {
+                // Keep each recent-start fixture recent even when the complete
+                // matrix takes more than the restart window on a loaded host.
+                let started = if started == now {
+                    nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
+                        .unwrap()
+                        .num_microseconds()
+                } else {
+                    started
+                };
                 let scope_check = if scope == "user" {
                     "test \"$1\" = --user || exit 1\nshift\n"
                 } else {
                     "test \"$1\" = show || exit 1\n"
                 };
-                // A response taking more than half the total query budget still
-                // answers; it must not be cut off by an arbitrary per-unit split.
-                let delay = if active == "delayed" {
-                    "/bin/sleep 0.025\n"
-                } else {
-                    ""
+                // Responsive managers can exceed 40 ms on a busy host (#312).
+                // Keep the original delay too. A response above half the total
+                // budget must not be cut off by a per-observation split; the
+                // fresh active service needs two responses on one deadline.
+                let delay = match active {
+                    "delayed" => "/bin/sleep 0.025\n",
+                    "busy" => "/bin/sleep 0.3\n",
+                    "busy-active" => "/bin/sleep 0.075\n",
+                    _ => "",
                 };
-                let active = if active == "delayed" {
-                    "activating"
-                } else {
-                    active
+                let active = match active {
+                    "delayed" | "busy" => "activating",
+                    "busy-active" => "active",
+                    _ => active,
                 };
                 let response = if active == "unknown" {
                     "exit 1".to_owned()
