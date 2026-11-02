@@ -2,7 +2,7 @@
  * The grouped layout, on demand (D212, D188): everything a group of columns needs and a plain view never does.
  *
  * - The DOM of a group (`readColumns`, `arrange`, `applyCols`, `fromGrid`): one grid per group, read back from the DOM
- *   and written from the model (views/world.ts, windows/lifecycle.ts, windows/move.ts).
+ *   and written from the model (views/world.ts, windows/lifecycle.ts, windows/move.on-demand.ts).
  * - The rules that change a group (`splitRight`, `splitDown`, `newRight`, `removeWin`, the landing of a grouped move, and
  *   `problems`, the check every rule holds). The pure rules are in layout/grid.ts.
  *
