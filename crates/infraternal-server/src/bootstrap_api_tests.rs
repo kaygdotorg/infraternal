@@ -251,6 +251,37 @@ async fn each_bootstrap_action_message_uses_the_shared_api_key_rate_limit() {
     drop(auth);
 }
 
+/// J137 P3-7: only the owner can add hosts, so a non-owner key never holds one of the
+/// shared bootstrap sockets the owner's own add-host needs.
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn a_non_owner_key_cannot_hold_a_bootstrap_socket() {
+    let (auth, _, _, _, address, server, pool, api) = fixture(false).await;
+    let token = "fixture-member-bootstrap-key-never-print";
+    let now = now().unwrap();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES('member','member',0,'x','member','Member')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,'member','j94-cli','[\"hosts:write\"]',?,?,0)")
+        .bind(crate::auth::hash(token))
+        .bind(now)
+        .bind(now + 3600)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut request = format!("ws://{address}/v1/bootstrap/ws")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    rejection(request, StatusCode::FORBIDDEN).await;
+    assert_eq!(api.sockets.available_permits(), 16);
+    server.abort();
+    drop(auth);
+}
+
 /// J137 P3-5: a key-driven add-host audits every target it names, and keeps a target id
 /// only when it is a valid host identifier.
 #[cfg(feature = "remote")]

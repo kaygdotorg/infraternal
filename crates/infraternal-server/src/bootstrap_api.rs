@@ -208,6 +208,19 @@ async fn upgrade(
             Ok(identity) => identity,
             Err(status) => return status.into_response(),
         };
+        // Only the owner adds hosts (invitation issuance refuses everyone else), so only the
+        // owner's keys may hold one of the shared bootstrap sockets. A non-owner key with
+        // `hosts:write` could otherwise park all of them and block the owner's add-host.
+        // Rejected: a per-account share of the sockets, which still lets several non-owner
+        // accounts together exhaust the pool for a call that can never succeed.
+        let owner: Option<bool> = sqlx::query_scalar("SELECT owner=1 FROM users WHERE id=?")
+            .bind(&identity.person_id)
+            .fetch_optional(api.auth.pool())
+            .await
+            .unwrap_or(None);
+        if owner != Some(true) {
+            return StatusCode::FORBIDDEN.into_response();
+        }
         (
             identity.person_id.clone(),
             Secret::new(Vec::new()),
