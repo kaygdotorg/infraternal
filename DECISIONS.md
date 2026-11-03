@@ -1411,7 +1411,7 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      #259 rename work alone reached 307,714 B; the owner chose a moderate
      raise that keeps the gate (growth stays visible) over removing it or
      loading rename on demand. Big features still load on demand.
-189. **Card and window transparency (owner, 2026-10-08):** four levels for each,
+189. **Card and window transparency (owner, 2026-10-08; superseded by D322):** four levels for each,
      "Glass" renamed **Frosted**. Dark/light tint and blur:
      - **Solid:** cards 1.00/1.00, 0 px; windows 1.00/1.00, 0 px.
      - **Tinted:** cards 0.70/0.78, 8 px; windows 0.85/0.90, 0 px.
@@ -3616,3 +3616,17 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      with the owner's Apple Developer ID and notarized. Signing material
      comes from the owner's 1Password via a service account, only on the
      Mac build machine, never in the repo, logs or argv.
+322. **Appearance presets replace the card and window levels (owner,
+     2026-11-03, #323; amends D189):** "we should make it simpler! not have
+     options for cards and windows both and rather only have the windows
+     options". There is one transparency setting with three built-in
+     presets: **Solid** (100% tint, 0% blur), **Tinted** (75%, 0%) and
+     **Frosted** (50%, 100%). Clear is dropped. Blur is shown as a
+     percentage, never in px: 0 px = 0% and 24 px = 100%. A preset bundles
+     tint, blur, fonts, Colors and UI size. The top of Settings → Appearance
+     is one horizontally scrollable strip of preset cards. The last card has
+     a dotted border and a large +, which adds a preset. The person can edit
+     the built-in presets and reset them ("a reset button placed somewhere
+     nicer"). "Themes" is renamed **Colors**. Still open: whether floating
+     cards follow the preset or keep one overlay material, whether light
+     mode uses the same numbers, and the default preset.
