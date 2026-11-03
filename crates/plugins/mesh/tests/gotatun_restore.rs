@@ -39,6 +39,19 @@ fn index() -> u32 {
         .unwrap()
 }
 
+/// The kernel's view of the mesh TUN's transmit queue, in packets, from this namespace.
+fn tx_queue_len() -> u32 {
+    let line = link_line();
+    let mut words = line.split_whitespace().skip_while(|word| *word != "qlen");
+    // `ip -o` ends each joined line with a backslash.
+    words
+        .nth(1)
+        .unwrap()
+        .trim_end_matches('\\')
+        .parse()
+        .unwrap()
+}
+
 fn private_state(name: &str) -> std::path::PathBuf {
     let state = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&state);
@@ -105,6 +118,11 @@ fn restart_reattaches_the_persisted_tun_and_mesh_identity() {
         let mut first = Node::restore_with_engine(&state, EngineKind::GotaTun)?;
         let identity = first.up()?;
         let link = index();
+        // A TUN opens with a 500-packet transmit queue; the engine needs 1,024 (#260 J88e).
+        let first_queue = (
+            tx_queue_len(),
+            first.engine_health().and_then(|health| health.tx_queue_len),
+        );
         // A process end, as an infraternal agent restart: the TUN stays (D332).
         drop(first);
         assert!(Device::owned_tun()?, "the TUN outlives its process");
@@ -117,6 +135,21 @@ fn restart_reattaches_the_persisted_tun_and_mesh_identity() {
             index(),
             link,
             "the restarted engine reattaches the same link"
+        );
+        let restarted_queue = (
+            tx_queue_len(),
+            restarted
+                .engine_health()
+                .and_then(|health| health.tx_queue_len),
+        );
+        let needed = infraternal_plugin_mesh::gotatun_node::TUN_TX_QUEUE_LEN;
+        assert!(
+            first_queue.0 >= needed && first_queue.1 == Some(first_queue.0),
+            "the new TUN's transmit queue (kernel, reported): {first_queue:?}"
+        );
+        assert!(
+            restarted_queue.0 >= needed && restarted_queue.1 == Some(restarted_queue.0),
+            "the reattached TUN's transmit queue (kernel, reported): {restarted_queue:?}"
         );
         restarted.down()?;
         assert!(!Device::owned_tun()?, "down removes the persisted TUN");

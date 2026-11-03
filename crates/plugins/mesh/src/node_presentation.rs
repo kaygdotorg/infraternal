@@ -146,12 +146,35 @@ fn engine_health(
             ),
         ));
     }
-    Ok(health.stopped.then(|| {
-        (
+    let short_queue = health
+        .tx_queue_len
+        .filter(|&len| len < crate::gotatun_node::TUN_TX_QUEUE_LEN);
+    if let Some(len) = short_queue {
+        rows.push((
+            "Queue",
+            if len == 0 {
+                "the TUN transmit queue could not be read; the engine needs 1024 packets".to_owned()
+            } else {
+                format!(
+                    "the TUN transmit queue holds {len} packets, below the 1024 the engine needs; raising it needs network-admin rights"
+                )
+            },
+        ));
+    }
+    Ok(if health.stopped {
+        Some((
             Tone::Attention,
             "Mesh engine stopped on an error and restarts in a moment.".to_owned(),
-        )
-    }))
+        ))
+    } else {
+        short_queue.map(|_| {
+            (
+                Tone::Attention,
+                "Mesh is on, but its TUN transmit queue is short and can drop packets under load."
+                    .to_owned(),
+            )
+        })
+    })
 }
 
 /// Standard base64 of a 32-byte public key; the JSON form of a key is text, never a byte array.
@@ -381,6 +404,22 @@ mod tests {
             shown.body.contains("1 packet this machine sent"),
             "{}",
             shown.body
+        );
+        let short = serde_json::json!({"state":"On","peer_count":1,
+            "engine":{"stopped":false,"restarts":0,"refused_frames":0,"tx_queue_len":500}});
+        let shown = status(short, 120).expect("short queue");
+        assert!(matches!(shown.tone, Tone::Attention));
+        assert!(
+            shown.message.contains("transmit queue is short"),
+            "{}",
+            shown.message
+        );
+        assert!(shown.body.contains("holds 500 packets"), "{}", shown.body);
+        let raised = serde_json::json!({"state":"On","peer_count":1,
+            "engine":{"stopped":false,"restarts":0,"refused_frames":0,"tx_queue_len":1024}});
+        assert_eq!(
+            status(raised, 100).expect("raised").message,
+            "Mesh is on. 1 peer."
         );
         let kernel = serde_json::json!({"state":"On","peer_count":1,"engine":null});
         assert_eq!(

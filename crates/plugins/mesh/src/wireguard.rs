@@ -399,6 +399,29 @@ impl Device {
     pub fn activate_tun() -> io::Result<()> {
         activate(index()?)
     }
+    /// Raise the mesh TUN's transmit queue (`txqueuelen`) to at least `len` packets and return the
+    /// length it has afterwards. A shorter queue drops bursts the host writes faster than the
+    /// engine reads (#260 J88e: ring drops fell from 1.14 M to 304 at 1,024). An already longer
+    /// queue is left alone.
+    /// # Errors
+    /// Reports a missing interface or a refused change, for example without `CAP_NET_ADMIN`.
+    pub(crate) fn raise_tx_queue_len(len: u32) -> io::Result<u32> {
+        let index = index()?;
+        if tx_queue_len_of(index)? >= len {
+            return tx_queue_len_of(index);
+        }
+        let mut payload = vec![0; 16];
+        payload[4..8].copy_from_slice(&index.to_ne_bytes());
+        attribute(&mut payload, IFLA_TXQLEN, &len.to_ne_bytes())?;
+        Socket::open(SockProtocol::NetlinkRoute)?.request(16, 4, &payload)?;
+        tx_queue_len_of(index)
+    }
+    /// The mesh TUN's transmit queue length, in packets.
+    /// # Errors
+    /// Reports a missing interface or malformed link metadata.
+    pub(crate) fn tx_queue_len() -> io::Result<u32> {
+        tx_queue_len_of(index()?)
+    }
     /// Read only local /32 and /128 aliases on the owned interface for recovery fencing.
     pub(crate) fn host_addresses() -> io::Result<BTreeSet<IpAddr>> {
         let index = index()?;
@@ -788,6 +811,19 @@ fn activate(index: u32) -> io::Result<()> {
     attribute(&mut payload, 4, &1380_u32.to_ne_bytes())?;
     Socket::open(SockProtocol::NetlinkRoute)?.request(16, 4, &payload)?;
     Ok(())
+}
+/// `IFLA_TXQLEN`: a link's transmit queue length, in packets.
+const IFLA_TXQLEN: u16 = 13;
+fn tx_queue_len_of(index: u32) -> io::Result<u32> {
+    let mut payload = vec![0; 16];
+    payload[4..8].copy_from_slice(&index.to_ne_bytes());
+    let replies = Socket::open(SockProtocol::NetlinkRoute)?.request(18, 4, &payload)?;
+    let reply = replies.first().ok_or(io::ErrorKind::NotFound)?;
+    netlink::attributes(reply.get(16..).ok_or(io::ErrorKind::InvalidData)?)?
+        .into_iter()
+        .find(|field| field.kind == IFLA_TXQLEN)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
+        .and_then(|field| netlink::u32_at(field.payload, 0))
 }
 fn index() -> io::Result<u32> {
     Ok(nix::net::if_::if_nametoindex(INTERFACE)?)

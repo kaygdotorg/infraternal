@@ -21,7 +21,7 @@ use std::{
     net::IpAddr,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc as sync,
     },
     thread::{self, JoinHandle},
@@ -152,6 +152,8 @@ struct Health {
     stopped: AtomicBool,
     /// Outbound frames the TUN adapter could not decode and dropped.
     refused: Arc<AtomicU64>,
+    /// The TUN's transmit queue length after start, in packets; 0 when unreadable.
+    tx_queue_len: AtomicU32,
 }
 
 impl Health {
@@ -160,6 +162,7 @@ impl Health {
             stopped: self.stopped.load(Ordering::Relaxed),
             restarts: self.restarts.load(Ordering::Relaxed),
             refused_frames: self.refused.load(Ordering::Relaxed),
+            tx_queue_len: Some(self.tx_queue_len.load(Ordering::Relaxed)),
         }
     }
 }
@@ -170,7 +173,16 @@ pub struct EngineHealth {
     pub stopped: bool,
     pub restarts: u64,
     pub refused_frames: u64,
+    /// The TUN transmit queue in packets: below [`TUN_TX_QUEUE_LEN`] when the agent could not
+    /// raise it, 0 when it could not read it. `None` from an agent that does not report it.
+    #[serde(default)]
+    pub tx_queue_len: Option<u32>,
 }
+
+/// The TUN transmit queue the engine needs, in packets. `GotaTun` raises it only on a TUN it
+/// creates itself; this engine's adapter creates the TUN, so the agent raises it (#260 J88e:
+/// with 1,024 the 1 h soak lost no probe and ring drops fell from 1.14 M to 304).
+pub const TUN_TX_QUEUE_LEN: u32 = 1024;
 
 impl Engine {
     /// Start `GotaTun` with the fork's Linux TUN adapter and offload handling.
@@ -217,6 +229,7 @@ impl Engine {
                     adopt,
                 ));
                 let Started {
+                    tx_queue_len,
                     tun,
                     device,
                     pending,
@@ -228,6 +241,9 @@ impl Engine {
                         return;
                     }
                 };
+                worker_health
+                    .tx_queue_len
+                    .store(tx_queue_len, Ordering::Relaxed);
                 if info_tx.send(Ok(info.clone())).is_err() {
                     if let Some(device) = device.and_then(Arc::into_inner) {
                         runtime.block_on(device.stop());
@@ -368,6 +384,7 @@ impl Drop for Engine {
 
 /// What a successful start hands to the worker loop.
 struct Started {
+    tx_queue_len: u32,
     tun: LinuxPacketIo,
     device: Option<Arc<GotaDevice>>,
     pending: Option<PendingDevice>,
@@ -429,6 +446,11 @@ async fn initialize(
     }
     crate::wireguard::Device::mark_tun(local_public_key)?;
     crate::wireguard::Device::activate_tun()?;
+    // Raised on a new and on a reattached TUN alike. A refusal does not stop the engine: the
+    // length it really has goes to `mesh status`.
+    let tx_queue_len = crate::wireguard::Device::raise_tx_queue_len(TUN_TX_QUEUE_LEN)
+        .or_else(|_| crate::wireguard::Device::tx_queue_len())
+        .unwrap_or(0);
     let tun = LinuxPacketIo::new(tun);
     let (factory, port) = bind_udp(requested_port).await?;
     let peers = config
@@ -466,6 +488,7 @@ async fn initialize(
     // Marked and running: from here the interface outlives this process (D332).
     tun.tun.persist()?;
     Ok(Started {
+        tx_queue_len,
         tun,
         device,
         pending,
@@ -1040,7 +1063,8 @@ mod tests {
         };
         let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
         let worker = tokio::spawn(run_worker(receiver, state));
-        assert_eq!(health.snapshot(), super::EngineHealth::default());
+        let initial = health.snapshot();
+        assert!(!initial.stopped && initial.restarts == 0 && initial.refused_frames == 0);
 
         drop(kernel);
         let mut seen_stopped = false;
