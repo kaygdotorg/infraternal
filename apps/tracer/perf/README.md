@@ -20,6 +20,8 @@ The moved thresholds remain unchanged:
   resume p99 within the original RTT-derived budget, access render upper
   bound < 1000 ms;
 - renderer: prediction-on median 50 MB throughput ≥ 95% of prediction-off;
+- frame incident: injected 200 ms stall has worst interval > 190 ms, attributed
+  script > 150 ms and heartbeat lateness > 100 ms;
 - frame meter: mean/p99 < 50 µs, self time < 0.05 ms, layout overhead ≤ 3,
   style overhead ≤ ceil(control × 1.05) + 3;
 - backspace prediction: every measured input cost < 2 ms;

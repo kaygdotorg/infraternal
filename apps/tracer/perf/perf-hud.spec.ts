@@ -1,6 +1,6 @@
 /** Unchanged frame-meter CPU and recalculation budgets, run under perf-run on the perf VM (#314). */
 import { expect, test, type Page } from "playwright/test";
-import { hud, open } from "../test/perf-hud-fixture";
+import { hud, open, recordPanStall } from "../test/perf-hud-fixture";
 
 test("the frame body costs under 0.05 ms and the meter causes no layout or style work between repaints", async ({ page }) => {
   test.setTimeout(240_000);
@@ -58,4 +58,15 @@ test("the frame body costs under 0.05 ms and the meter causes no layout or style
   const self = await hud(page).call((h) => h.selfTime());
   console.log("PERF-SELF real frames", JSON.stringify(self));
   expect(self.meanMs).toBeLessThan(0.05);
+});
+
+/** Browser frame timestamps and observer durations are timing evidence, measured on the perf VM. */
+test("an injected pan stall retains its frame, script and heartbeat timing bounds", async ({ page }) => {
+  const { incidents } = await recordPanStall(page);
+  expect(incidents).toHaveLength(1);
+  const [incident] = incidents;
+  expect(incident!.worstMs).toBeGreaterThan(190);
+  const scripts = incident!.loaf.flatMap((frame) => frame.scripts);
+  expect(scripts.some((script) => script.src.includes("perf-spec-stall") && script.ms > 150)).toBe(true);
+  expect(incident!.diag.stalls.some((stall) => stall.late > 100)).toBe(true);
 });
