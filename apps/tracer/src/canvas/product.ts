@@ -15,19 +15,16 @@ import { mountToast } from "../../../../packages/ui/src/toast";
 import { ICON_INFO } from "../../../../packages/ui/src/icons";
 import { identityModel } from "./account/model";
 import type { SettingsSource } from "./views/settings-body.on-demand";
-import { onDemand } from "../on-demand";
+import { onDemand, whenIdle } from "../on-demand";
 import { ensureHostMarks, hostPlatformFromOs, type HostPlatform } from "../../../../packages/ui/src/host-icons";
 import { setLinkRoundTrip } from "../../../../packages/ui/src/window-card";
 import { ConnectionPool, MuxConnection } from "../connection";
 import { isCanonicalUuid } from "../identifiers";
 import type { CoreScreen } from "../core-screen";
 import type { TerminalClient, TerminalHooks } from "../terminal";
-import { createAddHost } from "./addhost";
-import { attachSetup, warmSetup } from "./addhost/setup-attach";
+import type { AddHost } from "./addhost";
 import { createAuthorityControl } from "./addhost/authority-unlock";
-import { createOverlayFlowHost } from "./addhost/flow-host";
 import type { ProvisioningService } from "./addhost/service";
-import { createWindowFlowHost } from "./addhost/window-host";
 import { installDocsSource } from "./docs/docs-source";
 import { createCanvas, type CanvasController } from "./create";
 import { CELL, boxOf } from "./layout/geometry";
@@ -174,29 +171,20 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   let provisioning: Promise<ProvisioningService> | undefined;
   const loadProvisioning = (): Promise<ProvisioningService> =>
     (provisioning ??= onDemand(() => import("./addhost/real.on-demand")).then((m) => m.createRealProvisioning()).catch((e: unknown) => { provisioning = undefined; throw e; }));
-  const addHost = createAddHost(core, {
-    service: loadProvisioning, sink: { setupInPill: true, prepareTerminal() {
-      const font = core.font();
-      // Optional preparation shares the normal open path's cached resources.
-      // A failed prefetch leaves the eventual terminal open responsible for its error.
-      void onDemand(() => import("../terminal")).then(({ TerminalClient }) => TerminalClient.prepare(font)).catch(() => {});
-    }, enrolled(hosts, status) {
-      for (const host of hosts) {
-        const hostId = host.hostId;
-        if (!hostId) { core.toast.show({ message: "The host did not return its connection identity. Add it again.", tone: "error", duration: 5000 }); continue; }
-        sessions.registerHost({ id: hostId, name: host.name, ...(host.user ? { user: host.user } : {}), os: host.os, ...(host.address ? { address: host.address } : {}) });
-        if (host.sessionId) {
-          setupPendingHostIds.add(hostId);
-          inventory.attach(hostId, host.sessionId);
-          // The shell is attachable now; install, join and start go on behind it and show in this window's machine pill.
-          const rec = canvas.cx.win.openSession(hostId, host.sessionId);
-          if (rec) void attachSetup(rec, { host: host.name, hostId, status, remove: () => { const label = removal.label(); return label ? { label, run: (anchor) => removal.remove(hostId, host.name, anchor) } : undefined; }, onComplete: () => { setupPendingHostIds.delete(hostId); } });
-        } else canvas.cx.win.open(hostId);
-        applyIdentities([{ id: hostId, name: host.name, ...(host.user ? { user: host.user } : {}), os: host.os }]);
-      }
-    }, openHost(hostId) { canvas.cx.win.open(hostId); }, hasHost: (hostId) => sessions.hosts().some((host) => host.id === hostId) },
-    host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
-  });
+  // Adding a host is something the person chooses, so its glue is on demand (addhost/mount.on-demand.ts, D188): fetched when the
+  // browser is idle after the canvas is up, and on the first tap if that has not happened. Its palette row appears when it arrives.
+  let addHostMount: Promise<AddHost | undefined> | undefined;
+  const mountAddHostNow = (): Promise<AddHost | undefined> => addHostMount ??= onDemand(() => import("./addhost/mount.on-demand")).then((m) => {
+    if (disposed) return undefined;
+    const mounted = m.mountAddHost(core, { service: loadProvisioning, cx: () => canvas.cx, sessions, inventory, setupPendingHostIds, removal, applyIdentities: (hosts) => applyIdentities(hosts) });
+    core.refreshPalette();
+    return mounted;
+  }, (error: unknown) => { addHostMount = undefined; throw error; });
+  whenIdle(() => { void mountAddHostNow().catch(() => undefined); }, 1000);
+  const addHost = {
+    open(): void { void mountAddHostNow().then((mounted) => mounted?.open(), () => core.toast.show({ message: "The add-host flow couldn't load. Check your connection and try again." })); },
+    dispose(): void { void addHostMount?.then((mounted) => mounted?.dispose(), () => undefined); },
+  };
   const authority = createAuthorityControl(core, { service: loadProvisioning });
   let welcomedOnce = false;
   const offAuthorityWelcome = connection.onWelcome(() => {
@@ -262,7 +250,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     }];
   }
   const canvas = createCanvas(core, {
-    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined, ...(accountStatuses ? { accountStatuses, accountRefresh: () => { void accountModel?.refresh?.(); } } : {}) }, mesh, hostRemoval: removal, addHost: () => { warmSetup(); addHost.open(); }, authority, appWindows: createAppWindowsAdapter(connection), startupHints },
+    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined, ...(accountStatuses ? { accountStatuses, accountRefresh: () => { void accountModel?.refresh?.(); } } : {}) }, mesh, hostRemoval: removal, addHost: () => addHost.open(), authority, appWindows: createAppWindowsAdapter(connection), startupHints },
     float: false,
     persisted: (id) => id !== "settings",
   });
