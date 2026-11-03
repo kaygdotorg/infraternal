@@ -21,7 +21,7 @@ import { el } from "../dom";
 import { restPx } from "../springs";
 import { ICON, viewIcon } from "./icons";
 import { windowLabel } from "../windows/label";
-import { viewRecentWindows, viewWindowEntries } from "../toolbar/palette";
+import { viewRecentWindows, viewWindowEntries } from "../toolbar/view-windows";
 import { endActivity, setActivity } from "../../perf-activity";
 
 /** Rows the view's hover card lists before its "All" row (TASTE: lists stay short). */
