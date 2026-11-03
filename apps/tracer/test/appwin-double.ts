@@ -41,6 +41,9 @@ function layoutSnapshot(): Record<string, unknown> {
 }
 /** A new test source starts from an empty, uninitialized account layout: the next page seeds it from its own storage. */
 export function appwinLayoutReset(): void {
+  // Old pages can leave edits buffered in the latency proxy after teardown. Retire their sockets before replacing
+  // account state: handleWire drops frames from closed sockets, so they cannot populate the next fixture.
+  for (const socket of layoutSubscribers.keys()) socket.terminate();
   layout = { format: FORMAT, version: VERSION, revision: 0, views: [] };
   layoutInitialized = false; layoutSubscribers.clear(); layoutReceipts.clear();
 }

@@ -49,7 +49,7 @@ async function openProductCanvas(page: Page, viewport: ViewportCase): Promise<vo
   expect((await request.post(mockUrl("/__mock/reset"))).ok()).toBe(true);
   expect((await request.post(mockUrl("/__mock/open-terminal"))).ok()).toBe(true);
   await page.setViewportSize({ width: viewport.width, height: viewport.height });
-  await page.goto("/?mock=1&proto=product&theme=ink&bg=none");
+  await page.goto("/?mock=1&proto=product&layout=server&theme=ink&bg=none");
   await expect(page.locator('.cl[data-view="console"] .ui-window')).toHaveCount(1, { timeout: 30_000 });
   await expect.poll(() => productProbe(page).then((probe) => probe.connected), { timeout: 30_000 }).toBe(true);
   await expect.poll(async () => (await mockState(request)).attach_count, { timeout: 15_000 }).toBeGreaterThan(0);
