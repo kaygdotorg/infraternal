@@ -18,6 +18,10 @@ const appWindowChromeExecutable = process.env.TRACER_CHROME_EXECUTABLE;
 if (appWindowChromeExecutable !== undefined && appWindowBrowser !== "chrome") {
   throw new Error("TRACER_CHROME_EXECUTABLE requires TRACER_APPWIN_BROWSER=chrome");
 }
+// The evidence root is named after the process id (evidence-path.ts), and a worker is another process than this config.
+// Export the root so specs resolve the same directory the test server writes its reports to; otherwise a spec that reads
+// a server-written file (perf-hud's incident file) looks in a directory that does not exist.
+process.env.INFRATERNAL_EVIDENCE_DIR ??= tracerEvidencePath(".");
 // Browser reports and frame incidents stay outside the checkout.
 const perfDir = process.env.INFRATERNAL_PERF_DIR ?? tracerEvidencePath("perf");
 const origin = `http://localhost:${port}`;
