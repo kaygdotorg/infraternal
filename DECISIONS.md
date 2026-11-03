@@ -3734,3 +3734,26 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      tonight". The userspace interface survives an infraternal agent
      restart, as kernel WireGuard's does, so routes the person added and
      open flows are kept: "correct!".
+333. **When a passkey is asked (owner, 2026-11-03; refines D28, D311,
+     D319):** "I don't want a passkey ask everytime I wanna do admin
+     operations. because I should be able to ask my agent to do those
+     things." The model ("agreed"):
+     - A tap at sign-in, and to unlock the machine CA after a restart.
+     - A tap when approving an API key. The approval page shows its exact
+       scopes and lifetime (short by default, for example 24 hours). Every
+       action inside that scope then runs with no further tap, from an AI
+       agent, the CLI or MCP. Every action is still audited, and the key can
+       be revoked at any time.
+     - In the browser, one tap starts 15 minutes of admin actions without
+       taps.
+     - A tap for each action, even with a key: creating or widening a key,
+       admin role changes and CA setup, recovery-key and passkey changes,
+       deleting the account, turning these rules off, and a direct
+       connection whose identity is in doubt (D319).
+334. **Small answers (owner, 2026-11-03):**
+     - The second, limited account was for the orchestrator to test with:
+       "it was for you! ... but we need that to be in an ee repo". Invites
+       and multi-user management live in a separate EE repository (D31);
+       its structure is grilled first.
+     - No `hosts remove --retain`: "this makes no sense. what situation
+       would this be helpful in? isn't our agent already small enough".
