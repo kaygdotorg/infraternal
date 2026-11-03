@@ -1,4 +1,7 @@
-//! Audited Linux PTY and process boundary; all unsafe code is confined here [13][40].
+//! Audited Linux and macOS PTY and process boundary; all unsafe code is confined here [13][40].
+//!
+//! On macOS the PTY child only becomes the session leader here; its privilege
+//! drop and D335 placement happen after exec in `session_shell` (#328).
 #![allow(unsafe_code)]
 use nix::{
     fcntl::{FcntlArg, OFlag, fcntl},
@@ -6,9 +9,9 @@ use nix::{
     sys::signal::{Signal, killpg},
     unistd::{self, ForkResult, Uid, User},
 };
-use std::os::unix::ffi::OsStrExt as _;
+#[cfg(any(target_os = "linux", test))]
+use std::ffi::CString;
 use std::{
-    ffi::CString,
     fs::File,
     io,
     mem::MaybeUninit,
@@ -16,10 +19,11 @@ use std::{
         fd::{AsRawFd, FromRawFd},
         unix::process::CommandExt,
     },
-    path::Path,
     process::{Child, Command, Stdio},
     sync::atomic::{AtomicU8, Ordering},
 };
+#[cfg(target_os = "linux")]
+use std::{os::unix::ffi::OsStrExt as _, path::Path};
 
 // Broad TERM compatibility, true colour and the cooperative startup marker [D315].
 const TERMINAL_ENVIRONMENT: [(&str, &str); 3] = [
@@ -143,6 +147,7 @@ pub struct Pty {
 }
 
 /// Replacing a startup file must not silently discard ACLs or other security metadata.
+#[cfg(target_os = "linux")]
 pub(crate) fn file_has_attributes(file: &File) -> io::Result<bool> {
     // SAFETY: a null buffer and zero size query only the required list length;
     // the borrowed descriptor remains open and the kernel retains no pointer.
@@ -157,12 +162,28 @@ pub(crate) fn file_has_attributes(file: &File) -> io::Result<bool> {
         Err(error)
     }
 }
+/// Refuse debugger attach to this shim for its lifetime (the Darwin
+/// counterpart of Linux non-dumpability for ptrace). Core files are already
+/// refused by the hard `RLIMIT_CORE` of 0 that every infraternal process sets
+/// first. The flag is not inherited by the PTY child it forks.
+#[cfg(target_os = "macos")]
+pub(crate) fn deny_debugger() -> io::Result<()> {
+    const PT_DENY_ATTACH: nix::libc::c_int = 31;
+    // SAFETY: PT_DENY_ATTACH takes no pid, address or data; scalar arguments only.
+    if unsafe { nix::libc::ptrace(PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn errno(error: nix::errno::Errno) -> io::Error {
     io::Error::from_raw_os_error(error as i32)
 }
 
 /// Keep sparse shim mappings out of khugepaged while retaining the caller's
 /// policy for the user's shell. This runs during single-threaded shim startup.
+// macOS has no transparent huge pages; the shared signature stays fallible.
+#[cfg_attr(target_os = "macos", allow(clippy::unnecessary_wraps))]
 pub(crate) fn disable_shim_thp() -> io::Result<Option<nix::libc::c_int>> {
     #[cfg(target_os = "linux")]
     {
@@ -202,6 +223,7 @@ fn set_thp_disabled(disabled: nix::libc::c_int) -> io::Result<()> {
 
 /// `PR_SET_THP_DISABLE` survives fork/exec. Undo only the shim's opt-out so
 /// shells and their programs retain the launcher's policy after exec.
+#[cfg(target_os = "linux")]
 fn restore_child_thp(inherited: Option<nix::libc::c_int>) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     if let Some(disabled) = inherited {
@@ -493,6 +515,12 @@ impl Pty {
         }
         nix::sys::stat::fchmod(&slave, nix::sys::stat::Mode::from_bits_truncate(0o600))
             .map_err(errno)?;
+        #[cfg(target_os = "macos")]
+        let mut command = {
+            let _ = child_thp;
+            darwin_command(&user, slave, readiness, program)?
+        };
+        #[cfg(target_os = "linux")]
         let mut command = linux_command(&user, slave, readiness, program, child_thp)?;
         let child = command.spawn()?;
         let master = File::from(terminal.master);
@@ -879,7 +907,9 @@ pub(crate) fn prepare_parent_bound_child(command: &mut Command) {
 }
 
 /// Keep the proxy's rootful credential drop inside the audited child boundary [#281].
-#[cfg(unix)]
+// Linux only, like its public wrapper: on macOS the proxy child is refused
+// before this boundary (lib.rs), and Darwin has no nix `setgroups`.
+#[cfg(target_os = "linux")]
 pub(crate) fn prepare_proxy_child(
     command: &mut Command,
     working_directory: &File,
@@ -1084,7 +1114,12 @@ fn reset_child_signals() -> io::Result<()> {
     let mut action: nix::libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = nix::libc::SIG_DFL;
     unsafe { nix::libc::sigemptyset(&raw mut action.sa_mask) };
-    for signal in 1..=nix::libc::SIGRTMAX() {
+    // Darwin has no real-time signals: its signals are 1..NSIG-1 (31).
+    #[cfg(target_os = "linux")]
+    let last = nix::libc::SIGRTMAX();
+    #[cfg(target_os = "macos")]
+    let last = 31;
+    for signal in 1..=last {
         if signal == nix::libc::SIGKILL || signal == nix::libc::SIGSTOP {
             continue;
         }
@@ -1239,6 +1274,7 @@ mod pin_exec_error_tests {
 
 /// The Linux PTY child: the account's shell with an explicit environment,
 /// dropping to the account in `pre_exec` after it becomes the session leader.
+#[cfg(target_os = "linux")]
 fn linux_command(
     user: &User,
     slave: File,
@@ -1310,8 +1346,88 @@ fn linux_command(
     Ok(command)
 }
 
+/// The Darwin PTY child: the private session-shell entry (behind `launchctl
+/// asuser` for a GUI login) with the slave as its standard handles. It becomes
+/// the terminal's session leader here and drops privileges after exec.
+#[cfg(target_os = "macos")]
+fn darwin_command(
+    user: &User,
+    slave: File,
+    readiness: bool,
+    program: &[std::ffi::OsString],
+) -> io::Result<Command> {
+    let start = if readiness {
+        crate::session_shell::Start::Readiness
+    } else if program.is_empty() {
+        crate::session_shell::Start::Login
+    } else {
+        crate::session_shell::Start::Program
+    };
+    let mut command = crate::session_shell::command(user, start, program)?;
+    command
+        .envs(TERMINAL_ENVIRONMENT)
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave));
+    for (name, value) in crate::session_locale_environment() {
+        command.env(name, value);
+    }
+    if let Some(directory) = std::env::var_os("ZDOTDIR") {
+        command.env("ZDOTDIR", directory);
+    }
+    prepare_child(&mut command);
+    lead_terminal(&mut command);
+    Ok(command)
+}
+
+/// Make the PTY child the leader of a fresh session whose controlling terminal
+/// is its standard input (the slave). Privileges stay root until the private
+/// session-shell entry drops them after exec (`session_shell`).
+#[cfg(target_os = "macos")]
+fn lead_terminal(command: &mut Command) {
+    // SAFETY: setsid and ioctl are async-signal-safe and use no captured
+    // allocation or lock; Command has installed the slave as descriptor 0.
+    unsafe {
+        command.pre_exec(|| {
+            unistd::setsid().map_err(errno)?;
+            if nix::libc::ioctl(0, nix::libc::TIOCSCTTY.into(), 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// The Darwin shell for the non-worker login path: the same private entry as
+/// `spawn_with_command`. Inherited host-login environments are Linux-only.
+#[cfg(target_os = "macos")]
+fn shell_command(user: &User, inherited: bool, readiness: bool) -> io::Result<Command> {
+    if inherited {
+        return Err(io::ErrorKind::Unsupported.into());
+    }
+    let start = if readiness {
+        crate::session_shell::Start::Readiness
+    } else {
+        crate::session_shell::Start::Login
+    };
+    let mut command = crate::session_shell::command(user, start, &[])?;
+    command
+        .env("TERM", "xterm-256color")
+        .env("COLORTERM", "truecolor");
+    for (name, value) in crate::session_locale_environment() {
+        command.env(name, value);
+    }
+    if let Some(directory) = std::env::var_os("ZDOTDIR") {
+        command.env("ZDOTDIR", directory);
+    }
+    prepare_child(&mut command);
+    lead_terminal(&mut command);
+    Ok(command)
+}
+
 // The broker inherits the host login environment/limits; legacy PTYs start
 // from the existing explicit environment. Both paths use the same shell setup.
+#[cfg(target_os = "linux")]
 fn shell_command(user: &User, inherited: bool, readiness: bool) -> io::Result<Command> {
     let name =
         CString::new(user.name.clone()).map_err(|_| io::Error::other("invalid login name"))?;
@@ -1948,6 +2064,7 @@ mod child_environment_tests {
 pub(crate) mod handoff;
 
 /// Literal programs bypass login-shell argument conventions; the shell path is still exported.
+#[cfg(target_os = "linux")]
 fn session_command(shell: &Path, readiness: bool, program: &[std::ffi::OsString]) -> Command {
     let mut command = Command::new(
         program
