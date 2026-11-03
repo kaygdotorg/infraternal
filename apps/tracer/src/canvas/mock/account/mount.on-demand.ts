@@ -2,11 +2,12 @@
  * The person's card on the test double (`?mock=1&proto=clusters&account=1`): the card is the product's (`canvas/account`),
  * fed by a double that knows everything the server cannot say yet, with the review scaffolding around it: palette rows that open
  * every state at once, and the dev-only data toggle (Demo data / Worst case / Empty / One). Loaded on demand with the mockup; the
- * product has none of this file.
+ * product has none of this file. It is named `*.on-demand.ts` because it imports the card mount, which is on demand (#330):
+ * every importer of an on-demand module must itself be on demand, or the gate counts the mount as critical again.
  */
 import { ICON_INFO, ICONS } from "../../../../../../packages/ui/src/icons";
 import type { CoreScreen, PaletteEntry } from "../../../core-screen";
-import { mountAccountCard, type AccountMount } from "../../account";
+import { mountAccountCard, type AccountMount } from "../../account/mount.on-demand";
 import type { DataMode } from "../data-mode";
 import { SCENARIOS, type AccountDouble } from "./double";
 import { accountDouble } from "./store";

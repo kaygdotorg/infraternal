@@ -329,7 +329,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     .then((area) => { if (disposed) area?.dispose(); else versionArea = area; })
     .catch(() => { /* the pill is news, not a dependency */ });
   // The person's card (D283) hangs on the sidebar's person pill. Its code is its own chunk, fetched once the canvas is up.
-  let account: import("./account").AccountMount | undefined;
+  let account: import("./account/mount.on-demand").AccountMount | undefined;
   if (person) {
     // The card's chunk can arrive after the sidebar is open (a slow link, a busy device). A press on the pill in that gap must not
     // fall through to the pill's old small menu, which the card replaces: it is claimed here and the card opens once it is mounted.
@@ -343,7 +343,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     };
     foot?.addEventListener("click", claimPress, true);
     // The card needs the model too (its own on-demand chunk), so the press stays claimed until both have arrived.
-    void Promise.all([import("./account"), loadAccount()]).then(([{ mountAccountCard }, session]) => {
+    void Promise.all([onDemand(() => import("./account/mount.on-demand")), loadAccount()]).then(([{ mountAccountCard }, session]) => {
       foot?.removeEventListener("click", claimPress, true);
       if (disposed) return;
       const mounted = mountAccountCard({ core, model: session.model, openSettings: (section) => {

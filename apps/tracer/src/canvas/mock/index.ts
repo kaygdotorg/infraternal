@@ -49,7 +49,7 @@ import type { VersionMock } from "./version";
 import { mountTransparencyCompare } from "./transparency";
 import { createDataMode, mountDataToggle } from "./data-mode";
 import { DATA_IDS, type DataId } from "./data-ids";
-import type { AccountMock } from "./account";
+import type { AccountMock } from "./account/mount.on-demand";
 import { createStartupDemo } from "./startup-demo";
 
 const CLOSE = '<path d="m7 7 10 10M17 7 7 17"/>';
@@ -236,7 +236,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     const wanted = query.get("data") ?? "";
     const dataMode = createDataMode((DATA_IDS as string[]).includes(wanted) ? (wanted as DataId) : "demo");
     stopToggle = mountDataToggle(stage, dataMode);
-    void onDemand(() => import("./account")).then((m) => { if (!signal.aborted) account = m.createAccountMock(core, dataMode); });
+    void onDemand(() => import("./account/mount.on-demand")).then((m) => { if (!signal.aborted) account = m.createAccountMock(core, dataMode); });
   }
   const removeProvider = core.addPaletteProvider(() => {
     const out: PaletteEntry[] = [...sessionScenes.entries(), ...connection.entries(), ...(version?.entries() ?? []), ...(account?.entries() ?? []), ...(startupDemo?.entries() ?? [])];
