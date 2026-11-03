@@ -3717,3 +3717,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      machine's firewall or router may still block it. The Mesh pair stays
      on the mesh address, and rootful behaviour (80/443 behind the managed
      firewall gate) is unchanged.
+331. **GotaTun measurement and next steps (owner, 2026-11-03, #260):**
+     - Loaded latency counts lost probes. A lost packet costs an SSH
+       retransmit, so a cut that turns loss into a little queueing wins,
+       and the fork pin moves to 73eb9f1 (uncapped UDP socket buffers on
+       Linux): "agreed".
+     - Next memory step: release the packet pool when a link goes idle,
+       aimed at the 11–14 MiB per endpoint that stays after load: "yes
+       please, we gotta really optimise it."
+     - Testing: "please extensively test it on linux and macos".
