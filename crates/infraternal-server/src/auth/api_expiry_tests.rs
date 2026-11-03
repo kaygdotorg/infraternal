@@ -162,8 +162,20 @@ async fn api_key_upgrade_starts_thirty_days_at_migration_once() {
         .execute(&pool)
         .await
         .unwrap();
-    auth.set_test_http_time(deadline - 1);
+    // J154 P3-1 (migration 0047): a key from before D333 also ends at most 24 hours after
+    // the upgrade, however long its sliding deadline still is.
+    let hard_end: i64 = sqlx::query_scalar("SELECT hard_expires_at FROM api_keys")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!((before + 86_400..=after + 86_400).contains(&hard_end));
+    auth.set_test_http_time(hard_end - 1);
     auth.api_authorize(&key, "hosts:read").await.unwrap();
+    auth.set_test_http_time(hard_end);
+    assert!(matches!(
+        auth.api_authorize(&key, "hosts:read").await,
+        Err(Error::Denied)
+    ));
 }
 
 #[tokio::test]

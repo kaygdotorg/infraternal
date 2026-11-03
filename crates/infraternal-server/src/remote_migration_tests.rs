@@ -95,14 +95,14 @@ async fn remote_identity_and_sessions_upgrade_dev_v11_and_remain_idempotent() {
 #[tokio::test]
 async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_order() {
     let migrations = sqlx::migrate!("./migrations");
-    let expected: Vec<i64> = (1..=38).chain([43, 44, 45, 46]).collect();
+    let expected: Vec<i64> = (1..=38).chain([43, 44, 45, 46, 47]).collect();
     let versions: Vec<i64> = migrations
         .iter()
         .map(|migration| migration.version)
         .collect();
     assert_eq!(
         versions, expected,
-        "fresh releases retain allocated migrations; audit 0043, key lifetime 0044, action tap 0045, read audit 0046"
+        "fresh releases retain allocated migrations; audit 0043, key lifetime 0044, action tap 0045, read audit 0046, pre-D333 key end 0047"
     );
 
     let production = SqlitePoolOptions::new()
@@ -133,7 +133,7 @@ async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_ord
             .fetch_one(&production)
             .await
             .unwrap();
-    assert_eq!((version, applied), (46, 42));
+    assert_eq!((version, applied), (47, 43));
     let mesh: (String, Option<String>, Option<String>) =
         sqlx::query_as("SELECT name, name_source, name_claim FROM mesh_nodes WHERE id=42")
             .fetch_one(&production)
@@ -267,12 +267,13 @@ async fn hostname_migration_upgrades_release6_copy_without_changing_canvas_or_ch
             .await
             .unwrap();
     // 0039..=0042 are allocated to other slices; the API audit table is 0043 (#303) and the
-    // approved key lifetime 0044 and the per-action tap 0045 (D333); key read summaries 0046.
-    assert_eq!(after.len(), 42);
+    // approved key lifetime 0044 and the per-action tap 0045 (D333); key read summaries 0046; pre-D333 key end 0047.
+    assert_eq!(after.len(), 43);
     assert_eq!(after[38].0, 43);
     assert_eq!(after[39].0, 44);
     assert_eq!(after[40].0, 45);
     assert_eq!(after[41].0, 46);
+    assert_eq!(after[42].0, 47);
     assert_eq!(&after[..28], before.as_slice());
     assert_eq!(after[28].0, 29);
     assert_eq!(after[29].0, 30);
