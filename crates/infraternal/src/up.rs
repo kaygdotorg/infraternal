@@ -32,6 +32,18 @@ const SERVICE_NAME: &str = "infraternal-agent.service";
 const SERVICE_BINARY: &str = "/var/lib/infraternal/bin/infraternal";
 const SERVICE_DATA: &str = "/var/lib/infraternal/agent";
 const PATH_BINARY: &str = "/usr/local/bin/infraternal";
+/// Where distributions (and `NixOS`) install the two programs `up` runs. PATH is
+/// never searched: the invoking user controls it, and a sudo policy can keep
+/// it for the root helper, so a PATH lookup could hand the machine key to
+/// another program or run one as root (#263, J122 P2).
+const SUDO_CANDIDATES: [&str; 3] = ["/usr/bin/sudo", "/bin/sudo", "/run/wrappers/bin/sudo"];
+const SYSTEMCTL_CANDIDATES: [&str; 3] = [
+    "/usr/bin/systemctl",
+    "/bin/systemctl",
+    "/run/current-system/sw/bin/systemctl",
+];
+/// The only environment the root helper gives systemctl.
+const HELPER_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// A user-facing failure class with a stable D303 exit status.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,6 +60,8 @@ enum Failure {
     LocalState,
     SudoUnavailable,
     SudoDenied,
+    UntrustedTool,
+    NoSystemd,
 }
 
 impl Failure {
@@ -62,16 +76,19 @@ impl Failure {
             | Self::Runtime
             | Self::Failed
             | Self::LocalState
-            | Self::SudoUnavailable => CommandState::Failed,
-            Self::SudoDenied => CommandState::Refused,
+            | Self::SudoUnavailable
+            | Self::NoSystemd => CommandState::Failed,
+            Self::SudoDenied | Self::UntrustedTool => CommandState::Refused,
         }
     }
 
     const fn exit(self) -> Exit {
         match self {
             Self::InvalidServer => Exit::Usage,
-            Self::Permission | Self::Expired | Self::SudoDenied => Exit::NotAllowed,
-            Self::Unsupported | Self::SudoUnavailable => Exit::NotFound,
+            Self::Permission | Self::Expired | Self::SudoDenied | Self::UntrustedTool => {
+                Exit::NotAllowed
+            }
+            Self::Unsupported | Self::SudoUnavailable | Self::NoSystemd => Exit::NotFound,
             Self::Unreachable => Exit::Unreachable,
             Self::Partial => Exit::Partial,
             Self::Throttled | Self::Runtime | Self::Failed | Self::LocalState => Exit::Failed,
@@ -101,6 +118,12 @@ impl Failure {
             }
             Self::SudoDenied => {
                 "sudo did not authorize the system service installation. Check your privileges, then rerun infraternal up."
+            }
+            Self::UntrustedTool => {
+                "sudo or systemctl can be changed by a user other than root. Give it and its directories back to root, then rerun infraternal up."
+            }
+            Self::NoSystemd => {
+                "infraternal up installs a systemd system service, and systemctl is not installed in a system directory."
             }
         }
     }
@@ -185,6 +208,18 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
         Err(failure) => return fail(json_output, failure),
     };
     let origin = server.origin().ascii_serialization();
+    // Find both privileged programs before an approval is requested, so a
+    // missing or replaceable one never wastes the owner's passkey approval.
+    let Ok(executable) = env::current_exe() else {
+        return fail(json_output, Failure::Permission);
+    };
+    let mut sudo = match sudo_command(&executable, &origin, json_output) {
+        Ok(command) => command,
+        Err(failure) => return fail(json_output, failure),
+    };
+    if let Err(failure) = trusted_tool(&SYSTEMCTL_CANDIDATES, Failure::NoSystemd) {
+        return fail(json_output, failure);
+    }
     let hostname = local_hostname();
     let host_id = uuid::Uuid::new_v4();
     let Ok(data) = crate::remote::default_data() else {
@@ -233,11 +268,7 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
         Err(failure) => return fail(json_output, failure),
     };
     invitation.wipe();
-    let Ok(executable) = env::current_exe() else {
-        return fail(json_output, Failure::Permission);
-    };
-    let mut command = sudo_command(&executable, &origin, json_output);
-    if let Err(failure) = invoke_sudo(&mut command, &payload) {
+    if let Err(failure) = invoke_sudo(&mut sudo, &payload) {
         return fail(json_output, failure);
     }
     if crate::remote::retire_prepared_join_key(&data).is_err() {
@@ -283,6 +314,11 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
     let server = server_url(server_input)?;
     let origin = server.origin().ascii_serialization();
     let handoff = read_handoff(&mut io::stdin().lock())?;
+    // Resolved again as root: the caller's check proves nothing to this process.
+    // After the handoff is read (the caller's write must not fail on a closed
+    // pipe) and before enrollment, so a refusal leaves no half-joined machine.
+    let systemctl =
+        trusted_tool(&SYSTEMCTL_CANDIDATES, Failure::NoSystemd).map_err(|_| Failure::Failed)?;
     let mut invitation = ApprovedInvitation(
         serde_json::from_slice(&handoff.invitation).map_err(|_| Failure::Permission)?,
     );
@@ -306,8 +342,7 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
         ))
         .map_err(|error| map_remote_failure(&error))?;
     let executable = env::current_exe().map_err(|_| Failure::Partial)?;
-    install_system_service(Path::new("/"), &executable, Path::new("systemctl"), 0)
-        .map_err(|_| Failure::Partial)
+    install_system_service(Path::new("/"), &executable, &systemctl, 0).map_err(|_| Failure::Partial)
 }
 
 fn server_url(input: &str) -> Result<Url, Failure> {
@@ -659,8 +694,9 @@ fn take_bytes(
     Ok(Zeroizing::new(value.to_vec()))
 }
 
-fn sudo_command(executable: &Path, server: &str, json_output: bool) -> Command {
-    let mut command = Command::new("sudo");
+/// The one sudo invocation: a root-owned sudo runs this binary's hidden helper.
+fn sudo_command(executable: &Path, server: &str, json_output: bool) -> Result<Command, Failure> {
+    let mut command = Command::new(trusted_tool(&SUDO_CANDIDATES, Failure::SudoUnavailable)?);
     command
         .arg("--")
         .arg(executable)
@@ -669,7 +705,74 @@ fn sudo_command(executable: &Path, server: &str, json_output: bool) -> Command {
     if json_output {
         command.arg("--json");
     }
-    command
+    Ok(command)
+}
+
+/// The first of `candidates` that exists, if only root can replace it.
+/// `missing` is the failure when none exists.
+fn trusted_tool(candidates: &[&str], missing: Failure) -> Result<PathBuf, Failure> {
+    trusted_program(candidates, 0).map_err(|error| match error {
+        ToolError::Missing => missing,
+        ToolError::Untrusted => Failure::UntrustedTool,
+    })
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum ToolError {
+    Missing,
+    Untrusted,
+}
+
+/// Resolve the first existing candidate to its canonical file, checking that
+/// nobody but root (or `owner`, which tests set to themselves) can replace it.
+/// An existing but replaceable candidate is refused, never skipped, so a
+/// tampered first choice cannot quietly fall through to another.
+fn trusted_program(candidates: &[&str], owner: u32) -> Result<PathBuf, ToolError> {
+    for candidate in candidates {
+        let candidate = Path::new(candidate);
+        let canonical = match fs::canonicalize(candidate) {
+            Ok(path) => path,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(ToolError::Untrusted),
+        };
+        // Both chains count: symlinks on the way (merged /usr, NixOS's
+        // /run/current-system) live in the candidate's own directories.
+        let trusted = regular_executable_of(&canonical, owner)
+            && candidate
+                .parent()
+                .into_iter()
+                .flat_map(Path::ancestors)
+                .chain(canonical.parent().into_iter().flat_map(Path::ancestors))
+                .all(|directory| protected_directory(directory, owner));
+        return if trusted {
+            Ok(canonical)
+        } else {
+            Err(ToolError::Untrusted)
+        };
+    }
+    Err(ToolError::Missing)
+}
+
+fn regular_executable_of(path: &Path, owner: u32) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| {
+        let mode = metadata.permissions().mode();
+        metadata.is_file()
+            && (metadata.uid() == 0 || metadata.uid() == owner)
+            && mode & 0o022 == 0
+            && mode & 0o111 != 0
+    })
+}
+
+/// A directory only root (or `owner`) can add to or rename in. A sticky
+/// directory (such as `/nix/store`) may be group-writable: others can add
+/// entries there but cannot replace the root-owned ones checked below it.
+fn protected_directory(directory: &Path, owner: u32) -> bool {
+    fs::metadata(directory).is_ok_and(|metadata| {
+        let mode = metadata.permissions().mode();
+        metadata.is_dir()
+            && (metadata.uid() == 0 || metadata.uid() == owner)
+            && (mode & 0o022 == 0 || mode & 0o1000 != 0)
+    })
 }
 
 fn invoke_sudo(command: &mut Command, payload: &[u8]) -> Result<(), Failure> {
@@ -872,7 +975,12 @@ fn run_systemctl(
     arguments: &[&str],
     expected_output: Option<&str>,
 ) -> io::Result<()> {
-    let output = Command::new(systemctl).args(arguments).output()?;
+    // Root runs systemctl with a fixed environment, not whatever sudo kept.
+    let output = Command::new(systemctl)
+        .args(arguments)
+        .env_clear()
+        .env("PATH", HELPER_PATH)
+        .output()?;
     if !output.status.success()
         || expected_output.is_some_and(|expected| {
             std::str::from_utf8(&output.stdout).ok().map(str::trim) != Some(expected)
@@ -917,9 +1025,9 @@ fn fail(json_output: bool, failure: Failure) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        Failure, JoinInvitation, Mode, approval_qr, encode_handoff, install_system_service,
-        invoke_sudo, join_approval_link, machine_key_short, machine_start_body, map_remote_failure,
-        read_handoff, sudo_command,
+        Failure, JoinInvitation, Mode, SUDO_CANDIDATES, ToolError, approval_qr, encode_handoff,
+        install_system_service, invoke_sudo, join_approval_link, machine_key_short,
+        machine_start_body, map_remote_failure, read_handoff, sudo_command, trusted_program,
     };
     use crate::cli::output::Exit;
     use serde_json::json;
@@ -1014,12 +1122,24 @@ mod tests {
 
     #[test]
     fn one_sudo_command_runs_the_hidden_system_enrollment_helper() {
-        let command = sudo_command(
+        let Ok(command) = sudo_command(
             Path::new("/home/user/bin/infraternal"),
             "https://mesh.example.org",
             false,
+        ) else {
+            // A host without a root-owned sudo refuses before any approval.
+            assert_eq!(
+                trusted_program(&SUDO_CANDIDATES, 0),
+                Err(ToolError::Missing)
+            );
+            return;
+        };
+        // Never a PATH lookup: the trusted, canonical sudo file itself.
+        assert!(Path::new(command.get_program()).is_absolute());
+        assert_eq!(
+            Ok(Path::new(command.get_program()).to_path_buf()),
+            trusted_program(&SUDO_CANDIDATES, 0)
         );
-        assert_eq!(command.get_program(), "sudo");
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
             [
@@ -1028,6 +1148,101 @@ mod tests {
                 std::ffi::OsStr::new("__up-system"),
                 std::ffi::OsStr::new("https://mesh.example.org"),
             ]
+        );
+    }
+
+    /// A private directory chain the test user owns, holding one program.
+    fn program_in(temporary: &TemporaryDirectory, directory_mode: u32, file_mode: u32) -> String {
+        let directory = temporary.0.join("bin");
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(&temporary.0, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(directory_mode)).unwrap();
+        let program = directory.join("tool");
+        fs::write(&program, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(file_mode)).unwrap();
+        program.to_str().unwrap().to_owned()
+    }
+
+    fn me() -> u32 {
+        nix::unistd::geteuid().as_raw()
+    }
+
+    #[test]
+    fn a_program_only_its_owner_can_replace_is_trusted_at_its_canonical_path() {
+        let temporary = TemporaryDirectory::new();
+        let program = program_in(&temporary, 0o755, 0o755);
+        assert_eq!(
+            trusted_program(&[program.as_str()], me()),
+            Ok(fs::canonicalize(&program).unwrap())
+        );
+        // A sticky shared directory (like /nix/store) is still protected.
+        let sticky = TemporaryDirectory::new();
+        let program = program_in(&sticky, 0o1777, 0o755);
+        assert!(trusted_program(&[program.as_str()], me()).is_ok());
+    }
+
+    #[test]
+    fn a_program_others_can_replace_is_refused() {
+        for (directory_mode, file_mode) in [
+            (0o755, 0o775),
+            (0o755, 0o757),
+            (0o777, 0o755),
+            (0o775, 0o755),
+        ] {
+            let temporary = TemporaryDirectory::new();
+            let program = program_in(&temporary, directory_mode, file_mode);
+            assert_eq!(
+                trusted_program(&[program.as_str()], me()),
+                Err(ToolError::Untrusted),
+                "directory {directory_mode:o}, file {file_mode:o}"
+            );
+        }
+        // Owned by someone else entirely: the test user cannot vouch for it.
+        let temporary = TemporaryDirectory::new();
+        let program = program_in(&temporary, 0o755, 0o755);
+        assert_eq!(
+            trusted_program(&[program.as_str()], me().wrapping_add(1)),
+            if me() == 0 {
+                Ok(fs::canonicalize(&program).unwrap())
+            } else {
+                Err(ToolError::Untrusted)
+            }
+        );
+    }
+
+    #[test]
+    fn a_replaceable_first_candidate_is_refused_not_skipped() {
+        let bad = TemporaryDirectory::new();
+        let good = TemporaryDirectory::new();
+        let bad = program_in(&bad, 0o777, 0o755);
+        let good = program_in(&good, 0o755, 0o755);
+        assert_eq!(
+            trusted_program(&[bad.as_str(), good.as_str()], me()),
+            Err(ToolError::Untrusted)
+        );
+        let missing = TemporaryDirectory::new();
+        let missing = missing.0.join("absent");
+        assert_eq!(
+            trusted_program(&[missing.to_str().unwrap(), good.as_str()], me()),
+            Ok(fs::canonicalize(&good).unwrap())
+        );
+        assert_eq!(
+            trusted_program(&[missing.to_str().unwrap()], me()),
+            Err(ToolError::Missing)
+        );
+    }
+
+    #[test]
+    fn a_symlink_in_a_writable_directory_is_refused_even_to_a_trusted_file() {
+        let target = TemporaryDirectory::new();
+        let target = program_in(&target, 0o755, 0o755);
+        let open = TemporaryDirectory::new();
+        fs::set_permissions(&open.0, fs::Permissions::from_mode(0o777)).unwrap();
+        let link = open.0.join("tool");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(
+            trusted_program(&[link.to_str().unwrap()], me()),
+            Err(ToolError::Untrusted)
         );
     }
 

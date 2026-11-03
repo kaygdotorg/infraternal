@@ -59,9 +59,12 @@ test("up is approved in J82's real page and enrolls over HTTPS without port 7443
   const systemctlCalls = process.env.UP_SYSTEMCTL_CALLS;
   const serviceSystemctlCalls = process.env.UP_SERVICE_SYSTEMCTL_CALLS;
   const helperOutput = process.env.UP_HELPER_OUTPUT;
+  const decoyCalls = process.env.UP_DECOY_CALLS;
+  const root = process.env.UP_PRIVATE_ROOT;
   const caBundle = process.env.UP_TEST_CA_BUNDLE;
   const evidence = process.env.INFRATERAL_UP_EVIDENCE_DIR;
-  if (!control || !sudoCalls || !systemctlCalls || !serviceSystemctlCalls || !helperOutput || !caBundle) {
+  if (!control || !sudoCalls || !systemctlCalls || !serviceSystemctlCalls || !helperOutput || !decoyCalls || !root
+    || !caBundle) {
     throw new Error("The namespace proof did not provide its private fixture paths");
   }
   const requestLines: string[] = [];
@@ -69,22 +72,25 @@ test("up is approved in J82's real page and enrolls over HTTPS without port 7443
   const addressAtRequest: string[] = [];
   const failedRequests: string[] = [];
   let inspectedResponse: import("playwright/test").Response | undefined;
-  const home = join(control, "home");
-  const dataHome = join(control, "data");
-  await mkdir(home, { recursive: true, mode: 0o700 });
+  // `up` runs in the private root (paths below are as it sees them); /infraternal is server.binary.
+  const dataHome = join(root, "home/up/data");
   await mkdir(dataHome, { recursive: true, mode: 0o700 });
   await writeFile(sudoCalls, "");
   await writeFile(helperOutput, "");
 
   const output = { stdout: "", stderr: "" };
-  cli = spawn(server.binary, ["up", server.origin, "--json"], {
+  cli = spawn("/usr/bin/unshare", [
+    "--pid", "--fork", `--mount-proc=${join(root, "proc")}`,
+    "/usr/sbin/chroot", root, "/infraternal", "up", server.origin, "--json",
+  ], {
     detached: true,
     env: {
-      ...process.env,
-      HOME: home,
+      // Decoy sudo and systemctl come first: `up` must use the root-owned ones in /usr/bin.
+      PATH: "/tmp/decoy:/usr/local/bin:/usr/bin:/bin",
+      HOME: "/home/up",
       HOSTNAME: MACHINE,
-      XDG_DATA_HOME: dataHome,
-      SSL_CERT_FILE: caBundle,
+      XDG_DATA_HOME: "/home/up/data",
+      SSL_CERT_FILE: "/etc/ssl/certs/ca-certificates.crt",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -234,6 +240,7 @@ test("up is approved in J82's real page and enrolls over HTTPS without port 7443
   expect(output.stdout.includes("/usr/local/bin/infraternal")).toBe(true);
   expect(output.stdout.includes("active")).toBe(true);
 
+  expect(await readFile(decoyCalls, "utf8"), "a PATH decoy ran instead of the trusted program").toBe("");
   expect(await readFile(sudoCalls, "utf8")).toBe("sudo\n");
   expect(await readFile(serviceSystemctlCalls, "utf8")).toBe(
     "daemon-reload\nenable --now infraternal-agent.service\nis-active infraternal-agent.service\n",
