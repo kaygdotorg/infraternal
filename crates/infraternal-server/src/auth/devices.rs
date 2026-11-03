@@ -15,7 +15,6 @@ impl Auth {
                     "hosts:read"
                         | "hosts:write"
                         | "sessions:read"
-                        | "sessions:write"
                         | "status:read"
                         | "terminal:connect"
                         | "actions:dry-run"

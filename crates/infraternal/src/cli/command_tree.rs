@@ -367,7 +367,7 @@ mod tests {
                 "--scope",
                 "hosts:write",
                 "--scope",
-                "sessions:write",
+                "terminal:connect",
             ])
             .expect("repeated scope options");
         let selected = selected(&matches);
@@ -378,7 +378,7 @@ mod tests {
                 .expect("scope values")
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            ["hosts:write", "sessions:write"]
+            ["hosts:write", "terminal:connect"]
         );
     }
 

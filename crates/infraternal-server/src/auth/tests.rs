@@ -879,7 +879,6 @@ async fn device_keys_accept_declared_action_scopes_without_broadening_to_unknown
         "hosts:read",
         "hosts:write",
         "sessions:read",
-        "sessions:write",
         "status:read",
         "terminal:connect",
         "actions:dry-run",

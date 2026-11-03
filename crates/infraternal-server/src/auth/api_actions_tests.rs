@@ -443,3 +443,15 @@ async fn pending_audit_rows_that_never_finish_are_expired() {
         ]
     );
 }
+
+/// J137 P3-6: `sessions:write` is not grantable until an action declares it.
+#[tokio::test]
+async fn sign_in_refuses_a_scope_that_no_action_uses() {
+    let f = fixture().await;
+    assert!(matches!(
+        f.auth
+            .device_start("cli", vec!["sessions:write".to_owned()], NOW)
+            .await,
+        Err(Error::Invalid)
+    ));
+}

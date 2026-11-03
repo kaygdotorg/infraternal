@@ -35,6 +35,17 @@ mod tests {
         assert_eq!(SCOPES, ["hosts:read", "sessions:read", "status:read"]);
     }
 
+    /// J137 P3-6: a scope no action declares is not grantable; a later action that declared
+    /// it would otherwise become callable by keys already issued, without a new approval.
+    #[test]
+    fn scopes_without_an_action_are_refused() {
+        assert!(matches!(
+            super::requested_scopes(&["sessions:write"]),
+            Err(Failure::InvalidScope)
+        ));
+        assert!(super::requested_scopes(&["hosts:write"]).is_ok());
+    }
+
     #[test]
     fn stored_key_selection_requires_one_server_or_an_explicit_origin() {
         let directory = TemporaryDirectory::new();
@@ -433,12 +444,7 @@ use zeroize::Zeroizing;
 use crate::cli::output::{CommandResult, CommandState, Exit, emit, print_progress};
 
 const SCOPES: [&str; 3] = ["hosts:read", "sessions:read", "status:read"];
-const ADDITIONAL_SCOPES: [&str; 4] = [
-    "hosts:write",
-    "sessions:write",
-    "terminal:connect",
-    "actions:dry-run",
-];
+const ADDITIONAL_SCOPES: [&str; 3] = ["hosts:write", "terminal:connect", "actions:dry-run"];
 const MAX_RESPONSE_BYTES: usize = 8 * 1024;
 const MAX_CREDENTIAL_FILE_BYTES: usize = 64 * 1024;
 const MAX_DEVICE_LIFETIME_SECONDS: u64 = 10 * 60;
@@ -1229,7 +1235,7 @@ fn fail(json_output: bool, failure: Failure) -> ExitCode {
         Failure::InvalidScope => (
             CommandState::Refused,
             "That API-key scope is not supported.",
-            "Choose a supported scope: hosts:write, sessions:write, terminal:connect or actions:dry-run.",
+            "Choose a supported scope: hosts:write, terminal:connect or actions:dry-run.",
         ),
         Failure::Dns => (
             CommandState::Unknown,
