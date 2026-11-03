@@ -301,7 +301,21 @@ inspect_upgrade() {
  # offers anything; "- -" means the identity cannot be read (#305, D335).
  setup_enrolled=$("$helper" --bootstrap-runtime "$base" "$identity" enrolled </dev/null) || exit $?
  case "$setup_enrolled" in *[!0-9a-zA-Z._\ -]*|*\ *\ *) exit 77;; esac
- printf 'INFRATERNAL_SETUP_UPGRADE %s %s %s %s %s %s %s %s %s\n' "$previous_host" "$previous_transaction" "$identity" "$setup_locked_machine" "$setup_upgrade_lease_pid" "$setup_upgrade_lease_birth" "$setup_since" "$setup_sockets" "$setup_enrolled"
+ printf 'INFRATERNAL_SETUP_UPGRADE %s %s %s %s %s %s %s %s %s %s\n' "$previous_host" "$previous_transaction" "$identity" "$setup_locked_machine" "$setup_upgrade_lease_pid" "$setup_upgrade_lease_birth" "$setup_since" "$setup_sockets" "$setup_enrolled" "$(upgrade_liveness)"
+}
+# "live" when the unit is active and its main process started at or after the
+# journal's last lease write: the upgrade's own START ran and the new agent is
+# serving, perhaps connected to the server that enrolled it. Only the commit
+# was lost. "idle" otherwise. The person is told before anything is stopped
+# (#305 P2-2). Informational: the mutating steps compare the record without it,
+# so an agent that restarts in between does not turn into a refusal.
+upgrade_liveness() {
+ $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1 || { printf 'idle\n'; return; }
+ setup_main=$($manager show -p MainPID --value infraternal-agent.service 2>/dev/null || :)
+ case "$setup_main" in ''|0|*[!0-9]*) printf 'idle\n'; return;; esac
+ setup_lease_epoch=$setup_lock_epoch
+ setup_process_start_epoch "$setup_main" || { printf 'idle\n'; return; }
+ if [ "$setup_lock_epoch" -ge "$setup_lease_epoch" ]; then printf 'live\n'; else printf 'idle\n'; fi
 }
 not_live() {
  if [ -d "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ]; then
@@ -596,9 +610,10 @@ retire_stuck_service() {
  aside_origin=
  setup_guard
  replace_observed=$(inspect_previous)
- [ "$replace_observed" = "$replace_expected" ] || exit 75
+ # The last field (live or idle) informs the person only (upgrade_liveness).
+ [ "${replace_observed% *}" = "${replace_expected% *}" ] || exit 75
  set -- $replace_expected
- [ "$#" = 11 ] && [ "$1" = INFRATERNAL_SETUP_UPGRADE ] || exit 75
+ [ "$#" = 12 ] && [ "$1" = INFRATERNAL_SETUP_UPGRADE ] || exit 75
  replace_transaction=$3
  replace_identity=$4
  stage="$base/.bootstrap-lock"
@@ -733,7 +748,8 @@ restore_superseded_install() {
 # upgrade worked and only its commit was lost. Finish it as commit would.
 finish_stuck_upgrade() {
  setup_guard
- [ "$(inspect_previous)" = "$1" ] || exit 75
+ finish_observed=$(inspect_previous)
+ [ "${finish_observed% *}" = "${1% *}" ] || exit 75
  stage="$base/.bootstrap-lock"
  # A failed activation keeps its rollback journal; nothing to finish.
  [ -f "$stage/activating" ] || exit 0

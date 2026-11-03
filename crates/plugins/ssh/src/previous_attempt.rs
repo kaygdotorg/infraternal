@@ -63,6 +63,9 @@ pub struct PreviousAttempt {
     enrolled: Option<Enrolled>,
     /// An install an earlier Replace or Re-enroll set aside and did not put back.
     set_aside: Option<SetAside>,
+    /// The stuck upgrade's agent is running and started after the journal's
+    /// lease: it may be serving and connected to its server now (#305 P2-2).
+    live: bool,
 }
 
 /// A stuck install an earlier attempt set aside, as Check found it (#305 P2-1).
@@ -191,6 +194,7 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
             sockets: 0,
             lease_owner: None,
             enrolled: None,
+            live: false,
             set_aside: Some(SetAside {
                 replaced,
                 machine: parse_machine(machine)?,
@@ -199,14 +203,15 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
             }),
         }));
     }
-    let (host, transaction, identity, sockets, lease_owner, enrolled) = match fields.as_slice() {
+    let (host, transaction, identity, sockets, lease_owner, enrolled, live) = match fields.as_slice()
+    {
         [
             "INFRATERNAL_SETUP_STALE",
             host,
             transaction,
             identity,
             sockets,
-        ] => (*host, *transaction, *identity, *sockets, None, None),
+        ] => (*host, *transaction, *identity, *sockets, None, None, false),
         [
             "INFRATERNAL_SETUP_UPGRADE",
             host,
@@ -219,6 +224,7 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
             sockets,
             digest,
             server,
+            live,
         ] => (
             *host,
             *transaction,
@@ -226,6 +232,11 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
             *sockets,
             Some(parse_lease_owner(machine, pid, birth, since)?),
             parse_enrolled(digest, server)?,
+            match *live {
+                "live" => true,
+                "idle" => false,
+                _ => return Err(refused()),
+            },
         ),
         _ => return Err(refused()),
     };
@@ -255,6 +266,7 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
         lease_owner,
         enrolled,
         set_aside: None,
+        live,
     }))
 }
 
@@ -413,6 +425,7 @@ impl PreviousAttempt {
                             .as_ref()
                             .map_or_else(String::new, |enrolled| enrolled.server.clone())
                     }),
+                    reenroll && self.live,
                 )
         } else {
             failure
@@ -505,15 +518,20 @@ impl PreviousAttempt {
     #[must_use]
     pub fn reenroll_findings(&self, mode: InstallMode, challenge: uuid::Uuid) -> Leftovers {
         let mut leftovers = self.findings(mode, challenge);
-        leftovers.findings[0] = self
-            .enrolled
-            .as_ref()
-            .map_or(Cow::Borrowed("Enrolled with another server"), |enrolled| {
-                Cow::Owned(format!("Enrolled with another server: {}", enrolled.server))
-            });
-        leftovers.findings[1] = Cow::Borrowed(
-            "It joins this server as a new host; the old install is set aside, not deleted",
+        // An unreadable identity proves no other server: say only what is known.
+        leftovers.findings[0] = self.enrolled.as_ref().map_or(
+            Cow::Borrowed("An install this server did not enroll; its identity cannot be read"),
+            |enrolled| Cow::Owned(format!("Enrolled with another server: {}", enrolled.server)),
         );
+        leftovers.findings[1] = if self.live {
+            Cow::Borrowed(
+                "Its infraternal agent is running and may be connected to that server now; joining here disconnects it",
+            )
+        } else {
+            Cow::Borrowed(
+                "It joins this server as a new host; the old install is set aside, not deleted",
+            )
+        };
         leftovers
     }
 
@@ -531,13 +549,14 @@ impl PreviousAttempt {
             enrolled.push_str(&identity.server);
         }
         format!(
-            "INFRATERNAL_SETUP_UPGRADE {} {} {} {} {pid} {birth} {} {} {enrolled}",
+            "INFRATERNAL_SETUP_UPGRADE {} {} {} {} {pid} {birth} {} {} {enrolled} {}",
             self.host.simple(),
             self.transaction.simple(),
             self.identity,
             owner.map_or("", |owner| owner.machine.as_str()),
             owner.map_or("", |owner| owner.since.as_str()),
             self.sockets,
+            if self.live { "live" } else { "idle" },
         )
     }
 
@@ -761,7 +780,7 @@ mod tests {
 
     fn upgrade(sockets: u16) -> PreviousAttempt {
         let record = format!(
-            "INFRATERNAL_SETUP_UPGRADE {} {} 1:2 host 99 1 2026-11-02T07:48:26Z {sockets} - -\n",
+            "INFRATERNAL_SETUP_UPGRADE {} {} 1:2 host 99 1 2026-11-02T07:48:26Z {sockets} - - idle\n",
             "1".repeat(32),
             "2".repeat(32)
         );
@@ -785,7 +804,7 @@ mod tests {
     fn upgrade_record_round_trips_with_its_enrolled_identity() {
         let digest = "ab".repeat(32);
         let record = format!(
-            "INFRATERNAL_SETUP_UPGRADE {} {} 1:2 host 99 1 2026-11-02T07:48:26Z 2 {digest} old.example\n",
+            "INFRATERNAL_SETUP_UPGRADE {} {} 1:2 host 99 1 2026-11-02T07:48:26Z 2 {digest} old.example idle\n",
             "1".repeat(32),
             "2".repeat(32)
         );
@@ -798,14 +817,14 @@ mod tests {
             })
         );
         assert_eq!(format!("{}\n", previous.upgrade_record()), record);
-        assert!(upgrade(0).upgrade_record().ends_with(" 0 - -"));
+        assert!(upgrade(0).upgrade_record().ends_with(" 0 - - idle"));
         for bad in [
             format!("{} old.example", "AB".repeat(32)),
             "- old.example".into(),
             format!("{digest} -bad"),
         ] {
             let record = format!(
-                "INFRATERNAL_SETUP_UPGRADE {} {} 1:2 host 99 1 2026-11-02T07:48:26Z 2 {bad}\n",
+                "INFRATERNAL_SETUP_UPGRADE {} {} 1:2 host 99 1 2026-11-02T07:48:26Z 2 {bad} idle\n",
                 "1".repeat(32),
                 "2".repeat(32)
             );
@@ -856,7 +875,7 @@ mod tests {
     #[test]
     fn reenroll_confirmation_names_the_other_server_and_the_sessions() {
         let record = format!(
-            "INFRATERNAL_SETUP_UPGRADE {} {} 1:2 host 99 1 2026-11-02T07:48:26Z 2 {} old.example\n",
+            "INFRATERNAL_SETUP_UPGRADE {} {} 1:2 host 99 1 2026-11-02T07:48:26Z 2 {} old.example idle\n",
             "1".repeat(32),
             "2".repeat(32),
             "ab".repeat(32)

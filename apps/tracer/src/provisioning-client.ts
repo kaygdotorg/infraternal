@@ -61,6 +61,8 @@ export interface FailureDetail {
     enrolled_with?: string;
     /** An earlier add-host set this install aside and did not put it back (#305). */
     set_aside?: boolean;
+    /** The stuck install's infraternal agent is running and may be connected to its other server now (#305). */
+    live?: boolean;
   };
   /** Observed SHA256 host-key fingerprints; untrusted, present only for `host-key`. */
   fingerprints?: string[];
@@ -170,6 +172,7 @@ function parseSetupLock(value: unknown): FailureDetail["setup_lock"] | undefined
   if (typeof value.sessions === "number" && Number.isSafeInteger(value.sessions) && value.sessions >= 0 && value.sessions <= 1024) lock.sessions = value.sessions;
   if (typeof value.enrolled_with === "string" && (value.enrolled_with === "" || /^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/.test(value.enrolled_with))) lock.enrolled_with = value.enrolled_with;
   if (value.set_aside === true) lock.set_aside = true;
+  if (value.live === true) lock.live = true;
   return lock;
 }
 

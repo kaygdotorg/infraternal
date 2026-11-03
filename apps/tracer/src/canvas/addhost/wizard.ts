@@ -819,7 +819,7 @@ export class Wizard {
     if (replaceStuck) {
       const label = this.foot.querySelector<HTMLElement>('[data-ah="start-fresh"] span');
       const lock = job.view.failure?.setup_lock;
-      if (label) label.textContent = lock?.set_aside ? "Put it back" : lock?.enrolled_with !== undefined ? "Join as a new host" : "Replace the stuck install";
+      if (label) label.textContent = lock?.set_aside ? "Put it back" : lock?.enrolled_with !== undefined ? lock.live ? "Disconnect and join here" : "Join as a new host" : "Replace the stuck install";
     }
   }
 

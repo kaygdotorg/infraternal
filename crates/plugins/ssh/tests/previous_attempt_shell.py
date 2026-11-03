@@ -182,6 +182,13 @@ transaction={TRANSACTION}
         self.manager_active.touch()
         return stage, payload
 
+    def mutating_calls(self):
+        """Manager calls that change the service; inspection only reads it."""
+        if not self.manager_log.exists():
+            return []
+        return [call for call in self.manager_log.read_text().splitlines()
+                if call.split(' ')[0] not in ('is-active', 'is-enabled', 'show')]
+
     def service_state(self):
         """(enabled, active) as the mock service manager holds it."""
         wants = self.unit.parent / 'default.target.wants/infraternal-agent.service'
@@ -705,7 +712,7 @@ replace_stuck_install "$observed"
         self.assertTrue(self.identity_path.exists())
         # The read-only check refuses before the stop: the service and its
         # sessions are never touched (#305 P2-3).
-        self.assertFalse(self.manager_log.exists(), 'the service is never stopped for a refusal a read-only check can see')
+        self.assertEqual(self.mutating_calls(), [], 'the service is never stopped for a refusal a read-only check can see')
         self.assertEqual(self.service_state(), (True, True))
         # A later add-host must still see the same stuck install instead of an
         # ownership refusal (#305).
@@ -732,7 +739,7 @@ replace_stuck_install "$observed"
         self.assertIsNone(unrelated.poll(), 'a process that only has a host file open is not an infraternal agent')
         self.assertTrue(stage.exists(), 'uncertain host activity keeps the journal for retry')
         # Found by the read-only scan, before the service was touched (#305 P1-2).
-        self.assertFalse(self.manager_log.exists(), 'the service is never stopped for a refusal the scan can see')
+        self.assertEqual(self.mutating_calls(), [], 'the service is never stopped for a refusal the scan can see')
 
     def test_reused_lease_pid_with_a_different_start_time_is_never_signalled(self):
         stage, _ = self.make_upgrade_fixture(f'{os.getpid()} 1\n')
@@ -822,10 +829,8 @@ replace_stuck_install "$observed"
         self.assertTrue((aside / '.bootstrap-lock/transaction').exists())
         self.assertEqual((aside / '.superseded-service').read_text(), 'yes yes\n')
         self.assertIn('# infraternal bootstrap', (aside / '.superseded-unit').read_text())
-        log = self.manager_log.read_text().splitlines()
-        self.assertEqual(log[:5], [
-            'is-enabled --quiet infraternal-agent.service',
-            'is-active --quiet infraternal-agent.service',
+        log = self.mutating_calls()
+        self.assertEqual(log[:3], [
             'stop infraternal-agent.service',
             'disable infraternal-agent.service',
             'daemon-reload',
@@ -847,6 +852,37 @@ replace_stuck_install "$observed"
             'start infraternal-agent.service',
         ])
         self.assertEqual(self.service_state(), (True, True), 'enabled and running, as found')
+
+    def test_an_upgrade_names_whether_its_agent_is_running_since_the_lease(self):
+        # #305 P2-2: the unit is active and its main process started after the
+        # journal's last lease write, so the upgrade's own START ran.
+        stage, _ = self.make_upgrade_fixture()
+        agent = subprocess.Popen(['sleep', '30'])
+        self.children.append(agent)
+        os.utime(stage / 'lease', (1, 1))
+        body = f'''
+live_manager() {{
+ if [ "$1" = show ]; then printf '%s\\n' {agent.pid}; return; fi
+ mock_manager "$@"
+}}
+manager=live_manager
+inspect_previous
+'''
+        self.assertTrue(self.run_shell(body).stdout.decode().endswith(' live\n'))
+        # Started before the lease: an old agent, not the upgrade's.
+        now = datetime.datetime.now().timestamp() + 3600
+        os.utime(stage / 'lease', (now, now))
+        self.assertTrue(self.run_shell(body).stdout.decode().endswith(' idle\n'))
+        # Not running at all.
+        self.manager_active.unlink()
+        self.assertTrue(self.run_shell(body).stdout.decode().endswith(' idle\n'))
+
+    def test_a_restarting_agent_does_not_turn_a_confirmed_replacement_into_a_refusal(self):
+        self.make_upgrade_fixture()
+        expected = self.run_shell('\ninspect_previous').stdout.decode().strip()
+        self.assertTrue(expected.endswith(' idle'), expected)
+        result = self.run_shell(f'\nreplace_stuck_install "{expected[:-4]}live"\n')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
 
     def test_a_disabled_stopped_install_is_put_back_disabled_and_stopped(self):
         self.make_upgrade_fixture()
@@ -939,7 +975,7 @@ supersede_stuck_install "{expected}"
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         self.assertFalse(stage.exists(), 'the lost commit is finished (#305 P2-2)')
         self.assertTrue((self.base / 'bin/live').exists())
-        self.assertFalse(self.manager_log.exists(), 'the running service is never touched')
+        self.assertEqual(self.mutating_calls(), [], 'the running service is never touched')
 
     def test_failed_upgrade_rollback_replaces_activating_with_failed_before_stop(self):
         stage, _ = self.make_upgrade_fixture()

@@ -292,6 +292,9 @@ pub(crate) struct SetupLock {
     /// An earlier add-host set this install aside and did not put it back (#305).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     set_aside: bool,
+    /// The stuck install's agent is running and may be connected to its other server (#305).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    live: bool,
 }
 
 /// Serialize the failure's wire fields; each UUID has its own key and its own field.
@@ -381,6 +384,7 @@ impl Failure {
             sessions: None,
             enrolled_with: None,
             set_aside: false,
+            live: false,
         });
         self
     }
@@ -417,6 +421,7 @@ impl Failure {
         mut self,
         sessions: u16,
         enrolled_with: Option<String>,
+        live: bool,
     ) -> Self {
         if let Some(lock) = self
             .ids
@@ -425,6 +430,7 @@ impl Failure {
         {
             lock.sessions = Some(sessions);
             lock.enrolled_with = enrolled_with;
+            lock.live = live;
         }
         self
     }
@@ -460,13 +466,21 @@ impl Failure {
             lock.machine, lock.since
         );
         if let Some(server) = &lock.enrolled_with {
-            // An empty name: the host could not read its identity file.
+            // An empty name: the host could not read its identity file, so
+            // nothing shows that another server enrolled it (#305 P2-2).
             if server.is_empty() {
-                text.push_str(" This machine is enrolled with another server.");
+                text.push_str(" This server did not enroll this machine, and its identity cannot be read.");
             } else {
                 let _ = write!(
                     text,
                     " This machine is enrolled with another server, {server}."
+                );
+            }
+            if lock.live {
+                let other = if server.is_empty() { "the server that enrolled it" } else { server.as_str() };
+                let _ = write!(
+                    text,
+                    " Its infraternal agent is running and may be connected to {other} now. Joining it here disconnects it from {other}; remove it there afterwards."
                 );
             }
             text.push_str(" Joining it to this server makes it a new host with a new key; its old infraternal agent is set aside, not deleted.");

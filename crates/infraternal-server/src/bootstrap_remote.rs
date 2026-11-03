@@ -2038,7 +2038,7 @@ mod tests {
         let host = f.prior.simple();
         let transaction = Uuid::new_v4().simple();
         let check = format!(
-            "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_UPGRADE {host} {transaction} 1:2 fixture 99999999 1 2026-11-02T04:05:06Z 0 {} remote.example.test\n",
+            "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_UPGRADE {host} {transaction} 1:2 fixture 99999999 1 2026-11-02T04:05:06Z 0 {} remote.example.test idle\n",
             hex(&digest)
         )
         .into_bytes();
@@ -2143,7 +2143,7 @@ mod tests {
     /// A stuck-upgrade check record for `host`, enrolled with `server` under `digest`.
     fn stuck_check(host: Uuid, digest: &[u8; 32], server: &str) -> Vec<u8> {
         format!(
-            "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_UPGRADE {} {} 1:2 fixture 99999999 1 2026-11-02T04:05:06Z 2 {} {server}\n",
+            "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_UPGRADE {} {} 1:2 fixture 99999999 1 2026-11-02T04:05:06Z 2 {} {server} idle\n",
             host.simple(),
             Uuid::new_v4().simple(),
             hex(digest)

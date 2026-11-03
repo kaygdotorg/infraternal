@@ -91,6 +91,15 @@ test("a machine enrolled with another server asks to join as a new host (D335)",
   expect(guideFor("code", unnamed).happened).toBe("Join it to this server as a new host with a new key. Its old infraternal agent is stopped and set aside, not deleted.");
 });
 
+test("a live install says joining here disconnects it from its server, and an unread one claims no server (#305)", () => {
+  const lock = { machine: "code", pid: 254, since: "2026-11-02T04:05:06Z", active: false, sessions: 0 };
+  const guide = (setup_lock: object) => guideFor("code", { kind: "stale_previous_attempt", message: "x", log_tail: [], setup_lock } as unknown as FailureDetail);
+  expect(guide({ ...lock, enrolled_with: "monitor01.example", live: true }).happened)
+    .toStartWith("Its infraternal agent is running and may be connected to monitor01.example now. Joining it here disconnects it from that server; remove it there afterwards.");
+  expect(guide({ ...lock, enrolled_with: "" }).title).toBe("code has an install this server did not enroll");
+  expect(guide({ ...lock, enrolled_with: "", live: true }).happened).toContain("connected to the server that enrolled it now");
+});
+
 test("an install an earlier add-host set aside is offered back, not installed beside (#305)", () => {
   const failure = {
     kind: "stale_previous_attempt",

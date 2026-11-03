@@ -192,9 +192,13 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
           tone: "info",
         };
         // D335: another server enrolled this machine; it can join this one as a new host.
+        // An unnamed server: the identity could not be read, so nothing shows another server enrolled it.
+        // A live agent may be connected to its server right now; joining here disconnects it (#305).
         if (lock.enrolled_with !== undefined) return {
-          title: `${name} is enrolled with another server`,
-          happened: `${lock.enrolled_with ? `It belongs to ${lock.enrolled_with}. ` : ""}Join it to this server as a new host with a new key. Its old infraternal agent is stopped and set aside, not deleted.`,
+          title: lock.enrolled_with ? `${name} is enrolled with another server` : `${name} has an install this server did not enroll`,
+          happened: lock.live
+            ? `Its infraternal agent is running and may be connected to ${lock.enrolled_with || "the server that enrolled it"} now. Joining it here disconnects it from that server; remove it there afterwards. It joins this server as a new host with a new key, and its old infraternal agent is set aside, not deleted.`
+            : `${lock.enrolled_with ? `It belongs to ${lock.enrolled_with}. ` : ""}Join it to this server as a new host with a new key. Its old infraternal agent is stopped and set aside, not deleted.`,
           next: sessionsLine(lock),
           fix: "replace-stuck-install",
           tone: "info",

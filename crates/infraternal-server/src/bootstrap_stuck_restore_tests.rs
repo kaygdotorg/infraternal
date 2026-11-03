@@ -226,7 +226,7 @@ impl SshSession for HostSession {
 /// A check record for the fixture's stuck upgrade of `host`, enrolled under `digest` with `server`.
 fn home_check(home: &Home, host: Uuid, digest: &[u8; 32], server: &str) -> Vec<u8> {
     format!(
-        "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_UPGRADE {} {} 1:2 fixture 99999999 1 2026-11-02T04:05:06Z 0 {} {server}\n",
+        "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_UPGRADE {} {} 1:2 fixture 99999999 1 2026-11-02T04:05:06Z 0 {} {server} idle\n",
         host.simple(),
         home.transaction.simple(),
         hex(digest)
@@ -566,4 +566,30 @@ async fn check_offers_back_an_install_an_earlier_attempt_left_set_aside() {
     assert!(run.ran("\nrestore_superseded_install "));
     assert!(!run.ran("prepare-join-key"));
     home.assert_as_found();
+}
+
+#[tokio::test]
+async fn a_live_install_is_named_live_before_it_is_disconnected_from_its_server() {
+    let f = fixture(true).await;
+    let home = Arc::new(Home::new());
+    let check = String::from_utf8(home_check(&home, Uuid::new_v4(), &[9; 32], "old.example"))
+        .unwrap()
+        .replace(" idle\n", " live\n")
+        .into_bytes();
+    let run = Run::start(&f, &home, check, [7; 32], Stop::Join);
+    run.offer().await;
+    let events = run.batch().events(0).1;
+    let offer = events.iter().find(|event| event.leftovers.is_some()).unwrap();
+    let failure = serde_json::to_value(offer.failure.as_ref().unwrap()).unwrap();
+    assert_eq!(failure["setup_lock"]["live"], true);
+    let message = failure["message"].as_str().unwrap();
+    assert!(
+        message.contains("running and may be connected to old.example now")
+            && message.contains("disconnects it from old.example"),
+        "{message}"
+    );
+    assert!(
+        offer.leftovers.as_ref().unwrap().findings[1].contains("joining here disconnects it")
+    );
+    assert!(!run.ran("\nsupersede_stuck_install "), "nothing is stopped before the person confirms");
 }
