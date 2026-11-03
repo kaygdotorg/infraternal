@@ -305,7 +305,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const build = buildVersion();
   const canvasItems = new Map<string, ToolbarItem>();
   const settingsSections: SettingsSection[] = [aboutSection({ name: "infraternal", version: build.short, commit: build.full, built: build.built })];
-  const shortcutsPanel = shortcutsSection();
+  const shortcutsPanel = shortcutsSection(stage);
   if (options.canvas && !options.settingsView) settingsSections.unshift(shortcutsPanel);
   const aboutPanel = settingsSections[0]!;
   const settings = options.canvas && !options.settingsView ? createSettingsOverlay({ stage, sections: settingsSections }) : undefined;
