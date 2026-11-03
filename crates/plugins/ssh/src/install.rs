@@ -1348,6 +1348,9 @@ pub fn parse_refusal(receipt: &[u8], step: InstallStep) -> Option<Failure> {
 // The shell keeps the same open description until all receipt cleanup ends.
 // Legacy runtimes without that file use the binary's conservative socket probe.
 // A private parent-directory setup guard fences startup during final lock unlink.
+// `refuse <cause>` names why an earlier journal is not recoverable with a fixed
+// token (#305). The read-only check sets setup_check=yes, so the record reaches
+// parse_check and the person sees the cause; every mutating caller still exits 75.
 pub(crate) const RUNTIME_CLEANUP: &str = include_str!("runtime_cleanup.sh");
 
 // Cache records contain only public executable content. Every lookup repeats

@@ -4,8 +4,8 @@ private_file() {
  [ "$(stat -c '%s' "$1")" -le 128 ] || exit 71
 }
 hex_id() {
- [ "${#1}" = 32 ] || exit 75
- case "$1" in *[!0-9a-f]*) exit 75;; esac
+ [ "${#1}" = 32 ] || refuse id
+ case "$1" in *[!0-9a-f]*) refuse id;; esac
 }
 setup_process_start_epoch() {
  process_start_ticks "$1" || return 1
@@ -95,7 +95,7 @@ private_tree() {
  setup_bad=$(find "$setup_tree" \( ! -uid "$(id -u)" -o ! \( -type d -o -type f \) -o -perm /077 -o \( -type d ! -perm 0700 \) \) -print -quit) || exit 71
  [ -z "$setup_bad" ] || exit 71
  setup_count=$(find "$setup_tree" -printf . | wc -c)
- [ "$setup_count" -le 4096 ] || exit 75
+ [ "$setup_count" -le 4096 ] || refuse size
 }
 validate_upgrade_socket_dir() {
  setup_socket_dir=$1
@@ -104,7 +104,7 @@ validate_upgrade_socket_dir() {
  for setup_socket in "$setup_socket_dir"/* "$setup_socket_dir"/.[!.]* "$setup_socket_dir"/..?*; do
   [ -e "$setup_socket" ] || [ -L "$setup_socket" ] || continue
   setup_entry_count=$((setup_entry_count + 1))
-  [ "$setup_entry_count" -le 1024 ] || exit 75
+  [ "$setup_entry_count" -le 1024 ] || refuse size
   setup_socket_name=${setup_socket##*/}
   case "$setup_socket_name" in
    *.ending)
@@ -148,10 +148,10 @@ validate_upgrade_stage() {
  stage="$base/.bootstrap-lock"
  [ -d "$stage" ] && [ ! -L "$stage" ] && [ -O "$stage" ] && [ "$(stat -c '%a' "$stage")" = 700 ] || exit 71
  private_file "$stage/transaction"
- [ "$(cat "$stage/transaction")" = "$previous_transaction" ] || exit 75
+ [ "$(cat "$stage/transaction")" = "$previous_transaction" ] || refuse transaction
  private_file "$stage/kind"
- [ "$(cat "$stage/kind")" = upgrade ] || exit 75
- parse_setup_lease "$stage/lease" || exit 75
+ [ "$(cat "$stage/kind")" = upgrade ] || refuse kind
+ parse_setup_lease "$stage/lease" || refuse lease
  setup_upgrade_lease_pid=$setup_lease_pid
  setup_upgrade_lease_birth=$setup_lease_birth
  for entry in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
@@ -160,28 +160,28 @@ validate_upgrade_stage() {
    transaction|kind|lease) :;;
    activating|failed|stopping|stop-refused|had-binary|had-state|had-launcher|was-active|was-enabled|replacing-binary|replacing-state|replacing-unit|replacing-launcher|linger-requested)
     private_file "$entry"
-    [ "$(stat -c '%s' "$entry")" = 0 ] || exit 75;;
+    [ "$(stat -c '%s' "$entry")" = 0 ] || refuse marker;;
    payload)
     [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a' "$entry")" = 700 ] || exit 71;;
    previous-binary)
     [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a:%h' "$entry")" = 700:1 ] || exit 71;;
    unit|previous-unit)
     [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a:%h' "$entry")" = 600:1 ] || exit 71
-    [ "$(stat -c '%s' "$entry")" -le 4096 ] || exit 75;;
+    [ "$(stat -c '%s' "$entry")" -le 4096 ] || refuse size;;
    cache)
     private_tree "$entry"
     for cache_entry in "$entry"/* "$entry"/.[!.]* "$entry"/..?*; do
      [ -e "$cache_entry" ] || [ -L "$cache_entry" ] || continue
      case "${cache_entry##*/}" in
-      owner) private_file "$cache_entry"; [ "$(cat "$cache_entry")" = INFRATERNAL_PAYLOAD_CACHE_V1 ] || exit 75;;
+      owner) private_file "$cache_entry"; [ "$(cat "$cache_entry")" = INFRATERNAL_PAYLOAD_CACHE_V1 ] || refuse cache;;
       payload)
        [ -f "$cache_entry" ] && [ ! -L "$cache_entry" ] && [ -O "$cache_entry" ] && [ "$(stat -c '%a:%h' "$cache_entry")" = 700:2 ] || exit 71
        [ "$stage/payload" -ef "$cache_entry" ] || exit 71;;
-      *) exit 75;;
+      *) refuse entry;;
      esac
     done;;
    state|previous-state) private_tree "$entry";;
-   *) exit 75;;
+   *) refuse entry;;
   esac
  done
  if [ -f "$stage/payload" ] && [ ! -L "$stage/payload" ]; then
@@ -196,19 +196,19 @@ validate_upgrade_stage() {
      setup_cache="$base.bootstrap-cache"
      [ -d "$setup_cache" ] && [ ! -L "$setup_cache" ] && [ -O "$setup_cache" ] && [ "$(stat -c '%a' "$setup_cache")" = 700 ] || exit 71
      private_file "$setup_cache/owner"
-     [ "$(cat "$setup_cache/owner")" = INFRATERNAL_PAYLOAD_CACHE_V1 ] || exit 75
+     [ "$(cat "$setup_cache/owner")" = INFRATERNAL_PAYLOAD_CACHE_V1 ] || refuse cache
      [ -f "$setup_cache/payload" ] && [ ! -L "$setup_cache/payload" ] && [ -O "$setup_cache/payload" ] && [ "$(stat -c '%a:%h' "$setup_cache/payload")" = 700:2 ] && [ "$stage/payload" -ef "$setup_cache/payload" ] || exit 71
     fi;;
    *) exit 71;;
   esac
  fi
- [ ! -e "$stage/activating" ] || [ ! -e "$stage/failed" ] || exit 75
- [ -f "$stage/activating" ] || [ -f "$stage/failed" ] || exit 75
+ [ ! -e "$stage/activating" ] || [ ! -e "$stage/failed" ] || refuse marker
+ [ -f "$stage/activating" ] || [ -f "$stage/failed" ] || refuse marker
 }
 validate_upgrade_root() {
  [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ] && [ "$(stat -c '%a' "$base")" = 700 ] || exit 71
  private_file "$base/.bootstrap-owner"
- [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || exit 75
+ [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || refuse owner
  previous_host=$(cat "$base/.bootstrap-owner")
  hex_id "$previous_host"
  identity=$(stat -c '%d:%i' "$base")
@@ -221,7 +221,7 @@ validate_upgrade_root() {
    .bootstrap-owner|.bootstrap-lock|bin|state|sessions) :;;
    .bootstrap-ready)
     private_file "$entry"
-    [ "$(cat "$entry")" = "$previous_host" ] || exit 75;;
+    [ "$(cat "$entry")" = "$previous_host" ] || refuse owner;;
    *) exit 71;;
   esac
  done
@@ -233,11 +233,11 @@ validate_upgrade_root() {
  done
  [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$base/bin/current" ] || exit 71
  [ -f "$unit" ] && [ ! -L "$unit" ] && [ -O "$unit" ] && [ "$(stat -c '%a:%h' "$unit")" = 600:1 ] || exit 71
- [ "$(stat -c '%s' "$unit")" -le 4096 ] || exit 75
+ [ "$(stat -c '%s' "$unit")" -le 4096 ] || refuse size
  grep -Fxq "# infraternal bootstrap $previous_host" "$unit" || exit 71
  grep -Fxq "ExecStart=\"$base/bin/current\" agent --data \"$base/state\" --state \"$base/sessions\" run" "$unit" || exit 71
  setup_wanted=$(sed -n 's/^WantedBy=//p' "$unit")
- case "$setup_wanted" in default.target|multi-user.target) :;; *) exit 75;; esac
+ case "$setup_wanted" in default.target|multi-user.target) :;; *) refuse unit;; esac
  setup_wants_dir="$(dirname "$unit")/$setup_wanted.wants"
  [ -d "$setup_wants_dir" ] && [ ! -L "$setup_wants_dir" ] && [ -O "$setup_wants_dir" ] || exit 71
  setup_wants_mode=$(stat -c '%a' "$setup_wants_dir")
@@ -249,16 +249,16 @@ validate_upgrade_root() {
 inspect_upgrade() {
  validate_upgrade_root
  validate_upgrade_stage
- [ -d /proc ] || exit 75
+ [ -d /proc ] || refuse tool
  setup_lock_epoch=$(stat -c '%Y' "$stage/lease" 2>/dev/null || :)
- case "$setup_lock_epoch" in ''|*[!0-9]*) exit 75;; esac
+ case "$setup_lock_epoch" in ''|*[!0-9]*) refuse lease;; esac
  setup_since=$(date -u -d "@$setup_lock_epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || :)
- case "$setup_since" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) :;; *) exit 75;; esac
+ case "$setup_since" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) :;; *) refuse lease;; esac
  setup_locked_machine=$(hostname 2>/dev/null || :)
  case "$setup_locked_machine" in ''|[-.]*|*[!a-zA-Z0-9._-]*) setup_locked_machine=unknown;; esac
  [ "${#setup_locked_machine}" -le 253 ] || setup_locked_machine=unknown
  if [ -e "/proc/$setup_upgrade_lease_pid/stat" ]; then
-  process_start_ticks "$setup_upgrade_lease_pid" || exit 75
+  process_start_ticks "$setup_upgrade_lease_pid" || refuse lease
   if [ "$process_start_ticks" = "$setup_upgrade_lease_birth" ] && [ -L "/proc/$setup_upgrade_lease_pid/fd/7" ] && [ "$stage" -ef "/proc/$setup_upgrade_lease_pid/fd/7" ]; then
    printf 'INFRATERNAL_SETUP_LOCKED %s %s %s %s\n' "$setup_locked_machine" "$setup_upgrade_lease_pid" "$setup_upgrade_lease_birth" "$setup_since"
    return
@@ -270,7 +270,7 @@ inspect_upgrade() {
   for setup_socket in "$setup_socket_dir"/*.sock; do
    [ -S "$setup_socket" ] && [ ! -L "$setup_socket" ] && [ -O "$setup_socket" ] || continue
    setup_sockets=$((setup_sockets + 1))
-   [ "$setup_sockets" -le 1024 ] || exit 75
+   [ "$setup_sockets" -le 1024 ] || refuse size
   done
  done
   # Discover an old or missing helper before offering replacement. The public
@@ -287,7 +287,7 @@ not_live() {
   exec 8<&-
  fi
  if [ -e "$base" ] || [ -L "$base" ]; then
-  base_real=$(CDPATH= cd -P "$base" 2>/dev/null && pwd -P) || exit 75
+  base_real=$(CDPATH= cd -P "$base" 2>/dev/null && pwd -P) || refuse tool
  else
   base_real=$(CDPATH= cd -P "$(dirname "$base")" && pwd -P)/${base##*/}
  fi
@@ -299,20 +299,20 @@ not_live() {
   "$helper" --bootstrap-runtime "$base" "$(stat -c '%d:%i' "$base")" sessions </dev/null || exit $?
   break
  done
- case "$base" in *[\*\?\[]*) exit 75;; esac
- case "$base_real" in *[\*\?\[]*) exit 75;; esac
+ case "$base" in *[\*\?\[]*) refuse tool;; esac
+ case "$base_real" in *[\*\?\[]*) refuse tool;; esac
  set --
  for process in /proc/[0-9]*; do
   [ -O "$process" ] || continue
   set -- "$@" "$process/exe" "$process/fd"
-  [ "$#" -le 8192 ] || exit 75
+  [ "$#" -le 8192 ] || refuse size
  done
- [ "$#" -le 8192 ] || exit 75
- command -v find >/dev/null 2>&1 || exit 75
+ [ "$#" -le 8192 ] || refuse size
+ command -v find >/dev/null 2>&1 || refuse tool
  if live=$(find "$@" -maxdepth 1 \( -lname "$base/*" -o -lname "$base_real/*" \) -print -quit 2>/dev/null); then
   :
  else
-  [ "$?" = 1 ] || exit 75
+  [ "$?" = 1 ] || refuse tool
  fi
  [ -z "$live" ] || exit 73
 
@@ -349,13 +349,13 @@ inspect_previous() {
  receipt=
  for candidate in "$base".bootstrap-rollback-*; do
   [ -e "$candidate" ] || [ -L "$candidate" ] || continue
-  [ -z "$receipt" ] || exit 75
+  [ -z "$receipt" ] || refuse receipt
   receipt=$candidate
  done
  if [ -z "$receipt" ] && [ ! -e "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ] && [ ! -e "$base/.bootstrap-acquiring" ] && [ ! -L "$base/.bootstrap-acquiring" ]; then
   if [ -e "$base" ] || [ -L "$base" ]; then
    private_file "$base/.bootstrap-owner"
-   [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || exit 75
+   [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || refuse owner
    hex_id "$(cat "$base/.bootstrap-owner")"
   fi
   printf 'INFRATERNAL_SETUP_CLEAR\n'
@@ -367,29 +367,29 @@ inspect_previous() {
   hex_id "$previous_transaction"
   read -r previous_host recorded_transaction kind identity extra < "$receipt"
   hex_id "$previous_host"
-  [ "$(cat "$receipt")" = "$previous_host $previous_transaction fresh $identity" ] || exit 75
-  case "$identity" in ''|:*|*:|*:*:*|*[!0-9:]*) exit 75;; esac
-  case "$identity" in *:*) :;; *) exit 75;; esac
+  [ "$(cat "$receipt")" = "$previous_host $previous_transaction fresh $identity" ] || refuse receipt
+  case "$identity" in ''|:*|*:|*:*:*|*[!0-9:]*) refuse receipt;; esac
+  case "$identity" in *:*) :;; *) refuse receipt;; esac
   if [ ! -e "$base" ] && [ ! -L "$base" ]; then
    not_live
    printf 'INFRATERNAL_SETUP_STALE %s %s %s 0\n' "$previous_host" "$previous_transaction" "$identity"
    return
   fi
   [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ] && [ "$(stat -c '%a' "$base")" = 700 ] || exit 71
-  [ "$(stat -c '%d:%i' "$base")" = "$identity" ] || exit 75
+  [ "$(stat -c '%d:%i' "$base")" = "$identity" ] || refuse identity
   if [ ! -e "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ]; then
    for entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
     [ ! -e "$entry" ] && [ ! -L "$entry" ] || exit 71
    done
   else
    private_file "$base/.bootstrap-owner"
-   [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || exit 75
-   [ "$(cat "$base/.bootstrap-owner")" = "$previous_host" ] || exit 75
+   [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || refuse owner
+   [ "$(cat "$base/.bootstrap-owner")" = "$previous_host" ] || refuse owner
   fi
  else
   [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ] && [ "$(stat -c '%a' "$base")" = 700 ] || exit 71
   private_file "$base/.bootstrap-owner"
-  [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || exit 75
+  [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || refuse owner
   previous_host=$(cat "$base/.bootstrap-owner")
   hex_id "$previous_host"
   identity=$(stat -c '%d:%i' "$base")
@@ -397,13 +397,13 @@ inspect_previous() {
    private_file "$base/.bootstrap-acquiring"
    record=$(cat "$base/.bootstrap-acquiring")
    previous_transaction=${record% fresh}
-   [ "$record" = "$previous_transaction fresh" ] || exit 75
+   [ "$record" = "$previous_transaction fresh" ] || refuse transaction
   else
    [ -d "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ] && [ -O "$base/.bootstrap-lock" ] && [ "$(stat -c '%a' "$base/.bootstrap-lock")" = 700 ] || exit 71
    private_file "$base/.bootstrap-lock/transaction"
    private_file "$base/.bootstrap-lock/kind"
    previous_kind=$(cat "$base/.bootstrap-lock/kind")
-   case "$previous_kind" in fresh|upgrade) :;; *) exit 75;; esac
+   case "$previous_kind" in fresh|upgrade) :;; *) refuse kind;; esac
    previous_transaction=$(cat "$base/.bootstrap-lock/transaction")
   fi
   hex_id "$previous_transaction"
@@ -421,9 +421,9 @@ inspect_previous() {
   [ -d "$stage" ] && [ ! -L "$stage" ] && [ -O "$stage" ] && [ "$(stat -c '%a' "$stage")" = 700 ] || exit 71
   if [ -e "$stage/transaction" ] || [ -L "$stage/transaction" ]; then
    private_file "$stage/transaction"
-   [ "$(cat "$stage/transaction")" = "$previous_transaction" ] || exit 75
+   [ "$(cat "$stage/transaction")" = "$previous_transaction" ] || refuse transaction
    private_file "$stage/kind"
-   [ "$(cat "$stage/kind")" = fresh ] || exit 75
+   [ "$(cat "$stage/kind")" = fresh ] || refuse kind
    for entry in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
     case "${entry##*/}" in
@@ -432,12 +432,12 @@ inspect_previous() {
      payload)
       [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] || exit 71
       case "$(stat -c '%a' "$entry")" in 600|700) :;; *) exit 71;; esac;;
-     *) exit 75;;
+     *) refuse entry;;
     esac
    done
   else
    private_file "$base/.bootstrap-acquiring"
-   [ "$(cat "$base/.bootstrap-acquiring")" = "$previous_transaction fresh" ] || exit 75
+   [ "$(cat "$base/.bootstrap-acquiring")" = "$previous_transaction fresh" ] || refuse transaction
    for entry in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
     [ ! -e "$entry" ] && [ ! -L "$entry" ] || exit 71
    done
@@ -445,8 +445,8 @@ inspect_previous() {
  fi
  if [ -e "$base/.bootstrap-acquiring" ] || [ -L "$base/.bootstrap-acquiring" ]; then
   private_file "$base/.bootstrap-acquiring"
-  [ "$(stat -c '%s' "$base/.bootstrap-acquiring")" = 39 ] || exit 75
-  [ "$(cat "$base/.bootstrap-acquiring")" = "$previous_transaction fresh" ] || exit 75
+  [ "$(stat -c '%s' "$base/.bootstrap-acquiring")" = 39 ] || refuse transaction
+  [ "$(cat "$base/.bootstrap-acquiring")" = "$previous_transaction fresh" ] || refuse transaction
  fi
  for entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
   [ -e "$entry" ] || [ -L "$entry" ] || continue
@@ -454,7 +454,7 @@ inspect_previous() {
    .bootstrap-owner|.bootstrap-lock|.bootstrap-acquiring|sessions) :;;
    .bootstrap-ready)
     private_file "$entry"
-    [ "$(cat "$entry")" = "$previous_host" ] || exit 75;;
+    [ "$(cat "$entry")" = "$previous_host" ] || refuse owner;;
    bin)
     [ -d "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a' "$entry")" = 700 ] || exit 71
     for child in "$entry"/* "$entry"/.[!.]* "$entry"/..?*; do
@@ -474,7 +474,7 @@ inspect_previous() {
    if [ "$entry" = "$base/sessions/plugins.sock" ]; then
     validate_control_socket
     sockets=$((sockets + 1))
-    [ "$sockets" -le 1024 ] || exit 75
+    [ "$sockets" -le 1024 ] || refuse size
     continue
    fi
    [ -S "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a' "$entry")" = 600 ] || exit 71
@@ -483,7 +483,7 @@ inspect_previous() {
    [ "$name" = "$socket_id.sock" ] || exit 71
    hex_id "$socket_id"
    sockets=$((sockets + 1))
-   [ "$sockets" -le 1024 ] || exit 75
+   [ "$sockets" -le 1024 ] || refuse size
   done
  done
  printf 'INFRATERNAL_SETUP_STALE %s %s %s %s\n' "$previous_host" "$previous_transaction" "$identity" "$sockets"

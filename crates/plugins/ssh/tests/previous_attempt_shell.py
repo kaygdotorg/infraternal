@@ -709,6 +709,46 @@ mock_manager() {{
         self.assertEqual(foreign.read_text(), 'foreign data')
         self.assertTrue(self.socket.exists())
 
+    def make_fresh_connect_stage(self):
+        """A fresh attempt that stopped at Connect: D291 key preparation copied
+        state into the lock and the payload cache link was published (#305)."""
+        self.listener.close()
+        self.receipt.unlink()
+        stage = self.base / '.bootstrap-lock'
+        stage.mkdir(mode=0o700)
+        for name, value in [('transaction', TRANSACTION + '\n'), ('kind', 'fresh\n'), ('lease', '99999999 1\n')]:
+            item = stage / name
+            item.write_text(value)
+            item.chmod(0o600)
+        payload = stage / 'payload'
+        shutil.copyfile(os.environ['INFRATERNAL_TEST_RUNTIME_HELPER'], payload)
+        payload.chmod(0o700)
+        cache = stage / 'cache'
+        cache.mkdir(mode=0o700)
+        os.link(payload, cache / 'payload')
+        owner = cache / 'owner'
+        owner.write_text('INFRATERNAL_PAYLOAD_CACHE_V1\n')
+        owner.chmod(0o600)
+        state = stage / 'state'
+        state.mkdir(mode=0o700)
+        key = state / 'join-key.der'
+        key.write_bytes(b'synthetic')
+        key.chmod(0o600)
+        return stage
+
+    def test_check_names_the_refusal_cause_without_mutating(self):
+        stage = self.make_fresh_connect_stage()
+        foreign = stage / 'personal.txt'
+        foreign.write_text('foreign data')
+        checked = self.run_shell('\nsetup_check=yes\ninspect_previous')
+        self.assertEqual(checked.returncode, 0)
+        self.assertEqual(checked.stdout.decode(), 'INFRATERNAL_SETUP_REFUSED entry\n')
+        # Mutating callers keep the fail-closed status.
+        self.assertEqual(self.run_shell('\ninspect_previous').returncode, 75)
+        self.assertEqual(self.recover('unused').returncode, 75)
+        self.assertEqual(foreign.read_text(), 'foreign data')
+        self.assertTrue((stage / 'state/join-key.der').exists())
+
     def test_replaced_directory_binding_is_refused(self):
         self.listener.close()
         self.receipt.write_text(f'{HOST} {TRANSACTION} fresh 0:1\n')

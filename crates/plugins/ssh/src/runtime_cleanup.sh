@@ -1,4 +1,9 @@
 # Validate runtime lifetime under the cleanup shell's inherited lock descriptor (#230).
+refuse() {
+ printf 'INFRATERNAL_SETUP_REFUSED %s\n' "$1"
+ [ "${setup_check:-no}" != yes ] || exit 0
+ exit 75
+}
 runtime_helper() {
  helper="$base.bootstrap-cache/payload"
  [ -d "$base.bootstrap-cache" ] && [ ! -L "$base.bootstrap-cache" ] && [ -O "$base.bootstrap-cache" ] && [ "$(stat -c '%a' "$base.bootstrap-cache")" = 700 ] || exit 76
@@ -37,7 +42,7 @@ validate_retired_stage() {
     bad=$(find "$entry" \( ! -uid "$(id -u)" -o ! \( -type d -o -type f \) -o -perm /077 -o \( -type d ! -perm 0700 \) \) -print -quit) || exit 71
     [ -z "$bad" ] || exit 71
     count=$(find "$entry" -printf . | wc -c)
-    [ "$count" -le 1024 ] || exit 75
+    [ "$count" -le 1024 ] || refuse size
     continue;;
    current|launcher)
     [ -L "$entry" ] || exit 71
@@ -49,13 +54,13 @@ validate_retired_stage() {
     [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] || exit 71
     case "$(stat -c '%a' "$entry")" in 600|700) continue;; *) exit 71;; esac;;
    transaction|kind|lease|unit|activating|failed|stopping|stop-refused|had-binary|had-state|had-launcher|was-active|was-enabled|replacing-binary|replacing-state|replacing-unit|replacing-launcher|linger-requested) :;;
-   *) exit 75;;
+   *) refuse entry;;
   esac
   [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a:%h' "$entry")" = 600:1 ] || exit 71
   [ "$(stat -c '%s' "$entry")" -le 4096 ] || exit 71
   case "${entry##*/}" in
-   transaction) [ "$(cat "$entry")" = "$1" ] || exit 75;;
-   kind) [ "$(cat "$entry")" = fresh ] || exit 75;;
+   transaction) [ "$(cat "$entry")" = "$1" ] || refuse transaction;;
+   kind) [ "$(cat "$entry")" = fresh ] || refuse kind;;
    unit) grep -Fxq "# infraternal bootstrap $2" "$entry" || exit 71;;
    lease) [ "$(stat -c '%s' "$entry")" -le 64 ] || exit 71;;
    *) [ "$(stat -c '%s' "$entry")" = 0 ] || exit 71;;

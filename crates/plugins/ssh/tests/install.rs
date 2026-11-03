@@ -1947,6 +1947,24 @@ fn earlier_attempt_lock_diagnostic_names_machine_process_and_start_time() {
 }
 
 #[test]
+fn earlier_attempt_refusal_names_its_cause_from_fixed_text() {
+    let check = "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\n";
+    let parse = |cause: &str| {
+        let record = format!("{check}INFRATERNAL_SETUP_REFUSED {cause}\n");
+        infraternal_plugin_ssh::previous_attempt::parse_check(record.as_bytes())
+            .unwrap_err()
+            .message
+    };
+    assert!(parse("entry").contains("holds a file this version does not recognize"));
+    assert!(parse("receipt").contains("older or changed format"));
+    // A token this version does not know never reaches the person verbatim.
+    assert_eq!(
+        parse("something-new"),
+        "The earlier setup journal has an unsupported or changed format. Host provisioning left it untouched."
+    );
+}
+
+#[test]
 fn earlier_attempt_classification_preserves_status_boundary_and_authentication() {
     use infraternal_plugin_ssh::model::{FailureKind, InstallStep};
     for status in [71, 72, 73, 75] {
