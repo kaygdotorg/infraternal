@@ -101,7 +101,9 @@ test("a refused new shell says why in the strip, and Try again recovers", async 
   await expect(strip.locator(".cl-sx-strip-text")).toHaveText(/The infraternal agent on .+ cannot reach the server\. Check that outbound TCP 443 is allowed from /, { timeout: 10_000 });
   await expect(strip).toHaveAttribute("data-result", "refused");
   // The reason sits in the strip, not in a toast on the side.
-  await expect(page.locator(".ui-toast")).toBeHidden();
+  // The page has two toast hosts (one hidden, one that may be closing an earlier "ok" toast), so a bare `.ui-toast` is two
+  // elements. What matters is that the refusal is in none of them.
+  await expect(page.locator(".ui-toast").filter({ hasText: /cannot reach the server|could not start/ })).toHaveCount(0);
   await page.mouse.move(2, 2);
   const dir = tracerEvidencePath("ended-strip");
   await mkdir(dir, { recursive: true });
