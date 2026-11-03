@@ -339,3 +339,184 @@ async fn a_machine_name_outside_the_cli_set_is_refused() {
     body["request"]["hostname"] = json!("Build-01.lan_2");
     assert_eq!(start(&app, v4_network(99), &body).await, StatusCode::OK);
 }
+
+/// Start a join from its own network and inspect it as the owner; returns its codes.
+async fn inspected_join(app: &axum::Router, session: &str, network: u32) -> Value {
+    let started = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/auth/device-start")
+                .header("content-type", "application/json")
+                .extension(ClientAddress(v4_network(network)))
+                .body(axum::body::Body::from(join().to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(started.status(), StatusCode::OK);
+    let started: Value =
+        serde_json::from_slice(&started.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let code = json!({"code": started["user_code"]});
+    assert_eq!(
+        browser(app, "device-inspect", Some(session), &code)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    started
+}
+
+async fn json_body(response: axum::response::Response) -> Value {
+    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+}
+
+#[tokio::test]
+async fn a_machine_join_needs_a_passkey_tap_for_that_approval() {
+    // J134 P3-2: a fresh login within five minutes used to approve any join.
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    let app = super::http::router(f.auth.clone());
+    f.auth.set_test_http_time(NOW);
+    let first = inspected_join(&app, &f.session, 1).await;
+    let second = inspected_join(&app, &f.session, 2).await;
+    let first_code = json!({"code": first["user_code"]});
+    // The session is fresh (registered at NOW), yet the plain approval refuses a join.
+    assert_eq!(
+        browser(&app, "device-approve", Some(&f.session), &first_code)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    // A proof of an ordinary login ceremony does not approve a join either.
+    let login = json_body(
+        browser(
+            &app,
+            "login-start",
+            Some(&f.session),
+            &json!({"user_id": f.user}),
+        )
+        .await,
+    )
+    .await;
+    let proof = f.software.login(&login, ORIGIN, true);
+    let finish = |code: &Value, ceremony: &Value, proof: &Value| json!({"code": code["user_code"], "ceremony": ceremony["ceremony"], "proof": proof});
+    assert_eq!(
+        browser(
+            &app,
+            "device-approve-finish",
+            Some(&f.session),
+            &finish(&first, &login, &proof)
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    // A ceremony started for the first code does not approve the second.
+    let start = browser(&app, "device-approve-start", Some(&f.session), &first_code).await;
+    assert_eq!(start.status(), StatusCode::OK);
+    let start = json_body(start).await;
+    let proof = f.software.login(&start, ORIGIN, true);
+    assert_eq!(
+        browser(
+            &app,
+            "device-approve-finish",
+            Some(&f.session),
+            &finish(&second, &start, &proof)
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    // Its own code, with its own proof, approves exactly that join, once.
+    assert_eq!(
+        browser(
+            &app,
+            "device-approve-finish",
+            Some(&f.session),
+            &finish(&first, &start, &proof)
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert!(
+        f.auth
+            .device_join_approved(str_field(&first, "poll_token"), NOW)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !f.auth
+            .device_join_approved(str_field(&second, "poll_token"), NOW)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        browser(
+            &app,
+            "device-approve-finish",
+            Some(&f.session),
+            &finish(&first, &start, &proof)
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED,
+        "a ceremony is single use"
+    );
+}
+
+#[tokio::test]
+async fn a_join_ceremony_belongs_to_the_session_that_started_it() {
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    let app = super::http::router(f.auth.clone());
+    f.auth.set_test_http_time(NOW);
+    let pending = inspected_join(&app, &f.session, 1).await;
+    let code = json!({"code": pending["user_code"]});
+    let start =
+        json_body(browser(&app, "device-approve-start", Some(&f.session), &code).await).await;
+    let proof = f.software.login(&start, ORIGIN, true);
+    let other = "C".repeat(43);
+    let body = json!({"code": pending["user_code"], "ceremony": start["ceremony"], "proof": proof});
+    assert_eq!(
+        browser(&app, "device-approve-finish", Some(&other), &body)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    // A code nobody inspected yet cannot start a ceremony.
+    let uninspected = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/auth/device-start")
+                .header("content-type", "application/json")
+                .extension(ClientAddress(v4_network(5)))
+                .body(axum::body::Body::from(join().to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let uninspected = json_body(uninspected).await;
+    assert_eq!(
+        browser(
+            &app,
+            "device-approve-start",
+            Some(&f.session),
+            &json!({"code": uninspected["user_code"]})
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    // The owner's own session still finishes it after the stranger's attempt.
+    assert_eq!(
+        browser(&app, "device-approve-finish", Some(&f.session), &body)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}

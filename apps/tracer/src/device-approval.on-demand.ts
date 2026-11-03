@@ -201,7 +201,8 @@ function wireApproval(host: HTMLElement, code: string, kind: ApprovalKind, hooks
     const waiting: Loading = loading(button.querySelector<HTMLElement>(".busy-count")!, 400);
     void (async () => {
       try {
-        await loginWithPasskey(deviceName());
+        // A join's approval is its own passkey tap, bound to this code; a CLI sign-in follows a fresh login.
+        if (kind !== "join_machine") await loginWithPasskey(deviceName());
         await approveDeviceApproval(code, kind);
         leave();
         hooks.onApproved();

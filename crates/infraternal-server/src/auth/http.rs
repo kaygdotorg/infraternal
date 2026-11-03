@@ -134,6 +134,14 @@ struct DeviceStart {
 struct Code {
     code: String,
 }
+/// A passkey proof for the join-approval ceremony started for `code`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApproveJoin {
+    code: String,
+    ceremony: String,
+    proof: Value,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Revoke {
@@ -418,6 +426,18 @@ async fn execute(
         "device-approve" => {
             let b: Code = body(value)?;
             auth.device_approve(cookie(headers)?, &b.code, now).await?;
+            json!({"ok":true})
+        }
+        // A machine join is approved by a passkey ceremony bound to its code.
+        "device-approve-start" => {
+            let b: Code = body(value)?;
+            auth.device_approve_start(cookie(headers)?, &b.code, now)
+                .await?
+        }
+        "device-approve-finish" => {
+            let b: ApproveJoin = body(value)?;
+            auth.device_approve_finish(cookie(headers)?, &b.code, &b.ceremony, b.proof, now)
+                .await?;
             json!({"ok":true})
         }
         "device-redeem" => {

@@ -431,18 +431,15 @@ async fn device_code_machine_join_returns_the_same_key_bound_receipt_on_retry() 
             "key_fingerprint": key_fingerprint,
         })
     );
-    assert_eq!(
-        request(
-            &app,
-            "/auth/device-approve",
-            json!({"code":approval["user_code"]}),
-            Some(&token),
-            "https://auth.example.test",
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
+    // The bound passkey ceremony itself is covered by the auth tests; this
+    // test is about what redemption does after an approval.
+    auth.approve_join_without_passkey_for_tests(
+        &token,
+        approval["user_code"].as_str().unwrap(),
+        now,
+    )
+    .await
+    .unwrap();
 
     let redeem = json!({"token":approval["poll_token"]});
     let response = request(&app, "/auth/device-redeem", redeem.clone(), None, "").await;

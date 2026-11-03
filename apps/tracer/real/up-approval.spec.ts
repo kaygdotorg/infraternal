@@ -1,4 +1,4 @@
-/** Exercises `infraternal up` through a real server and the production approval page from J82 (#263). */
+/** Exercises `infraternal up` through a real server and the production approval page (#263, J82's page). */
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { access, mkdir, readFile, readlink, stat, writeFile } from "node:fs/promises";
@@ -52,7 +52,7 @@ test.afterAll(async () => {
   await server?.dispose();
 });
 
-test("up is approved in J82's real page and enrolls over HTTPS without port 7443", async () => {
+test("up is approved in the real page and enrolls over HTTPS without port 7443", async () => {
   test.setTimeout(180_000);
   const control = process.env.UP_E2E_CONTROL_DIR;
   const sudoCalls = process.env.UP_SUDO_CALLS;
@@ -118,7 +118,7 @@ test("up is approved in J82's real page and enrolls over HTTPS without port 7443
   expect(output.terminal.includes("##"), "the terminal approval output must include a QR").toBe(true);
   expect(!/poll_token|"token"\s*:/i.test(output.terminal)).toBe(true);
 
-  // Force a new document before following the printed link: a fragment-only navigation does not rerun J82's startup.
+  // Force a new document before following the printed link: a fragment-only navigation does not rerun the page's startup.
   // Keep the same page target so its virtual passkey authenticator remains available for fresh approval.
   page.on("request", (request) => {
     const url = new URL(request.url());

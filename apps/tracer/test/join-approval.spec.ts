@@ -15,7 +15,10 @@ const TITLE = (name: string) => `Add ${name} to localhost:${process.env.TRACER_T
 interface Mock {
   requests: string[];
   addressAtRequest: string[];
-  loginStarts: () => number;
+  /** Passkey ceremonies started for this approval (`device-approve-start`). */
+  approvalStarts: () => number;
+  /** Ordinary logins: a join's approval never needs one (#263, J134 P3-2). */
+  logins: () => number;
   approvals: () => number;
 }
 
@@ -23,7 +26,8 @@ interface Mock {
 async function mockJoin(page: Page, request: Record<string, unknown> = {}, options: { cancelPasskey?: boolean } = {}): Promise<Mock> {
   const requests: string[] = [];
   const addressAtRequest: string[] = [];
-  let loginStarts = 0;
+  let approvalStarts = 0;
+  let logins = 0;
   let approvals = 0;
   await page.addInitScript((cancel) => {
     Object.defineProperty(navigator.credentials, "get", {
@@ -53,7 +57,11 @@ async function mockJoin(page: Page, request: Record<string, unknown> = {}, optio
     kind: "join_machine", hostname: "build-01", mode: "system", key_fingerprint: FINGERPRINT, ...request,
   } }));
   await page.route("**/auth/login-start", async route => {
-    loginStarts += 1;
+    logins += 1;
+    await route.fulfill({ json: { ceremony: "login", options: { publicKey: {} } } });
+  });
+  await page.route("**/auth/device-approve-start", async route => {
+    approvalStarts += 1;
     await route.fulfill({ json: { ceremony: "fixture", options: { publicKey: {
       challenge: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       rpId: "localhost",
@@ -63,11 +71,13 @@ async function mockJoin(page: Page, request: Record<string, unknown> = {}, optio
       extensions: { prf: { eval: { first: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" } } },
     } } } });
   });
-  await page.route("**/auth/device-approve", async route => {
+  await page.route("**/auth/device-approve-finish", async route => {
     approvals += 1;
     await route.fulfill({ json: { ok: true } });
   });
-  return { requests, addressAtRequest, loginStarts: () => loginStarts, approvals: () => approvals };
+  return {
+    requests, addressAtRequest, approvalStarts: () => approvalStarts, logins: () => logins, approvals: () => approvals,
+  };
 }
 
 const tick = (page: Page) => page.getByText("I checked that the code and key match my terminal");
@@ -136,13 +146,15 @@ test("nothing approves by itself: loading, ticking and a cancelled passkey leave
   await page.goto(LINK);
   await expect(page.getByRole("heading", { name: TITLE("build-01") })).toBeVisible();
   expect(mock.approvals()).toBe(0);
-  expect(mock.loginStarts()).toBe(0);
+  expect(mock.approvalStarts()).toBe(0);
+  expect(mock.logins()).toBe(0);
   await tick(page).click();
   await expect(page.getByRole("button", { name: "Approve with passkey" })).toBeEnabled();
   expect(mock.approvals()).toBe(0);
   await page.getByRole("button", { name: "Approve with passkey" }).click();
   await expect(page.getByRole("alert").filter({ hasText: "passkey prompt was cancelled" })).toBeVisible();
-  expect(mock.loginStarts()).toBe(1);
+  expect(mock.approvalStarts()).toBe(1);
+  expect(mock.logins()).toBe(0);
   expect(mock.approvals()).toBe(0);
 });
 
@@ -178,14 +190,25 @@ test("every machine needs its own passkey tap", async ({ page }) => {
   await page.getByRole("button", { name: "Open infraternal" }).click();
   await expect(page.getByText("TEST DOUBLE")).toBeVisible();
 
-  const approvedCodes: string[] = [];
+  const starts: Array<{ code: string; ceremony: string }> = [];
+  const finishes: Array<{ code: string; ceremony: string }> = [];
   const requests: string[] = [];
   page.on("request", seen => { const path = new URL(seen.url()).pathname; if (path.startsWith("/auth/")) requests.push(path); });
   await page.route("**/auth/device-inspect", route => route.fulfill({ json: {
     kind: "join_machine", hostname: "build-01", mode: "system", key_fingerprint: FINGERPRINT,
   } }));
-  await page.route("**/auth/device-approve", async route => {
-    approvedCodes.push(String(route.request().postDataJSON().code));
+  // The double has no join ceremony: borrow its real login options (so the virtual authenticator answers), and give
+  // each start its own ceremony ID, so the test can see which start a finish belongs to.
+  await page.route("**/auth/device-approve-start", async route => {
+    const login = await route.fetch({ url: new URL("/auth/login-start", route.request().url()).href, postData: "{}" });
+    const ceremony = `approval-${starts.length + 1}`;
+    starts.push({ code: String(route.request().postDataJSON().code), ceremony });
+    await route.fulfill({ json: { ...(await login.json() as object), ceremony } });
+  });
+  await page.route("**/auth/device-approve-finish", async route => {
+    const body = route.request().postDataJSON() as { code: unknown; ceremony: unknown; proof: unknown };
+    expect(typeof body.proof).toBe("object");
+    finishes.push({ code: String(body.code), ceremony: String(body.ceremony) });
     await route.fulfill({ json: { ok: true } });
   });
   for (const code of ["AbCdEfGhIjKlMnOp", "QwErTyUiOpAsDfGh"]) {
@@ -198,10 +221,12 @@ test("every machine needs its own passkey tap", async ({ page }) => {
     await expect(page.getByRole("heading", { name: "Machine approved" })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.dataset.passkeyGets)).toBe("1");
   }
-  expect(approvedCodes).toEqual(["AbCdEfGhIjKlMnOp", "QwErTyUiOpAsDfGh"]);
-  // Each approval came after a login that finished in this page, not after a reused one.
-  const finishes = requests.filter(path => path === "/auth/login-finish").length;
-  expect(finishes).toBeGreaterThanOrEqual(2);
+  // Each approval is its own ceremony, finished with the code it was started for, and no login stands in for it.
+  expect(starts).toEqual([
+    { code: "AbCdEfGhIjKlMnOp", ceremony: "approval-1" }, { code: "QwErTyUiOpAsDfGh", ceremony: "approval-2" },
+  ]);
+  expect(finishes).toEqual(starts);
+  expect(requests.filter(path => path === "/auth/device-approve")).toEqual([]);
 });
 
 test("Escape cancels without approving and returns to the app", async ({ page }) => {
@@ -213,7 +238,8 @@ test("Escape cancels without approving and returns to the app", async ({ page })
   await expect(page.getByRole("heading", { name: TITLE("build-01") })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Approve with passkey" })).toHaveCount(0);
   expect(mock.approvals()).toBe(0);
-  expect(mock.loginStarts()).toBe(0);
+  expect(mock.approvalStarts()).toBe(0);
+  expect(mock.logins()).toBe(0);
 });
 
 test("Escape does nothing while the passkey prompt is open", async ({ page }) => {
@@ -235,7 +261,8 @@ test("going back leaves the page without approving", async ({ page }) => {
   await expect(page.getByRole("heading", { name: TITLE("build-01") })).toBeVisible();
   await page.goBack();
   expect(mock.approvals()).toBe(0);
-  expect(mock.loginStarts()).toBe(0);
+  expect(mock.approvalStarts()).toBe(0);
+  expect(mock.logins()).toBe(0);
 });
 
 test("a request that has expired offers no approval and says what to do", async ({ page }) => {

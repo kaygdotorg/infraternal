@@ -74,6 +74,22 @@ const APPROVAL_LIFETIME: i64 = 600;
 #[derive(Default)]
 pub(super) struct PendingSources(HashMap<Network, Vec<i64>>);
 
+/// Most join-approval ceremonies waiting for a passkey at once (each lives
+/// for one ceremony lifetime).
+const MAX_JOIN_CEREMONIES: usize = 1024;
+
+/// Join-approval passkey ceremonies, keyed by ceremony ID. Each is bound to
+/// the session that started it and the code it approves.
+#[derive(Default)]
+pub(super) struct JoinCeremonies(HashMap<String, JoinCeremony>);
+
+struct JoinCeremony {
+    session_hash: String,
+    user_id: String,
+    code_hash: String,
+    expires: i64,
+}
+
 /// Public, bounded machine facts shown before a fresh passkey approves enrollment [#263].
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -280,28 +296,160 @@ impl Auth {
         )
     }
 
-    /// Signed-in browser approval requires a fresh passkey tap and binds exact requested scopes.
+    /// Approve a CLI sign-in after a fresh passkey tap, binding its exact requested scopes.
+    /// A machine join never takes this path: it needs a tap for that approval
+    /// ([`Self::device_approve_start`]).
     pub async fn device_approve(&self, session_token: &str, code: &str, now: i64) -> Result<()> {
         let session = self.session(session_token, now).await?;
         session.require_fresh(now)?;
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("UPDATE users SET name=name WHERE id=?")
-            .bind(&session.user_id)
-            .execute(&mut *tx)
-            .await?;
-        require_session_tx(&mut tx, &hash(session_token), &session.user_id, now).await?;
-        let kind = sqlx::query_scalar::<_, String>(
-            "SELECT kind FROM approvals WHERE code_hash=? AND expires>? AND user_id IS NULL \
-             AND (kind='sign_in' OR inspect_attempts>0)",
+        self.approve_code(session_token, &session.user_id, code, "sign_in", None, now)
+            .await
+    }
+
+    /// Start the passkey ceremony that approves exactly one inspected machine
+    /// join, for this session (#263, J134 P3-2). A recent login is not enough:
+    /// D311 ("approval always needs the passkey") and D319 ("whenever in
+    /// doubt, ask for passkey") want a tap for *this* approval, so a script in
+    /// the page cannot approve other pending joins after any login.
+    pub(crate) async fn device_approve_start(
+        &self,
+        session_token: &str,
+        code: &str,
+        now: i64,
+    ) -> Result<Value> {
+        let session = self.session(session_token, now).await?;
+        let pending: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM approvals WHERE code_hash=? AND expires>? \
+             AND user_id IS NULL AND kind='join_machine' AND inspect_attempts>0) \
+             AND EXISTS(SELECT 1 FROM users WHERE id=? AND owner=1)",
         )
         .bind(hash(code))
         .bind(now)
+        .bind(&session.user_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !pending {
+            return Err(Error::Denied);
+        }
+        let mut ceremonies = self.join_ceremonies.lock().await;
+        ceremonies.0.retain(|_, ceremony| ceremony.expires > now);
+        if ceremonies.0.len() >= MAX_JOIN_CEREMONIES {
+            return Err(Error::Throttled);
+        }
+        let start = self.login_start(&session.user_id, now).await?;
+        let id = start["ceremony"].as_str().ok_or(Error::Denied)?.to_owned();
+        ceremonies.0.insert(
+            id,
+            JoinCeremony {
+                session_hash: hash(session_token),
+                user_id: session.user_id,
+                code_hash: hash(code),
+                expires: now + super::CEREMONY,
+            },
+        );
+        Ok(start)
+    }
+
+    /// Approve the machine join this ceremony was started for, with the passkey
+    /// proof of that same ceremony. The ceremony is single use.
+    pub(crate) async fn device_approve_finish(
+        &self,
+        session_token: &str,
+        code: &str,
+        ceremony: &str,
+        proof: Value,
+        now: i64,
+    ) -> Result<()> {
+        let entry = {
+            let mut ceremonies = self.join_ceremonies.lock().await;
+            let bound = ceremonies.0.get(ceremony).ok_or(Error::Denied)?;
+            // Another session or another code cannot spend this ceremony, and
+            // a mismatch leaves it for the page that started it.
+            if bound.session_hash != hash(session_token) || bound.code_hash != hash(code) {
+                return Err(Error::Denied);
+            }
+            ceremonies.0.remove(ceremony).ok_or(Error::Denied)?
+        };
+        if entry.expires <= now {
+            return Err(Error::Denied);
+        }
+        let verified = self.verify_passkey(ceremony, proof, now).await?;
+        if verified.user() != entry.user_id {
+            return Err(Error::Denied);
+        }
+        self.approve_code(
+            session_token,
+            &entry.user_id,
+            code,
+            "join_machine",
+            Some(verified.credential()),
+            now,
+        )
+        .await
+    }
+
+    /// Approve a join with no passkey, for tests of what happens after approval.
+    #[cfg(test)]
+    pub(crate) async fn approve_join_without_passkey_for_tests(
+        &self,
+        session_token: &str,
+        code: &str,
+        now: i64,
+    ) -> Result<()> {
+        let session = self.session(session_token, now).await?;
+        self.approve_code(
+            session_token,
+            &session.user_id,
+            code,
+            "join_machine",
+            None,
+            now,
+        )
+        .await
+    }
+
+    /// Bind one pending approval of `kind` to this live session's person, in
+    /// one writer transaction. For a join, `credential` is the passkey that
+    /// just signed the bound ceremony; it must still be registered.
+    async fn approve_code(
+        &self,
+        session_token: &str,
+        user: &str,
+        code: &str,
+        kind: &str,
+        credential: Option<&str>,
+        now: i64,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE users SET name=name WHERE id=?")
+            .bind(user)
+            .execute(&mut *tx)
+            .await?;
+        require_session_tx(&mut tx, &hash(session_token), user, now).await?;
+        if let Some(credential) = credential
+            && !sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM passkeys WHERE id=? AND user_id=?)",
+            )
+            .bind(credential)
+            .bind(user)
+            .fetch_one(&mut *tx)
+            .await?
+        {
+            return Err(Error::Denied);
+        }
+        sqlx::query_scalar::<_, String>(
+            "SELECT kind FROM approvals WHERE code_hash=? AND expires>? AND user_id IS NULL \
+             AND kind=? AND (kind='sign_in' OR inspect_attempts>0)",
+        )
+        .bind(hash(code))
+        .bind(now)
+        .bind(kind)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(Error::Denied)?;
         if kind == "join_machine"
             && !sqlx::query_scalar::<_, bool>("SELECT owner=1 FROM users WHERE id=?")
-                .bind(&session.user_id)
+                .bind(user)
                 .fetch_one(&mut *tx)
                 .await?
         {
@@ -311,7 +459,7 @@ impl Auth {
             "UPDATE approvals SET user_id=?,approved_session_hash=? \
              WHERE code_hash=? AND expires>? AND user_id IS NULL",
         )
-        .bind(session.user_id)
+        .bind(user)
         .bind(hash(session_token))
         .bind(hash(code))
         .bind(now)

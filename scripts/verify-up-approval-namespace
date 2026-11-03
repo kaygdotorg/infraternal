@@ -2,20 +2,14 @@
 # Run `up` with the public HTTPS listener available and legacy 7443 traffic blocked (#263, #291).
 set -euo pipefail
 : "${INFRATERNAL_BIN:?set the compiled CLI/server binary}"
-: "${TRACER_DIST:?set the production tracer build from J82's join-approval-ui branch}"
-: "${J82_WORKTREE:?set the J82 join-approval-ui worktree used to build TRACER_DIST}"
-: "${CARGO_TARGET_DIR:?set this job's target directory}"
+: "${TRACER_DIST:?set the production tracer build of this checkout, apps/tracer/dist}"
+: "${CARGO_TARGET_DIR:?set the target directory of this run}"
 
-expected_j82=6e11b71bf48042dddcbf295b9746d3977bb246e8
-actual_j82="$(git -C "$J82_WORKTREE" rev-parse HEAD)"
-if [[ "$actual_j82" != "$expected_j82" ]]; then
-    printf 'J82 worktree HEAD mismatch: expected %s, found %s\n' "$expected_j82" "$actual_j82" >&2
-    exit 1
-fi
-expected_dist="$(realpath "$J82_WORKTREE/apps/tracer/dist")"
-actual_dist="$(realpath "$TRACER_DIST")"
-if [[ "$actual_dist" != "$expected_dist" ]]; then
-    printf 'TRACER_DIST must be the production dist built from the verified J82 worktree\n' >&2
+repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# The approval page and its passkey ceremony (J134 P3-2) live in this
+# checkout since J82's page was folded in, so the dist must be built from it.
+if [[ "$(realpath "$TRACER_DIST")" != "$(realpath "$repo_dir/apps/tracer/dist")" ]]; then
+    printf 'TRACER_DIST must be the production dist built from this checkout\n' >&2
     exit 1
 fi
 
@@ -33,8 +27,6 @@ else
     printf 'run as root for the non-root CLI check, or set UP_E2E_SKIP_NONROOT=1\n' >&2
     exit 1
 fi
-
-repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 control="$(mktemp -d /tmp/up.XXXXXX)"
 chmod 700 "$control"
 mkdir -m 700 "$control/bin" "$control/runtime" "$control/root"
