@@ -279,7 +279,7 @@ inspect_upgrade() {
   case "$setup_sockets" in ''|*[!0-9]*) exit 77;; esac
  fi
  # The server matches the enrolled key digest and server name before it
- # offers anything; "- -" means the identity cannot be read (#305).
+ # offers anything; "- -" means the identity cannot be read (#305, D335).
  setup_enrolled=$("$helper" --bootstrap-runtime "$base" "$identity" enrolled </dev/null) || exit $?
  case "$setup_enrolled" in *[!0-9a-zA-Z._\ -]*|*\ *\ *) exit 77;; esac
  printf 'INFRATERNAL_SETUP_UPGRADE %s %s %s %s %s %s %s %s %s\n' "$previous_host" "$previous_transaction" "$identity" "$setup_locked_machine" "$setup_upgrade_lease_pid" "$setup_upgrade_lease_birth" "$setup_since" "$setup_sockets" "$setup_enrolled"
@@ -528,6 +528,7 @@ stop_stage_shims() {
 # once the old install is moved out of the way.
 retire_stuck_service() {
  replace_expected=$1
+ aside=
  setup_guard
  replace_observed=$(inspect_previous)
  [ "$replace_observed" = "$replace_expected" ] || exit 75
@@ -552,8 +553,15 @@ retire_stuck_service() {
  exec 7< "$stage"
  flock -n 7 || exit 73
 }
-# Undo retire_stuck_service: re-enable and restart the service if it was so found.
+# Undo retire_stuck_service: move a set-aside install back if this command
+# moved it, then re-enable and restart the service if it was so found.
 restore_stuck_service() {
+ if [ -n "$aside" ] && [ -d "$aside" ] && [ ! -L "$aside" ] && [ ! -e "$base" ] && [ ! -L "$base" ]; then
+  mv -T "$aside" "$base"
+  if [ -f "$base/.superseded-unit" ] && [ ! -e "$unit" ] && [ ! -L "$unit" ]; then mv "$base/.superseded-unit" "$unit"; fi
+  [ -e "$launcher" ] || [ -L "$launcher" ] || ln -s "$base/bin/current" "$launcher"
+  rm -f "$base/.superseded-service"
+ fi
  $manager daemon-reload >/dev/null 2>&1 || :
  [ "$replace_enabled" != yes ] || $manager enable infraternal-agent.service >/dev/null 2>&1 || :
  [ "$replace_active" != yes ] || $manager start infraternal-agent.service >/dev/null 2>&1 || :
@@ -567,6 +575,33 @@ replace_stuck_install() {
  [ ! -e "$replaced" ] && [ ! -L "$replaced" ] || exit 72
  mv -T "$stage" "$replaced"
  trap - EXIT
+}
+# Set aside an install another server enrolled, whole, so the machine can
+# join this server as a new host (D335). Nothing is deleted: the directory,
+# its unit and the service state it was found in stay restorable.
+supersede_stuck_install() {
+ retire_stuck_service "$1"
+ aside="$base.bootstrap-superseded-$replace_transaction"
+ [ ! -e "$aside" ] && [ ! -L "$aside" ] || { aside=; exit 72; }
+ mv -T "$base" "$aside"
+ printf '%s %s\n' "$replace_enabled" "$replace_active" > "$aside/.superseded-service"
+ mv "$unit" "$aside/.superseded-unit"
+ rm -f "$launcher"
+ $manager daemon-reload >/dev/null 2>&1 || exit 73
+ trap - EXIT
+}
+# Put back an install set aside by supersede_stuck_install after the new
+# enrollment failed and its own rollback removed the new installation.
+restore_superseded_install() {
+ setup_guard
+ aside="$base.bootstrap-superseded-$1"
+ [ -d "$aside" ] && [ ! -L "$aside" ] && [ -O "$aside" ] || exit 71
+ [ ! -e "$base" ] && [ ! -L "$base" ] || exit 72
+ [ ! -e "$unit" ] && [ ! -L "$unit" ] || exit 72
+ private_file "$aside/.superseded-service"
+ read -r replace_enabled replace_active < "$aside/.superseded-service"
+ case "$replace_enabled:$replace_active" in yes:yes|yes:no|no:yes|no:no) :;; *) exit 71;; esac
+ restore_stuck_service
 }
 # The server saw this host connected with the journal's own identity: the
 # upgrade worked and only its commit was lost. Finish it as commit would.

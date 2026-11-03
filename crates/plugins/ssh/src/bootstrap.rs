@@ -52,6 +52,10 @@ pub enum StuckInstall {
     /// The host is connected now with this identity, so the upgrade worked
     /// and only its commit was lost: finish the journal, replace nothing.
     Finish,
+    /// Another server enrolled this machine. After explicit confirmation it
+    /// joins this server as a new host with a new key; its old install is
+    /// set aside, not deleted (D335).
+    Reenroll,
 }
 
 /// The stuck upgrade as the read-only check saw it.
@@ -838,11 +842,13 @@ impl Bootstrap {
                     )
                     .await;
                 }
+                let mut rolled_back = true;
                 if let Some(installation) = resources.installation {
                     let cleanup =
                         tokio::time::timeout(Duration::from_secs(30), installation.rollback())
                             .await;
-                    if !matches!(cleanup, Ok(Ok(()))) {
+                    rolled_back = matches!(cleanup, Ok(Ok(())));
+                    if !rolled_back {
                         if let Some(state) = lock(&batch.states).get_mut(&target.id) {
                             state.cleanup = Some(installation.cleanup_coordinates());
                         }
@@ -856,6 +862,30 @@ impl Bootstrap {
                             None,
                         );
                     }
+                }
+                // The new enrollment failed: put back the install it set aside,
+                // but only once this attempt's own files are gone (D335).
+                if let Some((session, previous)) = resources.superseded
+                    && rolled_back
+                {
+                    let restored = tokio::time::timeout(
+                        Duration::from_secs(30),
+                        previous.restore_superseded(session.as_ref(), &target),
+                    )
+                    .await;
+                    emit(
+                        &batch,
+                        &target,
+                        attempt,
+                        Step::Install,
+                        if matches!(restored, Ok(Ok(()))) {
+                            "The earlier infraternal agent was put back as it was found."
+                        } else {
+                            "The earlier infraternal agent stays set aside beside the setup directory; it was not put back."
+                        },
+                        started,
+                        None,
+                    );
                 }
                 if let Some(host) = resources.host {
                     // Invalidate invitations/partial new authority through the trusted
@@ -1154,7 +1184,7 @@ impl Bootstrap {
                 if let Some(host) = previous.replacement_host() {
                     // The server decides before anything is offered or stopped:
                     // a stuck upgrade is replaced only when this server can
-                    // re-enroll the same identity (#305).
+                    // re-enroll the same identity (#305, D335).
                     let verdict = self
                         .backend
                         .check_stuck_install(
@@ -1186,10 +1216,25 @@ impl Bootstrap {
                                 started,
                                 session.as_ref(),
                                 &previous,
-                                false,
+                                FreshMode::Replace,
                             )
                             .await?;
                             Some(host)
+                        }
+                        StuckInstall::Reenroll => {
+                            self.await_start_fresh(
+                                batch,
+                                target,
+                                attempt,
+                                started,
+                                session.as_ref(),
+                                &previous,
+                                FreshMode::Reenroll,
+                            )
+                            .await?;
+                            // A later failure puts the set-aside install back.
+                            resources.superseded = Some((session.clone(), previous));
+                            None
                         }
                     }
                 } else {
@@ -1212,7 +1257,11 @@ impl Bootstrap {
                         started,
                         session.as_ref(),
                         &previous,
-                        automatic,
+                        if automatic {
+                            FreshMode::Automatic
+                        } else {
+                            FreshMode::Confirm
+                        },
                     )
                     .await?;
                     None
@@ -1692,9 +1741,9 @@ impl Bootstrap {
         started: Instant,
         session: &dyn SshSession,
         previous: &PreviousAttempt,
-        automatic: bool,
+        mode: FreshMode,
     ) -> Result<(), Failure> {
-        if automatic {
+        if mode == FreshMode::Automatic {
             emit(
                 batch,
                 target,
@@ -1721,8 +1770,12 @@ impl Bootstrap {
                 Step::Check,
                 "This host has leftovers from an earlier setup",
                 started,
-                Some(previous.stuck_failure()),
-                Some(Box::new(previous.findings(target.mode, challenge))),
+                Some(previous.stuck_failure(mode == FreshMode::Reenroll)),
+                Some(Box::new(if mode == FreshMode::Reenroll {
+                    previous.reenroll_findings(target.mode, challenge)
+                } else {
+                    previous.findings(target.mode, challenge)
+                })),
             );
             resumed.await.map_err(|_| {
                 Failure::install("Host provisioning stopped while waiting to start fresh.")
@@ -1730,7 +1783,11 @@ impl Bootstrap {
         }
         self.backend
             .record_start_fresh(target, previous.host, previous.transaction, "started");
-        let result = previous.start_fresh(session, target).await;
+        let result = if mode == FreshMode::Reenroll {
+            previous.supersede(session, target).await
+        } else {
+            previous.start_fresh(session, target).await
+        };
         self.backend.record_start_fresh(
             target,
             previous.host,
@@ -1811,9 +1868,24 @@ async fn restore_previous(
     Ok(())
 }
 
+/// How an earlier attempt is cleared before this one continues.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FreshMode {
+    /// This server's failed-host binding owns it: clear it without asking.
+    Automatic,
+    /// Ask, then remove an earlier fresh setup's leftovers.
+    Confirm,
+    /// Ask, then replace a stuck upgrade this server enrolled.
+    Replace,
+    /// Ask, then set aside an install another server enrolled (D335).
+    Reenroll,
+}
+
 /// Mutation resources belong to one attempt, including its rollback and host retirement.
 #[derive(Default)]
 struct AttemptResources {
+    /// An install set aside for re-enrollment; put back if this attempt fails (D335).
+    superseded: Option<(Arc<dyn SshSession>, PreviousAttempt)>,
     installation: Option<Installation>,
     host: Option<uuid::Uuid>,
     // Protect the real shim before a durable routing write can be cancelled.

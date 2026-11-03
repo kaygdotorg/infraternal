@@ -634,9 +634,11 @@ impl Backend for RemoteBackend {
                 .map_err(|_| unavailable())?;
             let Some((owner, revoked, matches)) = row else {
                 // No server enrolled this host id here: another server did.
-                // Whether it may join as a new host is the owner's decision;
-                // until then it is refused by name and left untouched.
-                return Err(another_server());
+                // The machine may join as a new host after confirmation (D335),
+                // but only if this server will accept it right now.
+                self.ensure_not_already_added(authority, request.target, lookup)
+                    .await?;
+                return Ok(StuckInstall::Reenroll);
             };
             let stored = self
                 .issuer
@@ -925,13 +927,6 @@ async fn wait_installed_actor(
     .await
     .map_err(|_| route_unavailable())?
 }
-/// The stuck install's host id is unknown here: another server enrolled it.
-fn another_server() -> Failure {
-    Failure::unsupported(
-        "This machine is enrolled with another server. Host provisioning left its infraternal agent untouched.",
-    )
-}
-
 /// What the server knows about a stuck upgrade's host id that it has a record for.
 struct StuckFacts {
     /// Same owner, not revoked, and this destination.
@@ -1694,7 +1689,8 @@ mod tests {
                         }
                     }
                     format!("KEY-DIGEST {encoded}\n").into_bytes()
-                } else if script.contains(" agent --data ") && script.contains(" join ") {
+                } else if script.contains("agent --data \"$stage/state\" join ") {
+                    // The enrollment command itself; setup routines may mention joining.
                     return Err(Failure::install("stop after the reissued invitation"));
                 } else {
                     Vec::new()
@@ -2207,6 +2203,7 @@ mod tests {
     fn mutating(scripts: &[String]) -> Vec<&'static str> {
         [
             "\nreplace_stuck_install ",
+            "\nsupersede_stuck_install ",
             "\nfinish_stuck_upgrade ",
             "prepare-join-key",
         ]
@@ -2256,8 +2253,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_machine_another_server_enrolled_is_refused_by_name_before_anything_changes() {
+    async fn a_machine_another_server_enrolled_joins_as_a_new_host_after_confirmation() {
         let f = fixture(true).await;
+        let stuck = Uuid::new_v4();
+        let (events, scripts) = run_stuck(&f, stuck_check(stuck, &[9; 32], "old.example")).await;
+        let lock = events
+            .iter()
+            .find(|event| event.leftovers.is_some())
+            .and_then(|event| event.failure.as_ref())
+            .map(|failure| serde_json::to_value(failure).unwrap()["setup_lock"].clone())
+            .expect("the person is asked before anything changes");
+        assert_eq!(lock["enrolled_with"], "old.example");
+        assert_eq!(lock["sessions"], 2);
+        // Set aside first, then a new key, then the new host's invitation.
+        let position = |needle: &str| scripts.iter().position(|script| script.contains(needle));
+        let aside = position("\nsupersede_stuck_install ").expect("the old install is set aside");
+        let failed = events.iter().rev().find(|event| event.step == Step::Failed);
+        assert!(
+            position("prepare-join-key").is_some_and(|key| key > aside),
+            "{failed:?}"
+        );
+        assert!(position("\nreplace_stuck_install ").is_none());
+        // The fixture refuses the join: the set-aside install is put back.
+        assert!(position("\nrestore_superseded_install ").unwrap() > aside);
+        assert!(
+            events
+                .iter()
+                .any(|event| event.message.contains("put back as it was found"))
+        );
+        let stuck_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_hosts WHERE id=?")
+            .bind(stuck.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(stuck_rows, 0, "the old host id is never adopted");
+        let issued: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM remote_join_tokens WHERE host_id<>?")
+                .bind(f.prior.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(issued, 1, "one invitation for a new host id");
+    }
+
+    #[tokio::test]
+    async fn a_locked_ca_refuses_reenrollment_before_anything_changes() {
+        let f = fixture(false).await;
         let (events, scripts) =
             run_stuck(&f, stuck_check(Uuid::new_v4(), &[9; 32], "old.example")).await;
         let failed = events
@@ -2265,7 +2306,7 @@ mod tests {
             .find(|event| event.step == Step::Failed)
             .unwrap();
         assert!(
-            failed.message.contains("enrolled with another server"),
+            failed.message.contains("administrator passkey"),
             "{}",
             failed.message
         );

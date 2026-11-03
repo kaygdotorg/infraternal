@@ -3,6 +3,7 @@
 use crate::auth_order::Authentication;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::net::Ipv6Addr;
 
 pub(crate) const SOCKET_PROBE_UNAVAILABLE: &str = "Finishing earlier setup needs the matching infraternal binary on this host. Its files were kept.";
@@ -279,6 +280,12 @@ pub(crate) struct SetupLock {
     pid: Option<u32>,
     since: String,
     active: bool,
+    /// Open terminal sessions a stuck-install replacement ends (#305, D13).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sessions: Option<u16>,
+    /// The other server a stuck install is enrolled with; it may join as a new host (D335).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enrolled_with: Option<String>,
 }
 
 /// Serialize the failure's wire fields; each UUID has its own key and its own field.
@@ -364,7 +371,27 @@ impl Failure {
             pid,
             since,
             active,
+            sessions: None,
+            enrolled_with: None,
         });
+        self
+    }
+
+    /// Name what confirming a stuck-install replacement ends and where the machine is enrolled.
+    #[must_use]
+    pub(crate) fn with_stuck_install(
+        mut self,
+        sessions: u16,
+        enrolled_with: Option<String>,
+    ) -> Self {
+        if let Some(lock) = self
+            .ids
+            .as_deref_mut()
+            .and_then(|ids| ids.setup_lock.as_mut())
+        {
+            lock.sessions = Some(sessions);
+            lock.enrolled_with = enrolled_with;
+        }
         self
     }
 
@@ -377,16 +404,38 @@ impl Failure {
             |pid| format!("process {pid}"),
         );
         if lock.active {
-            Cow::Owned(format!(
+            return Cow::Owned(format!(
                 "On {}, {process} holds the setup lock since {}. If the install is stuck, retry after the lease expires, then replace the stuck install.",
                 lock.machine, lock.since
-            ))
-        } else {
-            Cow::Owned(format!(
-                "The failed setup on {} left a lease last held by {process} since {}. Replace the stuck install to continue.",
-                lock.machine, lock.since
-            ))
+            ));
         }
+        let mut text = format!(
+            "The failed setup on {} left a lease last held by {process} since {}.",
+            lock.machine, lock.since
+        );
+        if let Some(server) = &lock.enrolled_with {
+            // An empty name: the host could not read its identity file.
+            if server.is_empty() {
+                text.push_str(" This machine is enrolled with another server.");
+            } else {
+                let _ = write!(
+                    text,
+                    " This machine is enrolled with another server, {server}."
+                );
+            }
+            text.push_str(" Joining it to this server makes it a new host with a new key; its old infraternal agent is set aside, not deleted.");
+        } else {
+            text.push_str(" Replace the stuck install to continue.");
+        }
+        match lock.sessions {
+            Some(0) => text.push_str(" No terminal sessions are open."),
+            Some(1) => text.push_str(" 1 open terminal session will end."),
+            Some(open) => {
+                let _ = write!(text, " {open} open terminal sessions will end.");
+            }
+            None => {}
+        }
+        Cow::Owned(text)
     }
     /// Return the public challenge only while this error represents a host-key refusal.
     #[must_use]

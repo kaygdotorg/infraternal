@@ -63,7 +63,7 @@ pub struct PreviousAttempt {
     enrolled: Option<Enrolled>,
 }
 
-/// The stuck install's enrolled key digest and the server that issued it (#305).
+/// The stuck install's enrolled key digest and the server that issued it (#305, D335).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Enrolled {
     pub digest: [u8; 32],
@@ -329,18 +329,27 @@ impl PreviousAttempt {
 
     /// Preserve lease coordinates when presenting the explicit stuck-upgrade action.
     #[must_use]
-    pub(crate) fn stuck_failure(&self) -> Failure {
+    pub(crate) fn stuck_failure(&self, reenroll: bool) -> Failure {
         let failure = Failure::new(
             FailureKind::StalePreviousAttempt,
             "An earlier install stopped while replacing this infraternal agent.",
         );
         if let Some(owner) = &self.lease_owner {
-            failure.with_setup_lock(
-                owner.machine.clone(),
-                Some(owner.pid),
-                owner.since.clone(),
-                false,
-            )
+            failure
+                .with_setup_lock(
+                    owner.machine.clone(),
+                    Some(owner.pid),
+                    owner.since.clone(),
+                    false,
+                )
+                .with_stuck_install(
+                    self.sockets,
+                    reenroll.then(|| {
+                        self.enrolled
+                            .as_ref()
+                            .map_or_else(String::new, |enrolled| enrolled.server.clone())
+                    }),
+                )
         } else {
             failure
         }
@@ -382,6 +391,22 @@ impl PreviousAttempt {
         self.enrolled.as_ref()
     }
 
+    /// Confirmation for joining a machine another server enrolled as a new host (D335).
+    #[must_use]
+    pub fn reenroll_findings(&self, mode: InstallMode, challenge: uuid::Uuid) -> Leftovers {
+        let mut leftovers = self.findings(mode, challenge);
+        leftovers.findings[0] = self
+            .enrolled
+            .as_ref()
+            .map_or(Cow::Borrowed("Enrolled with another server"), |enrolled| {
+                Cow::Owned(format!("Enrolled with another server: {}", enrolled.server))
+            });
+        leftovers.findings[1] = Cow::Borrowed(
+            "It joins this server as a new host; the old install is set aside, not deleted",
+        );
+        leftovers
+    }
+
     /// The exact upgrade record every mutating step recompares on the host.
     fn upgrade_record(&self) -> String {
         let owner = self.lease_owner.as_ref();
@@ -406,7 +431,7 @@ impl PreviousAttempt {
         )
     }
 
-    /// Run one upgrade-journal routine for this exact observed record (#305).
+    /// Run one upgrade-journal routine for this exact observed record (#305, D335).
     async fn upgrade_action(
         &self,
         session: &dyn SshSession,
@@ -419,6 +444,43 @@ impl PreviousAttempt {
             crate::install::SETUP_LOCK,
             crate::install::RUNTIME_CLEANUP,
             crate::transport::shell_quote(&self.upgrade_record())
+        );
+        session
+            .run(
+                &Installation::script_for(target.mode, self.host, self.transaction, &body),
+                Input::Empty,
+            )
+            .await
+            .map_err(classify)?;
+        Ok(())
+    }
+
+    /// Set aside a stuck install another server enrolled, after the same ordered retirement.
+    /// # Errors
+    /// Refuses a changed record or live holders; any failure after the stop restores the service.
+    pub async fn supersede(
+        &self,
+        session: &dyn SshSession,
+        target: &Target,
+    ) -> Result<(), Failure> {
+        self.upgrade_action(session, target, "supersede_stuck_install")
+            .await
+    }
+
+    /// Put a set-aside install back after the new enrollment failed and rolled back.
+    /// # Errors
+    /// Refuses while any new installation or unit is still in place.
+    pub async fn restore_superseded(
+        &self,
+        session: &dyn SshSession,
+        target: &Target,
+    ) -> Result<(), Failure> {
+        target.validate()?;
+        let body = format!(
+            "{}\n{}\n{INSPECT}\nrestore_superseded_install {}\n",
+            crate::install::SETUP_LOCK,
+            crate::install::RUNTIME_CLEANUP,
+            self.transaction.simple()
         );
         session
             .run(
@@ -624,5 +686,33 @@ mod tests {
             );
             assert!(parse(record.as_bytes()).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn reenroll_confirmation_names_the_other_server_and_the_sessions() {
+        let record = format!(
+            "INFRATERNAL_SETUP_UPGRADE {} {} 1:2 host 99 1 2026-11-02T07:48:26Z 2 {} old.example\n",
+            "1".repeat(32),
+            "2".repeat(32),
+            "ab".repeat(32)
+        );
+        let previous = parse(record.as_bytes()).unwrap().unwrap();
+        let message = serde_json::to_value(previous.stuck_failure(true)).unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            message.contains("enrolled with another server, old.example."),
+            "{message}"
+        );
+        assert!(message.contains("set aside, not deleted"), "{message}");
+        assert!(
+            message.ends_with("2 open terminal sessions will end."),
+            "{message}"
+        );
+        let lock = &serde_json::to_value(previous.stuck_failure(true)).unwrap()["setup_lock"];
+        assert_eq!(lock["sessions"], 2);
+        assert_eq!(lock["enrolled_with"], "old.example");
+        assert!(serde_json::to_value(previous.stuck_failure(false)).unwrap()["setup_lock"]["enrolled_with"].is_null());
     }
 }

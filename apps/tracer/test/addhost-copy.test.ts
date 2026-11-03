@@ -61,6 +61,33 @@ test("a failed upgrade offers an explicit stuck-install replacement", () => {
   expect(guide.next).toBe("");
 });
 
+test("a stuck-install replacement names the open terminal sessions it ends (#305)", () => {
+  const lock = { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false };
+  const guide = (sessions: number) => guideFor("fixture host", {
+    kind: "stale_previous_attempt", message: "x", log_tail: [], setup_lock: { ...lock, sessions },
+  } as unknown as FailureDetail);
+  expect(guide(0).next).toBe("No terminal sessions are open on it.");
+  expect(guide(1).next).toBe("1 open terminal session will end.");
+  expect(guide(3).next).toBe("3 open terminal sessions will end.");
+});
+
+test("a machine enrolled with another server asks to join as a new host (D335)", () => {
+  const failure = {
+    kind: "stale_previous_attempt",
+    message: "x",
+    log_tail: [],
+    setup_lock: { machine: "code", pid: 254, since: "2026-11-02T04:05:06Z", active: false, sessions: 2, enrolled_with: "monitor01.example" },
+  } as unknown as FailureDetail;
+  expect(guideFor("code", failure)).toMatchObject({
+    title: "code is enrolled with another server",
+    happened: "It belongs to monitor01.example. Join it to this server as a new host with a new key. Its old infraternal agent is stopped and set aside, not deleted.",
+    next: "2 open terminal sessions will end.",
+    fix: "replace-stuck-install",
+  });
+  const unnamed = { ...failure, setup_lock: { ...failure.setup_lock!, enrolled_with: "" } } as FailureDetail;
+  expect(guideFor("code", unnamed).happened).toBe("Join it to this server as a new host with a new key. Its old infraternal agent is stopped and set aside, not deleted.");
+});
+
 test("install advice follows the step that stopped, and never tells people to restore access", () => {
   const steps = ["connect", "upload", "install", "join", "start", "readiness"] as const;
   const advice = steps.map((failed_step) => guideFor("host", { kind: "install", message: "m", log_tail: [], failed_step }).next);

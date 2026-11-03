@@ -707,6 +707,50 @@ replace_stuck_install "$observed"
         self.assertEqual(commit.returncode, 0, commit.stderr.decode())
         self.assertFalse(replaced.exists(), 'the next commit retires them')
 
+    def test_another_servers_install_is_set_aside_whole_and_can_be_put_back(self):
+        stage, _ = self.make_upgrade_fixture()
+        result = self.confirm('supersede_stuck_install')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        aside = Path(f'{self.base}.bootstrap-superseded-{TRANSACTION}')
+        self.assertFalse(self.base.exists(), 'the setup directory is free for a new host (D335)')
+        self.assertFalse(self.unit.exists())
+        self.assertFalse(self.launcher.is_symlink())
+        self.assertTrue((aside / 'state/identity.json').exists(), 'nothing is deleted')
+        self.assertTrue((aside / '.bootstrap-lock/transaction').exists())
+        self.assertEqual((aside / '.superseded-service').read_text(), 'yes yes\n')
+        self.assertIn('# infraternal bootstrap', (aside / '.superseded-unit').read_text())
+        log = self.manager_log.read_text().splitlines()
+        self.assertEqual(log[:5], [
+            'is-enabled --quiet infraternal-agent.service',
+            'is-active --quiet infraternal-agent.service',
+            'stop infraternal-agent.service',
+            'disable infraternal-agent.service',
+            'daemon-reload',
+        ])
+        self.assertNotIn('start infraternal-agent.service', log)
+        self.manager_log.unlink()
+        restore = self.run_shell(f'\nrestore_superseded_install {TRANSACTION}\n')
+        self.assertEqual(restore.returncode, 0, restore.stderr.decode())
+        self.assertFalse(aside.exists())
+        self.assertTrue(self.identity_path.exists())
+        self.assertTrue(stage.exists(), 'the stuck journal is back exactly as found')
+        self.assertTrue(self.unit.exists())
+        self.assertEqual(os.readlink(self.launcher), str(self.base / 'bin/current'))
+        self.assertFalse((self.base / '.superseded-service').exists())
+        self.assertEqual(self.manager_log.read_text().splitlines(), [
+            'daemon-reload',
+            'enable infraternal-agent.service',
+            'start infraternal-agent.service',
+        ])
+
+    def test_restore_refuses_while_a_new_install_is_in_place(self):
+        self.make_upgrade_fixture()
+        self.assertEqual(self.confirm('supersede_stuck_install').returncode, 0)
+        self.base.mkdir(mode=0o700)
+        restore = self.run_shell(f'\nrestore_superseded_install {TRANSACTION}\n')
+        self.assertEqual(restore.returncode, 72, restore.stderr.decode())
+        self.assertTrue(Path(f'{self.base}.bootstrap-superseded-{TRANSACTION}').exists())
+
     def test_a_connected_upgrade_is_finished_not_replaced(self):
         stage, _ = self.make_upgrade_fixture()
         result = self.confirm('finish_stuck_upgrade')

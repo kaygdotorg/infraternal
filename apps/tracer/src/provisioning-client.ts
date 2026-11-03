@@ -51,7 +51,13 @@ export interface FailureDetail {
   message: string;
   log_tail: string[];
   /** Validated host-local setup lease coordinates for lock and interrupted-upgrade guidance. */
-  setup_lock?: { machine: string; pid?: number; since: string; active: boolean };
+  setup_lock?: {
+    machine: string; pid?: number; since: string; active: boolean;
+    /** Open terminal sessions that replacing the stuck install ends (#305). */
+    sessions?: number;
+    /** The other server the stuck install is enrolled with ("" when unnamed); joining makes a new host (D335). */
+    enrolled_with?: string;
+  };
   /** Observed SHA256 host-key fingerprints; untrusted, present only for `host-key`. */
   fingerprints?: string[];
   host_key_challenge?: string;
@@ -156,6 +162,8 @@ function parseSetupLock(value: unknown): FailureDetail["setup_lock"] | undefined
     active: value.active,
   };
   if (typeof value.pid === "number") lock.pid = value.pid;
+  if (typeof value.sessions === "number" && Number.isSafeInteger(value.sessions) && value.sessions >= 0 && value.sessions <= 1024) lock.sessions = value.sessions;
+  if (typeof value.enrolled_with === "string" && (value.enrolled_with === "" || /^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/.test(value.enrolled_with))) lock.enrolled_with = value.enrolled_with;
   return lock;
 }
 

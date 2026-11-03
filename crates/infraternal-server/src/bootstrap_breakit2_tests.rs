@@ -998,7 +998,8 @@ impl Backend for ObservedBackend {
     ) -> Operation<'a, StuckInstall> {
         let backend = self.0.clone();
         Box::pin(async move {
-            // BREAKIT2_REPLACE_STUCK replays a stuck install this server enrolled.
+            // BREAKIT2_REPLACE_STUCK replays a stuck install this server
+            // enrolled; without it the fixture is another server's (D335).
             if std::env::var_os("BREAKIT2_REPLACE_STUCK").is_some() {
                 seed_replacement_host(&backend, authority, &request).await;
             }
@@ -1323,7 +1324,10 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         sessions_changed: Mutex::default(),
     });
     let timeout_retry = std::env::var_os("BREAKIT2_TIMEOUT_RETRY").is_some();
-    let replace_stuck = std::env::var_os("BREAKIT2_REPLACE_STUCK").is_some();
+    // Confirm the stuck-install action: replace (this server's host) or
+    // join as a new host (another server's, D335).
+    let replace_stuck = std::env::var_os("BREAKIT2_REPLACE_STUCK").is_some()
+        || std::env::var_os("BREAKIT2_REENROLL_STUCK").is_some();
     let retry_private =
         (timeout_retry || std::env::var_os("BREAKIT2_RETRY").is_some()).then(|| private.clone());
     // Adding the same host a second time must name the existing host (#189).

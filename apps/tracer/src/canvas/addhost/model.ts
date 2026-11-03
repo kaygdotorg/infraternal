@@ -55,6 +55,13 @@ export function failureLine(failure: FailureDetail | undefined): string {
   }
 }
 
+/** What confirming a stuck-install replacement ends; empty when the server did not say (#305, D13). */
+function sessionsLine(lock: NonNullable<FailureDetail["setup_lock"]>): string {
+  if (lock.sessions === undefined) return "";
+  if (lock.sessions === 0) return "No terminal sessions are open on it.";
+  return lock.sessions === 1 ? "1 open terminal session will end." : `${lock.sessions} open terminal sessions will end.`;
+}
+
 /** Turn the validated host lease coordinates into the message shown in the flow. */
 function setupLockLine(lock: NonNullable<FailureDetail["setup_lock"]>, active: boolean): string {
   const owner = lock.pid === undefined ? "an unidentified process" : `process ${lock.pid}`;
@@ -173,13 +180,24 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
       tone: "danger",
     };
     case "stale_previous_attempt":
-      if (failure.setup_lock?.active === false) return {
-        title: "A stuck infraternal agent was found on " + name,
-        happened: setupLockLine(failure.setup_lock, false),
-        next: "",
-        fix: "replace-stuck-install",
-        tone: "info",
-      };
+      if (failure.setup_lock?.active === false) {
+        const lock = failure.setup_lock;
+        // D335: another server enrolled this machine; it can join this one as a new host.
+        if (lock.enrolled_with !== undefined) return {
+          title: `${name} is enrolled with another server`,
+          happened: `${lock.enrolled_with ? `It belongs to ${lock.enrolled_with}. ` : ""}Join it to this server as a new host with a new key. Its old infraternal agent is stopped and set aside, not deleted.`,
+          next: sessionsLine(lock),
+          fix: "replace-stuck-install",
+          tone: "info",
+        };
+        return {
+          title: "A stuck infraternal agent was found on " + name,
+          happened: setupLockLine(lock, false),
+          next: sessionsLine(lock),
+          fix: "replace-stuck-install",
+          tone: "info",
+        };
+      }
       return {
         title: "This host has leftovers from an earlier setup",
         happened: "infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.",
