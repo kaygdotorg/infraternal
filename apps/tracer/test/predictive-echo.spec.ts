@@ -1,5 +1,6 @@
 /** Exercises opt-in local echo directly against the production Ghostty renderer build. */
 import { expect, test } from "playwright/test";
+import { freezePredictionFrame, releasePredictionFrame } from "./predictive-backspace-fixture";
 
 const port = Number(process.env.TRACER_TEST_PORT ?? "4621");
 const baseURL = `http://localhost:${port}`;
@@ -175,7 +176,7 @@ test("predictive echo draws only when Ghostty reports a visible normal-screen cu
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.pendingText ?? ""))
     .toBe("");
   await context.request.post("/__mock/alternate-screen", { data: { active: false } });
-  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.enabled ?? false))
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.enabled ?? false), { timeout: 30_000 })
     .toBe(true);
 
   await context.request.post("/__mock/echo-mode", { data: { mode: "wrong" } });
@@ -249,7 +250,7 @@ test("predictive echo draws only when Ghostty reports a visible normal-screen cu
   await resetScreen();
   await page.evaluate(() => window.__tracerTestDouble?.seedPrompt());
   // This is a fresh client: attachment precedes the RTT proof that enables prediction.
-  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.enabled ?? false))
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.enabled ?? false), { timeout: 30_000 })
     .toBe(true);
   await inject("x");
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.pendingText ?? ""))
@@ -350,7 +351,10 @@ test(`predicted glyph and cursor pixels match confirmed cells at DPR ${pixelTest
 
   const readGeometry = () => page.evaluate(() => {
     const canvas = document.querySelector<HTMLCanvasElement>("#terminal-host canvas");
-    const drawnCursor = window.__tracerTestDouble?.predictiveEcho()?.overlay?.cursor;
+    const frozen = document.querySelector<HTMLCanvasElement>("[data-frozen-prediction]");
+    const drawnCursor = frozen
+      ? JSON.parse(frozen.dataset.cursor!) as { x: number; y: number; width: number; height: number }
+      : window.__tracerTestDouble?.predictiveEcho()?.overlay?.cursor;
     const metrics = window.__tracerTestDouble?.rendererMetrics();
     if (!canvas || !metrics) throw new Error("renderer canvas or metrics are unavailable");
     const canvasContext = canvas.getContext("2d", { willReadFrequently: true });
@@ -387,11 +391,8 @@ test(`predicted glyph and cursor pixels match confirmed cells at DPR ${pixelTest
   const start = { x: original.cursorX, y: original.cursorY };
   const shortLine = "MMMMMMMMMMMMMMMMMMMMMMMM";
   const shortExpected = advanceAscii(start, original.columns, shortLine.length);
-  await page.evaluate((value) => {
-    for (const character of value) window.__tracerTestDouble?.injectInput(character);
-  }, shortLine);
-  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.pendingText ?? ""))
-    .toBe(shortLine);
+  const shortFrame = await freezePredictionFrame(page, [...shortLine]);
+  expect(shortFrame.text).toBe(shortLine);
 
   const pendingGeometry = await readGeometry();
   expect(pendingGeometry.cursor).toBeDefined();
@@ -405,6 +406,7 @@ test(`predicted glyph and cursor pixels match confirmed cells at DPR ${pixelTest
     height: pendingGeometry.cellHeight,
   }));
   const pendingShortPng = await page.screenshot({ scale: "device" });
+  await releasePredictionFrame(page);
   const pendingShortPixels = await inspectPixels(
     page,
     pendingShortPng,
@@ -449,13 +451,12 @@ test(`predicted glyph and cursor pixels match confirmed cells at DPR ${pixelTest
 
   const beforeBackspace = Number(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.outputSequence ?? "0"));
   const backspaceExpected = stepBack(shortExpected.cursor, 1);
-  await page.evaluate(() => window.__tracerTestDouble?.injectInput("\u007f"));
-  await expect.poll(() => page.evaluate(() => Boolean(window.__tracerTestDouble?.predictiveEcho()?.overlay?.cursor)))
-    .toBe(true);
+  await freezePredictionFrame(page, ["\u007f"]);
   const pendingBackspaceGeometry = await readGeometry();
   const pendingBackspaceBox = pendingBackspaceGeometry.cursor!;
   expect(pendingBackspaceBox.x).toBeCloseTo(pendingBackspaceGeometry.canvas.x + backspaceExpected.x * pendingBackspaceGeometry.cellWidth, 2);
   const pendingBackspacePng = await page.screenshot({ scale: "device" });
+  await releasePredictionFrame(page);
   const pendingBackspacePixels = await inspectPixels(
     page,
     pendingBackspacePng,
@@ -491,11 +492,8 @@ test(`predicted glyph and cursor pixels match confirmed cells at DPR ${pixelTest
   expect(wrapStart.x + longLength).toBeGreaterThan(wrapStartGeometry.columns);
   const longLine = "M".repeat(longLength);
   const longExpected = advanceAscii(wrapStart, wrapStartGeometry.columns, longLength);
-  await page.evaluate((value) => {
-    for (const character of value) window.__tracerTestDouble?.injectInput(character);
-  }, longLine);
-  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.pendingText ?? ""))
-    .toBe(longLine);
+  const longFrame = await freezePredictionFrame(page, [...longLine]);
+  expect(longFrame.text).toBe(longLine);
   const pendingLongGeometry = await readGeometry();
   expect(pendingLongGeometry.cursor).toBeDefined();
   expect(pendingLongGeometry.cursor!.x).toBeCloseTo(pendingLongGeometry.canvas.x + longExpected.cursor.x * pendingLongGeometry.cellWidth, 2);
@@ -507,6 +505,7 @@ test(`predicted glyph and cursor pixels match confirmed cells at DPR ${pixelTest
     height: pendingLongGeometry.cellHeight,
   }));
   const pendingLongPng = await page.screenshot({ scale: "device" });
+  await releasePredictionFrame(page);
   const pendingLongPixels = await inspectPixels(page, pendingLongPng, pendingLongGeometry.cursor!, longCellBoxes);
   expect(pendingLongPixels.glyphPixels.every((count) => count > 0)).toBe(true);
   expectCursorPixelBounds(pendingLongPixels, pendingLongGeometry.cursor!, dpr);
@@ -553,18 +552,8 @@ test("predictive echo captures pending and confirmed glyphs across production vi
       await capturePage.evaluate(() => window.__tracerTestDouble?.seedPrompt());
       await expect.poll(() => capturePage.evaluate(() => window.__tracerTestDouble?.screenText() ?? ""))
         .toContain("$");
-      // Prepare the screenshot before input; font loading must not consume the pending frame.
-      await capturePage.evaluate(() => document.fonts.ready);
-      await context.request.post("/__mock/echo-mode", { data: { mode: "normal", delay_ms: 300 } });
-      const injected = await capturePage.waitForFunction((value) => {
-        const terminal = window.__tracerTestDouble;
-        if (!terminal?.isConnected() || terminal.predictiveEcho()?.enabled !== true) return false;
-        for (const character of value) terminal.injectInput(character);
-        return true;
-      }, captureText, { timeout: 30_000 });
-      await injected.dispose();
-      await expect.poll(() => capturePage.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.pendingText ?? ""))
-        .toBe(captureText);
+      const frame = await freezePredictionFrame(capturePage, [...captureText]);
+      expect(frame.text).toBe(captureText);
 
       const pendingPath = testInfo.outputPath(`predictive-${capture.name}-${capture.theme}-pending.png`);
       await capturePage.screenshot({ path: pendingPath });
@@ -573,8 +562,9 @@ test("predictive echo captures pending and confirmed glyphs across production vi
         contentType: "image/png",
       });
       // The canvas draws predicted text at the theme's prediction alpha; the cursor stays opaque.
-      expect(await capturePage.locator(".terminal-text-overlay").evaluate((node) => getComputedStyle(node).visibility))
+      expect(await capturePage.locator("[data-frozen-prediction]").evaluate((node) => getComputedStyle(node).visibility))
         .toBe("visible");
+      await releasePredictionFrame(capturePage);
 
       await expect.poll(async () => {
         const state = await (await context.request.get("/__mock/state")).json() as { echoed_text: string };

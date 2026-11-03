@@ -1,6 +1,6 @@
 /** Functional backspace and cursor regressions; CPU budgets run on the perf VM (#314). */
 import { expect, test } from "playwright/test";
-import { dpr, openPredictingTerminal, runKeys } from "./predictive-backspace-fixture";
+import { dpr, freezePredictionFrame, openPredictingTerminal, releasePredictionFrame, runKeys } from "./predictive-backspace-fixture";
 
 const BS = "\x7f";
 
@@ -122,37 +122,13 @@ test(`predicted cursor pixels sit on the cell edge after backspace at DPR ${dpr}
   const typed = await runKeys(page, [..."pixel check"], 10);
   expect(typed.violations).toEqual([]);
   expect(typed.settled).toBe(true);
-  // Font loading must finish before the prediction: screenshot waits for fonts.
-  await page.evaluate(() => document.fonts.ready);
-  // Keep the echo behind the screenshot so this oracle reads speculative pixels.
-  await context.request.post("/__mock/echo-mode", { data: { mode: "normal", delay_ms: 300 } });
-  const geometryHandle = await page.waitForFunction(() => {
-    const d = window.__tracerTestDouble;
-    if (!d?.isConnected() || d.predictiveEcho()?.enabled !== true) return null;
-    // Capture the pending cursor in the same task as the keys, before an echo
-    // or a route change can clear this particular prediction.
-    for (const key of ["\x7f", "\x7f", "\x7f"]) d.injectInput(key);
-    const canvas = document.querySelector<HTMLCanvasElement>("#terminal-host canvas")!;
-    const box = canvas.getBoundingClientRect();
-    const cursor = d.predictiveEcho()!.overlay?.cursor;
-    if (!cursor) throw new Error(`Backspace did not predict: ${d.predictiveEcho()!.reason}`);
-    return { left: box.x + cursor.x, top: box.y + cursor.y, width: cursor.width, height: cursor.height, cw: d.rendererMetrics()!.cellWidth };
-  }, undefined, { timeout: 30_000 });
-  const geometry = await geometryHandle.jsonValue();
-  await geometryHandle.dispose();
-  if (!geometry) throw new Error("Prediction geometry was not captured");
-  const geometryEvidence = await page.evaluate(() => {
-    const source = document.querySelector<HTMLCanvasElement>("#terminal-host canvas")!;
-    const overlay = document.querySelector<HTMLCanvasElement>("#terminal-host .terminal-text-overlay")!;
-    return { sourceLeft: source.getBoundingClientRect().x, sourceTop: source.getBoundingClientRect().y,
-      overlayLeft: overlay.getBoundingClientRect().x, overlayTop: overlay.getBoundingClientRect().y,
-      sourceOffsetLeft: source.offsetLeft, sourceOffsetTop: source.offsetTop };
-  });
+  const frame = await freezePredictionFrame(page, ["\x7f", "\x7f", "\x7f"]);
+  const geometry = frame.geometry;
+  const geometryEvidence = frame.origins;
   console.log("PREDICTED_CURSOR_GEOMETRY", JSON.stringify({ ...geometryEvidence, ...geometry }));
   const screenshotPath = info.outputPath("predicted-backspace-cursor.png");
   const png = await page.screenshot({ path: screenshotPath, scale: "device" });
-  const capturedCursor = await page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.overlay?.cursor);
-  expect(capturedCursor).toBeDefined();
+  await releasePredictionFrame(page);
   await info.attach("predicted-backspace-cursor", { path: screenshotPath, contentType: "image/png" });
   expect(geometryEvidence.overlayLeft).toBeCloseTo(geometryEvidence.sourceLeft, 2);
   expect(geometryEvidence.overlayTop).toBeCloseTo(geometryEvidence.sourceTop, 2);

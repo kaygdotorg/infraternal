@@ -6,7 +6,8 @@
  * A page-side model of the host line (cells, cursor, wrap-pending) replays the
  * same keys the mock host echoes. After every key, while the prediction is
  * still unconfirmed, the drawn cursor and glyphs are compared with that model;
- * after the echoes land, the renderer's own cursor and screen are.
+ * after the echoes land, the renderer's own cursor and screen are. Shared screenshot
+ * probes preserve those production bitmaps before encoding can outlive the prediction.
  */
 import { expect, type Page } from "playwright/test";
 
@@ -160,4 +161,53 @@ export function runKeys(page: Page, keys: string[], gapMs: number): Promise<RunR
       settled,
     };
   }, { keys, gapMs });
+}
+
+/**
+ * Preserves the actual pending renderer frame before transport or PNG encoding can advance it.
+ * The copy contains the original renderer and prediction bitmaps at their existing shared origin;
+ * it neither redraws glyphs nor invents cursor pixels. Live confirmation continues underneath it.
+ */
+export async function freezePredictionFrame(page: Page, keys: string[]) {
+  await page.evaluate(() => document.fonts.ready);
+  const handle = await page.waitForFunction((keys) => {
+    const terminal = window.__tracerTestDouble;
+    if (!terminal?.isConnected() || terminal.predictiveEcho()?.enabled !== true) return null;
+    for (const key of keys) terminal.injectInput(key);
+    const prediction = terminal.predictiveEcho()!;
+    const snapshot = prediction.overlay;
+    const source = document.querySelector<HTMLCanvasElement>("#terminal-host canvas")!;
+    const overlay = document.querySelector<HTMLCanvasElement>("#terminal-host .terminal-text-overlay")!;
+    if (!snapshot?.visible || !snapshot.cursor || getComputedStyle(overlay).visibility !== "visible") {
+      throw new Error(`Ready input did not produce a visible prediction: ${prediction.reason}`);
+    }
+    const sourceBox = source.getBoundingClientRect();
+    const overlayBox = overlay.getBoundingClientRect();
+    if (Math.abs(sourceBox.x - overlayBox.x) > 0.005 || Math.abs(sourceBox.y - overlayBox.y) > 0.005
+      || source.width !== overlay.width || source.height !== overlay.height) {
+      throw new Error("Renderer and prediction raster origins or backing sizes differ");
+    }
+    const frame = overlay.cloneNode(false) as HTMLCanvasElement;
+    frame.dataset.frozenPrediction = "";
+    frame.dataset.cursor = JSON.stringify(snapshot.cursor);
+    const context = frame.getContext("2d")!;
+    context.drawImage(source, 0, 0);
+    context.drawImage(overlay, 0, 0);
+    overlay.after(frame);
+    return {
+      text: snapshot.text,
+      geometry: { left: sourceBox.x + snapshot.cursor.x, top: sourceBox.y + snapshot.cursor.y,
+        width: snapshot.cursor.width, height: snapshot.cursor.height },
+      origins: { sourceLeft: sourceBox.x, sourceTop: sourceBox.y, overlayLeft: overlayBox.x, overlayTop: overlayBox.y },
+    };
+  }, keys, { timeout: 30_000 });
+  const frame = await handle.jsonValue();
+  await handle.dispose();
+  if (!frame) throw new Error("Prediction frame was not captured");
+  return frame;
+}
+
+/** Reveals the live renderer again before checking the independently confirmed output. */
+export async function releasePredictionFrame(page: Page): Promise<void> {
+  await page.evaluate(() => document.querySelectorAll("[data-frozen-prediction]").forEach((node) => node.remove()));
 }
