@@ -545,7 +545,7 @@ stop_stage_shims() {
 }
 # Stop the stuck install's service and shims for the exact confirmed record.
 # Every read-only proof runs first; after the stop, any failure puts the
-# service back as it was found (#305 P1-2). Callers clear the EXIT trap only
+# service back as it was found (#305 P1-2). Callers clear the traps only
 # once the old install is moved out of the way.
 retire_stuck_service() {
  replace_expected=$1
@@ -571,7 +571,14 @@ retire_stuck_service() {
  if $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1; then replace_active=yes; fi
  # The state found travels with the journal, so whatever step fails later,
  # in this script or after it, can put the service back as it was (#305 P1-1).
- trap 'replace_status=$?; trap - EXIT; restore_stuck_service; exit "$replace_status"' EXIT
+ # dash runs no EXIT trap when a signal ends it, and a dropped SSH session
+ # ends it with HUP or PIPE: trap those too (#305 P2-1). While restoring, the
+ # signals are ignored, so a closed stdout cannot cut the restore short.
+ trap 'replace_status=$?; replace_untrap; restore_stuck_service; exit "$replace_status"' EXIT
+ trap 'replace_untrap; restore_stuck_service; exit 129' HUP
+ trap 'replace_untrap; restore_stuck_service; exit 130' INT
+ trap 'replace_untrap; restore_stuck_service; exit 143' TERM
+ trap 'replace_untrap; restore_stuck_service; exit 141' PIPE
  printf '%s %s\n' "$replace_enabled" "$replace_active" >| "$stage/found-service"
  retire_setup_lease
  $manager stop infraternal-agent.service >/dev/null 2>&1 || exit 73
@@ -582,6 +589,14 @@ retire_stuck_service() {
  not_live
  exec 7< "$stage"
  flock -n 7 || exit 73
+}
+replace_untrap() {
+ trap - EXIT
+ trap '' HUP INT TERM PIPE
+}
+# The set-aside is complete: from here a failure belongs to the caller's restore.
+replace_done() {
+ trap - EXIT HUP INT TERM PIPE
 }
 # Undo retire_stuck_service: move what this command set aside ($aside) back
 # to where it was ($aside_origin), then re-enable and restart the service if
@@ -610,7 +625,7 @@ replace_stuck_install() {
  aside=$replaced
  aside_origin=$stage
  mv -T "$stage" "$replaced"
- trap - EXIT
+ replace_done
 }
 # Put back a journal that replace_stuck_install moved aside, after the new
 # enrollment failed and its own rollback removed its journal: the stuck
@@ -648,7 +663,7 @@ supersede_stuck_install() {
  mv "$unit" "$aside/.superseded-unit"
  rm -f "$launcher"
  $manager daemon-reload >/dev/null 2>&1 || exit 73
- trap - EXIT
+ replace_done
 }
 # Put back an install set aside by supersede_stuck_install after the new
 # enrollment failed and its own rollback removed the new installation.

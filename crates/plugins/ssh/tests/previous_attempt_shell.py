@@ -859,6 +859,34 @@ replace_stuck_install "$observed"
         self.assertEqual(restore.returncode, 0, restore.stderr.decode())
         self.assertEqual(self.service_state(), (False, False), 'as found, not "fixed"')
 
+    def signal_after_the_stop(self, signal, status):
+        # /bin/sh is dash on Debian and Ubuntu, and dash runs no EXIT trap when
+        # a signal ends it; a dropped SSH session sends HUP or PIPE (#305 P2-1).
+        stage, _ = self.make_upgrade_fixture()
+        expected = self.run_shell('\ninspect_previous').stdout.decode().strip()
+        result = self.run_shell(f'''
+signal_manager() {{
+ mock_manager "$@"
+ [ "$1" != disable ] || kill -{signal} $$
+}}
+manager=signal_manager
+supersede_stuck_install "{expected}"
+''')
+        self.assertEqual(result.returncode, status, result.stderr.decode())
+        self.assertEqual(self.service_state(), (True, True), 'enabled and running, as found')
+        self.assertTrue(stage.exists())
+        self.assertFalse((stage / 'found-service').exists())
+        self.assertFalse(Path(f'{self.base}.bootstrap-superseded-{TRANSACTION}').exists())
+
+    def test_a_hangup_after_the_stop_still_puts_the_service_back(self):
+        self.signal_after_the_stop('HUP', 129)
+
+    def test_a_termination_after_the_stop_still_puts_the_service_back(self):
+        self.signal_after_the_stop('TERM', 143)
+
+    def test_a_broken_pipe_after_the_stop_still_puts_the_service_back(self):
+        self.signal_after_the_stop('PIPE', 141)
+
     def test_restore_refuses_while_a_new_install_is_in_place(self):
         self.make_upgrade_fixture()
         self.assertEqual(self.confirm('supersede_stuck_install').returncode, 0)
