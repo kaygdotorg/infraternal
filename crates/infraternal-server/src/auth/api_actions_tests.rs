@@ -387,3 +387,27 @@ async fn streamed_actions_share_the_per_key_rate_limit_and_audit_rejection() {
     assert_eq!(denied, (token_hash, f.user, "denied".to_owned()));
     assert!(!serde_json::to_string(&denied).unwrap().contains(token));
 }
+
+/// J137 P3-4: revoking a key wakes its owner's live streams, which recheck and close.
+#[tokio::test]
+async fn revoking_a_key_wakes_its_owner_streams() {
+    let f = fixture().await;
+    let token_hash = hash("fixture-revoke-wake-key-never-print");
+    sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,?,'fixture-cli','[\"hosts:write\"]',?,?,0)")
+        .bind(&token_hash)
+        .bind(&f.user)
+        .bind(NOW)
+        .bind(NOW + 86_400)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let events = f.auth.revocation_events(&f.user);
+    f.auth
+        .api_revoke(&f.session, &token_hash, NOW)
+        .await
+        .unwrap();
+    assert!(
+        events.has_changed().unwrap(),
+        "revocation published no event"
+    );
+}

@@ -205,18 +205,23 @@ impl Auth {
     /// Revoke an API key belonging to this user after a fresh tap.
     /// Retaining its one-way id lets denied actions keep accurate audit attribution until the
     /// audit retention bound; `expires_at` becomes the revocation time so that bound counts
-    /// from here.
+    /// from here. The owner's live streams are woken after commit so a key-driven add-host
+    /// stream rechecks the key and ends (J137 P3-4).
     pub async fn api_revoke(&self, session_token: &str, key_hash: &str, now: i64) -> Result<()> {
         let session = self.session(session_token, now).await?;
         session.require_fresh(now)?;
-        sqlx::query(
+        let revoked = sqlx::query(
             "UPDATE api_keys SET dead=1,expires_at=MIN(expires_at,?) WHERE token_hash=? AND user_id=?",
         )
         .bind(now)
         .bind(key_hash)
         .bind(&session.user_id)
         .execute(&self.pool)
-        .await?;
+        .await?
+        .rows_affected();
+        if revoked == 1 {
+            self.revocations.publish(&session.user_id, None);
+        }
         Ok(())
     }
 
