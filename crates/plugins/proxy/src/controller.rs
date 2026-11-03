@@ -1165,7 +1165,7 @@ mod tests {
     impl Drop for FakeSupervisor {
         fn drop(&mut self) {
             if let Some(gate) = &self.public_gate {
-                let _ = gate(None);
+                let _ = gate(crate::ingress::PublicGateState::Cleared);
             }
             if let Some(events) = &self.stopped
                 && let Ok(mut events) = events.lock()
@@ -1241,10 +1241,12 @@ mod tests {
                     .swap(true, std::sync::atomic::Ordering::AcqRel)
                 && let Some(gate) = &self.public_gate
             {
-                gate(Some(infraternal_mesh::proxy_ports::ListenerPortPair {
-                    http: self.listener_ports.http,
-                    https: self.listener_ports.https,
-                }))?;
+                gate(crate::ingress::PublicGateState::Closed(
+                    infraternal_mesh::proxy_ports::ListenerPortPair {
+                        http: self.listener_ports.http,
+                        https: self.listener_ports.https,
+                    },
+                ))?;
             }
             self.snapshots
                 .lock()

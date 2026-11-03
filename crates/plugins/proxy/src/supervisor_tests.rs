@@ -8,8 +8,10 @@ use crate::{
     config::{
         DYNAMIC_CONFIG_FILENAME, DnsChallenge, ListenerPorts, PublishedService, StaticConfig,
     },
+    ingress::PublicGateState,
     names::CertificateName,
 };
+use infraternal_mesh::proxy_ports::ListenerPortPair;
 use std::{
     env,
     io::{BufRead, Write},
@@ -980,7 +982,7 @@ fn a_new_supervisor_stops_an_orphan_that_holds_the_child_lock() {
 
 #[test]
 fn the_public_gate_is_closed_before_a_child_starts_and_cleared_after_it_stops() {
-    type Calls = std::sync::Arc<std::sync::Mutex<Vec<(Option<u16>, bool)>>>;
+    type Calls = std::sync::Arc<std::sync::Mutex<Vec<(PublicGateState, bool)>>>;
     let root = std::env::temp_dir().join(format!("proxy-gate-{}", uuid::Uuid::new_v4()));
     let (state, lock_directory) = supervisor_fixture(&root);
     let executable = root.join("fake-traefik");
@@ -992,13 +994,13 @@ fn the_public_gate_is_closed_before_a_child_starts_and_cleared_after_it_stops() 
         generation_probe_settings(&root, &state, &lock_directory, executable, probe.address);
     let recorded = std::sync::Arc::clone(&calls);
     let observed_marker = marker.clone();
-    settings.public_gate = Some(std::sync::Arc::new(move |pair| {
+    settings.public_gate = Some(std::sync::Arc::new(move |gate| {
         recorded
             .lock()
             .map_err(|_| std::io::Error::other("gate log"))?
-            .push((pair.map(|pair| pair.https), observed_marker.exists()));
+            .push((gate, observed_marker.exists()));
         // Mark the child as possibly running only once the gate is closed.
-        if pair.is_some() {
+        if matches!(gate, PublicGateState::Closed(_)) {
             std::fs::write(&observed_marker, b"").map_err(std::io::Error::other)?;
         }
         Ok(())
@@ -1006,30 +1008,137 @@ fn the_public_gate_is_closed_before_a_child_starts_and_cleared_after_it_stops() 
     let supervisor = TraefikSupervisor::start(settings, std::sync::Arc::new(|_: String| {}))
         .expect("start idle supervisor");
     supervisor
-        .replace(vec![PublishedService {
-            id: "docs".to_owned(),
-            hostname: "docs.n1.example.test".to_owned(),
-            backend: "127.0.0.1:3000".parse().expect("backend"),
-            allowed_sources: Vec::new(),
-            public: true,
-            https_port: 10_443,
-            certificate: CertificateName::Wildcard("*.n1.example.test".to_owned()),
-        }])
+        .replace(vec![public_service()])
         .expect("start the child for a public route");
     let while_running = calls.lock().expect("gate log").clone();
     drop(supervisor);
     let after_stop = calls.lock().expect("gate log").clone();
     drop(probe);
     std::fs::remove_dir_all(root).expect("remove gate fixture");
+    let pair = ListenerPortPair {
+        http: 10_080,
+        https: 10_443,
+    };
     assert_eq!(
         while_running,
-        [(Some(10_443), false)],
-        "the gate closes once, before the child exists"
+        [
+            (PublicGateState::Closed(pair), false),
+            (PublicGateState::Open(pair), true)
+        ],
+        "the gate closes before the child exists and opens once it confirmed a public route"
     );
     assert_eq!(
-        after_stop,
-        [(Some(10_443), false), (None, true)],
+        after_stop.last(),
+        Some(&(PublicGateState::Cleared, true)),
         "the gate is cleared after the child stops"
+    );
+}
+
+fn public_service() -> PublishedService {
+    PublishedService {
+        id: "docs".to_owned(),
+        hostname: "docs.n1.example.test".to_owned(),
+        backend: "127.0.0.1:3000".parse().expect("backend"),
+        allowed_sources: Vec::new(),
+        public: true,
+        https_port: 10_443,
+        certificate: CertificateName::Wildcard("*.n1.example.test".to_owned()),
+    }
+}
+
+// The rootful gate is shared with the Mesh firewall through the ingress publisher. A crash
+// clears it; the restarted child must reopen it for the public route it already serves,
+// without the controller publishing anything new.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_crash_restart_reopens_the_public_gate_for_applied_routes() {
+    use crate::ingress::IngressPublisher;
+    use infraternal_mesh::proxy_ports::MeshProxyIngress;
+
+    const MARK: &str = "4273";
+    let root = std::env::temp_dir().join(format!("proxy-gate-restart-{}", uuid::Uuid::new_v4()));
+    let (state, lock_directory) = supervisor_fixture(&root);
+    let executable = root.join("fake-traefik");
+    fake_traefik(
+        &executable,
+        format!("#!/bin/sh\nexec /bin/sleep {MARK}\n").as_bytes(),
+    );
+    let probe = generation_probe_server(state.join(DYNAMIC_CONFIG_FILENAME), false);
+    let publisher = std::sync::Arc::new(IngressPublisher::default());
+    let applied: std::sync::Arc<std::sync::Mutex<Vec<MeshProxyIngress>>> =
+        std::sync::Arc::default();
+    let recorded = std::sync::Arc::clone(&applied);
+    publisher
+        .set_observer(std::sync::Arc::new(move |ingress| {
+            recorded
+                .lock()
+                .map_err(|_| std::io::Error::other("ingress log"))?
+                .push(ingress);
+            Ok(())
+        }))
+        .expect("observe ingress");
+    let mut settings =
+        generation_probe_settings(&root, &state, &lock_directory, executable, probe.address);
+    settings.public_gate = Some(publisher.public_gate());
+    let supervisor = TraefikSupervisor::start(settings, std::sync::Arc::new(|_: String| {}))
+        .expect("start idle supervisor");
+    supervisor
+        .replace(vec![public_service()])
+        .expect("start the child for a public route");
+    let live = |ingress: &MeshProxyIngress| {
+        ingress.public_route_active && ingress.public_listener_pair.is_some()
+    };
+    let open_before = publisher.current().is_ok_and(|ingress| live(&ingress));
+
+    // Crash the child the way an OOM kill would.
+    let own = std::process::id().to_string();
+    let child = std::fs::read_dir("/proc")
+        .expect("list processes")
+        .flatten()
+        .find(|entry| {
+            let path = entry.path();
+            std::fs::read(path.join("cmdline")).is_ok_and(|cmdline| {
+                cmdline
+                    .split(|byte| *byte == 0)
+                    .any(|argument| argument == MARK.as_bytes())
+            }) && std::fs::read_to_string(path.join("status")).is_ok_and(|status| {
+                status
+                    .lines()
+                    .any(|line| line.strip_prefix("PPid:").map(str::trim) == Some(own.as_str()))
+            })
+        })
+        .and_then(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
+        .expect("find the fake Traefik child");
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(child),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("crash the child");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let reopened = loop {
+        let history = applied.lock().expect("ingress log").clone();
+        let cleared = history
+            .iter()
+            .position(|ingress| ingress.public_listener_pair.is_none());
+        if let Some(cleared) = cleared
+            && history[cleared..].iter().any(live)
+        {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    drop(supervisor);
+    drop(probe);
+    std::fs::remove_dir_all(root).expect("remove gate fixture");
+    assert!(open_before, "a confirmed public route opens the gate");
+    assert!(
+        reopened,
+        "after a crash restart the gate must open again for the routes already applied: {:?}",
+        applied.lock().expect("ingress log")
     );
 }
 

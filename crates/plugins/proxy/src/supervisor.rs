@@ -3,6 +3,7 @@
 use crate::{
     config::{ListenerPorts, PublishedService, StaticConfig},
     identity,
+    ingress::PublicGateState,
 };
 use nix::fcntl::{Flock, FlockArg};
 use std::{
@@ -1257,11 +1258,24 @@ fn start_runtime_child(
         Err(error) => {
             // A failed start has already reaped its child; its gate must not outlive it.
             if let Some(gate) = &settings.public_gate {
-                let _ = gate(None);
+                let _ = gate(PublicGateState::Cleared);
             }
             return Err(error);
         }
     };
+    // The child has confirmed these services. After a crash restart nothing else would mark
+    // its public routes live again. A failure here leaves the gate closed, which fails safe;
+    // the controller's next confirmed update opens it.
+    if let Some(gate) = &settings.public_gate
+        && runtime.services.iter().any(|service| service.public)
+    {
+        let _ = gate(PublicGateState::Open(
+            infraternal_mesh::proxy_ports::ListenerPortPair {
+                http: ports.http,
+                https: ports.https,
+            },
+        ));
+    }
     runtime.child = Some(started);
     runtime.listener_ports = Some(ports);
     let _ = runtime
@@ -1357,10 +1371,12 @@ fn start_managed_child(
     identity::verify_unshared()?;
     if let Some(gate) = &settings.public_gate {
         // The wildcard pair must be gated before the child can accept on it.
-        gate(Some(infraternal_mesh::proxy_ports::ListenerPortPair {
-            http: config.ports.http,
-            https: config.ports.https,
-        }))?;
+        gate(PublicGateState::Closed(
+            infraternal_mesh::proxy_ports::ListenerPortPair {
+                http: config.ports.http,
+                https: config.ports.https,
+            },
+        ))?;
     }
     let mut child = TraefikChild::spawn_holding(
         &settings.executable,
@@ -1470,7 +1486,7 @@ fn stop_owned_child(
         && stopped.is_ok()
         && let Some(gate) = &settings.public_gate
     {
-        gate(None)?;
+        gate(PublicGateState::Cleared)?;
     }
     stopped
 }
