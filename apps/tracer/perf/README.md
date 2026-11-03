@@ -24,7 +24,8 @@ The moved thresholds remain unchanged:
   script > 150 ms and heartbeat lateness > 100 ms;
 - frame meter: mean/p99 < 50 µs, self time < 0.05 ms, layout overhead ≤ 3,
   style overhead ≤ ceil(control × 1.05) + 3;
-- backspace prediction: every measured input cost < 2 ms;
+- backspace prediction: every measured input cost < 2 ms; in-flight resize never
+  mutes or mispredicts under the original echo deadline (2 × RTT + 64 ms);
 - synchronized output: input send ≤ 16 ms while output is held. This check uses
   the direct fixture backend: its 150 ms paint hold must not expire while a
   300 ms fixture control/observation request is in flight.

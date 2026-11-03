@@ -1,6 +1,6 @@
 /** Functional backspace and cursor regressions; CPU budgets run on the perf VM (#314). */
 import { expect, test } from "playwright/test";
-import { dpr, freezePredictionFrame, openPredictingTerminal, releasePredictionFrame, runKeys } from "./predictive-backspace-fixture";
+import { dpr, freezePredictionFrame, openPredictingTerminal, releasePredictionFrame, resizeWithInflightInput, runKeys } from "./predictive-backspace-fixture";
 
 const BS = "\x7f";
 
@@ -157,39 +157,13 @@ test(`predicted cursor pixels sit on the cell edge after backspace at DPR ${dpr}
   expect(distance(edges.left, edges.afterRight)).toBeGreaterThan(80);
 });
 
-test(`typing through a layout change keeps predicting without mispredictions at DPR ${dpr}`, async ({ page, context }) => {
+test(`layout changes preserve the host cursor and recover prediction after late echo at DPR ${dpr}`, async ({ page, context }) => {
   test.setTimeout(120_000);
-  await openPredictingTerminal(page, context);
-  const start = await page.evaluate(() => window.__tracerTestDouble!.rendererMetrics()!.cursorX);
-  // The worst misprediction streak seen while typing: it resets to 0 once an echo matches again.
-  const type = (text: string, gapMs: number) => page.evaluate(async ({ text, gapMs }) => {
-    let worst = 0;
-    let muted = false;
-    for (const ch of text) {
-      const d = window.__tracerTestDouble!;
-      d.injectInput(ch);
-      await new Promise((resolve) => setTimeout(resolve, gapMs));
-      const p = d.predictiveEcho()!;
-      worst = Math.max(worst, p.mispredictions);
-      muted ||= p.muted;
-    }
-    return { worst, muted };
-  }, { text, gapMs });
-  // Keys are in flight (300 ms round trip) when the viewport, and with it the terminal grid, changes.
-  const early = await type("abcdef", 20);
-  await page.setViewportSize({ width: 660, height: 900 });
-  // The echoes of the early keys arrive while later keys are typed. They must not release the wait early and
-  // let a newer key be placed from a cursor that lacks them, which shows as repeated mispredictions and a mute.
-  const late = await type("ghijklmnopqrstuvwxyz", 80);
-  await page.waitForTimeout(1500);
-  const state = await page.evaluate(() => {
-    const d = window.__tracerTestDouble!;
-    const p = d.predictiveEcho()!;
-    return { mispredictions: p.mispredictions, muted: p.muted, reason: p.reason, cursorX: d.rendererMetrics()!.cursorX };
-  });
+  const { start, early, late, state, recoveredState } = await resizeWithInflightInput(page, context, 500);
   expect(state.cursorX).toBe(start + 26);
   expect(state.reason).not.toBe("repeated-mispredictions");
-  expect(state.muted).toBe(false);
   expect(Math.max(early.worst, late.worst)).toBe(0);
-  expect(early.muted || late.muted).toBe(false);
+  expect(recoveredState.muted).toBe(false);
+  expect(recoveredState.mispredictions).toBe(0);
+  expect(recoveredState.cursorX).toBe(start + 27);
 });

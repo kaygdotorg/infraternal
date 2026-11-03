@@ -211,3 +211,64 @@ export async function freezePredictionFrame(page: Page, keys: string[]) {
 export async function releasePredictionFrame(page: Page): Promise<void> {
   await page.evaluate(() => document.querySelectorAll("[data-frozen-prediction]").forEach((node) => node.remove()));
 }
+
+/** Shares the original in-flight resize scenario with its unchanged perf-VM no-mute budget. */
+export async function resizeWithInflightInput(page: Page, context: import("playwright/test").BrowserContext, echoDelayMs = 0) {
+  await openPredictingTerminal(page, context);
+  if (echoDelayMs > 0) await context.request.post("/__mock/echo-mode", { data: { mode: "normal", delay_ms: echoDelayMs } });
+  const start = await page.evaluate(() => window.__tracerTestDouble!.rendererMetrics()!.cursorX);
+  // The worst misprediction streak seen while typing: it resets to 0 once an echo matches again.
+  const type = (text: string, gapMs: number) => page.evaluate(async ({ text, gapMs }) => {
+    const startedAt = performance.now();
+    let worst = 0;
+    let muted = false;
+    const samples: Array<{ at: number; input: string; phase: string; muted: boolean; reason: string; pending: string; rtt: number | undefined; output: string; cursorX: number }> = [];
+    const observe = (input: string, phase: string): void => {
+      const d = window.__tracerTestDouble!;
+      const p = d.predictiveEcho()!;
+      if (!p.muted) return;
+      const metrics = d.rendererMetrics()!;
+      samples.push({ at: performance.now(), input, phase, muted: p.muted, reason: p.reason,
+        pending: p.pendingText, rtt: p.roundTripMs, output: metrics.outputSequence, cursorX: metrics.cursorX });
+    };
+    for (const ch of text) {
+      const d = window.__tracerTestDouble!;
+      observe(ch, "before");
+      d.injectInput(ch);
+      await new Promise((resolve) => setTimeout(resolve, gapMs));
+      const p = d.predictiveEcho()!;
+      worst = Math.max(worst, p.mispredictions);
+      muted ||= p.muted;
+      observe(ch, "after");
+    }
+    return { startedAt, worst, muted, samples };
+  }, { text, gapMs });
+  // Keys are in flight (300 ms round trip) when the viewport, and with it the terminal grid, changes.
+  const early = await type("abcdef", 20);
+  await page.setViewportSize({ width: 660, height: 900 });
+  // The echoes of the early keys arrive while later keys are typed. They must not release the wait early and
+  // let a newer key be placed from a cursor that lacks them, which shows as repeated mispredictions and a mute.
+  const late = await type("ghijklmnopqrstuvwxyz", 80);
+  await page.waitForTimeout(1500);
+  if (echoDelayMs > 0) await expect.poll(() => page.evaluate(() => window.__tracerTestDouble!.rendererMetrics()!.cursorX), { timeout: 30_000 }).toBe(start + 26);
+  const state = await page.evaluate(() => {
+    const d = window.__tracerTestDouble!;
+    const p = d.predictiveEcho()!;
+    return { mispredictions: p.mispredictions, muted: p.muted, reason: p.reason, cursorX: d.rendererMetrics()!.cursorX };
+  });
+  let recoveredState = state;
+  if (echoDelayMs > 0) {
+    // The safety mute is expected for a host slower than its echo deadline. A fresh timely echo proves recovery.
+    await context.request.post("/__mock/echo-mode", { data: { mode: "normal" } });
+    await page.evaluate(() => window.__tracerTestDouble!.injectInput("!"));
+    await expect.poll(() => page.evaluate(() => window.__tracerTestDouble!.predictiveEcho()!.muted), { timeout: 30_000 }).toBe(false);
+    await expect.poll(() => page.evaluate(() => window.__tracerTestDouble!.rendererMetrics()!.cursorX), { timeout: 30_000 }).toBe(start + 27);
+    recoveredState = await page.evaluate(() => {
+      const d = window.__tracerTestDouble!;
+      const p = d.predictiveEcho()!;
+      return { mispredictions: p.mispredictions, muted: p.muted, reason: p.reason, cursorX: d.rendererMetrics()!.cursorX };
+    });
+  }
+  console.log("LAYOUT_PREDICTION_STATE", JSON.stringify({ echoDelayMs, early, late, state, recoveredState }));
+  return { start, early, late, state, recoveredState };
+}

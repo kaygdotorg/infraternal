@@ -1,6 +1,6 @@
-/** Unchanged per-key prediction CPU budget, run under perf-run on the perf VM (#314). */
+/** Unchanged per-key prediction CPU and echo-deadline budgets, run under perf-run on the perf VM (#314). */
 import { expect, test } from "playwright/test";
-import { dpr, openPredictingTerminal, runKeys } from "../test/predictive-backspace-fixture";
+import { dpr, openPredictingTerminal, resizeWithInflightInput, runKeys } from "../test/predictive-backspace-fixture";
 
 const KEY_COST_BUDGET_MS = 2;
 const BS = "\x7f";
@@ -27,4 +27,14 @@ test(`the first predicted key stays within the per-key budget at DPR ${dpr}`, as
   console.log(`first-key cost ${costs[0]!.toFixed(2)} ms; rest max ${Math.max(...costs.slice(1)).toFixed(2)} ms`);
   expect(costs.length).toBe(9);
   expect(Math.max(...costs)).toBeLessThan(KEY_COST_BUDGET_MS);
+});
+
+/** The existing echo deadline is a latency guard; shared functional hosts deliberately exercise late recovery. */
+test(`typing through a layout change does not reach the echo deadline at DPR ${dpr}`, async ({ page, context }) => {
+  const { start, early, late, state } = await resizeWithInflightInput(page, context);
+  expect(state.cursorX).toBe(start + 26);
+  expect(state.reason).not.toBe("repeated-mispredictions");
+  expect(state.muted).toBe(false);
+  expect(Math.max(early.worst, late.worst)).toBe(0);
+  expect(early.muted || late.muted).toBe(false);
 });
