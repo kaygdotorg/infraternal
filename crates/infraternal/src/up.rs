@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     env, fs,
-    io::{self, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
@@ -208,6 +208,12 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
         Err(failure) => return fail(json_output, failure),
     };
     let origin = server.origin().ascii_serialization();
+    // The code and link are a live approval capability for ten minutes. Show
+    // them only to a person at a terminal, never into a pipe, file or CI log,
+    // and do not wait out the lifetime when nobody can see them (#263).
+    if !approval_display_is_terminal(json_output) {
+        return needs_terminal(&origin, json_output);
+    }
     // Find both privileged programs before an approval is requested, so a
     // missing or replaceable one never wastes the owner's passkey approval.
     let Ok(executable) = env::current_exe() else {
@@ -453,6 +459,34 @@ fn approval_qr(link: &str) -> Result<String, Failure> {
         rendered.push('\n');
     }
     Ok(rendered)
+}
+
+/// Whether the stream the approval code goes to (stderr under `--json`, else
+/// stdout) is a terminal.
+fn approval_display_is_terminal(json_output: bool) -> bool {
+    if json_output {
+        io::stderr().is_terminal()
+    } else {
+        io::stdout().is_terminal()
+    }
+}
+
+/// D303 pending result for a run nobody can approve from: no key is prepared,
+/// the server is not contacted, and no code exists to leak.
+fn needs_terminal(origin: &str, json_output: bool) -> ExitCode {
+    emit(
+        CommandResult::new(
+            "up",
+            CommandState::Pending,
+            "Approving this machine needs a terminal; no join was started.",
+            json!({ "server": origin }),
+        )
+        .with_next_step(format!(
+            "Run infraternal up {origin} in a terminal, then approve the code it shows with your passkey."
+        )),
+        json_output,
+        Exit::NotAllowed,
+    )
 }
 
 fn print_approval(

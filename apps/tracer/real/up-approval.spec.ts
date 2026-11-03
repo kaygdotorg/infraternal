@@ -78,10 +78,18 @@ test("up is approved in J82's real page and enrolls over HTTPS without port 7443
   await writeFile(sudoCalls, "");
   await writeFile(helperOutput, "");
 
-  const output = { stdout: "", stderr: "" };
-  cli = spawn("/usr/bin/unshare", [
-    "--pid", "--fork", `--mount-proc=${join(root, "proc")}`,
+  // `up` shows its code only on a terminal (#263): run it on a pseudo-terminal whose output is
+  // `output.terminal`, with stdout (the final JSON) redirected to its own file.
+  const stdoutFile = join(control, "up-stdout");
+  await writeFile(stdoutFile, "");
+  const upCommand = [
+    "/usr/bin/unshare", "--pid", "--fork", `--mount-proc=${join(root, "proc")}`,
     "/usr/sbin/chroot", root, "/infraternal", "up", server.origin, "--json",
+  ].map(shellQuote).join(" ");
+  const output = { terminal: "" };
+  const stdout = async (): Promise<string> => readFile(stdoutFile, "utf8");
+  cli = spawn("/usr/bin/script", [
+    "--quiet", "--flush", "--return", "--command", `exec ${upCommand} >${shellQuote(stdoutFile)}`, "/dev/null",
   ], {
     detached: true,
     env: {
@@ -92,24 +100,22 @@ test("up is approved in J82's real page and enrolls over HTTPS without port 7443
       XDG_DATA_HOME: "/home/up/data",
       SSL_CERT_FILE: "/etc/ssl/certs/ca-certificates.crt",
     },
-    stdio: ["ignore", "pipe", "pipe"],
+    // stdin stays an open pipe so the pseudo-terminal never reads end-of-file.
+    stdio: ["pipe", "pipe", "pipe"],
   });
-  cli.stdout?.on("data", (chunk: Buffer) => { output.stdout += chunk.toString("utf8"); });
-  cli.stderr?.on("data", (chunk: Buffer) => { output.stderr += chunk.toString("utf8"); });
+  cli.stdout?.on("data", (chunk: Buffer) => { output.terminal += chunk.toString("utf8"); });
+  cli.stderr?.on("data", (chunk: Buffer) => { output.terminal += chunk.toString("utf8"); });
 
-  await waitFor(
-    () => output.stdout.length > 0 || (USER_CODE.test(output.stderr) && SHORT_KEY.test(output.stderr)),
-    45_000,
-  );
-  expect(output.stdout.length, "up --json must keep pending progress off stdout").toBe(0);
-  const code = output.stderr.match(USER_CODE)?.[1];
-  const machineKey = output.stderr.match(SHORT_KEY)?.[1];
+  await waitFor(() => USER_CODE.test(output.terminal) && SHORT_KEY.test(output.terminal), 45_000);
+  expect((await stdout()).length, "up --json must keep pending progress off stdout").toBe(0);
+  const code = output.terminal.match(USER_CODE)?.[1];
+  const machineKey = output.terminal.match(SHORT_KEY)?.[1];
   const approvalOrigin = new URL(server.origin).origin;
   expect(/^[A-Za-z0-9_-]{16}$/.test(code ?? "")).toBe(true);
   expect(/^[A-Za-z0-9+/]{4}( [A-Za-z0-9+/]{4}){3}$/.test(machineKey ?? "")).toBe(true);
-  expect(output.stderr.includes(`${approvalOrigin}/#join=${code}`)).toBe(true);
-  expect(output.stderr.includes("##"), "the terminal approval output must include a QR").toBe(true);
-  expect(!/poll_token|"token"\s*:/i.test(output.stderr)).toBe(true);
+  expect(output.terminal.includes(`${approvalOrigin}/#join=${code}`)).toBe(true);
+  expect(output.terminal.includes("##"), "the terminal approval output must include a QR").toBe(true);
+  expect(!/poll_token|"token"\s*:/i.test(output.terminal)).toBe(true);
 
   // Force a new document before following the printed link: a fragment-only navigation does not rerun J82's startup.
   // Keep the same page target so its virtual passkey authenticator remains available for fresh approval.
@@ -211,7 +217,8 @@ test("up is approved in J82's real page and enrolls over HTTPS without port 7443
     throw error;
   }
   const result = await waitForExit(cli, 90_000);
-  const jsonResult = JSON.parse(output.stdout) as Record<string, unknown>;
+  const finalStdout = await stdout();
+  const jsonResult = JSON.parse(finalStdout) as Record<string, unknown>;
   if (result.code !== 0) {
     const helper = await readFile(helperOutput, "utf8").catch(() => "");
     const sudo = await readFile(sudoCalls, "utf8").catch(() => "");
@@ -233,12 +240,12 @@ test("up is approved in J82's real page and enrolls over HTTPS without port 7443
     throw new Error(`up failed after approval: ${JSON.stringify(diagnostic)}`);
   }
   expect(jsonResult.command === "up" && jsonResult.state === "ready").toBe(true);
-  expect(output.stdout.trim().split(/\r?\n/).length).toBe(1);
-  expect(!output.stdout.includes(code!)).toBe(true);
-  expect(!output.stdout.includes("#join=")).toBe(true);
-  expect(!/user_code|poll_token|approval_(url|qr)|"token"\s*:/i.test(output.stdout)).toBe(true);
-  expect(output.stdout.includes("/usr/local/bin/infraternal")).toBe(true);
-  expect(output.stdout.includes("active")).toBe(true);
+  expect(finalStdout.trim().split(/\r?\n/).length).toBe(1);
+  expect(!finalStdout.includes(code!)).toBe(true);
+  expect(!finalStdout.includes("#join=")).toBe(true);
+  expect(!/user_code|poll_token|approval_(url|qr)|"token"\s*:/i.test(finalStdout)).toBe(true);
+  expect(finalStdout.includes("/usr/local/bin/infraternal")).toBe(true);
+  expect(finalStdout.includes("active")).toBe(true);
 
   expect(await readFile(decoyCalls, "utf8"), "a PATH decoy ran instead of the trusted program").toBe("");
   expect(await readFile(sudoCalls, "utf8")).toBe("sudo\n");
@@ -358,6 +365,10 @@ async function provisionRemoteAuthority(target: Page): Promise<void> {
     target.off("response", onResponse);
     target.off("requestfailed", onRequestFailed);
   }
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
