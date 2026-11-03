@@ -11,12 +11,13 @@ usage() {
     exit 2
 }
 
+original_args=("$@")
 [[ $# -ge 1 && "$1" = /* ]] || usage
 output="$1"
 shift
 [[ "$output" != "/" ]] || usage
 output="${output%/}"
-notary_profile="${INFRATERAL_NOTARY_PROFILE:-infraternal-notary}"
+notary_profile="${INFRATERNAL_NOTARY_PROFILE:-infraternal-notary}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --notary-profile)
@@ -43,21 +44,17 @@ case "$output/" in
     "$root/"*) printf 'release destination must be outside the checkout\n' >&2; exit 2 ;;
 esac
 
-# Serialize every Mac build and signing operation with other jobs using this VM.
-# The lock is an atomic directory; only this invocation removes it in EXIT cleanup.
-lock=/tmp/mac-bench.lock
-lock_acquired=0
-max_wait_seconds=1800
-for ((elapsed = 0; elapsed < max_wait_seconds; elapsed += 2)); do
-    if mkdir "$lock" 2>/dev/null; then
-        lock_acquired=1
-        break
-    fi
-    sleep 2
-done
-if [[ "$lock_acquired" -ne 1 ]]; then
-    printf 'timed out waiting for /tmp/mac-bench.lock after %s seconds\n' "$max_wait_seconds" >&2
-    exit 75
+# Serialize every Mac build and signing operation with other jobs on this VM.
+# The other jobs hold /tmp/mac-bench.lock with flock(2); macOS ships no flock(1),
+# but lockf(1) takes the same kernel lock, so the two exclude each other (a
+# mkdir-style lock would not). The script re-runs itself under lockf: the kernel
+# drops the lock when the process ends, however it ends, so no cleanup is needed,
+# and -k keeps the file because deleting a lock file other jobs have open splits
+# the lock in two. -t bounds the wait; lockf exits 75 on timeout.
+if [[ -z "${INFRATERNAL_MAC_LOCK_HELD:-}" ]]; then
+    exec /usr/bin/env INFRATERNAL_MAC_LOCK_HELD=1 \
+        /usr/bin/lockf -k -t 1800 /tmp/mac-bench.lock \
+        "$root/scripts/macos-release" "${original_args[@]}"
 fi
 
 keychain="$HOME/Library/Keychains/infraternal-signing.keychain-db"
@@ -71,9 +68,6 @@ cleanup() {
     fi
     if [[ -n "$scratch" ]]; then
         rm -rf -- "$scratch" || true
-    fi
-    if [[ "$lock_acquired" -eq 1 ]]; then
-        rmdir "$lock" 2>/dev/null || true
     fi
     exit "$result"
 }
