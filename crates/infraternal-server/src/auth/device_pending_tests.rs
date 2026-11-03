@@ -49,6 +49,25 @@ fn v4(index: u32) -> IpAddr {
     IpAddr::V4((0x0a00_0000 + index).into())
 }
 
+/// One address in the `index`th IPv4 /24, so each start has its own network.
+fn v4_network(index: u32) -> IpAddr {
+    IpAddr::V4((0x0a00_0000 + (index << 8)).into())
+}
+
+/// Host 1 of the /64 `network` (its low 16 bits) inside /56 `subnet` of `2001:db8:7::/48`.
+fn v6_in_48(subnet: u16, network: u16) -> IpAddr {
+    IpAddr::V6(std::net::Ipv6Addr::new(
+        0x2001,
+        0xdb8,
+        7,
+        (subnet << 8) | (network & 0xff),
+        0,
+        0,
+        0,
+        1,
+    ))
+}
+
 #[tokio::test]
 async fn machine_join_start_deletes_expired_approvals() {
     let _guard = SERIAL.lock().await;
@@ -72,23 +91,23 @@ async fn pending_approvals_of_every_kind_share_one_server_cap() {
     for index in 0..1024 {
         let body = if index % 2 == 0 { join() } else { sign_in() };
         assert_eq!(
-            start(&app, v4(index), &body).await,
+            start(&app, v4_network(index), &body).await,
             StatusCode::OK,
             "start {index}"
         );
     }
     assert_eq!(
-        start(&app, v4(5000), &join()).await,
+        start(&app, v4_network(5000), &join()).await,
         StatusCode::TOO_MANY_REQUESTS
     );
     assert_eq!(
-        start(&app, v4(5001), &sign_in()).await,
+        start(&app, v4_network(5001), &sign_in()).await,
         StatusCode::TOO_MANY_REQUESTS
     );
     assert_eq!(rows(&f.auth).await, 1024);
     // Expiry frees the whole cap again.
     f.auth.set_test_http_time(NOW + 600);
-    assert_eq!(start(&app, v4(5000), &join()).await, StatusCode::OK);
+    assert_eq!(start(&app, v4_network(5000), &join()).await, StatusCode::OK);
     assert_eq!(rows(&f.auth).await, 1);
 }
 
@@ -214,4 +233,77 @@ async fn anonymous_flood_cannot_stop_the_owner_reviewing_an_approval() {
             .status(),
         StatusCode::TOO_MANY_REQUESTS
     );
+}
+
+#[tokio::test]
+async fn one_ipv6_allocation_cannot_fill_the_server_cap() {
+    // J134 P2-2: 205 /64s inside one /48 (each in its own /56), five starts each.
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = super::http::router(f.auth.clone());
+    f.auth.set_test_http_time(NOW);
+    let mut accepted = 0;
+    for network in 0..205_u16 {
+        for _ in 0..5 {
+            if start(&app, v6_in_48(network, 0), &join()).await == StatusCode::OK {
+                accepted += 1;
+            }
+        }
+    }
+    assert_eq!(accepted, 32, "one /48 holds at most 32 pending approvals");
+    assert_eq!(start(&app, v4_network(9), &join()).await, StatusCode::OK);
+    assert_eq!(
+        start(&app, "2001:db8:8::1".parse().unwrap(), &sign_in()).await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn nested_source_caps_bound_each_prefix() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = super::http::router(f.auth.clone());
+    f.auth.set_test_http_time(NOW);
+    // One /56 holds 16, whichever of its /64s they come from.
+    for network in 0..16 {
+        assert_eq!(
+            start(&app, v6_in_48(0, network), &join()).await,
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        start(&app, v6_in_48(0, 200), &join()).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // Another /56 of the same /48 takes the /48's remaining 16.
+    for network in 0..16 {
+        assert_eq!(
+            start(&app, v6_in_48(1, network), &join()).await,
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        start(&app, v6_in_48(2, 0), &join()).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // One IPv4 /24 holds 32; each of its addresses at most 5.
+    for _ in 0..5 {
+        assert_eq!(start(&app, v4(1), &sign_in()).await, StatusCode::OK);
+    }
+    assert_eq!(
+        start(&app, v4(1), &sign_in()).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    for host in 2..29 {
+        assert_eq!(start(&app, v4(host), &sign_in()).await, StatusCode::OK);
+    }
+    assert_eq!(
+        start(&app, v4(29), &sign_in()).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(start(&app, v4_network(1), &sign_in()).await, StatusCode::OK);
+    // Expiry frees every enclosing network together.
+    f.auth.set_test_http_time(NOW + 600);
+    assert_eq!(start(&app, v6_in_48(2, 0), &join()).await, StatusCode::OK);
+    assert_eq!(start(&app, v4(29), &sign_in()).await, StatusCode::OK);
 }

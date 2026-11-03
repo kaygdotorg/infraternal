@@ -2,10 +2,13 @@
 //!
 //! Starting an approval is public, so the rows it creates are bounded (#263):
 //! expired rows are deleted on every start, the server holds at most
-//! [`MAX_PENDING_APPROVALS`] unexpired approvals, and one source network at
-//! most [`MAX_PENDING_PER_SOURCE`]. The per-source count lives in memory only,
-//! so client addresses are never written to the database. A restart forgets
-//! it; the global cap still holds because it counts database rows.
+//! [`MAX_PENDING_APPROVALS`] unexpired approvals, and each source network
+//! holds at most its [`SOURCE_CAPS`] share. The caps nest (an IPv6 /64, /56
+//! and /48; an IPv4 address and /24), so one ordinary allocation cannot fill
+//! the server cap and refuse every other `up` (#263, J134 P2-2). The
+//! per-source counts live in memory only, so client addresses are never
+//! written to the database. A restart forgets them; the server cap still
+//! holds because it counts database rows.
 use super::{Auth, B64, Engine, Error, Result, Row, Value, hash, json, random, require_session_tx};
 use base64::engine::general_purpose::STANDARD_NO_PAD as FingerprintB64;
 use serde::{Deserialize, Serialize};
@@ -15,19 +18,61 @@ use uuid::Uuid;
 
 /// Most unexpired approvals (sign-in and machine join) the server holds at once.
 pub(crate) const MAX_PENDING_APPROVALS: i64 = 1024;
-/// Most unexpired approvals one source network may hold. A person retrying a
-/// sign-in or `up` a few times stays well under it; filling the global cap
-/// needs about 205 distinct networks.
-pub(crate) const MAX_PENDING_PER_SOURCE: usize = 5;
+/// Most unexpired approvals each enclosing source network may hold, as
+/// (prefix length, cap). A person retrying a sign-in or `up` a few times stays
+/// well under the innermost cap. A site's /56 or a tunnel broker's /48 holds
+/// at most 32, so filling the server cap needs 32 distinct /48s or /24s.
+/// Rejected: evicting the oldest uninspected approval at the server cap. A
+/// fast flood would then displace a real code in the seconds before its owner
+/// opens it, while caps never remove an approval they admitted.
+const SOURCE_CAPS: Caps = Caps {
+    v6: [(64, 5), (56, 16), (48, 32)],
+    v4: [(32, 5), (24, 32)],
+};
+
+/// Nested per-network caps for each address family; see [`SOURCE_CAPS`].
+struct Caps {
+    v6: [(u8, usize); 3],
+    v4: [(u8, usize); 2],
+}
+
+/// One enclosing network of a caller: its masked address and prefix length.
+type Network = (IpAddr, u8);
+
+impl Caps {
+    /// Every network enclosing `source` that has a cap, with that cap.
+    /// IPv4-mapped IPv6 addresses count as their IPv4 address.
+    fn networks(&self, source: IpAddr) -> impl Iterator<Item = (Network, usize)> + '_ {
+        let source = crate::runtime::device_source(source);
+        let (v6, v4) = match source {
+            IpAddr::V6(address) => (Some(u128::from(address)), None),
+            IpAddr::V4(address) => (None, Some(u32::from(address))),
+        };
+        let v6 = v6.into_iter().flat_map(|bits| {
+            self.v6.iter().map(move |&(prefix, cap)| {
+                let mask = u128::MAX << (128 - u32::from(prefix));
+                ((IpAddr::V6((bits & mask).into()), prefix), cap)
+            })
+        });
+        let v4 = v4.into_iter().flat_map(|bits| {
+            self.v4.iter().map(move |&(prefix, cap)| {
+                let mask = u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0);
+                ((IpAddr::V4((bits & mask).into()), prefix), cap)
+            })
+        });
+        v6.chain(v4)
+    }
+}
 /// Approval and receipt lifetime in seconds (D311).
 const APPROVAL_LIFETIME: i64 = 600;
 
-/// Expiry times of the approvals each source network started; a network's
-/// entry vanishes with its last unexpired approval. Each expiry was admitted
-/// under the global cap, and a row leaves the table before expiry only when an
-/// owner approves and redeems its sign-in, so the map tracks the cap.
+/// Expiry times of the approvals started inside each capped source network;
+/// a network's entry vanishes with its last unexpired approval. Each expiry
+/// was admitted under the server cap and is recorded once per enclosing
+/// network (at most three), and a row leaves the table before expiry only when
+/// an owner approves and redeems its sign-in, so the map tracks the cap.
 #[derive(Default)]
-pub(super) struct PendingSources(HashMap<IpAddr, Vec<i64>>);
+pub(super) struct PendingSources(HashMap<Network, Vec<i64>>);
 
 /// Public, bounded machine facts shown before a fresh passkey approves enrollment [#263].
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -181,7 +226,6 @@ impl Auth {
 
     /// Store one approval within the pending caps (module docs), deleting expired rows first.
     async fn insert_approval(&self, approval: ApprovalDraft<'_>, source: IpAddr) -> Result<Value> {
-        let network = crate::runtime::device_source(source);
         let now = approval.now;
         let expires = now + APPROVAL_LIFETIME;
         // Held across the transaction: concurrent starts cannot both take the last slot.
@@ -190,7 +234,10 @@ impl Auth {
             expiries.retain(|&expiry| expiry > now);
             !expiries.is_empty()
         });
-        if sources.0.get(&network).map_or(0, Vec::len) >= MAX_PENDING_PER_SOURCE {
+        if SOURCE_CAPS
+            .networks(source)
+            .any(|(network, cap)| sources.0.get(&network).map_or(0, Vec::len) >= cap)
+        {
             return Err(Error::Throttled);
         }
         let mut tx = self.pool.begin().await?;
@@ -219,7 +266,9 @@ impl Auth {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        sources.0.entry(network).or_default().push(expires);
+        for (network, _) in SOURCE_CAPS.networks(source) {
+            sources.0.entry(network).or_default().push(expires);
+        }
         Ok(
             json!({"poll_token":approval.token,"user_code":approval.code,"expires_in":APPROVAL_LIFETIME}),
         )
