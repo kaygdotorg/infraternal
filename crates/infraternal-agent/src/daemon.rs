@@ -272,25 +272,72 @@ struct OpenTask {
     context: infraternal_plugin_api::admission::NodeContext,
 }
 
+/// Public reason for a failed terminal open. A rootless host's refused login is a fact the person can act on, so it
+/// is named instead of reading as a malformed request (#327). Every other `PermissionDenied` (a revoked person, a
+/// worker owned by another account) stays `Invalid`, so root hosts answer exactly as before.
+fn open_refusal(error: &io::Error) -> infraternal_plugin_api::admission::OpenRefusal {
+    use crate::logins::RootlessRefusal;
+    use infraternal_plugin_api::admission::OpenRefusal;
+    match (RootlessRefusal::of(error), error.kind()) {
+        (Some(RootlessRefusal::NoMatchingLogin), _) => OpenRefusal::NoLogin,
+        (Some(RootlessRefusal::OtherAccount), _) => OpenRefusal::Permission,
+        (
+            None,
+            io::ErrorKind::InvalidInput
+            | io::ErrorKind::InvalidData
+            | io::ErrorKind::PermissionDenied,
+        ) => OpenRefusal::Invalid,
+        (None, _) => OpenRefusal::ResourceUnavailable,
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    //! A refused login names its true reason; only malformed requests are "invalid" (#327).
+    use super::*;
+    use infraternal_plugin_api::admission::OpenRefusal;
+
+    #[test]
+    fn io_kinds_map_to_their_reason() {
+        let kind = |kind| open_refusal(&io::Error::from(kind));
+        assert_eq!(kind(io::ErrorKind::InvalidInput), OpenRefusal::Invalid);
+        assert_eq!(kind(io::ErrorKind::InvalidData), OpenRefusal::Invalid);
+        // Revocation and worker ownership are not rootless facts: root hosts keep answering as before.
+        assert_eq!(kind(io::ErrorKind::PermissionDenied), OpenRefusal::Invalid);
+        assert_eq!(
+            kind(io::ErrorKind::TimedOut),
+            OpenRefusal::ResourceUnavailable
+        );
+    }
+
+    #[test]
+    fn rootless_host_names_why_it_cannot_log_in() {
+        if nix::unistd::Uid::effective().is_root() {
+            eprintln!("SKIP rootless refusal: runs only as a non-root account");
+            return;
+        }
+        // A person whose name is no account here: a root host would fall back to root, a rootless one cannot.
+        let absent = crate::logins::account("j142-no-such-account").unwrap_err();
+        assert_eq!(open_refusal(&absent), OpenRefusal::NoLogin);
+        // An account that exists but is not this infraternal agent's own.
+        let other = crate::logins::account("root").unwrap_err();
+        assert_eq!(open_refusal(&other), OpenRefusal::Permission);
+    }
+}
+
 // Construct cold login futures only when requested. Keeping their creation
 // outside the dispatcher poll function avoids touching their much larger code
 // working set on every idle greeting/receive, without an eager heap allocation.
 #[cold]
 #[inline(never)]
 fn spawn_open(opens: &mut OpenTasks, stream: u32, call_id: u32, task: OpenTask) {
-    use infraternal_plugin_api::admission::OpenRefusal;
     opens.spawn(async move {
         let result = async {
             task.plugins.admit("terminal.open", task.context).await?;
             let manager = *task.manager.get_or_init(Manager::detect).await;
             open_requested(&task.exe, &task.state, manager, task.input, task.prepare)
                 .await
-                .map_err(|error| match error.kind() {
-                    io::ErrorKind::InvalidInput
-                    | io::ErrorKind::InvalidData
-                    | io::ErrorKind::PermissionDenied => OpenRefusal::Invalid,
-                    _ => OpenRefusal::ResourceUnavailable,
-                })
+                .map_err(|error| open_refusal(&error))
         }
         .await;
         (stream, call_id, result)
