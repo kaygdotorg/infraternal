@@ -429,19 +429,45 @@ const REFUSED_MESSAGE: &str = "The earlier setup journal has an unsupported or c
 /// An unknown token keeps the generic refusal rather than echoing remote bytes.
 fn refusal_message(cause: &str) -> &'static str {
     match cause {
-        "entry" => "The earlier setup lock holds a file this version does not recognize. Host provisioning left it untouched.",
-        "kind" => "The earlier setup journal records a setup kind this version does not recognize. Host provisioning left it untouched.",
-        "transaction" => "The earlier setup lock and its journal name different setup attempts. Host provisioning left them untouched.",
-        "lease" => "The earlier setup lease record is malformed. Host provisioning left it untouched.",
-        "marker" => "The earlier setup journal's progress markers contradict each other. Host provisioning left it untouched.",
-        "cache" => "The earlier setup's payload cache has an unrecognized owner record. Host provisioning left it untouched.",
-        "owner" => "The setup directory's owner record is malformed or names another host. Host provisioning left it untouched.",
-        "receipt" => "The earlier setup's rollback receipt has an older or changed format. Host provisioning left it untouched.",
-        "identity" => "The setup directory was replaced after the earlier setup recorded it. Host provisioning left it untouched.",
-        "unit" => "The earlier infraternal agent's service unit is enabled for an unrecognized target. Host provisioning left it untouched.",
-        "size" => "The earlier setup left more files, sockets or processes than host provisioning inspects. Host provisioning left it untouched.",
-        "id" => "The earlier setup journal has a malformed host, transaction or session id. Host provisioning left it untouched.",
-        "tool" => "This host lacks /proc or find, or its setup path contains shell pattern characters, so the earlier setup cannot be inspected safely.",
+        "entry" => {
+            "The earlier setup lock holds a file this version does not recognize. Host provisioning left it untouched."
+        }
+        "kind" => {
+            "The earlier setup journal records a setup kind this version does not recognize. Host provisioning left it untouched."
+        }
+        "transaction" => {
+            "The earlier setup lock and its journal name different setup attempts. Host provisioning left them untouched."
+        }
+        "lease" => {
+            "The earlier setup lease record is malformed. Host provisioning left it untouched."
+        }
+        "marker" => {
+            "The earlier setup journal's progress markers contradict each other. Host provisioning left it untouched."
+        }
+        "cache" => {
+            "The earlier setup's payload cache has an unrecognized owner record. Host provisioning left it untouched."
+        }
+        "owner" => {
+            "The setup directory's owner record is malformed or names another host. Host provisioning left it untouched."
+        }
+        "receipt" => {
+            "The earlier setup's rollback receipt has an older or changed format. Host provisioning left it untouched."
+        }
+        "identity" => {
+            "The setup directory was replaced after the earlier setup recorded it. Host provisioning left it untouched."
+        }
+        "unit" => {
+            "The earlier infraternal agent's service unit is enabled for an unrecognized target. Host provisioning left it untouched."
+        }
+        "size" => {
+            "The earlier setup left more files, sockets or processes than host provisioning inspects. Host provisioning left it untouched."
+        }
+        "id" => {
+            "The earlier setup journal has a malformed host, transaction or session id. Host provisioning left it untouched."
+        }
+        "tool" => {
+            "This host lacks /proc or find, or its setup path contains shell pattern characters, so the earlier setup cannot be inspected safely."
+        }
         _ => REFUSED_MESSAGE,
     }
 }
