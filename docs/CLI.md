@@ -117,9 +117,12 @@ credential when more than one is present.
 The hosted key actions are `status`, `hosts list`, `hosts add`, `hosts remove`
 and `sessions list`. `hosts add` streams each setup step and the captured
 remote setup failure detail. `hosts remove <id> --dry-run` shows what would be
-removed and changes nothing; `hosts remove <id>` removes the host and uninstalls
-its infraternal agent. Inside its `hosts:write` scope the key needs no further
-passkey tap (D333); the tap was the key's approval, and every call is audited.
+removed and changes nothing. `hosts remove <id>` first shows that same dry run, asks
+`Type yes to confirm`, and only then removes the host and uninstalls its
+infraternal agent (D28). `--yes` skips the question for scripts; `--json` and
+pipes need it. Inside its `hosts:write` scope the key needs no further passkey tap
+(D333); the tap was the key's approval, and every call is audited. Reads are
+counted per key and minute rather than logged one row per call.
 
 Hosted actions without an explicit API scope remain unavailable to the CLI;
 they cannot bypass authorization or change a temporary local collector.

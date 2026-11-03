@@ -411,6 +411,15 @@ further passkey tap: inside one writer transaction the key is rechecked for
 and own the host, and the key's audit row is completed with the removal. The agent
 is always uninstalled (D334). Every call is audited.
 
+D28 ("dry run first") is enforced by the route for every `DryRun::Required` action.
+A successful dry run also returns `review_token` and `review_expires_in` (120 s).
+The real call must send the same input with `dry_run: false` and that token. The
+token is bound to the key, the action and the exact input apart from `dry_run` and
+`review_token`. It works once, and its first presentation spends it. A missing
+token gets `400 {"error":"review_required"}`. A mismatched, replayed or expired
+token gets `400 {"error":"review_invalid"}`. Nothing runs in either case, and the
+refusal is audited as `denied`.
+
 A process-owned operation keeps the authorized mutation alive after a browser
 HTTP disconnect. SQLite's writer transaction serializes final authorization,
 a bounded five-second node uninstall handoff and public revocation. It deletes
