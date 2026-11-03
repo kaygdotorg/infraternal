@@ -5,6 +5,7 @@
  * are level with their neighbours, and closing a half gives back the layout it came from.
  */
 import { expect, test, type Page } from "playwright/test";
+import { PEEK } from "../src/canvas/window-sizes";
 import { uiFactor } from "./ui-factor";
 
 const VIEW = '.cl[data-view="console"]';
@@ -376,8 +377,10 @@ test.describe("the phone after a split in a group (TASTE: chrome is never clippe
       return { id: w.dataset.windowId, left: Math.round(r.left), right: Math.round(r.right), headLeft: Math.round(head.left), span: Number(w.dataset.span) || 1 };
     }), VIEW);
     const vw = await page.evaluate(() => document.documentElement.clientWidth);
-    // The windows that the camera frames (those on screen at all) show their header whole: the header's left edge is not off the screen.
-    const framed = pills.filter((p) => p.right > 0 && p.left < vw);
+    // The windows that the camera frames show their header whole: the header's left edge is not off the screen. A neighbour's
+    // slice at the screen edge (TASTE "Neighbouring windows peek on phones", owner 2026-10-11, the default "Edge to edge") is
+    // not framed: it is meant to run past the edge, so only a window with more than that slice on the screen counts.
+    const framed = pills.filter((p) => Math.min(p.right, vw) - Math.max(p.left, 0) > PEEK + 2);
     expect(framed.length).toBeGreaterThan(0);
     for (const p of framed) expect(p.headLeft, `${p.id} header left edge`).toBeGreaterThanOrEqual(-1);
     for (const p of framed) expect(p.right, `${p.id} right edge`).toBeLessThanOrEqual(vw + 1);
