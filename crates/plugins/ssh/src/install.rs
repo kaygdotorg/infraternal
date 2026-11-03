@@ -418,11 +418,16 @@ impl Installation {
             .run(&self.script(&payload.body), payload.input())
             .await
             .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
+        // retire_setup_lease stops the staged lease but keeps its record, and
+        // start_setup_lease creates a new one under `set -C`. Remove the record
+        // first, as handoff_setup_lease does; this shell keeps the stage flock
+        // on fd 7 in between (#305).
         let body = format!(
             r#"stage="$base/.bootstrap-lock"
 [ -f "$stage/kind" ] && [ ! -L "$stage" ] || exit 71
 [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
 retire_setup_lease
+rm -f "$stage/lease"
 if [ -e "$base/state" ] || [ -L "$base/state" ]; then
     [ -d "$base/state" ] && [ ! -L "$base/state" ] && [ -O "$base/state" ] && [ "$(stat -c '%a' "$base/state")" = 700 ] || exit 71
     cp -a "$base/state" "$stage/state"
@@ -1699,7 +1704,11 @@ fn parse_join_key_receipt(bytes: &[u8]) -> Result<[u8; 32], Failure> {
         }
         _ => return Err(invalid_setup()),
     };
-    Err(Failure::install(message).at(InstallStep::Connect))
+    // Failure::at replaces Install text with the generic per-step remedy; these
+    // fixed receipts already name the exact HTTPS cause, so only record the step.
+    let mut failure = Failure::install(message);
+    failure.failed_step = Some(InstallStep::Connect);
+    Err(failure)
 }
 
 fn hex_nibble(byte: u8) -> Result<u8, Failure> {
