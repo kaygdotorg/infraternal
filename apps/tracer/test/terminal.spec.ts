@@ -7,12 +7,25 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
 });
 
 /** Access failures must not expose a guessed form or browser exception details. */
-test("status failure, invalid setup token, and cancelled passkey have distinct guidance", async ({ page }) => {
+test("status failure, invalid setup token, and cancelled passkey have distinct guidance", async ({ page }, info) => {
   await page.context().request.post("/__mock/reset");
   await page.route("**/auth/status", (route) => route.fulfill({ status: 503, json: {} }));
   await page.goto("/");
   await expect(page.getByRole("alert")).toHaveText("The server could not complete the request. Try again.");
   await expect(page.locator("form")).toHaveCount(0);
+  // Keep production error-state evidence at the desktop and phone review sizes.
+  for (const [width, height] of [[1440, 900], [393, 852], [375, 667]] as const) {
+    for (const colorScheme of ["dark", "light"] as const) {
+      await page.setViewportSize({ width, height });
+      await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
+      await page.goto("/");
+      await expect(page.getByRole("alert")).toHaveText("The server could not complete the request. Try again.");
+      await page.evaluate(() => document.fonts.ready);
+      const path = info.outputPath(`unavailable-${width}-${colorScheme}.png`);
+      await page.screenshot({ path, animations: "disabled" });
+      await info.attach(`unavailable-${width}-${colorScheme}`, { path, contentType: "image/png" });
+    }
+  }
   await page.unroute("**/auth/status");
   await page.getByRole("button", { name: "Try again" }).click();
   await page.locator("#setup-token").fill("invalid-input");
