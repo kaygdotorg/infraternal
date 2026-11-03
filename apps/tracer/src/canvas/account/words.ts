@@ -87,9 +87,10 @@ export interface Reading {
   tip: string;
 }
 
-/** The recovery key, in one value: calm when set up and recently verified, otherwise the concern and the way out. */
+/** Setup presence stays calm when history is unavailable; known verification checks drive age concerns. */
 export function recoveryReading(recovery: Recovery, now: number): Reading {
   if (!recovery.setUp) return { value: "Not set up", mark: "warn", tip: "You have no recovery key. Set one up in Settings" };
+  if (recovery.verifiedAt === undefined) return { value: "Set up", mark: "ok", tip: "Set up; verification history unavailable" };
   if (recovery.verifiedAt === null) return { value: "Never verified, verify now", mark: "warn", tip: "You have not checked that you hold it. Verify it in Settings" };
   if (now - recovery.verifiedAt > RECOVERY_STALE_DAYS * DAY) return { value: `Not verified since ${shortDate(recovery.verifiedAt, now)}, verify now`, mark: "warn", tip: "Check that you still hold it. Verify it in Settings" };
   return { value: "Set up", mark: "ok", tip: "Recovery key, in Settings" };

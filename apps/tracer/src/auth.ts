@@ -147,6 +147,23 @@ export async function checkSession(): Promise<AuthSession | undefined> {
   }
 }
 
+/** Setup facts only. No verification timestamp exists yet, so none is inferred. */
+export interface AccountSummary {
+  user_id: string;
+  session_incarnation: string;
+  passkeys: number;
+  recovery_set_up: boolean;
+}
+
+export async function readAccountSummary(): Promise<AccountSummary> {
+  const summary = await post<AccountSummary>("account-summary", {});
+  if (typeof summary.user_id !== "string" || typeof summary.session_incarnation !== "string"
+    || !Number.isSafeInteger(summary.passkeys) || summary.passkeys < 0 || typeof summary.recovery_set_up !== "boolean") {
+    throw new AuthError("Your account summary could not be read. Try again.");
+  }
+  return summary;
+}
+
 /**
  * Ends this device's session on the server, which also drops its sockets. A session the server no longer knows (401) is
  * already signed out, so it counts as done; any other failure is thrown, because the cookie would still be valid and
@@ -227,10 +244,34 @@ export async function registerOwner(
 
 /** Completes a UV-required passkey login and verifies its DEK envelope locally. */
 export async function loginWithPasskey(device: string): Promise<string> {
-  const start = await post<AuthStart>("login-start", {});
+  return unlockWithPasskey(device);
+}
+
+/** Adding a key needs the same authenticated local unwrap, without retaining a DEK in the screen. */
+export async function addSecondPasskey(userId: string): Promise<void> {
+  await unlockWithPasskey("Browser", userId, async (dek) => {
+    const start = await post<AuthStart>("add-start", {});
+    if (canonicalUuid(start.user_id, "passkey user id") !== userId) throw new AuthError("Your signed-in account changed. Reload and try again.");
+    const publicKey = creationOptions(start.options.publicKey);
+    const input = prfInputFrom(publicKey);
+    let prf: Uint8Array | undefined;
+    try {
+      const created = await navigator.credentials.create({ publicKey });
+      if (!(created instanceof PublicKeyCredential)) throw new AuthError("Passkey registration was cancelled.");
+      if (credentialOutputs(created).prf?.enabled !== true) throw new AuthError("This passkey cannot protect your account key. Choose another passkey.");
+      prf = prfFrom(created) ?? await credentialPrf(created, publicKey.rp.id, input);
+      const wrap = await wrapDek(prf, dek, userId, "passkey");
+      await post("registration-finish", { ceremony: requiredString(start.ceremony, "registration ceremony"), proof: credentialProof(created), passkey_wrap: wrap });
+    } finally { prf?.fill(0); input.fill(0); }
+  });
+}
+
+async function unlockWithPasskey(device: string, expectedUser?: string, useKey?: (key: Uint8Array) => Promise<void>): Promise<string> {
+  const start = await post<AuthStart>("login-start", expectedUser ? { user_id: expectedUser } : {});
   const publicKey = requestOptions(start.options.publicKey);
   let prf: Uint8Array | undefined;
   let userId: string;
+  let unlockedKey: Uint8Array | undefined;
 
   try {
     const assertion = await navigator.credentials.get({ publicKey });
@@ -247,6 +288,7 @@ export async function loginWithPasskey(device: string): Promise<string> {
     try {
       const session = await post<AuthSession>("unlock-session", {});
       userId = canonicalUuid(session?.user_id, "session user id");
+      if (expectedUser && userId !== expectedUser) throw new AuthError("Choose a passkey for the account you are adding to.");
       const stored = await post<StoredWrap[]>("wraps", {});
       const keyId = base64url(copyBytes(assertion.rawId, "rawId"));
       const entry = stored.find((entry) => entry.kind === "passkey" && entry.key_id === keyId);
@@ -262,18 +304,20 @@ export async function loginWithPasskey(device: string): Promise<string> {
           prf = await credentialPrf(assertion, publicKey.rpId, first);
         }
       } finally { first.fill(0); }
-      const dek = await unwrapDek(prf, envelope, userId, "passkey");
-      if (dek.byteLength !== 32) throw new AuthError("Your account key could not be unlocked. Try again.");
-      dek.fill(0);
+      unlockedKey = await unwrapDek(prf, envelope, userId, "passkey");
+      if (unlockedKey.byteLength !== 32) throw new AuthError("Your account key could not be unlocked. Try again.");
+      if (!useKey) { unlockedKey.fill(0); unlockedKey = undefined; }
       await post("unlock-finish", { pending_transaction: transaction });
     } catch (error: unknown) {
       try { await post("logout", { pending_transaction: transaction }); }
       catch { throw new AuthError("Your account key was not unlocked. Sign in again; this incomplete session cannot access the terminal."); }
       throw error;
     }
+    if (useKey && unlockedKey) await useKey(unlockedKey);
     return userId;
   } finally {
     prf?.fill(0);
+    unlockedKey?.fill(0);
   }
 }
 

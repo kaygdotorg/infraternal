@@ -1,7 +1,7 @@
 /**
  * Wires the person's card (D283) into the sidebar footer: a press on the person's pill opens the card inside the sidebar
  * instead of the small menu, and the pill carries one amber mark when something needs attention (Q6, words.ts). The same
- * mount serves the product (its model knows the name and the username) and the mock (a test double that knows everything),
+ * mount serves the product (identity plus setup facts read on open) and the mock (a test double that knows everything),
  * so the card is one thing in both.
  *
  * This file is small and is all the first screen's path needs; the card itself (`panel.on-demand.ts`) and its styles
@@ -119,14 +119,4 @@ export function mountAccountCard(env: AccountMountEnv): AccountMount | undefined
       panel?.dispose();
     },
   };
-}
-
-/**
- * What the product knows of the person today: the name and the username of the signed-in account. The server has no store
- * for the rest yet (passkeys, the recovery key's state, devices, the machines each account logs in to, email, picture), so
- * the model leaves them undefined and the card draws no row for them, and offers no control to change what cannot be saved.
- */
-export function identityModel(identity: { name: string; username: string }): AccountModel {
-  const person = { name: identity.name, username: identity.username };
-  return { person: () => person, onChange: () => () => undefined };
 }
