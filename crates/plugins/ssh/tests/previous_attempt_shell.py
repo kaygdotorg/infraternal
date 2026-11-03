@@ -765,6 +765,51 @@ replace_stuck_install "$observed"
         self.assertEqual(commit.returncode, 0, commit.stderr.decode())
         self.assertFalse(replaced.exists(), 'the next commit retires them')
 
+    def test_a_replacement_records_the_service_found_with_its_journal(self):
+        self.make_upgrade_fixture()
+        self.assertEqual(self.confirm('replace_stuck_install').returncode, 0)
+        replaced = Path(f'{self.base}.bootstrap-replaced-{TRANSACTION}')
+        self.assertEqual((replaced / 'found-service').read_text(), 'yes yes\n')
+        self.assertEqual(self.service_state(), (False, False))
+
+    def test_a_failed_replacement_is_put_back_as_found(self):
+        stage, _ = self.make_upgrade_fixture()
+        before = self.run_shell('\ninspect_previous').stdout
+        self.assertEqual(self.confirm('replace_stuck_install').returncode, 0)
+        # The new upgrade failed and its rollback removed its own journal (#305 P1-1).
+        restore = self.run_shell(f'\nrestore_replaced_install {TRANSACTION}\n')
+        self.assertEqual(restore.returncode, 0, restore.stderr.decode())
+        self.assertEqual(restore.stdout, b'restored\n')
+        self.assertEqual(self.service_state(), (True, True), 'enabled and running, as found')
+        self.assertFalse((stage / 'found-service').exists())
+        self.assertFalse(Path(f'{self.base}.bootstrap-replaced-{TRANSACTION}').exists())
+        self.assertEqual(self.run_shell('\ninspect_previous').stdout, before, 'the same stuck install, as found')
+
+    def test_a_replaced_journal_waits_for_the_new_attempts_rollback(self):
+        stage, _ = self.make_upgrade_fixture()
+        self.assertEqual(self.confirm('replace_stuck_install').returncode, 0)
+        stage.mkdir(mode=0o700)
+        restore = self.run_shell(f'\nrestore_replaced_install {TRANSACTION}\n')
+        self.assertEqual(restore.returncode, 72, restore.stderr.decode())
+        self.assertTrue(Path(f'{self.base}.bootstrap-replaced-{TRANSACTION}').exists())
+        self.assertEqual(self.service_state(), (False, False))
+
+    def test_restoring_what_was_never_set_aside_changes_nothing(self):
+        self.make_upgrade_fixture()
+        for action in ('restore_replaced_install', 'restore_superseded_install'):
+            restore = self.run_shell(f'\n{action} {TRANSACTION}\n')
+            self.assertEqual(restore.returncode, 0, restore.stderr.decode())
+            self.assertEqual(restore.stdout, b'untouched\n')
+        self.assertFalse(self.manager_log.exists())
+
+    def test_an_interrupted_replacement_record_keeps_the_journal_recognized(self):
+        stage, _ = self.make_upgrade_fixture()
+        found = stage / 'found-service'
+        found.write_text('yes yes\n')
+        found.chmod(0o600)
+        result = self.run_shell('\ninspect_previous')
+        self.assertTrue(result.stdout.decode().startswith(f'INFRATERNAL_SETUP_UPGRADE {HOST} {TRANSACTION} '), result.stdout)
+
     def test_another_servers_install_is_set_aside_whole_and_can_be_put_back(self):
         stage, _ = self.make_upgrade_fixture()
         result = self.confirm('supersede_stuck_install')

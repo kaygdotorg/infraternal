@@ -483,28 +483,40 @@ impl PreviousAttempt {
     }
 
     /// Put a set-aside install back after the new enrollment failed and rolled back.
+    /// `replaced` names a Replace (journal only) rather than a Re-enroll (whole install).
+    /// Returns false when this transaction was never set aside, so nothing changed.
     /// # Errors
     /// Refuses while any new installation or unit is still in place.
-    pub async fn restore_superseded(
+    pub async fn restore_set_aside(
         &self,
         session: &dyn SshSession,
         target: &Target,
-    ) -> Result<(), Failure> {
+        replaced: bool,
+    ) -> Result<bool, Failure> {
         target.validate()?;
         let body = format!(
-            "{}\n{}\n{INSPECT}\nrestore_superseded_install {}\n",
+            "{}\n{}\n{INSPECT}\n{} {}\n",
             crate::install::SETUP_LOCK,
             crate::install::RUNTIME_CLEANUP,
+            if replaced {
+                "restore_replaced_install"
+            } else {
+                "restore_superseded_install"
+            },
             self.transaction.simple()
         );
-        session
+        let output = session
             .run(
                 &Installation::script_for(target.mode, self.host, self.transaction, &body),
                 Input::Empty,
             )
             .await
             .map_err(classify)?;
-        Ok(())
+        match output.stdout.as_slice() {
+            b"restored\n" => Ok(true),
+            b"untouched\n" => Ok(false),
+            _ => Err(refused()),
+        }
     }
 
     /// Finish an upgrade whose host is connected with this identity: only its commit was lost.

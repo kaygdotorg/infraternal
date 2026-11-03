@@ -1558,6 +1558,14 @@ mod tests {
         ));
     }
 
+    mod stuck_restore {
+        //! A failed Replace or Re-enroll puts the stuck install back as found (#305).
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/bootstrap_stuck_restore_tests.rs"
+        ));
+    }
+
     mod retirement_contention {
         //! A separate SQLite writer can outlive the connection's busy timeout.
         include!(concat!(
@@ -2275,12 +2283,8 @@ mod tests {
         );
         assert!(position("\nreplace_stuck_install ").is_none());
         // The fixture refuses the join: the set-aside install is put back.
+        // stuck_restore runs that restore program for real and checks the result.
         assert!(position("\nrestore_superseded_install ").unwrap() > aside);
-        assert!(
-            events
-                .iter()
-                .any(|event| event.message.contains("put back as it was found"))
-        );
         let stuck_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_hosts WHERE id=?")
             .bind(stuck.as_bytes().as_slice())
             .fetch_one(&f.pool)

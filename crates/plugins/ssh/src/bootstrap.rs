@@ -543,6 +543,14 @@ impl Bootstrap {
         }
     }
 
+    /// Shorten the per-attempt limit, so tests reach the deadline path quickly.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_attempt_deadline(mut self, deadline: Duration) -> Self {
+        self.deadline = deadline;
+        self
+    }
+
     /// Resolve signed production payloads through the existing installation transaction [225].
     #[must_use]
     pub fn with_payload_source(mut self, source: Arc<dyn PayloadSource>) -> Self {
@@ -864,28 +872,40 @@ impl Bootstrap {
                     }
                 }
                 // The new enrollment failed: put back the install it set aside,
-                // but only once this attempt's own files are gone (D335).
-                if let Some((session, previous)) = resources.superseded
+                // but only once this attempt's own files are gone (#305 P1-1, D335).
+                if let Some(aside) = resources.set_aside
                     && rolled_back
                 {
                     let restored = tokio::time::timeout(
                         Duration::from_secs(30),
-                        previous.restore_superseded(session.as_ref(), &target),
+                        aside.previous.restore_set_aside(
+                            aside.session.as_ref(),
+                            &target,
+                            aside.replaced,
+                        ),
                     )
                     .await;
-                    emit(
-                        &batch,
-                        &target,
-                        attempt,
-                        Step::Install,
-                        if matches!(restored, Ok(Ok(()))) {
-                            "The earlier infraternal agent was put back as it was found."
-                        } else {
-                            "The earlier infraternal agent stays set aside beside the setup directory; it was not put back."
-                        },
-                        started,
-                        None,
-                    );
+                    let message = match restored {
+                        Ok(Ok(true)) => {
+                            Some("The earlier infraternal agent was put back as it was found.")
+                        }
+                        // Never set aside: the host is as it was found.
+                        Ok(Ok(false)) => None,
+                        _ => Some(
+                            "The earlier infraternal agent was not put back. Add the host again to put it back.",
+                        ),
+                    };
+                    if let Some(message) = message {
+                        emit(
+                            &batch,
+                            &target,
+                            attempt,
+                            Step::Install,
+                            message,
+                            started,
+                            None,
+                        );
+                    }
                 }
                 if let Some(host) = resources.host {
                     // Invalidate invitations/partial new authority through the trusted
@@ -1208,33 +1228,78 @@ impl Bootstrap {
                                 "This host is already added. Open its terminal from Console.",
                             ));
                         }
-                        StuckInstall::Replace => {
-                            self.await_start_fresh(
-                                batch,
-                                target,
-                                attempt,
-                                started,
-                                session.as_ref(),
-                                &previous,
-                                FreshMode::Replace,
+                        StuckInstall::Replace | StuckInstall::Reenroll => {
+                            let mode = if verdict == StuckInstall::Replace {
+                                FreshMode::Replace
+                            } else {
+                                FreshMode::Reenroll
+                            };
+                            self.confirm_start_fresh(
+                                batch, target, attempt, started, &previous, mode,
                             )
                             .await?;
-                            Some(host)
-                        }
-                        StuckInstall::Reenroll => {
-                            self.await_start_fresh(
-                                batch,
-                                target,
-                                attempt,
-                                started,
-                                session.as_ref(),
-                                &previous,
-                                FreshMode::Reenroll,
-                            )
-                            .await?;
-                            // A later failure puts the set-aside install back.
-                            resources.superseded = Some((session.clone(), previous));
-                            None
+                            // The person may have waited most of the attempt: the
+                            // host could have been revoked, or the old agent could
+                            // have connected since. Ask again right before the stop;
+                            // only the same verdict may stop anything (#305 P1-1, P3-1).
+                            let again = self
+                                .backend
+                                .check_stuck_install(
+                                    &batch.authority,
+                                    StuckInstallCheck {
+                                        target,
+                                        check: &check,
+                                        host,
+                                        lookup: lookup.clone(),
+                                        enrolled: previous.enrolled(),
+                                    },
+                                )
+                                .await?;
+                            if again != verdict {
+                                return Err(Failure::install(
+                                    "This host changed while it waited for your confirmation. Nothing was stopped; add it again to see what it needs now.",
+                                ));
+                            }
+                            let replaced = mode == FreshMode::Replace;
+                            if replaced {
+                                // Recorded before the stop: any later failure, even
+                                // a dropped attempt, puts the old install back (#305 P1-1).
+                                resources.set_aside = Some(SetAside {
+                                    session: session.clone(),
+                                    previous: previous.clone(),
+                                    replaced,
+                                });
+                            }
+                            let acted = self
+                                .act_start_fresh(
+                                    batch,
+                                    target,
+                                    attempt,
+                                    started,
+                                    session.as_ref(),
+                                    &previous,
+                                    mode,
+                                )
+                                .await;
+                            if let Err(error) = &acted
+                                && script_finished(error)
+                            {
+                                // The script ran to its end: its own trap already
+                                // put the service back, and nothing is set aside.
+                                resources.set_aside = None;
+                            }
+                            acted?;
+                            if replaced {
+                                Some(host)
+                            } else {
+                                // A later failure puts the set-aside install back.
+                                resources.set_aside = Some(SetAside {
+                                    session: session.clone(),
+                                    previous,
+                                    replaced,
+                                });
+                                None
+                            }
                         }
                     }
                 } else {
@@ -1743,6 +1808,23 @@ impl Bootstrap {
         previous: &PreviousAttempt,
         mode: FreshMode,
     ) -> Result<(), Failure> {
+        self.confirm_start_fresh(batch, target, attempt, started, previous, mode)
+            .await?;
+        self.act_start_fresh(batch, target, attempt, started, session, previous, mode)
+            .await
+    }
+
+    /// Offer the earlier attempt's action and wait for the person's confirmation;
+    /// an automatic recovery only announces itself. Changes nothing on the host.
+    async fn confirm_start_fresh(
+        &self,
+        batch: &BatchInner,
+        target: &Target,
+        attempt: u32,
+        started: Instant,
+        previous: &PreviousAttempt,
+        mode: FreshMode,
+    ) -> Result<(), Failure> {
         if mode == FreshMode::Automatic {
             emit(
                 batch,
@@ -1781,6 +1863,21 @@ impl Bootstrap {
                 Failure::install("Host provisioning stopped while waiting to start fresh.")
             })?;
         }
+        Ok(())
+    }
+
+    /// Run the confirmed action on the host.
+    #[allow(clippy::too_many_arguments)]
+    async fn act_start_fresh(
+        &self,
+        batch: &BatchInner,
+        target: &Target,
+        attempt: u32,
+        started: Instant,
+        session: &dyn SshSession,
+        previous: &PreviousAttempt,
+        mode: FreshMode,
+    ) -> Result<(), Failure> {
         self.backend
             .record_start_fresh(target, previous.host, previous.transaction, "started");
         let result = if mode == FreshMode::Reenroll {
@@ -1881,11 +1978,26 @@ enum FreshMode {
     Reenroll,
 }
 
+/// A stuck install this attempt set aside, or may have: put back if the attempt fails.
+struct SetAside {
+    session: Arc<dyn SshSession>,
+    previous: PreviousAttempt,
+    /// A Replace moved only the journal; a Re-enroll moved the whole install (D335).
+    replaced: bool,
+}
+
+/// Whether a failed host step is the script's own exit, so its trap has run.
+/// No status, or ssh's own 255, means the connection failed and the host
+/// side may still have finished.
+fn script_finished(error: &Failure) -> bool {
+    error.exit_status.is_some_and(|status| status != 255)
+}
+
 /// Mutation resources belong to one attempt, including its rollback and host retirement.
 #[derive(Default)]
 struct AttemptResources {
-    /// An install set aside for re-enrollment; put back if this attempt fails (D335).
-    superseded: Option<(Arc<dyn SshSession>, PreviousAttempt)>,
+    /// A stuck install set aside for Replace or Re-enroll; put back if this attempt fails.
+    set_aside: Option<SetAside>,
     installation: Option<Installation>,
     host: Option<uuid::Uuid>,
     // Protect the real shim before a durable routing write can be cancelled.

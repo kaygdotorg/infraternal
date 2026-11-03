@@ -1000,8 +1000,16 @@ impl Backend for ObservedBackend {
         Box::pin(async move {
             // BREAKIT2_REPLACE_STUCK replays a stuck install this server
             // enrolled; without it the fixture is another server's (D335).
+            // Seeded once: the attempt asks again right before the stop (#305 P1-1).
             if std::env::var_os("BREAKIT2_REPLACE_STUCK").is_some() {
-                seed_replacement_host(&backend, authority, &request).await;
+                let seeded: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=?)")
+                    .bind(request.host.as_bytes().as_slice())
+                    .fetch_one(&backend.issuer.store().0)
+                    .await
+                    .unwrap();
+                if !seeded {
+                    seed_replacement_host(&backend, authority, &request).await;
+                }
             }
             let verdict = backend.check_stuck_install(authority, request).await;
             println!("STUCK breakit2 verdict={verdict:?}");
