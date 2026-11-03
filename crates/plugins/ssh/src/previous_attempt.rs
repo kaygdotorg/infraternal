@@ -61,6 +61,19 @@ pub struct PreviousAttempt {
     lease_owner: Option<LeaseOwner>,
     /// An upgrade journal's enrolled identity, if the host could read it.
     enrolled: Option<Enrolled>,
+    /// An install an earlier Replace or Re-enroll set aside and did not put back.
+    set_aside: Option<SetAside>,
+}
+
+/// A stuck install an earlier attempt set aside, as Check found it (#305 P2-1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SetAside {
+    /// A Replace moved only the journal; a Re-enroll moved the whole install.
+    replaced: bool,
+    machine: String,
+    /// Whether its service was enabled and running when it was set aside.
+    enabled: bool,
+    active: bool,
 }
 
 /// The stuck install's enrolled key digest and the server that issued it (#305, D335).
@@ -151,6 +164,41 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
     if let ["INFRATERNAL_SETUP_REFUSED", cause] = fields.as_slice() {
         return Err(Failure::install(refusal_message(cause)));
     }
+    if let [
+        "INFRATERNAL_SETUP_SET_ASIDE",
+        kind,
+        host,
+        transaction,
+        machine,
+        enabled,
+        active,
+    ] = fields.as_slice()
+    {
+        let flag = |value: &str| match value {
+            "yes" => Ok(true),
+            "no" => Ok(false),
+            _ => Err(refused()),
+        };
+        let replaced = match *kind {
+            "replaced" => true,
+            "superseded" => false,
+            _ => return Err(refused()),
+        };
+        return Ok(Some(PreviousAttempt {
+            host: canonical_id(host)?,
+            transaction: canonical_id(transaction)?,
+            identity: String::new(),
+            sockets: 0,
+            lease_owner: None,
+            enrolled: None,
+            set_aside: Some(SetAside {
+                replaced,
+                machine: parse_machine(machine)?,
+                enabled: flag(enabled)?,
+                active: flag(active)?,
+            }),
+        }));
+    }
     let (host, transaction, identity, sockets, lease_owner, enrolled) = match fields.as_slice() {
         [
             "INFRATERNAL_SETUP_STALE",
@@ -206,6 +254,7 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
         sockets,
         lease_owner,
         enrolled,
+        set_aside: None,
     }))
 }
 
@@ -396,6 +445,52 @@ impl PreviousAttempt {
                     (true, 1) => Cow::Borrowed("1 open terminal session will end"),
                     (true, open) => Cow::Owned(format!("{open} open terminal sessions will end")),
                 },
+            ],
+        }
+    }
+
+    /// Whether Check found an install an earlier attempt set aside, and if so
+    /// whether that was a Replace (true) or a Re-enroll (false).
+    #[must_use]
+    pub(crate) fn set_aside(&self) -> Option<bool> {
+        self.set_aside.as_ref().map(|aside| aside.replaced)
+    }
+
+    /// The offer to put a set-aside install back as it was found (#305 P2-1).
+    #[must_use]
+    pub(crate) fn set_aside_failure(&self) -> Failure {
+        let failure = Failure::new(
+            FailureKind::StalePreviousAttempt,
+            "An earlier add-host set this infraternal agent aside and did not put it back.",
+        );
+        match &self.set_aside {
+            Some(aside) => failure
+                .with_setup_lock(aside.machine.clone(), None, "unknown".into(), false)
+                .with_setup_attempt(Some(self.transaction))
+                .with_set_aside(),
+            None => failure,
+        }
+    }
+
+    /// What putting a set-aside install back does.
+    #[must_use]
+    pub fn set_aside_findings(&self, mode: InstallMode, challenge: uuid::Uuid) -> Leftovers {
+        let (enabled, active) = self
+            .set_aside
+            .as_ref()
+            .map_or((false, false), |aside| (aside.enabled, aside.active));
+        Leftovers {
+            challenge,
+            mode,
+            findings: vec![
+                Cow::Borrowed("An infraternal agent an earlier add-host set aside"),
+                Cow::Borrowed("Nothing was deleted; it goes back where it was"),
+                Cow::Borrowed(match (enabled, active) {
+                    (true, true) => "Its service is enabled and started again, as it was found",
+                    (true, false) => "Its service is enabled again but not started, as it was found",
+                    (false, true) => "Its service is started again but not enabled, as it was found",
+                    (false, false) => "Its service stays stopped and disabled, as it was found",
+                }),
             ],
         }
     }
@@ -642,6 +737,9 @@ fn refusal_message(cause: &str) -> &'static str {
         "size" => {
             "The earlier setup left more files, sockets or processes than host provisioning inspects. Host provisioning left it untouched."
         }
+        "aside" => {
+            "Several earlier installs are set aside beside the setup directory, so it is unclear which to put back. Host provisioning left them untouched."
+        }
         "id" => {
             "The earlier setup journal has a malformed host, transaction or session id. Host provisioning left it untouched."
         }
@@ -713,6 +811,46 @@ mod tests {
             );
             assert!(parse(record.as_bytes()).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_set_aside_install_is_offered_back_by_its_record() {
+        let record = format!(
+            "INFRATERNAL_SETUP_SET_ASIDE superseded {} {} host yes no\n",
+            "1".repeat(32),
+            "2".repeat(32)
+        );
+        let previous = parse(record.as_bytes()).unwrap().unwrap();
+        assert_eq!(previous.set_aside(), Some(false));
+        assert_eq!(previous.replacement_host(), None, "never a Replace offer");
+        let failure = serde_json::to_value(previous.set_aside_failure()).unwrap();
+        assert_eq!(failure["setup_lock"]["set_aside"], true);
+        assert!(
+            failure["message"]
+                .as_str()
+                .unwrap()
+                .contains("set this machine's infraternal agent aside"),
+            "{failure}"
+        );
+        let findings = previous.set_aside_findings(InstallMode::Rootless, uuid::Uuid::nil());
+        assert_eq!(
+            findings.findings[2],
+            "Its service is enabled again but not started, as it was found"
+        );
+        for bad in ["moved", "superseded-x"] {
+            let record = format!(
+                "INFRATERNAL_SETUP_SET_ASIDE {bad} {} {} host yes no\n",
+                "1".repeat(32),
+                "2".repeat(32)
+            );
+            assert!(parse(record.as_bytes()).is_err(), "{bad}");
+        }
+        let record = format!(
+            "INFRATERNAL_SETUP_SET_ASIDE replaced {} {} host maybe no\n",
+            "1".repeat(32),
+            "2".repeat(32)
+        );
+        assert!(parse(record.as_bytes()).is_err());
     }
 
     #[test]

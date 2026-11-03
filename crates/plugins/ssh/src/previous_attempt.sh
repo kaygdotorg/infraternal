@@ -366,6 +366,48 @@ no_redirect() {
   fi
  done
 }
+# An earlier Replace or Re-enroll set the stuck install aside and could not
+# put it back: its restore never ran (a dropped session) or failed. Name it,
+# so the person can put it back instead of installing beside it (#305 P2-1).
+# A Re-enroll that committed keeps its old install beside the new $base, and
+# a Replace that committed removed its journal, so neither is reported.
+# Fails (1) when there is nothing to report.
+report_set_aside() {
+ set_aside=
+ for candidate in "$base".bootstrap-superseded-* "$base".bootstrap-replaced-*; do
+  [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+  case "$candidate" in
+   "$base".bootstrap-superseded-*)
+    [ ! -e "$base" ] && [ ! -L "$base" ] || continue
+    set_aside_kind=superseded
+    set_aside_transaction=${candidate#"$base.bootstrap-superseded-"}
+    set_aside_owner="$candidate/.bootstrap-owner"
+    set_aside_service="$candidate/.superseded-service";;
+   *)
+    [ -d "$base" ] && [ ! -L "$base" ] || continue
+    set_aside_kind=replaced
+    set_aside_transaction=${candidate#"$base.bootstrap-replaced-"}
+    set_aside_owner="$base/.bootstrap-owner"
+    set_aside_service="$candidate/found-service";;
+  esac
+  [ -z "$set_aside" ] || refuse aside
+  set_aside=$candidate
+  [ -d "$candidate" ] && [ ! -L "$candidate" ] && [ -O "$candidate" ] || exit 71
+  hex_id "$set_aside_transaction"
+  private_file "$set_aside_owner"
+  [ "$(stat -c '%s' "$set_aside_owner")" = 33 ] || refuse owner
+  set_aside_host=$(cat "$set_aside_owner")
+  hex_id "$set_aside_host"
+  private_file "$set_aside_service"
+  read -r set_aside_enabled set_aside_active < "$set_aside_service"
+  case "$set_aside_enabled:$set_aside_active" in yes:yes|yes:no|no:yes|no:no) :;; *) refuse marker;; esac
+ done
+ [ -n "$set_aside" ] || return 1
+ setup_locked_machine=$(hostname 2>/dev/null || :)
+ case "$setup_locked_machine" in ''|[-.]*|*[!a-zA-Z0-9._-]*) setup_locked_machine=unknown;; esac
+ [ "${#setup_locked_machine}" -le 253 ] || setup_locked_machine=unknown
+ printf 'INFRATERNAL_SETUP_SET_ASIDE %s %s %s %s %s %s\n' "$set_aside_kind" "$set_aside_host" "$set_aside_transaction" "$setup_locked_machine" "$set_aside_enabled" "$set_aside_active"
+}
 inspect_previous() {
  no_redirect
  setup_allow_locked_inspection=yes
@@ -395,6 +437,7 @@ inspect_previous() {
    [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || refuse owner
    hex_id "$(cat "$base/.bootstrap-owner")"
   fi
+  report_set_aside && return
   printf 'INFRATERNAL_SETUP_CLEAR\n'
   return
  fi

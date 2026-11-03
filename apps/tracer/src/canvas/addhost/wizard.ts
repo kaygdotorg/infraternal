@@ -818,7 +818,8 @@ export class Wizard {
     this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${open}${guide.fix === "none" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
     if (replaceStuck) {
       const label = this.foot.querySelector<HTMLElement>('[data-ah="start-fresh"] span');
-      if (label) label.textContent = job.view.failure?.setup_lock?.enrolled_with !== undefined ? "Join as a new host" : "Replace the stuck install";
+      const lock = job.view.failure?.setup_lock;
+      if (label) label.textContent = lock?.set_aside ? "Put it back" : lock?.enrolled_with !== undefined ? "Join as a new host" : "Replace the stuck install";
     }
   }
 

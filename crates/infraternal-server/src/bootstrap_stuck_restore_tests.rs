@@ -534,3 +534,36 @@ async fn the_confirmation_wait_does_not_use_up_the_attempt_deadline() {
     assert!(run.ran("\nreplace_stuck_install "), "the confirmed action runs");
     home.assert_as_found();
 }
+
+#[tokio::test]
+async fn check_offers_back_an_install_an_earlier_attempt_left_set_aside() {
+    let f = fixture(true).await;
+    let home = Arc::new(Home::new());
+    // An earlier Re-enroll set the install aside, and its restore never ran.
+    home.supersede();
+    let check = format!(
+        "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_SET_ASIDE superseded {} {} fixture yes yes\n",
+        Uuid::new_v4().simple(),
+        home.transaction.simple()
+    )
+    .into_bytes();
+    let run = Run::start(&f, &home, check, [7; 32], Stop::Join);
+    let lock = {
+        run.offer().await;
+        run.batch()
+            .events(0)
+            .1
+            .iter()
+            .find_map(|event| event.failure.as_ref())
+            .map(|failure| serde_json::to_value(failure).unwrap()["setup_lock"].clone())
+            .unwrap()
+    };
+    assert_eq!(lock["set_aside"], true);
+    assert!(!run.ran("prepare-join-key"), "nothing is installed beside it");
+    run.confirm(run.offer().await);
+    let event = finished(run.batch()).await;
+    assert!(event.message.contains("put back as it was found"), "{}", event.message);
+    assert!(run.ran("\nrestore_superseded_install "));
+    assert!(!run.ran("prepare-join-key"));
+    home.assert_as_found();
+}

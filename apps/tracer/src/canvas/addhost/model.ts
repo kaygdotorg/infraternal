@@ -183,6 +183,14 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
     case "stale_previous_attempt":
       if (failure.setup_lock?.active === false) {
         const lock = failure.setup_lock;
+        // #305: an earlier add-host set the install aside and could not put it back.
+        if (lock.set_aside) return {
+          title: `${name}'s infraternal agent was set aside`,
+          happened: "An earlier add-host set it aside and could not put it back. Nothing was deleted.",
+          next: "Put it back as it was found, then add the host again to continue.",
+          fix: "replace-stuck-install",
+          tone: "info",
+        };
         // D335: another server enrolled this machine; it can join this one as a new host.
         if (lock.enrolled_with !== undefined) return {
           title: `${name} is enrolled with another server`,

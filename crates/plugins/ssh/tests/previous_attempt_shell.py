@@ -887,6 +887,44 @@ supersede_stuck_install "{expected}"
     def test_a_broken_pipe_after_the_stop_still_puts_the_service_back(self):
         self.signal_after_the_stop('PIPE', 141)
 
+    def test_check_reports_an_install_set_aside_and_never_put_back(self):
+        # #305 P2-1: the restore never ran, so Check must not answer CLEAR.
+        self.make_upgrade_fixture()
+        self.assertEqual(self.confirm('supersede_stuck_install').returncode, 0)
+        result = self.run_shell('\nsetup_check=yes\ninspect_previous')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(
+            result.stdout.decode(),
+            f'INFRATERNAL_SETUP_SET_ASIDE superseded {HOST} {TRANSACTION} {socket.gethostname()} yes yes\n',
+        )
+
+    def test_check_reports_a_replaced_journal_never_put_back(self):
+        self.make_upgrade_fixture()
+        self.manager_active.unlink()
+        self.assertEqual(self.confirm('replace_stuck_install').returncode, 0)
+        result = self.run_shell('\nsetup_check=yes\ninspect_previous')
+        self.assertEqual(
+            result.stdout.decode(),
+            f'INFRATERNAL_SETUP_SET_ASIDE replaced {HOST} {TRANSACTION} {socket.gethostname()} yes no\n',
+        )
+
+    def test_an_old_install_kept_beside_a_new_host_is_not_reported(self):
+        self.make_upgrade_fixture()
+        self.assertEqual(self.confirm('supersede_stuck_install').returncode, 0)
+        # The re-enrollment committed: a new install owns the setup directory.
+        self.base.mkdir(mode=0o700)
+        owner = self.base / '.bootstrap-owner'
+        owner.write_text('5' * 32 + '\n')
+        owner.chmod(0o600)
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, b'INFRATERNAL_SETUP_CLEAR\n')
+
+    def test_several_set_aside_installs_are_refused_by_name(self):
+        self.make_upgrade_fixture()
+        self.assertEqual(self.confirm('supersede_stuck_install').returncode, 0)
+        other = Path(f'{self.base}.bootstrap-superseded-{"6" * 32}')
+        shutil.copytree(f'{self.base}.bootstrap-superseded-{TRANSACTION}', other, symlinks=True)
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, b'INFRATERNAL_SETUP_REFUSED aside\n')
+
     def test_restore_refuses_while_a_new_install_is_in_place(self):
         self.make_upgrade_fixture()
         self.assertEqual(self.confirm('supersede_stuck_install').returncode, 0)

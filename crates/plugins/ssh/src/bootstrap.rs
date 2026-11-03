@@ -1226,7 +1226,29 @@ impl Bootstrap {
             }
             let lookup = session.trust_lookup();
             let replacement_host = if let Some(previous) = previous {
-                if let Some(host) = previous.replacement_host() {
+                if let Some(replaced) = previous.set_aside() {
+                    // An earlier Replace or Re-enroll set the stuck install aside
+                    // and could not put it back. Offer that, never an install
+                    // beside it (#305 P2-1).
+                    self.confirm_start_fresh(
+                        batch,
+                        target,
+                        attempt,
+                        started,
+                        &previous,
+                        FreshMode::PutBack,
+                        resources.deadline.as_ref(),
+                    )
+                    .await?;
+                    let restored = previous
+                        .restore_set_aside(session.as_ref(), target, replaced)
+                        .await?;
+                    return Err(Failure::install(if restored {
+                        "The earlier infraternal agent was put back as it was found. Add the host again to continue."
+                    } else {
+                        "Nothing was set aside any more. Add the host again to continue."
+                    }));
+                } else if let Some(host) = previous.replacement_host() {
                     // The server decides before anything is offered or stopped:
                     // a stuck upgrade is replaced only when this server can
                     // re-enroll the same identity (#305, D335).
@@ -1897,11 +1919,15 @@ impl Bootstrap {
                 Step::Check,
                 "This host has leftovers from an earlier setup",
                 started,
-                Some(previous.stuck_failure(mode == FreshMode::Reenroll)),
-                Some(Box::new(if mode == FreshMode::Reenroll {
-                    previous.reenroll_findings(target.mode, challenge)
+                Some(if mode == FreshMode::PutBack {
+                    previous.set_aside_failure()
                 } else {
-                    previous.findings(target.mode, challenge)
+                    previous.stuck_failure(mode == FreshMode::Reenroll)
+                }),
+                Some(Box::new(match mode {
+                    FreshMode::Reenroll => previous.reenroll_findings(target.mode, challenge),
+                    FreshMode::PutBack => previous.set_aside_findings(target.mode, challenge),
+                    _ => previous.findings(target.mode, challenge),
                 })),
             );
             if let Some(deadline) = deadline {
@@ -2031,6 +2057,8 @@ enum FreshMode {
     Replace,
     /// Ask, then set aside an install another server enrolled (D335).
     Reenroll,
+    /// Ask, then put back an install an earlier Replace or Re-enroll set aside.
+    PutBack,
 }
 
 /// A stuck install this attempt set aside, or may have: put back if the attempt fails.

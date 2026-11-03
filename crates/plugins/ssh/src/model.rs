@@ -289,6 +289,9 @@ pub(crate) struct SetupLock {
     /// The other server a stuck install is enrolled with; it may join as a new host (D335).
     #[serde(skip_serializing_if = "Option::is_none")]
     enrolled_with: Option<String>,
+    /// An earlier add-host set this install aside and did not put it back (#305).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    set_aside: bool,
 }
 
 /// Serialize the failure's wire fields; each UUID has its own key and its own field.
@@ -377,7 +380,21 @@ impl Failure {
             attempt: None,
             sessions: None,
             enrolled_with: None,
+            set_aside: false,
         });
+        self
+    }
+
+    /// Mark the lock as an install an earlier add-host set aside and did not put back.
+    #[must_use]
+    pub(crate) fn with_set_aside(mut self) -> Self {
+        if let Some(lock) = self
+            .ids
+            .as_deref_mut()
+            .and_then(|ids| ids.setup_lock.as_mut())
+        {
+            lock.set_aside = true;
+        }
         self
     }
 
@@ -424,6 +441,12 @@ impl Failure {
             || process.clone(),
             |attempt| format!("setup attempt {attempt} ({process})"),
         );
+        if lock.set_aside {
+            return Cow::Owned(format!(
+                "An earlier add-host on {} set this machine's infraternal agent aside and did not put it back. Nothing was deleted. Put it back as it was found, then add the host again to continue.",
+                lock.machine
+            ));
+        }
         if lock.active {
             // Only an upgrade journal offers a replacement, and only once its
             // lease is gone; a running setup can only be waited for (#305).

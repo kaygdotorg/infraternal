@@ -91,6 +91,21 @@ test("a machine enrolled with another server asks to join as a new host (D335)",
   expect(guideFor("code", unnamed).happened).toBe("Join it to this server as a new host with a new key. Its old infraternal agent is stopped and set aside, not deleted.");
 });
 
+test("an install an earlier add-host set aside is offered back, not installed beside (#305)", () => {
+  const failure = {
+    kind: "stale_previous_attempt",
+    message: "x",
+    log_tail: [],
+    setup_lock: { machine: "code", since: "unknown", active: false, set_aside: true },
+  } as unknown as FailureDetail;
+  expect(guideFor("code", failure)).toMatchObject({
+    title: "code's infraternal agent was set aside",
+    happened: "An earlier add-host set it aside and could not put it back. Nothing was deleted.",
+    next: "Put it back as it was found, then add the host again to continue.",
+    fix: "replace-stuck-install",
+  });
+});
+
 test("install advice follows the step that stopped, and never tells people to restore access", () => {
   const steps = ["connect", "upload", "install", "join", "start", "readiness"] as const;
   const advice = steps.map((failed_step) => guideFor("host", { kind: "install", message: "m", log_tail: [], failed_step }).next);
