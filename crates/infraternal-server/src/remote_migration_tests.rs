@@ -169,6 +169,65 @@ async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_ord
 }
 
 #[tokio::test]
+async fn machine_join_migration_preserves_nine_hundred_second_invitations_and_allows_six_hundred() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let mut deployed = sqlx::migrate!("./migrations");
+    deployed
+        .migrations
+        .to_mut()
+        .retain(|migration| migration.version <= 32);
+    deployed.run(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES ('owner','Owner',1,'fixture','owner','Owner')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let existing_host = uuid::Uuid::from_u128(1);
+    let machine_host = uuid::Uuid::from_u128(2);
+    for host in [existing_host, machine_host] {
+        sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES (?,'owner','rootful',0,100)")
+            .bind(host.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO remote_join_tokens(host_id,mode,digest,issued_at,expires_at) VALUES (?,'rootful',?,100,1000)")
+        .bind(existing_host.as_bytes().as_slice())
+        .bind([1_u8; 32].as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+    let old_invitation: (String, i64, i64, Option<i64>, Option<Vec<u8>>) = sqlx::query_as(
+        "SELECT mode,issued_at,expires_at,consumed_at,expected_key_digest FROM remote_join_tokens WHERE host_id=?",
+    )
+    .bind(existing_host.as_bytes().as_slice())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(old_invitation, ("rootful".into(), 100, 1000, None, None));
+    sqlx::query("INSERT INTO remote_join_tokens(host_id,mode,digest,issued_at,expires_at,expected_key_digest) VALUES (?,'rootful',?,200,800,?)")
+        .bind(machine_host.as_bytes().as_slice())
+        .bind([2_u8; 32].as_slice())
+        .bind([7_u8; 32].as_slice())
+        .execute(&pool)
+        .await
+        .expect("a machine receipt uses the approved ten-minute expiry");
+    let machine_expiry: i64 =
+        sqlx::query_scalar("SELECT expires_at FROM remote_join_tokens WHERE host_id=?")
+            .bind(machine_host.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(machine_expiry, 800);
+}
+
+#[tokio::test]
 async fn old_uuid_mesh_placeholders_upgrade_to_audited_unnamed_labels() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)

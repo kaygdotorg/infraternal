@@ -633,6 +633,8 @@ async fn build_router_core(
         config.data_dir.join("ssh-trust"),
     )
     .await?;
+    #[cfg(feature = "remote")]
+    let auth_api_issuer = issuer.clone();
     #[cfg(all(feature = "ssh", feature = "remote"))]
     let integration = issuer.map(|issuer| (issuer, hosts.clone()));
     #[cfg(all(feature = "ssh", not(feature = "remote")))]
@@ -703,10 +705,14 @@ async fn build_router_core(
             .await
             .map_err(ServerError::Listener)?;
     }
+    #[cfg(feature = "remote")]
+    let auth_api = auth::router_with_invitation_issuer(auth.clone(), auth_api_issuer);
+    #[cfg(not(feature = "remote"))]
+    let auth_api = auth::router(auth.clone());
     let app = Router::new()
         .route("/healthz", get(health))
         .with_state(pool)
-        .merge(auth::router(auth.clone()))
+        .merge(auth_api)
         .merge(websocket::router(ws_state))
         .merge(ca_api);
     #[cfg(feature = "remote")]
@@ -1176,6 +1182,27 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[tokio::test]
+    async fn loopback_https_port_initializes_auth_with_the_server_database() {
+        let data_dir = temp_dir();
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("open private server database");
+        let auth = crate::auth::Auth::new(pool.clone(), "localhost", "https://localhost:443")
+            .await
+            .expect("initialize auth against the server database");
+        let mut setup_announced = false;
+        auth.bootstrap(super::unix_seconds().expect("current server time"), |_| {
+            setup_announced = true;
+        })
+        .await
+        .expect("bootstrap auth against the server database");
+        assert!(setup_announced, "new server database should need setup");
+        drop(auth);
+        pool.close().await;
+        std::fs::remove_dir_all(data_dir).expect("remove temporary server database");
     }
 
     #[test]

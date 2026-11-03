@@ -10,6 +10,7 @@ use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
     aead::{Aead, Payload},
 };
+use base64::engine::general_purpose::STANDARD_NO_PAD as FINGERPRINT_B64;
 use bytes::{Bytes, BytesMut};
 use futures_util::{SinkExt, Stream, StreamExt};
 use hkdf::Hkdf;
@@ -869,6 +870,236 @@ async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
     assert!(!stored.contains(&f.words));
     f.auth.logout(&f.session).await.unwrap();
     assert!(f.auth.session(&f.session, NOW).await.is_err());
+}
+
+#[tokio::test]
+async fn sign_in_device_inspection_keeps_its_existing_unbounded_retry_behavior() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let approval = f
+        .auth
+        .device_start("cli", vec!["hosts:read".into()], NOW)
+        .await
+        .unwrap();
+    for attempt in 1..=6 {
+        assert_eq!(
+            f.auth
+                .device_inspect(&f.session, str_field(&approval, "user_code"), NOW)
+                .await
+                .unwrap()["scopes"],
+            json!(["hosts:read"]),
+            "sign-in inspection attempt {attempt}"
+        );
+    }
+    f.auth
+        .device_approve(&f.session, str_field(&approval, "user_code"), NOW)
+        .await
+        .unwrap();
+    assert!(
+        f.auth
+            .device_redeem(str_field(&approval, "poll_token"), NOW)
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn device_join_request_inspects_as_a_key_and_mode_bound_machine_join() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = super::http::router(f.auth.clone());
+    let host_id = Uuid::new_v4();
+    let key_digest = (0_u8..=u8::MAX)
+        .map(|byte| [byte; 32])
+        .find(|candidate| FINGERPRINT_B64.encode(candidate) != B64.encode(candidate))
+        .expect("fixture key digest whose fingerprint needs standard base64");
+    let key_fingerprint = format!("SHA256:{}", FINGERPRINT_B64.encode(key_digest));
+    let start = json!({
+        "kind": "join_machine",
+        "device": "laptop",
+        "request": {
+            "host_id": host_id,
+            "hostname": "laptop",
+            "mode": "system",
+            "execution_uid": 0,
+            "key_fingerprint": key_fingerprint,
+        },
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/auth/device-start")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(serde_json::to_vec(&start).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let approval: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/auth/device-inspect")
+                .header("content-type", "application/json")
+                .header("origin", ORIGIN)
+                .header("cookie", format!("__Host-infraternal={}", f.session))
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&json!({"code": approval["user_code"]})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let review: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(review["kind"], "join_machine");
+    assert_eq!(review["hostname"], "laptop");
+    assert_eq!(review["mode"], "system");
+    assert_eq!(review["key_fingerprint"], key_fingerprint);
+    assert!(review.get("host_id").is_none());
+    assert!(review.get("request").is_none());
+    assert!(review.get("key_fingerprint").is_some());
+}
+
+#[tokio::test]
+async fn device_join_approval_requires_the_owner_session() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    sqlx::query("UPDATE users SET owner=0 WHERE id=?")
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let app = super::http::router(f.auth.clone());
+    let start = json!({
+        "kind": "join_machine",
+        "device": "laptop",
+        "request": {
+            "host_id": Uuid::new_v4(),
+            "hostname": "laptop",
+            "mode": "system",
+            "execution_uid": 0,
+            "key_fingerprint": format!(
+                "SHA256:{}",
+                FINGERPRINT_B64.encode(Sha256::digest(rand::random::<[u8; 32]>()))
+            ),
+        },
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/auth/device-start")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(serde_json::to_vec(&start).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let approval: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/auth/device-inspect")
+                .header("content-type", "application/json")
+                .header("origin", ORIGIN)
+                .header("cookie", format!("__Host-infraternal={}", f.session))
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&json!({"code": approval["user_code"]})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/auth/device-approve")
+                .header("content-type", "application/json")
+                .header("origin", ORIGIN)
+                .header("cookie", format!("__Host-infraternal={}", f.session))
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&json!({"code": approval["user_code"]})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn device_join_code_allows_only_five_inspection_attempts() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = super::http::router(f.auth.clone());
+    let start = json!({
+        "kind": "join_machine",
+        "device": "laptop",
+        "request": {
+            "host_id": Uuid::new_v4(),
+            "hostname": "laptop",
+            "mode": "system",
+            "execution_uid": 0,
+            "key_fingerprint": format!(
+                "SHA256:{}",
+                FINGERPRINT_B64.encode(Sha256::digest(rand::random::<[u8; 32]>()))
+            ),
+        },
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/auth/device-start")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(serde_json::to_vec(&start).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let approval: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    for attempt in 1..=6 {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/auth/device-inspect")
+                    .header("content-type", "application/json")
+                    .header("origin", ORIGIN)
+                    .header("cookie", format!("__Host-infraternal={}", f.session))
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&json!({"code": approval["user_code"]})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let expected = if attempt <= 5 {
+            axum::http::StatusCode::OK
+        } else {
+            axum::http::StatusCode::UNAUTHORIZED
+        };
+        assert_eq!(response.status(), expected, "inspection attempt {attempt}");
+    }
 }
 
 #[tokio::test]

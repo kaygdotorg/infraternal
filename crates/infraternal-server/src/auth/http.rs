@@ -20,11 +20,38 @@ mod hostname_tests;
 
 /// Mount the POST-only `/auth/{action}` API. TLS terminates at the configured public origin.
 pub fn router(auth: Auth) -> Router {
+    router_with_state(HttpState {
+        auth,
+        #[cfg(feature = "remote")]
+        invitation_issuer: None,
+    })
+}
+
+#[cfg(feature = "remote")]
+/// Mount auth with the runtime's existing issuer for approved machine enrollment.
+pub(crate) fn router_with_invitation_issuer(
+    auth: Auth,
+    invitation_issuer: Option<crate::remote_http::InvitationIssuer>,
+) -> Router {
+    router_with_state(HttpState {
+        auth,
+        invitation_issuer,
+    })
+}
+
+#[derive(Clone)]
+struct HttpState {
+    auth: Auth,
+    #[cfg(feature = "remote")]
+    invitation_issuer: Option<crate::remote_http::InvitationIssuer>,
+}
+
+fn router_with_state(state: HttpState) -> Router {
     Router::new()
         .route("/auth/{action}", post(dispatch))
         .layer(DefaultBodyLimit::max(32 * 1024))
         .layer(axum::middleware::map_response(no_store))
-        .with_state(auth)
+        .with_state(state)
 }
 
 // One typed body per action; unknown fields (including PRF/DEK plaintext) fail closed.
@@ -90,9 +117,14 @@ struct Token {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Device {
+struct DeviceStart {
     device: String,
-    scopes: Vec<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    scopes: Option<Vec<String>>,
+    #[serde(default)]
+    request: Option<super::devices::JoinMachineRequest>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -151,12 +183,20 @@ async fn no_store(mut response: Response) -> Response {
 }
 
 async fn dispatch(
-    State(auth): State<Auth>,
+    State(state): State<HttpState>,
     Path(action): Path<String>,
     headers: HeaderMap,
     Json(value): Json<Value>,
 ) -> Response {
-    let result = execute(&auth, &action, &headers, value).await;
+    let result = execute(
+        &state.auth,
+        #[cfg(feature = "remote")]
+        state.invitation_issuer.as_ref(),
+        &action,
+        &headers,
+        value,
+    )
+    .await;
     let response = match result {
         Ok(response) => response,
         Err(Error::Throttled) => (
@@ -181,6 +221,11 @@ async fn dispatch(
         Err(Error::Conflict) => (
             StatusCode::CONFLICT,
             Json(json!({"error":"username already exists"})),
+        )
+            .into_response(),
+        Err(Error::RemoteUnavailable) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"enrollment unavailable"})),
         )
             .into_response(),
         Err(_) => (
@@ -216,6 +261,7 @@ pub(super) fn current_time(auth: &Auth) -> super::Result<i64> {
 #[allow(clippy::too_many_lines)]
 async fn execute(
     auth: &Auth,
+    #[cfg(feature = "remote")] invitation_issuer: Option<&crate::remote_http::InvitationIssuer>,
     action: &str,
     headers: &HeaderMap,
     value: Value,
@@ -341,8 +387,16 @@ async fn execute(
             json!({"ok":true})
         }
         "device-start" => {
-            let b: Device = body(value)?;
-            auth.device_start(&b.device, b.scopes, now).await?
+            let b: DeviceStart = body(value)?;
+            match (b.kind.as_deref(), b.scopes, b.request) {
+                (None | Some("sign_in"), Some(scopes), None) => {
+                    auth.device_start(&b.device, scopes, now).await?
+                }
+                (Some("join_machine"), None, Some(request)) => {
+                    auth.device_join_start(&b.device, request, now).await?
+                }
+                _ => return Err(Error::Invalid),
+            }
         }
         "device-inspect" => {
             let b: Code = body(value)?;
@@ -355,6 +409,20 @@ async fn execute(
         }
         "device-redeem" => {
             let b: Token = body(value)?;
+            #[cfg(feature = "remote")]
+            if auth.device_join_approved(&b.token, now).await? {
+                let approval = auth.approved_device_join(&b.token, now).await?;
+                let issuer = invitation_issuer.ok_or(Error::RemoteUnavailable)?;
+                let invitation = issuer
+                    .issue_approved_machine_join(&b.token, approval, now)
+                    .await
+                    .map_err(|status| match status {
+                        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Error::Denied,
+                        StatusCode::BAD_REQUEST => Error::Invalid,
+                        _ => Error::RemoteUnavailable,
+                    })?;
+                return Ok(Json(invitation).into_response());
+            }
             json!({"api_key":auth.device_redeem(&b.token, now).await?})
         }
         "security-settings" => {

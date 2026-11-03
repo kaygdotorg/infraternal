@@ -13,6 +13,8 @@ mod committed;
 pub(crate) mod cookies;
 mod crypto;
 mod devices;
+#[cfg(feature = "remote")]
+pub(crate) use devices::ApprovedMachineJoin;
 mod http;
 mod recovery;
 mod recovery_rotation;
@@ -51,6 +53,8 @@ use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
 pub use http::router;
+#[cfg(feature = "remote")]
+pub(crate) use http::router_with_invitation_issuer;
 const DAY: i64 = 86_400;
 const SESSION: i64 = 30 * DAY;
 const CEREMONY: i64 = 300;
@@ -108,6 +112,8 @@ pub enum Error {
     Json,
     #[error("too many requests")]
     Throttled,
+    #[error("enrollment unavailable")]
+    RemoteUnavailable,
 }
 // JSON diagnostics can echo attacker-supplied strings; never retain them in auth errors.
 impl From<serde_json::Error> for Error {

@@ -1,5 +1,87 @@
 //! Single-use device approval and exact-scope API key authorization [27,28].
 use super::{Auth, B64, Engine, Error, Result, Row, Value, hash, json, random, require_session_tx};
+use base64::engine::general_purpose::STANDARD_NO_PAD as FingerprintB64;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+/// Public, bounded machine facts shown before a fresh passkey approves enrollment [#263].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct JoinMachineRequest {
+    pub(crate) host_id: Uuid,
+    pub(crate) hostname: String,
+    pub(crate) mode: String,
+    pub(crate) execution_uid: u32,
+    pub(crate) key_fingerprint: String,
+}
+
+/// A passkey-approved machine request retained only until its ten-minute receipt expires.
+pub(crate) struct ApprovedMachineJoin {
+    pub(crate) user_id: String,
+    pub(crate) session_hash: String,
+    pub(crate) issued_at: i64,
+    pub(crate) expires_at: i64,
+    pub(crate) request: JoinMachineRequest,
+}
+
+struct ApprovalDraft<'a> {
+    token: &'a str,
+    code: &'a str,
+    kind: &'a str,
+    scopes: &'a str,
+    device: &'a str,
+    request: Option<&'a str>,
+    now: i64,
+}
+
+impl JoinMachineRequest {
+    pub(crate) fn key_digest(&self) -> Result<[u8; 32]> {
+        let encoded = self
+            .key_fingerprint
+            .strip_prefix("SHA256:")
+            .ok_or(Error::Invalid)?;
+        let decoded = FingerprintB64.decode(encoded).map_err(|_| Error::Invalid)?;
+        if decoded.len() != 32 || FingerprintB64.encode(&decoded) != encoded {
+            return Err(Error::Invalid);
+        }
+        decoded.try_into().map_err(|_| Error::Invalid)
+    }
+
+    fn validate(&self) -> Result<[u8; 32]> {
+        if self.hostname.is_empty()
+            || self.hostname.len() > 128
+            || self.hostname.chars().any(char::is_control)
+            || !matches!(self.mode.as_str(), "system" | "user")
+            || (self.mode == "system") != (self.execution_uid == 0)
+        {
+            return Err(Error::Invalid);
+        }
+        self.key_digest()
+    }
+
+    fn fingerprint(&self) -> Result<String> {
+        self.key_digest()?;
+        Ok(self.key_fingerprint.clone())
+    }
+
+    /// Derive one stable, short-lived invitation capability from its exact approval.
+    pub(crate) fn receipt_token(&self, poll_token: &str) -> Result<String> {
+        let poll_bytes = B64.decode(poll_token).map_err(|_| Error::Denied)?;
+        if poll_bytes.len() != 32 || B64.encode(&poll_bytes) != poll_token {
+            return Err(Error::Denied);
+        }
+        let key_digest = self.key_digest()?;
+        let mut digest = Sha256::new();
+        digest.update(b"infraternal/device-join-receipt/v1\0");
+        digest.update(poll_bytes);
+        digest.update(self.host_id.as_bytes());
+        digest.update(self.mode.as_bytes());
+        digest.update(self.execution_uid.to_be_bytes());
+        digest.update(key_digest);
+        Ok(B64.encode(digest.finalize()))
+    }
+}
 
 #[allow(clippy::missing_errors_doc)]
 impl Auth {
@@ -24,17 +106,60 @@ impl Auth {
             .await?;
         let token = random();
         let code = B64.encode(rand::random::<[u8; 12]>());
+        let scopes = serde_json::to_string(&scopes)?;
+        self.insert_approval(ApprovalDraft {
+            token: &token,
+            code: &code,
+            kind: "sign_in",
+            scopes: &scopes,
+            device,
+            request: None,
+            now,
+        })
+        .await
+    }
+
+    /// Start a D311-style fresh-passkey approval that requests one machine identity [#263].
+    pub(crate) async fn device_join_start(
+        &self,
+        device: &str,
+        request: JoinMachineRequest,
+        now: i64,
+    ) -> Result<Value> {
+        if device.is_empty() || device.len() > 128 || now < 0 {
+            return Err(Error::Invalid);
+        }
+        request.validate()?;
+        let token = random();
+        let code = B64.encode(rand::random::<[u8; 12]>());
+        let request = serde_json::to_string(&request)?;
+        self.insert_approval(ApprovalDraft {
+            token: &token,
+            code: &code,
+            kind: "join_machine",
+            scopes: "[]",
+            device,
+            request: Some(&request),
+            now,
+        })
+        .await
+    }
+
+    async fn insert_approval(&self, approval: ApprovalDraft<'_>) -> Result<Value> {
         sqlx::query(
-            "INSERT INTO approvals(token_hash,code_hash,scopes,device,expires) VALUES (?,?,?,?,?)",
+            "INSERT INTO approvals(token_hash,code_hash,scopes,device,expires,kind,request_json) \
+             VALUES (?,?,?,?,?,?,?)",
         )
-        .bind(hash(&token))
-        .bind(hash(&code))
-        .bind(serde_json::to_string(&scopes)?)
-        .bind(device)
-        .bind(now + 600)
+        .bind(hash(approval.token))
+        .bind(hash(approval.code))
+        .bind(approval.scopes)
+        .bind(approval.device)
+        .bind(approval.now + 600)
+        .bind(approval.kind)
+        .bind(approval.request)
         .execute(&self.pool)
         .await?;
-        Ok(json!({"poll_token":token,"user_code":code,"expires_in":600}))
+        Ok(json!({"poll_token":approval.token,"user_code":approval.code,"expires_in":600}))
     }
 
     /// Signed-in browser approval requires a fresh passkey tap and binds exact requested scopes.
@@ -47,10 +172,29 @@ impl Auth {
             .execute(&mut *tx)
             .await?;
         require_session_tx(&mut tx, &hash(session_token), &session.user_id, now).await?;
+        let kind = sqlx::query_scalar::<_, String>(
+            "SELECT kind FROM approvals WHERE code_hash=? AND expires>? AND user_id IS NULL \
+             AND (kind='sign_in' OR inspect_attempts>0)",
+        )
+        .bind(hash(code))
+        .bind(now)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(Error::Denied)?;
+        if kind == "join_machine"
+            && !sqlx::query_scalar::<_, bool>("SELECT owner=1 FROM users WHERE id=?")
+                .bind(&session.user_id)
+                .fetch_one(&mut *tx)
+                .await?
+        {
+            return Err(Error::Denied);
+        }
         if sqlx::query(
-            "UPDATE approvals SET user_id=? WHERE code_hash=? AND expires>? AND user_id IS NULL",
+            "UPDATE approvals SET user_id=?,approved_session_hash=? \
+             WHERE code_hash=? AND expires>? AND user_id IS NULL",
         )
         .bind(session.user_id)
+        .bind(hash(session_token))
         .bind(hash(code))
         .bind(now)
         .execute(&mut *tx)
@@ -67,22 +211,58 @@ impl Auth {
     /// Inspect requested device and scopes before approval (a code alone never grants access).
     pub async fn device_inspect(&self, token: &str, code: &str, now: i64) -> Result<Value> {
         self.session(token, now).await?;
-        let row =
-            sqlx::query("SELECT device,scopes FROM approvals WHERE code_hash=? AND expires>?")
-                .bind(hash(code))
-                .bind(now)
-                .fetch_optional(&self.pool)
-                .await?
-                .ok_or(Error::Denied)?;
-        Ok(
-            json!({"device":row.get::<String,_>("device"),"scopes":serde_json::from_str::<Value>(row.get("scopes"))?}),
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT device,scopes,kind,request_json FROM approvals \
+             WHERE code_hash=? AND expires>? \
+             AND (kind='sign_in' OR (kind='join_machine' AND inspect_attempts<5))",
         )
+        .bind(hash(code))
+        .bind(now)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(Error::Denied)?;
+        let kind: String = row.get("kind");
+        if kind == "join_machine"
+            && sqlx::query(
+                "UPDATE approvals SET inspect_attempts=inspect_attempts+1 \
+                 WHERE code_hash=? AND expires>? AND kind='join_machine' AND inspect_attempts<5",
+            )
+            .bind(hash(code))
+            .bind(now)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+                != 1
+        {
+            return Err(Error::Denied);
+        }
+        let value = match kind.as_str() {
+            "sign_in" => json!({
+                "device": row.get::<String, _>("device"),
+                "scopes": serde_json::from_str::<Value>(row.get("scopes"))?,
+            }),
+            "join_machine" => {
+                let request_json: Option<String> = row.get("request_json");
+                let request: JoinMachineRequest =
+                    serde_json::from_str(request_json.as_deref().ok_or(Error::Invalid)?)?;
+                json!({
+                    "kind": "join_machine",
+                    "hostname": request.hostname,
+                    "mode": request.mode,
+                    "key_fingerprint": request.fingerprint()?,
+                })
+            }
+            _ => return Err(Error::Invalid),
+        };
+        tx.commit().await?;
+        Ok(value)
     }
 
     /// Redeem approval once. The API key is returned only here and stored as a hash.
     pub async fn device_redeem(&self, token: &str, now: i64) -> Result<String> {
         let mut tx = self.pool.begin().await?;
-        let row = sqlx::query("DELETE FROM approvals WHERE token_hash=? AND expires>? AND user_id IS NOT NULL RETURNING user_id,device,scopes")
+        let row = sqlx::query("DELETE FROM approvals WHERE token_hash=? AND expires>? AND user_id IS NOT NULL AND kind='sign_in' RETURNING user_id,device,scopes")
             .bind(hash(token)).bind(now).fetch_optional(&mut *tx).await?.ok_or(Error::Denied)?;
         let now = api_key_time(&mut tx, now).await?;
         let key = random();
@@ -97,6 +277,51 @@ impl Auth {
             .await?;
         tx.commit().await?;
         Ok(key)
+    }
+
+    /// Whether a polling token names an approved machine request rather than sign-in.
+    pub(crate) async fn device_join_approved(&self, token: &str, now: i64) -> Result<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM approvals WHERE token_hash=? AND expires>? \
+             AND kind='join_machine' AND user_id IS NOT NULL)",
+        )
+        .bind(hash(token))
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Read a still-live owner approval without consuming its exact-key recovery receipt.
+    pub(crate) async fn approved_device_join(
+        &self,
+        token: &str,
+        now: i64,
+    ) -> Result<ApprovedMachineJoin> {
+        let row = sqlx::query(
+            "SELECT user_id,approved_session_hash,request_json,expires FROM approvals \
+             WHERE token_hash=? AND expires>? AND kind='join_machine' AND user_id IS NOT NULL",
+        )
+        .bind(hash(token))
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(Error::Denied)?;
+        let request_json: Option<String> = row.get("request_json");
+        let request: JoinMachineRequest =
+            serde_json::from_str(request_json.as_deref().ok_or(Error::Invalid)?)?;
+        request.validate()?;
+        let expires_at = row.get::<i64, _>("expires");
+        let issued_at = expires_at.checked_sub(600).ok_or(Error::Invalid)?;
+        Ok(ApprovedMachineJoin {
+            user_id: row.get("user_id"),
+            session_hash: row
+                .get::<Option<String>, _>("approved_session_hash")
+                .ok_or(Error::Denied)?,
+            issued_at,
+            expires_at,
+            request,
+        })
     }
 
     /// Validate a CLI/MCP key for one explicit scope; no browser session or fresh-tap privilege.
