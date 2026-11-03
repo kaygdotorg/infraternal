@@ -61,6 +61,13 @@ async function windowMenu(page: Page, id: string, action: string): Promise<void>
 
 const activate = (page: Page, id: string): Promise<void> => page.locator(`${VIEW} .ui-window[data-window-id="${id}"] .ui-window-body`).first().click({ position: { x: 20, y: 40 } }).then(() => page.waitForTimeout(400));
 
+// The default chords off a Mac (D222, shortcuts.ts): Ctrl+Alt is AltGr on many layouts, so no default uses it. These replace
+// the D212 chords (Ctrl+Shift+Alt+D, Ctrl+Alt+R, Ctrl+Alt+D) that the keymap left in 2026-10-10 (d0aacfa1e).
+const SPLIT_RIGHT = ["Control", "Shift", "KeyD"];
+const SPLIT_DOWN = ["Control", "Shift", "KeyE"];
+const NEW_RIGHT = ["Control", "Shift", "Enter"];
+const NEW_BELOW = ["Control", "Shift", "Alt", "Enter"];
+
 async function press(page: Page, chord: string[]): Promise<void> {
   for (const k of chord) await page.keyboard.down(k);
   for (const k of [...chord].reverse()) await page.keyboard.up(k);
@@ -75,9 +82,9 @@ const act = (page: Page, action: string): Promise<void> => page.evaluate((a) => 
 /** A three-window stack in the middle column: edge-arm is split down, then the middle window is split right. */
 async function stacked(page: Page): Promise<void> {
   await activate(page, "w-edge-arm");
-  await press(page, ["Control", "Shift", "Alt", "KeyD"]);
+  await press(page, SPLIT_DOWN);
   await activate(page, "w-edge-arm");
-  await press(page, ["Control", "Shift", "KeyD"]);
+  await press(page, SPLIT_RIGHT);
 }
 
 function expectNoOverlap(g: Grid): void {
@@ -109,7 +116,7 @@ test.describe("split right in a stacked column (D212)", () => {
   test("by ⌘K: Split right on the stacked window gives the same layout", async ({ page }) => {
     await boot(page);
     await activate(page, "w-edge-arm");
-    await press(page, ["Control", "Shift", "Alt", "KeyD"]);
+    await press(page, SPLIT_DOWN);
     await activate(page, "w-edge-arm");
     const before = await grid(page);
     await page.keyboard.press("Control+Shift+K");
@@ -128,7 +135,7 @@ test.describe("split right in a stacked column (D212)", () => {
   test("by mouse: the header pill's split right on the middle window divides it the same way", async ({ page }) => {
     await boot(page);
     await activate(page, "w-edge-arm");
-    await press(page, ["Control", "Shift", "Alt", "KeyD"]);
+    await press(page, SPLIT_DOWN);
     await activate(page, "w-edge-arm");
     const before = await grid(page);
     // A half is narrow: its actions sit behind the ⋯ (TASTE: title first), and the menu holds the same action.
@@ -144,10 +151,10 @@ test.describe("split right in a stacked column (D212)", () => {
   test("closing the new half gives back the layout it came from, widths and heights", async ({ page }) => {
     await boot(page);
     await activate(page, "w-edge-arm");
-    await press(page, ["Control", "Shift", "Alt", "KeyD"]);
+    await press(page, SPLIT_DOWN);
     const beforeSplit = await grid(page);
     await activate(page, "w-edge-arm");
-    await press(page, ["Control", "Shift", "KeyD"]);
+    await press(page, SPLIT_RIGHT);
     const newId = (await grid(page)).active!;
     await windowMenu(page, newId, "close");
     await page.waitForTimeout(1000);
@@ -181,7 +188,7 @@ test.describe("split right in a stacked column (D212)", () => {
     await stacked(page);
     const before = await grid(page);
     await activate(page, "w-nix-cache");
-    await press(page, ["Control", "Shift", "KeyD"]);
+    await press(page, SPLIT_RIGHT);
     const after = await grid(page);
     expect(after.total).toBe(before.total);
     expect(after.windows).toBe(before.windows + 1);
@@ -196,7 +203,7 @@ test.describe("split right in a stacked column (D212)", () => {
     await stacked(page);
     await activate(page, "w-edge-arm");
     const before = await grid(page);
-    await press(page, ["Control", "Alt", "KeyR"]);
+    await press(page, NEW_RIGHT);
     const after = await grid(page);
     expect(after.groups, "the group is untouched").toBe(1);
     expect(after.cols.length).toBe(before.cols.length + 1);
@@ -209,7 +216,7 @@ test.describe("split right in a stacked column (D212)", () => {
     await stacked(page);
     await activate(page, "w-edge-arm");
     const before = await grid(page);
-    await press(page, ["Control", "Alt", "KeyD"]);
+    await press(page, NEW_BELOW);
     const after = await grid(page);
     expect(after.windows).toBe(before.windows + 1);
     expect(after.total).toBe(before.total);
@@ -222,7 +229,7 @@ test.describe("split right in a stacked column (D212)", () => {
     await stacked(page);
     await activate(page, "w-edge-arm-s2");
     const before = await grid(page);
-    await press(page, ["Control", "Shift", "Alt", "KeyD"]);
+    await press(page, SPLIT_DOWN);
     const after = await grid(page);
     expect(after.windows).toBe(before.windows + 1);
     expectNoOverlap(after);
