@@ -43,8 +43,13 @@
             echo "rustup shim: only 'rustup which <tool>' is supported (nix provides the toolchain)" >&2
             exit 1
           '';
+          # The pinned Zig as a fixed-output derivation (D213, D328).
+          # scripts/auth-toolchain copies it into the target directory instead
+          # of downloading the same tarball again.
+          zig = pkgs.callPackage ./nix/zig.nix { };
         in {
           default = pkgs.mkShell {
+            INFRATERNAL_ZIG = zig.unpacked;
             packages = [
               rust rustupShim
               pkgs.cargo-deny          # cargo-deny gate (deny.toml)
@@ -55,7 +60,7 @@
               pkgs.python3             # release and fixture scripts
               pkgs.gnumake pkgs.perl   # vendored OpenSSL build drivers
               pkgs.gcc                 # host-side build scripts and proc macros
-              pkgs.curl pkgs.xz pkgs.gnutar pkgs.gzip  # scripts/auth-toolchain fetches Zig
+              pkgs.curl pkgs.xz pkgs.gnutar pkgs.gzip  # auth-toolchain's download fallback
               pkgs.git pkgs.cacert
               pkgs.ripgrep              # release bundle ELF validation
               pkgs.sccache             # opt-in shared compiler cache, see shellHook
