@@ -19,6 +19,34 @@ impl Drop for LiveFixtureDirectory {
     }
 }
 
+/// A public test CA that the ordinary disposable target can read during preflight.
+struct TestHttpsRoot(PathBuf);
+impl TestHttpsRoot {
+    fn write(root: &openssl::x509::X509Ref) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "infraternal-breakit2-root-{}-{}.pem",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, root.to_pem().unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        Self(path)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+impl Drop for TestHttpsRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 async fn live_fixture(scratch: &std::path::Path) -> (LiveFixtureDirectory, Fixture) {
     let directory =
         LiveFixtureDirectory(scratch.join(format!("live-authority-{}", Uuid::new_v4())));
@@ -483,8 +511,8 @@ fn breakit2_step(script: &str, input: &Input<'_>) -> &'static str {
             "upload"
         }
         Input::File(_) => "upload",
-        Input::Bytes(_) if script.starts_with("# INFRATERAL_TRANSFER_SETUP_V1") => "reuse_setup",
-        Input::Bytes(_) if script.starts_with("# INFRATERAL_SETUP_STEPS_V1") => "setup",
+        Input::Bytes(_) if script.starts_with("# INFRATERNAL_TRANSFER_SETUP_V1") => "reuse_setup",
+        Input::Bytes(_) if script.starts_with("# INFRATERNAL_SETUP_STEPS_V1") => "setup",
         Input::Bytes(_) => "join",
         Input::Empty if script.starts_with(infraternal_plugin_ssh::probe::CHECK_SCRIPT) => "check",
         Input::Empty if script.contains("ln \"$cache/payload\" \"$stage/payload\"") => {
@@ -501,6 +529,23 @@ fn breakit2_step(script: &str, input: &Input<'_>) -> &'static str {
     }
 }
 
+/// Trust the disposable HTTPS root for the join-key preflight command only.
+///
+/// That preflight verifies the public origin with system roots. OpenSSL's default verify
+/// paths honour `SSL_CERT_FILE`, so the harness points it at the test CA instead of
+/// adding a trust hook to the shipped binary or the target's system store.
+fn breakit2_test_https_root(script: &str, root: Option<&std::path::Path>) -> String {
+    if !script.contains("prepare-join-key") {
+        return script.to_owned();
+    }
+    let Some(root) = root else {
+        return script.to_owned();
+    };
+    let root = root.to_str().expect("test HTTPS root path is UTF-8");
+    let quoted = format!("'{}'", root.replace('\'', "'\\''"));
+    format!("export SSL_CERT_FILE={quoted}\n{script}")
+}
+
 #[test]
 fn breakit2_step_labels_join_key_preflight_as_connect() {
     let script = "payload agent --data state prepare-join-key https://server:4930";
@@ -512,8 +557,31 @@ fn breakit2_step_labels_join_key_preflight_as_connect() {
     assert_eq!(breakit2_step("commit", &Input::Signal(signal)), "commit");
 }
 
+#[test]
+fn breakit2_step_labels_both_setup_headers_as_setup() {
+    let transfer = "# INFRATERNAL_TRANSFER_SETUP_V1\ntransfer_setup";
+    let setup = "# INFRATERNAL_SETUP_STEPS_V1\nsetup_step";
+
+    assert_eq!(breakit2_step(transfer, &Input::Bytes(b"fixture")), "reuse_setup");
+    assert_eq!(breakit2_step(setup, &Input::Bytes(b"fixture")), "setup");
+}
+
+#[test]
+fn breakit2_test_https_root_is_scoped_to_join_key_preflight() {
+    let path = std::path::Path::new("/tmp/test 'root.pem");
+    let preflight = "payload agent --data state prepare-join-key https://server:4930";
+    let command = breakit2_test_https_root(preflight, Some(path));
+
+    assert!(command.starts_with("export SSL_CERT_FILE='"));
+    assert!(command.contains("test '\\''root.pem'\n"));
+    assert!(command.ends_with(preflight));
+    assert_eq!(breakit2_test_https_root("other command", Some(path)), "other command");
+    assert_eq!(breakit2_test_https_root(preflight, None), preflight);
+}
+
 struct TimedSession {
     inner: Arc<dyn SshSession>,
+    test_https_root: Option<PathBuf>,
 }
 impl SshSession for TimedSession {
     fn session_bridge(&self) -> bool {
@@ -629,10 +697,17 @@ impl SshSession for TimedSession {
                         1,
                     )
                 });
+            let command = refused.as_deref().unwrap_or(&instrumented);
+            let test_https_root = if step == "connect" {
+                self.test_https_root.as_deref()
+            } else {
+                None
+            };
+            let command = breakit2_test_https_root(command, test_https_root);
             let started = Instant::now();
             let mut result = self
                 .inner
-                .run(refused.as_deref().unwrap_or(&instrumented), input)
+                .run(&command, input)
                 .await;
             if let Some(path) = lock_trace_path.as_deref() {
                 report_retry_lock_trace(path);
@@ -721,6 +796,7 @@ printf 'DIAG_START unit_file=%s state=%s\n' "$unit_state" "$state"
 }
 pub(super) struct TimedTransport {
     pub(super) adapter: OpenSsh,
+    pub(super) test_https_root: Option<PathBuf>,
 }
 impl SshTransport for TimedTransport {
     fn open(
@@ -744,7 +820,10 @@ impl SshTransport for TimedTransport {
                 started.elapsed().as_secs_f64() * 1000.0,
                 result.is_ok()
             );
-            Ok(Arc::new(TimedSession { inner: result? }) as Arc<dyn SshSession>)
+            Ok(Arc::new(TimedSession {
+                inner: result?,
+                test_https_root: self.test_https_root.clone(),
+            }) as Arc<dyn SshSession>)
         })
     }
 }
@@ -1179,6 +1258,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let server_name =
         std::env::var("BREAKIT2_SERVER_NAME").unwrap_or_else(|_| "addhost-breakit2.test".into());
     let (identity, material) = crate::remote_runtime::tests::server_material_for_name(&server_name);
+    let test_https_root = TestHttpsRoot::write(material.issuer());
     let source: Arc<dyn CaKeySource> = Arc::new(Signer(Some(material.clone())));
     let hosts = RemoteHosts::from_source(Some(source.clone()));
     let store = f.backend.issuer.store().clone();
@@ -1252,6 +1332,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                 scratch: scratch.clone(),
                 command_timeout: Duration::from_secs(30),
             },
+            test_https_root: Some(test_https_root.path().to_owned()),
         }),
         private: Mutex::new(Some(Secret::new(private))),
     });
@@ -1707,6 +1788,7 @@ async fn compound_retry_fixture_reaches_install_boundary() {
     });
     let session = TimedSession {
         inner: observation.clone(),
+        test_https_root: None,
     };
     let script = r#"# INFRATERNAL_SETUP_STEPS_V1
 setup_step() {
