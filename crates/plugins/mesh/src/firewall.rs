@@ -167,10 +167,16 @@ impl Firewall {
     ///
     /// Called after every confirmed route snapshot, also an unchanged one: a source that lost
     /// a route since the last confirmation has its proxied flows retired here.
+    ///
+    /// Only a `confirmed` call moves that reference to `config`. A gate-only or other local
+    /// update may run while Traefik still serves routes rendered from an older configuration
+    /// (a crash restart from retained routes, say). Moving the reference then would let a
+    /// source reconnect under the old routes and keep that flow past the next confirmation.
     pub fn apply_proxy_ingress(
         &mut self,
         config: &Config,
         proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
+        confirmed: bool,
     ) -> io::Result<()> {
         if self.proxy_ingress != *proxy_ingress || self.accepted.as_ref() != Some(config) {
             self.install(config, &[], false, config, proxy_ingress)?;
@@ -184,7 +190,9 @@ impl Firewall {
             &self.proxy_ingress,
         )?;
         self.accepted = Some(config.clone());
-        self.proxy_config = Some(config.clone());
+        if confirmed {
+            self.proxy_config = Some(config.clone());
+        }
         Ok(())
     }
     // The node persists public intent between installation and irreversible retirement.

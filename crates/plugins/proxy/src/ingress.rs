@@ -16,8 +16,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Callback that applies one complete proxy ingress state to the Mesh packet filter.
-pub type MeshIngressObserver = Arc<dyn Fn(MeshProxyIngress) -> io::Result<()> + Send + Sync>;
+/// Callback that applies one complete proxy ingress state to the Mesh packet filter. The flag
+/// is true only for a state whose routes Traefik has just confirmed.
+pub type MeshIngressObserver = Arc<dyn Fn(MeshProxyIngress, bool) -> io::Result<()> + Send + Sync>;
 
 /// The supervisor's view of its child's wildcard public listener pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,7 +70,7 @@ impl IngressPublisher {
             return Ok(());
         }
         match &applied.observer {
-            Some(observer) => observer(next.clone())?,
+            Some(observer) => observer(next.clone(), confirmed)?,
             None if next.public_listener_pair.is_some() => {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,

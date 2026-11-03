@@ -165,8 +165,12 @@ type Counters =
     std::collections::BTreeMap<crate::policy::model::PublicKey, crate::wireguard::Counters>;
 type ConfigurationObserver = Arc<dyn Fn(Option<Config>) -> std::io::Result<()> + Send + Sync>;
 /// Synchronous return path used by the proxy controller after Traefik applies a route snapshot.
+///
+/// The flag says whether Traefik confirmed this state (see [`Node::set_proxy_ingress`]).
 pub type ProxyIngressObserver = Arc<
-    dyn Fn(infraternal_mesh::proxy_ports::MeshProxyIngress) -> std::io::Result<()> + Send + Sync,
+    dyn Fn(infraternal_mesh::proxy_ports::MeshProxyIngress, bool) -> std::io::Result<()>
+        + Send
+        + Sync,
 >;
 /// How long the following pages of one listing reuse the first page's kernel dump. A listing pages through in
 /// milliseconds; anything older is a new listing and reads the kernel again.
@@ -247,14 +251,14 @@ impl MeshNodePlugin {
     #[must_use]
     pub fn proxy_ingress_observer(&self) -> ProxyIngressObserver {
         let owner = Arc::clone(&self.owner);
-        Arc::new(move |proxy_ingress| {
+        Arc::new(move |proxy_ingress, confirmed| {
             let mut owner = owner
                 .lock()
                 .map_err(|_| std::io::Error::other("Mesh owner is unavailable"))?;
             owner
                 .node()
                 .map_err(|_| std::io::Error::other("Mesh state is unavailable"))?
-                .set_proxy_ingress(proxy_ingress)
+                .set_proxy_ingress(proxy_ingress, confirmed)
         })
     }
 }

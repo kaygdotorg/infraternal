@@ -260,20 +260,25 @@ impl Node {
     pub fn active(&self) -> bool {
         self.identity.is_some()
     }
-    /// Apply the proxy's confirmed Mesh routes to the owned firewall.
+    /// Apply the proxy's Mesh routes and public gate to the owned firewall.
+    ///
+    /// `confirmed` is true only when Traefik has confirmed a route snapshot rendered from the
+    /// current Mesh configuration; gate-only and other local updates pass false.
     ///
     /// # Errors
     /// Returns a firewall or conntrack cleanup failure without accepting a new policy.
     pub fn set_proxy_ingress(
         &mut self,
         proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
+        confirmed: bool,
     ) -> io::Result<()> {
         // An unchanged snapshot still reaches the firewall: Traefik has just confirmed it, and
         // any source that lost a route since the last confirmation must lose its open flows.
         if self.active()
             && let Some(config) = self.config.as_ref()
         {
-            self.firewall.apply_proxy_ingress(config, &proxy_ingress)?;
+            self.firewall
+                .apply_proxy_ingress(config, &proxy_ingress, confirmed)?;
         }
         self.proxy_ingress = proxy_ingress;
         Ok(())

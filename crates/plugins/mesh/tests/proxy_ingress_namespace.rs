@@ -228,7 +228,9 @@ fn check(mut firewall: Firewall) {
     };
     let config = configuration(&[8080, 22]);
     firewall.apply(&config).unwrap();
-    firewall.apply_proxy_ingress(&config, &ingress).unwrap();
+    firewall
+        .apply_proxy_ingress(&config, &ingress, true)
+        .unwrap();
 
     let mut granted = Client::connect(namespace.id(), "10.254.0.3", pair.https);
     let connected = granted.line();
@@ -289,7 +291,7 @@ fn revocation(mut firewall: Firewall) {
     let config = configuration_with(&[(3, both), (4, one)]);
     firewall.apply(&config).unwrap();
     firewall
-        .apply_proxy_ingress(&config, &ingress(both))
+        .apply_proxy_ingress(&config, &ingress(both), true)
         .unwrap();
     let mut narrowed_peer = Client::connect(namespace.id(), "10.254.0.3", https);
     let mut other_peer = Client::connect(namespace.id(), "10.254.0.4", https);
@@ -305,7 +307,7 @@ fn revocation(mut firewall: Firewall) {
     let narrowed = configuration_with(&[(3, one), (4, one)]);
     firewall.apply(&narrowed).unwrap();
     firewall
-        .apply_proxy_ingress(&narrowed, &ingress(both))
+        .apply_proxy_ingress(&narrowed, &ingress(both), true)
         .unwrap();
     let after_grant_revocation = [narrowed_peer.echo(), other_peer.echo()];
     let mut reconnected = Client::connect(namespace.id(), "10.254.0.3", https);
@@ -313,7 +315,7 @@ fn revocation(mut firewall: Firewall) {
 
     // Route 8080 is unpublished; both peers held it.
     firewall
-        .apply_proxy_ingress(&narrowed, &ingress(&[9090]))
+        .apply_proxy_ingress(&narrowed, &ingress(&[9090]), true)
         .unwrap();
     let after_unpublish = [reconnected.echo(), other_peer.echo()];
 
@@ -347,4 +349,62 @@ fn nft_revoking_a_route_ends_the_sources_open_proxied_flows() {
 #[ignore = "Run alone inside unshare -Urn with a disposable network namespace."]
 fn nf_tables_revoking_a_route_ends_the_sources_open_proxied_flows() {
     revocation(Firewall::nf_tables());
+}
+
+// Only a snapshot Traefik confirmed moves the "last confirmed" reference. A gate-only update
+// can land while Traefik still serves routes rendered from the older configuration (a crash
+// restart from retained routes). A source that reconnects in that window must still lose the
+// flow once Traefik confirms the narrowed routes.
+fn unconfirmed_update(mut firewall: Firewall) {
+    let (namespace, https) = namespace_with_listener();
+    let pair = MIXED_LISTENER_PAIRS[1];
+    let ingress = |public_gate: bool| MeshProxyIngress {
+        listener_pair: Some(pair),
+        backend_ports: [8080, 9090].into_iter().collect(),
+        public_listener_pair: public_gate.then_some(MIXED_LISTENER_PAIRS[0]),
+        ..MeshProxyIngress::default()
+    };
+    let both: &[u16] = &[8080, 9090];
+    let config = configuration_with(&[(3, both)]);
+    firewall.apply(&config).unwrap();
+    firewall
+        .apply_proxy_ingress(&config, &ingress(false), true)
+        .unwrap();
+
+    // .3 loses route 9090 and keeps 8080. The Mesh change installs; before the controller's
+    // replace, the restarted Traefik's gate update arrives, unconfirmed.
+    let narrowed = configuration_with(&[(3, &[8080])]);
+    firewall.apply(&narrowed).unwrap();
+    firewall
+        .apply_proxy_ingress(&narrowed, &ingress(true), false)
+        .unwrap();
+    // The old routes still admit .3 to 9090 inside Traefik; the packet filter admits the pair.
+    let mut reconnected = Client::connect(namespace.id(), "10.254.0.3", https);
+    let reconnect = [reconnected.line(), reconnected.echo()];
+
+    // Traefik confirms the narrowed snapshot.
+    firewall
+        .apply_proxy_ingress(&narrowed, &ingress(true), true)
+        .unwrap();
+    let after_confirmation = reconnected.echo();
+
+    drop(reconnected);
+    teardown(firewall, namespace);
+    assert_eq!(reconnect, ["connected", "echo"]);
+    assert_eq!(
+        after_confirmation, "lost",
+        "a flow opened under routes Traefik had not yet narrowed must end at the confirmation"
+    );
+}
+
+#[test]
+#[ignore = "Run alone inside unshare -Urn with a disposable network namespace."]
+fn nft_an_unconfirmed_update_does_not_move_the_flow_reference() {
+    unconfirmed_update(Firewall::default());
+}
+
+#[test]
+#[ignore = "Run alone inside unshare -Urn with a disposable network namespace."]
+fn nf_tables_an_unconfirmed_update_does_not_move_the_flow_reference() {
+    unconfirmed_update(Firewall::nf_tables());
 }

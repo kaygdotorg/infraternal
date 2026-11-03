@@ -1317,7 +1317,7 @@ mod tests {
             .expect("controller fixture state")
             .rootful = true;
         controller
-            .set_mesh_ingress_observer(Arc::new(|_| Ok(())))
+            .set_mesh_ingress_observer(Arc::new(|_, _| Ok(())))
             .expect("install fake firewall observer");
         (controller, snapshots, started_addresses)
     }
@@ -1335,7 +1335,7 @@ mod tests {
         let observer: MeshIngressObserver = {
             let applied = Arc::clone(&applied);
             let snapshots = Arc::clone(&snapshots);
-            Arc::new(move |ingress| {
+            Arc::new(move |ingress, _confirmed| {
                 let snapshots = snapshots
                     .lock()
                     .map_err(|_| io::Error::other("applied route fixture is unavailable"))?;
@@ -1415,7 +1415,7 @@ mod tests {
         let observer: MeshIngressObserver = {
             let snapshot_counts = Arc::clone(&snapshot_counts);
             let snapshots = Arc::clone(&snapshots);
-            Arc::new(move |ingress| {
+            Arc::new(move |ingress, _confirmed| {
                 let count = snapshots
                     .lock()
                     .map_err(|_| io::Error::other("route fixture is unavailable"))?
@@ -1465,7 +1465,7 @@ mod tests {
         let gates = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&gates);
         controller
-            .set_mesh_ingress_observer(Arc::new(move |ingress| {
+            .set_mesh_ingress_observer(Arc::new(move |ingress, _confirmed| {
                 recorded
                     .lock()
                     .map_err(|_| io::Error::other("gate fixture"))?

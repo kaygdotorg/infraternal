@@ -1069,7 +1069,7 @@ fn a_crash_restart_reopens_the_public_gate_for_applied_routes() {
         std::sync::Arc::default();
     let recorded = std::sync::Arc::clone(&applied);
     publisher
-        .set_observer(std::sync::Arc::new(move |ingress| {
+        .set_observer(std::sync::Arc::new(move |ingress, _confirmed| {
             recorded
                 .lock()
                 .map_err(|_| std::io::Error::other("ingress log"))?
