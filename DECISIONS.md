@@ -421,6 +421,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     spring (0.2 s, bounce 0.2) drives the fill, the overshoot swell and the
     draw-on. Pointer toggles animate. Keyboard toggles are instant. The same
     rule applies to every repeated interaction: one primitive, reused.
+    **Amended (owner, 2026-11-02/03, #308):** "can we get rid of this elastic
+    overshoot please?" The tick's spring is critically damped like every other
+    spring (no bounce, no overshoot swell). The droplet split/join animation is
+    the one deliberate exception: "the droplet splitting animation is what we
+    wanted".
 100. **No font swap, ever.** Each page preloads the fonts that its first
      view uses. Font faces use `font-display: block`, and a view renders once
      its font is ready (with a short cap). The first frame is the final frame.
@@ -962,6 +967,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Desktop:** the trackpad or wheel scrolls the terminal under the
        pointer; Shift is horizontal; Space+drag or middle-drag pans the
        canvas; a click activates a window.
+     **Pinch amended (owner, 2026-11-03):** pinch never zooms the viewport
+     while the canvas is locked. With the canvas unlocked, a pinch over the
+     canvas zooms the canvas. Inside a window, pinch belongs to that window's
+     content: a terminal changes its font size, and an app window passes the
+     pinch to the app. The browser's own page zoom never triggers.
 160. **One reusable, per-instance-extensible component per UI concept:**
      every UI concept (overlay/popover/sheet material, pill, capsule tabs,
      rows, tooltip, tick and copy swap, toast, buttons, spring) exists
@@ -1769,6 +1779,13 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        rebindable and appear in ⌘K and the window's header pill.
      - **Words:** "Split right", "Split down", "New window right", "New
        window below". There are no tabs.
+     **Settings rows (owner, 2026-11-03, #304):** "Settings - Appearance is
+     one row which scrolls down to let's say Setting - Access, no per window
+     scrolling. they scroll up and down as groups." Each Settings component
+     is one horizontal row of its windows. Scrolling down moves to the next
+     component's row as a group, and no window scrolls on its own. The grid
+     therefore groups windows into rows without needing a window that spans
+     columns. Rejected: one column per component.
 213. **Zig is the C toolchain for static builds (owner, 2026-10-10):** the
      C dependencies of the static musl binaries (OpenSSL, SQLite, and
      libghostty-vt, which is written in Zig per D94) are compiled with `zig
