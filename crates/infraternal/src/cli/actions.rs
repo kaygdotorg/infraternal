@@ -328,6 +328,12 @@ fn hosted_server_actions() -> Vec<ActionDefinition> {
                         "dry_run".to_owned(),
                         JsonSchema::boolean("Show what would be removed and change nothing."),
                     ),
+                    (
+                        "yes".to_owned(),
+                        JsonSchema::boolean(
+                            "Remove after showing the dry run, without asking. For scripts that already reviewed it.",
+                        ),
+                    ),
                 ],
                 ["host_id".to_owned()],
             ),

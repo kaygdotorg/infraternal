@@ -196,7 +196,11 @@ fn command_input(
                         "The host ID is invalid. Choose an ID from `infraternal hosts list`.",
                     )
                 })?;
-            Ok(json!({"host_id":host,"dry_run":matches.get_flag("dry_run")}))
+            Ok(json!({
+                "host_id": host,
+                "dry_run": matches.get_flag("dry_run"),
+                "yes": matches.get_flag("yes"),
+            }))
         }
         "ssh.start" => {
             #[cfg(feature = "ssh")]
@@ -249,6 +253,7 @@ async fn dispatch(
     match action.id {
         "ssh.start" => add_host(command, server, api_key, input, json_output).await,
         "remote.host.list" => list_hosts(server, api_key, input).await,
+        "remote.host.remove" => remove_host(server, api_key, input, json_output).await,
         _ => post_action(server, api_key, action.id, &input).await,
     }
 }
@@ -261,6 +266,102 @@ async fn post_action(
 ) -> Result<Value, ActionFailure> {
     let path = format!("/v1/actions/{action_id}");
     post_json(server, api_key, &path, input).await
+}
+
+/// D28: a removal is always its own dry run first. The review is shown, the person (or
+/// `--yes`) confirms, and only then is the removal sent with the dry run's single-use
+/// review token. `--dry-run` stops after the review. The token is never printed.
+async fn remove_host(
+    server: &Url,
+    api_key: &str,
+    mut input: Value,
+    json_output: bool,
+) -> Result<Value, ActionFailure> {
+    let yes = input
+        .as_object_mut()
+        .and_then(|fields| fields.remove("yes"))
+        .and_then(|yes| yes.as_bool())
+        .unwrap_or(false);
+    let review_only = input["dry_run"] == true;
+    input["dry_run"] = true.into();
+    let mut review = post_action(server, api_key, "remote.host.remove", &input).await?;
+    let token = take_review_token(&mut review);
+    if review_only {
+        return Ok(review);
+    }
+    let token = token.ok_or_else(|| {
+        ActionFailure::new(
+            Exit::Failed,
+            "The server did not return a review for this removal, so nothing was removed.",
+        )
+    })?;
+    if !confirm_removal(&review, yes, json_output) {
+        return Err(ActionFailure::new(
+            Exit::NotAllowed,
+            "Nothing was removed. Confirm in a terminal, or check the dry run with `--dry-run` and pass `--yes`.",
+        )
+        .with_details(
+            "The removal needs a confirmation after its dry run.",
+            review,
+        ));
+    }
+    post_action(
+        server,
+        api_key,
+        "remote.host.remove",
+        &confirmed_removal(input, token.as_str()),
+    )
+    .await
+}
+
+/// Take the review token out of a dry run's result so that it is never printed.
+fn take_review_token(review: &mut Value) -> Option<Zeroizing<String>> {
+    let fields = review.as_object_mut()?;
+    fields.remove("review_expires_in");
+    match fields.remove("review_token")? {
+        Value::String(token) if !token.is_empty() => Some(Zeroizing::new(token)),
+        _ => None,
+    }
+}
+
+/// The real call repeats the reviewed input exactly, as the token is bound to it.
+fn confirmed_removal(mut input: Value, token: &str) -> Value {
+    input["dry_run"] = false.into();
+    input["review_token"] = token.into();
+    input
+}
+
+/// Show the dry run on stderr and ask. Only a terminal can answer; `--json` and pipes need
+/// `--yes`. The host name and effect come from the server and are made terminal-safe.
+fn confirm_removal(review: &Value, yes: bool, json_output: bool) -> bool {
+    use std::io::{BufRead, IsTerminal, Read, Write};
+    let host = terminal_safe(review["host"].as_str().unwrap_or("this host"));
+    if !json_output {
+        eprintln!(
+            "Dry run: {}",
+            terminal_safe(review["label"].as_str().unwrap_or("Remove the host"))
+        );
+        if let Some(effect) = review["effect"].as_str() {
+            eprintln!("{}", terminal_safe(effect));
+        }
+    }
+    if yes {
+        return true;
+    }
+    if json_output || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return false;
+    }
+    eprint!("Remove {host}? Type yes to confirm: ");
+    if std::io::stderr().flush().is_err() {
+        return false;
+    }
+    let mut answer = String::new();
+    std::io::stdin()
+        .lock()
+        .take(128)
+        .read_line(&mut answer)
+        .is_ok()
+        && answer.trim() == "yes"
 }
 
 async fn list_hosts(server: &Url, api_key: &str, input: Value) -> Result<Value, ActionFailure> {
@@ -539,7 +640,7 @@ async fn post_json_inner(
         )
     })?;
     let status = response.status();
-    if !status.is_success() {
+    if !status.is_success() && status != StatusCode::BAD_REQUEST {
         return Err(status_failure(status));
     }
     let bytes = Limited::new(response.into_body(), MAX_RESPONSE)
@@ -553,12 +654,29 @@ async fn post_json_inner(
         })?
         .to_bytes();
     drop(task);
+    if status == StatusCode::BAD_REQUEST {
+        return Err(bad_request_failure(&bytes));
+    }
     serde_json::from_slice(&bytes).map_err(|_| {
         ActionFailure::new(
             Exit::Failed,
             "The server returned an invalid action result.",
         )
     })
+}
+
+/// A 400 names a refused review (D28) by a fixed code; any other 400 stays generic.
+fn bad_request_failure(body: &[u8]) -> ActionFailure {
+    let code = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|body| body["error"].as_str().map(str::to_owned));
+    match code.as_deref() {
+        Some("review_required" | "review_invalid") => ActionFailure::new(
+            Exit::Failed,
+            "The removal review expired or was already used, so nothing was removed. Run the command again to see a new dry run.",
+        ),
+        _ => status_failure(StatusCode::BAD_REQUEST),
+    }
 }
 
 fn status_failure(status: StatusCode) -> ActionFailure {
@@ -773,6 +891,45 @@ mod tests {
         assert_eq!(failure.exit, exit);
         assert_eq!(failure.message, message);
         assert_eq!(failure.exit, Exit::NotAllowed);
+    }
+
+    /// D28: the dry run's token is taken out of what is printed, and the real call repeats the
+    /// reviewed input with it. Without a terminal or `--yes` nothing is confirmed.
+    #[test]
+    fn removal_sends_the_reviewed_input_with_its_token_and_never_prints_it() {
+        let mut review = json!({
+            "dry_run": true, "host": "host.example", "review_token": "fixture-review-token",
+            "review_expires_in": 120,
+        });
+        let token = super::take_review_token(&mut review).expect("token");
+        assert_eq!(review, json!({"dry_run": true, "host": "host.example"}));
+        let input = json!({"host_id": "00000000-0000-0000-0000-000000000001", "dry_run": true});
+        assert_eq!(
+            super::confirmed_removal(input, token.as_str()),
+            json!({
+                "host_id": "00000000-0000-0000-0000-000000000001",
+                "dry_run": false,
+                "review_token": "fixture-review-token",
+            })
+        );
+        assert!(
+            !super::confirm_removal(&review, false, true),
+            "--json needs --yes"
+        );
+        assert!(super::confirm_removal(&review, true, true));
+    }
+
+    #[test]
+    fn a_refused_review_says_nothing_was_removed() {
+        for code in ["review_required", "review_invalid"] {
+            let failure = super::bad_request_failure(json!({"error": code}).to_string().as_bytes());
+            assert!(failure.message.contains("nothing was removed"), "{code}");
+        }
+        let failure = super::bad_request_failure(b"{}");
+        assert_eq!(
+            failure.message,
+            status_failure(StatusCode::BAD_REQUEST).message
+        );
     }
 
     #[test]
