@@ -9,7 +9,7 @@ use axum::{
     routing::post,
 };
 use bytes::Bytes;
-use infraternal_plugin_api::{ActionDef, Operation, SocketHost};
+use infraternal_plugin_api::{ActionDef, Effect, Operation, SocketHost};
 use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -57,10 +57,15 @@ fn bearer_only(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// Audit rows, and the one-way ids of revoked or expired keys they name, are kept for 90
-/// days. The table also holds at most `AUDIT_MAX_ROWS` rows, so even a live key at its full
-/// rate limit cannot grow it without bound (J137 P2-1).
+/// days.
+///
+/// Invariant (J154 P2-1): a row for a changing action or a denial is never evicted before
+/// then, whatever any key does afterwards. Reads (`Effect::Read`) are therefore not one row
+/// per call: they are counted in `api_read_audit`, one row per key, action and minute, and
+/// only that table has a row cap. Changing rows stay bounded by the per-key rate limit
+/// (at most 30 a minute per key) times the 90 days; denials by one a minute per key.
 pub(crate) const AUDIT_RETENTION_SECONDS: i64 = 90 * 86_400;
-const AUDIT_MAX_ROWS: i64 = 100_000;
+const READ_AUDIT_MAX_ROWS: i64 = 100_000;
 /// No key action stays open this long: HTTP actions time out after 15 s, the bootstrap
 /// stream finishes its row as soon as the batch starts, and a removal request expires after
 /// 300 s. A row still `pending` after this never finished (an unpolled removal, or a server
@@ -82,8 +87,13 @@ pub(crate) async fn prune_audit(pool: &SqlitePool, now: i64) -> Result<(), sqlx:
         .bind(cutoff)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM api_action_audit WHERE id<=(SELECT id FROM api_action_audit ORDER BY id DESC LIMIT 1 OFFSET ?)")
-        .bind(AUDIT_MAX_ROWS)
+    sqlx::query("DELETE FROM api_read_audit WHERE minute<?")
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await?;
+    // Only read summaries are capped; the oldest minutes go first.
+    sqlx::query("DELETE FROM api_read_audit WHERE minute<=(SELECT minute FROM api_read_audit ORDER BY minute DESC LIMIT 1 OFFSET ?)")
+        .bind(READ_AUDIT_MAX_ROWS)
         .execute(&mut *tx)
         .await?;
     // A dead key's `expires_at` is its expiry or revocation time. Past the audit bound no
@@ -329,6 +339,30 @@ impl ActionGuard {
             .await
             .map(|_| ())
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+    }
+
+    /// Count one finished read in its key's summary row for this minute (J154 P2-1). Reads
+    /// change nothing, so a failed count withholds the answer instead of blocking the call
+    /// up front: the caller turns an error here into 503.
+    pub(crate) async fn record_read(
+        &self,
+        identity: &AuthorizedKey,
+        action_id: &str,
+        ok: bool,
+        now: i64,
+    ) -> Result<(), StatusCode> {
+        let minute = now - now.rem_euclid(60);
+        sqlx::query("INSERT INTO api_read_audit(key_id,person_id,action_id,minute,calls,failed) VALUES(?,?,?,?,1,?) ON CONFLICT(key_id,action_id,minute) DO UPDATE SET calls=calls+1,failed=failed+excluded.failed")
+            .bind(&identity.key_id)
+            .bind(&identity.person_id)
+            .bind(action_id)
+            .bind(minute)
+            .bind(i64::from(!ok))
+            .execute(&self.pool)
+            .await
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        self.prune_if_due(now).await;
+        Ok(())
     }
 
     async fn admit(&self, key_id: &str, now: i64) -> bool {
@@ -602,36 +636,32 @@ async fn action(
         Ok(identity) => identity,
         Err(status) => return status.into_response(),
     };
-    let target_id = audit_target(&input);
-    let target_id = target_id.as_deref();
     let Ok(now) = crate::runtime::unix_seconds() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    if action.effect == Effect::Read {
+        // Reads are counted per key and minute, not written one row per call (J154 P2-1).
+        let result = run_action(&api, action, identity.clone(), input, now, 0).await;
+        let ok = matches!(result, Ok((_, true)));
+        if let Err(status) = api.guard.record_read(&identity, action.id, ok, now).await {
+            return status.into_response();
+        }
+        return match result {
+            Ok((value, true)) => value.into_response(),
+            Ok((value, false)) => (StatusCode::BAD_REQUEST, value).into_response(),
+            Err(status) => status.into_response(),
+        };
+    }
+    let target_id = audit_target(&input);
     let audit_id = match api
         .guard
-        .begin_audit(&identity, &action_id, target_id, now)
+        .begin_audit(&identity, &action_id, target_id.as_deref(), now)
         .await
     {
         Ok(audit_id) => audit_id,
         Err(status) => return status.into_response(),
     };
-    let result: Result<(Json<Value>, bool), StatusCode> = match action_id.as_str() {
-        "server.status" if !action.fresh_passkey => {
-            server_status(&api.pool).await.map(|value| (value, true))
-        }
-        "sessions.list" if !action.fresh_passkey => session_list(&api, &identity.person_id)
-            .await
-            .map(|value| (value, true)),
-        "remote.host.remove" if !action.fresh_passkey => {
-            remove_host(&api, &identity, &input, now, audit_id).await
-        }
-        // ssh.start uses the existing bounded bootstrap WebSocket adapter.
-        "ssh.start" => Err(StatusCode::BAD_REQUEST),
-        _ if action.fresh_passkey => Err(StatusCode::NOT_FOUND),
-        _ => dispatch_plugin_action(&api, action, identity, input)
-            .await
-            .map(|result| (Json(result.value), result.ok)),
-    };
+    let result = run_action(&api, action, identity, input, now, audit_id).await;
     match result {
         // A completed removal finished its audit row in the removal's own transaction.
         Ok((value, true)) if action_id == "remote.host.remove" && value.0["dry_run"] != true => {
@@ -665,6 +695,35 @@ async fn action(
             let _ = api.guard.finish_audit(audit_id, state, None, now).await;
             status.into_response()
         }
+    }
+}
+
+/// Run one authorized, key-callable action. `audit_id` is the changing action's open audit
+/// row (a removal completes it in its own transaction); reads pass 0 and never use it.
+async fn run_action(
+    api: &Api,
+    action: ActionDef,
+    identity: AuthorizedKey,
+    input: Value,
+    now: i64,
+    audit_id: i64,
+) -> Result<(Json<Value>, bool), StatusCode> {
+    match action.id {
+        "server.status" if !action.fresh_passkey => {
+            server_status(&api.pool).await.map(|value| (value, true))
+        }
+        "sessions.list" if !action.fresh_passkey => session_list(api, &identity.person_id)
+            .await
+            .map(|value| (value, true)),
+        "remote.host.remove" if !action.fresh_passkey => {
+            remove_host(api, &identity, &input, now, audit_id).await
+        }
+        // ssh.start uses the existing bounded bootstrap WebSocket adapter.
+        "ssh.start" => Err(StatusCode::BAD_REQUEST),
+        _ if action.fresh_passkey => Err(StatusCode::NOT_FOUND),
+        _ => dispatch_plugin_action(api, action, identity, input)
+            .await
+            .map(|result| (Json(result.value), result.ok)),
     }
 }
 

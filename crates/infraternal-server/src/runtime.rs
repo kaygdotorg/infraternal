@@ -1389,6 +1389,69 @@ mod tests {
         std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
     }
 
+    /// J154 P2-1: reads by key are one summary row per key, action and minute, never one audit
+    /// row per call.
+    #[tokio::test]
+    async fn key_reads_are_counted_per_minute_not_written_per_call() {
+        let data_dir = temp_dir();
+        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(agent_socket),
+        )
+        .await
+        .expect("server router startup");
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("reopen real SQLite");
+        let token = "fixture-read-count-key-never-print";
+        let now = super::unix_seconds().expect("current time");
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES('owner','owner',1,'x')")
+            .execute(&pool)
+            .await
+            .expect("owner");
+        sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,'owner','fixture-cli','[\"status:read\"]',?,?,0)")
+            .bind(crate::auth::hash(token))
+            .bind(now)
+            .bind(now + 3600)
+            .execute(&pool)
+            .await
+            .expect("key");
+        for _ in 0..5 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/actions/server.status")
+                        .header("content-type", "application/json")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::from("{}"))
+                        .expect("action request"),
+                )
+                .await
+                .expect("action response");
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+        }
+        let per_call: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_action_audit")
+            .fetch_one(&pool)
+            .await
+            .expect("audit rows");
+        assert_eq!(per_call, 0, "reads write no per-call row");
+        let (rows, calls, failed): (i64, i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*),SUM(calls),SUM(failed) FROM api_read_audit WHERE key_id=? AND action_id='server.status'",
+        )
+        .bind(crate::auth::hash(token))
+        .fetch_one(&pool)
+        .await
+        .expect("read summary");
+        // Five calls can straddle one minute boundary.
+        assert!(matches!(rows, 1 | 2), "{rows}");
+        assert_eq!((calls, failed), (5, 0));
+        pool.close().await;
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
     /// Host inventory is a server-side socket plugin, not an infraternal agent descriptor; the
     /// bearer route must find it in the same runtime the browser socket dispatches to.
     #[cfg(feature = "remote")]

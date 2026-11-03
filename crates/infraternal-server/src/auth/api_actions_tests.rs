@@ -358,6 +358,30 @@ async fn a_read_flood_never_evicts_an_earlier_removal_row() {
     assert_eq!(removals, 1, "the removal row survives the read flood");
 }
 
+/// J154 P2-1: the row cap bounds read summaries, oldest minutes first.
+#[tokio::test]
+async fn read_summaries_are_capped_oldest_first() {
+    let f = fixture().await;
+    let now = crate::runtime::unix_seconds().unwrap();
+    let base = now - 80 * 86_400;
+    sqlx::query("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<100010) INSERT INTO api_read_audit(key_id,person_id,action_id,minute,calls,failed) SELECT 'k',?,'server.status',?+i*60,30,0 FROM n")
+        .bind(&f.user)
+        .bind(base)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    crate::api_actions::prune_audit(&f.auth.pool, now)
+        .await
+        .unwrap();
+    let (rows, oldest): (i64, i64) =
+        sqlx::query_as("SELECT COUNT(*),MIN(minute) FROM api_read_audit")
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, 100_000);
+    assert_eq!(oldest, base + 11 * 60);
+}
+
 /// Revocation stamps the key's end of life, so retention counts from the revocation.
 #[tokio::test]
 async fn revocation_stamps_the_key_end_of_life() {
