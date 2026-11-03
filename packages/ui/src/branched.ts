@@ -1,4 +1,6 @@
 /** Builds the accessible host/session tree and updates its current-host indicators. */
+import { ICON_DETACHED, icon } from "./icons";
+import { onDoubleActivate } from "./double-activate";
 
 import { cssPx } from "./ui-scale";
 export interface BranchLeaf {
@@ -16,6 +18,12 @@ export interface BranchLeaf {
   heading?: boolean;
   /** A quiet note after the label: new output (a dot), or the result of a finished command. */
   mark?: "output" | "ok" | "fail";
+  /** What the warm tooltip of the mark says, when the default ("Finished successfully", "Failed", "New output") is not enough. */
+  markTip?: string;
+  /** The label is a name the person may change by double click, double tap, F2 or the row menu (the tree's `rename` option saves it). */
+  renamable?: boolean;
+  /** The rename field's accessible name ("Session name"). Default "Host name". */
+  renameLabel?: string;
 }
 
 export interface BranchSection {
@@ -30,13 +38,31 @@ export interface BranchSection {
   leaves: BranchLeaf[];
 }
 
+export interface BranchedOptions {
+  active: string;
+  onSelect?: (id: string) => void;
+  /**
+   * Opens the rename field on a renamable row (a double click or double tap, F2, or the row menu's Rename); false when it cannot.
+   * The caller owns the field and the saving (the sidebar's is an on-demand module, D188): this tree only knows which rows
+   * may be renamed and what gesture starts it.
+   */
+  openRename?: (row: HTMLElement) => boolean;
+}
+
 export interface BranchedMenu {
   /** `notify` is false only when synchronizing a model update back into the tree. */
   select(id: string, instant?: boolean, notify?: boolean): void;
+  /** Opens the rename field on the renamable row with this id (F2 and the row menu; a double click does the same). False when there is none. */
+  rename(id: string): boolean;
   dispose(): void;
 }
 
-const MARK_NAME = { output: "new output", ok: "command finished", fail: "command failed" } as const;
+/** The id a list row carries (a leaf's button, or a caption that names a thing), for the row menu. */
+export const branchRowId = (row: Element): string | undefined => (row as HTMLElement).dataset.id ?? row.querySelector<HTMLElement>(".bm-leaf")?.dataset.id;
+
+const DETACHED_NAME = "Detached";
+const MARK_TIP = { output: "New output", ok: "Finished successfully", fail: "Failed" } as const;
+const MARK_NAME ={ output: "new output", ok: "command finished", fail: "command failed" } as const;
 const RADIUS = 8;
 const STUB = 12;
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
@@ -99,8 +125,19 @@ function makeSection(section: BranchSection): HTMLElement {
   for (const leaf of section.leaves) {
     if (leaf.heading) {
       const caption = el("li", "bm-row bm-subhead");
-      caption.setAttribute("role", "presentation");
-      caption.textContent = leaf.label;
+      // A caption that names a thing (a host) is a row of its own for the row menu (D309): focusable, so the menu key reaches it.
+      if (leaf.id) {
+        const name = el("span", "bm-label");
+        name.textContent = leaf.label;
+        caption.append(name);
+        caption.dataset.id = leaf.id;
+        caption.setAttribute("role", "treeitem");
+        caption.tabIndex = 0;
+        if (leaf.renamable) { caption.dataset.renamable = ""; if (leaf.renameLabel) caption.dataset.renameLabel = leaf.renameLabel; }
+      } else {
+        caption.textContent = leaf.label;
+        caption.setAttribute("role", "presentation");
+      }
       list.append(caption);
       continue;
     }
@@ -109,6 +146,7 @@ function makeSection(section: BranchSection): HTMLElement {
     const button = el("button", "bm-leaf");
     button.type = "button";
     button.dataset.id = leaf.id;
+    if (leaf.renamable) { button.dataset.renamable = ""; if (leaf.renameLabel) button.dataset.renameLabel = leaf.renameLabel; }
     button.disabled = Boolean(leaf.disabled);
     const spoken = [leaf.label, leaf.state, leaf.mark ? MARK_NAME[leaf.mark] : "", leaf.meta].filter(Boolean);
     button.setAttribute("aria-label", spoken.join(", "));
@@ -118,12 +156,21 @@ function makeSection(section: BranchSection): HTMLElement {
     const label = el("span", "bm-label");
     label.textContent = leaf.label;
     const leafMeta = el("span", "bm-meta");
-    leafMeta.textContent = leaf.meta ?? "";
+    if (leaf.state === "detached") {
+      // The note for a detached session is an icon, not the word: the hollow dot already says "not open" and the
+      // word took a third of the row. The warm tooltip and the accessible name carry the word (TASTE: icons with tooltips).
+      leafMeta.classList.add("is-detached");
+      leafMeta.dataset.tip = DETACHED_NAME;
+      leafMeta.setAttribute("role", "img");
+      leafMeta.setAttribute("aria-label", DETACHED_NAME);
+      leafMeta.innerHTML = icon(ICON_DETACHED);
+    } else leafMeta.textContent = leaf.meta ?? "";
     button.append(glyph, label);
     if (leaf.mark) {
       const mark = el("span", "ui-mark");
       mark.dataset.mark = leaf.mark;
-      mark.setAttribute("aria-hidden", "true");
+      mark.setAttribute("aria-hidden", "true"); // the row's own name already says it (MARK_NAME)
+      mark.dataset.tip = leaf.markTip ?? MARK_TIP[leaf.mark]; // an icon without a tooltip is a bug (TASTE)
       button.append(mark);
     }
     button.append(leafMeta);
@@ -143,7 +190,7 @@ function makeSection(section: BranchSection): HTMLElement {
 export function branchedMenu(
   host: HTMLElement,
   sections: BranchSection[],
-  opts: { active: string; onSelect?: (id: string) => void },
+  opts: BranchedOptions,
 ): BranchedMenu {
   host.replaceChildren();
   host.classList.add("bm");
@@ -248,6 +295,20 @@ export function branchedMenu(
   };
   host.addEventListener("click", onClick);
 
+  // Renaming in place: a double click or double tap on a renamable row's name, F2 or the row menu on the focused row. The
+  // click that comes first still selects the leaf (a single click keeps its meaning); the field is placed over the name,
+  // never inside the button. A row is a leaf (its button) or a caption that names a host.
+  const renamableOf = (from: Element | null): HTMLElement | undefined => from?.closest<HTMLElement>("[data-renamable][data-id]") ?? undefined;
+  const leafOf = (event: Event): HTMLElement | undefined => (event.target instanceof Element ? renamableOf(event.target) : undefined);
+  const abort = new AbortController();
+  if (opts.openRename) {
+    // The key is the first press's row id: the tree is rebuilt, and re-sorted, between the two presses.
+    onDoubleActivate(host, (event, key) => {
+      const row = typeof key === "string" ? [...host.querySelectorAll<HTMLElement>("[data-renamable][data-id]")].find((n) => n.dataset.id === key) : leafOf(event);
+      if (row) opts.openRename!(row);
+    }, abort.signal, (event) => leafOf(event)?.dataset.id); // by id: the tree is rebuilt between the two taps, its buttons are new
+  }
+
   // Observe folds as well as the host so branch geometry stays aligned after a fold toggles.
   const observer = new ResizeObserver(() => layout(false));
   observer.observe(host);
@@ -259,10 +320,15 @@ export function branchedMenu(
       layout(!instant);
       if (notify) opts.onSelect?.(id);
     },
+    rename(id) {
+      const row = [...host.querySelectorAll<HTMLElement>("[data-renamable][data-id]")].find((n) => n.dataset.id === id);
+      return row ? opts.openRename?.(row) ?? false : false;
+    },
     dispose() {
       disposed = true;
       observer.disconnect();
       host.removeEventListener("click", onClick);
+      abort.abort();
     },
   };
   // No first layout here: the observer above reports the host after the browser's own layout and before paint, so the

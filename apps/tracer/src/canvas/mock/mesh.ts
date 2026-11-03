@@ -75,6 +75,9 @@ export function createMockMesh(world: MockWorld): MockMesh {
     moveGrant: (g, to) => inner.moveGrant(g, to),
     renameGrant: (g, name) => inner.renameGrant(g, name),
     removeGrant: (g) => inner.removeGrant(g),
+    renameNode(name, newName) {
+      return inner.renameNode(name, newName).then(() => { const pin = pinned.get(name); if (pin) { pinned.delete(name); pinned.set(newName.trim(), pin); } });
+    },
     pin(id, x, y) { pinned.set(id, { x: Math.round(x), y: Math.round(y) }); inner.pin(id, x, y); },
     onChange(l) { listeners.add(l); return () => { listeners.delete(l); }; },
     onFailure(l) { failures.add(l); return () => { failures.delete(l); }; },

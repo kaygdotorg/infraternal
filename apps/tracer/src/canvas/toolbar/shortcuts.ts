@@ -80,7 +80,7 @@ export function installShortcuts(cx: Ctx): () => void {
   ];
   const offBindings = onBindingsChange(() => cx.toolbar.update());
   window.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape" || e.defaultPrevented || stage.querySelector(".palette:not([hidden])") || document.querySelector(".ui-confirm-tip[data-open='true']")) return;
+    if (e.key !== "Escape" || e.defaultPrevented || stage.querySelector(".palette:not([hidden])") || document.querySelector(".ui-confirm-tip[data-open='true'], .ui-row-ask")) return;
     if (isTypingTarget(e.target)) return;
     if (cx.float.isOpen()) { cx.float.close(); return; }
     cx.nav.showOverview();

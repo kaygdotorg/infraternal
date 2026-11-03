@@ -78,20 +78,20 @@ const STYLE = `
 .ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 var(--text-body, 0.8125rem)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
 .ui-confirm-tip-detail { margin: 0; white-space: pre-line; overflow-wrap: anywhere; color: var(--fg-2); font: 450 var(--text-secondary, 0.75rem)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
 .ui-confirm-tip-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.375rem; }
-.ui-confirm-tip button { display: inline-grid; width: 1.75rem; height: 1.75rem; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent;
+:is(.ui-confirm-tip, .ui-confirm-bar) button { display: inline-grid; width: 1.75rem; height: 1.75rem; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent;
   color: var(--fg-2); cursor: pointer;
   transition: transform 120ms cubic-bezier(0.23, 1, 0.32, 1), background-color 120ms ease, color 120ms ease; }
-.ui-confirm-tip button svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.ui-confirm-tip button:active { transform: scale(0.97); }
-.ui-confirm-tip button:focus { outline: none; }
-:root[data-focus-ring="on"] .ui-confirm-tip button:focus-visible { outline: 2px solid color-mix(in oklab, var(--fg) 55%, transparent); outline-offset: 2px; }
-@media (hover: hover) and (pointer: fine) { .ui-confirm-tip button:not(.ui-confirm-yes):hover { background: var(--hover); color: var(--fg); } }
+:is(.ui-confirm-tip, .ui-confirm-bar) button svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+:is(.ui-confirm-tip, .ui-confirm-bar) button:active { transform: scale(0.97); }
+:is(.ui-confirm-tip, .ui-confirm-bar) button:focus { outline: none; }
+:root[data-focus-ring="on"] :is(.ui-confirm-tip, .ui-confirm-bar) button:focus-visible { outline: 2px solid color-mix(in oklab, var(--fg) 55%, transparent); outline-offset: 2px; }
+@media (hover: hover) and (pointer: fine) { :is(.ui-confirm-tip, .ui-confirm-bar) button:not(.ui-confirm-yes):hover { background: var(--hover); color: var(--fg); } }
 /* The overlay material gives its text a soft halo in the tint colour (styles.css), meant for text that sits straight on
    a busy terminal. The confirmation is a near-opaque card of its own, where the halo is only a dark smear around the
    glyphs (it read as blurred text on the confirm button and the grey effect line), so nothing inside it takes one. */
 .ui-confirm-tip, .ui-confirm-tip * { text-shadow: none; }
-.ui-confirm-tip .ui-confirm-yes { background: var(--fg); color: var(--bg); }
-.ui-confirm-tip .ui-confirm-yes svg { stroke-width: 2; }
+:is(.ui-confirm-tip, .ui-confirm-bar) .ui-confirm-yes { background: var(--fg); color: var(--bg); }
+:is(.ui-confirm-tip, .ui-confirm-bar) .ui-confirm-yes svg { stroke-width: 2; }
 /* The secondary action keeps to the start of the row so the answer and the dismissal stay together on the right. */
 .ui-confirm-tip .ui-confirm-alt { margin-right: auto; }
 /* With three actions a phone-width card stacks them full width in priority order (answer, way out, dismiss), never a ragged wrap. */
@@ -107,8 +107,8 @@ const STYLE = `
 @media (pointer: coarse) {
   .ui-confirm-tip { gap: 0.875rem; padding: 1rem; }
   .ui-confirm-tip[data-named] button { width: auto; padding: 0 0.75rem; }
-  .ui-confirm-tip button { width: 2.75rem; height: 2.75rem; }
-  .ui-confirm-tip button svg { width: 1.125rem; height: 1.125rem; }
+  :is(.ui-confirm-tip, .ui-confirm-bar) button { width: 2.75rem; height: 2.75rem; }
+  :is(.ui-confirm-tip, .ui-confirm-bar) button svg { width: 1.125rem; height: 1.125rem; }
 }
 @media (prefers-reduced-motion: reduce) { .ui-confirm-tip { transition: opacity 120ms ease; transform: none; } }
 `;
@@ -320,6 +320,9 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
   });
   return instance;
 }
+
+/** Puts the tooltip and confirmation styles on the page; a surface that borrows the confirmation's buttons (`.ui-confirm-bar`) calls it before it opens. */
+export function installTooltipStyles(): void { buildStyleOnly(); }
 
 function buildStyleOnly(): void {
   if (document.getElementById("ui-tooltip-style")) return;

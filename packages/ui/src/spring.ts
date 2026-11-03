@@ -44,6 +44,14 @@ export class Spring {
       this.omega = omega;
     }
   }
+  /**
+   * Moves toward `to` starting with `velocity` (units per second), the way a released drag carries on: the motion
+   * continues from where the finger left it instead of starting from rest. Reduced motion jumps like `set`.
+   */
+  fling(to: number, velocity: number) {
+    this.set(to);
+    if (this.raf) this.velocity = velocity;
+  }
   /** Moves toward `to`; `instant` (keyboard input, reduced motion) jumps there. */
   set(to: number, instant = false) {
     this.target = to;

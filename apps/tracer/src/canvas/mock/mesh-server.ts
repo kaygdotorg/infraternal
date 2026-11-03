@@ -282,6 +282,19 @@ export class FakeMeshServer implements MeshTransport {
         g.name = next;
         return this.respond({});
       }
+      case ACTION.nodeRename: {
+        this.strict(input, ["node_id", "name"]);
+        const node = typeof input.node_id === "number" ? this.nodes.get(input.node_id) : undefined;
+        const next = this.name(input.name);
+        if (!node) throw new ActionRefused(undefined, "not found");
+        if ([...this.nodes.values()].some((o) => o !== node && o.name === next)) throw new ActionRefused(undefined, "conflict");
+        // Grants and relays name hosts by name in this fake; the real server holds ids and needs none of this.
+        const was = node.name, swap = (v: string): string => (v === was ? next : v);
+        for (const g of this.grants) { g.from = swap(g.from); g.to = swap(g.to); if (g.via) g.via = swap(g.via); }
+        for (const o of this.nodes.values()) if (o.via) o.via = swap(o.via);
+        node.name = next;
+        return this.respond({});
+      }
       case ACTION.remove: {
         this.strict(input, ["name"]);
         const g = this.grants.find((o) => o.name === input.name);

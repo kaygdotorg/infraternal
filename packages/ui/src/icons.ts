@@ -77,7 +77,9 @@ export const ICON_INFO = `<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 
 export const ICON_HELP = `<circle cx="12" cy="12" r="8.5"/><path d="M9.7 9.7a2.4 2.4 0 1 1 3.4 2.2c-.7.4-1.1.9-1.1 1.7M12 16.8v.01"/>`;
 export const ICON_ALERT = `<circle cx="12" cy="12" r="8.5"/><path d="M12 7.8v5M12 16.2v.01"/>`;
 export const ICON_CIRCLE_CHECK = `<circle cx="12" cy="12" r="8.5"/><path d="M8.2 12.4l2.7 2.7 5-5.6"/>`;
-export const ICON_KEY = `<circle cx="8" cy="12" r="3.5"/><path d="M11.5 12H21M17 12v3M20 12v2"/>`;
+/** A chain whose two links have come apart: a session that keeps running with no window showing it (detached). */
+export const ICON_DETACHED = `<path d="M10.5 8.5H8.5a3.5 3.5 0 0 0 0 7h2M13.5 8.5h2a3.5 3.5 0 0 1 0 7h-2"/>`;
+export const ICON_KEY =`<circle cx="8" cy="12" r="3.5"/><path d="M11.5 12H21M17 12v3M20 12v2"/>`;
 
 /** An inline svg for one of the icon constants; `className` extends `ui-icon`. */
 export const icon = (paths: string, className = ""): string =>

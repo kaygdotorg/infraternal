@@ -38,6 +38,8 @@ export interface MeshModule {
   countText(c: ViewRec): string;
   /** The grants as they are now (a copy). */
   grants(): Grant[];
+  /** The graph view once its code has loaded (rename.on-demand.ts reaches it to redraw and to open a name field). */
+  graph(): GraphViewModule | undefined;
   /** What the Mesh view has on screen right now (specs and the frame-time benchmark read this). */
   graphStats(): ReturnType<GraphViewModule["stats"]>;
   dispose(): void;
@@ -106,6 +108,7 @@ export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
   const offFailure = source.onFailure((message) => cx.toast.show({ message }));
   const hostCount = (): number => source.data().nodes.size;
   return {
+    graph: () => gv,
     buildGraph, redraw, updateOverlay, refreshLayout: (c) => gv?.refresh(c),
     summaryRows: () => [["Hosts", String(hostCount())], ["Allowed access", String(source.grants().length)], ["Through another host", String(source.grants().filter((g) => g.via).length)]],
     countText: () => `${hostCount()} host${hostCount() === 1 ? "" : "s"} · ${source.grants().length} allowed`,

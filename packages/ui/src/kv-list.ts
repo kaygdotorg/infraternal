@@ -52,6 +52,12 @@ export interface KeyValueRow {
   press?: { run(cell: HTMLElement): void; tip: string };
   /** No key: the value spans the whole row. A wide row with `press` is a link and shows a chevron. */
   wide?: boolean;
+  /**
+   * A pane that belongs to the row and opens under it (the privileged-access consent under "Access level"). The row owns
+   * only its place: the pane opens and closes itself and is the same element across `set` calls, so a repaint does not
+   * rebuild it, and whatever step it shows survives a change of the row's own value.
+   */
+  panel?: HTMLElement;
 }
 
 export interface KeyValueList {
@@ -215,6 +221,7 @@ export function createKeyValueList(label: string): KeyValueList {
       entry.meter = meter;
       paintMeter(meter, row.meter);
     }
+    if (row.panel) item.append(row.panel);
     entries.push(entry);
     return item;
   };
@@ -224,7 +231,7 @@ export function createKeyValueList(label: string): KeyValueList {
   };
 
   /** What decides the structure: rows that differ only in value, mark, press and meter level patch in place. */
-  const shapeOf = (rows: KeyValueRow[]): string => rows.map((r) => `${r.group ?? ""}\u0001${r.key}\u0001${r.hint ?? ""}\u0001${r.meter === undefined ? "-" : "m"}${r.wide ? "w" : ""}${r.wide && r.press ? "p" : ""}`).join("\u0002");
+  const shapeOf = (rows: KeyValueRow[]): string => rows.map((r) => `${r.group ?? ""}\u0001${r.key}\u0001${r.hint ?? ""}\u0001${r.meter === undefined ? "-" : "m"}${r.wide ? "w" : ""}${r.wide && r.press ? "p" : ""}${r.panel ? "n" : ""}`).join("\u0002");
   let shape: string | undefined;
   const sameFace = (a: KeyValueRow, b: KeyValueRow): boolean => a.value === b.value && a.mark === b.mark && a.press?.tip === b.press?.tip && Boolean(a.press) === Boolean(b.press);
 
@@ -256,7 +263,7 @@ export function createKeyValueList(label: string): KeyValueList {
     root,
     set(rows) {
       const next = shapeOf(rows);
-      if (next === shape && entries.length === rows.length) { patch(rows); return; }
+      if (next === shape && entries.length === rows.length && rows.every((r, i) => r.panel === entries[i]!.row.panel)) { patch(rows); return; }
       for (const entry of entries) window.clearTimeout(entry.swap);
       shape = next;
       entries = [];

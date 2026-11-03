@@ -172,7 +172,8 @@ export function openDetailsPopover(
     close("pointer");
   }, { capture: true, signal: events.signal });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") { event.stopPropagation(); close("keyboard"); anchor.focus({ preventScroll: true }); }
+    // A pane inside the popover that owns Escape (the access-level consent) takes this one; the popover closes on the next.
+    if (event.key === "Escape" && !(event.target instanceof Element && event.target.closest("[data-owns-escape]"))) { event.stopPropagation(); close("keyboard"); anchor.focus({ preventScroll: true }); }
   }, { capture: true, signal: events.signal });
   window.addEventListener("resize", () => place(), { signal: events.signal });
   window.visualViewport?.addEventListener("resize", () => place(), { signal: events.signal });
@@ -192,22 +193,43 @@ export interface DetailsModule {
 
 export function createDetails(cx: Ctx, source: DetailsSource): DetailsModule {
   let open: DetailsPopover | undefined;
+  // The "Access level" row (#215) exists only on an instance that can raise the agent's privileges; its code loads with the first popover that needs it.
+  let access: import("./access-level.on-demand").AccessLevel | undefined;
+  let accessLoading: Promise<void> | undefined;
+  const loadAccess = (): Promise<void> => accessLoading ??= cx.adapters.privilege
+    ? import("./access-level.on-demand").then((m) => { access = m.createAccessLevel(cx, cx.adapters.privilege!); })
+    : Promise.resolve();
+  /** Adds the Access level row after Login in the Host tab. */
+  const withAccess = (rec: WinRec, facts: DetailsFacts, refresh: () => void): DetailsFacts => {
+    if (!access || rec.model.kind !== "terminal") return facts;
+    const rows = facts.sections.find((x) => x.id === "host")?.rows;
+    if (!rows) return facts;
+    const at = rows.findIndex((r) => r.key === "Login");
+    const row = access.row(rec.model.host, rec.model.user ?? "your user", refresh);
+    const group = rows[at]?.group;
+    rows.splice(at + 1, 0, group ? { ...row, group } : row);
+    return facts;
+  };
   const close = (instant = false): void => { open?.close(instant ? "keyboard" : "pointer"); };
-  return {
+  const module: DetailsModule = {
     toggle(rec, how) {
       if (open?.windowId === rec.model.id) { open.close(how); return; }
       open?.close("keyboard");
       if (!source.facts(rec)) return;
+      if (cx.adapters.privilege && !access) { void loadAccess().then(() => module.toggle(rec, how)); return; }
       let stop = (): void => {};
-      const popover = openDetailsPopover(cx.stage, rec.card.pill, { windowId: rec.model.id, read: () => source.facts(rec)!, ...(rec.model.hostId && cx.adapters.hostRemoval?.label() ? { action: { label: "Remove host", hint: cx.adapters.hostRemoval.label()!, run: (anchor: HTMLElement) => cx.adapters.hostRemoval?.remove(rec.model.hostId!, rec.model.host, anchor) } } : {}) }, how, () => {
+      let repaint = (): void => {};
+      const popover = openDetailsPopover(cx.stage, rec.card.pill, { windowId: rec.model.id, read: () => withAccess(rec, source.facts(rec)!, () => repaint()), ...(rec.model.hostId && cx.adapters.hostRemoval?.label() ? { action: { label: "Remove host", hint: cx.adapters.hostRemoval.label()!, run: (anchor: HTMLElement) => cx.adapters.hostRemoval?.remove(rec.model.hostId!, rec.model.host, anchor) } } : {}) }, how, () => {
         stop();
         if (open === popover) open = undefined;
       });
       open = popover;
+      repaint = popover.refresh;
       stop = source.open?.(rec, popover.refresh) ?? stop;
     },
     close,
     isOpen: () => open !== undefined,
-    dispose() { open?.close("keyboard"); },
+    dispose() { open?.close("keyboard"); access?.dispose(); },
   };
+  return module;
 }

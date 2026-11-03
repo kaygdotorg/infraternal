@@ -1,6 +1,6 @@
 /** Mounts the authenticated terminal shell, theme controls, host tree, and mobile key tray. */
 import { bindInputToolbar } from "../../../packages/ui/src/input-toolbar";
-import { branchedMenu, type BranchSection, type BranchedMenu } from "../../../packages/ui/src/branched";
+import { branchedMenu, type BranchSection, type BranchedMenu, type BranchedOptions } from "../../../packages/ui/src/branched";
 import { applyTheme, DEFAULT_CARD, DEFAULT_WINDOW, LEVEL_NAMES, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
 import { refreshTip } from "../../../packages/ui/src/tooltip";
 import { Spring } from "../../../packages/ui/src/spring";
@@ -119,7 +119,7 @@ export interface CoreScreen {
   settingsPanels: { toolbar: SettingsSection; shortcuts: SettingsSection; about: SettingsSection };
   /** The row that shows now. */
   toolbarRow(): "canvas" | "keys";
-  setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void): BranchedMenu;
+  setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void, extras?: Pick<BranchedOptions, "openRename">): BranchedMenu;
   /** Adds palette rows computed each time the palette opens (state-dependent actions); returns a remover. */
   addPaletteProvider(provider: () => PaletteEntry[]): () => void;
   /** Refreshes visible contextual rows after authoritative data changes, keeping the query and selected action. */
@@ -817,8 +817,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (event.target instanceof Element && event.target.closest("[data-owns-escape]")) return;
       // A card that takes Escape from anywhere on the page (`data-owns-escape="page"`: the version panel, which a click leaves focus outside of in Safari) closes itself first.
       if (document.querySelector("[data-owns-escape='page']")) return;
-      // An open menu or confirmation (the profile pill's menu, a sign-out question) closes first and keeps the sidebar it hangs from.
-      if (palette.hidden && document.querySelector(".ui-anchored-popover, .ui-confirm-tip[data-open='true']")) return;
+      // An open menu or confirmation (the profile pill's menu, a sign-out question, a row's in-row question) or a revealed row
+      // (row-menu.ts closes it) closes first and keeps the sidebar it hangs from.
+      if (palette.hidden && document.querySelector(".ui-anchored-popover, .ui-confirm-tip[data-open='true'], .ui-row-ask, [data-swiped]")) return;
       // The palette owns this Escape: it stops here, so a canvas flow (the add-host wizard listens in the document's
       // capture phase, after this window listener) stays open. The capture order is what makes stopping necessary.
       if (!palette.hidden) { setPalette(false, "keyboard"); event.preventDefault(); event.stopPropagation(); }
@@ -1568,9 +1569,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
         dispose() { const at = settingsSections.indexOf(toolbarSettings); if (at >= 0) settingsSections.splice(at, 1); canvasItems.clear(); rebuildStaticEntries(); canvasRowEl.replaceChildren(); canvasRowEl.hidden = true; keysRowEl.hidden = false; keytray.dataset.rows = "1"; settleRow(1, true); },
       };
     },
-    setHostTree(sections, activeLeaf, onSelect) {
+    setHostTree(sections, activeLeaf, onSelect, extras) {
       branch.dispose();
-      branch = branchedMenu(get<HTMLElement>("#tree"), sections, { active: activeLeaf, onSelect });
+      branch = branchedMenu(get<HTMLElement>("#tree"), sections, { active: activeLeaf, onSelect, ...extras });
       return branch;
     },
     setRoundTrip(milliseconds) {
