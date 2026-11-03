@@ -68,10 +68,15 @@ fi
 
 keychain="$HOME/Library/Keychains/infraternal-signing.keychain-db"
 keychain_unlocked=0
+search_list_changed=0
+original_search_list=()
 scratch=""
 cleanup() {
     result=$?
     trap - EXIT
+    if [[ "$search_list_changed" -eq 1 ]]; then
+        /usr/bin/security list-keychains -d user -s "${original_search_list[@]}" >/dev/null 2>&1 || true
+    fi
     if [[ "$keychain_unlocked" -eq 1 ]]; then
         /usr/bin/security lock-keychain "$keychain" >/dev/null 2>&1 || true
     fi
@@ -138,6 +143,26 @@ guard unlockStatus == errSecSuccess else {
 SWIFT
 /usr/bin/swift "$scratch/unlock-keychain.swift" "$keychain" "$password_file" >/dev/null
 keychain_unlocked=1
+
+# On macOS 26 codesign answers "no identity found" for a valid identity unless its
+# keychain is on the user's search list, even with --keychain (checked on the
+# build Mac with both the development and the Developer ID identity). Prepend the
+# dedicated keychain for this run and restore the exact original list on exit.
+# This edits only the list of paths; no other keychain is opened or changed.
+while IFS= read -r entry; do
+    entry="${entry#*\"}"
+    original_search_list+=("${entry%\"*}")
+done < <(/usr/bin/security list-keychains -d user)
+if [[ "${#original_search_list[@]}" -gt 0 ]]; then
+    in_list=0
+    for entry in "${original_search_list[@]}"; do
+        [[ "$entry" != "$keychain" ]] || in_list=1
+    done
+    if [[ "$in_list" -eq 0 ]]; then
+        /usr/bin/security list-keychains -d user -s "$keychain" "${original_search_list[@]}"
+        search_list_changed=1
+    fi
+fi
 
 # The dedicated keychain also holds a self-signed development identity (pinned in
 # identity.sha1) that gives local builds a stable TCC identity. A release must not
