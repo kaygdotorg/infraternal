@@ -213,8 +213,31 @@ async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() 
     assert_bound_join_response(&app, &store, &key, join).await;
 }
 
+async fn issue_bound_machine_invitation(
+    app: &Router,
+    token: &str,
+    host_id: Uuid,
+    key: &PKey<Private>,
+) -> JoinInvitation {
+    let response = request(
+        app,
+        "/remote/invitations",
+        json!({
+            "host_id": host_id,
+            "mode": "rootful",
+            "execution_uid": 0,
+            "expected_key_digest": openssl::sha::sha256(&key.raw_public_key().unwrap()),
+        }),
+        Some(token),
+        "https://auth.example.test",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+}
+
 #[tokio::test]
-async fn machine_invitation_redeems_only_with_the_approved_public_key() {
+async fn machine_invitation_spends_capability_after_key_mismatch() {
     let (_, pool, _) = crate::enrollment::authority::tests::enrolled().await;
     let auth = Auth::new(
         pool.clone(),
@@ -236,49 +259,87 @@ async fn machine_invitation_redeems_only_with_the_approved_public_key() {
     let app = router(auth, pool.clone(), source.clone(), endpoint);
     let host_id = Uuid::new_v4();
     let approved_key = PKey::generate_ed25519().unwrap();
-    let response = request(
-        &app,
-        "/remote/invitations",
-        json!({
-            "host_id": host_id,
-            "mode": "rootful",
-            "execution_uid": 0,
-            "expected_key_digest": openssl::sha::sha256(&approved_key.raw_public_key().unwrap()),
-        }),
-        Some(&token),
-        "https://auth.example.test",
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let invitation: JoinInvitation =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let invitation = issue_bound_machine_invitation(&app, &token, host_id, &approved_key).await;
     assert_eq!(invitation.host_id, host_id);
     assert_eq!(invitation.mode, Mode::Rootful);
     assert_eq!(invitation.execution_uid, 0);
 
     let other_key = PKey::generate_ed25519().unwrap();
-    let join = |key: &PKey<openssl::pkey::Private>| {
+    let response = request(
+        &app,
+        "/remote/join",
         json!({
             "host_id": host_id,
             "mode": "rootful",
             "token": invitation.token,
-            "csr_der": B64.encode(csr(key)),
-        })
-    };
+            "csr_der": B64.encode(csr(&other_key)),
+        }),
+        None,
+        "",
+    )
+    .await;
     assert_eq!(
-        request(&app, "/remote/join", join(&other_key), None, "")
-            .await
-            .status(),
+        response.status(),
         StatusCode::FORBIDDEN,
         "a copied invitation cannot enroll a different key"
     );
+    let consumed: bool = sqlx::query_scalar(
+        "SELECT consumed_at IS NOT NULL FROM remote_join_tokens WHERE host_id=?",
+    )
+    .bind(host_id.as_bytes().as_slice())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(consumed, "a definitive key mismatch spends the invitation");
+    let api_keys: i64 = sqlx::query_scalar("SELECT count(*) FROM api_keys")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(api_keys, 0, "machine approval does not mint an API key");
+}
+
+#[tokio::test]
+async fn machine_invitation_redeems_with_the_approved_public_key() {
+    let (_, pool, _) = crate::enrollment::authority::tests::enrolled().await;
+    let auth = Auth::new(
+        pool.clone(),
+        "auth.example.test",
+        "https://auth.example.test",
+    )
+    .await
+    .unwrap();
+    let token = session(&pool).await;
+    let material = crate::ca::tests::test_material();
+    let source = Arc::new(crate::ca_memory::MemoryCaSource::cold_start(
+        material.issuer().clone(),
+    ));
+    let endpoint = EnrollmentEndpoint {
+        ca_der: material.issuer().to_der().unwrap(),
+        endpoint: "127.0.0.1:4443".parse().unwrap(),
+        server_name: "localhost".into(),
+    };
+    let app = router(auth, pool.clone(), source.clone(), endpoint);
+    let host_id = Uuid::new_v4();
+    let approved_key = PKey::generate_ed25519().unwrap();
+    let invitation = issue_bound_machine_invitation(&app, &token, host_id, &approved_key).await;
     source.unlock_from(&Administrator(material)).unwrap();
     assert_eq!(
-        request(&app, "/remote/join", join(&approved_key), None, "")
-            .await
-            .status(),
+        request(
+            &app,
+            "/remote/join",
+            json!({
+                "host_id": host_id,
+                "mode": "rootful",
+                "token": invitation.token,
+                "csr_der": B64.encode(csr(&approved_key)),
+            }),
+            None,
+            "",
+        )
+        .await
+        .status(),
         StatusCode::OK,
-        "the approved machine key can redeem the still-live invitation"
+        "the approved machine key can redeem its invitation"
     );
     let api_keys: i64 = sqlx::query_scalar("SELECT count(*) FROM api_keys")
         .fetch_one(&pool)
