@@ -30,6 +30,7 @@ fn mesh_service(sources: Vec<IpAddr>) -> PublishedService {
 
 fn static_config() -> StaticConfig {
     StaticConfig {
+        entry_points: crate::config::EntryPoints::Mixed,
         mesh_address: "100.64.0.2".parse().expect("mesh address"),
         public_bind_address: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
         ports: ListenerPorts {
@@ -193,8 +194,9 @@ fn static_config_binds_public_wildcard_and_mesh_listeners_to_the_mesh_ip() {
 fn rootless_public_entrypoints_bind_to_loopback() {
     let mut config = static_config();
     config.public_bind_address = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
-    config.ports = detect_mixed_listener_ports(false, IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
-        .expect("select rootless stable listener ports");
+    config.ports =
+        detect_mixed_listener_ports(false, IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), None)
+            .expect("select rootless stable listener ports");
     let rendered = render_static_config(&config).expect("rootless static config");
 
     assert!(
@@ -208,7 +210,7 @@ fn rootless_public_entrypoints_bind_to_loopback() {
 
 #[test]
 fn mixed_listener_selection_keeps_public_and_mesh_ports_disjoint() {
-    let ports = detect_mixed_listener_ports(false, IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+    let ports = detect_mixed_listener_ports(false, IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), None)
         .expect("select separate rootless listeners");
 
     assert_eq!(ports.http, 10_080);
@@ -347,4 +349,72 @@ fn atomic_config_writes_are_owner_only_and_replace_the_previous_snapshot() {
     assert_eq!(metadata.mode() & 0o777, 0o600);
     assert_eq!(fs::read(&destination).expect("config bytes"), b"second");
     fs::remove_dir_all(root).expect("remove config root");
+}
+
+#[test]
+fn rootless_processes_split_the_public_and_mesh_listeners() {
+    let mut config = static_config();
+    config.entry_points = crate::config::EntryPoints::MeshOnly;
+    let mesh = render_static_config(&config).expect("render the Mesh-only process");
+    assert!(mesh.contains("100.64.0.2:10081") && mesh.contains("100.64.0.2:10444"));
+    assert!(!mesh.contains("[entryPoints.http]") && !mesh.contains("[entryPoints.https]"));
+    assert!(
+        !mesh.contains("0.0.0.0"),
+        "no wildcard listener in the Mesh process"
+    );
+
+    config.entry_points = crate::config::EntryPoints::PublicOnly;
+    config.ports.mesh_http = None;
+    config.ports.mesh_https = None;
+    let public = render_static_config(&config).expect("render the public-only process");
+    assert!(public.contains("0.0.0.0:10080") && public.contains("0.0.0.0:10443"));
+    assert!(!public.contains("mesh-http") && !public.contains("mesh-https"));
+    assert!(public.contains("[entryPoints.health]"));
+}
+
+#[test]
+fn mesh_routes_never_attach_to_the_public_entrypoints() {
+    let mesh = mesh_service(vec!["100.64.0.3".parse().expect("peer")]);
+    let mut public = mesh_service(Vec::new());
+    public.id = "public".to_owned();
+    public.hostname = "public.build01.ssh.kayg.org".to_owned();
+    public.public = true;
+    let rendered = render_dynamic_config(&[mesh, public]).expect("render routes");
+    let value: Value = serde_json::from_slice(&rendered).expect("dynamic JSON");
+    for (name, router) in value["http"]["routers"].as_object().expect("routers") {
+        let entry_points = router["entryPoints"].as_array().expect("entrypoints");
+        if name.ends_with("docs") {
+            assert!(
+                entry_points.iter().all(|entry| entry
+                    .as_str()
+                    .is_some_and(|entry| entry.starts_with("mesh-"))),
+                "Mesh route {name} must stay on the Mesh entrypoints: {entry_points:?}"
+            );
+        }
+        if name.ends_with("public") {
+            assert!(
+                entry_points
+                    .iter()
+                    .all(|entry| entry == "http" || entry == "https")
+            );
+        }
+    }
+}
+
+#[test]
+fn the_public_pair_is_probed_on_both_families_and_skips_the_mesh_pair() {
+    use infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS;
+    let mesh = MIXED_LISTENER_PAIRS[0];
+    let first = crate::config::detect_public_listener_pair(Some(mesh)).expect("a free pair");
+    assert_ne!(first, mesh);
+    assert!(![mesh.http, mesh.https].contains(&first.http));
+    // Occupy that pair's HTTPS port on the IPv6 wildcard only; the probe must move on.
+    let held = std::net::TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, first.https));
+    if let Ok(_held) = held {
+        let next = crate::config::detect_public_listener_pair(Some(mesh)).expect("next free pair");
+        assert_ne!(
+            next, first,
+            "a port taken on [::] is not free for Traefik's dual-stack listener"
+        );
+    }
 }

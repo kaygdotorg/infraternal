@@ -429,6 +429,7 @@ fn live_process_without_a_healthy_private_ping_is_reported_unhealthy() {
         lock_directory: lock_directory.clone(),
         dynamic_config_path: state.join(DYNAMIC_CONFIG_FILENAME),
         static_config: StaticConfig {
+            entry_points: crate::config::EntryPoints::Mixed,
             mesh_address: "10.77.0.1".parse().expect("mesh address"),
             public_bind_address: "127.0.0.1".parse().expect("rootless public bind"),
             ports: ListenerPorts {
@@ -708,6 +709,7 @@ fn generation_probe_settings(
         lock_directory: lock_directory.to_owned(),
         dynamic_config_path: state.join(DYNAMIC_CONFIG_FILENAME),
         static_config: StaticConfig {
+            entry_points: crate::config::EntryPoints::Mixed,
             mesh_address: "10.77.0.1".parse().expect("mesh address"),
             public_bind_address: "127.0.0.1".parse().expect("rootless public bind"),
             ports: ListenerPorts {
@@ -752,6 +754,7 @@ fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state(
         lock_directory: lock_directory.clone(),
         dynamic_config_path: state.join(DYNAMIC_CONFIG_FILENAME),
         static_config: StaticConfig {
+            entry_points: crate::config::EntryPoints::Mixed,
             mesh_address: "10.77.0.1".parse().expect("mesh address"),
             public_bind_address: "127.0.0.1".parse().expect("rootless public bind"),
             ports: ListenerPorts {

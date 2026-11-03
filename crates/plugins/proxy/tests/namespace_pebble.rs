@@ -162,6 +162,7 @@ fn run_namespace_case() {
             lock_directory: root.clone(),
             dynamic_config_path: state.join(DYNAMIC_CONFIG_FILENAME),
             static_config: StaticConfig {
+                entry_points: infraternal_plugin_proxy::config::EntryPoints::Mixed,
                 mesh_address,
                 public_bind_address: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
                 ports: listener_ports,

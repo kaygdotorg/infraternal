@@ -1,6 +1,8 @@
 //! Renders stable public and mesh listeners plus exact-host dynamic routes atomically [#281].
 //! Mesh routes use the same accepted peer addresses as mesh DNS. Rootful public listeners keep a
-//! stable wildcard bind behind a firewall gate; rootless public entrypoints bind only to loopback.
+//! stable wildcard bind behind a firewall gate in the one mixed process. Without root there is no
+//! gate, so the Mesh process has no public entrypoints at all, and public routes get their own
+//! process whose wildcard listener exists only while a public route is applied (D330).
 //! Audience changes only replace dynamic routes and preserve active connections. Certificate state
 //! remains node-local.
 //! A nonce-gated rawdata route on the loopback-only health entrypoint lets the supervisor acknowledge
@@ -71,12 +73,34 @@ pub struct DnsChallenge {
     pub disable_authoritative_ns_checks: bool,
 }
 
+/// Which listeners one Traefik process owns.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EntryPoints {
+    /// Rootful: the public pair (behind the firewall gate) and the Mesh pair in one process.
+    Mixed,
+    /// Rootless Mesh process: only the Mesh pair on the Mesh address.
+    MeshOnly,
+    /// Rootless public process: only the public pair on every address.
+    PublicOnly,
+}
+
+impl EntryPoints {
+    const fn public(self) -> bool {
+        matches!(self, Self::Mixed | Self::PublicOnly)
+    }
+    const fn mesh(self) -> bool {
+        matches!(self, Self::Mixed | Self::MeshOnly)
+    }
+}
+
 /// Inputs for rendering the static Traefik file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StaticConfig {
+    /// Listeners this process owns.
+    pub entry_points: EntryPoints,
     /// Node's mesh address used by mesh listeners.
     pub mesh_address: IpAddr,
-    /// Address for the stable public entrypoints; rootless operation must use loopback.
+    /// Address for the public entrypoints; the wildcard, behind the gate when rootful (D330).
     pub public_bind_address: IpAddr,
     /// Public and mesh HTTP/HTTPS listener ports.
     pub ports: ListenerPorts,
@@ -145,15 +169,21 @@ pub fn detect_listener_ports(rootful: bool, mesh_address: IpAddr, public: bool) 
 /// Select stable public and mesh-address listener pairs for the lifetime of one proxy process.
 ///
 /// The mesh pair stays configured even when no mesh route is active, so adding or removing routes
-/// changes only the watched dynamic snapshot and never requires an entrypoint restart.
+/// changes only the watched dynamic snapshot and never requires an entrypoint restart. Without
+/// root, `rootless_public` is the separate public process's pair, which the Mesh pair avoids.
 ///
 /// # Errors
 /// Returns an address-in-use error when no bounded pair of high ports is available.
 pub fn detect_mixed_listener_ports(
     rootful: bool,
     mesh_address: IpAddr,
+    rootless_public: Option<infraternal_mesh::proxy_ports::ListenerPortPair>,
 ) -> io::Result<ListenerPorts> {
     let mut ports = detect_listener_ports(rootful, mesh_address, true);
+    if let (false, Some(pair)) = (rootful, rootless_public) {
+        ports.http = pair.http;
+        ports.https = pair.https;
+    }
     let available = |port| TcpListener::bind(SocketAddr::new(mesh_address, port)).is_ok();
     for pair in infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS
         .iter()
@@ -176,6 +206,46 @@ pub fn detect_mixed_listener_ports(
         io::ErrorKind::AddrInUse,
         "no separate high ports are available for mesh-only proxy routes",
     ))
+}
+
+/// Probe the first free public pair for a rootless public process, avoiding the Mesh pair.
+///
+/// Traefik's wildcard listener is one dual-stack socket, so each port must be free on both
+/// `0.0.0.0` and `[::]`. A host without IPv6 only needs the IPv4 wildcard. The probe can still
+/// lose a race to another process; Traefik then fails to bind and the start reports it.
+///
+/// # Errors
+/// Returns an address-in-use error when every candidate pair is taken.
+pub fn detect_public_listener_pair(
+    mesh: Option<infraternal_mesh::proxy_ports::ListenerPortPair>,
+) -> io::Result<infraternal_mesh::proxy_ports::ListenerPortPair> {
+    let free = |port: u16| {
+        let ipv4 = TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).is_ok();
+        let ipv6 = match TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, port)) {
+            Ok(_) => true,
+            Err(error) => {
+                error.raw_os_error() == Some(nix::libc::EAFNOSUPPORT)
+                    || error.raw_os_error() == Some(nix::libc::EADDRNOTAVAIL)
+            }
+        };
+        ipv4 && ipv6
+    };
+    let taken = mesh.map(|pair| [pair.http, pair.https]).unwrap_or_default();
+    infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS
+        .iter()
+        .copied()
+        .find(|pair| {
+            !taken.contains(&pair.http)
+                && !taken.contains(&pair.https)
+                && free(pair.http)
+                && free(pair.https)
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "no free port pair is available for public proxy routes",
+            )
+        })
 }
 
 /// Render a complete Traefik static configuration in TOML.
@@ -243,20 +313,34 @@ pub fn render_static_config(config: &StaticConfig) -> io::Result<String> {
 }
 
 fn render_entry_points(config: &StaticConfig, rendered: &mut String) -> io::Result<()> {
-    let plain_address = SocketAddr::new(config.public_bind_address, config.ports.http).to_string();
-    let tls_address = SocketAddr::new(config.public_bind_address, config.ports.https).to_string();
-    writeln!(
-        rendered,
-        "[entryPoints.http]\naddress = {}",
-        toml_string(&plain_address)?
-    )
-    .map_err(io::Error::other)?;
-    writeln!(
-        rendered,
-        "\n[entryPoints.https]\naddress = {}",
-        toml_string(&tls_address)?
-    )
-    .map_err(io::Error::other)?;
+    if config.entry_points.public() {
+        let plain_address =
+            SocketAddr::new(config.public_bind_address, config.ports.http).to_string();
+        let tls_address =
+            SocketAddr::new(config.public_bind_address, config.ports.https).to_string();
+        writeln!(
+            rendered,
+            "[entryPoints.http]\naddress = {}",
+            toml_string(&plain_address)?
+        )
+        .map_err(io::Error::other)?;
+        writeln!(
+            rendered,
+            "\n[entryPoints.https]\naddress = {}\n",
+            toml_string(&tls_address)?
+        )
+        .map_err(io::Error::other)?;
+    }
+    if config.entry_points.mesh() {
+        render_mesh_entry_points(config, rendered)?;
+    }
+    let health_address = toml_string(&format!("127.0.0.1:{}", config.private_ping_port))?;
+    writeln!(rendered, "[entryPoints.health]\naddress = {health_address}")
+        .map_err(io::Error::other)?;
+    Ok(())
+}
+
+fn render_mesh_entry_points(config: &StaticConfig, rendered: &mut String) -> io::Result<()> {
     let (Some(mesh_http), Some(mesh_https)) = (config.ports.mesh_http, config.ports.mesh_https)
     else {
         return Err(invalid_input(
@@ -265,20 +349,14 @@ fn render_entry_points(config: &StaticConfig, rendered: &mut String) -> io::Resu
     };
     writeln!(
         rendered,
-        "\n[entryPoints.mesh-http]\naddress = {}",
+        "[entryPoints.mesh-http]\naddress = {}",
         toml_string(&SocketAddr::new(config.mesh_address, mesh_http).to_string())?
     )
     .map_err(io::Error::other)?;
     writeln!(
         rendered,
-        "\n[entryPoints.mesh-https]\naddress = {}",
+        "\n[entryPoints.mesh-https]\naddress = {}\n",
         toml_string(&SocketAddr::new(config.mesh_address, mesh_https).to_string())?
-    )
-    .map_err(io::Error::other)?;
-    let health_address = toml_string(&format!("127.0.0.1:{}", config.private_ping_port))?;
-    writeln!(
-        rendered,
-        "\n[entryPoints.health]\naddress = {health_address}"
     )
     .map_err(io::Error::other)?;
     Ok(())
@@ -559,18 +637,19 @@ fn write_config_atomic_with_owner(
 }
 
 fn validate_static_config(config: &StaticConfig) -> io::Result<()> {
-    let mesh_listener_valid = match (config.ports.mesh_http, config.ports.mesh_https) {
-        (Some(http), Some(https)) => {
-            http != 0
-                && https != 0
-                && http != https
-                && ![config.ports.http, config.ports.https].contains(&http)
-                && ![config.ports.http, config.ports.https].contains(&https)
-                && config.private_ping_port != http
-                && config.private_ping_port != https
-        }
-        (None | Some(_), None) | (None, Some(_)) => false,
-    };
+    let mesh_listener_valid = !config.entry_points.mesh()
+        || match (config.ports.mesh_http, config.ports.mesh_https) {
+            (Some(http), Some(https)) => {
+                http != 0
+                    && https != 0
+                    && http != https
+                    && ![config.ports.http, config.ports.https].contains(&http)
+                    && ![config.ports.http, config.ports.https].contains(&https)
+                    && config.private_ping_port != http
+                    && config.private_ping_port != https
+            }
+            (None | Some(_), None) | (None, Some(_)) => false,
+        };
     if config.mesh_address.is_unspecified()
         || config.mesh_address.is_loopback()
         || config.ports.http == 0

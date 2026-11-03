@@ -2,7 +2,8 @@
 
 use crate::{
     config::{
-        DnsChallenge, ListenerPorts, PublishedService, StaticConfig, detect_mixed_listener_ports,
+        DnsChallenge, EntryPoints, ListenerPorts, PublishedService, StaticConfig,
+        detect_mixed_listener_ports, detect_public_listener_pair,
     },
     custody::{DnsTokenCustody, FileDnsTokenCustody},
     download::{ComponentDownloader, CurlTransport},
@@ -107,6 +108,8 @@ struct ControllerState {
     mesh: Option<AcceptedMeshContext>,
     exposures: BTreeMap<u16, Exposure>,
     supervisor: Option<Box<dyn RouteSupervisor>>,
+    // Rootless only: the public-only process. It exists exactly while a public route does.
+    public_supervisor: Option<Box<dyn RouteSupervisor>>,
     listener_ports: ListenerPorts,
 }
 
@@ -149,11 +152,26 @@ pub trait SupervisorFactory: Send + Sync {
     ///
     /// A rootful supervisor receives the public listener gate: it closes the gate before a child
     /// binds the wildcard pair and clears it once that child is reaped.
+    /// Without root, `rootless_public` is the public process's pair for the Mesh pair to avoid.
     fn start(
         &self,
         context: &AcceptedMeshContext,
         public_gate: Option<PublicGate>,
+        rootless_public: Option<infraternal_mesh::proxy_ports::ListenerPortPair>,
     ) -> io::Result<(Box<dyn RouteSupervisor>, ListenerPorts)>;
+
+    /// Rootless only: prepare a public-only process on a free wildcard pair (D330).
+    ///
+    /// # Errors
+    /// Returns an error when no pair is free or the process state can't be prepared.
+    fn start_public(
+        &self,
+        context: &AcceptedMeshContext,
+        mesh_pair: Option<infraternal_mesh::proxy_ports::ListenerPortPair>,
+    ) -> io::Result<(
+        Box<dyn RouteSupervisor>,
+        infraternal_mesh::proxy_ports::ListenerPortPair,
+    )>;
 }
 
 /// Shares accepted Mesh identity with the action handler and its sibling observer.
@@ -173,6 +191,7 @@ impl Default for ProxyController {
                 mesh: None,
                 exposures: BTreeMap::new(),
                 supervisor: None,
+                public_supervisor: None,
                 listener_ports: ListenerPorts {
                     http: 10_080,
                     https: 10_443,
@@ -344,12 +363,6 @@ impl ProxyController {
                 "Mesh identity is unavailable; turn Mesh on before publishing.",
             );
         };
-        if request.public && !state.rootful {
-            return error_reply(
-                "not_allowed",
-                "Rootless proxy listeners are loopback-only; public publishing requires rootful host firewall access.",
-            );
-        }
         let first_public = request.public
             && !state
                 .exposures
@@ -391,7 +404,11 @@ impl ProxyController {
                 "The proxy could not update its routes; check its component and DNS provider configuration.",
             );
         }
-        publication_list(&state)
+        let mut reply = publication_list(&state)?;
+        if request.public && !state.rootful {
+            reply = with_public_reachability_warning(&reply, state.listener_ports)?;
+        }
+        Ok(reply)
     }
 
     fn unpublish(
@@ -440,7 +457,11 @@ impl ProxyController {
                         .listener_ports
                         .https_for_publication(route.public),
                 );
-                if route.public {
+                if route.public && !state.rootful && state.public_supervisor.is_none() {
+                    format!(
+                        "Stopped publishing {url}. The public listener is closed, and with it every open connection."
+                    )
+                } else if route.public {
                     format!(
                         "Stopped publishing {url}. New connections are refused; connections already open, such as WebSockets, stay open until they close."
                     )
@@ -459,7 +480,24 @@ impl ProxyController {
     }
 
     fn reconcile(&self, state: &mut ControllerState) -> io::Result<()> {
-        let mut services = refresh_routes(state)?;
+        if state.rootful {
+            return self.reconcile_main(state, |_| true);
+        }
+        // Without root there is no firewall gate, so public routes live in their own process.
+        // Removing a route updates or stops that process before the Mesh one is touched.
+        self.reconcile_public(state)?;
+        self.reconcile_main(state, |service| !service.public)
+    }
+
+    fn reconcile_main(
+        &self,
+        state: &mut ControllerState,
+        owned: fn(&PublishedService) -> bool,
+    ) -> io::Result<()> {
+        let routes = |state: &mut ControllerState| -> io::Result<Vec<PublishedService>> {
+            Ok(refresh_routes(state)?.into_iter().filter(owned).collect())
+        };
+        let mut services = routes(state)?;
         if state.supervisor.is_some()
             && self.ingress.current()?.public_route_active
             && !services.iter().any(|service| service.public)
@@ -470,7 +508,7 @@ impl ProxyController {
         }
         if let Some(supervisor) = &state.supervisor {
             if let Some(ports) = supervisor.replace(services.clone())? {
-                state.listener_ports = ports;
+                merge_main_ports(state, ports);
             }
             self.update_mesh_ingress(state, &services, true)?;
             return Ok(());
@@ -492,16 +530,74 @@ impl ProxyController {
             )
         })?;
         let public_gate = state.rootful.then(|| self.ingress.public_gate());
-        let (supervisor, listener_ports) = factory.start(context, public_gate)?;
-        state.listener_ports = listener_ports;
-        services = refresh_routes(state)?;
+        let rootless_public =
+            (!state.rootful).then_some(infraternal_mesh::proxy_ports::ListenerPortPair {
+                http: state.listener_ports.http,
+                https: state.listener_ports.https,
+            });
+        let (supervisor, listener_ports) = factory.start(context, public_gate, rootless_public)?;
+        merge_main_ports(state, listener_ports);
+        services = routes(state)?;
         let listener_ports = supervisor.replace(services.clone())?;
         if let Some(ports) = listener_ports {
-            state.listener_ports = ports;
+            merge_main_ports(state, ports);
         }
         state.supervisor = Some(supervisor);
         self.update_mesh_ingress(state, &services, true)?;
         Ok(())
+    }
+
+    // Rootless public routes (D330). Without a firewall the listener's life is the only control:
+    // the process starts with its first public snapshot already applied, and the last removal
+    // is reported only after the process has exited and its wildcard listener is closed.
+    fn reconcile_public(&self, state: &mut ControllerState) -> io::Result<()> {
+        let public = |state: &mut ControllerState| -> io::Result<Vec<PublishedService>> {
+            Ok(refresh_routes(state)?
+                .into_iter()
+                .filter(|service| service.public)
+                .collect())
+        };
+        if public(state)?.is_empty() {
+            // Dropping the owner stops and reaps the child before this returns.
+            state.public_supervisor = None;
+            return Ok(());
+        }
+        if state.public_supervisor.is_none() {
+            let factory = self.factory.as_ref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "proxy runtime is not configured",
+                )
+            })?;
+            let context = state.mesh.as_ref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "accepted Mesh identity is unavailable",
+                )
+            })?;
+            let mesh_pair = state
+                .listener_ports
+                .mesh_http
+                .zip(state.listener_ports.mesh_https)
+                .map(
+                    |(http, https)| infraternal_mesh::proxy_ports::ListenerPortPair { http, https },
+                );
+            let (supervisor, pair) = factory.start_public(context, mesh_pair)?;
+            state.listener_ports.http = pair.http;
+            state.listener_ports.https = pair.https;
+            state.public_supervisor = Some(supervisor);
+        }
+        // Routes are rendered again so redirects and URLs name the selected pair.
+        let services = public(state)?;
+        let replaced = state
+            .public_supervisor
+            .as_ref()
+            .map_or(Ok(None), |supervisor| supervisor.replace(services));
+        if replaced.is_err() {
+            // An unconfirmed public snapshot must not leave a wildcard listener running.
+            state.public_supervisor = None;
+        }
+        replaced.map(|_| ())
     }
 
     // Publish the Mesh routes Traefik has applied. The public gate itself belongs to the
@@ -564,14 +660,16 @@ struct DownloadedTraefikFactory {
     log: Arc<ProxyLog>,
 }
 
-impl SupervisorFactory for DownloadedTraefikFactory {
-    fn start(
+impl DownloadedTraefikFactory {
+    // One Traefik process: its own config directory, ACME file, health port and locks. Two
+    // processes never share an ACME file, so neither can overwrite the other's account state.
+    fn start_process(
         &self,
         context: &AcceptedMeshContext,
+        entry_points: EntryPoints,
+        listener_ports: ListenerPorts,
         public_gate: Option<PublicGate>,
-    ) -> io::Result<(Box<dyn RouteSupervisor>, ListenerPorts)> {
-        let rootful = identity::rootful();
-        let listener_ports = detect_mixed_listener_ports(rootful, context.mesh_address)?;
+    ) -> io::Result<Box<dyn RouteSupervisor>> {
         let profile = self.profile.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -596,23 +694,27 @@ impl SupervisorFactory for DownloadedTraefikFactory {
             &OpenSshManifestVerifier,
         )?;
 
-        let proxy_state = self.state_dir.join("proxy");
+        let mut proxy_state = self.state_dir.join("proxy");
         ensure_proxy_directory(&proxy_state)?;
         // The lock stays out of the child-readable directory: its parent must be agent-only.
-        let private_state = self.state_dir.join("proxy-private");
+        let mut private_state = self.state_dir.join("proxy-private");
         ensure_private_directory(&private_state)?;
+        if entry_points == EntryPoints::PublicOnly {
+            proxy_state = proxy_state.join("public");
+            ensure_proxy_directory(&proxy_state)?;
+            private_state = private_state.join("public");
+            ensure_private_directory(&private_state)?;
+        }
         let dynamic_directory = proxy_state.join("dynamic");
         ensure_proxy_directory(&dynamic_directory)?;
         let acme_storage = proxy_state.join("acme.json");
         ensure_private_file(&acme_storage)?;
         let private_ping_port = loopback_port()?;
         let static_config = StaticConfig {
+            entry_points,
             mesh_address: context.mesh_address,
-            public_bind_address: if rootful {
-                IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-            } else {
-                IpAddr::V4(Ipv4Addr::LOCALHOST)
-            },
+            // Go opens one dual-stack socket for the IPv4 wildcard.
+            public_bind_address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             ports: listener_ports,
             private_ping_port,
             dynamic_directory: PathBuf::from("dynamic"),
@@ -638,12 +740,79 @@ impl SupervisorFactory for DownloadedTraefikFactory {
                     private_ping_port,
                 ),
                 startup_timeout: PRIVATE_PING_TIMEOUT,
-                public_gate: if rootful { public_gate } else { None },
+                public_gate,
             },
             Arc::clone(&self.log),
         )?;
-        Ok((Box::new(supervisor), listener_ports))
+        Ok(Box::new(supervisor))
     }
+}
+
+impl SupervisorFactory for DownloadedTraefikFactory {
+    fn start(
+        &self,
+        context: &AcceptedMeshContext,
+        public_gate: Option<PublicGate>,
+        rootless_public: Option<infraternal_mesh::proxy_ports::ListenerPortPair>,
+    ) -> io::Result<(Box<dyn RouteSupervisor>, ListenerPorts)> {
+        let rootful = identity::rootful();
+        let listener_ports =
+            detect_mixed_listener_ports(rootful, context.mesh_address, rootless_public)?;
+        let (entry_points, public_gate) = if rootful {
+            (EntryPoints::Mixed, public_gate)
+        } else {
+            (EntryPoints::MeshOnly, None)
+        };
+        let supervisor = self.start_process(context, entry_points, listener_ports, public_gate)?;
+        Ok((supervisor, listener_ports))
+    }
+
+    fn start_public(
+        &self,
+        context: &AcceptedMeshContext,
+        mesh_pair: Option<infraternal_mesh::proxy_ports::ListenerPortPair>,
+    ) -> io::Result<(
+        Box<dyn RouteSupervisor>,
+        infraternal_mesh::proxy_ports::ListenerPortPair,
+    )> {
+        let pair = detect_public_listener_pair(mesh_pair)?;
+        let ports = ListenerPorts {
+            http: pair.http,
+            https: pair.https,
+            mesh_http: None,
+            mesh_https: None,
+        };
+        let supervisor = self.start_process(context, EntryPoints::PublicOnly, ports, None)?;
+        Ok((supervisor, pair))
+    }
+}
+
+// Rootful, the mixed process owns every pair. Rootless, the Mesh process reports only its
+// Mesh pair; the public pair belongs to the public process and is never overwritten here.
+fn merge_main_ports(state: &mut ControllerState, ports: ListenerPorts) {
+    if state.rootful {
+        state.listener_ports = ports;
+    } else {
+        state.listener_ports.mesh_http = ports.mesh_http;
+        state.listener_ports.mesh_https = ports.mesh_https;
+    }
+}
+
+// D330: without root nothing on this machine filters the public pair for us.
+fn with_public_reachability_warning(
+    reply: &[u8],
+    ports: ListenerPorts,
+) -> Result<Vec<u8>, infraternal_plugin_api::PluginError> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(reply).map_err(|_| infraternal_plugin_api::PluginError::Rejected)?;
+    let warning = format!(
+        "Public routes listen on ports {} and {} on every address of this machine. The Mesh firewall does not filter these ports; only this machine's firewall or your router limits who can reach them, and either may still block them.",
+        ports.http, ports.https
+    );
+    let message = value["message"].as_str().unwrap_or_default().to_owned();
+    value["message"] = serde_json::Value::String(format!("{message} {warning}"));
+    value["warning"] = serde_json::Value::String(warning);
+    serde_json::to_vec(&value).map_err(|_| infraternal_plugin_api::PluginError::Rejected)
 }
 
 fn target_platform() -> io::Result<(&'static str, &'static str)> {
@@ -867,16 +1036,28 @@ fn refresh_routes(state: &mut ControllerState) -> io::Result<Vec<PublishedServic
 fn publication_list(
     state: &ControllerState,
 ) -> Result<Vec<u8>, infraternal_plugin_api::PluginError> {
-    let process_running = state
-        .supervisor
-        .as_ref()
-        .map_or(Ok(false), |supervisor| supervisor.is_running())
-        .map_err(|_| infraternal_plugin_api::PluginError::Rejected)?;
+    let running = |supervisor: &Option<Box<dyn RouteSupervisor>>| {
+        supervisor
+            .as_ref()
+            .map_or(Ok(false), |supervisor| supervisor.is_running())
+            .map_err(|_| infraternal_plugin_api::PluginError::Rejected)
+    };
+    let main_running = running(&state.supervisor)?;
+    let public_running = if state.rootful {
+        main_running
+    } else {
+        running(&state.public_supervisor)?
+    };
     let services: Vec<_> = state
         .exposures
         .values()
         .filter_map(|exposure| {
             let route = exposure.last_route.as_ref()?;
+            let process_running = if exposure.spec.public {
+                public_running
+            } else {
+                main_running
+            };
             let reachable = state.enabled
                 && process_running
                 && (exposure.spec.public
@@ -967,6 +1148,8 @@ mod tests {
         snapshots: Arc<Mutex<Vec<Vec<PublishedService>>>>,
         started_addresses: Arc<Mutex<Vec<IpAddr>>>,
         listener_ports: ListenerPorts,
+        public_snapshots: Snapshots,
+        public_events: Arc<Mutex<Vec<&'static str>>>,
     }
 
     // Emulates the real supervisor's gate ownership: closed before the first child starts,
@@ -976,12 +1159,18 @@ mod tests {
         listener_ports: ListenerPorts,
         public_gate: Option<PublicGate>,
         child_started: std::sync::atomic::AtomicBool,
+        stopped: Option<Arc<Mutex<Vec<&'static str>>>>,
     }
 
     impl Drop for FakeSupervisor {
         fn drop(&mut self) {
             if let Some(gate) = &self.public_gate {
                 let _ = gate(None);
+            }
+            if let Some(events) = &self.stopped
+                && let Ok(mut events) = events.lock()
+            {
+                events.push("public process stopped");
             }
         }
     }
@@ -991,6 +1180,7 @@ mod tests {
             &self,
             context: &AcceptedMeshContext,
             public_gate: Option<PublicGate>,
+            _rootless_public: Option<infraternal_mesh::proxy_ports::ListenerPortPair>,
         ) -> io::Result<(Box<dyn RouteSupervisor>, ListenerPorts)> {
             self.started_addresses
                 .lock()
@@ -1002,8 +1192,43 @@ mod tests {
                     listener_ports: self.listener_ports,
                     public_gate,
                     child_started: std::sync::atomic::AtomicBool::new(false),
+                    stopped: None,
                 }),
                 self.listener_ports,
+            ))
+        }
+
+        fn start_public(
+            &self,
+            _context: &AcceptedMeshContext,
+            mesh_pair: Option<infraternal_mesh::proxy_ports::ListenerPortPair>,
+        ) -> io::Result<(
+            Box<dyn RouteSupervisor>,
+            infraternal_mesh::proxy_ports::ListenerPortPair,
+        )> {
+            let pair = infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS
+                .iter()
+                .copied()
+                .find(|pair| mesh_pair != Some(*pair))
+                .ok_or_else(|| io::Error::other("fixture pair"))?;
+            self.public_events
+                .lock()
+                .map_err(|_| io::Error::other("fixture events"))?
+                .push("public process started");
+            Ok((
+                Box::new(FakeSupervisor {
+                    snapshots: Arc::clone(&self.public_snapshots),
+                    listener_ports: ListenerPorts {
+                        http: pair.http,
+                        https: pair.https,
+                        mesh_http: None,
+                        mesh_https: None,
+                    },
+                    public_gate: None,
+                    child_started: std::sync::atomic::AtomicBool::new(false),
+                    stopped: Some(Arc::clone(&self.public_events)),
+                }),
+                pair,
             ))
         }
     }
@@ -1080,6 +1305,8 @@ mod tests {
             snapshots: Arc::clone(&snapshots),
             started_addresses: Arc::clone(&started_addresses),
             listener_ports,
+            public_snapshots: Arc::default(),
+            public_events: Arc::default(),
         });
         let controller = ProxyController::with_factory(factory);
         controller
@@ -1267,59 +1494,123 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rootless_mode_rejects_public_publication() {
-        let (controller, snapshots) = controller_with_ports(ListenerPorts {
-            http: 10_080,
-            https: 10_443,
-            mesh_http: None,
-            mesh_https: None,
-        });
+    struct RootlessFixture {
+        controller: ProxyController,
+        mesh_snapshots: Snapshots,
+        mesh_starts: StartedAddresses,
+        public_snapshots: Snapshots,
+        public_events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    fn rootless_controller() -> RootlessFixture {
+        let mesh_snapshots: Snapshots = Arc::default();
+        let mesh_starts: StartedAddresses = Arc::default();
+        let public_snapshots: Snapshots = Arc::default();
+        let public_events: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+        let selected = infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS[1];
+        let controller = ProxyController::with_factory(Arc::new(FakeFactory {
+            snapshots: Arc::clone(&mesh_snapshots),
+            started_addresses: Arc::clone(&mesh_starts),
+            listener_ports: ListenerPorts {
+                http: 10_080,
+                https: 10_443,
+                mesh_http: Some(selected.http),
+                mesh_https: Some(selected.https),
+            },
+            public_snapshots: Arc::clone(&public_snapshots),
+            public_events: Arc::clone(&public_events),
+        }));
         controller
             .state
             .lock()
             .expect("controller fixture state")
             .rootful = false;
         controller
-            .set_mesh_context(Some(context(&[(3000, Ipv4Addr::new(10, 254, 0, 3))])))
+            .set_mesh_context(Some(context(&[
+                (3000, Ipv4Addr::new(10, 254, 0, 3)),
+                (4000, Ipv4Addr::new(10, 254, 0, 3)),
+            ])))
             .expect("accept Mesh grants");
-
-        let output = controller
-            .call(
-                "proxy.publish",
-                br#"{"port":3000,"public":true,"confirm_public":true}"#,
-            )
-            .expect("typed rootless publication result");
-        let value: Value = serde_json::from_slice(&output).expect("error result JSON");
-        assert_eq!(value["error"]["code"], "not_allowed");
-        assert!(
-            value["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("loopback-only"))
-        );
-        assert!(snapshots.lock().expect("route snapshots").is_empty());
+        RootlessFixture {
+            controller,
+            mesh_snapshots,
+            mesh_starts,
+            public_snapshots,
+            public_events,
+        }
     }
 
     #[test]
-    fn a_new_proxy_state_directory_is_prepared_for_the_child() {
-        let root = env::temp_dir().join(format!("proxy-dir-init-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&root).expect("create proxy state root");
-        fs::set_permissions(&root, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE))
-            .expect("make proxy state root private");
-        let path = root.join("proxy");
+    fn rootless_public_publication_warns_that_only_the_host_firewall_limits_reach() {
+        let fixture = rootless_controller();
+        let output = fixture
+            .controller
+            .call(
+                "proxy.publish",
+                br#"{"port":4000,"public":true,"confirm_public":true}"#,
+            )
+            .expect("publish a public route without root");
+        let value: Value = serde_json::from_slice(&output).expect("publication JSON");
 
-        ensure_proxy_directory(&path).expect("create the child-readable proxy directory");
-        ensure_proxy_directory(&path).expect("accept the prepared directory again");
-
-        let metadata = fs::symlink_metadata(&path).expect("inspect proxy directory");
-        let (_, child_group) = identity::child_ids().expect("proxy identity");
-        assert_eq!(metadata.uid(), nix::unistd::Uid::effective().as_raw());
-        assert_eq!(metadata.gid(), child_group);
-        assert_eq!(
-            metadata.mode() & 0o7777,
-            if identity::rootful() { 0o750 } else { 0o700 }
+        assert!(
+            value["error"].is_null(),
+            "rootless --public is allowed: {value}"
         );
-        fs::remove_dir_all(root).expect("remove proxy state fixture");
+        let warning = value["warning"].as_str().expect("reachability warning");
+        let pair = infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS[0];
+        assert!(warning.contains(&pair.https.to_string()), "{warning}");
+        assert!(warning.contains("only this machine's firewall or your router"));
+        assert!(warning.contains("Mesh firewall does not filter"));
+        assert_eq!(
+            value["services"][0]["url"],
+            format!("https://port-4000.web01.ssh.kayg.org:{}", pair.https)
+        );
+        // The public route was applied by the public process before the reply.
+        let public = fixture.public_snapshots.lock().expect("public snapshots");
+        assert_eq!(public.len(), 1);
+        assert!(public[0].iter().all(|route| route.public));
+        assert!(
+            fixture.mesh_starts.lock().expect("Mesh starts").is_empty(),
+            "a public route alone needs no Mesh process"
+        );
+    }
+
+    #[test]
+    fn rootless_public_routes_never_restart_the_mesh_listeners() {
+        let fixture = rootless_controller();
+        fixture
+            .controller
+            .call("proxy.publish", br#"{"port":3000}"#)
+            .expect("publish a Mesh route");
+        fixture
+            .controller
+            .call(
+                "proxy.publish",
+                br#"{"port":4000,"public":true,"confirm_public":true}"#,
+            )
+            .expect("publish a public route");
+        fixture
+            .controller
+            .call("proxy.unpublish", br#"{"target":"4000"}"#)
+            .expect("remove the public route");
+
+        assert_eq!(fixture.mesh_starts.lock().expect("Mesh starts").len(), 1);
+        for snapshot in fixture
+            .mesh_snapshots
+            .lock()
+            .expect("Mesh snapshots")
+            .iter()
+        {
+            assert!(
+                snapshot.iter().all(|route| !route.public),
+                "the Mesh process never carries a public route"
+            );
+        }
+        assert_eq!(
+            *fixture.public_events.lock().expect("public events"),
+            ["public process started", "public process stopped"],
+            "the wildcard listener is closed before the removal is reported"
+        );
     }
 
     #[test]

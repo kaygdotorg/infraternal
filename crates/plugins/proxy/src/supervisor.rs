@@ -1326,10 +1326,14 @@ fn start_managed_child(
     log: Arc<ProxyLog>,
 ) -> io::Result<(TraefikChild, ListenerPorts)> {
     let mut config = settings.static_config.clone();
-    if config.ports.mesh_http.is_none() && config.ports.mesh_https.is_none() {
+    if config.entry_points != crate::config::EntryPoints::PublicOnly
+        && config.ports.mesh_http.is_none()
+        && config.ports.mesh_https.is_none()
+    {
         config.ports = crate::config::detect_mixed_listener_ports(
-            nix::unistd::Uid::effective().is_root(),
+            identity::rootful(),
             config.mesh_address,
+            None,
         )?;
     }
     for service in services.iter_mut() {
