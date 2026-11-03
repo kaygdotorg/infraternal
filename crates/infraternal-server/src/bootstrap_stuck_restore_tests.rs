@@ -516,3 +516,21 @@ async fn a_reenroll_dropped_while_it_sets_the_install_aside_still_puts_it_back()
     assert!(run.ran("\nrestore_superseded_install "));
     home.assert_as_found();
 }
+
+#[tokio::test]
+async fn the_confirmation_wait_does_not_use_up_the_attempt_deadline() {
+    let f = fixture(true).await;
+    let digest = own_stuck_host(&f).await;
+    let home = Arc::new(Home::new());
+    let check = home_check(&home, f.prior, &digest, "remote.example.test");
+    let deadline = Duration::from_secs(10);
+    let run = Run::start_with(&f, &home, check, digest, Stop::Join, Some(deadline));
+    let challenge = run.offer().await;
+    // The person takes longer than the whole attempt deadline to decide.
+    tokio::time::sleep(deadline + Duration::from_secs(1)).await;
+    run.confirm(challenge);
+    let event = finished(run.batch()).await;
+    assert!(!event.message.contains("time limit"), "{}", event.message);
+    assert!(run.ran("\nreplace_stuck_install "), "the confirmed action runs");
+    home.assert_as_found();
+}

@@ -400,7 +400,11 @@ impl Bootstrap {
             // A previous acquisition may have failed before a full image existed.
             // Reverify it before renewing any enrollment authority for this retry.
             let (binary, _) = self
-                .resolve_payload(saved.architecture, false, self.payload_budget(started))
+                .resolve_payload(
+                    saved.architecture,
+                    false,
+                    Self::payload_budget(started + self.deadline),
+                )
                 .await?;
             let join = self.backend.reissue_invitation(&authority, host).await?;
             installation.restart_setup(&binary, &join).await?;
@@ -808,22 +812,33 @@ impl Bootstrap {
         } else {
             let mut closed = batch.socket_closed.subscribe();
             let mut detached = false;
-            let running = tokio::time::timeout(
-                self.deadline,
-                self.run(&batch, &target, attempt, started, &mut resources, auth_once),
-            );
+            let (deadline, mut until) = watch::channel(started + self.deadline);
+            resources.deadline = Some(deadline);
+            let expiry = tokio::time::sleep_until((*until.borrow_and_update()).into());
+            tokio::pin!(expiry);
+            let running = self.run(&batch, &target, attempt, started, &mut resources, auth_once);
             tokio::pin!(running);
+            // One watcher for the whole attempt: the loop turns again on every
+            // deadline change, and a watcher made per turn would drop its
+            // authorization query mid-flight each time.
+            let revoked = self.backend.authority_cancelled(&batch.authority);
+            tokio::pin!(revoked);
             loop {
                 tokio::select! {
                     biased;
                     _ = cancel.changed() => break Err(cancelled),
-                    _ = self.backend.authority_cancelled(&batch.authority) => break Err(cancelled),
+                    _ = &mut revoked => break Err(cancelled),
                     () = async { if *closed.borrow() { return; } let _ = closed.changed().await; }, if !detached => {
                         let published = lock(&batch.history).metadata.get(&target.id).is_some_and(|m| m.session_id.is_some());
                         if !published { break Err(cancelled); }
                         detached = true;
                     },
-                    result = &mut running => break result.unwrap_or_else(|_| Err(Failure::install("Host installation exceeded its time limit."))),
+                    result = &mut running => break result,
+                    Ok(()) = until.changed() => {
+                        let at = *until.borrow_and_update();
+                        expiry.as_mut().reset(at.into());
+                    },
+                    () = &mut expiry => break Err(Failure::install("Host installation exceeded its time limit.")),
                 }
             }
         };
@@ -994,12 +1009,14 @@ impl Bootstrap {
 
     /// Resolve the first trusted image before any installation writes. A full
     /// fallback is retained so an older release does not repeat its acquisition.
+    #[allow(clippy::too_many_arguments)]
     async fn payload(
         &self,
         batch: &BatchInner,
         target: &Target,
         attempt: u32,
         started: Instant,
+        until: Instant,
         architecture: crate::probe::Architecture,
         early: bool,
     ) -> Result<(std::path::PathBuf, Option<std::path::PathBuf>), Failure> {
@@ -1017,15 +1034,15 @@ impl Bootstrap {
                 None,
             );
         }
-        self.resolve_payload(architecture, early, self.payload_budget(started))
+        self.resolve_payload(architecture, early, Self::payload_budget(until))
             .await
     }
 
-    fn payload_budget(&self, started: Instant) -> Duration {
-        // End acquisition before the enclosing attempt deadline so its named
-        // failure survives instead of becoming a generic installation timeout.
-        self.deadline
-            .saturating_sub(started.elapsed())
+    /// End acquisition before the enclosing attempt deadline `until` so its
+    /// named failure survives instead of becoming a generic installation timeout.
+    fn payload_budget(until: Instant) -> Duration {
+        until
+            .saturating_duration_since(Instant::now())
             .saturating_sub(Duration::from_secs(1))
             .min(Duration::from_secs(60))
     }
@@ -1091,7 +1108,15 @@ impl Bootstrap {
                 check.architecture
             };
             let (binary, _) = self
-                .payload(batch, target, attempt, started, architecture, false)
+                .payload(
+                    batch,
+                    target,
+                    attempt,
+                    started,
+                    started + self.deadline,
+                    architecture,
+                    false,
+                )
                 .await?;
             Installation::prepare_recovery(session, target, &binary).await
         })
@@ -1235,7 +1260,13 @@ impl Bootstrap {
                                 FreshMode::Reenroll
                             };
                             self.confirm_start_fresh(
-                                batch, target, attempt, started, &previous, mode,
+                                batch,
+                                target,
+                                attempt,
+                                started,
+                                &previous,
+                                mode,
+                                resources.deadline.as_ref(),
                             )
                             .await?;
                             // The person may have waited most of the attempt: the
@@ -1317,6 +1348,7 @@ impl Bootstrap {
                         } else {
                             FreshMode::Confirm
                         },
+                        resources.deadline.as_ref(),
                     )
                     .await?;
                     None
@@ -1339,7 +1371,15 @@ impl Bootstrap {
             let mut staged_payload = None;
             let key_binding = if let Some(origin) = server_origin.as_deref() {
                 let (session_binary, full_binary) = self
-                    .payload(batch, target, attempt, started, check.architecture, false)
+                    .payload(
+                        batch,
+                        target,
+                        attempt,
+                        started,
+                        resources.until(started + self.deadline),
+                        check.architecture,
+                        false,
+                    )
                     .await?;
                 let binary = full_binary
                     .clone()
@@ -1417,7 +1457,15 @@ impl Bootstrap {
             let (session_binary, mut full_binary) = match staged_payload {
                 Some(payload) => payload,
                 None => {
-                    self.payload(batch, target, attempt, started, check.architecture, early)
+                    self.payload(
+                        batch,
+                        target,
+                        attempt,
+                        started,
+                        resources.until(started + self.deadline),
+                        check.architecture,
+                        early,
+                    )
                         .await?
                 }
             };
@@ -1437,6 +1485,7 @@ impl Bootstrap {
                 started,
                 None,
             );
+            let until = resources.until(started + self.deadline);
             let setup = async {
                 if early {
                     let encoding = checked
@@ -1497,7 +1546,7 @@ impl Bootstrap {
                                 let (full, _) = self.resolve_payload(
                                     check.architecture,
                                     false,
-                                    self.payload_budget(started),
+                                    Self::payload_budget(until),
                                 ).await?;
                                 full_binary = Some(full.clone());
                                 full
@@ -1797,8 +1846,9 @@ impl Bootstrap {
         session: &dyn SshSession,
         previous: &PreviousAttempt,
         mode: FreshMode,
+        deadline: Option<&watch::Sender<Instant>>,
     ) -> Result<(), Failure> {
-        self.confirm_start_fresh(batch, target, attempt, started, previous, mode)
+        self.confirm_start_fresh(batch, target, attempt, started, previous, mode, deadline)
             .await?;
         self.act_start_fresh(batch, target, attempt, started, session, previous, mode)
             .await
@@ -1806,6 +1856,10 @@ impl Bootstrap {
 
     /// Offer the earlier attempt's action and wait for the person's confirmation;
     /// an automatic recovery only announces itself. Changes nothing on the host.
+    /// The wait does not count toward the attempt's deadline: the deadline
+    /// starts again in full once the person confirms, so a slow decision never
+    /// leaves the stop and the new enrollment only seconds (#305 P2-1).
+    #[allow(clippy::too_many_arguments)]
     async fn confirm_start_fresh(
         &self,
         batch: &BatchInner,
@@ -1814,6 +1868,7 @@ impl Bootstrap {
         started: Instant,
         previous: &PreviousAttempt,
         mode: FreshMode,
+        deadline: Option<&watch::Sender<Instant>>,
     ) -> Result<(), Failure> {
         if mode == FreshMode::Automatic {
             emit(
@@ -1849,9 +1904,15 @@ impl Bootstrap {
                     previous.findings(target.mode, challenge)
                 })),
             );
+            if let Some(deadline) = deadline {
+                deadline.send_replace(Instant::now() + CONFIRMATION_WAIT);
+            }
             resumed.await.map_err(|_| {
                 Failure::install("Host provisioning stopped while waiting to start fresh.")
             })?;
+            if let Some(deadline) = deadline {
+                deadline.send_replace(Instant::now() + self.deadline);
+            }
         }
         Ok(())
     }
@@ -1955,6 +2016,10 @@ async fn restore_previous(
     Ok(())
 }
 
+/// How long a confirmation may wait for the person. Closing the add-host
+/// window cancels it sooner; this only bounds a window left open.
+const CONFIRMATION_WAIT: Duration = Duration::from_mins(15);
+
 /// How an earlier attempt is cleared before this one continues.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FreshMode {
@@ -1986,6 +2051,9 @@ fn script_finished(error: &Failure) -> bool {
 /// Mutation resources belong to one attempt, including its rollback and host retirement.
 #[derive(Default)]
 struct AttemptResources {
+    /// The attempt's deadline. A confirmation pauses it and restarts it in full
+    /// once the person confirms (#305 P2-1).
+    deadline: Option<watch::Sender<Instant>>,
     /// A stuck install set aside for Replace or Re-enroll; put back if this attempt fails.
     set_aside: Option<SetAside>,
     installation: Option<Installation>,
@@ -1994,6 +2062,13 @@ struct AttemptResources {
     published: bool,
     // Only an acknowledged publication may suppress the wizard failure event.
     announced: bool,
+}
+
+impl AttemptResources {
+    /// The attempt's current deadline, or `fallback` before the attempt set one.
+    fn until(&self, fallback: Instant) -> Instant {
+        self.deadline.as_ref().map_or(fallback, |deadline| *deadline.borrow())
+    }
 }
 
 // Retain only failed live-session transaction coordinates; success removes the
