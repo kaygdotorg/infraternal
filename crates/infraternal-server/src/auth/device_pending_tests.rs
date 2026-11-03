@@ -381,12 +381,12 @@ async fn a_machine_join_needs_a_passkey_tap_for_that_approval() {
     let first = inspected_join(&app, &f.session, 1).await;
     let second = inspected_join(&app, &f.session, 2).await;
     let first_code = json!({"code": first["user_code"]});
-    // The session is fresh (registered at NOW), yet the plain approval refuses a join.
-    assert_eq!(
+    // The session is fresh (registered at NOW), yet no plain approval exists.
+    assert_ne!(
         browser(&app, "device-approve", Some(&f.session), &first_code)
             .await
             .status(),
-        StatusCode::UNAUTHORIZED
+        StatusCode::OK
     );
     // A proof of an ordinary login ceremony does not approve a join either.
     let login = json_body(
@@ -517,5 +517,68 @@ async fn a_join_ceremony_belongs_to_the_session_that_started_it() {
             .await
             .status(),
         StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn a_cli_sign_in_needs_a_passkey_tap_for_that_approval() {
+    // J145 P3-3: any login within 300 s used to approve a CLI sign-in key.
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    let app = super::http::router(f.auth.clone());
+    f.auth.set_test_http_time(NOW);
+    let started = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/auth/device-start")
+                .header("content-type", "application/json")
+                .extension(ClientAddress(v4_network(3)))
+                .body(axum::body::Body::from(sign_in().to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let started = json_body(started).await;
+    let code = json!({"code": started["user_code"]});
+    // The session is fresh (registered at NOW), yet that alone approves nothing.
+    assert_ne!(
+        browser(&app, "device-approve", Some(&f.session), &code)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert!(
+        f.auth
+            .device_redeem(str_field(&started, "poll_token"), NOW)
+            .await
+            .is_err()
+    );
+    // The sign-in is approved by a tap for this code, once.
+    let start = browser(&app, "device-approve-start", Some(&f.session), &code).await;
+    assert_eq!(start.status(), StatusCode::OK);
+    let start = json_body(start).await;
+    let proof = f.software.login(&start, ORIGIN, true);
+    let finish =
+        json!({"code": started["user_code"], "ceremony": start["ceremony"], "proof": proof});
+    assert_eq!(
+        browser(&app, "device-approve-finish", Some(&f.session), &finish)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert!(
+        f.auth
+            .device_redeem(str_field(&started, "poll_token"), NOW)
+            .await
+            .is_ok()
+    );
+    assert_ne!(
+        browser(&app, "device-approve-finish", Some(&f.session), &finish)
+            .await
+            .status(),
+        StatusCode::OK,
+        "a ceremony is single use"
     );
 }

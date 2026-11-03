@@ -142,17 +142,12 @@ export async function inspectDeviceApproval(code: string, expected: ApprovalRevi
 const FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{43}$/;
 
 /**
- * Approves from a user action. A CLI sign-in needs the caller to have completed a fresh passkey login first. A machine
- * join asks for its own passkey tap here: the server binds that ceremony to this code and this session, so no other
- * login can approve it (#263, J134 P3-2).
+ * Approves from a user action with a passkey tap for this request alone: the server binds the ceremony to this code
+ * and this session, so no earlier login can approve a CLI sign-in or a machine join (#263, J134 P3-2, J145 P3-3).
  */
 export async function approveDeviceApproval(code: string, kind: ApprovalReview["kind"] = "sign_in"): Promise<void> {
   if (!isDeviceUserCode(code)) throw invalidDeviceApprovalLink(kind);
   try {
-    if (kind !== "join_machine") {
-      await post("device-approve", { code });
-      return;
-    }
     const start = await post<AuthStart>("device-approve-start", { code });
     const assertion = await navigator.credentials.get({ publicKey: requestOptions(start.options.publicKey) });
     if (!(assertion instanceof PublicKeyCredential)) throw new AuthError("Passkey approval was cancelled.");

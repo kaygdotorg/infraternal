@@ -13,12 +13,11 @@ import {
   approveDeviceApproval,
   inspectDeviceApproval,
   isDeviceUserCode,
-  loginWithPasskey,
   type JoinApprovalReview,
 } from "./auth";
 import type { ApprovalKind } from "./approval-link";
 import { shortFingerprint } from "./key-fingerprint";
-import { deviceName, safeAuthMessage } from "./onboarding";
+import { safeAuthMessage } from "./onboarding";
 import { loading, type Loading } from "../../../packages/ui/src/countup";
 import { createKeyValueList } from "../../../packages/ui/src/kv-list";
 import { springCheckbox } from "../../../packages/ui/src/tick";
@@ -201,8 +200,7 @@ function wireApproval(host: HTMLElement, code: string, kind: ApprovalKind, hooks
     const waiting: Loading = loading(button.querySelector<HTMLElement>(".busy-count")!, 400);
     void (async () => {
       try {
-        // A join's approval is its own passkey tap, bound to this code; a CLI sign-in follows a fresh login.
-        if (kind !== "join_machine") await loginWithPasskey(deviceName());
+        // The approval is its own passkey tap, bound to this code.
         await approveDeviceApproval(code, kind);
         leave();
         hooks.onApproved();

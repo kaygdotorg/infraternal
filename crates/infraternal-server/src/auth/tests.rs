@@ -161,6 +161,16 @@ impl Software {
         signer.sign_to_vec().unwrap()
     }
 }
+/// Approve a pending request the only way the server allows: a passkey
+/// ceremony bound to its code and this session (#263, J145 P3-3).
+async fn approve_with_passkey(f: &mut Fixture, code: &str, now: i64) -> Result<()> {
+    let start = f.auth.device_approve_start(&f.session, code, now).await?;
+    let proof = f.software.login(&start, ORIGIN, true);
+    let ceremony = str_field(&start, "ceremony").to_owned();
+    f.auth
+        .device_approve_finish(&f.session, code, &ceremony, proof, now)
+        .await
+}
 fn str_field<'a>(v: &'a Value, key: &str) -> &'a str {
     v[key].as_str().unwrap()
 }
@@ -791,7 +801,7 @@ async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
             .is_err()
     );
     // New fixture avoids resurrecting an expired record for the device API assertions.
-    let f = fixture().await;
+    let mut f = fixture().await;
     let approval = f
         .auth
         .device_start("cli", vec!["hosts:read".into()], TEST_SOURCE, NOW)
@@ -816,8 +826,7 @@ async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
             .unwrap()["scopes"],
         json!(["hosts:read"])
     );
-    f.auth
-        .device_approve(&f.session, str_field(&approval, "user_code"), NOW)
+    approve_with_passkey(&mut f, str_field(&approval, "user_code"), NOW)
         .await
         .unwrap();
     let key = f
@@ -859,8 +868,7 @@ async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
         .await
         .unwrap();
     assert!(
-        f.auth
-            .device_approve(&f.session, str_field(&approval, "user_code"), NOW + 600)
+        approve_with_passkey(&mut f, str_field(&approval, "user_code"), NOW + 600)
             .await
             .is_err()
     );
@@ -878,7 +886,7 @@ async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
 #[tokio::test]
 async fn sign_in_device_inspection_keeps_its_existing_unbounded_retry_behavior() {
     let _guard = SERIAL.lock().await;
-    let f = fixture().await;
+    let mut f = fixture().await;
     let approval = f
         .auth
         .device_start("cli", vec!["hosts:read".into()], TEST_SOURCE, NOW)
@@ -894,8 +902,7 @@ async fn sign_in_device_inspection_keeps_its_existing_unbounded_retry_behavior()
             "sign-in inspection attempt {attempt}"
         );
     }
-    f.auth
-        .device_approve(&f.session, str_field(&approval, "user_code"), NOW)
+    approve_with_passkey(&mut f, str_field(&approval, "user_code"), NOW)
         .await
         .unwrap();
     assert!(
@@ -1031,7 +1038,7 @@ async fn device_join_approval_requires_the_owner_session() {
         .oneshot(
             axum::http::Request::builder()
                 .method("POST")
-                .uri("/auth/device-approve")
+                .uri("/auth/device-approve-start")
                 .header("content-type", "application/json")
                 .header("origin", ORIGIN)
                 .header("cookie", format!("__Host-infraternal={}", f.session))
@@ -1302,8 +1309,9 @@ async fn recovery_expiry_revocation_and_cross_user_isolation() {
         .device_start("cli", vec!["hosts:read".into()], TEST_SOURCE, NOW)
         .await
         .unwrap();
+    // Recovery, not the approval ceremony, is under test here.
     f.auth
-        .device_approve(&f.session, str_field(&approval, "user_code"), NOW)
+        .approve_without_passkey_for_tests(&f.session, str_field(&approval, "user_code"), NOW)
         .await
         .unwrap();
     let api_key = f

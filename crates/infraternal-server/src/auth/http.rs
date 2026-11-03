@@ -423,12 +423,7 @@ async fn execute(
             let b: Code = body(value)?;
             auth.device_inspect(cookie(headers)?, &b.code, now).await?
         }
-        "device-approve" => {
-            let b: Code = body(value)?;
-            auth.device_approve(cookie(headers)?, &b.code, now).await?;
-            json!({"ok":true})
-        }
-        // A machine join is approved by a passkey ceremony bound to its code.
+        // Every approval (CLI sign-in, machine join) is a passkey ceremony bound to its code.
         "device-approve-start" => {
             let b: Code = body(value)?;
             auth.device_approve_start(cookie(headers)?, &b.code, now)

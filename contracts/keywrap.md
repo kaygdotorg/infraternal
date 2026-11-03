@@ -102,7 +102,8 @@ Argon2 work at two simultaneous calls; exhausted capacity fails closed.
 | recovery-cancel | `{}` + any live session | `{ok:true}` |
 | device-start | `{device,scopes}` | `{poll_token,user_code,expires_in:600}` |
 | device-inspect | `{code}` + session | requested device/scopes for approval UI |
-| device-approve | `{code}` + fresh session | `{ok:true}` |
+| device-approve-start | `{code}` + session (owner for a machine join; join codes must be inspected first) | passkey `{ceremony,options}` bound to this code and session |
+| device-approve-finish | `{code,ceremony,proof}` + the same session | `{ok:true}`; one tap approves exactly this request, once (#263) |
 | device-redeem | `{token:poll_token}` | `{api_key}` once |
 | api-list | `{}` + session | device/scopes and nonsecret revocation `id` |
 | security-settings | `{}` + live owner session | `{api_key_lifetime_days}` |
