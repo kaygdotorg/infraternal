@@ -110,12 +110,15 @@ fn run_with_publishers<'a>(
     installation: Option<&'a infraternal_plugin_remote::uninstall::Context>,
 ) -> ClientFuture<'a> {
     Box::pin(async move {
-        let mut renewal =
-            crate::remote_renewal::RenewalIdentity::new(&identity.identity, &identity.roots, publisher);
+        let mut renewal = crate::remote_renewal::RenewalIdentity::new(
+            &identity.identity,
+            &identity.roots,
+            publisher,
+        );
         if let Some(rotation) = rotation {
             renewal.enable_identity_rotation(rotation)?;
         }
-        run_inner(
+        Box::pin(run_inner(
             identity,
             state,
             Some(&renewal),
@@ -124,7 +127,7 @@ fn run_with_publishers<'a>(
             None,
             #[cfg(any(test, feature = "native-streams"))]
             None,
-        )
+        ))
         .await
     })
 }
@@ -138,14 +141,14 @@ pub async fn run_with_registry(
     state: Option<PathBuf>,
     registry: crate::plugins::SharedRegistry,
 ) -> io::Result<()> {
-    run_inner(
+    Box::pin(run_inner(
         identity,
         state,
         None,
         None,
         Some(crate::plugin_control::Registry::from_shared(registry)),
         None,
-    )
+    ))
     .await
 }
 
@@ -161,14 +164,14 @@ pub async fn run_with_registry_observed(
     registry: crate::plugins::SharedRegistry,
     observer: impl Fn(&'static str, io::ErrorKind) + Send + Sync,
 ) -> io::Result<()> {
-    run_inner(
+    Box::pin(run_inner(
         identity,
         state,
         None,
         None,
         Some(crate::plugin_control::Registry::from_shared(registry)),
         Some(&observer),
-    )
+    ))
     .await
 }
 
@@ -256,7 +259,8 @@ async fn run_inner(
     // credentials temporarily prevent another connection attempt.
     #[cfg(target_os = "linux")]
     let lifetime = Mutex::new(None::<std::sync::Arc<std::fs::File>>);
-    supervisor::run(|connected| {
+    // The retry loop owns large QUIC/TLS state; keep that frame off the caller's stack.
+    Box::pin(supervisor::run(|connected| {
         let service = &service;
         #[cfg(target_os = "linux")]
         let lifetime = &lifetime;
@@ -298,23 +302,26 @@ async fn run_inner(
             if let Some(observer) = observer {
                 return trace_attempt(
                     "server-path",
-                    server_path::run_observed(
+                    Box::pin(server_path::run_observed(
                         identity,
                         state,
                         renewal,
                         plugins,
                         connected,
                         Some(observer),
-                    )
+                    ))
                     .await,
                 );
             }
             trace_attempt(
                 "server-path",
-                server_path::run(identity, state, renewal, plugins, connected).await,
+                Box::pin(server_path::run(
+                    identity, state, renewal, plugins, connected,
+                ))
+                .await,
             )
         }
-    })
+    }))
     .await
 }
 

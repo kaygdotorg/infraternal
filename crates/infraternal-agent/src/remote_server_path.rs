@@ -800,7 +800,7 @@ pub(super) async fn run(
     registry: crate::plugin_control::Registry,
     connected: tokio::sync::watch::Sender<bool>,
 ) -> io::Result<()> {
-    run_observed(
+    Box::pin(run_observed(
         identity,
         state,
         renewal,
@@ -808,7 +808,7 @@ pub(super) async fn run(
         connected,
         #[cfg(any(test, feature = "native-streams"))]
         None,
-    )
+    ))
     .await
 }
 

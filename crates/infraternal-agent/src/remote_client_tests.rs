@@ -776,7 +776,12 @@ async fn cancelled_connection_withdraws_retained_registry_capabilities() {
     let state = StateDirectory::new();
     let state_path = state.0.clone();
     let runner = tokio::spawn(async move {
-        run_with_registry(&identity, Some(state_path), runner_registry).await
+        Box::pin(run_with_registry(
+            &identity,
+            Some(state_path),
+            runner_registry,
+        ))
+        .await
     });
     let connection = tokio::time::timeout(Duration::from_secs(5), async {
         server.accept().await.unwrap().await.unwrap()

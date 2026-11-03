@@ -51,7 +51,7 @@ async fn run(
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
     registry: crate::plugin_control::Registry,
 ) -> io::Result<()> {
-    super::super::supervisor::run(|connected| {
+    Box::pin(super::super::supervisor::run(|connected| {
         super::run(
             identity,
             state.clone(),
@@ -59,7 +59,7 @@ async fn run(
             registry.clone(),
             connected,
         )
-    })
+    }))
     .await
 }
 
@@ -1831,13 +1831,13 @@ async fn failed_control_worker_returns_to_retry_owner() {
     let directory = Directory::new();
     let result = tokio::time::timeout(
         Duration::from_secs(1),
-        super::run(
+        Box::pin(super::run(
             &identity,
             directory.0.clone(),
             None,
             crate::plugin_control::Registry::unavailable(),
             tokio::sync::watch::channel(false).0,
-        ),
+        )),
     )
     .await
     .expect("failed worker must return to the owner that recreates its service");
