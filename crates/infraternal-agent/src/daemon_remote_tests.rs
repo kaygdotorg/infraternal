@@ -228,10 +228,18 @@ async fn cancelling_remote_dispatch_retires_the_borrowed_authenticated_channel()
         .send(&control, 0, &hello())
         .await
         .unwrap();
-    assert!(matches!(
-        Receive::default().next(&control).await.unwrap().frame,
-        Frame::Hello { version: 1, .. }
-    ));
+    // `spare` keeps the host socket open, so a dispatcher that fails before
+    // its greeting never gives the peer EOF. Wait on both: the greeting, or
+    // the dispatcher's own result (#332).
+    let mut daemon = daemon;
+    let mut receive = Receive::default();
+    tokio::select! {
+        greeting = receive.next(&control) => assert!(matches!(
+            greeting.unwrap().frame,
+            Frame::Hello { version: 1, .. }
+        )),
+        ended = &mut daemon => panic!("dispatcher ended before its greeting: {ended:?}"),
+    }
     daemon.abort();
     let _ = daemon.await;
     assert_eq!(
