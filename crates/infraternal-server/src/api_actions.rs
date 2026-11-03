@@ -549,18 +549,8 @@ struct Api {
 #[serde(deny_unknown_fields)]
 struct RemovalInput {
     host_id: Uuid,
-    #[serde(default = "default_uninstall")]
-    uninstall: bool,
-}
-
-fn default_uninstall() -> bool {
-    true
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RemovalStatusInput {
-    request_id: String,
+    /// D28 / `DryRun::Required`: every caller states whether this is the review or the removal.
+    dry_run: bool,
 }
 
 /// Mounts the bearer action adapter beside the browser handlers; each adapter calls the same
@@ -579,10 +569,6 @@ pub(crate) fn router(
     };
     Router::new()
         .route("/v1/actions/{action_id}", post(action))
-        .route(
-            "/v1/actions/remote.host.remove/status",
-            post(removal_status),
-        )
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024))
         .with_state(api)
 }
@@ -636,10 +622,8 @@ async fn action(
         "sessions.list" if !action.fresh_passkey => session_list(&api, &identity.person_id)
             .await
             .map(|value| (value, true)),
-        "remote.host.remove" if action.fresh_passkey => {
-            start_removal(&api, token, &input, now, audit_id)
-                .await
-                .map(|value| (Json(value), true))
+        "remote.host.remove" if !action.fresh_passkey => {
+            remove_host(&api, &identity, &input, now, audit_id).await
         }
         // ssh.start uses the existing bounded bootstrap WebSocket adapter.
         "ssh.start" => Err(StatusCode::BAD_REQUEST),
@@ -649,11 +633,15 @@ async fn action(
             .map(|result| (Json(result.value), result.ok)),
     };
     match result {
-        Ok((value, _)) if action_id == "remote.host.remove" => value.into_response(),
+        // A completed removal finished its audit row in the removal's own transaction.
+        Ok((value, true)) if action_id == "remote.host.remove" && value.0["dry_run"] != true => {
+            value.into_response()
+        }
         Ok((value, true)) => {
+            let result = (value.0["dry_run"] == true).then_some("dry_run");
             if api
                 .guard
-                .finish_audit(audit_id, "complete", None, now)
+                .finish_audit(audit_id, "complete", result, now)
                 .await
                 .is_err()
             {
@@ -717,50 +705,37 @@ async fn session_list(api: &Api, person_id: &str) -> Result<Json<Value>, StatusC
     Ok(Json(json!({"sessions":sessions})))
 }
 
-async fn start_removal(
+/// D333: a `hosts:write` key removes a host with no further tap, and `dry_run: true` first
+/// shows what would be removed. The dry run's row is completed by the caller; a removal's row
+/// is completed in the removal's own transaction.
+async fn remove_host(
     api: &Api,
-    token: &str,
+    identity: &AuthorizedKey,
     input: &Value,
     now: i64,
     audit_id: i64,
-) -> Result<Value, StatusCode> {
+) -> Result<(Json<Value>, bool), StatusCode> {
     let request: RemovalInput =
         serde_json::from_value(input.clone()).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if request.dry_run {
+        return api
+            .removal
+            .review_with_key(&identity.person_id, request.host_id)
+            .await
+            .map(|value| (Json(value), true))
+            .map_err(|_| StatusCode::FORBIDDEN);
+    }
     api.removal
-        .start_api_audited(
-            token,
+        .remove_with_key(
+            &identity.key_id,
+            &identity.person_id,
             request.host_id,
-            request.uninstall,
+            audit_id,
             now,
-            Some(audit_id),
         )
         .await
+        .map(|value| (Json(value), true))
         .map_err(|_| StatusCode::FORBIDDEN)
-}
-
-async fn removal_status(
-    State(api): State<Api>,
-    headers: HeaderMap,
-    Json(input): Json<RemovalStatusInput>,
-) -> Response {
-    let Some(token) = bearer_only(&headers) else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    let action_id = "remote.host.remove";
-    let Some(action) = shared_action(&api.sessions, action_id) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    match api.guard.authorize_token(token, &action).await {
-        Ok(_) => {}
-        Err(status) => return status.into_response(),
-    }
-    let Ok(now) = crate::runtime::unix_seconds() else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    };
-    match api.removal.api_status(token, &input.request_id, now).await {
-        Ok(value) => Json(value).into_response(),
-        Err(_) => StatusCode::FORBIDDEN.into_response(),
-    }
 }
 
 /// Tests the authorization table, bearer parser and per-key admission independently of storage.
@@ -777,7 +752,11 @@ mod tests {
                 Some("hosts:read"),
                 false,
             ),
-            (infraternal_plugin_remote::REMOVE, Some("hosts:write"), true),
+            (
+                infraternal_plugin_remote::REMOVE,
+                Some("hosts:write"),
+                false,
+            ),
             (
                 infraternal_plugin_ssh::manifest::START,
                 Some("hosts:write"),

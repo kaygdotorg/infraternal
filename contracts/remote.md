@@ -403,6 +403,14 @@ original session and owner, for 300 seconds. The finish body contains `host_id`,
 A foreign host UUID, replay, expired challenge, logout, lost owner authority or
 removed signing passkey is refused.
 
+With an API key (D333), `POST /v1/actions/remote.host.remove` takes `host_id` and a
+required `dry_run`. `dry_run: true` returns the review (host, label, and that the
+agent is uninstalled) and changes nothing. `dry_run: false` removes the host with no
+further passkey tap: inside one writer transaction the key is rechecked for
+`hosts:write` (J90, clock read in the transaction), its account must be the owner's
+and own the host, and the key's audit row is completed with the removal. The agent
+is always uninstalled (D334). Every call is audited.
+
 A process-owned operation keeps the authorized mutation alive after a browser
 HTTP disconnect. SQLite's writer transaction serializes final authorization,
 a bounded five-second node uninstall handoff and public revocation. It deletes

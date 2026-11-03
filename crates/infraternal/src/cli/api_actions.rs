@@ -13,14 +13,13 @@ use hyper::{
 };
 use serde_json::{Value, json};
 use std::{collections::HashSet, fmt::Write as _, pin::Pin, process::ExitCode, time::Duration};
-use tokio::{net::TcpStream, time::Instant};
+use tokio::net::TcpStream;
 use tokio_tungstenite::{client_async, tungstenite::Message};
 use url::Url;
 use zeroize::Zeroizing;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 const ADD_HOST_TIMEOUT: Duration = Duration::from_secs(240);
-const APPROVAL_POLL: Duration = Duration::from_secs(10);
 const MAX_RESPONSE: usize = 256 * 1024;
 const MAX_DIAGNOSTIC: usize = 16 * 1024;
 const MAX_HOST_PAGES: usize = 24;
@@ -139,7 +138,11 @@ pub fn run(
             CommandResult::new(
                 &command,
                 CommandState::Ready,
-                success_message(definition.id),
+                if data["dry_run"] == true {
+                    "Dry run: nothing was changed. Run it again without --dry-run to apply."
+                } else {
+                    success_message(definition.id)
+                },
                 scrub_value(data, credential.api_key.as_str()),
             ),
             json_output,
@@ -193,7 +196,7 @@ fn command_input(
                         "The host ID is invalid. Choose an ID from `infraternal hosts list`.",
                     )
                 })?;
-            Ok(json!({"host_id":host,"uninstall":true}))
+            Ok(json!({"host_id":host,"dry_run":matches.get_flag("dry_run")}))
         }
         "ssh.start" => {
             #[cfg(feature = "ssh")]
@@ -246,7 +249,6 @@ async fn dispatch(
     match action.id {
         "ssh.start" => add_host(command, server, api_key, input, json_output).await,
         "remote.host.list" => list_hosts(server, api_key, input).await,
-        "remote.host.remove" => remove_host(command, server, api_key, input, json_output).await,
         _ => post_action(server, api_key, action.id, &input).await,
     }
 }
@@ -478,126 +480,6 @@ fn bootstrap_event_failure(event: Value) -> ActionFailure {
     ActionFailure::new(exit, message).with_details(details, event)
 }
 
-async fn remove_host(
-    command: &str,
-    server: &Url,
-    api_key: &str,
-    input: Value,
-    json_output: bool,
-) -> Result<Value, ActionFailure> {
-    let start = post_action(server, api_key, "remote.host.remove", &input).await?;
-    let request_id = start["request_id"].as_str().ok_or_else(|| {
-        ActionFailure::new(
-            Exit::Failed,
-            "The server did not return a removal request ID.",
-        )
-    })?;
-    let code = start["user_code"]
-        .as_str()
-        .and_then(approval_code)
-        .ok_or_else(|| {
-            ActionFailure::new(
-                Exit::Failed,
-                "The server did not return a valid removal approval code.",
-            )
-        })?;
-    let link = removal_approval_link(server, code);
-    // Everything the server returned is cleaned before it reaches the terminal or JSON.
-    let approval = scrub_value(
-        json!({
-            "server": server.origin().ascii_serialization(),
-            "code": code,
-            "verification_url": link,
-            "action": start["action"],
-            "expires_in_seconds": start["expires_in"],
-        }),
-        api_key,
-    );
-    let mut progress = CommandResult::new(
-        command,
-        CommandState::Pending,
-        "This removal needs a fresh owner passkey tap.",
-        approval.clone(),
-    )
-    .with_next_step("Open the link, review what will be removed, and approve with your passkey.")
-    .with_body(format!(
-        "Open this link and approve the displayed removal with your passkey:\n{link}\n\nCode: {code}"
-    ));
-    if json_output {
-        "Waiting for the owner to approve this removal with a fresh passkey tap."
-            .clone_into(&mut progress.message);
-    }
-    print_progress(&progress, json_output, false);
-
-    let lifetime = start["expires_in"].as_u64().unwrap_or(300).clamp(1, 600);
-    let deadline = Instant::now() + Duration::from_secs(lifetime);
-    loop {
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(expired_removal_failure(approval));
-        }
-        tokio::time::sleep(APPROVAL_POLL.min(deadline - now)).await;
-        let status = post_json(
-            server,
-            api_key,
-            "/v1/actions/remote.host.remove/status",
-            &json!({"request_id":request_id}),
-        )
-        .await
-        .map_err(|failure| {
-            ActionFailure::new(
-                Exit::Partial,
-                "The removal started, but the CLI could not confirm its final result.",
-            )
-            .with_details(failure.message, approval.clone())
-        })?;
-        if let Some(result) = removal_status_result(status, &approval)? {
-            return Ok(result);
-        }
-    }
-}
-
-/// The server issues 12 random bytes as unpadded base64url. Anything else is refused
-/// before it is printed or placed in the approval link.
-fn approval_code(code: &str) -> Option<&str> {
-    (code.len() == 16
-        && code
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'))
-    .then_some(code)
-}
-
-fn removal_approval_link(server: &Url, code: &str) -> String {
-    let mut link = server.clone();
-    link.query_pairs_mut().append_pair("action_code", code);
-    link.to_string()
-}
-
-fn expired_removal_failure(approval: Value) -> ActionFailure {
-    ActionFailure::new(
-        Exit::NotAllowed,
-        "The removal was declined or its passkey approval expired. Start a new removal request if it is still needed.",
-    )
-    .with_details("No removal is executed without a fresh passkey approval.", approval)
-}
-
-fn removal_status_result(status: Value, approval: &Value) -> Result<Option<Value>, ActionFailure> {
-    match status["state"].as_str() {
-        Some("complete") => Ok(Some(status["result"].clone())),
-        Some("denied") => Err(ActionFailure::new(
-            Exit::NotAllowed,
-            "The removal was declined or its passkey approval expired. Start a new removal request if it is still needed.",
-        )
-        .with_details("No removal is executed without a fresh passkey approval.", approval.clone())),
-        Some("pending") => Ok(None),
-        _ => Err(ActionFailure::new(
-            Exit::Partial,
-            "The removal request returned an unknown state; check the host before retrying.",
-        )
-        .with_details("The server returned an invalid removal status.", status)),
-    }
-}
-
 async fn post_json(
     server: &Url,
     api_key: &str,
@@ -754,7 +636,7 @@ fn success_message(action_id: &str) -> &'static str {
         "server.status" => "The server status was read.",
         "remote.host.list" => "The server host list was read.",
         "sessions.list" => "The server session list was read.",
-        "remote.host.remove" => "The host removal was approved and completed.",
+        "remote.host.remove" => "The host was removed.",
         "ssh.start" => "Host setup completed.",
         _ => "The hosted action completed.",
     }
@@ -878,38 +760,11 @@ impl Drop for Connection {
 #[cfg(test)]
 mod tests {
     use super::{
-        Exit, approval_code, bootstrap_event_failure, expired_removal_failure, host_setup_failure,
-        removal_approval_link, removal_status_result, scrub_failure, scrub_value, status_failure,
+        Exit, bootstrap_event_failure, host_setup_failure, scrub_failure, scrub_value,
+        status_failure,
     };
     use hyper::StatusCode;
     use serde_json::json;
-    use url::Url;
-
-    #[test]
-    fn removal_link_opens_the_action_approval_page() {
-        let server = Url::parse("https://ssh.example.test/").unwrap();
-        assert_eq!(
-            removal_approval_link(&server, "A_b-c123"),
-            "https://ssh.example.test/?action_code=A_b-c123"
-        );
-    }
-
-    #[test]
-    fn approval_expiry_is_a_fresh_passkey_refusal() {
-        let failure = expired_removal_failure(json!({"code":"A_b-c123"}));
-        assert_eq!(failure.exit, Exit::NotAllowed);
-        assert!(failure.message.contains("approval expired"));
-        assert!(failure.details.unwrap().contains("fresh passkey approval"));
-    }
-
-    #[test]
-    fn refused_passkey_approval_uses_d303_not_allowed() {
-        let approval = json!({"code":"A_b-c123"});
-        let failure = removal_status_result(json!({"state":"denied"}), &approval).unwrap_err();
-        assert_eq!(failure.exit, Exit::NotAllowed);
-        assert!(failure.message.contains("declined"));
-        assert_eq!(failure.data, approval);
-    }
 
     #[test]
     fn expired_or_revoked_key_uses_the_shared_d303_diagnostic() {
@@ -983,21 +838,5 @@ mod tests {
             );
         }
         assert!(!printed.contains(key));
-    }
-
-    /// J137 P3-2: only a code of the shape the server issues is printed or put in the link.
-    #[test]
-    fn removal_codes_must_have_the_issued_shape() {
-        assert!(approval_code("AbCdEfGhIjKl-n_p").is_some());
-        for code in [
-            "",
-            "short",
-            "AbCdEfGhIjKlMnOpQ",
-            "AbCdEfGhIjKl\u{1b}nOp",
-            "AbCdEfGhIjKl Mn",
-            "AbCdEfGh/jKlMnOp",
-        ] {
-            assert!(approval_code(code).is_none(), "{code:?}");
-        }
     }
 }

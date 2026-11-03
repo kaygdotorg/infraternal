@@ -36,35 +36,11 @@ pub struct Finish {
     ceremony: String,
     proof: Value,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ApprovalCode {
-    code: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ApprovalProof {
-    code: String,
-    ceremony: String,
-    proof: Value,
-}
 pub(crate) fn router(auth: Auth, removal: Removal) -> Router {
     Router::new()
         .route("/remote/hosts/actions", post(actions))
         .route("/remote/hosts/remove/start", post(start))
         .route("/remote/hosts/remove/finish", post(finish))
-        .route(
-            "/remote/hosts/remove/approval/inspect",
-            post(approval_inspect),
-        )
-        .route(
-            "/remote/hosts/remove/approval/approve",
-            post(approval_approve),
-        )
-        .route(
-            "/remote/hosts/remove/approval/decline",
-            post(approval_decline),
-        )
         .layer(axum::extract::DefaultBodyLimit::max(32768))
         .layer(axum::middleware::from_fn(deadline))
         .with_state(Api {
@@ -140,64 +116,6 @@ async fn finish(
         .await
         .map(Json)
         .map_err(|_| StatusCode::FORBIDDEN)
-}
-
-/// Inspect one action request through the existing owner session and same-origin boundary.
-async fn approval_inspect(
-    State(api): State<Api>,
-    incoming: axum::extract::Request,
-) -> Result<Json<Value>, StatusCode> {
-    let (token, now, bytes, _permit) = body(&api, incoming).await?;
-    let input: ApprovalCode = decode(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if !valid_action_code(&input.code) {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    api.removal
-        .inspect_api_approval(&token, &input.code, now)
-        .await
-        .map(Json)
-        .map_err(|_| StatusCode::FORBIDDEN)
-}
-
-/// Verify the action-bound assertion before allowing the request to publish removal.
-async fn approval_approve(
-    State(api): State<Api>,
-    incoming: axum::extract::Request,
-) -> Result<Json<Value>, StatusCode> {
-    let (token, now, bytes, _permit) = body(&api, incoming).await?;
-    let input: ApprovalProof = decode(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if !valid_action_code(&input.code) || input.ceremony.is_empty() || input.ceremony.len() > 128 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    api.removal
-        .approve_api(&token, &input.code, &input.ceremony, input.proof, now)
-        .await
-        .map(Json)
-        .map_err(|_| StatusCode::FORBIDDEN)
-}
-
-/// Refuse a pending action without creating a passkey ceremony or changing the host.
-async fn approval_decline(
-    State(api): State<Api>,
-    incoming: axum::extract::Request,
-) -> Result<StatusCode, StatusCode> {
-    let (token, now, bytes, _permit) = body(&api, incoming).await?;
-    let input: ApprovalCode = decode(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if !valid_action_code(&input.code) {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    api.removal
-        .decline_api(&token, &input.code, now)
-        .await
-        .map_err(|_| StatusCode::FORBIDDEN)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-fn valid_action_code(value: &str) -> bool {
-    value.len() == 16
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 async fn actions(State(api): State<Api>, headers: HeaderMap) -> Result<Json<Value>, StatusCode> {

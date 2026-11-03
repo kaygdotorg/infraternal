@@ -425,11 +425,8 @@ mod tests {
                     panic!("{} must carry its shared hosted definition", path.join(" "))
                 });
             assert_eq!(hosted.id, action_id);
-            assert_eq!(
-                hosted.fresh_passkey,
-                action_id == "remote.host.remove",
-                "only removal among these actions needs a fresh tap"
-            );
+            // D333: inside its scope a key needs no further tap, removal included.
+            assert!(!hosted.fresh_passkey, "{action_id}");
         }
 
         let matches = build(&registry)
@@ -448,6 +445,25 @@ mod tests {
         assert_eq!(selected(&matches).path, ["status"]);
         assert_eq!(hosted.id, "server.status");
         assert!(!hosted.fresh_passkey);
+    }
+
+    /// D333 keeps the dry run of a key-driven removal: `--dry-run` reaches the shared input.
+    #[test]
+    #[cfg(feature = "remote")]
+    fn hosts_remove_takes_a_dry_run_flag() {
+        let registry = registry().expect("action registry");
+        let matches = build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "hosts",
+                "remove",
+                "00000000-0000-0000-0000-000000000001",
+                "--dry-run",
+            ])
+            .expect("hosts remove --dry-run");
+        let command = selected(&matches);
+        assert_eq!(command.path, ["hosts", "remove"]);
+        assert!(command.matches.get_flag("dry_run"));
     }
 
     #[test]

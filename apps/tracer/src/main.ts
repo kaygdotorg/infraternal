@@ -99,12 +99,9 @@ declare global {
 }
 
 const app = document.querySelector<HTMLElement>("#app") ?? missingMount();
-type DeviceApprovalLink =
-  | { kind: "device" | "removal"; code: string }
-  | { kind: "device" | "removal"; error: string }
-  | undefined;
+type DeviceApprovalLink = { code: string } | { error: string } | undefined;
 let deviceApprovalLink = consumeDeviceApprovalLink();
-let approvalCompletion: "device" | "removal-approved" | "removal-declined" | undefined;
+let deviceApprovalComplete = false;
 type UiFont = "sans" | "mono";
 
 const uiFont = uiFontPreference();
@@ -164,11 +161,7 @@ async function start(): Promise<void> {
   if (deviceApprovalLink && "error" in deviceApprovalLink) {
     await fontsReady;
     installTooltips();
-    if (deviceApprovalLink.kind === "removal") {
-      await showRemovalApproval(undefined, deviceApprovalLink.error);
-    } else {
-      await showDeviceApproval(undefined, deviceApprovalLink.error);
-    }
+    await showDeviceApproval(undefined, deviceApprovalLink.error);
     return;
   }
   try {
@@ -194,22 +187,12 @@ async function refreshAuth(): Promise<void> {
 }
 
 async function showAuthState(status: AuthStatus): Promise<void> {
-  if (approvalCompletion) {
-    await showApprovalCompletion(approvalCompletion);
+  if (deviceApprovalComplete) {
+    await showDeviceApprovalSuccess();
     return;
   }
   if (deviceApprovalLink && "code" in deviceApprovalLink) {
     const code = deviceApprovalLink.code;
-    if (deviceApprovalLink.kind === "removal") {
-      const session = status.setupRequired ? undefined : await checkSession();
-      if (session) {
-        activeUserId = session.user_id;
-        await showRemovalApproval(code);
-      } else {
-        renderAuth(status.setupRequired, "", status.setupTokenCommand);
-      }
-      return;
-    }
     if (!isDeviceUserCode(code)) {
       await showDeviceApproval(code);
       return;
@@ -309,8 +292,7 @@ function renderAuth(
     peerSessions.forget(userId);
     activeUserId = userId;
     if (deviceApprovalLink && "code" in deviceApprovalLink) {
-      if (deviceApprovalLink.kind === "removal") void showRemovalApproval(deviceApprovalLink.code);
-      else void showDeviceApproval(deviceApprovalLink.code);
+      void showDeviceApproval(deviceApprovalLink.code);
       return;
     }
     if (firstSetup) showWelcome(welcomeName ?? "", instant);
@@ -325,46 +307,9 @@ async function showDeviceApproval(code?: string, error?: string): Promise<void> 
   document.documentElement.removeAttribute("data-ui-font");
   try {
     const { mountDeviceApproval } = await onDemand(() => import("./device-approval.on-demand"));
-    await mountDeviceApproval(app, code ?? null, error, () => { approvalCompletion = "device"; });
+    await mountDeviceApproval(app, code ?? null, error, () => { deviceApprovalComplete = true; });
   } catch {
     renderUnavailable("Could not load device sign-in. Check your connection and reopen the link.");
-    return;
-  }
-  scheduleBackdrop();
-}
-
-/** Reviews a host removal through the existing approval page and fresh passkey ceremony. */
-async function showRemovalApproval(code?: string, error?: string): Promise<void> {
-  authLight();
-  document.documentElement.removeAttribute("data-ui-font");
-  try {
-    const { mountRemovalApproval } = await onDemand(() => import("./device-approval.on-demand"));
-    await mountRemovalApproval(
-      app,
-      code ?? null,
-      error,
-      () => { approvalCompletion = "removal-approved"; },
-      () => { approvalCompletion = "removal-declined"; },
-    );
-  } catch {
-    renderUnavailable("Could not load the removal request. Check your connection and reopen the link.");
-    return;
-  }
-  scheduleBackdrop();
-}
-
-async function showApprovalCompletion(completion: NonNullable<typeof approvalCompletion>): Promise<void> {
-  if (completion === "device") {
-    await showDeviceApprovalSuccess();
-    return;
-  }
-  authLight();
-  document.documentElement.removeAttribute("data-ui-font");
-  try {
-    const { mountRemovalApprovalResult } = await onDemand(() => import("./device-approval.on-demand"));
-    mountRemovalApprovalResult(app, completion === "removal-approved");
-  } catch {
-    renderUnavailable("The removal request was updated. Return to the terminal to continue.");
     return;
   }
   scheduleBackdrop();
@@ -386,28 +331,18 @@ async function showDeviceApprovalSuccess(): Promise<void> {
 /** Synchronously removes every device code before `start` can issue any auth request. */
 function consumeDeviceApprovalLink(): DeviceApprovalLink {
   const url = new URL(location.href);
-  const deviceCodes = url.searchParams.getAll("device_code");
-  const removalCodes = url.searchParams.getAll("action_code");
-  if (deviceCodes.length === 0 && removalCodes.length === 0) return undefined;
+  const codes = url.searchParams.getAll("device_code");
+  if (codes.length === 0) return undefined;
   url.searchParams.delete("device_code");
-  url.searchParams.delete("action_code");
   try {
     history.replaceState(history.state, "", `${url.pathname}${url.search}${url.hash}`);
   } catch {
-    return {
-      kind: removalCodes.length > 0 ? "removal" : "device",
-      error: "This approval link could not be cleared from the address bar. Close this page and open the link again.",
-    };
+    return { error: "This sign-in link could not be cleared from the address bar. Close this page and open the link again." };
   }
-  if (deviceCodes.length + removalCodes.length !== 1) {
-    return {
-      kind: removalCodes.length > 0 ? "removal" : "device",
-      error: "This approval link has more than one code. Ask the person who started it to create a new request.",
-    };
+  if (codes.length !== 1) {
+    return { error: "This sign-in link has more than one code. Ask the person who started it to run infraternal sign-in again." };
   }
-  return removalCodes.length === 1
-    ? { kind: "removal", code: removalCodes[0] ?? "" }
-    : { kind: "device", code: deviceCodes[0] ?? "" };
+  return { code: codes[0] ?? "" };
 }
 
 function showWelcome(displayName: string, instant = false): void {

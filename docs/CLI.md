@@ -116,9 +116,10 @@ credential when more than one is present.
 
 The hosted key actions are `status`, `hosts list`, `hosts add`, `hosts remove`
 and `sessions list`. `hosts add` streams each setup step and the captured
-remote setup failure detail. `hosts remove` opens an action-bound request on
-the device-approval page and waits for a fresh owner passkey tap. The key alone
-never authorizes removal; refusal or expiry exits 3.
+remote setup failure detail. `hosts remove <id> --dry-run` shows what would be
+removed and changes nothing; `hosts remove <id>` removes the host and uninstalls
+its infraternal agent. Inside its `hosts:write` scope the key needs no further
+passkey tap (D333); the tap was the key's approval, and every call is audited.
 
 Hosted actions without an explicit API scope remain unavailable to the CLI;
 they cannot bypass authorization or change a temporary local collector.

@@ -36,13 +36,15 @@ pub mod remote_tls;
 #[cfg(feature = "native-streams")]
 pub mod wire_datagrams;
 
-/// Remove one enrolled host under a purpose-bound fresh owner passkey proof.
+/// Remove one enrolled host: in the browser with its own passkey assertion, or with a
+/// `hosts:write` API key inside its scope and no further tap (D333). Always dry-run first.
 pub const REMOVE: ActionDef = ActionDef {
     id: "remote.host.remove",
     summary: "Remove a host and uninstall its infraternal agent.",
     instructions: &[
         "Select the host using its ID from the server inventory.",
-        "Every removal needs a fresh owner passkey approval; an API key cannot approve it.",
+        "Run it with dry_run first to see what will be removed, then again to remove it.",
+        "A key with hosts:write removes the host without a further passkey tap; every call is audited.",
         "By default the infraternal agent, its service, and its data are removed from the host.",
         "If the host cannot be reached, its server access is still revoked and remaining cleanup is reported.",
     ],
@@ -54,7 +56,7 @@ pub const REMOVE: ActionDef = ActionDef {
     dry_run: DryRun::Required,
     opens: None,
     api_scope: Some("hosts:write"),
-    fresh_passkey: true,
+    fresh_passkey: false,
 };
 /// Internal node handoff; only an authenticated server can request its exact installation.
 pub const UNINSTALL: ActionDef = ActionDef {

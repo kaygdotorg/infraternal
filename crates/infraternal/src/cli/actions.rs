@@ -319,10 +319,16 @@ fn hosted_server_actions() -> Vec<ActionDefinition> {
             infraternal_plugin_remote::REMOVE,
             &["hosts", "remove"],
             JsonSchema::object(
-                [(
-                    "host_id".to_owned(),
-                    JsonSchema::string("ID of the host to remove."),
-                )],
+                [
+                    (
+                        "host_id".to_owned(),
+                        JsonSchema::string("ID of the host to remove."),
+                    ),
+                    (
+                        "dry_run".to_owned(),
+                        JsonSchema::boolean("Show what would be removed and change nothing."),
+                    ),
+                ],
                 ["host_id".to_owned()],
             ),
         )

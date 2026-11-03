@@ -1440,33 +1440,6 @@ mod tests {
         std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
     }
 
-    #[cfg(feature = "remote")]
-    #[tokio::test]
-    async fn production_router_mounts_the_owner_action_approval_routes() {
-        let data_dir = temp_dir();
-        let mut configuration = config(data_dir.clone());
-        configuration.public_origin = "https://auth.example.test".to_owned();
-        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
-        let (app, _) =
-            router_with_agent(configuration, EmbeddedAgent::from_test_socket(agent_socket))
-                .await
-                .expect("server router startup");
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/remote/hosts/remove/approval/inspect")
-                    .header("content-type", "application/json")
-                    .header("origin", "https://auth.example.test")
-                    .body(Body::from(r#"{"code":"AbCdEfGhIjKlMnOp"}"#))
-                    .expect("approval inspection request"),
-            )
-            .await
-            .expect("approval inspection response");
-        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
-        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
-    }
-
     /// Recreate the real runtime/router over one file database and replace its stale control socket.
     #[cfg(unix)]
     #[tokio::test]

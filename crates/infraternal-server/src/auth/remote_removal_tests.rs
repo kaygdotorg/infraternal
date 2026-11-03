@@ -115,22 +115,27 @@ async fn logout_or_role_loss_after_removal_start_preserves_host() {
     }
 }
 
-#[allow(clippy::too_many_lines)] // Keep the fresh-tap, owner-session and one-time assertions in one ordered scenario.
+/// D333: inside its `hosts:write` scope a key removes a host with no further tap. The dry run
+/// changes nothing; the removal revokes the host and completes the key's audit row in the same
+/// transaction.
 #[tokio::test]
-async fn api_key_removal_waits_for_a_fresh_owner_passkey_and_is_one_time() {
-    let mut f = fixture().await;
+async fn a_hosts_write_key_dry_runs_then_removes_without_a_tap() {
+    let f = fixture().await;
     let host = Uuid::new_v4();
-    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootful',0,1)")
-        .bind(host.as_bytes().as_slice())
-        .bind(&f.user)
-        .execute(&f.auth.pool)
-        .await
-        .unwrap();
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootful',0,1)").bind(host.as_bytes().as_slice()).bind(&f.user).execute(&f.auth.pool).await.unwrap();
     sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,'root@host.example',NULL)")
         .bind(host.as_bytes().as_slice())
         .execute(&f.auth.pool)
         .await
         .unwrap();
+    let key_hash = hash("fixture-removal-key-never-print");
+    let now = crate::runtime::unix_seconds().unwrap();
+    sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,?,'fixture-cli','[\"hosts:write\"]',?,?,0)")
+        .bind(&key_hash).bind(&f.user).bind(now).bind(now + 3600)
+        .execute(&f.auth.pool).await.unwrap();
+    let audit_id: i64 = sqlx::query_scalar("INSERT INTO api_action_audit(key_id,person_id,action_id,target_id,state,occurred_at) VALUES(?,?,'remote.host.remove',?,'pending',?) RETURNING id")
+        .bind(&key_hash).bind(&f.user).bind(host.to_string()).bind(now)
+        .fetch_one(&f.auth.pool).await.unwrap();
     let service = crate::remote_removal::Removal::new(
         f.auth.clone(),
         f.auth.pool.clone(),
@@ -138,107 +143,52 @@ async fn api_key_removal_waits_for_a_fresh_owner_passkey_and_is_one_time() {
         crate::remote_runtime::RemoteHosts::default(),
         PathBuf::new(),
     );
-    let device = f
-        .auth
-        .device_start("j94-test", vec!["hosts:write".to_owned()], NOW)
-        .await
-        .unwrap();
-    f.auth
-        .device_approve(&f.session, str_field(&device, "user_code"), NOW)
-        .await
-        .unwrap();
-    let key = f
-        .auth
-        .device_redeem(str_field(&device, "poll_token"), NOW)
-        .await
-        .unwrap();
 
-    let request = service.start_api(&key, host, true, NOW).await.unwrap();
-    let request_id = str_field(&request, "request_id").to_owned();
-    let code = str_field(&request, "user_code").to_owned();
-    assert_eq!(
-        code.len(),
-        16,
-        "the shared device-approval page accepts 16-character codes"
-    );
-    let review = service
-        .inspect_api_approval(&f.session, &code, NOW)
-        .await
-        .unwrap();
-    let ceremony = str_field(&review, "ceremony").to_owned();
-    assert!(
-        !ceremony.is_empty(),
-        "inspection must start a passkey challenge bound to this removal"
-    );
-    assert!(
-        review["options"]["publicKey"]["challenge"]
-            .as_str()
-            .is_some(),
-        "inspection must return the public challenge for that removal"
-    );
-    assert_eq!(review["action"]["label"], "Remove host.example");
-    assert_eq!(review["action"]["uninstall"], true);
-
-    let another = service.start_api(&key, host, false, NOW).await.unwrap();
-    let another_code = str_field(&another, "user_code").to_owned();
-    let another_review = service
-        .inspect_api_approval(&f.session, &another_code, NOW)
-        .await
-        .unwrap();
-    let another_ceremony = str_field(&another_review, "ceremony");
-    assert_ne!(
-        ceremony, another_ceremony,
-        "each removal gets its own challenge"
-    );
-    let wrong_proof = f.software.login(&another_review, ORIGIN, true);
-    assert!(
-        service
-            .approve_api(&f.session, &code, another_ceremony, wrong_proof, NOW + 1,)
+    let review = service.review_with_key(&f.user, host).await.unwrap();
+    assert_eq!(review["dry_run"], true);
+    assert_eq!(review["host"], "host.example");
+    assert_eq!(review["uninstall"], true);
+    let revoked = |pool: sqlx::SqlitePool| async move {
+        sqlx::query_scalar::<_, bool>("SELECT revoked_at IS NOT NULL FROM remote_hosts WHERE id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&pool)
             .await
-            .is_err()
-    );
-
-    // The API key may initiate and inspect its result, but cannot stand in for
-    // the signed-in owner's fresh passkey session.
-    let proof = f.software.login(&review, ORIGIN, true);
+            .unwrap()
+    };
     assert!(
-        service
-            .approve_api(&key, &code, &ceremony, proof.clone(), NOW)
-            .await
-            .is_err()
+        !revoked(f.auth.pool.clone()).await,
+        "a dry run changes nothing"
     );
-    let pending = service.api_status(&key, &request_id, NOW).await.unwrap();
-    assert_eq!(pending["state"], "pending");
 
     let result = service
-        .approve_api(&f.session, &code, &ceremony, proof.clone(), NOW + 60)
+        .remove_with_key(&key_hash, &f.user, host, audit_id, now)
         .await
         .unwrap();
     assert_eq!(result["state"], "removed");
+    assert!(revoked(f.auth.pool.clone()).await);
+    let audit: (String, Option<String>) =
+        sqlx::query_as("SELECT state,result FROM api_action_audit WHERE id=?")
+            .bind(audit_id)
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+    assert_eq!(audit, ("complete".to_owned(), Some("removed".to_owned())));
     assert!(
         service
-            .approve_api(&f.session, &code, &ceremony, proof, NOW + 60)
+            .remove_with_key(&key_hash, &f.user, host, audit_id, now)
             .await
-            .is_err()
+            .is_err(),
+        "a removed host cannot be removed again"
     );
-    let status = service
-        .api_status(&key, &request_id, NOW + 60)
-        .await
-        .unwrap();
-    assert_eq!(status["state"], "complete");
-    assert_eq!(status["result"]["state"], "removed");
 }
 
+/// The key path rechecks the key, its owner and the host inside the removal transaction.
 #[tokio::test]
-async fn api_removal_admission_refusal_keeps_the_request_retryable() {
-    let mut f = fixture().await;
+async fn key_removal_refuses_revoked_keys_foreign_hosts_and_missing_scope() {
+    let f = fixture().await;
     let host = Uuid::new_v4();
-    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootful',0,1)")
-        .bind(host.as_bytes().as_slice())
-        .bind(&f.user)
-        .execute(&f.auth.pool)
-        .await
-        .unwrap();
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootful',0,1)").bind(host.as_bytes().as_slice()).bind(&f.user).execute(&f.auth.pool).await.unwrap();
+    let now = crate::runtime::unix_seconds().unwrap();
     let service = crate::remote_removal::Removal::new(
         f.auth.clone(),
         f.auth.pool.clone(),
@@ -246,181 +196,49 @@ async fn api_removal_admission_refusal_keeps_the_request_retryable() {
         crate::remote_runtime::RemoteHosts::default(),
         PathBuf::new(),
     );
-    let device = f
-        .auth
-        .device_start("j94-test", vec!["hosts:write".to_owned()], NOW)
-        .await
-        .unwrap();
-    f.auth
-        .device_approve(&f.session, str_field(&device, "user_code"), NOW)
-        .await
-        .unwrap();
-    let key = f
-        .auth
-        .device_redeem(str_field(&device, "poll_token"), NOW)
-        .await
-        .unwrap();
-    let request = service.start_api(&key, host, false, NOW).await.unwrap();
-    let request_id = str_field(&request, "request_id").to_owned();
-    let code = str_field(&request, "user_code").to_owned();
-    let review = service
-        .inspect_api_approval(&f.session, &code, NOW + 1)
-        .await
-        .unwrap();
-    let ceremony = str_field(&review, "ceremony").to_owned();
-    let proof = f.software.login(&review, ORIGIN, true);
-
-    let full = service.hold_api_admission_for_test().unwrap();
+    for (name, scopes, dead) in [
+        ("fixture-dead-removal-key", "[\"hosts:write\"]", 1),
+        ("fixture-read-removal-key", "[\"hosts:read\"]", 0),
+    ] {
+        sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,?,'fixture-cli',?,?,?,?)")
+            .bind(hash(name)).bind(&f.user).bind(scopes).bind(now).bind(now + 3600).bind(dead)
+            .execute(&f.auth.pool).await.unwrap();
+        assert!(
+            service
+                .remove_with_key(&hash(name), &f.user, host, 0, now)
+                .await
+                .is_err(),
+            "{name}"
+        );
+    }
+    let live = hash("fixture-live-removal-key");
+    sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,?,'fixture-cli','[\"hosts:write\"]',?,?,0)")
+        .bind(&live).bind(&f.user).bind(now).bind(now + 3600)
+        .execute(&f.auth.pool).await.unwrap();
     assert!(
         service
-            .approve_api(&f.session, &code, &ceremony, proof.clone(), NOW + 1)
+            .review_with_key(&f.user, Uuid::new_v4())
             .await
             .is_err()
     );
-    drop(full);
-
-    assert_eq!(
-        service
-            .approve_api(&f.session, &code, &ceremony, proof, NOW + 1)
-            .await
-            .unwrap()["state"],
-        "removed",
-        "temporary admission pressure must not consume the one-time approval"
-    );
-    assert_eq!(
-        service
-            .api_status(&key, &request_id, NOW + 1)
-            .await
-            .unwrap()["state"],
-        "complete"
-    );
-}
-
-#[tokio::test]
-async fn api_key_removal_expiry_is_denied_without_a_passkey_or_host_mutation() {
-    let mut f = fixture().await;
-    let host = Uuid::new_v4();
-    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootful',0,1)")
-        .bind(host.as_bytes().as_slice())
-        .bind(&f.user)
-        .execute(&f.auth.pool)
-        .await
-        .unwrap();
-    let service = crate::remote_removal::Removal::new(
-        f.auth.clone(),
-        f.auth.pool.clone(),
-        crate::enrollment::EnrollmentStore::new(f.auth.pool.clone()),
-        crate::remote_runtime::RemoteHosts::default(),
-        PathBuf::new(),
-    );
-    let device = f
-        .auth
-        .device_start("j94-test", vec!["hosts:write".to_owned()], NOW)
-        .await
-        .unwrap();
-    f.auth
-        .device_approve(&f.session, str_field(&device, "user_code"), NOW)
-        .await
-        .unwrap();
-    let key = f
-        .auth
-        .device_redeem(str_field(&device, "poll_token"), NOW)
-        .await
-        .unwrap();
-    let started = service.start_api(&key, host, false, NOW).await.unwrap();
-    let request_id = str_field(&started, "request_id").to_owned();
-    let code = str_field(&started, "user_code").to_owned();
-    let review = service
-        .inspect_api_approval(&f.session, &code, NOW)
-        .await
-        .unwrap();
-    let ceremony = str_field(&review, "ceremony").to_owned();
-    let proof = f.software.login(&review, ORIGIN, true);
-
     assert!(
         service
-            .approve_api(&f.session, &code, &ceremony, proof, NOW + 301,)
+            .remove_with_key(&live, &f.user, Uuid::new_v4(), 0, now)
             .await
-            .is_err()
+            .is_err(),
+        "a host the owner does not have"
     );
-    let status = service
-        .api_status(&key, &request_id, NOW + 301)
-        .await
-        .unwrap();
-    assert_eq!(status["state"], "denied");
-    let live: bool = sqlx::query_scalar("SELECT revoked_at IS NULL FROM remote_hosts WHERE id=?")
+    assert!(
+        service
+            .remove_with_key(&live, "someone-else", host, 0, now)
+            .await
+            .is_err(),
+        "the key's own account only"
+    );
+    let still: bool = sqlx::query_scalar("SELECT revoked_at IS NULL FROM remote_hosts WHERE id=?")
         .bind(host.as_bytes().as_slice())
         .fetch_one(&f.auth.pool)
         .await
         .unwrap();
-    assert!(live, "an expired approval must not publish host removal");
-}
-
-#[tokio::test]
-async fn api_key_revocation_after_removal_start_blocks_passkey_approval() {
-    let mut f = fixture().await;
-    let host = Uuid::new_v4();
-    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootful',0,1)")
-        .bind(host.as_bytes().as_slice())
-        .bind(&f.user)
-        .execute(&f.auth.pool)
-        .await
-        .unwrap();
-    let service = crate::remote_removal::Removal::new(
-        f.auth.clone(),
-        f.auth.pool.clone(),
-        crate::enrollment::EnrollmentStore::new(f.auth.pool.clone()),
-        crate::remote_runtime::RemoteHosts::default(),
-        PathBuf::new(),
-    );
-    let device = f
-        .auth
-        .device_start("j94-test", vec!["hosts:write".to_owned()], NOW)
-        .await
-        .unwrap();
-    f.auth
-        .device_approve(&f.session, str_field(&device, "user_code"), NOW)
-        .await
-        .unwrap();
-    let key = f
-        .auth
-        .device_redeem(str_field(&device, "poll_token"), NOW)
-        .await
-        .unwrap();
-    let request = service.start_api(&key, host, false, NOW).await.unwrap();
-    let code = str_field(&request, "user_code");
-    let review = service
-        .inspect_api_approval(&f.session, code, NOW)
-        .await
-        .unwrap();
-    let ceremony = str_field(&review, "ceremony").to_owned();
-    let proof = f.software.login(&review, ORIGIN, true);
-    let login = f.auth.login_start(&f.user, NOW + 1).await.unwrap();
-    let fresh = f
-        .auth
-        .login_finish(
-            str_field(&login, "ceremony"),
-            f.software.login(&login, ORIGIN, true),
-            "phone",
-            NOW + 1,
-        )
-        .await
-        .unwrap();
-    f.auth
-        .api_revoke(&fresh, &hash(&key), NOW + 1)
-        .await
-        .unwrap();
-    assert!(
-        service
-            .approve_api(&fresh, code, &ceremony, proof, NOW + 1)
-            .await
-            .is_err()
-    );
-    let remains_live: bool =
-        sqlx::query_scalar("SELECT revoked_at IS NULL FROM remote_hosts WHERE id=?")
-            .bind(host.as_bytes().as_slice())
-            .fetch_one(&f.auth.pool)
-            .await
-            .unwrap();
-    assert!(remains_live, "a revoked API key cannot publish removal");
+    assert!(still);
 }
