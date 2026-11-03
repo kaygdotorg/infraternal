@@ -374,10 +374,13 @@ fn render_with_aliases(
                     .iter()
                     .any(|range| range.contains(pair.https))
         })
-        .map_or_else(String::new, |pair| format!("{}, {}", pair.http, pair.https));
+        .map_or_else(String::new, |pair| {
+            format!(" elements = {{ {}, {} }};", pair.http, pair.https)
+        });
+    // nft rejects an empty `elements = { }` list, so an empty set omits the clause.
     let _ = writeln!(
         script,
-        " set proxy_ingress_ports {{ type inet_service; elements = {{ {proxy_ingress_ports} }}; }}"
+        " set proxy_ingress_ports {{ type inet_service;{proxy_ingress_ports} }}"
     );
     for (direction, inbound) in [("incoming", true), ("outgoing", false)] {
         for (family, ipv6) in [("ipv4_addr", false), ("ipv6_addr", true)] {
@@ -750,7 +753,7 @@ mod tests {
             ]));
 
         let rules = render(&config, false);
-        assert!(rules.contains("set proxy_ingress_ports { type inet_service; elements = {  }; }"));
+        assert!(rules.contains("set proxy_ingress_ports { type inet_service; }"));
         assert!(rules.contains("set incoming4_proxy_sources { type ipv4_addr; }"));
         assert!(!rules.contains("10080-10335"));
     }
