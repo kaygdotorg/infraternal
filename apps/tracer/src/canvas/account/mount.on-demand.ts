@@ -4,9 +4,14 @@
  * mount serves the product (identity plus setup facts read on open) and the mock (a test double that knows everything),
  * so the card is one thing in both.
  *
- * This file is small and is all the first screen's path needs; the card itself (`panel.on-demand.ts`) and its styles
- * (`account.css`) load on idle after the first paint, or at the first press, whichever comes first (D188). The pill's
- * press is claimed in the capture phase straight away, so the old menu can never open in the meantime.
+ * This file is small and is fetched as soon as the canvas is up, together with the account model (`session.on-demand.ts`);
+ * the card itself (`panel.on-demand.ts`) and its styles (`account.css`) load on idle after the first paint, or at the first
+ * press, whichever comes first (D188). The pill's press is claimed in the capture phase straight away, so the old menu can
+ * never open in the meantime.
+ *
+ * It is named `*.on-demand.ts` on purpose (#330): the transfer gate (chunk-classes.ts) counts a dynamically loaded module with
+ * any other name as an entry of the critical class, and with it the words and the avatar painter that only it reaches. It is
+ * not first-paint code: the sidebar draws the person's name and picture itself.
  *
  * The card is in the sidebar, so the sidebar must be showing it: the palette actions open the sidebar first.
  */

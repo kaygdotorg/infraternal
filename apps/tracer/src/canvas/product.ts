@@ -13,7 +13,7 @@
  */
 import { mountToast } from "../../../../packages/ui/src/toast";
 import { ICON_INFO } from "../../../../packages/ui/src/icons";
-import { identityModel } from "./account/model";
+import type { StatusActionPref } from "../../../../packages/ui/src/settings-panels";
 import type { SettingsSource } from "./views/settings-body.on-demand";
 import { onDemand, whenIdle } from "../on-demand";
 import { ensureHostMarks, hostPlatformFromOs, type HostPlatform } from "../../../../packages/ui/src/host-icons";
@@ -213,44 +213,35 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   // A saved layout with a group needs the grouped module before its views are built (D212). Any other canvas starts the
   // fetch in createCanvas and does not wait for it.
   if (saved && docHasGroups(saved)) await loadGroups();
-  const accountModel = options.person ? identityModel(options.person, options.accountId, options.sessionIncarnation) : undefined;
-  let accountStatuses: SettingsSource["accountStatuses"];
-  if (accountModel) {
-    const model = accountModel;
-    let busy = false;
-    const listeners = new Set<() => void>();
-    const changed = (): void => { for (const listener of listeners) listener(); };
-    const onChange = (listener: () => void): (() => void) => {
-      listeners.add(listener);
-      const off = model.onChange(listener);
-      return () => { listeners.delete(listener); off(); };
-    };
-    accountStatuses = () => [{
-      id: "passkeys", title: "Passkeys",
-      text: () => busy ? "Follow the passkey prompts" : model.person().passkeys === undefined ? "Unavailable" : `${model.person().passkeys} set up`,
-      action: () => !busy && model.person().passkeys === 1 ? "Add a second" : undefined,
-      act: () => {
-        if (busy) return;
-        busy = true;
-        changed();
-        void import("../auth").then((auth) => auth.addSecondPasskey(options.accountId))
-          .then(() => { window.location.reload(); })
-          .catch(() => {
-            busy = false;
-            changed();
-            core.toast.show({ message: "The passkey could not be added. Reload before trying again.", tone: "error", action: { label: "Reload", onSelect: () => { window.location.reload(); } } });
-          });
-      },
-      refresh: () => undefined, onChange,
-    }, {
-      id: "recovery", title: "Recovery key",
-      text: () => model.person().recovery ? `${model.person().recovery?.setUp ? "Set up" : "Not set up"}; verification history unavailable` : undefined,
-      action: () => undefined, act: () => undefined,
-      refresh: () => undefined, onChange,
-    }];
-  }
+  // The account model and the Settings → Account rows are their own chunk (#330): they stay out of the critical class. It is
+  // fetched with the card's code once the canvas is up, or at once when Settings → Account opens first. The shell rows below
+  // are all that Settings needs synchronously: a row whose text is still undefined stays hidden and draws when the chunk lands.
+  const person = options.person;
+  let accountLoaded: import("./account/session.on-demand").AccountSession | undefined;
+  let accountLoading: Promise<import("./account/session.on-demand").AccountSession> | undefined;
+  const shellListeners = new Set<() => void>();
+  const loadAccount = (): Promise<import("./account/session.on-demand").AccountSession> => accountLoading ??= onDemand(() => import("./account/session.on-demand")).then((module) => {
+    const session = module.createAccountSession({ person: person!, accountId: options.accountId, sessionIncarnation: options.sessionIncarnation, toast: core.toast });
+    accountLoaded = session;
+    // One subscription covers both rows: the model drives the text, and the passkey row's own busy state reports through it.
+    session.statuses[0]?.onChange(() => { for (const listener of shellListeners) listener(); });
+    for (const listener of shellListeners) listener();
+    return session;
+  }, (error: unknown) => { accountLoading = undefined; throw error; });
+  const shellRow = (index: number, id: string, title: string): StatusActionPref => ({
+    id, title,
+    text: () => accountLoaded?.statuses[index]?.text(),
+    action: () => accountLoaded?.statuses[index]?.action(),
+    act: () => accountLoaded?.statuses[index]?.act(),
+    refresh: () => undefined,
+    onChange: (listener) => { shellListeners.add(listener); return () => { shellListeners.delete(listener); }; },
+  });
+  const accountStatuses: SettingsSource["accountStatuses"] = person ? () => {
+    void loadAccount().catch(() => { /* the rows stay hidden; opening Settings again retries */ });
+    return [shellRow(0, "passkeys", "Passkeys"), shellRow(1, "recovery", "Recovery key")];
+  } : undefined;
   const canvas = createCanvas(core, {
-    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined, ...(accountStatuses ? { accountStatuses, accountRefresh: () => { void accountModel?.refresh?.(); } } : {}) }, mesh, hostRemoval: removal, addHost: () => addHost.open(), authority, appWindows: createAppWindowsAdapter(connection), startupHints },
+    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined, ...(accountStatuses ? { accountStatuses, accountRefresh: () => { void loadAccount().then((session) => session.model.refresh?.()).catch(() => undefined); } } : {}) }, mesh, hostRemoval: removal, addHost: () => addHost.open(), authority, appWindows: createAppWindowsAdapter(connection), startupHints },
     float: false,
     persisted: (id) => id !== "settings",
   });
@@ -338,8 +329,8 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     .then((area) => { if (disposed) area?.dispose(); else versionArea = area; })
     .catch(() => { /* the pill is news, not a dependency */ });
   // The person's card (D283) hangs on the sidebar's person pill. Its code is its own chunk, fetched once the canvas is up.
-  let account: import("./account").AccountMount | undefined;
-  if (accountModel) {
+  let account: import("./account/mount.on-demand").AccountMount | undefined;
+  if (person) {
     // The card's chunk can arrive after the sidebar is open (a slow link, a busy device). A press on the pill in that gap must not
     // fall through to the pill's old small menu, which the card replaces: it is claimed here and the card opens once it is mounted.
     const foot = core.stage.querySelector<HTMLElement>(".ui-sidebar-foot");
@@ -351,10 +342,11 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       pressedEarly = true;
     };
     foot?.addEventListener("click", claimPress, true);
-    void import("./account").then(({ mountAccountCard }) => {
+    // The card needs the model too (its own on-demand chunk), so the press stays claimed until both have arrived.
+    void Promise.all([onDemand(() => import("./account/mount.on-demand")), loadAccount()]).then(([{ mountAccountCard }, session]) => {
       foot?.removeEventListener("click", claimPress, true);
       if (disposed) return;
-      const mounted = mountAccountCard({ core, model: accountModel, openSettings: (section) => {
+      const mounted = mountAccountCard({ core, model: session.model, openSettings: (section) => {
         // The card is a summary: choosing its home must uncover Settings, especially under the phone sidebar.
         account?.panel()?.close(false, "keyboard");
         core.stage.querySelector<HTMLButtonElement>("#sidebar-toggle[aria-expanded='true']")?.click();
