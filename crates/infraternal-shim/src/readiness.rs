@@ -12,6 +12,11 @@ mod sealed {
     use super::{AsFd, AsRawFd, OwnedFd, RawFd};
     pub trait Source {
         fn descriptor(&self) -> RawFd;
+        /// Reactor interest; read and write unless the descriptor kind
+        /// cannot report write readiness.
+        fn interest() -> tokio::io::Interest {
+            tokio::io::Interest::READABLE.add(tokio::io::Interest::WRITABLE)
+        }
     }
     impl Source for OwnedFd {
         fn descriptor(&self) -> RawFd {
@@ -40,6 +45,11 @@ mod sealed {
     impl Source for nix::sys::event::Kqueue {
         fn descriptor(&self) -> RawFd {
             self.as_fd().as_raw_fd()
+        }
+        // A kqueue descriptor supports only read filters: registering
+        // EVFILT_WRITE on it fails with EINVAL.
+        fn interest() -> tokio::io::Interest {
+            tokio::io::Interest::READABLE
         }
     }
 }
@@ -84,7 +94,7 @@ impl<T: Source> Registration<T> {
         // always return the same open descriptor. AsyncFd owns Descriptor<T>
         // until deregistration before drop. This wrapper exposes no mutable
         // owner access, so safe callers cannot close or replace it while live.
-        unsafe { AsyncFd::register(Descriptor(source)) }
+        unsafe { AsyncFd::register_with_interest(Descriptor(source), T::interest()) }
             .map(Self)
             .map_err(|error| error.into_parts().1)
     }
