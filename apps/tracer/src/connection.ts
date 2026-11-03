@@ -201,6 +201,8 @@ export class MuxConnection {
   private resumeSent = false;
   private serverVisibility = false;
   private attachedCount = 0;
+  /** The last link state given to `onConnectionChange`; undefined until the first report. */
+  private linkReported: boolean | undefined;
   /** Streams that attached on this server-side connection: the server keeps a writer row for each, up to its cap. */
   private readonly writersUsed = new Set<number>();
   /** Streams attached on the current WebSocket; resume retains terminal writers but replaces their attachments. */
@@ -364,7 +366,17 @@ export class MuxConnection {
   streamAttached(attached: boolean, streamId?: number): void {
     if (attached && streamId !== undefined) this.writersUsed.add(streamId);
     this.attachedCount = Math.max(0, this.attachedCount + (attached ? 1 : -1));
-    if (attached) { this.config.onConnectionChange?.(true); for (const l of [...this.attachListeners]) l(); }
+    if (attached) { this.reportLink(true); for (const l of [...this.attachListeners]) l(); }
+  }
+
+  /**
+   * Reports the link to the screen (`onConnectionChange`) and remembers what it was told. A stream that attaches reports
+   * "connected"; a socket that closes reports "not connected". Without a terminal to attach there is no other report, so
+   * `Welcome` repeats it after a loss (see there).
+   */
+  private reportLink(connected: boolean): void {
+    this.linkReported = connected;
+    this.config.onConnectionChange?.(connected);
   }
 
   onRoundTrip(listener: (ms: number | undefined) => void): () => void {
@@ -476,7 +488,7 @@ export class MuxConnection {
     this.calls.clear();
     this.credentials?.connectionId.fill(0);
     this.credentials?.resumeToken.fill(0);
-    this.config.onConnectionChange?.(false);
+    this.reportLink(false);
     this.socket?.close(1000, "terminal closed");
     this.streams.clear();
   }
@@ -603,7 +615,7 @@ export class MuxConnection {
     this.welcomed = false;
     this.attachedOnSocket.clear();
     this.attachedCount = 0;
-    this.config.onConnectionChange?.(false);
+    this.reportLink(false);
     this.resetPings();
     for (const call of this.calls.values()) call.reject(new Error("connection lost"));
     this.calls.clear();
@@ -782,6 +794,10 @@ export class MuxConnection {
         for (const l of [...this.welcomeListeners]) l();
         if (!this.resumeSent) this.writersUsed.clear();
         for (const s of [...this.streams.values()]) s.onWelcome(this.resumeSent);
+        // The link is back. A stream that holds a session reports it when it attaches again; a page with none (every window
+        // ended, or only views without terminals) never would, and the top pill would say "offline" for good on a link that
+        // is up and carries a live inventory. Only a recovery reports here: the first connect keeps waiting for its attach.
+        if (this.linkReported === false && ![...this.streams.values()].some((s) => s.hasSession())) this.reportLink(true);
         return;
       case "Result": {
         const pending = this.calls.get(frame.callId);
