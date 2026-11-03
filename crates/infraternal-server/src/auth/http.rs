@@ -543,27 +543,47 @@ async fn ingress(auth: &Auth, action: &str, headers: &HeaderMap, now: i64) -> su
     if matches!(action, "device-start" | "device-redeem") {
         return Ok(());
     }
-    // Browser actions keep one fixed 120/minute partition that device callers
+    // Browser actions share one fixed 120/minute partition that device callers
     // cannot spend; IP/proxy headers are never trusted here.
-    let mut budget = auth.ingress.lock().await;
-    if now - budget.window >= 60 {
-        *budget = Ingress {
-            window: now,
-            ..Ingress::default()
-        };
+    {
+        let mut budget = auth.ingress.lock().await;
+        if now - budget.window >= 60 {
+            budget.window = now;
+            budget.browser = 0;
+        }
+        if budget.browser < u32::from(BROWSER_PER_MINUTE) {
+            budget.browser += 1;
+            return Ok(());
+        }
     }
-    if budget.browser >= 120 {
+    // Once anonymous callers have spent the partition, a live signed-in session
+    // still gets its own per-person budget, so a flood cannot stop the owner
+    // from reviewing and approving an `up` (#263, J134 P2-1). The session is
+    // looked up only on this exhausted path; an invalid cookie stays throttled.
+    let Ok(token) = cookie(headers) else {
         return Err(Error::Throttled);
-    }
-    budget.browser += 1;
-    Ok(())
+    };
+    let user = auth
+        .session(token, now)
+        .await
+        .map_err(|_| Error::Throttled)?
+        .user_id;
+    let mut budget = auth.ingress.lock().await;
+    crate::runtime::admit_temporal_request(&mut budget.people, user, now, BROWSER_PER_MINUTE)
+        .map_err(|_| Error::Throttled)
 }
 
-/// Fixed-size browser admission partition; every browser action counts, including authenticated reads.
+/// Anonymous browser requests per minute, and each person's budget after that.
+const BROWSER_PER_MINUTE: u8 = 120;
+
+/// Fixed-size browser admission partition; every browser action counts,
+/// including authenticated reads. `people` holds the per-person budgets that
+/// signed-in sessions fall back to once the partition is spent.
 #[derive(Default)]
 pub(super) struct Ingress {
     window: i64,
     browser: u32,
+    people: std::collections::HashMap<String, crate::runtime::SourceBucket>,
 }
 
 /// Keep the unauthenticated response limited to first-run state and its local command.

@@ -996,18 +996,15 @@ async fn source_admission(
     let Ok(now) = unix_seconds() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    // Public device-code requests have no process-wide ceiling (one caller
-    // could spend it for everyone, #263), so this per-network budget is their
-    // only request limit and must not reset when an IPv6 caller rotates hosts.
-    let principal = if device {
-        device_source(source)
-    } else {
-        source
-    };
+    // Every auth caller is accounted to its network, never its address: an
+    // IPv6 caller rotating hosts inside one /64 must neither reset its budget
+    // nor fill the shared map and refuse everyone else (#263, J134 P2-1).
+    // Device-code requests have no process-wide ceiling, so this per-network
+    // budget is their only request limit.
     let mut buckets = policy.buckets.lock().await;
     if let Err(response) = admit_temporal_request(
         &mut buckets,
-        (principal, device),
+        (device_source(source), device),
         now,
         if device { 10 } else { 30 },
     ) {
@@ -1017,7 +1014,7 @@ async fn source_admission(
     next.run(request).await
 }
 
-/// The network a public device-code caller is accounted to: the IPv4 address,
+/// The network an auth caller is accounted to: the IPv4 address,
 /// or the /64 of an IPv6 address (one interface allocation; hosts inside it
 /// rotate freely). IPv4-mapped IPv6 addresses count as their IPv4 address.
 pub(crate) fn device_source(source: IpAddr) -> IpAddr {
@@ -1030,20 +1027,15 @@ pub(crate) fn device_source(source: IpAddr) -> IpAddr {
     }
 }
 
-/// Bounded refusal reasons share ordinary auth's exact HTTP response without
-/// allocating a boxed response for each refused request.
+/// A spent window shares ordinary auth's exact HTTP response without
+/// allocating a boxed response for each refused request. A full map never
+/// refuses: it evicts (see [`admit_temporal_request`]).
 pub(crate) enum TemporalRefusal {
-    Capacity,
     Budget,
 }
 impl IntoResponse for TemporalRefusal {
     fn into_response(self) -> Response {
         match self {
-            Self::Capacity => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "source admission capacity exhausted",
-            )
-                .into_response(),
             Self::Budget => (
                 StatusCode::TOO_MANY_REQUESTS,
                 [(header::RETRY_AFTER, "60")],
@@ -1054,18 +1046,32 @@ impl IntoResponse for TemporalRefusal {
     }
 }
 
+/// Most principals one fixed-window budget map holds.
+const TEMPORAL_PRINCIPALS: usize = 4096;
+
 /// Shared fixed-window auth budget. Expired entries are reclaimed without an
-/// idle worker; the bounded map refuses new principals when full. Keys must be
-/// server-attributed (trusted source address or live authenticated user ID).
-pub(crate) fn admit_temporal_request<K: Eq + std::hash::Hash>(
+/// idle worker. When the map is full, the principal with the oldest window is
+/// evicted, so a flood of new principals can never refuse a different caller
+/// (#263, J134 P2-1). Eviction only hands the evicted principal a fresh
+/// window early, so a flood buys at most one extra window per 4096 principals
+/// it brings. Keys must be server-attributed (trusted source network or live
+/// authenticated user ID).
+pub(crate) fn admit_temporal_request<K: Eq + std::hash::Hash + Clone>(
     buckets: &mut HashMap<K, SourceBucket>,
     principal: K,
     now: i64,
     limit: u8,
 ) -> Result<(), TemporalRefusal> {
     buckets.retain(|_, bucket| now.saturating_sub(bucket.window) < 60);
-    if !buckets.contains_key(&principal) && buckets.len() >= 4096 {
-        return Err(TemporalRefusal::Capacity);
+    if !buckets.contains_key(&principal) && buckets.len() >= TEMPORAL_PRINCIPALS {
+        // The same O(n) pass as the retain above, only on a full map.
+        if let Some(oldest) = buckets
+            .iter()
+            .min_by_key(|(_, bucket)| bucket.window)
+            .map(|(key, _)| key.clone())
+        {
+            buckets.remove(&oldest);
+        }
     }
     let bucket = buckets.entry(principal).or_insert(SourceBucket {
         window: now,
@@ -1782,6 +1788,58 @@ mod device_code_admission_tests {
             StatusCode::UNAUTHORIZED
         );
     }
+
+    /// Fresh IPv4 and IPv6 callers can still start an `up` after a flood.
+    async fn assert_fresh_sources_start(app: &Router, flood: &str) {
+        for fresh in ["203.0.113.9", "2001:db8:ffff::9"] {
+            let (status, _) = post(app, "device-start", fresh, &join_start()).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{flood}: fresh {fresh} device-start"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn one_ipv6_network_rotating_browser_calls_cannot_refuse_other_callers() {
+        // J134 P2-1: 4096 login-starts, one per address inside one /64.
+        let app = app().await;
+        let mut admitted = 0;
+        for host in 0..4096_u32 {
+            let source = format!("2001:db8:1:2::{:x}:{:x}", host >> 16, host & 0xffff);
+            if post(&app, "login-start", &source, &json!({})).await.0
+                != StatusCode::TOO_MANY_REQUESTS
+            {
+                admitted += 1;
+            }
+        }
+        // The whole /64 shares one 30/minute browser budget.
+        assert_eq!(admitted, 30);
+        assert_fresh_sources_start(&app, "one /64").await;
+    }
+
+    #[tokio::test]
+    async fn a_full_admission_map_evicts_instead_of_refusing_new_callers() {
+        // 4096 distinct /64s fill the shared map; a newcomer still gets in.
+        let app = app().await;
+        for network in 0..4096_u32 {
+            let source = format!("2001:db8:{:x}:{:x}::1", network >> 8, network & 0xff);
+            assert_ne!(
+                post(
+                    &app,
+                    "device-redeem",
+                    &source,
+                    &json!({"token": "A".repeat(43)})
+                )
+                .await
+                .0,
+                StatusCode::TOO_MANY_REQUESTS,
+                "{source}"
+            );
+        }
+        assert_fresh_sources_start(&app, "4096 networks").await;
+    }
 }
 
 #[cfg(all(test, feature = "remote"))]
@@ -1813,19 +1871,18 @@ mod temporal_admission_tests {
         assert!(admit_temporal_request(&mut buckets, 1, 61, 30).is_ok());
         assert_eq!(buckets.len(), 1);
         buckets.clear();
-        for principal in 0..4096 {
-            assert!(admit_temporal_request(&mut buckets, principal, 1, 30).is_ok());
-        }
-        assert_eq!(
-            admit_temporal_request(&mut buckets, 4096, 1, 30)
-                .unwrap_err()
-                .into_response()
-                .status(),
-            StatusCode::TOO_MANY_REQUESTS
-        );
+        // Principal 0 holds the oldest window; 1..4096 open later in the same minute.
         assert!(admit_temporal_request(&mut buckets, 0, 1, 30).is_ok());
+        for principal in 1..4096 {
+            assert!(admit_temporal_request(&mut buckets, principal, 2, 30).is_ok());
+        }
+        // A full map admits a new principal by evicting the oldest window,
+        // never by refusing the newcomer (#263, J134 P2-1).
+        assert!(admit_temporal_request(&mut buckets, 4096, 2, 30).is_ok());
         assert_eq!(buckets.len(), 4096);
-        assert!(admit_temporal_request(&mut buckets, 4096, 61, 30).is_ok());
+        assert!(!buckets.contains_key(&0));
+        assert!(buckets.contains_key(&4096));
+        assert!(admit_temporal_request(&mut buckets, 4096, 62, 30).is_ok());
         assert_eq!(buckets.len(), 1);
     }
 

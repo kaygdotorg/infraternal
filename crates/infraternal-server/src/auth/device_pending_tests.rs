@@ -120,3 +120,98 @@ async fn one_source_network_holds_at_most_five_pending_approvals() {
     f.auth.set_test_http_time(NOW + 600);
     assert_eq!(start(&app, host(5, 99), &join()).await, StatusCode::OK);
 }
+
+/// A browser call carrying `cookie` (or none), from the app's own origin.
+async fn browser(
+    app: &axum::Router,
+    action: &str,
+    cookie: Option<&str>,
+    body: &Value,
+) -> axum::response::Response {
+    let mut request = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("/auth/{action}"))
+        .header("content-type", "application/json")
+        .header("origin", ORIGIN)
+        .extension(ClientAddress(v4(77)));
+    if let Some(cookie) = cookie {
+        request = request.header("cookie", format!("__Host-infraternal={cookie}"));
+    }
+    app.clone()
+        .oneshot(
+            request
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn anonymous_flood_cannot_stop_the_owner_reviewing_an_approval() {
+    // J134 P2-1: anonymous callers spend the shared browser partition.
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = super::http::router(f.auth.clone());
+    f.auth.set_test_http_time(NOW);
+    let started = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/auth/device-start")
+                .header("content-type", "application/json")
+                .extension(ClientAddress(v4(1)))
+                .body(axum::body::Body::from(join().to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let started: Value =
+        serde_json::from_slice(&started.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    for _ in 0..120 {
+        assert_eq!(
+            browser(&app, "login-start", None, &json!({}))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+    let flooded = browser(&app, "login-start", None, &json!({})).await;
+    assert_eq!(flooded.status(), StatusCode::TOO_MANY_REQUESTS);
+    // A made-up cookie does not escape the anonymous partition.
+    assert_eq!(
+        browser(&app, "session", Some("A".repeat(43).as_str()), &json!({}))
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // The owner's live session still reviews the waiting `up`.
+    let review = browser(
+        &app,
+        "device-inspect",
+        Some(&f.session),
+        &json!({"code": started["user_code"]}),
+    )
+    .await;
+    assert_eq!(
+        review.status(),
+        StatusCode::OK,
+        "owner review was throttled"
+    );
+    // The owner's own budget is bounded too.
+    for _ in 1..120 {
+        assert_eq!(
+            browser(&app, "session", Some(&f.session), &json!({}))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        browser(&app, "session", Some(&f.session), &json!({}))
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
