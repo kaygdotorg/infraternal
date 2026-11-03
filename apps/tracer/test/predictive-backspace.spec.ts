@@ -119,13 +119,18 @@ test(`a backspace typed in the frame a backspace echo is written is placed from 
 test(`predicted cursor pixels sit on the cell edge after backspace at DPR ${dpr}`, async ({ page, context }, info) => {
   test.setTimeout(120_000);
   await openPredictingTerminal(page, context);
-  await runKeys(page, [..."pixel check"], 10);
-  await page.evaluate(() => {
-    const d = window.__tracerTestDouble!;
-    for (const key of ["\x7f", "\x7f", "\x7f"]) d.injectInput(key);
-  });
+  const typed = await runKeys(page, [..."pixel check"], 10);
+  expect(typed.violations).toEqual([]);
+  expect(typed.settled).toBe(true);
+  await expect.poll(() => page.evaluate(() =>
+    window.__tracerTestDouble?.isConnected() === true
+      && window.__tracerTestDouble.predictiveEcho()?.enabled === true,
+  ), { timeout: 30_000 }).toBe(true);
   const geometry = await page.evaluate(() => {
     const d = window.__tracerTestDouble!;
+    // Capture the pending cursor in the same task as the keys, before an echo
+    // or a route change can clear this particular prediction.
+    for (const key of ["\x7f", "\x7f", "\x7f"]) d.injectInput(key);
     const canvas = document.querySelector<HTMLCanvasElement>("#terminal-host canvas")!;
     const box = canvas.getBoundingClientRect();
     const cursor = d.predictiveEcho()!.overlay!.cursor!;
