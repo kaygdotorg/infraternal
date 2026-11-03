@@ -638,6 +638,16 @@ impl SshSession for TimedSession {
             if matches!(step, "upload" | "upload_setup") {
                 UPLOAD_STARTED.store(true, Ordering::SeqCst);
             }
+            // A Replace or Re-enroll that fails after the stuck install was set
+            // aside: refuse the new enrollment before it runs (#305 P1-1).
+            if std::env::var_os("BREAKIT2_FAIL_JOIN").is_some()
+                && script.contains("agent --data \"$stage/state\" join ")
+            {
+                println!("STUCK breakit2 inject=join_refusal step={step}");
+                return Err(Failure::install(
+                    "The fixture refused the enrollment after the set-aside.",
+                ));
+            }
             if step == "install"
                 && std::env::var_os("BREAKIT2_RETRY").is_some()
                 && FIRST_INSTALL.swap(false, Ordering::SeqCst)
