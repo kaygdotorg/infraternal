@@ -214,6 +214,17 @@ target="${CARGO_TARGET_DIR:-$root/target}"
 [[ "$target" = /* ]] || target="$root/$target"
 export CARGO_TARGET_DIR="$target"
 target_triple=aarch64-apple-darwin
+
+# .cargo/rustc.sh is the driver for the Linux static builds [D243]. It needs
+# bash 4.3 (`local -n`) and macOS ships 3.2, so use the pinned compiler directly
+# (CARGO_BUILD_RUSTC overrides the config file) and give it the same path
+# normalization as plain flags: the published binaries must not carry the build
+# machine's home directory. Changing the D243 driver is not this job's call.
+export CARGO_BUILD_RUSTC="$(rustup which rustc)"
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
+export RUSTFLAGS="--remap-path-prefix=$root=/infraternal --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$rustup_home=/rustup --remap-path-prefix=$target=/build"
+
 cargo build --locked --release --target "$target_triple" -p infraternal \
     --no-default-features --features remote,desktop --bin infraternal
 cargo build --locked --release --target "$target_triple" -p infraternal-plugin-desktop \
