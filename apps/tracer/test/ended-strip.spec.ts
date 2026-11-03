@@ -96,7 +96,9 @@ test("a refused new shell says why in the strip, and Try again recovers", async 
   const strip = win.locator(".cl-sx-strip");
   await retry(() => request.post("/__mock/refuse-next-open"));
   await strip.getByRole("button", { name: "New shell" }).click();
-  await expect(strip.locator(".cl-sx-strip-text")).toHaveText(/could not start a shell|unavailable/, { timeout: 10_000 });
+  // An "unavailable" refusal means the host's infraternal agent is not connected to the server; the strip says so and names the
+  // fix (#291, D291; terminal-refusal.ts, pinned by open-refusal.test.ts). It used to say "could not start a shell".
+  await expect(strip.locator(".cl-sx-strip-text")).toHaveText(/The infraternal agent on .+ cannot reach the server\. Check that outbound TCP 443 is allowed from /, { timeout: 10_000 });
   await expect(strip).toHaveAttribute("data-result", "refused");
   // The reason sits in the strip, not in a toast on the side.
   await expect(page.locator(".ui-toast")).toBeHidden();
