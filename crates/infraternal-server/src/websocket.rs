@@ -855,10 +855,10 @@ async fn run_socket(
                         Inbound::TransportPing(payload) => {
                             if while_authorized(&state, &user_id, &session_token, true, send_message(&mut sink, Message::Pong(payload))).await.is_err() { break; }
                         }
-                        // The transport's read task consumes socket ends and receive
-                        // failures itself (it retires the context, logged above); only
-                        // frames reach this queue.
-                        Inbound::SocketClose { .. } | Inbound::Failure(_) => {}
+                        // The transport's read task consumes socket ends, receive failures
+                        // (it retires the context, logged above) and probe Pongs (they renew
+                        // its lease) itself; only frames reach this queue.
+                        Inbound::TransportPong(_) | Inbound::SocketClose { .. } | Inbound::Failure(_) => {}
                         Inbound::Frame(wire) => {
                         if let Ok(decoded) = decode_muxed_frame(&wire)
                             && decoded.stream_id == CONTROL_STREAM
@@ -3234,6 +3234,7 @@ fn encode_session_id(session_id: &[u8; 16]) -> String {
 pub(super) enum Inbound {
     Frame(Bytes),
     TransportPing(Bytes),
+    TransportPong(Bytes),
     SocketClose {
         code: Option<u16>,
         reason: Option<&'static str>,
@@ -3265,6 +3266,7 @@ where
             Some(Inbound::TransportPing(payload)) => {
                 send_message(sink, Message::Pong(payload)).await?;
             }
+            Some(Inbound::TransportPong(_)) => {}
             Some(Inbound::SocketClose { .. } | Inbound::Failure(_)) => return Err(()),
             None => return Ok(None),
         }
@@ -3336,7 +3338,7 @@ where
                     *deadline = Some(deadline.map_or(partial, |existing| existing.min(partial)));
                 }
                 Message::Ping(payload) => return Ok(Some(Inbound::TransportPing(payload))),
-                Message::Pong(_) => {}
+                Message::Pong(payload) => return Ok(Some(Inbound::TransportPong(payload))),
                 Message::Close(frame) => {
                     let (code, reason) = frame.map_or((None, None), |frame| {
                         (

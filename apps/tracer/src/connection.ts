@@ -62,10 +62,9 @@ export function reconnectDelay(attempt: number): number {
   const step = Math.min(RECONNECT_CEILING_MS, RECONNECT_FIRST_MS * 2 ** Math.min(attempt, 10));
   return step + Math.random() * (step / 2);
 }
-const LIVENESS_TICK_MS = 25;
-// Idle waits for its correlated answer before sampling again. Ten milliseconds
-// after that answer leaves forty of the RTT + 50ms budget for scheduling jitter.
-const IDLE_PROBE_PAUSE_MS = 10;
+// Coalesce focus, page-show, and input events without a recurring idle timer.
+const ACTIVITY_PROBE_COOLDOWN_MS = 1000;
+const LIVENESS_TASK_TOLERANCE_MS = 25;
 const MAX_SOCKETS = 12;
 const VERSION = 1;
 /** Hello caps bit 0: a Resume follows this Hello. */
@@ -159,7 +158,9 @@ export class MuxConnection {
   /** One post-stall miss interval, separate from D300's two-miss deadline. */
   private livenessStallGraceAt = -Infinity;
   private lastPongAt = 0;
-  private fastProbeUntil = 0;
+  private lastActivityProbeAt = -Infinity;
+  private immediateRecovery = false;
+  private pageWasHidden = false;
   private readonly unacknowledgedInput = new Map<number, bigint>();
   // Unknown startup RTT uses the same bounded two-second grace as native routes.
   // Once sampled, smoothed RTT and variation tolerate local scheduling stalls.
@@ -179,7 +180,6 @@ export class MuxConnection {
   private nextStream = 1;
   private nextCall = 1;
   private nextPingNonce = 0n;
-  private lastPingAt = -Infinity;
   private retryTimer = 0;
   private retryAttempt = 0;
   /** Server refusals remain failures even when browser network hints lag. */
@@ -193,8 +193,10 @@ export class MuxConnection {
   private welcomedAt = 0;
   /** Retry hints stay installed from a reconnect timer until the next Welcome. */
   private retryHintListeners = false;
-  private readonly onNetworkAvailable = (): void => this.retryNow();
-  private readonly onPageVisible = (): void => { if (document.visibilityState === "visible") this.retryNow(); };
+  private readonly onNetworkAvailable = (): void => this.pageActivated(performance.now() - this.lastActivityProbeAt >= ACTIVITY_PROBE_COOLDOWN_MS);
+  private readonly onPageVisible = (): void => this.pageActivated();
+  private readonly onPageFocus = (): void => this.pageActivated();
+  private readonly onPageShow = (): void => this.pageActivated(performance.now() - this.lastActivityProbeAt >= ACTIVITY_PROBE_COOLDOWN_MS);
   private forcedDrop = false;
   private closed = false;
   private welcomed = false;
@@ -213,20 +215,59 @@ export class MuxConnection {
   constructor(private readonly config: ConnectionConfig = {}) {
     this.sessionIncarnation = config.sessionIncarnation;
     if (typeof document !== "undefined" && typeof document.addEventListener === "function") document.addEventListener("visibilitychange", this.onVisibility);
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+      window.addEventListener("focus", this.onPageFocus);
+      window.addEventListener("pageshow", this.onPageShow);
+    }
   }
 
   /** Visibility is transport state, independent of terminal and authentication state. */
   private pageVisibilityChanged(): void {
     if (this.closed) return;
-    // A retry armed before hiding must also park; its foreground hint stays installed.
-    if (this.pageHidden()) this.clearRetryTimer();
-    if (!this.isWelcomed) return;
-    this.resetPings(true);
-    this.livenessRtt = undefined;
-    this.livenessSrtt = undefined;
-    this.livenessRttvar = 0;
-    if (this.serverVisibility) this.send(CONTROL_STREAM, { type: "Event", subId: 0, eventJson: encoder.encode(JSON.stringify({ topic: "connection.visibility", hidden: this.pageHidden() })) });
-    this.scheduleLiveness();
+    if (this.pageHidden()) {
+      this.pageWasHidden = true;
+      // A hidden page sends no probes and owns no liveness deadline timer.
+      this.clearRetryTimer();
+      this.resetPings(true);
+      if (this.isWelcomed && this.serverVisibility) this.sendVisibility(true);
+      return;
+    }
+    if (this.isWelcomed && this.serverVisibility) this.sendVisibility(false);
+    const returning = this.pageWasHidden;
+    this.pageWasHidden = false;
+    this.pageActivated(returning);
+  }
+
+  private sendVisibility(hidden: boolean): void {
+    this.send(CONTROL_STREAM, {
+      type: "Event", subId: 0,
+      eventJson: encoder.encode(JSON.stringify({ topic: "connection.visibility", hidden })),
+    });
+  }
+
+  /** Resume a stale transport immediately, or prove a still-open one on demand. */
+  private pageActivated(forceProbe = false): void {
+    if (this.closed || this.pageHidden()) return;
+    const socket = this.socket;
+    if (!socket || socket.readyState === WebSocket.CLOSED) {
+      this.retryNow(true);
+      return;
+    }
+    if (socket.readyState !== WebSocket.OPEN || !this.isWelcomed) return;
+    if (forceProbe) {
+      this.resetPings(true);
+      this.lastActivityProbeAt = -Infinity;
+    }
+    this.probeForActivity();
+  }
+
+  /** Input itself is proof of activity; a quiet interval allows one prompt probe without a timer. */
+  private probeForActivity(): void {
+    if (!this.isWelcomed || this.closed || this.pageHidden() || this.pendingPings.size > 0) return;
+    const now = performance.now();
+    if (now - this.lastActivityProbeAt < ACTIVITY_PROBE_COOLDOWN_MS) return;
+    this.lastActivityProbeAt = now;
+    this.sampleRoundTrip();
   }
 
   private pageHidden(): boolean {
@@ -281,11 +322,10 @@ export class MuxConnection {
         const previous = this.unacknowledgedInput.get(streamId) ?? 0n;
         // Replayed earlier bytes cannot lower the outstanding input watermark.
         this.unacknowledgedInput.set(streamId, end > previous ? end : previous);
-        this.fastProbeUntil = performance.now() + 250;
-        this.scheduleLiveness();
       }
       onEncoded?.(performance.now());
       socket.send(this.sendScratch.subarray(0, length));
+      if (frame.type === "Input" && frame.replyTo === undefined) this.probeForActivity();
       // Terminal and desktop viewer attachments both need a Close to retire their server-side route.
       if (frame.type === "AttachTerm" || (frame.type === "Desktop" && frame.message.kind === "attach")) this.attachedOnSocket.add(streamId);
       onSent?.(performance.now());
@@ -384,18 +424,11 @@ export class MuxConnection {
     return () => { this.rttListeners.delete(listener); };
   }
 
-  /** Probe at the existing cadence; correlated RTT and jitter bound silence [D265, #199]. */
-  sampleRoundTrip(urgent = true): void {
+  /** Probe only on connection activation or input; correlated RTT and jitter bound silence [D265, #199]. */
+  sampleRoundTrip(): void {
     const startedAt = performance.now();
-    if (!this.isWelcomed || this.closed || this.pageHidden()) return;
+    if (!this.isWelcomed || this.closed || this.pageHidden() || this.pendingPings.size > 0) return;
     this.accountLivenessDelay(startedAt);
-    if (urgent) {
-      this.fastProbeUntil = startedAt + 250;
-      this.scheduleLiveness();
-    }
-    const dueAt = this.nextProbeAt();
-    if (startedAt < dueAt) return;
-    this.lastPingAt = startedAt;
     this.nextPingNonce = this.nextPingNonce >= MAX_U64 ? 1n : this.nextPingNonce + 1n;
     const nonce = this.nextPingNonce;
     // A delayed local timer cannot prove peer loss before there is a probe to answer.
@@ -411,6 +444,7 @@ export class MuxConnection {
     }
     this.pendingPings.set(nonce, startedAt);
     this.send(CONTROL_STREAM, { type: "Ping", nonce, sentUs: BigInt(Math.round(startedAt * 1000)) });
+    this.scheduleLiveness();
   }
 
   /** A pong arrived (on any stream). */
@@ -430,7 +464,6 @@ export class MuxConnection {
     this.stallGraceUsed = false;
     if (delayed) { this.scheduleLiveness(); return; }
     const ms = Math.max(1, now - startedAt);
-    if (this.livenessRtt !== undefined && ms > this.livenessRtt + 5) this.fastProbeUntil = now + Math.max(250, ms * 2);
     // Variation uses the previous smoothed RTT; only correlated replies train it.
     this.livenessRttvar = this.livenessSrtt === undefined ? ms / 2 : this.livenessRttvar * 0.75 + Math.abs(this.livenessSrtt - ms) * 0.25;
     this.livenessSrtt = this.livenessSrtt === undefined ? ms : this.livenessSrtt * 0.875 + ms * 0.125;
@@ -483,6 +516,10 @@ export class MuxConnection {
     this.closeNoteTimer = undefined;
     this.stopRetryHintListeners();
     if (typeof document !== "undefined" && typeof document.removeEventListener === "function") document.removeEventListener("visibilitychange", this.onVisibility);
+    if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+      window.removeEventListener("focus", this.onPageFocus);
+      window.removeEventListener("pageshow", this.onPageShow);
+    }
     this.resetPings();
     for (const call of this.calls.values()) call.reject(new Error("connection closed"));
     this.calls.clear();
@@ -645,7 +682,7 @@ export class MuxConnection {
   /** A late task cannot prove the page was responsive during its scheduled wait. */
   private accountLivenessDelay(now: number): boolean {
     const late = now - this.livenessDueAt;
-    if (late <= LIVENESS_TICK_MS) return false;
+    if (late <= LIVENESS_TASK_TOLERANCE_MS) return false;
     // The first stall may include the scheduled wait too. Preserve one fresh
     // miss interval after it; do not renew D300's full two-miss lease. With
     // callback gaps bounded by G and per-miss allowance A, retirement takes at
@@ -672,7 +709,9 @@ export class MuxConnection {
       return;
     }
     if (this.pageHidden()) {
+      window.clearTimeout(this.livenessTimer);
       this.livenessTimer = 0;
+      this.livenessDueAt = Infinity;
       return;
     }
     const now = performance.now();
@@ -695,30 +734,26 @@ export class MuxConnection {
       }
       return;
     }
-    this.sampleRoundTrip(false);
     this.scheduleLiveness();
   }
 
-  private nextProbeAt(): number {
-    const first = this.lastPingAt + LIVENESS_TICK_MS;
-    if (this.livenessRtt === undefined || performance.now() < this.fastProbeUntil || this.unacknowledgedInput.size > 0) return first;
-    // The response deadline stays armed while idle waits. Another request cannot
-    // redeem silence; typing or link doubt immediately restores pipelining.
-    return this.pendingPings.size > 0 ? Infinity : Math.max(first, this.lastPongAt + IDLE_PROBE_PAUSE_MS);
-  }
-
   private scheduleLiveness(): void {
-    if (!this.isWelcomed || this.closed || this.pageHidden()) return;
+    if (!this.isWelcomed || this.closed || this.pageHidden() || this.pendingPings.size === 0) {
+      // Nothing is owed: no deadline. A queued confirmation is cancelled with its timer, so drop its pending flag too;
+      // otherwise the early return below would keep every later probe from arming a deadline.
+      window.clearTimeout(this.livenessTimer);
+      this.livenessTimer = 0;
+      this.livenessDueAt = Infinity;
+      this.livenessConfirmationPending = false;
+      this.livenessConfirmationToken += 1;
+      return;
+    }
     // A zero-delay confirmation gets one socket-task turn even if input or a Pong arrives first.
     if (this.livenessConfirmationPending) return;
     window.clearTimeout(this.livenessTimer);
-    // Input or a server Ping may have sampled between timer ticks. Schedule at that probe's next due time,
-    // rather than skipping a tick and then expiring a healthy low-RTT route before another probe is sent.
     const clock = performance.now();
     this.accountLivenessDelay(clock);
-    const nextProbe = this.nextProbeAt() - clock;
-    const remaining = this.pendingPings.size > 0 ? this.responseDeadline() - clock : Infinity;
-    const delay = Math.max(1, Math.min(nextProbe, remaining));
+    const delay = Math.max(1, this.responseDeadline() - clock);
     this.livenessDueAt = clock + delay;
     this.livenessTimer = window.setTimeout(() => this.checkLiveness(), delay);
   }
@@ -727,6 +762,7 @@ export class MuxConnection {
     const socket = this.socket;
     if (!socket) return;
     this.noteClose(4000, "connection unresponsive", "this page");
+    this.immediateRecovery = true;
     this.disconnect(socket);
     this.status(plainCloseReason("connection unresponsive"));
     socket.close(4000, "connection unresponsive");
@@ -780,16 +816,12 @@ export class MuxConnection {
         this.welcomed = true;
         this.welcomedAt = performance.now();
         this.lastPongAt = this.welcomedAt;
-        this.fastProbeUntil = this.welcomedAt + 250;
         // A network change may have a different RTT; relearn before enforcing its deadline.
         this.livenessRtt = undefined;
         this.livenessSrtt = undefined;
         this.livenessRttvar = 0;
         if (this.pageHidden()) this.pageVisibilityChanged();
-        else if (!this.livenessConfirmationPending) {
-          this.livenessDueAt = this.welcomedAt + LIVENESS_TICK_MS;
-          this.livenessTimer = window.setTimeout(() => this.checkLiveness(), LIVENESS_TICK_MS);
-        }
+        else this.pageActivated(true);
         for (const subId of [...this.subscriptions.keys()]) this.openSubscription(subId);
         for (const l of [...this.welcomeListeners]) l();
         if (!this.resumeSent) this.writersUsed.clear();
@@ -828,8 +860,6 @@ export class MuxConnection {
       }
       case "Ping":
         this.send(CONTROL_STREAM, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
-        // A hidden page can answer when runnable but must not arm local deadlines.
-        if (!this.pageHidden()) this.sampleRoundTrip(false);
         return;
       case "Pong":
         this.acceptPong(frame.nonce, frame.sentUs);
@@ -853,19 +883,23 @@ export class MuxConnection {
     // a terminal really worked, check promptly during that bounded recovery
     // window, leaving one frame for paint. Refused or prolonged outages back off.
     // The first recovery can be quick; later short-lived failures use the exponential counter.
-    const delay = this.fastRecovery && this.retryAttempt === 0 ? 5 + Math.random() * 5 : reconnectDelay(this.retryAttempt);
+    const delay = this.immediateRecovery ? 0 : this.fastRecovery && this.retryAttempt === 0 ? 5 + Math.random() * 5 : reconnectDelay(this.retryAttempt);
+    this.immediateRecovery = false;
     this.retryAttempt += 1;
     this.retryTimer = window.setTimeout(() => { this.retryTimer = 0; this.connect(); }, delay);
     this.startRetryHintListeners();
   }
 
   /** Hints retry promptly without replacing an in-flight handshake or resetting refusal backoff. */
-  private retryNow(): void {
+  private retryNow(forceAfterReturn = false): void {
     if (this.closed || this.pageHidden()) return;
-    const socket = this.socket;
+    let socket = this.socket;
+    if (forceAfterReturn && socket?.readyState === WebSocket.CLOSED && this.welcomed) this.disconnect(socket);
+    socket = this.socket;
     const retryPending = this.retryTimer !== 0;
     const handshakePending = socket !== undefined && !this.welcomed;
-    if (!retryPending && !handshakePending && !this.retryHintListeners) return;
+    const socketClosed = socket?.readyState === WebSocket.CLOSED;
+    if (!retryPending && !handshakePending && !this.retryHintListeners && !(forceAfterReturn && socketClosed)) return;
     this.clearRetryTimer();
     if (!this.refusalBackoff) this.retryAttempt = 0;
     this.fastRecovery = !this.refusalBackoff && this.streams.size > 0;
@@ -873,7 +907,9 @@ export class MuxConnection {
     // discards a handshake the browser can resume when its network returns.
     if (socket && socket.readyState !== WebSocket.CLOSED) return;
     if (socket) this.socket = undefined;
+    if (forceAfterReturn) this.immediateRecovery = true;
     this.connect();
+    if (forceAfterReturn) this.immediateRecovery = false;
   }
 
   private startRetryHintListeners(): void {
@@ -906,11 +942,9 @@ export class MuxConnection {
     this.lastLivenessStallAt = -Infinity;
     this.stallGraceUsed = false;
     this.livenessStallGraceAt = -Infinity;
-    this.lastPingAt = -Infinity;
     this.lastRttReportAt = -Infinity;
     this.pendingPings.clear();
     if (!preserveInput) this.unacknowledgedInput.clear();
-    this.fastProbeUntil = 0;
     for (const l of this.rttListeners) l(undefined);
   }
 }

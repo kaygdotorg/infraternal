@@ -69,6 +69,8 @@ test("a retained unresponsive route loses readiness, resumes automatically and i
     advance(100);
     expect(connection.isWelcomed).toBe(true);
     forwarding = false;
+    // An idle route is proved on demand, not on a timer [#317]: the next activity probe goes unanswered.
+    connection.sampleRoundTrip();
     advance(526);
     expect(disconnected).toBe(1);
     expect(connection.isWelcomed).toBe(false);
