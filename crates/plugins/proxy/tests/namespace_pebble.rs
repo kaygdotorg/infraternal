@@ -36,6 +36,11 @@ use std::{
 
 const TEST_NAME: &str = "namespace_serves_a_granted_mesh_backend_with_pebble_dns01";
 const BACKEND_BODY: &[u8] = b"proxy-test-backend";
+// A host with tunnel modules loaded gives every new namespace its fallback devices. They are
+// down and carry no address or route, so they are not an external link.
+const FALLBACK_TUNNELS: &[&str] = &[
+    "tunl0", "gre0", "gretap0", "erspan0", "sit0", "ip6tnl0", "ip6gre0", "ip_vti0", "ip6_vti0",
+];
 
 /// Run the integration inside a fresh user and network namespace with loopback only.
 #[test]
@@ -73,11 +78,18 @@ fn run_namespace_case() {
         .output()
         .expect("inspect isolated namespace links");
     let links: Value = serde_json::from_slice(&links.stdout).expect("parse namespace links");
-    assert_eq!(links.as_array().map(Vec::len), Some(1));
-    assert_eq!(
-        links[0]["ifname"], "lo",
-        "test namespace must have no external link"
+    let links = links.as_array().expect("namespace link list");
+    assert!(
+        links.iter().any(|link| link["ifname"] == "lo"),
+        "test namespace must have a loopback"
     );
+    for link in links.iter().filter(|link| link["ifname"] != "lo") {
+        assert!(
+            FALLBACK_TUNNELS.contains(&link["ifname"].as_str().unwrap_or_default())
+                && link["operstate"] == "DOWN",
+            "test namespace must have no external link: {link}"
+        );
+    }
     for address in ["100.64.0.1/24", "100.64.0.2/24", "100.64.0.3/24"] {
         run("ip", &["address", "add", address, "dev", "lo"]);
     }
