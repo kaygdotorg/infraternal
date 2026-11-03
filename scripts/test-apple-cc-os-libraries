@@ -1,0 +1,62 @@
+#!/bin/sh
+# Regression for #265 P2-2: macOS links through .cargo/apple-cc.sh may load
+# only libraries the OS ships. Run on a Mac from the repository root (or pass
+# the wrapper path). It links tiny programs in a temporary directory and checks
+# that the wrapper refuses a user-writable dylib, a user-writable rpath and a
+# tool outside clang/clang++, and still links an OS-only program.
+set -eu
+
+wrapper=${1:-.cargo/apple-cc.sh}
+if [ "$(/usr/bin/uname -s)" != Darwin ]; then
+    printf 'run this regression on macOS\n' >&2
+    exit 77
+fi
+wrapper=$(cd "$(dirname -- "$wrapper")" && pwd)/$(basename -- "$wrapper")
+
+work=$(/usr/bin/mktemp -d /private/tmp/apple-cc-test.XXXXXX)
+trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
+printf 'int helper(void) { return 0; }\n' >"$work/helper.c"
+printf 'int main(void) { return 0; }\n' >"$work/plain.c"
+printf 'int helper(void);\nint main(void) { return helper(); }\n' >"$work/uses.c"
+/usr/bin/env -u SDKROOT -u DEVELOPER_DIR /usr/bin/clang -dynamiclib \
+    -install_name "$work/libhelper.dylib" -o "$work/libhelper.dylib" "$work/helper.c"
+
+failed=0
+expect() {
+    want=$1
+    label=$2
+    shift 2
+    set +e
+    "$@" >"$work/out" 2>&1
+    got=$?
+    set -e
+    if [ "$got" -eq "$want" ]; then
+        printf 'ok   %s (exit %s)\n' "$label" "$got"
+    else
+        printf 'FAIL %s: want exit %s, got %s\n' "$label" "$want" "$got"
+        /bin/cat "$work/out"
+        failed=1
+    fi
+}
+
+expect 0 'OS-only program links' "$wrapper" -o "$work/plain" "$work/plain.c"
+expect 0 'TOOLCHAINS is ignored' env TOOLCHAINS=org.example.missing \
+    "$wrapper" -o "$work/plain2" "$work/plain.c"
+expect 1 'user-writable dylib is refused' "$wrapper" -o "$work/uses" "$work/uses.c" \
+    -L"$work" -lhelper
+if [ -e "$work/uses" ]; then
+    printf 'FAIL refused output was left behind\n'
+    failed=1
+fi
+expect 1 'user-writable rpath is refused' "$wrapper" -o "$work/rpath" "$work/plain.c" \
+    -Wl,-rpath,/opt/homebrew/lib
+printf '%s\n-o\n%s\n-L%s\n-lhelper\n' "$work/uses.c" "$work/rsp" "$work" >"$work/args"
+expect 1 'response-file link is checked' "$wrapper" "@$work/args"
+expect 2 'a tool other than clang is refused' env APPLE_CC_TOOL=../bin/sh \
+    "$wrapper" -o "$work/tool" "$work/plain.c"
+expect 0 'compile-only call passes' "$wrapper" -c -o "$work/plain.o" "$work/plain.c"
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+printf 'PASS: apple-cc.sh links only OS libraries\n'
