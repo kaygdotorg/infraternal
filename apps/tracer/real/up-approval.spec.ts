@@ -95,8 +95,9 @@ test("up is approved in J82's real page and enrolls over HTTPS without port 7443
     env: {
       // Decoy sudo and systemctl come first: `up` must use the root-owned ones in /usr/bin.
       PATH: "/tmp/decoy:/usr/local/bin:/usr/bin:/bin",
+      // No HOSTNAME: shells do not export it, so the name must come from the
+      // namespace's kernel host name (`hostname up-e2e-node`, J134 P2-3).
       HOME: "/home/up",
-      HOSTNAME: MACHINE,
       XDG_DATA_HOME: "/home/up/data",
       SSL_CERT_FILE: "/etc/ssl/certs/ca-certificates.crt",
     },

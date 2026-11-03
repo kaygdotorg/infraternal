@@ -366,8 +366,18 @@ fn server_url(input: &str) -> Result<Url, Failure> {
     Ok(server)
 }
 
+/// The kernel's host name, the one fact the owner reads on the approval page.
+/// Not `$HOSTNAME`: shells keep it unexported, so every machine showed the
+/// fallback name (#263, J134 P2-3).
 fn local_hostname() -> String {
-    let name = env::var("HOSTNAME").unwrap_or_default();
+    let name = nix::unistd::gethostname()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    shown_hostname(&name)
+}
+
+/// Keep only the ASCII set the server accepts (`[A-Za-z0-9._-]`, at most 128).
+fn shown_hostname(name: &str) -> String {
     let safe = name
         .chars()
         .take(128)
@@ -1072,6 +1082,45 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
     use url::Url;
+
+    /// Child half of `the_machine_name_comes_from_the_kernel_not_the_environment`.
+    #[test]
+    #[ignore = "run only as a child process with a chosen environment"]
+    fn print_local_hostname() {
+        // On its own line: libtest prints the test name before the output.
+        println!("\nLOCAL_HOSTNAME={}", super::local_hostname());
+    }
+
+    #[test]
+    fn the_machine_name_comes_from_the_kernel_not_the_environment() {
+        // J134 P2-3: shells do not export HOSTNAME, so it is usually unset.
+        let kernel = fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
+        let expected = super::shown_hostname(kernel.trim());
+        assert_ne!(expected, "linux-host");
+        for decoy in [None, Some("decoy-from-environment")] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args([
+                "--exact",
+                "up::tests::print_local_hostname",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ]);
+            match decoy {
+                None => child.env_remove("HOSTNAME"),
+                Some(value) => child.env("HOSTNAME", value),
+            };
+            let output = child.output().unwrap();
+            assert!(output.status.success());
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let shown = stdout
+                .lines()
+                .find_map(|line| line.strip_prefix("LOCAL_HOSTNAME="))
+                .unwrap_or_else(|| panic!("no LOCAL_HOSTNAME line in {stdout:?}"));
+            assert_eq!(shown, expected, "HOSTNAME={decoy:?}");
+        }
+        assert_eq!(super::shown_hostname("a\u{202e}b c"), "a-b-c");
+    }
 
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
