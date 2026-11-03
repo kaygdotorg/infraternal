@@ -130,17 +130,16 @@ impl Auth {
     /// Return nonsecret owner and device context for one authenticated action.
     pub(crate) async fn api_authorize_context(
         &self,
-        token: &str,
+        token_hash: &str,
         scope: &str,
     ) -> Result<(String, String)> {
-        // Keep API adapters on the public authorizer so J90 sliding expiry,
+        // Keep API adapters on the J90 authorizer so sliding expiry,
         // policy clamping and revocation stay one implementation.
-        let user = self.api_authorize(token, scope).await?;
-        let token_hash = hash(token);
+        let user = self.api_authorize_key_hash(token_hash, scope).await?;
         let device: Option<String> = sqlx::query_scalar(
             "SELECT device FROM api_keys WHERE token_hash=? AND user_id=? AND dead=0",
         )
-        .bind(&token_hash)
+        .bind(token_hash)
         .bind(&user)
         .fetch_optional(&self.pool)
         .await?;
@@ -204,15 +203,20 @@ impl Auth {
     }
 
     /// Revoke an API key belonging to this user after a fresh tap.
-    /// Retaining its one-way id lets denied actions keep accurate audit attribution.
+    /// Retaining its one-way id lets denied actions keep accurate audit attribution until the
+    /// audit retention bound; `expires_at` becomes the revocation time so that bound counts
+    /// from here.
     pub async fn api_revoke(&self, session_token: &str, key_hash: &str, now: i64) -> Result<()> {
         let session = self.session(session_token, now).await?;
         session.require_fresh(now)?;
-        sqlx::query("UPDATE api_keys SET dead=1 WHERE token_hash=? AND user_id=?")
-            .bind(key_hash)
-            .bind(session.user_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE api_keys SET dead=1,expires_at=MIN(expires_at,?) WHERE token_hash=? AND user_id=?",
+        )
+        .bind(now)
+        .bind(key_hash)
+        .bind(&session.user_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

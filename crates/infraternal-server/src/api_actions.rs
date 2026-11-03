@@ -56,35 +56,93 @@ fn bearer_only(headers: &HeaderMap) -> Option<&str> {
     bearer_token(headers)
 }
 
-/// Fixed per-key window. A backward clock jump cannot give a key extra attempts.
+/// Audit rows, and the one-way ids of revoked or expired keys they name, are kept for 90
+/// days. The table also holds at most `AUDIT_MAX_ROWS` rows, so even a live key at its full
+/// rate limit cannot grow it without bound (J137 P2-1).
+pub(crate) const AUDIT_RETENTION_SECONDS: i64 = 90 * 86_400;
+const AUDIT_MAX_ROWS: i64 = 100_000;
+/// No key action stays open this long: HTTP actions time out after 15 s, the bootstrap
+/// stream finishes its row as soon as the batch starts, and a removal request expires after
+/// 300 s. A row still `pending` after this never finished (an unpolled removal, or a server
+/// restart mid-action) and is resolved as an expired denial.
+const PENDING_AUDIT_SECONDS: i64 = 3600;
+/// Retention runs at most this often, piggybacked on an audit write; there is no idle task.
+const PRUNE_INTERVAL_SECONDS: i64 = 3600;
+
+/// Apply the audit retention bound, expire never-finished rows, and drop long-dead keys.
+pub(crate) async fn prune_audit(pool: &SqlitePool, now: i64) -> Result<(), sqlx::Error> {
+    let cutoff = now.saturating_sub(AUDIT_RETENTION_SECONDS);
+    let mut tx = infraternal_plugin_api::storage::begin_immediate(pool).await?;
+    sqlx::query("UPDATE api_action_audit SET state='denied',result='expired',completed_at=? WHERE state='pending' AND occurred_at<?")
+        .bind(now)
+        .bind(now.saturating_sub(PENDING_AUDIT_SECONDS))
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM api_action_audit WHERE occurred_at<?")
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM api_action_audit WHERE id<=(SELECT id FROM api_action_audit ORDER BY id DESC LIMIT 1 OFFSET ?)")
+        .bind(AUDIT_MAX_ROWS)
+        .execute(&mut *tx)
+        .await?;
+    // A dead key's `expires_at` is its expiry or revocation time. Past the audit bound no
+    // row names it any more, and a later call with it is simply an unknown bearer.
+    sqlx::query("DELETE FROM api_keys WHERE dead=1 AND expires_at<?")
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
+}
+
+/// Calls per key per minute, shared by the HTTP route and the bootstrap stream.
+const KEY_CALLS_PER_WINDOW: u16 = 30;
+/// Calls per minute shared by every bearer that names no stored key. These are refused from
+/// a read, never take the writer and write no audit row; the bucket only bounds that read load.
+const UNKNOWN_CALLS_PER_WINDOW: u16 = 60;
+
+/// Fixed one-minute window. A backward clock jump cannot give a key extra attempts.
 #[derive(Debug, Default)]
 struct RateLimit {
     start: i64,
     used: u16,
+    /// One `denied` audit row per key per window, whatever the number of refusals.
+    denial_audited: bool,
 }
 
 impl RateLimit {
-    fn admit(&mut self, now: i64) -> bool {
+    fn admit(&mut self, now: i64, max_calls: u16) -> bool {
         const WINDOW_SECONDS: i64 = 60;
-        const MAX_CALLS: u16 = 30;
         if self.used == 0 {
             self.start = now;
         } else if now >= self.start.saturating_add(WINDOW_SECONDS) {
             self.start = now;
             self.used = 0;
+            self.denial_audited = false;
         } else if now < self.start {
             return false;
         }
-        if self.used >= MAX_CALLS {
+        if self.used >= max_calls {
             return false;
         }
         self.used += 1;
         true
     }
 
+    fn first_denial(&mut self) -> bool {
+        !std::mem::replace(&mut self.denial_audited, true)
+    }
+
     fn stale(&self, now: i64) -> bool {
         self.used == 0 || now >= self.start.saturating_add(60)
     }
+}
+
+#[derive(Default)]
+struct Limits {
+    /// Only stored keys get an entry, so random bearers cannot fill or evict this map.
+    keys: HashMap<String, RateLimit>,
+    unknown: RateLimit,
 }
 
 /// Safe identity for audit rows. The bearer value is never retained in the request state.
@@ -95,12 +153,20 @@ pub(crate) struct AuthorizedKey {
     pub(crate) device: String,
 }
 
+/// A stored, live-looking key that passed the per-key limit but has not yet been
+/// authorized for any scope.
+pub(crate) struct AdmittedKey {
+    key_id: String,
+    person_id: String,
+}
+
 /// Shared by HTTP actions and the existing bootstrap WebSocket action.
 #[derive(Clone)]
 pub(crate) struct ActionGuard {
     auth: Auth,
     pool: SqlitePool,
-    limits: Arc<Mutex<HashMap<String, RateLimit>>>,
+    limits: Arc<Mutex<Limits>>,
+    last_prune: Arc<std::sync::atomic::AtomicI64>,
 }
 
 impl ActionGuard {
@@ -109,6 +175,81 @@ impl ActionGuard {
             auth,
             pool,
             limits: Arc::default(),
+            last_prune: Arc::new(std::sync::atomic::AtomicI64::new(i64::MIN)),
+        }
+    }
+
+    /// Identify the bearer and charge its rate limit before any authorization work.
+    ///
+    /// Order (J137 P2-1): one read classifies the bearer. An unknown bearer is charged to a
+    /// shared bucket and refused without the writer or an audit row. A stored key is charged
+    /// to its own limit next, and only then does a revoked or expired key get refused. All
+    /// refusals of one key share at most one `denied` row per window. `action_id` names the
+    /// requested action for that row; callers pass a catalogue id, never caller text.
+    pub(crate) async fn admit_token(
+        &self,
+        token: &str,
+        action_id: &'static str,
+    ) -> Result<AdmittedKey, StatusCode> {
+        let key_id = crate::auth::hash(token);
+        let now = crate::runtime::unix_seconds().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        let row: Option<(String, bool, i64)> =
+            sqlx::query_as("SELECT user_id,dead,expires_at FROM api_keys WHERE token_hash=?")
+                .bind(&key_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        let Some((person_id, dead, expires_at)) = row else {
+            let admitted = self
+                .limits
+                .lock()
+                .await
+                .unknown
+                .admit(now, UNKNOWN_CALLS_PER_WINDOW);
+            return Err(if admitted {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            });
+        };
+        if !self.admit(&key_id, now).await {
+            self.audit_denied(&key_id, &person_id, action_id, now).await;
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+        if dead || expires_at <= now {
+            if !dead {
+                // J90 tombstones a key whose stored expiry passed; the refusal is the point.
+                let _ = self.auth.api_authorize_key_hash(&key_id, "").await;
+            }
+            self.audit_denied(&key_id, &person_id, action_id, now).await;
+            return Err(StatusCode::FORBIDDEN);
+        }
+        Ok(AdmittedKey { key_id, person_id })
+    }
+
+    /// Authorize an admitted key for one key-callable action's scope through J90.
+    pub(crate) async fn authorize_admitted(
+        &self,
+        admitted: AdmittedKey,
+        action: &ActionDef,
+    ) -> Result<AuthorizedKey, StatusCode> {
+        if !action.key_callable() {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        let scope = action.api_scope.ok_or(StatusCode::NOT_FOUND)?;
+        let AdmittedKey { key_id, person_id } = admitted;
+        match self.auth.api_authorize_context(&key_id, scope).await {
+            Ok((person, device)) if person == person_id => Ok(AuthorizedKey {
+                key_id,
+                person_id,
+                device,
+            }),
+            _ => {
+                let now =
+                    crate::runtime::unix_seconds().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+                self.audit_denied(&key_id, &person_id, action.id, now).await;
+                Err(StatusCode::FORBIDDEN)
+            }
         }
     }
 
@@ -118,25 +259,8 @@ impl ActionGuard {
         token: &str,
         action: &ActionDef,
     ) -> Result<AuthorizedKey, StatusCode> {
-        let action_id = action.id;
-        let scope = action.api_scope.ok_or(StatusCode::NOT_FOUND)?;
-        let key_id = crate::auth::hash(token);
-        let now = crate::runtime::unix_seconds().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-        let Ok((person_id, device)) = self.auth.api_authorize_context(token, scope).await else {
-            self.audit_denied(&key_id, action_id, now).await;
-            return Err(StatusCode::FORBIDDEN);
-        };
-        if !self.admit(&key_id, now).await {
-            self.insert_audit(&key_id, &person_id, action_id, None, "denied", now)
-                .await
-                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-            return Err(StatusCode::TOO_MANY_REQUESTS);
-        }
-        Ok(AuthorizedKey {
-            key_id,
-            person_id,
-            device,
-        })
+        let admitted = self.admit_token(token, action.id).await?;
+        self.authorize_admitted(admitted, action).await
     }
 
     /// Recheck the same key id, person and action scope without retaining the bearer value.
@@ -147,8 +271,8 @@ impl ActionGuard {
             .is_ok_and(|person_id| person_id == identity.person_id)
     }
 
-    /// Revalidate an already authenticated streaming caller against this message's own action
-    /// scope, then charge the same per-key limit as a one-shot API request.
+    /// Charge an already authenticated streaming caller the same per-key limit as a one-shot
+    /// request, then revalidate it against this message's own action scope.
     pub(crate) async fn authorize_identity(
         &self,
         identity: &AuthorizedKey,
@@ -156,22 +280,15 @@ impl ActionGuard {
     ) -> Result<i64, StatusCode> {
         let scope = action.api_scope.ok_or(StatusCode::NOT_FOUND)?;
         let now = crate::runtime::unix_seconds().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-        if !self.identity_is_live(identity, scope).await {
-            self.audit_denied(&identity.key_id, action.id, now).await;
-            return Err(StatusCode::FORBIDDEN);
-        }
         if !self.admit(&identity.key_id, now).await {
-            self.insert_audit(
-                &identity.key_id,
-                &identity.person_id,
-                action.id,
-                None,
-                "denied",
-                now,
-            )
-            .await
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            self.audit_denied(&identity.key_id, &identity.person_id, action.id, now)
+                .await;
             return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+        if !self.identity_is_live(identity, scope).await {
+            self.audit_denied(&identity.key_id, &identity.person_id, action.id, now)
+                .await;
+            return Err(StatusCode::FORBIDDEN);
         }
         Ok(now)
     }
@@ -216,28 +333,34 @@ impl ActionGuard {
 
     async fn admit(&self, key_id: &str, now: i64) -> bool {
         let mut limits = self.limits.lock().await;
-        if limits.len() >= 4096 {
-            limits.retain(|_, limit| !limit.stale(now));
+        // Entries exist only for stored keys; the cap is a backstop, not a working limit.
+        if limits.keys.len() >= 4096 {
+            limits.keys.retain(|_, limit| !limit.stale(now));
         }
-        if limits.len() >= 4096 && !limits.contains_key(key_id) {
+        if limits.keys.len() >= 4096 && !limits.keys.contains_key(key_id) {
             return false;
         }
-        limits.entry(key_id.to_owned()).or_default().admit(now)
+        limits
+            .keys
+            .entry(key_id.to_owned())
+            .or_default()
+            .admit(now, KEY_CALLS_PER_WINDOW)
     }
 
-    async fn audit_denied(&self, key_id: &str, action_id: &str, now: i64) {
-        // Scope denials and revoked/expired known keys still retain their owner attribution.
-        // An unknown random bearer has no person to attribute and creates no audit row.
-        let person_id: Option<String> =
-            sqlx::query_scalar("SELECT user_id FROM api_keys WHERE token_hash=?")
-                .bind(key_id)
-                .fetch_optional(&self.pool)
-                .await
-                .ok()
-                .flatten();
-        if let Some(person_id) = person_id {
+    /// Write this key's one `denied` row for the current window; later refusals in the same
+    /// window are counted by the limiter only. Scope denials and revoked or expired keys keep
+    /// their owner attribution.
+    async fn audit_denied(&self, key_id: &str, person_id: &str, action_id: &str, now: i64) {
+        let first = self
+            .limits
+            .lock()
+            .await
+            .keys
+            .get_mut(key_id)
+            .is_some_and(RateLimit::first_denial);
+        if first {
             let _ = self
-                .insert_audit(key_id, &person_id, action_id, None, "denied", now)
+                .insert_audit(key_id, person_id, action_id, None, "denied", now)
                 .await;
         }
     }
@@ -251,7 +374,7 @@ impl ActionGuard {
         state: &'static str,
         now: i64,
     ) -> Result<i64, sqlx::Error> {
-        sqlx::query_scalar("INSERT INTO api_action_audit(key_id,person_id,action_id,target_id,state,occurred_at) VALUES(?,?,?,?,?,?) RETURNING id")
+        let id = sqlx::query_scalar("INSERT INTO api_action_audit(key_id,person_id,action_id,target_id,state,occurred_at) VALUES(?,?,?,?,?,?) RETURNING id")
             .bind(key_id)
             .bind(person_id)
             .bind(action_id)
@@ -259,7 +382,24 @@ impl ActionGuard {
             .bind(state)
             .bind(now)
             .fetch_one(&self.pool)
-            .await
+            .await?;
+        self.prune_if_due(now).await;
+        Ok(id)
+    }
+
+    /// One caller per interval wins the swap and prunes; a failed prune retries next interval.
+    async fn prune_if_due(&self, now: i64) {
+        use std::sync::atomic::Ordering;
+        let last = self.last_prune.load(Ordering::Acquire);
+        if now < last.saturating_add(PRUNE_INTERVAL_SECONDS)
+            || self
+                .last_prune
+                .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return;
+        }
+        let _ = prune_audit(&self.pool, now).await;
     }
 }
 
@@ -611,7 +751,7 @@ async fn removal_status(
 /// Tests the authorization table, bearer parser and per-key admission independently of storage.
 #[cfg(test)]
 mod tests {
-    use super::{RateLimit, bearer_only, bearer_token};
+    use super::{KEY_CALLS_PER_WINDOW, RateLimit, bearer_only, bearer_token};
     use axum::http::{HeaderMap, HeaderValue, header};
 
     #[test]
@@ -732,10 +872,16 @@ mod tests {
     fn key_action_rate_limit_is_bounded_and_expires_after_one_minute() {
         let mut limit = RateLimit::default();
         for _ in 0..30 {
-            assert!(limit.admit(100));
+            assert!(limit.admit(100, KEY_CALLS_PER_WINDOW));
         }
-        assert!(!limit.admit(100));
-        assert!(!limit.admit(99));
-        assert!(limit.admit(160));
+        assert!(!limit.admit(100, KEY_CALLS_PER_WINDOW));
+        assert!(!limit.admit(99, KEY_CALLS_PER_WINDOW));
+        assert!(limit.first_denial());
+        assert!(!limit.first_denial());
+        assert!(limit.admit(160, KEY_CALLS_PER_WINDOW));
+        assert!(
+            limit.first_denial(),
+            "a new window may audit one denial again"
+        );
     }
 }

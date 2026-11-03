@@ -189,6 +189,167 @@ async fn successful_key_action_audit_keeps_key_id_and_person_only() {
     assert!(!serde_json::to_string(&row).unwrap().contains(token));
 }
 
+/// J137 P2-1: a leaked key that the owner revoked must not grow the audit table or hold the
+/// writer at the attacker's request rate. The limiter runs before authorization and a key
+/// records at most one `denied` row per window.
+#[tokio::test]
+async fn a_thousand_revoked_key_calls_are_limited_and_audited_once() {
+    use axum::http::StatusCode;
+
+    let f = fixture().await;
+    let token = "fixture-revoked-flood-key-never-print";
+    let now = crate::runtime::unix_seconds().unwrap();
+    sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,?,'fixture-cli','[\"hosts:write\"]',?,?,1)")
+        .bind(hash(token))
+        .bind(&f.user)
+        .bind(now)
+        .bind(now + 86_400)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let guard = crate::api_actions::ActionGuard::new(f.auth.clone(), f.auth.pool.clone());
+    let mut statuses = std::collections::BTreeMap::<u16, usize>::new();
+    for _ in 0..1000 {
+        let status = guard
+            .authorize_token(token, &infraternal_plugin_remote::REMOVE)
+            .await
+            .err()
+            .expect("a revoked key never authorizes");
+        *statuses.entry(status.as_u16()).or_default() += 1;
+    }
+    assert_eq!(
+        statuses,
+        [
+            (StatusCode::FORBIDDEN.as_u16(), 30),
+            (StatusCode::TOO_MANY_REQUESTS.as_u16(), 970)
+        ]
+        .into(),
+        "the per-key limit runs before authorization"
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_action_audit")
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1, "one denied row per key per window");
+}
+
+/// J137 P2-1: an unknown bearer is refused from a read. It neither opens the writer (the
+/// persisted key clock stays put) nor writes audit rows, and a global bucket bounds it.
+#[tokio::test]
+async fn unknown_bearers_never_take_the_writer_and_share_one_bucket() {
+    use axum::http::StatusCode;
+
+    let f = fixture().await;
+    sqlx::query("UPDATE server_settings SET api_key_time_high_water=0 WHERE id=1")
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let guard = crate::api_actions::ActionGuard::new(f.auth.clone(), f.auth.pool.clone());
+    let mut limited = 0;
+    for index in 0..1000 {
+        let status = guard
+            .authorize_token(
+                &format!("fixture-unknown-key-{index}"),
+                &infraternal_plugin_api::CORE_API_ACTIONS[0],
+            )
+            .await
+            .err()
+            .expect("an unknown key never authorizes");
+        assert!(matches!(
+            status,
+            StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
+        ));
+        limited += usize::from(status == StatusCode::TOO_MANY_REQUESTS);
+    }
+    assert!(limited > 0, "unknown bearers are rate limited too");
+    let (high_water, rows): (i64, i64) = sqlx::query_as(
+        "SELECT api_key_time_high_water,(SELECT COUNT(*) FROM api_action_audit) FROM server_settings WHERE id=1",
+    )
+    .fetch_one(&f.auth.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        high_water, 0,
+        "no writer transaction ran for an unknown key"
+    );
+    assert_eq!(rows, 0);
+}
+
+/// J137 P2-1: audit rows and revoked keys age out; a live key's rows inside the bound stay.
+#[tokio::test]
+async fn audit_rows_and_long_revoked_keys_are_pruned() {
+    let f = fixture().await;
+    let now = crate::runtime::unix_seconds().unwrap();
+    let old = now - crate::api_actions::AUDIT_RETENTION_SECONDS - 1;
+    for (token, expires_at, dead) in [
+        ("fixture-long-dead-key-never-print", old, 1),
+        ("fixture-recent-dead-key-never-print", now - 60, 1),
+        ("fixture-live-retained-key-never-print", now + 3600, 0),
+    ] {
+        sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,?,'fixture-cli','[\"status:read\"]',?,?,?)")
+            .bind(hash(token))
+            .bind(&f.user)
+            .bind(now)
+            .bind(expires_at)
+            .bind(dead)
+            .execute(&f.auth.pool)
+            .await
+            .unwrap();
+    }
+    for occurred_at in [old, old, now] {
+        sqlx::query("INSERT INTO api_action_audit(key_id,person_id,action_id,state,occurred_at) VALUES('k',?,'server.status','complete',?)")
+            .bind(&f.user)
+            .bind(occurred_at)
+            .execute(&f.auth.pool)
+            .await
+            .unwrap();
+    }
+    crate::api_actions::prune_audit(&f.auth.pool, now)
+        .await
+        .unwrap();
+    let audit: Vec<i64> = sqlx::query_scalar("SELECT occurred_at FROM api_action_audit")
+        .fetch_all(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(audit, [now]);
+    let mut keys: Vec<String> = sqlx::query_scalar("SELECT token_hash FROM api_keys")
+        .fetch_all(&f.auth.pool)
+        .await
+        .unwrap();
+    keys.sort();
+    let mut expected = [
+        hash("fixture-recent-dead-key-never-print"),
+        hash("fixture-live-retained-key-never-print"),
+    ];
+    expected.sort();
+    assert_eq!(keys, expected);
+}
+
+/// Revocation stamps the key's end of life, so retention counts from the revocation.
+#[tokio::test]
+async fn revocation_stamps_the_key_end_of_life() {
+    let f = fixture().await;
+    let token_hash = hash("fixture-revoke-stamp-key-never-print");
+    sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,?,'fixture-cli','[\"status:read\"]',?,?,0)")
+        .bind(&token_hash)
+        .bind(&f.user)
+        .bind(NOW)
+        .bind(NOW + 86_400)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    f.auth
+        .api_revoke(&f.session, &token_hash, NOW)
+        .await
+        .unwrap();
+    let expires_at: i64 = sqlx::query_scalar("SELECT expires_at FROM api_keys WHERE token_hash=?")
+        .bind(&token_hash)
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(expires_at, NOW);
+}
+
 #[tokio::test]
 async fn streamed_actions_share_the_per_key_rate_limit_and_audit_rejection() {
     use axum::http::StatusCode;
