@@ -32,6 +32,10 @@ const SERVICE_NAME: &str = "infraternal-agent.service";
 const SERVICE_BINARY: &str = "/var/lib/infraternal/bin/infraternal";
 const SERVICE_DATA: &str = "/var/lib/infraternal/agent";
 const PATH_BINARY: &str = "/usr/local/bin/infraternal";
+/// The image this process is running. Root installs this, never the file the
+/// invoking user's path names: that file may be the user's to replace between
+/// sudo starting the helper and the copy (#263, J134 P3-4).
+const RUNNING_IMAGE: &str = "/proc/self/exe";
 /// Where distributions (and `NixOS`) install the two programs `up` runs. PATH is
 /// never searched: the invoking user controls it, and a sudo policy can keep
 /// it for the root helper, so a PATH lookup could hand the machine key to
@@ -350,8 +354,8 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
             &handoff.key_pkcs8,
         ))
         .map_err(|error| map_remote_failure(&error))?;
-    let executable = env::current_exe().map_err(|_| Failure::Partial)?;
-    install_system_service(Path::new("/"), &executable, &systemctl, 0).map_err(|_| Failure::Partial)
+    install_system_service(Path::new("/"), Path::new(RUNNING_IMAGE), &systemctl, 0)
+        .map_err(|_| Failure::Partial)
 }
 
 fn server_url(input: &str) -> Result<Url, Failure> {
@@ -948,10 +952,6 @@ fn check_directory(metadata: &fs::Metadata, owner: u32) -> io::Result<()> {
 }
 
 fn copy_executable(source: &Path, destination: &Path, owner: u32) -> io::Result<()> {
-    let source_metadata = fs::metadata(source)?;
-    if !source_metadata.is_file() {
-        return Err(permission_error());
-    }
     match fs::symlink_metadata(destination) {
         Ok(metadata)
             if !metadata.is_file()
@@ -966,9 +966,30 @@ fn copy_executable(source: &Path, destination: &Path, owner: u32) -> io::Result<
     }
     let temporary = destination.with_extension(format!("{}.pending", uuid::Uuid::new_v4()));
     let result = (|| {
-        fs::copy(source, &temporary)?;
-        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))?;
-        fs::File::open(&temporary)?.sync_all()?;
+        // Hash what is read, then hash what landed on disk, and publish only
+        // a byte-identical copy. The source is opened once, so a path that
+        // changes meanwhile cannot mix two files.
+        let mut input = fs::File::open(source)?;
+        if !input.metadata()?.is_file() {
+            return Err(permission_error());
+        }
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&temporary)?;
+        let read = hash_stream(&mut input, Some(&mut output))?;
+        output.set_permissions(fs::Permissions::from_mode(0o755))?;
+        output.sync_all()?;
+        drop(output);
+        let written = hash_stream(&mut fs::File::open(&temporary)?, None)?;
+        if written != read {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "installed binary differs from the running image",
+            ));
+        }
         fs::rename(&temporary, destination)?;
         if let Some(parent) = destination.parent() {
             fs::File::open(parent)?.sync_all()?;
@@ -979,6 +1000,24 @@ fn copy_executable(source: &Path, destination: &Path, owner: u32) -> io::Result<
         let _ = fs::remove_file(temporary);
     }
     result
+}
+
+/// SHA-256 of everything `input` yields, copying it to `output` on the way.
+fn hash_stream(input: &mut impl Read, mut output: Option<&mut fs::File>) -> io::Result<[u8; 32]> {
+    let mut hasher = openssl::sha::Sha256::new();
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let read = match input.read(&mut buffer) {
+            Ok(0) => return Ok(hasher.finish()),
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        hasher.update(&buffer[..read]);
+        if let Some(output) = output.as_deref_mut() {
+            output.write_all(&buffer[..read])?;
+        }
+    }
 }
 
 fn install_path_link(path: &Path, owner: u32) -> io::Result<()> {
@@ -1445,6 +1484,36 @@ mod tests {
         assert_eq!(mode(&base.join("bin")), 0o755);
         assert_eq!(mode(&base.join("bin/infraternal")), 0o755);
         assert_eq!(mode(&base.join("agent")), 0o700, "state stays private");
+    }
+
+    #[test]
+    fn root_installs_the_running_image_byte_for_byte() {
+        // J134 P3-4: the helper copies /proc/self/exe, not a path.
+        let temporary = TemporaryDirectory::new();
+        let systemctl = temporary.0.join("systemctl");
+        fs::write(
+            &systemctl,
+            "#!/bin/sh\n[ \"$1\" != is-active ] || echo active\n",
+        )
+        .unwrap();
+        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+
+        install_system_service(
+            &temporary.0,
+            Path::new(super::RUNNING_IMAGE),
+            &systemctl,
+            nix::unistd::geteuid().as_raw(),
+        )
+        .unwrap();
+
+        let installed = fs::read(temporary.0.join("var/lib/infraternal/bin/infraternal")).unwrap();
+        let running = fs::read(std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(
+            openssl::sha::sha256(&installed),
+            openssl::sha::sha256(&running),
+            "installed binary is not the running test binary"
+        );
+        assert_eq!(super::RUNNING_IMAGE, "/proc/self/exe");
     }
 
     #[test]
