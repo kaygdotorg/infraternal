@@ -74,12 +74,22 @@ export interface DeviceApprovalReview {
 const MIN_KEY_LIFETIME_SECONDS = 3_600;
 const MAX_KEY_LIFETIME_SECONDS = 365 * 86_400;
 
-/** A key lifetime as a person reads it: hours up to two days ("24 hours"), whole days after. */
+/**
+ * A key lifetime as a person reads it: hours up to two days ("24 hours"), days after.
+ * The tap approves what this says, and the requester picks the number, so it is exact: every
+ * leftover minute and second is named ("1 hour, 59 minutes and 59 seconds"), never rounded down.
+ */
 export function keyLifetimeLabel(seconds: number): string {
-  const hours = Math.floor(seconds / 3_600);
-  if (seconds < 2 * 86_400 || seconds % 86_400 !== 0) return hours === 1 ? "1 hour" : `${hours} hours`;
-  const days = seconds / 86_400;
-  return `${days} days`;
+  const days = seconds >= 2 * 86_400 ? Math.floor(seconds / 86_400) : 0;
+  let rest = seconds - days * 86_400;
+  const hours = Math.floor(rest / 3_600);
+  rest -= hours * 3_600;
+  const minutes = Math.floor(rest / 60);
+  const parts = ([[days, "day"], [hours, "hour"], [minutes, "minute"], [rest - minutes * 60, "second"]] as const)
+    .filter(([count]) => count > 0)
+    .map(([count, unit]) => `${count} ${unit}${count === 1 ? "" : "s"}`);
+  if (parts.length < 2) return parts[0] ?? "0 seconds";
+  return `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
 }
 
 const DEVICE_APPROVAL_SCOPES = new Set([
