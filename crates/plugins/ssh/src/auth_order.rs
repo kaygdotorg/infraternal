@@ -535,9 +535,8 @@ mod tests {
             trust_lookup: Mutex::new(None),
         };
 
-        let failure = match pending.run(CHECK_SCRIPT, Input::Empty).await {
-            Ok(_) => panic!("first helper probe must request refresh"),
-            Err(failure) => failure,
+        let Err(failure) = pending.run(CHECK_SCRIPT, Input::Empty).await else {
+            panic!("first helper probe must request refresh");
         };
         assert_eq!(failure.exit_status, Some(76));
         let output = pending
