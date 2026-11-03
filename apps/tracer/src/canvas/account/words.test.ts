@@ -31,6 +31,12 @@ describe("a value says the state, and a concern says itself", () => {
     expect(recoveryReading({ setUp: true, verifiedAt: daysAgo(RECOVERY_STALE_DAYS + 1) }, NOW).mark).toBe("warn");
   });
 
+  test("unavailable verification history proves setup only, never age or possession", () => {
+    expect(recoveryReading({ setUp: true }, NOW)).toEqual({ value: "Set up", mark: "ok", tip: "Set up; verification history unavailable" });
+    expect(attention(person({ passkeys: 2, recovery: { setUp: true } }), NOW)).toBeUndefined();
+    expect(recoveryReading({ setUp: false }, NOW).value).toBe("Not set up");
+  });
+
   test("passkeys: the number when there are two or more, the concern when there are fewer", () => {
     expect(passkeyReading(2)).toMatchObject({ value: "2", mark: "ok" });
     expect(passkeyReading(12)).toMatchObject({ value: "12", mark: "ok" });

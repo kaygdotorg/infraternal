@@ -266,6 +266,7 @@ export function createAccountPanel(env: AccountPanelEnv): AccountPanel {
     if (!built) { built = build(); render(); }
     // Next to the pill that opens it, below an Inbox that may be showing.
     if (card.root.nextElementSibling !== env.before) env.parent.insertBefore(card.root, env.before);
+    void model.refresh?.();
     card.show(source);
     setOpen(true);
     if (focus) closeButton.focus({ preventScroll: true });

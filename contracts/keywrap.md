@@ -92,6 +92,7 @@ Argon2 work at two simultaneous calls; exhausted capacity fails closed.
 | login-start | `{}` (legacy `{user_id}` supported) | `{ceremony,options}` |
 | login-finish | `{ceremony,proof,device}` | restricted secure session cookie and `pending_transaction` |
 | session | `{}` | `{user_id,username,display_name,device,fresh}` and refreshed cookie |
+| account-summary | `{}` + unlocked session | `{user_id,session_incarnation,passkeys,recovery_set_up}` only; no verification history is recorded |
 | add-start | `{}` + session | enrollment options; recovery_words=null |
 | wraps | `{}` + session | `[{kind,key_id,wrap}]` for the session user |
 | recovery-start | `{username|user_id,verifier}` | `{token,delay_seconds,ready_at}` |

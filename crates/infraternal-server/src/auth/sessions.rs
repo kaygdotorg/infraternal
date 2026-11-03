@@ -34,6 +34,20 @@ impl Session {
 
 #[allow(clippy::missing_errors_doc)]
 impl Auth {
+    /// Read only setup facts, with authority and account scoping in the same statement.
+    /// No credential, recovery verifier or ciphertext is selected. Presence is not proof
+    /// that the person still holds their recovery key; verification history is unavailable.
+    pub(super) async fn account_summary(&self, token: &str, now: i64) -> Result<serde_json::Value> {
+        let row = sqlx::query("SELECT users.id AS user_id,(SELECT COUNT(*) FROM passkeys WHERE user_id=users.id) AS passkeys,(users.recovery_hash<>'' AND EXISTS(SELECT 1 FROM wraps WHERE user_id=users.id AND kind='recovery')) AS recovery_set_up FROM sessions JOIN users ON users.id=sessions.user_id WHERE sessions.token_hash=? AND sessions.unlocked=1 AND sessions.expires>?")
+            .bind(hash(token)).bind(now).fetch_optional(&self.pool).await?.ok_or(Error::Denied)?;
+        Ok(serde_json::json!({
+            "user_id": row.get::<String, _>("user_id"),
+            "session_incarnation": super::session_incarnation(token),
+            "passkeys": row.get::<i64, _>("passkeys"),
+            "recovery_set_up": row.get::<bool, _>("recovery_set_up"),
+        }))
+    }
+
     /// Slide a live session by 30 days, never resurrecting an expired or revoked record.
     pub async fn session(&self, token: &str, now: i64) -> Result<Session> {
         self.read_session(token, now, false).await

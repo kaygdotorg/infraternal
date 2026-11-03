@@ -13,6 +13,8 @@
  */
 import { mountToast } from "../../../../packages/ui/src/toast";
 import { ICON_INFO } from "../../../../packages/ui/src/icons";
+import { identityModel } from "./account/model";
+import type { SettingsSource } from "./views/settings-body.on-demand";
 import { onDemand } from "../on-demand";
 import { ensureHostMarks, hostPlatformFromOs, type HostPlatform } from "../../../../packages/ui/src/host-icons";
 import { setLinkRoundTrip } from "../../../../packages/ui/src/window-card";
@@ -223,8 +225,44 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   // A saved layout with a group needs the grouped module before its views are built (D212). Any other canvas starts the
   // fetch in createCanvas and does not wait for it.
   if (saved && docHasGroups(saved)) await loadGroups();
+  const accountModel = options.person ? identityModel(options.person, options.accountId, options.sessionIncarnation) : undefined;
+  let accountStatuses: SettingsSource["accountStatuses"];
+  if (accountModel) {
+    const model = accountModel;
+    let busy = false;
+    const listeners = new Set<() => void>();
+    const changed = (): void => { for (const listener of listeners) listener(); };
+    const onChange = (listener: () => void): (() => void) => {
+      listeners.add(listener);
+      const off = model.onChange(listener);
+      return () => { listeners.delete(listener); off(); };
+    };
+    accountStatuses = () => [{
+      id: "passkeys", title: "Passkeys",
+      text: () => busy ? "Follow the passkey prompts" : model.person().passkeys === undefined ? "Unavailable" : `${model.person().passkeys} set up`,
+      action: () => !busy && model.person().passkeys === 1 ? "Add a second" : undefined,
+      act: () => {
+        if (busy) return;
+        busy = true;
+        changed();
+        void import("../auth").then((auth) => auth.addSecondPasskey(options.accountId))
+          .then(() => { window.location.reload(); })
+          .catch(() => {
+            busy = false;
+            changed();
+            core.toast.show({ message: "The passkey could not be added. Reload before trying again.", tone: "error", action: { label: "Reload", onSelect: () => { window.location.reload(); } } });
+          });
+      },
+      refresh: () => undefined, onChange,
+    }, {
+      id: "recovery", title: "Recovery key",
+      text: () => model.person().recovery ? `${model.person().recovery?.setUp ? "Set up" : "Not set up"}; verification history unavailable` : undefined,
+      action: () => undefined, act: () => undefined,
+      refresh: () => undefined, onChange,
+    }];
+  }
   const canvas = createCanvas(core, {
-    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => { warmSetup(); addHost.open(); }, authority, appWindows: createAppWindowsAdapter(connection), startupHints },
+    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined, ...(accountStatuses ? { accountStatuses, accountRefresh: () => { void accountModel?.refresh?.(); } } : {}) }, mesh, hostRemoval: removal, addHost: () => { warmSetup(); addHost.open(); }, authority, appWindows: createAppWindowsAdapter(connection), startupHints },
     float: false,
     persisted: (id) => id !== "settings",
   });
@@ -312,9 +350,8 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     .then((area) => { if (disposed) area?.dispose(); else versionArea = area; })
     .catch(() => { /* the pill is news, not a dependency */ });
   // The person's card (D283) hangs on the sidebar's person pill. Its code is its own chunk, fetched once the canvas is up.
-  let account: { dispose(): void } | undefined;
-  if (options.person) {
-    const person = options.person;
+  let account: import("./account").AccountMount | undefined;
+  if (accountModel) {
     // The card's chunk can arrive after the sidebar is open (a slow link, a busy device). A press on the pill in that gap must not
     // fall through to the pill's old small menu, which the card replaces: it is claimed here and the card opens once it is mounted.
     const foot = core.stage.querySelector<HTMLElement>(".ui-sidebar-foot");
@@ -326,10 +363,15 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       pressedEarly = true;
     };
     foot?.addEventListener("click", claimPress, true);
-    void import("./account").then(({ mountAccountCard, identityModel }) => {
+    void import("./account").then(({ mountAccountCard }) => {
       foot?.removeEventListener("click", claimPress, true);
       if (disposed) return;
-      const mounted = mountAccountCard({ core, model: identityModel(person), openSettings: (section) => { window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${section}`, source: "pointer" } })); } });
+      const mounted = mountAccountCard({ core, model: accountModel, openSettings: (section) => {
+        // The card is a summary: choosing its home must uncover Settings, especially under the phone sidebar.
+        account?.panel()?.close(false, "keyboard");
+        core.stage.querySelector<HTMLButtonElement>("#sidebar-toggle[aria-expanded='true']")?.click();
+        window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${section}`, source: "pointer" } }));
+      } });
       account = mounted;
       if (pressedEarly) mounted?.show();
     }, () => { foot?.removeEventListener("click", claimPress, true); /* the old menu stays: better than a dead pill */ });

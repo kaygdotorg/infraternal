@@ -25,7 +25,9 @@ export interface SettingsSource {
   /** Section ids this source renders (besides the four built-in ones). */
   sections: readonly string[];
   render(section: string, pane: HTMLElement, cx: Ctx): (() => void) | void;
-  /** What the account section lists above its sign-out row (a mockup's passkeys); the product has no facts to show yet. */
+  /** Optional account security controls and static facts, above the sign-out row. */
+  accountStatuses?(): StatusActionPref[];
+  accountRefresh?(): void;
   accountFacts?(): Array<{ title: string; rows: Array<{ key: string; value: string }> }>;
 }
 
@@ -104,7 +106,15 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
       case "toolbar": return core.settingsPanels.toolbar.render(pane);
       case "shortcuts": return core.settingsPanels.shortcuts.render(pane);
       case "about": return core.settingsPanels.about.render(pane);
-      case "account": return renderAccount(pane, { groups: cx.adapters.settings.accountFacts?.() ?? [], signOut: (anchor) => { askSignOut(anchor, cx.toast); } });
+      case "account": {
+        const stop = renderAccount(pane, { groups: cx.adapters.settings.accountFacts?.() ?? [], statuses: cx.adapters.settings.accountStatuses?.() ?? [], signOut: (anchor) => { askSignOut(anchor, cx.toast); } });
+        // Settings windows are prepared off screen. Fetch only when this one comes into view.
+        const visible = new IntersectionObserver((entries) => {
+          if (cx.state.currentView === "settings" && entries.some((entry) => entry.isIntersecting)) cx.adapters.settings.accountRefresh?.();
+        });
+        visible.observe(pane);
+        return () => { visible.disconnect(); stop(); };
+      }
       default: return cx.adapters.settings.render(section, pane, cx);
     }
   })();

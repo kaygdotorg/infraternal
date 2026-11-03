@@ -12,6 +12,9 @@ use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
+#[path = "account_summary_tests.rs"]
+mod account_summary_tests;
+#[cfg(test)]
 #[path = "http_hostname_tests.rs"]
 mod hostname_tests;
 
@@ -257,6 +260,10 @@ async fn execute(
             return Ok(response);
         }
         "add-start" => auth.add_start(cookie(headers)?, now).await?,
+        "account-summary" => {
+            let _: Empty = body(value)?;
+            auth.account_summary(cookie(headers)?, now).await?
+        }
         "wraps" => auth.wraps(cookie(headers)?, now).await?,
         "unlock-session" => {
             let _: Empty = body(value)?;

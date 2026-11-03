@@ -388,6 +388,8 @@ export function renderFacts(container: HTMLElement, label: string, groups: FactG
 export interface AccountApi {
   /** Facts the product knows about the account, shown above the device group. */
   groups?: FactGroup[];
+  /** Account security uses the same state/action rows as host settings. */
+  statuses?: StatusActionPref[];
   /** Signs this device out. The product asks first (the compact confirmation) at `anchor`, the button that was pressed. */
   signOut(anchor: HTMLElement): void;
 }
@@ -398,6 +400,8 @@ export function renderAccount(container: HTMLElement, api: AccountApi): () => vo
   root.className = "ui-sp";
   container.append(root);
   const lists = factSections(root, "Account", api.groups ?? []);
+  const statuses = (api.statuses ?? []).map(statusBlock);
+  root.append(...statuses.map((status) => status.block));
   const block = document.createElement("section");
   block.dataset.kind = "this-device";
   block.append(heading("This device"));
@@ -417,5 +421,5 @@ export function renderAccount(container: HTMLElement, api: AccountApi): () => vo
   row.append(button);
   block.append(row);
   root.append(block);
-  return () => { for (const l of lists) l.dispose(); root.remove(); };
+  return () => { for (const l of lists) l.dispose(); for (const status of statuses) status.dispose(); root.remove(); };
 }
