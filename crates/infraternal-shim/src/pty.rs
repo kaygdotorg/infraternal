@@ -493,67 +493,7 @@ impl Pty {
         }
         nix::sys::stat::fchmod(&slave, nix::sys::stat::Mode::from_bits_truncate(0o600))
             .map_err(errno)?;
-        let name =
-            CString::new(user.name.clone()).map_err(|_| io::Error::other("invalid login name"))?;
-        let directory = CString::new(user.dir.as_os_str().as_bytes())
-            .map_err(|_| io::Error::other("invalid home directory"))?;
-        let root = Uid::effective().is_root();
-        let groups = if root {
-            unistd::getgrouplist(&name, user.gid).map_err(errno)?
-        } else {
-            Vec::new()
-        };
-        let target_uid = user.uid;
-        let group = user.gid;
-        let shell = if readiness || user.shell.as_os_str().is_empty() {
-            Path::new("/bin/sh")
-        } else {
-            user.shell.as_path()
-        };
-        let mut command = session_command(shell, readiness, program);
-        command
-            .env_clear()
-            .env("HOME", &user.dir)
-            .env("USER", &user.name)
-            .env("LOGNAME", &user.name)
-            .env("SHELL", shell)
-            .envs(TERMINAL_ENVIRONMENT)
-            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-            .stdin(Stdio::from(slave.try_clone()?))
-            .stdout(Stdio::from(slave.try_clone()?))
-            .stderr(Stdio::from(slave));
-        // Keep only locale values from the host environment; all other inherited
-        // variables stay scrubbed, and an explicit user locale remains authoritative.
-        for (name, value) in crate::session_locale_environment() {
-            command.env(name, value);
-        }
-        // Preserve zsh's supported profile location for isolated canaries.
-        if let Some(directory) = std::env::var_os("ZDOTDIR") {
-            command.env("ZDOTDIR", directory);
-        }
-        // SAFETY: the callback runs after fork, uses only libc-backed syscalls
-        // and existing immutable data, and neither allocates nor takes locks.
-        // Descriptor 0 is Command's installed slave; privilege order prevents
-        // retaining supplementary root groups after dropping uid.
-        prepare_child(&mut command);
-        unsafe {
-            command.pre_exec(move || {
-                restore_child_thp(child_thp)?;
-                unistd::setsid().map_err(errno)?;
-                if nix::libc::ioctl(0, nix::libc::TIOCSCTTY, 0) == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-                if root {
-                    unistd::setgroups(&groups).map_err(errno)?;
-                    unistd::setgid(group).map_err(errno)?;
-                    unistd::setuid(target_uid).map_err(errno)?;
-                }
-                // CStr uses the preallocated pointer without allocating after fork.
-                // Validate home traversal as the target uid, after dropping root.
-                unistd::chdir(directory.as_c_str()).map_err(errno)?;
-                Ok(())
-            });
-        }
+        let mut command = linux_command(&user, slave, readiness, program, child_thp)?;
         let child = command.spawn()?;
         let master = File::from(terminal.master);
         fcntl(&master, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).map_err(errno)?;
@@ -1295,6 +1235,79 @@ mod pin_exec_error_tests {
         };
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
+}
+
+/// The Linux PTY child: the account's shell with an explicit environment,
+/// dropping to the account in `pre_exec` after it becomes the session leader.
+fn linux_command(
+    user: &User,
+    slave: File,
+    readiness: bool,
+    program: &[std::ffi::OsString],
+    child_thp: Option<nix::libc::c_int>,
+) -> io::Result<Command> {
+    let name =
+        CString::new(user.name.clone()).map_err(|_| io::Error::other("invalid login name"))?;
+    let directory = CString::new(user.dir.as_os_str().as_bytes())
+        .map_err(|_| io::Error::other("invalid home directory"))?;
+    let root = Uid::effective().is_root();
+    let groups = if root {
+        unistd::getgrouplist(&name, user.gid).map_err(errno)?
+    } else {
+        Vec::new()
+    };
+    let target_uid = user.uid;
+    let group = user.gid;
+    let shell = if readiness || user.shell.as_os_str().is_empty() {
+        Path::new("/bin/sh")
+    } else {
+        user.shell.as_path()
+    };
+    let mut command = session_command(shell, readiness, program);
+    command
+        .env_clear()
+        .env("HOME", &user.dir)
+        .env("USER", &user.name)
+        .env("LOGNAME", &user.name)
+        .env("SHELL", shell)
+        .envs(TERMINAL_ENVIRONMENT)
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave));
+    // Keep only locale values from the host environment; all other inherited
+    // variables stay scrubbed, and an explicit user locale remains authoritative.
+    for (name, value) in crate::session_locale_environment() {
+        command.env(name, value);
+    }
+    // Preserve zsh's supported profile location for isolated canaries.
+    if let Some(directory) = std::env::var_os("ZDOTDIR") {
+        command.env("ZDOTDIR", directory);
+    }
+    // SAFETY: the callback runs after fork, uses only libc-backed syscalls
+    // and existing immutable data, and neither allocates nor takes locks.
+    // Descriptor 0 is Command's installed slave; privilege order prevents
+    // retaining supplementary root groups after dropping uid.
+    prepare_child(&mut command);
+    unsafe {
+        command.pre_exec(move || {
+            restore_child_thp(child_thp)?;
+            unistd::setsid().map_err(errno)?;
+            if nix::libc::ioctl(0, nix::libc::TIOCSCTTY, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if root {
+                unistd::setgroups(&groups).map_err(errno)?;
+                unistd::setgid(group).map_err(errno)?;
+                unistd::setuid(target_uid).map_err(errno)?;
+            }
+            // CStr uses the preallocated pointer without allocating after fork.
+            // Validate home traversal as the target uid, after dropping root.
+            unistd::chdir(directory.as_c_str()).map_err(errno)?;
+            Ok(())
+        });
+    }
+    Ok(command)
 }
 
 // The broker inherits the host login environment/limits; legacy PTYs start
