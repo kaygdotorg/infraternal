@@ -116,7 +116,7 @@ test(`a backspace typed in the frame a backspace echo is written is placed from 
   expect(result.report!.overlayColumn).toBe(result.start - 2);
 });
 
-test(`predicted cursor pixels sit on the cell edge after backspace at DPR ${dpr}`, async ({ page, context }) => {
+test(`predicted cursor pixels sit on the cell edge after backspace at DPR ${dpr}`, async ({ page, context }, info) => {
   test.setTimeout(120_000);
   await openPredictingTerminal(page, context);
   await runKeys(page, [..."pixel check"], 10);
@@ -131,7 +131,19 @@ test(`predicted cursor pixels sit on the cell edge after backspace at DPR ${dpr}
     const cursor = d.predictiveEcho()!.overlay!.cursor!;
     return { left: box.x + cursor.x, top: box.y + cursor.y, width: cursor.width, height: cursor.height, cw: d.rendererMetrics()!.cellWidth };
   });
-  const png = await page.screenshot({ scale: "device" });
+  const geometryEvidence = await page.evaluate(() => {
+    const source = document.querySelector<HTMLCanvasElement>("#terminal-host canvas")!;
+    const overlay = document.querySelector<HTMLCanvasElement>("#terminal-host .terminal-text-overlay")!;
+    return { sourceLeft: source.getBoundingClientRect().x, sourceTop: source.getBoundingClientRect().y,
+      overlayLeft: overlay.getBoundingClientRect().x, overlayTop: overlay.getBoundingClientRect().y,
+      sourceOffsetLeft: source.offsetLeft, sourceOffsetTop: source.offsetTop };
+  });
+  console.log("PREDICTED_CURSOR_GEOMETRY", JSON.stringify(geometryEvidence));
+  const screenshotPath = info.outputPath("predicted-backspace-cursor.png");
+  const png = await page.screenshot({ path: screenshotPath, scale: "device" });
+  await info.attach("predicted-backspace-cursor", { path: screenshotPath, contentType: "image/png" });
+  expect(geometryEvidence.overlayLeft).toBeCloseTo(geometryEvidence.sourceLeft, 2);
+  expect(geometryEvidence.overlayTop).toBeCloseTo(geometryEvidence.sourceTop, 2);
   const edges = await page.evaluate(async ({ base64, geometry, dpr }) => {
     const image = new Image();
     image.src = `data:image/png;base64,${base64}`;

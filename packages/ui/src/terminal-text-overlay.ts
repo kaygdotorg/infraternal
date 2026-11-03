@@ -223,10 +223,19 @@ export class TerminalTextOverlay {
   private syncGeometry(source: HTMLCanvasElement, dpr: number): void {
     const key = `${source.width}x${source.height}@${dpr}`;
     if (key === this.offsetKey) return;
+    // offsetLeft/Top round rem-based padding to whole CSS pixels. Preserve the
+    // renderer's fractional origin, undoing any shared canvas zoom first. These
+    // local offsets remain valid while the common scroll container moves.
+    const sourceBox = source.getBoundingClientRect();
+    const hostBox = this.host.getBoundingClientRect();
+    const sourceStyle = getComputedStyle(source);
+    const scaleX = sourceBox.width / Number.parseFloat(sourceStyle.width);
+    const scaleY = sourceBox.height / Number.parseFloat(sourceStyle.height);
+    // A hidden pane can warm before layout; retry its geometry when it is shown.
+    if (!(scaleX > 0) || !(scaleY > 0)) return;
     this.offsetKey = key;
-    // Both canvases live in the same scroll container, so offsets (not client rects) stay valid while it scrolls.
-    this.canvas.style.left = `${source.offsetLeft}px`;
-    this.canvas.style.top = `${source.offsetTop}px`;
+    this.canvas.style.left = `${(sourceBox.left - hostBox.left) / scaleX + this.host.scrollLeft - this.host.clientLeft}px`;
+    this.canvas.style.top = `${(sourceBox.top - hostBox.top) / scaleY + this.host.scrollTop - this.host.clientTop}px`;
     this.canvas.style.width = source.style.width || `${source.width / dpr}px`;
     this.canvas.style.height = source.style.height || `${source.height / dpr}px`;
     // Resizing a canvas clears it and resets its transform.
