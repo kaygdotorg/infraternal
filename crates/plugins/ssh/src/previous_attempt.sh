@@ -30,7 +30,9 @@ setup_lock_descriptor() {
  setup_lock_pid=$setup_candidate
  setup_lock_birth=$process_start_ticks
  setup_lock_epoch=
- if [ -f "$base/.bootstrap-lock/lease" ] && [ ! -L "$base/.bootstrap-lock/lease" ]; then
+ # The lease record dates the lock only when it names this holder. Any other
+ # holder, such as the parent guard's, is dated by its own start (#305).
+ if parse_setup_lease "$base/.bootstrap-lock/lease" && [ "$setup_lease_pid" = "$setup_candidate" ]; then
   setup_lease_epoch=$(stat -c '%Y' "$base/.bootstrap-lock/lease" 2>/dev/null || :)
   case "$setup_lease_epoch" in ''|*[!0-9]*) :;; *) setup_lock_epoch=$setup_lease_epoch;; esac
  fi
@@ -79,6 +81,7 @@ report_setup_lock() {
    if [ -n "${parent:-}" ] && setup_lock_descriptor "$setup_candidate" "$setup_process/fd/9" "$parent"; then break; fi
   done
  fi
+ setup_lock_attempt=$(setup_attempt "$setup_stage")
  setup_since=unknown
  case "$setup_lock_epoch" in ''|*[!0-9]*) :;;
   *) setup_since=$(date -u -d "@$setup_lock_epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || :);;
@@ -87,7 +90,18 @@ report_setup_lock() {
   [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) :;;
   *) setup_since=unknown;;
  esac
- printf 'INFRATERNAL_SETUP_LOCKED %s %s %s %s\n' "$setup_locked_machine" "$setup_lock_pid" "$setup_lock_birth" "$setup_since"
+ printf 'INFRATERNAL_SETUP_LOCKED %s %s %s %s %s\n' "$setup_locked_machine" "$setup_lock_pid" "$setup_lock_birth" "$setup_since" "$setup_lock_attempt"
+}
+# The setup attempt that owns a stage, from its own transaction record, or
+# "unknown"; it names the lock holder in the diagnostic (#305).
+setup_attempt() {
+ setup_attempt_value=
+ if [ -f "$1/transaction" ] && [ ! -L "$1/transaction" ] && [ -O "$1/transaction" ] && [ "$(stat -c '%s' "$1/transaction" 2>/dev/null || :)" = 33 ]; then
+  IFS= read -r setup_attempt_value < "$1/transaction" || setup_attempt_value=
+ fi
+ case "$setup_attempt_value" in *[!0-9a-f]*|'') setup_attempt_value=unknown;; esac
+ [ "${#setup_attempt_value}" = 32 ] || [ "$setup_attempt_value" = unknown ] || setup_attempt_value=unknown
+ printf '%s\n' "$setup_attempt_value"
 }
 private_tree() {
  setup_tree=$1
@@ -264,7 +278,7 @@ inspect_upgrade() {
  if [ -e "/proc/$setup_upgrade_lease_pid/stat" ]; then
   process_start_ticks "$setup_upgrade_lease_pid" || refuse lease
   if [ "$process_start_ticks" = "$setup_upgrade_lease_birth" ] && [ -L "/proc/$setup_upgrade_lease_pid/fd/7" ] && [ "$stage" -ef "/proc/$setup_upgrade_lease_pid/fd/7" ]; then
-   printf 'INFRATERNAL_SETUP_LOCKED %s %s %s %s\n' "$setup_locked_machine" "$setup_upgrade_lease_pid" "$setup_upgrade_lease_birth" "$setup_since"
+   printf 'INFRATERNAL_SETUP_LOCKED %s %s %s %s %s\n' "$setup_locked_machine" "$setup_upgrade_lease_pid" "$setup_upgrade_lease_birth" "$setup_since" "$previous_transaction"
    return
   fi
  fi

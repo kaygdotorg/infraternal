@@ -64,9 +64,10 @@ function sessionsLine(lock: NonNullable<FailureDetail["setup_lock"]>): string {
 
 /** Turn the validated host lease coordinates into the message shown in the flow. */
 function setupLockLine(lock: NonNullable<FailureDetail["setup_lock"]>, active: boolean): string {
-  const owner = lock.pid === undefined ? "an unidentified process" : `process ${lock.pid}`;
+  const process = lock.pid === undefined ? "an unidentified process" : `process ${lock.pid}`;
+  const owner = lock.attempt ? `setup attempt ${lock.attempt} (${process})` : process;
   return active
-    ? `${owner[0]?.toUpperCase()}${owner.slice(1)} on ${lock.machine} holds the setup lock since ${lock.since}.`
+    ? `${owner[0]?.toUpperCase()}${owner.slice(1)} on ${lock.machine} has held the setup lock since ${lock.since}.`
     : `The failed install on ${lock.machine} was last held by ${owner} since ${lock.since}.`;
 }
 
@@ -208,7 +209,7 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
     case "setup_running": return {
       title: failure.setup_lock ? "Setup is running on " + failure.setup_lock.machine : "Setup is already running on this host",
       happened: failure.setup_lock ? setupLockLine(failure.setup_lock, true) : failure.message,
-      next: failure.setup_lock ? "Wait for it to finish. If it stays stuck, replace the stuck install." : "Another setup for this host hasn't finished. Wait for it, or try again in a moment.",
+      next: failure.setup_lock ? "Wait for it to finish, then try again. A setup that stopped releases the lock within 3 minutes." : "Another setup for this host hasn't finished. Wait for it, or try again in a moment.",
       fix: "retry",
       tone: "info",
     };

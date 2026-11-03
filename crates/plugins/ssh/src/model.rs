@@ -280,6 +280,9 @@ pub(crate) struct SetupLock {
     pid: Option<u32>,
     since: String,
     active: bool,
+    /// The setup attempt that holds or last held the lock, by its first id characters (#305).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt: Option<String>,
     /// Open terminal sessions a stuck-install replacement ends (#305, D13).
     #[serde(skip_serializing_if = "Option::is_none")]
     sessions: Option<u16>,
@@ -371,9 +374,23 @@ impl Failure {
             pid,
             since,
             active,
+            attempt: None,
             sessions: None,
             enrolled_with: None,
         });
+        self
+    }
+
+    /// Name the setup attempt that holds the lock; the host's own name says only where it is.
+    #[must_use]
+    pub(crate) fn with_setup_attempt(mut self, attempt: Option<uuid::Uuid>) -> Self {
+        if let Some(lock) = self
+            .ids
+            .as_deref_mut()
+            .and_then(|ids| ids.setup_lock.as_mut())
+        {
+            lock.attempt = attempt.map(|attempt| attempt.simple().to_string()[..8].to_owned());
+        }
         self
     }
 
@@ -403,14 +420,20 @@ impl Failure {
             || "unknown process".to_owned(),
             |pid| format!("process {pid}"),
         );
+        let holder = lock.attempt.as_ref().map_or_else(
+            || process.clone(),
+            |attempt| format!("setup attempt {attempt} ({process})"),
+        );
         if lock.active {
+            // Only an upgrade journal offers a replacement, and only once its
+            // lease is gone; a running setup can only be waited for (#305).
             return Cow::Owned(format!(
-                "On {}, {process} holds the setup lock since {}. If the install is stuck, retry after the lease expires, then replace the stuck install.",
+                "On {}, {holder} has held the setup lock since {}. Wait for it to finish, then try again. A setup that stopped releases the lock within 3 minutes of its last step.",
                 lock.machine, lock.since
             ));
         }
         let mut text = format!(
-            "The failed setup on {} left a lease last held by {process} since {}.",
+            "The failed setup on {} left a lease last held by {holder} since {}.",
             lock.machine, lock.since
         );
         if let Some(server) = &lock.enrolled_with {

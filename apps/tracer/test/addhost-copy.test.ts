@@ -32,7 +32,7 @@ test("a setup already running says to wait", () => {
   expect(guide).toMatchObject({ title: "Setup is already running on this host", fix: "retry", tone: "info" });
 });
 
-test("a held setup lock identifies its machine, process, age and replacement path", () => {
+test("a held setup lock identifies its machine, attempt, process and age", () => {
   const failure = {
     kind: "setup_running",
     message: "Setup is already running on this host.",
@@ -40,8 +40,11 @@ test("a held setup lock identifies its machine, process, age and replacement pat
     setup_lock: { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: true },
   } as unknown as FailureDetail;
   const guide = guideFor("fixture host", failure);
-  expect(guide.happened).toBe("Process 254 on build-node holds the setup lock since 2026-11-02T04:05:06Z.");
-  expect(guide.next).toContain("replace the stuck install");
+  expect(guide.happened).toBe("Process 254 on build-node has held the setup lock since 2026-11-02T04:05:06Z.");
+  // Only an upgrade journal offers a replacement; a running setup is waited for (#305).
+  expect(guide.next).toBe("Wait for it to finish, then try again. A setup that stopped releases the lock within 3 minutes.");
+  const named = guideFor("fixture host", { ...failure, setup_lock: { ...failure.setup_lock!, attempt: "1a2b3c4d" } } as FailureDetail);
+  expect(named.happened).toBe("Setup attempt 1a2b3c4d (process 254) on build-node has held the setup lock since 2026-11-02T04:05:06Z.");
 });
 
 test("a failed upgrade offers an explicit stuck-install replacement", () => {

@@ -442,6 +442,45 @@ transaction={TRANSACTION}
             self.assertEqual(fields[:2], ['INFRATERNAL_SETUP_LOCKED', socket.gethostname()])
             self.assertEqual(fields[2:4], [str(child.pid), start_time])
             self.assertEqual(fields[4], since)
+            self.assertEqual(fields[5], 'unknown', 'the parent guard names no setup attempt')
+            child.communicate(b'done\n')
+
+    def test_parent_guard_holder_is_dated_by_its_own_start_not_another_lease(self):
+        # A stage whose old lease names a dead process must not date the live
+        # holder of the parent guard (#305).
+        self.listener.close()
+        stage = self.base / '.bootstrap-lock'
+        stage.mkdir(mode=0o700)
+        lease = stage / 'lease'
+        lease.write_text('99999999 1\n')
+        lease.chmod(0o600)
+        os.utime(lease, (1_000_000_000, 1_000_000_000))
+        transaction = stage / 'transaction'
+        transaction.write_text(TRANSACTION + '\n')
+        transaction.chmod(0o600)
+        inspect_now = self.temp / 'inspect-now'
+        observer = subprocess.Popen(
+            ['/bin/sh', '-c', self.shell_script(
+                f'\nwhile [ ! -e "{inspect_now}" ]; do sleep 0.01; done\ninspect_previous'
+            )],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=dict(os.environ, HOME=str(self.home)),
+        )
+        self.children.append(observer)
+        with subprocess.Popen(['/bin/sh', '-c', 'exec 9< "$1"; flock 9; echo ready; read answer', 'sh', str(self.base.parent)], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
+            self.assertEqual(child.stdout.readline(), b'ready\n')
+            stat = Path(f'/proc/{child.pid}/stat').read_text()
+            start_time = stat[stat.rfind(') ') + 2:].split()[19]
+            boot_time = next(int(line.split()[1]) for line in Path('/proc/stat').read_text().splitlines() if line.startswith('btime '))
+            since = datetime.datetime.fromtimestamp(boot_time + int(start_time) / os.sysconf('SC_CLK_TCK'), datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            inspect_now.touch(mode=0o600)
+            stdout, stderr = observer.communicate(timeout=5)
+            fields = stdout.decode().strip().split(' ')
+            self.assertEqual(observer.returncode, 0, stderr.decode())
+            self.assertEqual(fields[2], str(child.pid))
+            self.assertEqual(fields[4], since)
+            self.assertEqual(fields[5], TRANSACTION, 'the stage names its own attempt')
             child.communicate(b'done\n')
 
     def test_upgrade_journal_rejects_extra_lease_fields(self):
@@ -600,6 +639,7 @@ observe_manager() {{
             lease.stat().st_mtime, datetime.timezone.utc
         ).strftime('%Y-%m-%dT%H:%M:%SZ')
         self.assertEqual(fields[4], since)
+        self.assertEqual(fields[5], 'unknown', 'this stage has no transaction record')
         holder.communicate(b'done\n', timeout=5)
 
     def test_replacement_keeps_an_unauthenticated_payload_process_and_stays_retryable(self):

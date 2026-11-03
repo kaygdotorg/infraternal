@@ -126,13 +126,27 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
         .ok_or_else(refused)?
         .split(' ')
         .collect();
-    if let ["INFRATERNAL_SETUP_LOCKED", machine, pid, birth, since] = fields.as_slice() {
+    if let [
+        "INFRATERNAL_SETUP_LOCKED",
+        machine,
+        pid,
+        birth,
+        since,
+        attempt,
+    ] = fields.as_slice()
+    {
         let (machine, pid, since) = parse_active_lock(machine, pid, birth, since)?;
+        let attempt = if *attempt == "unknown" {
+            None
+        } else {
+            Some(canonical_id(attempt)?)
+        };
         return Err(Failure::new(
             FailureKind::SetupRunning,
             "Setup is already running on this host.",
         )
-        .with_setup_lock(machine, pid, since, true));
+        .with_setup_lock(machine, pid, since, true)
+        .with_setup_attempt(attempt));
     }
     if let ["INFRATERNAL_SETUP_REFUSED", cause] = fields.as_slice() {
         return Err(Failure::install(refusal_message(cause)));
@@ -342,6 +356,7 @@ impl PreviousAttempt {
                     owner.since.clone(),
                     false,
                 )
+                .with_setup_attempt(Some(self.transaction))
                 .with_stuck_install(
                     self.sockets,
                     reenroll.then(|| {

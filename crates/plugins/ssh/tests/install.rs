@@ -1894,7 +1894,7 @@ async fn active_transaction_is_live_between_ssh_setup_commands() {
         refused.kind,
         infraternal_plugin_ssh::model::FailureKind::SetupRunning
     );
-    assert!(refused.to_string().contains("holds the setup lock"));
+    assert!(refused.to_string().contains("has held the setup lock"));
     assert!(fixture.base().join(".bootstrap-lock").exists());
     transaction.rollback().await.unwrap();
     assert!(!fixture.base().exists());
@@ -1932,8 +1932,10 @@ fn earlier_attempt_lock_diagnostic_names_machine_process_and_start_time() {
     use infraternal_plugin_ssh::model::FailureKind;
 
     let check = "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\n";
-    let lock =
-        format!("{check}INFRATERNAL_SETUP_LOCKED build-node 254 9917 2026-11-02T04:05:06Z\n");
+    let lock = format!(
+        "{check}INFRATERNAL_SETUP_LOCKED build-node 254 9917 2026-11-02T04:05:06Z {}\n",
+        "2".repeat(32)
+    );
     let error = infraternal_plugin_ssh::previous_attempt::parse_check(lock.as_bytes()).unwrap_err();
     assert_eq!(error.kind, FailureKind::SetupRunning);
     let message = serde_json::to_value(error).unwrap()["message"]
@@ -1943,7 +1945,26 @@ fn earlier_attempt_lock_diagnostic_names_machine_process_and_start_time() {
     assert!(message.contains("build-node"));
     assert!(message.contains("254"));
     assert!(message.contains("2026-11-02T04:05:06Z"));
-    assert!(message.contains("holds the setup lock"));
+    assert!(message.contains("setup attempt 22222222 (process 254) has held the setup lock"));
+    // A running setup can only be waited for; replacement is offered only for
+    // an upgrade journal whose lease is gone (#305).
+    assert!(!message.contains("replace"), "{message}");
+    let unknown = lock.replace(&"2".repeat(32), "unknown");
+    let message = serde_json::to_value(
+        infraternal_plugin_ssh::previous_attempt::parse_check(unknown.as_bytes()).unwrap_err(),
+    )
+    .unwrap()["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        message.contains("process 254 has held the setup lock"),
+        "{message}"
+    );
+    for bad in ["2", "Z".repeat(32).as_str(), ""] {
+        let record = lock.replace(&"2".repeat(32), bad);
+        assert!(infraternal_plugin_ssh::previous_attempt::parse_check(record.as_bytes()).is_err());
+    }
 }
 
 #[test]
