@@ -74,9 +74,12 @@ impl AutoAuth {
             .transport
             .open(destination.clone(), credentials, mesh)
             .await?;
-        // Opening the SSH session proves this credential authenticated. Keep the
-        // session even when the read-only check returns a recoverable command status:
-        // callers may need the same connection to refresh an old setup helper.
+        // Only an allowlisted read-only check reaches this method. An adapter may
+        // authenticate lazily, when the check runs, so an Auth refusal without a
+        // command status still means this credential failed: return it and let the
+        // caller try the next method. A command status proves authentication; keep
+        // the session then, because a caller may need the same connection to
+        // refresh an old setup helper (exit 76).
         let result = if bridge {
             session.check_stream(script).await
         } else {
@@ -85,7 +88,12 @@ impl AutoAuth {
                 .await
                 .map(|output| (output, None))
         };
-        Ok((session, result))
+        match result {
+            Err(error) if error.kind == FailureKind::Auth && error.exit_status.is_none() => {
+                Err(error)
+            }
+            result => Ok((session, result)),
+        }
     }
 
     async fn automatic(
