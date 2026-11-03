@@ -21,6 +21,7 @@ agent = [
     "dep:tracing",
     "dep:gotatun-fork",
     "dep:infraternal-linux-tun",
+    "tokio/rt-multi-thread",
 ]
 # Relayed pairs through the seam C shim and relay address observation [313].
 relay = ["agent", "dep:socket2", "dep:infraternal-plugin-relay", "infraternal-plugin-relay/runtime", "infraternal-mesh/relay"]

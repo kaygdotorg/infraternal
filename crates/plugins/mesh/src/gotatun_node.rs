@@ -347,13 +347,28 @@ impl Drop for Engine {
     }
 }
 
+/// Most worker threads the engine runtime uses. `GotaTun` runs UDP receive and decryption, TUN
+/// reads, TUN writes, and encryption as separate tasks joined by channels; on one thread those
+/// hand-offs only add work (#260 R4b). The bound keeps a large host from giving the mesh every
+/// core.
+const ENGINE_WORKERS_MAX: usize = 4;
+
 fn engine_runtime() -> io::Result<(tokio::runtime::Runtime, bool)> {
+    // Transparent huge pages are disabled for the whole process before any engine thread or
+    // buffer exists.
     set_thp_disable(true).map_err(io::Error::from)?;
     let thp_disabled = get_thp_disable().map_err(io::Error::from)?;
     if !thp_disabled {
         return Err(io::ErrorKind::Unsupported.into());
     }
-    let runtime = RuntimeBuilder::new_current_thread().enable_all().build()?;
+    let workers = thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(ENGINE_WORKERS_MAX);
+    let runtime = RuntimeBuilder::new_multi_thread()
+        .worker_threads(workers)
+        .thread_name("infraternal-mesh-gotatun")
+        .enable_all()
+        .build()?;
     Ok((runtime, thp_disabled))
 }
 
@@ -732,6 +747,18 @@ mod tests {
         assert_eq!(
             EngineKind::parse(Some("gotatun")).expect("selectable engine"),
             EngineKind::GotaTun
+        );
+    }
+
+    /// `GotaTun`'s packet tasks are joined by channels and need worker threads to run in
+    /// parallel; the process keeps transparent huge pages off (#260 R4b).
+    #[test]
+    fn engine_runtime_runs_packet_tasks_on_worker_threads() {
+        let (runtime, thp_disabled) = super::engine_runtime().expect("engine runtime");
+        assert!(thp_disabled, "transparent huge pages stay disabled");
+        assert_eq!(
+            runtime.handle().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
         );
     }
 
