@@ -347,11 +347,32 @@ impl Default for SavedState {
     }
 }
 
-/// Return only the assigned peer host addresses that belong on the utun interface.
+/// How this node enforces D164 access rules, as `mesh status` reports it.
+///
+/// The Mac node has no packet filter yet (#265 slice 3), so it cannot narrow
+/// what a peer may reach. Until it can, it fails closed: see [`installed_peers`].
+pub const ENFORCEMENT: &str = "unavailable";
+
+/// The peers this node may connect to while it cannot enforce access rules.
+///
+/// The coordinator also distributes a peer when only the opposite direction is
+/// granted (`inbound` is `None`) or when the grant is narrowed to ports. A
+/// `WireGuard` peer would reach every port on this Mac in both cases, so only a
+/// peer that may open connections to every port here (`inbound` is `All`) is
+/// installed. The coordinator is always installed: every node may reach it
+/// (D164). The cost is that an arrow from this Mac to a node without the
+/// reverse arrow does not work until enforcement arrives.
+fn installed_peers(config: &Config) -> impl Iterator<Item = &crate::dataplane::PeerPolicy> {
+    config.peers.iter().filter_map(|(node, policy)| {
+        (config.server == Some(*node)
+            || matches!(policy.inbound, crate::policy::rules::TrafficPolicy::All))
+        .then_some(policy)
+    })
+}
+
+/// Return only the installed peers' host addresses that belong on the utun interface.
 fn route_addresses(config: &Config) -> BTreeSet<IpAddr> {
-    config
-        .peers
-        .values()
+    installed_peers(config)
         .flat_map(|policy| {
             [
                 IpAddr::V4(policy.peer.addresses.ipv4),
@@ -481,10 +502,9 @@ fn parse_utun_payload(frame: &[u8]) -> io::Result<&[u8]> {
     Ok(payload)
 }
 
+/// Convert the installed peers (see [`installed_peers`]) into `WireGuard` peers with host routes.
 fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
-    config
-        .peers
-        .values()
+    installed_peers(config)
         .map(|policy| {
             let peer = &policy.peer;
             let addresses = [
@@ -1437,6 +1457,89 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["10.254.0.4/32", "fd01::4/128"]
         );
+    }
+
+    fn peer_policy(id: u8, inbound: TrafficPolicy) -> PeerPolicy {
+        PeerPolicy {
+            peer: Peer {
+                key: PublicKey([id; 32]),
+                addresses: Addresses {
+                    ipv4: Ipv4Addr::new(10, 254, 0, id),
+                    ipv6: format!("fd01::{id}").parse().expect("peer IPv6"),
+                },
+                endpoint: None,
+            },
+            inbound,
+            outbound: TrafficPolicy::All,
+        }
+    }
+
+    fn installed_keys(config: &Config) -> BTreeSet<[u8; 32]> {
+        peers_for_config(config)
+            .expect("convert peers")
+            .iter()
+            .map(|peer| *peer.public_key.as_bytes())
+            .collect()
+    }
+
+    /// D164 deny-by-default must hold while the Mac has no packet filter (#265 P1-2).
+    #[test]
+    fn peers_without_full_inbound_access_are_not_installed() {
+        let mut config = config();
+        config.peers = BTreeMap::from([
+            // The coordinator is reachable by every node, whatever its inbound grant.
+            (NodeId(1), peer_policy(11, TrafficPolicy::None)),
+            (NodeId(4), peer_policy(4, TrafficPolicy::All)),
+            // Only this Mac → 5 is granted; 5 must not reach the Mac.
+            (NodeId(5), peer_policy(5, TrafficPolicy::None)),
+            // 6 → Mac is narrowed to one port, which this node cannot enforce.
+            (
+                NodeId(6),
+                peer_policy(
+                    6,
+                    TrafficPolicy::Ports(BTreeSet::from([crate::policy::rules::Port {
+                        protocol: crate::policy::rules::Protocol::Tcp,
+                        number: 22,
+                    }])),
+                ),
+            ),
+        ]);
+
+        assert_eq!(installed_keys(&config), BTreeSet::from([[11; 32], [4; 32]]));
+        let routes = route_addresses(&config);
+        for absent in [5, 6] {
+            assert!(!routes.contains(&IpAddr::V4(Ipv4Addr::new(10, 254, 0, absent))));
+        }
+        assert!(routes.contains(&IpAddr::V4(Ipv4Addr::new(10, 254, 0, 4))));
+        assert_eq!(super::ENFORCEMENT, "unavailable");
+    }
+
+    #[test]
+    fn revoking_an_arrow_removes_the_installed_peer() {
+        let old = config();
+        let identity = Identity {
+            public_key: old.local_key.expect("bound key"),
+            port: 51820,
+            compact_access: true,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_names: false,
+        };
+        assert_eq!(installed_keys(&old), BTreeSet::from([[2; 32]]));
+
+        // The coordinator keeps the peer because Mac → 4 is still granted.
+        let mut revoked = old.clone();
+        revoked.version += 1;
+        revoked.peers.get_mut(&NodeId(4)).expect("peer 4").inbound = TrafficPolicy::None;
+        let mut pending = None;
+        let mut applied = None;
+        for chunk in crate::configuration::chunks(Some(&old), &revoked).expect("delta") {
+            applied = stage_chunk(&mut pending, Some(&old), &identity, chunk).expect("stage delta");
+        }
+        let applied = applied.expect("complete revision");
+
+        assert!(applied.peers.contains_key(&NodeId(4)));
+        assert!(installed_keys(&applied).is_empty());
+        assert!(route_addresses(&applied).is_empty());
     }
 
     #[test]

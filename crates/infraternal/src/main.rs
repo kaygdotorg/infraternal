@@ -397,16 +397,8 @@ fn report_mesh_service_status_result(
             let (state, message, exit) =
                 mesh_status_result(operation, status.loaded, status.running);
             emit(
-                CommandResult::new(
-                    command,
-                    state,
-                    message,
-                    json!({
-                        "loaded": status.loaded,
-                        "running": status.running,
-                        "pid": status.pid,
-                    }),
-                ),
+                CommandResult::new(command, state, message, mesh_status_data(status))
+                    .with_details(MESH_ENFORCEMENT_DETAILS),
                 json_output,
                 exit,
             )
@@ -430,6 +422,21 @@ fn report_mesh_service_status_result(
             },
         ),
     }
+}
+
+/// Says what `enforcement: unavailable` means for someone reading `mesh status`.
+#[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+const MESH_ENFORCEMENT_DETAILS: &str = "Access rules are not enforced on this Mac yet, so it connects only to the server and to peers allowed to reach every port on it.";
+
+/// The machine-readable `mesh status` fields; `enforcement` reports the access-rule gap (#265).
+#[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+fn mesh_status_data(status: infraternal_plugin_mesh::macos_service::Status) -> serde_json::Value {
+    json!({
+        "loaded": status.loaded,
+        "running": status.running,
+        "pid": status.pid,
+        "enforcement": infraternal_plugin_mesh::macos_node::ENFORCEMENT,
+    })
 }
 
 #[cfg(all(feature = "plugin-mesh", any(target_os = "macos", test)))]
@@ -2061,6 +2068,18 @@ mod dispatch_tests {
 
     #[cfg(feature = "plugin-mesh")]
     use super::mesh_status_result;
+
+    #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+    #[test]
+    fn mesh_status_reports_that_access_rules_are_not_enforced() {
+        let data = super::mesh_status_data(infraternal_plugin_mesh::macos_service::Status {
+            loaded: true,
+            running: true,
+            pid: Some(42),
+        });
+        assert_eq!(data["enforcement"], "unavailable");
+        assert_eq!(data["running"], true);
+    }
     use super::{ExitCode, dispatch_selected_action};
     #[cfg(feature = "plugin-mesh")]
     use crate::cli::output::{CommandState, Exit};
