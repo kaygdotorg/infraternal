@@ -5,6 +5,12 @@ version = 2
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# ring is the binary's one crypto library (D289 rejected AWS-LC as a second one). A dependency
+# that defaults to AWS-LC must be built with its ring backend.
+deny = [
+    { crate = "aws-lc-rs", reason = "D289: ring is the only crypto library" },
+    { crate = "aws-lc-sys", reason = "D289: ring is the only crypto library" },
+]
 
 [licenses]
 version = 2
