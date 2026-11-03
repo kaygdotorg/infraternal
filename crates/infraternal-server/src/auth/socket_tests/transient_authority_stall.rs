@@ -188,6 +188,11 @@ async fn terminal_stream_survives_authority_stalls_without_loss_or_reorder() {
             let wire = tokio::time::timeout(Duration::from_secs(5), browser.next())
                 .await
                 .unwrap_or_else(|_| panic!("no output after a {stall_ms} ms stall"));
+            // Answer native liveness probes as a browser does [#317].
+            if let Some(Ok(Message::Ping(payload))) = wire {
+                browser.send(Message::Pong(payload)).await.unwrap();
+                continue;
+            }
             let Some(Ok(Message::Binary(bytes))) = wire else {
                 panic!("a {stall_ms} ms authority stall closed the terminal socket: {wire:?}");
             };

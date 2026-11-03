@@ -286,6 +286,187 @@ async fn browser_credit_case(overload: bool) {
     backend.abort();
 }
 
+/// A visible browser route is probed only with native WebSocket Ping control frames, and native
+/// Pongs alone keep it past the startup ceiling. A hidden route gets no probe of any kind and is
+/// not retired by that silence; becoming visible again restarts native probing [#317, D300].
+#[tokio::test(start_paused = true)]
+#[allow(clippy::too_many_lines)]
+async fn browser_route_probes_natively_while_visible_and_not_at_all_while_hidden() {
+    let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
+    let f = fixture().await;
+    let session = [73_u8; 16];
+    sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen) VALUES(?,?,unixepoch(),unixepoch())")
+        .bind(session.as_slice())
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let (socket, peer) = UnixStream::pair().unwrap();
+    let (address, server) = credit_server(&f, socket).await;
+    let (observed, _inputs) = tokio::sync::mpsc::channel(4);
+    let backend = tokio::spawn(input_backend(peer, observed));
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut browser, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .unwrap();
+    assert_server_hello(&mut browser).await;
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 4,
+            client_info: "native-liveness",
+        },
+    )
+    .await;
+    read_welcome(&mut browser).await;
+    // Probing starts once a terminal is attached.
+    client_ws_send(
+        &mut browser,
+        1,
+        &Frame::AttachTerm {
+            session_id: &session,
+            last_out_seq: 0,
+            last_in_seq: 0,
+        },
+    )
+    .await;
+    assert!(matches!(
+        decode_muxed_frame(&read_client_frame(&mut browser).await)
+            .unwrap()
+            .frame,
+        Frame::Ack { in_seq_acked: 0 }
+    ));
+
+    // Visible: 3 s of 30 ms steps outlasts the 2 s startup ceiling and D300's
+    // two-miss retirement many times, so only correlated native Pongs keep it.
+    // Each fence proves the server read that Pong before time moves again.
+    let mut last = 0;
+    for step in 0..100 {
+        tokio::time::advance(Duration::from_millis(30)).await;
+        let probe = receive_native_probe(&mut browser).await;
+        assert_eq!(probe.len(), 16);
+        let nonce = u64::from_le_bytes(probe[..8].try_into().unwrap());
+        assert_eq!(nonce, u64::from_le_bytes(probe[8..].try_into().unwrap()));
+        assert!(nonce > last, "probe correlations must increase");
+        last = nonce;
+        browser.send(Message::Pong(probe)).await.unwrap();
+        fence(&mut browser, 1000 + step).await;
+    }
+
+    // Hidden: the notice parks the lease. Probes the server wrote before reading
+    // it are answered while waiting for the first fence.
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Event {
+            sub_id: 0,
+            event_json: br#"{"topic":"connection.visibility","hidden":true}"#,
+        },
+    )
+    .await;
+    fence(&mut browser, 2).await;
+    for _ in 0..100 {
+        tokio::time::advance(Duration::from_millis(30)).await;
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+    }
+    // Any probe sent while hidden precedes this Pong on the ordered socket, and an
+    // unanswered one would have retired the route and closed it.
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Ping {
+            nonce: 3,
+            sent_us: 3,
+        },
+    )
+    .await;
+    loop {
+        match browser
+            .next()
+            .await
+            .expect("websocket message")
+            .expect("websocket frame")
+        {
+            Message::Binary(wire) => match decode_muxed_frame(&wire).unwrap().frame {
+                Frame::Pong { nonce: 3, .. } => break,
+                Frame::Ping { .. } => panic!("hidden route got an application probe"),
+                _ => {}
+            },
+            other => panic!("hidden route was probed or closed: {other:?}"),
+        }
+    }
+
+    // Visible again: a fresh lease probes natively at once.
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Event {
+            sub_id: 0,
+            event_json: br#"{"topic":"connection.visibility","hidden":false}"#,
+        },
+    )
+    .await;
+    tokio::time::advance(Duration::from_millis(30)).await;
+    let probe = receive_native_probe(&mut browser).await;
+    assert_eq!(probe.len(), 16);
+    browser.send(Message::Pong(probe)).await.unwrap();
+    fence(&mut browser, 4).await;
+    server.abort();
+    backend.abort();
+}
+
+/// Wait for the server's next probe. A muxed application Ping on a browser route is a regression.
+async fn receive_native_probe(
+    browser: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+) -> bytes::Bytes {
+    loop {
+        match browser
+            .next()
+            .await
+            .expect("websocket message")
+            .expect("websocket frame")
+        {
+            Message::Ping(payload) => return payload,
+            Message::Binary(wire) => {
+                if let Ok(decoded) = decode_muxed_frame(&wire)
+                    && let Frame::Ping { .. } = decoded.frame
+                {
+                    panic!("browser route sent an application Ping instead of a native one");
+                }
+            }
+            Message::Pong(_) | Message::Frame(_) => {}
+            other => panic!("unexpected frame while waiting for a native probe: {other:?}"),
+        }
+    }
+}
+
+/// Round-trip one client Ping, answering native probes on the way: the route is still open and
+/// every earlier client frame has been read.
+async fn fence(browser: &mut WebSocketStream<MaybeTlsStream<TcpStream>>, nonce: u64) {
+    client_ws_send(
+        browser,
+        0,
+        &Frame::Ping {
+            nonce,
+            sent_us: nonce,
+        },
+    )
+    .await;
+    // Attachment traffic (replay notices, output) may still be in flight; only the reply matters.
+    loop {
+        let reply = read_client_frame(browser).await;
+        if let Frame::Pong { nonce: n, .. } = decode_muxed_frame(&reply).unwrap().frame {
+            assert_eq!(n, nonce, "fence answered out of order");
+            return;
+        }
+    }
+}
+
 /// Withhold durable input Ack after forwarding, without blocking transport reads.
 async fn input_backend(mut peer: UnixStream, observed: tokio::sync::mpsc::Sender<Observed>) {
     let mut receive = BytesMut::new();
