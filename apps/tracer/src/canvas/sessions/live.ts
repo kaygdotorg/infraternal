@@ -222,7 +222,8 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
           if (first) settle();
           // A window whose strip asked for this shell says why itself, where the person is looking.
           if (this.refused?.(message)) return true;
-          core.toast.show({ message, tone: "error", ...(sessionList ? { duration: 0 } : {}),
+          // A refusal that names a way forward is long (about 150 characters); the default 4.2 s is too short to read it.
+          core.toast.show({ message, tone: "error", duration: sessionList ? 0 : Math.max(4200, message.length * 70),
             ...(sessionList && this.showSessions ? { action: { label: "Sessions", onSelect: this.showSessions } } : {}),
           });
           return true;
