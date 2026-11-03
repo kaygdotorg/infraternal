@@ -29,6 +29,35 @@ impl Key {
             .map_err(|_| io::ErrorKind::Other)?;
         Ok((Self(private), PublicKey(public)))
     }
+
+    /// Reconstruct the node-local key from the checked private state file.
+    /// # Errors
+    /// Refuses every key size other than the X25519 private-key size.
+    pub(crate) fn from_private_bytes(bytes: &[u8]) -> io::Result<Self> {
+        if bytes.len() != 32 {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Ok(Self(Zeroizing::new(bytes.to_vec())))
+    }
+
+    /// Borrow the key only long enough to place it in the protected node state file.
+    #[must_use]
+    pub(crate) fn private_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Copy the zeroized key buffer into `GotaTun`'s zeroizing secret type.
+    /// # Errors
+    /// Refuses a malformed OpenSSL key length.
+    pub(crate) fn gotatun_secret(&self) -> io::Result<gotatun::x25519::StaticSecret> {
+        let bytes: [u8; 32] = self
+            .0
+            .as_slice()
+            .try_into()
+            .map_err(|_| io::ErrorKind::InvalidData)?;
+        let bytes = Zeroizing::new(bytes);
+        Ok(gotatun::x25519::StaticSecret::from(*bytes))
+    }
 }
 pub use crate::dataplane::Peer;
 /// Public kernel peer status, available even while the coordinator is unreachable.
@@ -51,6 +80,53 @@ pub struct Counters {
 }
 /// Interface name is fixed: ownership never includes an operator's other interfaces.
 pub const INTERFACE: &str = "infraternal0";
+const KERNEL_ALIAS: &[u8] = b"infraternal.mesh.v1\0";
+const GOTATUN_ALIAS: &[u8] = b"infraternal.mesh.gotatun.v1\0";
+const GOTATUN_OWNER_PREFIX: &[u8] = b"infraternal.mesh.gotatun.v2:";
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
+/// One marked mesh link observed in a single route-netlink reply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ActiveLink {
+    pub(crate) engine: crate::gotatun_node::EngineKind,
+    pub(crate) ifindex: u32,
+    /// `None` for kernel links and legacy unbound `GotaTun` markers.
+    pub(crate) gotatun_owner: Option<PublicKey>,
+}
+
+/// Put only the public node identity in the marker because the TUN name is shared across installs.
+fn gotatun_alias(owner: PublicKey) -> Vec<u8> {
+    let mut alias = Vec::with_capacity(GOTATUN_OWNER_PREFIX.len() + owner.0.len() * 2 + 1);
+    alias.extend_from_slice(GOTATUN_OWNER_PREFIX);
+    for byte in owner.0 {
+        alias.push(HEX[usize::from(byte >> 4)]);
+        alias.push(HEX[usize::from(byte & 0x0f)]);
+    }
+    alias.push(0);
+    alias
+}
+
+fn parse_gotatun_owner(alias: &[u8]) -> Option<PublicKey> {
+    let encoded = alias.strip_prefix(GOTATUN_OWNER_PREFIX)?;
+    if encoded.len() != 65 || encoded[64] != 0 {
+        return None;
+    }
+    let mut owner = [0; 32];
+    for (index, pair) in encoded[..64].as_chunks::<2>().0.iter().enumerate() {
+        let high = hex_digit(pair[0])?;
+        let low = hex_digit(pair[1])?;
+        owner[index] = (high << 4) | low;
+    }
+    Some(PublicKey(owner))
+}
+
+fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
+    }
+}
 
 /// No timer or background thread: the socket exists only during one operation.
 pub struct Device;
@@ -70,7 +146,7 @@ impl Device {
         // explicitly before a later process may adopt it; never leave an unmarked success.
         let mut marker = vec![0; 16];
         attribute(&mut marker, 3, b"infraternal0\0")?;
-        attribute(&mut marker, 20, b"infraternal.mesh.v1\0")?;
+        attribute(&mut marker, 20, KERNEL_ALIAS)?;
         if let Err(error) = socket.request(16, 4, &marker) {
             Self::delete()?;
             return Err(error);
@@ -81,21 +157,95 @@ impl Device {
     /// # Errors
     /// Reports route-netlink errors or an unrelated interface with the same name.
     pub fn owned() -> io::Result<bool> {
+        Ok(Self::active_engine()?.is_some())
+    }
+    /// Mark a fresh TUN as this component's userspace data plane.
+    /// # Errors
+    /// Refuses a non-TUN interface or any route-netlink failure.
+    pub fn mark_tun(owner: PublicKey) -> io::Result<()> {
+        let mut payload = vec![0; 16];
+        attribute(&mut payload, 3, b"infraternal0\0")?;
+        attribute(&mut payload, 20, &gotatun_alias(owner))?;
+        Socket::open(SockProtocol::NetlinkRoute)?.request(16, 4, &payload)?;
+        Ok(())
+    }
+    /// Verify the TUN marker and link kind before adopting or retiring the engine.
+    /// # Errors
+    /// Reports an unrelated interface with the shared name or malformed link metadata.
+    pub fn owned_tun() -> io::Result<bool> {
+        Ok(Self::active_link()?
+            .is_some_and(|link| link.engine == crate::gotatun_node::EngineKind::GotaTun))
+    }
+    /// Read which owned data-plane link currently holds the shared mesh interface name.
+    /// # Errors
+    /// Refuses unmarked or unrelated interfaces rather than treating their name as ownership.
+    pub(crate) fn active_engine() -> io::Result<Option<crate::gotatun_node::EngineKind>> {
+        Ok(Self::active_link()?.map(|link| link.engine))
+    }
+    /// Read the link kind, interface index and `GotaTun` owner from one kernel snapshot.
+    /// # Errors
+    /// Treats a missing name as no link and refuses malformed or unrelated link metadata.
+    pub(crate) fn active_link() -> io::Result<Option<ActiveLink>> {
         let mut payload = vec![0; 16];
         attribute(&mut payload, 3, b"infraternal0\0")?;
         let replies = match Socket::open(SockProtocol::NetlinkRoute)?.request(18, 4, &payload) {
             Ok(replies) => replies,
-            Err(error) if error.raw_os_error() == Some(19) => return Ok(false),
+            Err(error) if matches!(error.raw_os_error(), Some(2 | 19)) => return Ok(None),
             Err(error) => return Err(error),
         };
-        for reply in replies {
-            for field in netlink::attributes(reply.get(16..).ok_or(io::ErrorKind::InvalidData)?)? {
-                if field.kind == 20 && field.payload == b"infraternal.mesh.v1\0" {
-                    return Ok(true);
+        let Some(reply) = replies.into_iter().next() else {
+            return Ok(None);
+        };
+        let ifindex = netlink::u32_at(&reply, 4)?;
+        let mut alias = None;
+        let mut kind = None;
+        for field in netlink::attributes(reply.get(16..).ok_or(io::ErrorKind::InvalidData)?)? {
+            match field.kind {
+                20 => alias = Some(field.payload),
+                18 => {
+                    for info in netlink::attributes(field.payload)? {
+                        if info.kind == 1 {
+                            kind = Some(info.payload);
+                        }
+                    }
                 }
+                _ => {}
+            }
+        }
+        if alias == Some(KERNEL_ALIAS) && kind.is_some_and(|kind| kind == b"wireguard\0") {
+            return Ok(Some(ActiveLink {
+                engine: crate::gotatun_node::EngineKind::Kernel,
+                ifindex,
+                gotatun_owner: None,
+            }));
+        }
+        if kind.is_some_and(|kind| kind == b"tun\0") {
+            let gotatun_owner = match alias {
+                Some(alias) if alias == GOTATUN_ALIAS => None,
+                Some(alias) => parse_gotatun_owner(alias),
+                None => None,
+            };
+            if alias == Some(GOTATUN_ALIAS) || gotatun_owner.is_some() {
+                return Ok(Some(ActiveLink {
+                    engine: crate::gotatun_node::EngineKind::GotaTun,
+                    ifindex,
+                    gotatun_owner,
+                }));
             }
         }
         Err(io::ErrorKind::AlreadyExists.into())
+    }
+    /// Delete the exact link observed by index, treating an already-removed link as complete.
+    /// # Errors
+    /// Reports route-netlink errors other than a missing link.
+    pub(crate) fn delete_ifindex(ifindex: u32) -> io::Result<()> {
+        let mut payload = vec![0; 16];
+        payload[4..8].copy_from_slice(&ifindex.to_ne_bytes());
+        match Socket::open(SockProtocol::NetlinkRoute)?.request(17, 4, &payload) {
+            Ok(_) => Ok(()),
+            Err(error) if matches!(error.raw_os_error(), Some(2 | 19)) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
     /// Remove the owned interface, including all its addresses/routes and kernel secrets.
     /// # Errors
@@ -242,6 +392,12 @@ impl Device {
             }
         }
         activate(index)
+    }
+    /// Raise a fresh `GotaTun` interface with the mesh MTU.
+    /// # Errors
+    /// Reports link configuration errors.
+    pub fn activate_tun() -> io::Result<()> {
+        activate(index()?)
     }
     /// Read only local /32 and /128 aliases on the owned interface for recovery fencing.
     pub(crate) fn host_addresses() -> io::Result<BTreeSet<IpAddr>> {

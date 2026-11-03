@@ -1,0 +1,15 @@
+# Minimal audited Linux ioctl boundary for the mesh userspace TUN [163,169].
+[package]
+name = "infraternal-linux-tun"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc = "0.2"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

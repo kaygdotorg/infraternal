@@ -1699,6 +1699,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "gotatun"
+version = "0.10.2"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=823133f828d8805f5ea17139f623395cc5cf7afa#823133f828d8805f5ea17139f623395cc5cf7afa"
+dependencies = [
+ "aead 0.5.2",
+ "aws-lc-rs",
+ "base64 0.22.1",
+ "bitfield-struct",
+ "blake2 0.10.6",
+ "bytes",
+ "chacha20poly1305",
+ "constant_time_eq",
+ "duplicate",
+ "either",
+ "eyre",
+ "futures",
+ "hmac 0.12.1",
+ "ip_network",
+ "ip_network_table",
+ "ipnetwork",
+ "libc",
+ "nix 0.31.3",
+ "parking_lot",
+ "rand 0.9.5",
+ "rand_chacha 0.9.0",
+ "rand_core 0.6.4",
+ "socket2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "typed-builder",
+ "windows-sys 0.61.2",
+ "x25519-dalek",
+ "zerocopy",
+]
+
+[[package]]
 name = "group"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2205,6 +2243,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "infraternal-linux-tun"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "infraternal-mesh"
 version = "0.1.0"
 dependencies = [
@@ -2282,8 +2327,10 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "futures-util",
- "gotatun",
+ "gotatun 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "gotatun 0.10.2 (git+https://github.com/kaygdotorg/gotatun?rev=823133f828d8805f5ea17139f623395cc5cf7afa)",
  "hickory-proto",
+ "infraternal-linux-tun",
  "infraternal-mesh",
  "infraternal-plugin-api",
  "infraternal-plugin-relay",

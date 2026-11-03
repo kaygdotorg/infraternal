@@ -1,4 +1,4 @@
-//! Namespace-only fixture for the seam C relay proof: a relay, or a real kernel mesh node with relayed pairs [313].
+//! Namespace-only fixture for the `GotaTun` relay proof: a relay, or a real mesh node with relayed pairs [220].
 //!
 //! Driven by `scripts/mesh-relay-proof.py` over stdin/stdout, one JSON object
 //! per line. Certificates and keys arrive on stdin and stay in memory;
@@ -9,8 +9,8 @@
 //!   disposable CA and one leaf per host and relay.
 //! - `relay_fixture relay`: read `{listen,cert,key,ca}`, run a relay; then
 //!   `"stats"` prints its counters and end of input stops it.
-//! - `relay_fixture node`: read `{host,cert,key,ca,port,addresses,relays}`,
-//!   create the kernel device and print its public key; then commands
+//! - `relay_fixture node`: read `{host,cert,key,ca,addresses,relays}`,
+//!   start the selected mesh data plane and print its public key; then commands
 //!   (see `Command`) until `"quit"` or end of input, which deletes the device.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
 
@@ -19,10 +19,13 @@ use infraternal_mesh::{
     model::{Addresses, NodeId, PublicKey},
 };
 use infraternal_plugin_mesh::{
-    dataplane::Peer,
+    configuration,
+    dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
+    node::Node,
+    policy::rules::TrafficPolicy,
     relay_path::{self, Observer, RelayPaths, RelaySpec},
     seam::Seam,
-    wireguard::{Client, Device, Key},
+    wireguard::Device,
 };
 use infraternal_plugin_relay::{
     relay::{Limits, Relay},
@@ -32,7 +35,7 @@ use infraternal_plugin_relay::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io::{BufRead, Write},
     net::SocketAddr,
     sync::{Arc, OnceLock},
@@ -151,7 +154,6 @@ struct NodeConfig {
     cert: String,
     key: String,
     ca: String,
-    port: u16,
     addresses: Addresses,
     relays: Vec<RelayConfig>,
 }
@@ -174,7 +176,7 @@ struct PeerConfig {
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Command {
-    /// Install kernel peers and their host routes.
+    /// Install coordinator peers and their host routes.
     Peers(Vec<PeerConfig>),
     /// Wait `grace_ms`; relay the peer if no direct handshake happened.
     DirectOrRelay {
@@ -185,7 +187,7 @@ enum Command {
     Relay {
         host: String,
     },
-    /// Probe relay `index` from the `WireGuard` port; record it in the book.
+    /// Probe relay `index` from the mesh UDP port; record it in the book.
     Observe {
         relay: usize,
         observer: u64,
@@ -199,12 +201,14 @@ enum Command {
 async fn node() {
     let mut input = lines();
     let config: NodeConfig = serde_json::from_str(&input.recv().await.unwrap()).unwrap();
-    Device::create().unwrap();
-    let (local, public) = Key::generate().unwrap();
-    Device::configure(&local, config.port).unwrap();
-    drop(local);
-    Device::addresses(config.addresses).unwrap();
-    let (_, port) = Device::identity().unwrap();
+    let mut node = Node::default();
+    let identity = node.up().unwrap();
+    assert!(
+        Device::owned_tun().unwrap(),
+        "relay fixture must use GotaTun"
+    );
+    let public = identity.public_key;
+    let port = identity.port;
     say(json!({"event": "identity", "public_key": hex(&public.0), "port": port}));
 
     let (events, mut event_queue) = tokio::sync::mpsc::channel(256);
@@ -249,7 +253,7 @@ async fn node() {
     let mut book = Discovery::new(1);
     let mut generation = 1;
     let mut peers: HashMap<String, (Peer, SystemTime)> = HashMap::new();
-    let mut wg = Client::new().unwrap();
+    let mut accepted: Option<Config> = None;
     let started = Instant::now();
     let since_start = || started.elapsed();
 
@@ -266,6 +270,22 @@ async fn node() {
         };
         match command {
             Command::Peers(list) => {
+                let mut next = Config {
+                    local_key: Some(public),
+                    server: None,
+                    node: NodeId(1),
+                    #[cfg(feature = "mesh-dns-spike")]
+                    name: None,
+                    #[cfg(feature = "mesh-dns-spike")]
+                    dns_suffix: infraternal_plugin_mesh::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
+                    version: accepted.as_ref().map_or(1, |old| old.version + 1),
+                    addresses: config.addresses,
+                    default_policy: DefaultPolicy::Allow,
+                    exposure: None,
+                    peers: BTreeMap::default(),
+                    #[cfg(feature = "mesh-dns-spike")]
+                    peer_names: Default::default(),
+                };
                 let installed: Vec<Peer> = list
                     .iter()
                     .map(|peer| Peer {
@@ -274,9 +294,24 @@ async fn node() {
                         endpoint: peer.endpoint,
                     })
                     .collect();
-                wg.peers(&installed, &[]).unwrap();
+                for (index, peer) in list.iter().zip(&installed).enumerate() {
+                    next.peers.insert(
+                        NodeId(u64::try_from(index + 2).unwrap()),
+                        PeerPolicy {
+                            peer: peer.1.clone(),
+                            inbound: TrafficPolicy::All,
+                            outbound: TrafficPolicy::All,
+                        },
+                    );
+                }
+                // GotaTun can complete a direct handshake while applying this snapshot. Record
+                // the lower-bound time first so that immediate, valid handshakes are not treated
+                // as stale merely because Node::chunk returns after starting its packet workers.
                 let installed_at = unix_time();
-                Device::routes(&installed, false).unwrap();
+                for chunk in configuration::chunks(accepted.as_ref(), &next).unwrap() {
+                    node.chunk(chunk).unwrap();
+                }
+                accepted = Some(next);
                 for (peer, kernel) in list.iter().zip(&installed) {
                     peers.insert(peer.host.clone(), (kernel.clone(), installed_at));
                     names
@@ -292,9 +327,14 @@ async fn node() {
             } => {
                 let (kernel, since) = peers[&name].clone();
                 tokio::time::sleep(Duration::from_millis(grace_ms)).await;
-                let counters = Device::counters().unwrap();
-                if relay_path::direct_failed(counters.get(&kernel.key), since) {
-                    let shim = paths.relay(host(&name), &kernel).await.unwrap();
+                let counters = node.counters().unwrap();
+                let peer_counters = counters.get(&kernel.key);
+                let direct_failed = relay_path::direct_failed(peer_counters, since);
+                if direct_failed {
+                    let shim = paths
+                        .relay_with_endpoint(&mut node, host(&name), &kernel)
+                        .await
+                        .unwrap();
                     say(json!({"event": "relayed", "peer": name, "shim": shim}));
                 } else {
                     say(json!({"event": "direct", "peer": name}));
@@ -302,7 +342,10 @@ async fn node() {
             }
             Command::Relay { host: name } => {
                 let (kernel, _) = peers[&name].clone();
-                let shim = paths.relay(host(&name), &kernel).await.unwrap();
+                let shim = paths
+                    .relay_with_endpoint(&mut node, host(&name), &kernel)
+                    .await
+                    .unwrap();
                 say(json!({"event": "relayed", "peer": name, "shim": shim}));
             }
             Command::Observe {
@@ -361,7 +404,7 @@ async fn node() {
             }
             Command::Stats => {
                 let stats = paths.stats();
-                let counters = Device::counters().unwrap();
+                let counters = node.counters().unwrap();
                 let kernel: Vec<Value> = peers
                     .iter()
                     .map(|(name, (kernel, _))| {
@@ -392,7 +435,7 @@ async fn node() {
     paths.close().await;
     printer.abort();
     drop(observer);
-    Device::delete().unwrap();
+    node.down().unwrap();
     say(json!({"event": "off"}));
 }
 

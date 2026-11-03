@@ -5,6 +5,7 @@ exclude = ["vendor/russh", "vendor/russh-sftp"]
 members = [
     "fuzz",
     "crates/infraternal-mesh",
+    "crates/infraternal-linux-tun",
     "crates/infraternal",
     "crates/infraternal-protocol",
     "crates/infraternal-plugin-api",

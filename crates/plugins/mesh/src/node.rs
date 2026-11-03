@@ -1,7 +1,8 @@
-//! Owns the root-only Mesh node, staged public configuration and synchronous kernel lifecycle [163,166,198].
+//! Owns the root-only Mesh node, staged public configuration and synchronous data-plane lifecycle [163,166,198].
 use crate::{
     dataplane::Config,
     firewall::Firewall,
+    gotatun_node::{Engine, EngineKind},
     wireguard::{Client, Device, Key},
 };
 use std::{
@@ -9,6 +10,8 @@ use std::{
     io,
     net::IpAddr,
 };
+#[cfg(feature = "relay")]
+use std::sync::Arc;
 
 pub use crate::dataplane::Chunk;
 struct Pending {
@@ -19,10 +22,60 @@ struct Pending {
     default_policy: crate::dataplane::DefaultPolicy,
     config: Config,
 }
+
+fn restore_routes(
+    store: &crate::node_state::Store,
+    state: &crate::node_state::State,
+) -> io::Result<BTreeSet<IpAddr>> {
+    let mut routes = store.route_inventory()?;
+    // A crash may leave the accepted snapshot older than a pruned journal.
+    // Union its peer addresses before replay; never claim arbitrary routes.
+    if let Some(config) = &state.config {
+        routes.extend(config.peers.values().flat_map(|peer| {
+            [
+                IpAddr::V4(peer.peer.addresses.ipv4),
+                IpAddr::V6(peer.peer.addresses.ipv6),
+            ]
+        }));
+    }
+    Ok(routes)
+}
+
+fn restore_gotatun(node: &mut Node, saved_config: Option<Config>) -> io::Result<()> {
+    if let Some(bound) = saved_config.as_ref().and_then(|config| config.local_key) {
+        let bytes = node
+            .store
+            .as_ref()
+            .ok_or(io::ErrorKind::NotFound)?
+            .read_private_key()?
+            .ok_or(io::ErrorKind::InvalidData)?;
+        let (_, public_key) = crate::gotatun_node::secret_from_bytes(&bytes)?;
+        if public_key != bound {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+    }
+    // Keep accepted public intent through startup, then clear only the in-memory
+    // applied view so replay sends the full snapshot to the newly empty device.
+    node.config.clone_from(&saved_config);
+    let identity = node.up()?;
+    if let Some(config) = saved_config {
+        if config
+            .local_key
+            .is_some_and(|key| key != identity.public_key)
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        node.config = None;
+        node.apply(config)?;
+    }
+    Ok(())
+}
+
 pub use crate::dataplane::Identity;
 
 /// The component has no polling loop. Its idle netlink socket closes on explicit down.
 pub struct Node {
+    engine_kind: EngineKind,
     identity: Option<Identity>,
     enabled: bool,
     store: Option<crate::node_state::Store>,
@@ -35,6 +88,7 @@ pub struct Node {
     // A committed revision remains restrictive until exact retirement succeeds.
     connection_cleanup_pending: bool,
     client: Option<Client>,
+    gotatun: Option<Engine>,
     #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
     // Only a newly accepted full snapshot replaces DNS names; coordinator loss keeps D166 state.
     dns_resolver: Option<crate::dns::Resolver>,
@@ -44,6 +98,7 @@ pub struct Node {
 impl Default for Node {
     fn default() -> Self {
         Self {
+            engine_kind: EngineKind::default(),
             identity: None,
             enabled: true,
             store: None,
@@ -55,6 +110,7 @@ impl Default for Node {
             owned: false,
             connection_cleanup_pending: false,
             client: None,
+            gotatun: None,
             #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
             dns_resolver: None,
             #[cfg(feature = "cutoff-measure")]
@@ -79,23 +135,30 @@ impl Node {
         }
     }
 
-    /// Restore public intent and adopt only an interface marked as this component's own.
+    /// Restore public intent and the selected, marked mesh data plane.
     /// # Errors
     /// Refuses unsafe state, unrelated interface ownership or failed policy recovery.
     pub fn restore(path: &std::path::Path) -> io::Result<Self> {
         let (store, state) = crate::node_state::Store::open(path)?;
-        let mut routes = store.route_inventory()?;
-        // A crash may leave the accepted snapshot older than a pruned journal.
-        // Union its peer addresses before replay; never claim arbitrary routes.
-        if let Some(config) = &state.config {
-            routes.extend(config.peers.values().flat_map(|peer| {
-                [
-                    IpAddr::V4(peer.peer.addresses.ipv4),
-                    IpAddr::V6(peer.peer.addresses.ipv6),
-                ]
-            }));
+        let requested_engine = EngineKind::from_environment()?;
+        let recorded_engine = store.recorded_engine()?;
+        let mut engine_kind = requested_engine.or(recorded_engine).unwrap_or_default();
+        let active_engine = Device::active_engine()?;
+        if active_engine == Some(EngineKind::Kernel)
+            && recorded_engine.is_none()
+            && requested_engine.is_none()
+        {
+            // Preserve nodes upgraded from the old kernel-only format until their
+            // owner selects GotaTun or runs an explicit down/up transition.
+            engine_kind = EngineKind::Kernel;
+            store.record_engine(engine_kind)?;
         }
+        if active_engine.is_some() && active_engine != Some(engine_kind) {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        let routes = restore_routes(&store, &state)?;
         let mut node = Self {
+            engine_kind,
             routes,
             enabled: state.enabled,
             store: Some(store),
@@ -105,7 +168,7 @@ impl Node {
             ..Self::default()
         };
         node.firewall.adopt()?;
-        if Device::owned()? {
+        if active_engine == Some(EngineKind::Kernel) {
             node.owned = true;
             let identity = Device::identity();
             // A process can stop after marking the interface but before setting
@@ -146,7 +209,7 @@ impl Node {
             node.client = Some(Client::new()?);
             if !node.enabled {
                 node.down()?;
-            } else if let Some(config) = state.config {
+            } else if let Some(config) = state.config.clone() {
                 // Recover public ownership while retained orphan keys still
                 // exist. Prove both durable writes before replay can retire any
                 // peer, route or policy. This republishes only accepted intent.
@@ -154,6 +217,8 @@ impl Node {
                 node.save(Some(&config), true)?;
                 node.apply(config)?;
             }
+        } else if engine_kind == EngineKind::GotaTun && node.enabled {
+            restore_gotatun(&mut node, state.config.clone())?;
         }
         if !node.owned {
             node.routes.clear();
@@ -169,14 +234,10 @@ impl Node {
     }
     /// Decide, changing nothing, which kernel objects host uninstall removes.
     ///
-    /// The interface name and the component marker are shared by every
-    /// infraternal agent on the machine, so neither proves the object is this
-    /// installation's: the server's embedded infraternal agent and `mesh up`
-    /// make the same marked `infraternal0`. Only an interface whose `WireGuard`
-    /// key is the one this state recorded (or, for state written before that
-    /// record existed, the key the coordinator bound) is ours. Its packet
-    /// filter is ours when the state recorded a frontend and no other node's
-    /// interface is live.
+    /// The interface name and marker are shared by infraternal components.
+    /// Match its engine and local public key against this node's durable record
+    /// before uninstall removes the link. Its packet filter is ours when the
+    /// state recorded a frontend and no other node's interface is live.
     ///
     /// Every object is decided before any is deleted (#235). An object with our
     /// name that is not ours is never an error: uninstall leaves it and names it,
@@ -184,28 +245,57 @@ impl Node {
     /// # Errors
     /// Reports unsafe state or a failed kernel or packet-filter query.
     pub fn plan_retirement(path: &std::path::Path) -> io::Result<Retirement> {
-        let (recorded, backend) = match crate::node_state::Store::open(path) {
-            Ok((store, state)) => (
-                store
-                    .recorded_interface()?
-                    .or_else(|| state.config.and_then(|config| config.local_key)),
-                state.backend,
-            ),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (None, None),
-            Err(error) => return Err(error),
-        };
-        let mut left = Vec::new();
-        // None: no interface with our name. Some(ours?) otherwise.
-        let interface =
-            match Device::owned() {
-                Ok(false) => None,
-                // A marked link without a readable WireGuard key is not provably ours.
-                Ok(true) => Some(recorded.is_some_and(|recorded| {
-                    Device::identity().is_ok_and(|(key, _)| key == recorded)
-                })),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Some(false),
+        let (recorded, backend, saved_engine, private_public) =
+            match crate::node_state::Store::open(path) {
+                Ok((store, state)) => {
+                    let recorded = store
+                        .recorded_interface()?
+                        .or_else(|| state.config.and_then(|config| config.local_key));
+                    let private_public = store
+                        .read_private_key()?
+                        .map(|bytes| {
+                            crate::gotatun_node::secret_from_bytes(&bytes).map(|pair| pair.1)
+                        })
+                        .transpose()?;
+                    (
+                        recorded,
+                        state.backend,
+                        store.recorded_engine()?,
+                        private_public,
+                    )
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => (None, None, None, None),
                 Err(error) => return Err(error),
             };
+        let mut left = Vec::new();
+        let mut interface_index = None;
+        // None: no interface with our name. Some(ours?) otherwise. Ownership of the userspace
+        // TUN is its per-installation public-key marker, not the shared engine-kind alias.
+        let interface = match Device::active_link() {
+            Ok(None) => None,
+            Ok(Some(link)) => {
+                let owned = match link.engine {
+                    EngineKind::Kernel => recorded.is_some_and(|recorded| {
+                        Device::identity().is_ok_and(|(key, _)| key == recorded)
+                    }),
+                    EngineKind::GotaTun => {
+                        saved_engine == Some(EngineKind::GotaTun)
+                            && recorded.is_some_and(|recorded| {
+                                link.gotatun_owner == Some(recorded)
+                                    && private_public == Some(recorded)
+                            })
+                    }
+                };
+                if owned {
+                    interface_index = Some(link.ifindex);
+                    Some(true)
+                } else {
+                    Some(false)
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Some(false),
+            Err(error) => return Err(error),
+        };
         if interface == Some(false) {
             left.push(crate::wireguard::INTERFACE);
         }
@@ -237,6 +327,7 @@ impl Node {
         };
         Ok(Retirement {
             interface: interface == Some(true),
+            interface_index,
             filter,
             left,
         })
@@ -286,7 +377,11 @@ impl Node {
     /// Disabled intent is not Off until retained kernel/socket ownership is gone.
     #[must_use]
     pub fn stopping(&self) -> bool {
-        !self.enabled && (self.owned || self.client.is_some() || self.identity.is_some())
+        !self.enabled
+            && (self.owned
+                || self.client.is_some()
+                || self.gotatun.is_some()
+                || self.identity.is_some())
     }
     /// Start only an enabled node; a coordinator reconnect cannot override local down.
     /// # Errors
@@ -309,6 +404,91 @@ impl Node {
         }
         Ok(())
     }
+    fn peer_counters(
+        &self,
+    ) -> io::Result<BTreeMap<crate::policy::model::PublicKey, crate::wireguard::Counters>> {
+        match self.engine_kind {
+            EngineKind::Kernel => Device::counters(),
+            EngineKind::GotaTun => self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .counters(),
+        }
+    }
+
+    /// Read counters from the selected node data plane.
+    /// # Errors
+    /// Reports a stopped node or a device query error.
+    pub fn counters(
+        &self,
+    ) -> io::Result<BTreeMap<crate::policy::model::PublicKey, crate::wireguard::Counters>> {
+        self.peer_counters()
+    }
+
+    /// Change one installed peer's UDP endpoint without changing its coordinator-owned key/routes.
+    /// This is the handoff used by the #220 relay shim; the next coordinator update remains authoritative.
+    /// # Errors
+    /// Reports a missing peer or a selected-engine update failure.
+    pub fn set_endpoint(
+        &mut self,
+        key: crate::policy::model::PublicKey,
+        endpoint: std::net::SocketAddr,
+    ) -> io::Result<()> {
+        match self.engine_kind {
+            EngineKind::Kernel => self
+                .client
+                .as_mut()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .endpoint(key, endpoint),
+            EngineKind::GotaTun => self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .set_endpoint(key, endpoint),
+        }
+    }
+
+    /// Return a relay callback that starts a handshake through this node's selected engine.
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_handshake_starter(
+        &self,
+        peer: &crate::dataplane::Peer,
+    ) -> io::Result<Arc<dyn Fn() + Send + Sync>> {
+        match self.engine_kind {
+            EngineKind::Kernel => {
+                let peer = peer.clone();
+                Ok(Arc::new(move || {
+                    let _ = crate::relay_path::start_kernel_handshake(&peer);
+                }))
+            }
+            EngineKind::GotaTun => Ok(self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .handshake_starter(peer.key)),
+        }
+    }
+    fn apply_peer_changes(
+        &mut self,
+        config: &Config,
+        changed: &[crate::dataplane::Peer],
+        retired: &[crate::policy::model::PublicKey],
+    ) -> io::Result<()> {
+        match self.engine_kind {
+            EngineKind::Kernel => self
+                .client
+                .as_mut()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .peers(changed, retired),
+            EngineKind::GotaTun => self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .apply(config.clone())
+                .map(|_| ()),
+        }
+    }
     fn retire_routes(&mut self) -> io::Result<()> {
         // Publish an empty inventory only after kernel teardown is complete.
         // Keep the in-memory inventory on failure so an explicit retry remains
@@ -319,7 +499,23 @@ impl Node {
         self.routes.clear();
         Ok(())
     }
-    /// Generate the key on the node and configure its owned kernel interface once.
+    fn local_key(&self) -> io::Result<(Key, crate::policy::model::PublicKey)> {
+        if let Some(store) = &self.store
+            && let Some(bytes) = store.read_private_key()?
+        {
+            let (secret, public_key) = crate::gotatun_node::secret_from_bytes(&bytes)?;
+            drop(secret);
+            return Ok((Key::from_private_bytes(&bytes)?, public_key));
+        }
+        let (key, public_key) = Key::generate()?;
+        if self.engine_kind == EngineKind::GotaTun
+            && let Some(store) = &self.store
+        {
+            store.write_private_key(key.private_bytes())?;
+        }
+        Ok((key, public_key))
+    }
+    /// Start the selected data plane with a node-local key and advertise its UDP port.
     /// # Errors
     /// Refuses missing privilege or any kernel error; never returns private material.
     pub fn up(&mut self) -> io::Result<Identity> {
@@ -331,51 +527,85 @@ impl Node {
         if let Some(identity) = &self.identity {
             return Ok(identity.clone());
         }
+        if let Some(engine) = EngineKind::from_environment()? {
+            self.engine_kind = engine;
+        }
         self.firewall.adopt()?;
-        let (key, public_key) = Key::generate()?;
-        // Name the interface in this installation's state before it exists:
-        // host uninstall removes only an interface whose key matches (#235).
+        let (key, public_key) = self.local_key()?;
         if let Some(store) = &self.store {
+            store.record_engine(self.engine_kind)?;
             store.record_interface(&public_key)?;
         }
-        Device::create()?;
-        self.owned = true;
-        let port = 0;
-        if let Err(error) = Device::configure(&key, port) {
-            let _ = self.down();
-            return Err(error);
-        }
-        let prepared = (|| {
-            let (device_key, port) = Device::identity()?;
-            if device_key != public_key || port == 0 {
-                return Err(io::ErrorKind::InvalidData.into());
+        match self.engine_kind {
+            EngineKind::Kernel => {
+                Device::create()?;
+                self.owned = true;
+                if let Err(error) = Device::configure(&key, 0) {
+                    let _ = self.down();
+                    return Err(error);
+                }
+                let prepared = (|| {
+                    let (device_key, port) = Device::identity()?;
+                    if device_key != public_key || port == 0 {
+                        return Err(io::ErrorKind::InvalidData.into());
+                    }
+                    let client = Client::new()?;
+                    self.routes.clear();
+                    self.save(None, true)?;
+                    Ok((port, client))
+                })();
+                match prepared {
+                    Ok((port, client)) => {
+                        self.enabled = true;
+                        self.client = Some(client);
+                        let identity = Identity {
+                            public_key,
+                            port,
+                            compact_access: true,
+                            #[cfg(feature = "mesh-dns-spike")]
+                            dns_names: cfg!(target_os = "linux"),
+                        };
+                        self.identity = Some(identity.clone());
+                        Ok(identity)
+                    }
+                    Err(error) => {
+                        Device::delete()?;
+                        self.owned = false;
+                        Err(error)
+                    }
+                }
             }
-            let client = Client::new()?;
-            // A fresh interface cannot inherit ownership from an older lifetime.
-            self.routes.clear();
-            self.save(None, true)?;
-            Ok((
-                Identity {
+            EngineKind::GotaTun => {
+                let engine = Engine::start(key.gotatun_secret()?, public_key, 0, None)?;
+                let (interface, port, thp_disabled, offloads_enabled) = engine.info();
+                if interface != crate::wireguard::INTERFACE
+                    || port == 0
+                    || !thp_disabled
+                    || !offloads_enabled
+                {
+                    let mut engine = engine;
+                    let _ = engine.stop();
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                self.owned = true;
+                self.gotatun = Some(engine);
+                if let Err(error) = self.save(self.config.as_ref(), true) {
+                    if let Some(mut engine) = self.gotatun.take() {
+                        let _ = engine.stop();
+                    }
+                    self.owned = false;
+                    return Err(error);
+                }
+                self.enabled = true;
+                let identity = Identity {
                     public_key,
                     port,
                     compact_access: true,
                     #[cfg(feature = "mesh-dns-spike")]
                     dns_names: cfg!(target_os = "linux"),
-                },
-                client,
-            ))
-        })();
-        match prepared {
-            Ok((identity, client)) => {
-                self.enabled = true;
-                self.client = Some(client);
+                };
                 self.identity = Some(identity.clone());
                 Ok(identity)
-            }
-            Err(error) => {
-                Device::delete()?;
-                self.owned = false;
-                Err(error)
             }
         }
     }
@@ -391,31 +621,58 @@ impl Node {
         {
             self.dns_resolver = None;
         }
+        let mut foreign_live_link = false;
         if self.owned {
-            // Confirmed absence is idempotent; a foreign replacement or a
-            // privilege error must never be treated as successful deletion.
-            if Device::owned()? {
-                // Retire peers in one generic-netlink request before the link
-                // deletion removes all addresses/routes in one route request.
-                // Reuse the live client; partial startup may not have one yet.
-                if let Some(client) = &mut self.client {
-                    client.clear_peers()?;
-                } else {
-                    Client::new()?.clear_peers()?;
+            match Device::active_link()? {
+                Some(active) if active.engine == self.engine_kind => {
+                    if active.engine == EngineKind::Kernel {
+                        // Retire peers before the link deletion removes all routes.
+                        if let Some(client) = &mut self.client {
+                            client.clear_peers()?;
+                        } else {
+                            Client::new()?.clear_peers()?;
+                        }
+                        Device::delete_ifindex(active.ifindex)?;
+                    } else {
+                        let owns_link = self.identity.as_ref().is_some_and(|identity| {
+                            active.gotatun_owner == Some(identity.public_key)
+                        });
+                        if let Some(mut engine) = self.gotatun.take() {
+                            engine.stop()?;
+                        }
+                        if owns_link {
+                            Device::delete_ifindex(active.ifindex)?;
+                        } else {
+                            // Another installation replaced this fixed-name TUN. Stop only our
+                            // stale worker; its link, routes and shared firewall belong to it.
+                            foreign_live_link = true;
+                        }
+                    }
                 }
-                Device::delete()?;
+                None => {
+                    if let Some(mut engine) = self.gotatun.take() {
+                        engine.stop()?;
+                    }
+                }
+                Some(_) => return Err(io::ErrorKind::AlreadyExists.into()),
             }
             self.owned = false;
         }
-        self.firewall.remove()?;
+        if !foreign_live_link {
+            self.firewall.remove()?;
+        }
         self.retire_routes()?;
         self.firewall = Firewall::default();
         self.proxy_ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
         self.client = None;
+        self.gotatun = None;
         self.identity = None;
         self.config = None;
         self.connection_cleanup_pending = false;
         self.pending = None;
+        if let Some(store) = &self.store {
+            store.remove_private_key()?;
+        }
         Ok(())
     }
     /// Read the retained applied configuration, never partial incoming chunks.
@@ -733,22 +990,51 @@ impl Node {
                         ));
                     }
                 }
-                self.client.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+                match self.engine_kind {
+                    EngineKind::Kernel => {
+                        self.client.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+                    }
+                    EngineKind::GotaTun => {
+                        self.gotatun.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+                    }
+                }
                 // Persist intent before installing endpoints. Restore replays it
                 // if the process stops between the save and kernel installation.
                 self.save(Some(&config), true)?;
-                let client = self.client.as_mut().ok_or(io::ErrorKind::NotConnected)?;
-                let installed = updates
-                    .iter()
-                    .try_for_each(|(previous, endpoint)| client.endpoint(previous.key, *endpoint));
+                let installed = match self.engine_kind {
+                    EngineKind::Kernel => {
+                        let client = self.client.as_mut().ok_or(io::ErrorKind::NotConnected)?;
+                        updates.iter().try_for_each(|(previous, endpoint)| {
+                            client.endpoint(previous.key, *endpoint)
+                        })
+                    }
+                    EngineKind::GotaTun => self
+                        .gotatun
+                        .as_ref()
+                        .ok_or(io::ErrorKind::NotConnected)?
+                        .apply(config.clone())
+                        .map(|_| ()),
+                };
                 if let Err(error) = installed {
-                    for (previous, _) in &updates {
-                        if let Some(endpoint) = previous.endpoint {
-                            client.endpoint(previous.key, endpoint)?;
-                        } else {
-                            // Omitting the endpoint attribute cannot clear one.
-                            // Recreate only this peer to restore the saved absence.
-                            client.peers(std::slice::from_ref(*previous), &[previous.key])?;
+                    match self.engine_kind {
+                        EngineKind::Kernel => {
+                            let client = self.client.as_mut().ok_or(io::ErrorKind::NotConnected)?;
+                            for (previous, _) in &updates {
+                                if let Some(endpoint) = previous.endpoint {
+                                    client.endpoint(previous.key, endpoint)?;
+                                } else {
+                                    // Omitting the endpoint attribute cannot clear one.
+                                    // Recreate only this peer to restore the saved absence.
+                                    client
+                                        .peers(std::slice::from_ref(*previous), &[previous.key])?;
+                                }
+                            }
+                        }
+                        EngineKind::GotaTun => {
+                            self.gotatun
+                                .as_ref()
+                                .ok_or(io::ErrorKind::NotConnected)?
+                                .apply(old.clone())?;
                         }
                     }
                     // Keep the newer durable desired endpoints for recovery.
@@ -785,7 +1071,8 @@ impl Node {
         // Retire orphan keys as well as keys removed from the retained configuration.
         let desired: std::collections::BTreeSet<_> =
             config.peers.values().map(|peer| peer.peer.key).collect();
-        let retired_keys: Vec<_> = Device::counters()?
+        let retired_keys: Vec<_> = self
+            .peer_counters()?
             .keys()
             .filter(|key| !desired.contains(key))
             .copied()
@@ -844,7 +1131,7 @@ impl Node {
             })
             .collect();
         let mut recorded = self.routes.clone();
-        if self.config.is_none() {
+        if self.config.is_none() && self.engine_kind == EngineKind::Kernel {
             // Read retained AllowedIPs while orphan keys still exist. Persist
             // their public ownership before touching peers, routes or policy.
             recorded.extend(Device::peer_routes()?);
@@ -874,10 +1161,7 @@ impl Node {
             }
             #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
             self.ensure_dns_resolver(config.addresses.ipv4)?;
-            self.client
-                .as_mut()
-                .ok_or(io::ErrorKind::NotConnected)?
-                .peers(&changed, &retired_keys)?;
+            self.apply_peer_changes(&config, &changed, &retired_keys)?;
             Device::routes(&changed, false)?;
             if self.config.is_none()
                 || self
@@ -915,17 +1199,26 @@ impl Node {
                 }
                 let restore: Vec<_> = old.peers.values().map(|peer| peer.peer.clone()).collect();
                 // If rollback itself fails the restrictive fence remains. Never report an applied version.
-                self.client
-                    .as_mut()
-                    .ok_or(io::ErrorKind::NotConnected)?
-                    .peers(
-                        &restore,
-                        &changed
-                            .iter()
-                            .filter(|peer| !old.peers.values().any(|old| old.peer.key == peer.key))
-                            .map(|peer| peer.key)
-                            .collect::<Vec<_>>(),
-                    )?;
+                if self.engine_kind == EngineKind::Kernel {
+                    self.client
+                        .as_mut()
+                        .ok_or(io::ErrorKind::NotConnected)?
+                        .peers(
+                            &restore,
+                            &changed
+                                .iter()
+                                .filter(|peer| {
+                                    !old.peers.values().any(|old| old.peer.key == peer.key)
+                                })
+                                .map(|peer| peer.key)
+                                .collect::<Vec<_>>(),
+                        )?;
+                } else {
+                    self.gotatun
+                        .as_ref()
+                        .ok_or(io::ErrorKind::NotConnected)?
+                        .apply(old.clone())?;
+                }
                 Device::routes(&restore, false)?;
                 let retained: Vec<_> = std::iter::once(old.addresses)
                     .chain(restore.iter().map(|peer| peer.addresses))
@@ -933,13 +1226,22 @@ impl Node {
                 Device::retain_recorded_routes(&self.routes, &retained)?;
                 self.firewall.apply(old)?;
             } else {
-                self.client
-                    .as_mut()
-                    .ok_or(io::ErrorKind::NotConnected)?
-                    .peers(
-                        &[],
-                        &changed.iter().map(|peer| peer.key).collect::<Vec<_>>(),
-                    )?;
+                if self.engine_kind == EngineKind::Kernel {
+                    self.client
+                        .as_mut()
+                        .ok_or(io::ErrorKind::NotConnected)?
+                        .peers(
+                            &[],
+                            &changed.iter().map(|peer| peer.key).collect::<Vec<_>>(),
+                        )?;
+                } else {
+                    let mut empty = config.clone();
+                    empty.peers.clear();
+                    self.gotatun
+                        .as_ref()
+                        .ok_or(io::ErrorKind::NotConnected)?
+                        .apply(empty)?;
+                }
                 Device::retain_recorded_routes(&self.routes, &[])?;
             }
             return Err(error);
@@ -1003,6 +1305,7 @@ impl Node {
 /// The kernel objects host uninstall removes, decided before any is deleted (#235).
 pub struct Retirement {
     interface: bool,
+    interface_index: Option<u32>,
     filter: Option<Firewall>,
     left: Vec<&'static str>,
 }
@@ -1017,7 +1320,7 @@ impl Retirement {
     /// Reports a failed kernel deletion.
     pub fn execute(self) -> io::Result<Vec<&'static str>> {
         if self.interface {
-            Device::delete()?;
+            Device::delete_ifindex(self.interface_index.ok_or(io::ErrorKind::InvalidData)?)?;
         }
         if let Some(mut filter) = self.filter {
             filter.remove()?;

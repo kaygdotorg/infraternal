@@ -10,6 +10,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Mutex,
 };
+use zeroize::Zeroizing;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
@@ -34,6 +35,8 @@ pub struct Store {
     // its own file so the accepted snapshot keeps the format older binaries
     // read; a rollback never meets an unknown field.
     interface_path: PathBuf,
+    engine_path: PathBuf,
+    key_path: PathBuf,
     // Canonical public bytes avoid repeated journal fsyncs on endpoint updates
     // without retaining a second per-peer tree. No private material is cached.
     route_body: Mutex<Vec<u8>>,
@@ -53,6 +56,8 @@ impl Store {
         let path = parent.join("mesh-public.json");
         let route_path = parent.join("mesh-routes.json");
         let interface_path = parent.join("mesh-interface.json");
+        let engine_path = parent.join("mesh-engine.json");
+        let key_path = parent.join("mesh-private-key");
         let state = read_public(&path)?.unwrap_or_default();
         let routes: BTreeSet<IpAddr> = read_public(&route_path)?.unwrap_or_default();
         let route_body = serde_json::to_vec(&routes).map_err(io::Error::other)?;
@@ -61,6 +66,8 @@ impl Store {
                 path,
                 route_path,
                 interface_path,
+                engine_path,
+                key_path,
                 route_body: Mutex::new(route_body),
             },
             state,
@@ -93,6 +100,79 @@ impl Store {
     /// Refuses an unsafe or malformed record.
     pub fn recorded_interface(&self) -> io::Result<Option<crate::policy::model::PublicKey>> {
         read_public(&self.interface_path)
+    }
+    /// Persist the selected engine separately from the legacy accepted snapshot.
+    /// # Errors
+    /// Refuses unsafe state files and reports durable-write failures.
+    pub(crate) fn record_engine(&self, engine: crate::gotatun_node::EngineKind) -> io::Result<()> {
+        write_public(
+            &self.engine_path,
+            &serde_json::to_vec(&engine).map_err(io::Error::other)?,
+        )
+    }
+    /// Read the selected engine, if this node has recorded one.
+    /// # Errors
+    /// Refuses unsafe metadata and malformed engine values.
+    pub(crate) fn recorded_engine(&self) -> io::Result<Option<crate::gotatun_node::EngineKind>> {
+        read_public(&self.engine_path)
+    }
+    /// Create a durable private key file without replacing an existing identity.
+    /// The bytes never enter the public state snapshot or a log.
+    /// # Errors
+    /// Refuses malformed key sizes, existing files and unsafe directory state.
+    pub fn write_private_key(&self, key: &[u8]) -> io::Result<()> {
+        if key.len() != 32 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(self.key_path.parent().ok_or(io::ErrorKind::InvalidInput)?)?;
+        let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+            .map_err(|(_, error)| error)?;
+        if self.key_path.exists() {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        write_private(&self.key_path, key)
+    }
+    /// Read the private key through a checked no-follow descriptor.
+    /// # Errors
+    /// Refuses symlinks, wrong ownership or mode, and non-32-byte data.
+    pub fn read_private_key(&self) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+        match OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&self.key_path)
+        {
+            Ok(mut file) => {
+                let metadata = file.metadata()?;
+                if !metadata.is_file()
+                    || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+                    || metadata.mode() & 0o777 != 0o600
+                    || metadata.len() != 32
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                let mut key = Zeroizing::new(Vec::with_capacity(32));
+                file.read_to_end(&mut key)?;
+                if key.len() != 32 {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                Ok(Some(key))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+    /// Remove the private key only after the owned userspace engine has stopped.
+    /// # Errors
+    /// Refuses unsafe key files and reports durable directory failures.
+    pub fn remove_private_key(&self) -> io::Result<()> {
+        if self.read_private_key()?.is_none() {
+            return Ok(());
+        }
+        fs::remove_file(&self.key_path)?;
+        FileSync::parent(&self.key_path)
     }
     /// Persist route ownership separately from accepting an in-flight config.
     /// # Errors
@@ -209,6 +289,33 @@ fn write_public(path: &Path, body: &[u8]) -> io::Result<()> {
     result
 }
 
+fn write_private(path: &Path, key: &[u8]) -> io::Result<()> {
+    let temporary = path.with_extension(format!("{}.new", std::process::id()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    let result = (|| {
+        file.write_all(key)?;
+        file.sync_all()?;
+        fs::hard_link(&temporary, path)?;
+        fs::remove_file(&temporary)?;
+        FileSync::parent(path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+
+struct FileSync;
+impl FileSync {
+    fn parent(path: &Path) -> io::Result<()> {
+        fs::File::open(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?.sync_all()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Provides isolated filesystem state for node persistence tests.
@@ -265,6 +372,57 @@ mod tests {
         assert_eq!(
             fs::metadata(&store.path).expect("mode").mode() & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn gotatun_private_key_round_trips_only_as_a_private_file() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let key = [0x5a; 32];
+
+        store.write_private_key(&key).expect("persist engine key");
+        let restored = store
+            .read_private_key()
+            .expect("read engine key")
+            .expect("persisted engine key");
+        assert_eq!(restored.as_slice(), key);
+        assert_eq!(
+            fs::metadata(&store.key_path)
+                .expect("private key metadata")
+                .mode()
+                & 0o777,
+            0o600
+        );
+        store.remove_private_key().expect("remove private key");
+        assert!(store.read_private_key().expect("key removed").is_none());
+    }
+
+    #[test]
+    fn selected_engine_is_durable_outside_the_legacy_public_snapshot() {
+        let directory = Directory::new();
+        let (store, state) = Store::open(&directory.0).expect("initial state");
+        assert!(store.recorded_engine().expect("no saved engine").is_none());
+        store.save(&state).expect("save the legacy snapshot");
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("save engine");
+        assert_eq!(
+            store.recorded_engine().expect("saved engine"),
+            Some(crate::gotatun_node::EngineKind::GotaTun)
+        );
+        assert_eq!(
+            fs::metadata(&store.engine_path)
+                .expect("engine metadata")
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(
+            !fs::read(&store.path)
+                .expect("legacy state remains readable")
+                .windows(b"gotatun".len())
+                .any(|window| window == b"gotatun")
         );
     }
     #[test]

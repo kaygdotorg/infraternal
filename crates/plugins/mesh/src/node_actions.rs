@@ -540,12 +540,7 @@ impl AgentPlugin for MeshNodePlugin {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn read_counters(_node: &mut Node) -> Result<Counters, PluginError> {
-    crate::wireguard::Device::counters().map_err(|_| PluginError::Rejected)
-}
-
-#[cfg(target_os = "macos")]
+/// Both node types read the counters of the engine they run.
 fn read_counters(node: &mut Node) -> Result<Counters, PluginError> {
     node.counters().map_err(|_| PluginError::Rejected)
 }
@@ -722,6 +717,90 @@ mod tests {
             "a local server does not dial itself"
         );
         plugin.call("mesh.down", b"{}").expect("cleanup");
+    }
+
+    #[test]
+    #[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
+    fn mesh_peers_action_reads_counters_from_the_selected_gotatun_engine() {
+        use crate::{
+            dataplane::{DefaultPolicy, Peer, PeerPolicy},
+            policy::{
+                model::{Addresses, NodeId},
+                rules::TrafficPolicy,
+            },
+            wireguard::{Device, Key},
+        };
+        use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};
+
+        let directory = std::env::temp_dir().join(format!("gotatun-peers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory).expect("private state directory");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("restrict state directory");
+        let mut plugin = MeshNodePlugin::new(&directory);
+        let (_, peer_key) = Key::generate().expect("peer key");
+        let chunk = Chunk {
+            local_key: None,
+            server: Some(NodeId(1)),
+            node: NodeId(2),
+            #[cfg(feature = "mesh-dns-spike")]
+            name: None,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
+            from_version: None,
+            version: 1,
+            index: 0,
+            last: true,
+            addresses: Addresses {
+                ipv4: "10.254.0.2".parse().expect("local IPv4"),
+                ipv6: "fd01::2".parse().expect("local IPv6"),
+            },
+            default_policy: DefaultPolicy::Deny,
+            exposure: None,
+            upserted: BTreeMap::from([(
+                NodeId(1),
+                PeerPolicy {
+                    peer: Peer {
+                        key: peer_key,
+                        addresses: Addresses {
+                            ipv4: "10.254.0.1".parse().expect("peer IPv4"),
+                            ipv6: "fd01::1".parse().expect("peer IPv6"),
+                        },
+                        endpoint: None,
+                    },
+                    inbound: TrafficPolicy::All,
+                    outbound: TrafficPolicy::All,
+                },
+            )]),
+            merged: BTreeMap::new(),
+            removed: Vec::new(),
+            #[cfg(feature = "mesh-dns-spike")]
+            peer_names: BTreeMap::new(),
+            #[cfg(feature = "mesh-dns-spike")]
+            removed_peer_names: Vec::new(),
+            access_updates: Vec::new(),
+        };
+
+        let result = (|| {
+            plugin.call("mesh.up", b"{}")?;
+            assert!(Device::owned_tun().expect("selected GotaTun TUN"));
+            plugin.call(
+                "mesh.configure",
+                &serde_json::to_vec(&chunk).expect("chunk"),
+            )?;
+            let page = plugin.call("mesh.peers", br#"{"cursor":null,"presence":false}"#)?;
+            let page: serde_json::Value = serde_json::from_slice(&page).expect("peer page");
+            assert_eq!(page["peers"].as_array().expect("rows").len(), 1);
+            assert_eq!(page["peers"][0]["counters"]["sent_bytes"], 0);
+            Ok::<_, PluginError>(())
+        })();
+        let stopped = plugin.call("mesh.down", b"{}");
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            result.is_ok(),
+            "mesh.peers could not read GotaTun counters: {result:?}"
+        );
+        assert!(stopped.is_ok(), "mesh cleanup failed: {stopped:?}");
     }
 
     #[test]

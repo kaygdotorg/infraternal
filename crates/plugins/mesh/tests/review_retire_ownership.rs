@@ -5,7 +5,7 @@
 #![cfg(all(feature = "agent", target_os = "linux"))]
 #![allow(clippy::unwrap_used)]
 
-use infraternal_plugin_mesh::node::Node;
+use infraternal_plugin_mesh::{node::Node, wireguard::Device};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -32,6 +32,12 @@ fn cleanup(directory: &Path) {
         .args(["delete", "table", "inet", "infraternal_mesh"])
         .status();
     let _ = fs::remove_dir_all(directory);
+}
+fn traced<T>(stage: &'static str, result: std::io::Result<T>) -> std::io::Result<T> {
+    result.map_err(|error| {
+        eprintln!("{stage}: {error:?}");
+        error
+    })
 }
 
 /// The server machine also joins its own mesh through its embedded infraternal
@@ -170,6 +176,77 @@ fn retire_leaves_another_installations_interface_and_filter() {
     assert!(
         link && table,
         "link {link}, table {table}: another installation's mesh was removed"
+    );
+}
+
+/// A `GotaTun` link has the same public name for every installation. Retirement
+/// must match the live per-installation marker before deleting that link.
+#[test]
+#[ignore = "Run as root in a disposable network namespace with CAP_NET_ADMIN."]
+fn retire_does_not_remove_another_installations_live_gotatun_tun() {
+    let ours = fresh_state("retire-gotatun-old-owner");
+    let other = fresh_state("retire-gotatun-live-owner");
+    let result = (|| {
+        let mut old = traced("restore old", Node::restore(&ours))?;
+        traced("start old", old.up())?;
+        assert!(traced("query old TUN", Device::owned_tun())?);
+        drop(old);
+
+        let mut current = traced("restore current", Node::restore(&other))?;
+        traced("start current", current.up())?;
+        let retired = traced("retire old", Node::retire(&ours))?;
+        let current_tun_survived = traced("query current TUN", Device::owned_tun())?;
+        let stopped = current.down();
+        Ok::<_, std::io::Error>((retired, current_tun_survived, stopped))
+    })();
+    cleanup(&ours);
+    cleanup(&other);
+    let (retired, current_tun_survived, stopped) = result.unwrap();
+    assert!(retired.contains(&"infraternal0"));
+    assert!(
+        current_tun_survived,
+        "retiring the old state removed the live GotaTun link"
+    );
+    assert!(
+        stopped.is_ok(),
+        "the live installation could not stop: {stopped:?}"
+    );
+}
+
+/// A stale live node may still own a worker after another installation
+/// replaces its interface. `down` must stop only its worker and leave the new
+/// installation's TUN and shared firewall in place.
+#[test]
+#[ignore = "Run as root in a disposable network namespace with CAP_NET_ADMIN."]
+fn down_does_not_remove_another_installations_replacement_gotatun_tun() {
+    let old_state = fresh_state("down-gotatun-old-owner");
+    let current_state = fresh_state("down-gotatun-live-owner");
+    let result = (|| {
+        let mut old = traced("restore old", Node::restore(&old_state))?;
+        traced("start old", old.up())?;
+        assert!(ip(&["link", "delete", "infraternal0"]));
+
+        let mut current = traced("restore current", Node::restore(&current_state))?;
+        traced("start current", current.up())?;
+        let old_stopped = old.down();
+        let current_tun_survived = traced("query current TUN", Device::owned_tun())?;
+        let current_stopped = current.down();
+        Ok::<_, std::io::Error>((old_stopped, current_tun_survived, current_stopped))
+    })();
+    cleanup(&old_state);
+    cleanup(&current_state);
+    let (old_stopped, current_tun_survived, current_stopped) = result.unwrap();
+    assert!(
+        old_stopped.is_ok(),
+        "stale node down failed: {old_stopped:?}"
+    );
+    assert!(
+        current_tun_survived,
+        "stale node down removed the replacement TUN"
+    );
+    assert!(
+        current_stopped.is_ok(),
+        "the current installation could not stop: {current_stopped:?}"
     );
 }
 

@@ -1,13 +1,12 @@
 //! Relayed pairs through the userspace shim, and relay address observation, for seam C [163,185,313].
 //!
-//! Only pairs that cannot go direct come here; direct pairs never leave the
-//! kernel (D313 Q1). For each relayed peer the shim binds one loopback UDP
-//! socket and points the kernel's `WireGuard` endpoint for that peer at it. The
-//! kernel sends the peer's ciphertext to that socket; the shim prefixes the
-//! relay link id and sends it as one QUIC DATAGRAM. Ciphertext arriving from
-//! the relay is sent from the same socket to the kernel's `WireGuard` port, so
-//! the kernel authenticates it and keeps (or roams back to) that endpoint. The
-//! shim never sees plaintext and never holds a mesh key.
+//! Only pairs that cannot go direct come here. For each relayed peer the shim
+//! binds one loopback UDP socket and points the selected data plane's endpoint
+//! at it. The engine sends peer ciphertext to that socket; the shim prefixes
+//! the relay link id and sends it as one QUIC DATAGRAM. Ciphertext arriving
+//! from the relay is sent from the same socket to the engine's UDP port, so the
+//! engine authenticates it. The shim never sees plaintext and never holds a
+//! mesh key.
 //!
 //! Relay choice in this slice: every node gets the same ordered relay list.
 //! A pair without a link asks every live relay; when links exist on several,
@@ -139,8 +138,8 @@ struct Live {
 
 struct Peer {
     host: HostId,
-    /// The kernel peer as installed while relayed (endpoint = the shim).
-    kernel: dataplane::Peer,
+    /// Starts a handshake through the engine that owns this peer.
+    handshake_starter: Arc<dyn Fn() + Send + Sync>,
     socket: UdpSocket,
     /// A delayed session start is pending (see `settle`).
     starting: std::sync::atomic::AtomicBool,
@@ -193,6 +192,59 @@ pub struct RelayPaths {
     shims: Mutex<HashMap<HostId, JoinHandle<()>>>,
 }
 
+/// Updates one configured peer endpoint while the relay shim owns its loopback socket.
+pub trait EndpointUpdater {
+    /// # Errors
+    /// Reports a selected data-plane update failure.
+    fn set_peer_endpoint(&mut self, peer: &dataplane::Peer, endpoint: SocketAddr)
+    -> io::Result<()>;
+
+    /// Return a callback that starts a handshake through the selected data plane.
+    /// # Errors
+    /// Reports a stopped or unavailable data plane.
+    fn handshake_starter(
+        &self,
+        peer: &dataplane::Peer,
+    ) -> io::Result<Arc<dyn Fn() + Send + Sync>>;
+}
+
+impl EndpointUpdater for wireguard::Client {
+    fn set_peer_endpoint(
+        &mut self,
+        peer: &dataplane::Peer,
+        endpoint: SocketAddr,
+    ) -> io::Result<()> {
+        self.endpoint(peer.key, endpoint)
+    }
+
+    fn handshake_starter(
+        &self,
+        peer: &dataplane::Peer,
+    ) -> io::Result<Arc<dyn Fn() + Send + Sync>> {
+        let peer = peer.clone();
+        Ok(Arc::new(move || {
+            let _ = start_kernel_handshake(&peer);
+        }))
+    }
+}
+
+impl EndpointUpdater for crate::node::Node {
+    fn set_peer_endpoint(
+        &mut self,
+        peer: &dataplane::Peer,
+        endpoint: SocketAddr,
+    ) -> io::Result<()> {
+        self.set_endpoint(peer.key, endpoint)
+    }
+
+    fn handshake_starter(
+        &self,
+        peer: &dataplane::Peer,
+    ) -> io::Result<Arc<dyn Fn() + Send + Sync>> {
+        self.relay_handshake_starter(peer)
+    }
+}
+
 impl RelayPaths {
     /// Start connecting to every relay. Events go to `events`; a full queue drops them.
     /// # Errors
@@ -227,29 +279,43 @@ impl RelayPaths {
         })
     }
 
-    /// Relay `peer` (kernel peer `kernel`): bind its shim socket, point the
-    /// kernel endpoint at it and ask the live relays for a link. Returns the
-    /// shim address now installed as the kernel endpoint.
+    /// Relay `peer` through the legacy kernel data plane.
     /// # Errors
     /// Fails if the socket cannot be bound or the kernel refuses the endpoint.
     pub async fn relay(&self, peer: HostId, kernel: &dataplane::Peer) -> io::Result<SocketAddr> {
+        let mut client = wireguard::Client::new()?;
+        self.relay_with_endpoint(&mut client, peer, kernel).await
+    }
+
+    /// Relay `peer`: bind its shim socket, update the selected data plane's peer endpoint,
+    /// and ask the live relays for a link. The ciphertext framing and relay protocol are unchanged.
+    /// # Errors
+    /// Fails if the socket cannot be bound or the selected data plane refuses the endpoint.
+    pub async fn relay_with_endpoint(
+        &self,
+        endpoint_updater: &mut impl EndpointUpdater,
+        peer: HostId,
+        kernel: &dataplane::Peer,
+    ) -> io::Result<SocketAddr> {
         if let Some(existing) = read(&self.shared.peers).get(&peer) {
             return existing.socket.local_addr();
         }
         let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
-        // Connected: only the kernel's own WireGuard socket can feed this shim.
+        // Connected: only the selected engine's UDP socket can feed this shim.
         socket
             .connect((Ipv4Addr::LOCALHOST, self.shared.wg_port))
             .await?;
         let local = socket.local_addr()?;
-        wireguard::Client::new()?.endpoint(kernel.key, local)?;
+        endpoint_updater.set_peer_endpoint(kernel, local)?;
+        let relayed_peer = dataplane::Peer {
+            endpoint: Some(local),
+            ..kernel.clone()
+        };
+        let handshake_starter = endpoint_updater.handshake_starter(&relayed_peer)?;
         let relays = self.shared.relays.len();
         let shim = Arc::new(Peer {
             host: peer,
-            kernel: dataplane::Peer {
-                endpoint: Some(local),
-                ..kernel.clone()
-            },
+            handshake_starter,
             socket,
             starting: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(PeerState {
@@ -466,18 +532,17 @@ async fn settle(shared: &Arc<Shared>, peer: &Arc<Peer>) {
     *write(&peer.active) = installed;
     // Only the end with the lower host id starts the session: two
     // initiations crossing on the relay each replace the other's handshake
-    // state, and both sides then wait out the 5 s retry. The start waits for
-    // the links to settle (several relays answer within milliseconds), so one
-    // initiation goes out: a second one inside the kernel's timestamp
-    // granularity would be refused by the peer as a replay.
+    // state, and both sides then wait out the retry. Start through the
+    // selected engine only after the link exists, so the initiation is not
+    // dropped before the relay is ready.
     if linked && shared.local < peer.host && !peer.starting.swap(true, Ordering::AcqRel) {
         let peer = peer.clone();
+        let handshake_starter = peer.handshake_starter.clone();
         tokio::spawn(async move {
             tokio::time::sleep(SETTLE).await;
             peer.starting.store(false, Ordering::Release);
             if read(&peer.active).is_some() {
-                // A failed kernel call leaves the retry timer to start the session.
-                let _ = start_handshake(&peer.kernel);
+                let _ = tokio::task::spawn_blocking(move || handshake_starter()).await;
             }
         });
     }
@@ -493,15 +558,9 @@ async fn settle(shared: &Arc<Shared>, peer: &Arc<Peer>) {
     }
 }
 
-/// Start the first session through a new link at once (the lower host id of
-/// the pair only, see `settle`). The kernel rate-limits
-/// handshake initiations to one per 5 s per peer, so a pair whose earlier
-/// direct attempts failed would wait for that timer even though the relay
-/// path is ready. A peer that never completed a handshake has no session to
-/// lose: installing it again resets the limiter, and its persistent
-/// keep-alive makes the kernel initiate immediately. A peer with any
-/// handshake is left alone; its session survives the endpoint change.
-fn start_handshake(peer: &dataplane::Peer) -> io::Result<()> {
+/// Start a kernel-backed peer's first session through a new link (see `settle`).
+/// A peer with an existing handshake is left alone so endpoint changes keep its session.
+pub(crate) fn start_kernel_handshake(peer: &dataplane::Peer) -> io::Result<()> {
     let counters = wireguard::Device::counters()?;
     if counters
         .get(&peer.key)
