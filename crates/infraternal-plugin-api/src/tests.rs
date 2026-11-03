@@ -572,3 +572,27 @@ fn native_lanes_start_above_every_core_leg_b_bit() {
     assert_eq!(MIN_NATIVE_STREAM_CAPABILITY.count_ones(), 1);
     assert!(MIN_NATIVE_STREAM_CAPABILITY > core);
 }
+
+/// J137 P2-2, D319: a destructive action is key-callable only behind its own fresh passkey.
+#[test]
+fn destructive_actions_need_a_fresh_passkey_to_be_key_callable() {
+    let base = ACTIONS[0];
+    let read = base.with_api_access(Some("hosts:read"), false);
+    assert!(read.key_callable());
+    assert!(!base.key_callable(), "no scope, no key");
+    let destructive = ActionDef {
+        effect: Effect::Destructive,
+        ..base
+    };
+    assert!(
+        !destructive
+            .with_api_access(Some("hosts:write"), false)
+            .key_callable(),
+        "a destructive action without a fresh passkey is never key-callable"
+    );
+    assert!(
+        destructive
+            .with_api_access(Some("hosts:write"), true)
+            .key_callable()
+    );
+}

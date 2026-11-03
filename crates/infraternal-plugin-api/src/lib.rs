@@ -544,6 +544,16 @@ impl ActionDef {
         self
     }
 
+    /// Whether an API key may start this action at all. Every key adapter (HTTP route, MCP)
+    /// asks this one question. A destructive action needs its own fresh passkey ceremony to
+    /// be key-callable; a descriptor that forgets `fresh_passkey` fails closed instead of
+    /// running without a tap (D319: "whenever in doubt, ask for passkey").
+    #[must_use]
+    pub const fn key_callable(&self) -> bool {
+        self.api_scope.is_some()
+            && (!matches!(self.effect, Effect::Destructive) || self.fresh_passkey)
+    }
+
     /// Render the declared steps for operator help without a second copy of the instructions.
     #[must_use]
     pub fn help(&self) -> String {

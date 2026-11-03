@@ -461,7 +461,7 @@ async fn action(
     let Some(action) = shared_action(&api.sessions, &action_id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if action.api_scope.is_none() {
+    if !action.key_callable() {
         return StatusCode::NOT_FOUND.into_response();
     }
     let identity = match api.guard.authorize_token(token, &action).await {
@@ -645,6 +645,56 @@ mod tests {
                 .collect::<Vec<_>>(),
             [Some("status:read"), Some("sessions:read")]
         );
+    }
+
+    /// J137 P2-2, D319: walks every compiled action definition (core, server plugins and the
+    /// infraternal agent's descriptors). A destructive action reaches an API key only behind
+    /// its own fresh passkey. New descriptors (canvas, MCP-visible actions) are covered
+    /// without editing this test.
+    #[tokio::test]
+    async fn every_compiled_destructive_action_needs_a_fresh_passkey_for_keys() {
+        use infraternal_plugin_api::{ActionDef, Effect};
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let runtime = crate::plugins::compiled(&pool).await.unwrap();
+        let actions: Vec<ActionDef> = infraternal_plugin_api::CORE_API_ACTIONS
+            .iter()
+            .chain(runtime.actions())
+            .chain(
+                infraternal_agent::plugins::descriptors()
+                    .iter()
+                    .flat_map(|descriptor| descriptor.actions),
+            )
+            .copied()
+            .collect();
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.effect == Effect::Destructive),
+            "the walk must see destructive actions"
+        );
+        assert!(actions.iter().any(|action| action.id == "remote.host.list"));
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.id == "remote.host.remove")
+        );
+        for action in &actions {
+            if action.effect == Effect::Destructive {
+                assert!(
+                    action.fresh_passkey || action.api_scope.is_none(),
+                    "{} is destructive and key-callable without a fresh passkey",
+                    action.id
+                );
+            }
+            assert_eq!(
+                action.key_callable(),
+                action.api_scope.is_some()
+                    && (action.effect != Effect::Destructive || action.fresh_passkey),
+                "{}",
+                action.id
+            );
+        }
     }
 
     #[test]
