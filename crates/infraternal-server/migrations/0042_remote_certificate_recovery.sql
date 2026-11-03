@@ -1,9 +1,9 @@
--- One proof-bound recovery result per expired predecessor makes lost replies retryable [133], #285.
+-- One committed recovery result per expired predecessor makes lost replies retryable [133], #285.
 -- Certificate DER is public; this table carries no host or CA private key.
 CREATE TABLE remote_certificate_recovery (
     host_id BLOB NOT NULL REFERENCES remote_hosts(id) ON DELETE RESTRICT
         CHECK (length(host_id) = 16),
-    predecessor_fingerprint BLOB NOT NULL UNIQUE
+    predecessor_fingerprint BLOB NOT NULL
         CHECK (length(predecessor_fingerprint) = 32),
     request_id BLOB NOT NULL CHECK (length(request_id) = 32),
     csr_digest BLOB NOT NULL CHECK (length(csr_digest) = 32),
@@ -25,6 +25,10 @@ CREATE TABLE remote_certificate_recovery (
     )
 );
 
-CREATE INDEX remote_certificate_recovery_expiry
-    ON remote_certificate_recovery(expires_at)
+CREATE UNIQUE INDEX remote_certificate_recovery_completed_predecessor
+    ON remote_certificate_recovery(host_id, predecessor_fingerprint)
+    WHERE certificate_der IS NOT NULL;
+
+CREATE INDEX remote_certificate_recovery_host_expiry
+    ON remote_certificate_recovery(host_id, expires_at)
     WHERE certificate_der IS NULL;

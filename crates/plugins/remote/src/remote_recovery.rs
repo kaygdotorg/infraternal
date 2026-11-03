@@ -9,7 +9,8 @@ use crate::{channel::Channel, remote_tls};
 /// One JSON message is bounded before decoding, independent of certificate size.
 pub const MAX_FRAME_BYTES: usize = 32 * 1024;
 
-/// Recovery requests never carry a reusable credential; the second request proves the old key.
+/// Recovery requests never carry a reusable credential. Both requests are signed by the
+/// predecessor key, so a party that knows only public host fields cannot open an operation.
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RecoveryRequest {
@@ -19,6 +20,8 @@ pub enum RecoveryRequest {
         predecessor_fingerprint: [u8; 32],
         request_id: [u8; 32],
         csr_digest: [u8; 32],
+        /// Ed25519 signature by the predecessor key over [`challenge_message`].
+        request_signature: Vec<u8>,
     },
     /// Prove possession of the registered key and provide the bounded signed CSR.
     Prove {
@@ -62,6 +65,29 @@ pub fn request_id(
     input.extend_from_slice(predecessor_fingerprint);
     input.extend_from_slice(csr_digest);
     openssl::sha::sha256(&input)
+}
+
+/// Canonical bytes the predecessor key signs to open a recovery operation.
+///
+/// The server verifies this before it spends per-host budget or records a challenge.
+/// Without it, anyone who knows the host ID and the predecessor fingerprint could fill
+/// the host's pending operations and its rate budget, and lock the real host out.
+/// Replaying a captured request only resumes the same idempotent operation; the
+/// separate proof transcript still binds issuance to a fresh server nonce.
+#[must_use]
+pub fn challenge_message(
+    host_id: Uuid,
+    predecessor_fingerprint: &[u8; 32],
+    request_id: &[u8; 32],
+    csr_digest: &[u8; 32],
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(48 + 16 + 32 * 3);
+    bytes.extend_from_slice(b"infraternal/remote-recovery/challenge/v1\0");
+    bytes.extend_from_slice(host_id.as_bytes());
+    bytes.extend_from_slice(predecessor_fingerprint);
+    bytes.extend_from_slice(request_id);
+    bytes.extend_from_slice(csr_digest);
+    bytes
 }
 
 /// Public transcript fields signed by the registered key during recovery.
@@ -128,11 +154,23 @@ pub async fn exchange(
     let config = remote_tls::recovery_client_config(roots)?;
     let connection = remote_tls::dial_recovery(address, server_name, &config).await?;
 
+    let mut signer =
+        openssl::sign::Signer::new_without_digest(&identity.key).map_err(|_| denied())?;
+    // Ed25519 signs the complete message in one operation; streaming updates are unsupported.
+    let request_signature = signer
+        .sign_oneshot_to_vec(&challenge_message(
+            proof.host_id,
+            &proof.predecessor_fingerprint,
+            &proof.request_id,
+            &proof.csr_digest,
+        ))
+        .map_err(|_| denied())?;
     let challenge_request = RecoveryRequest::Challenge {
         host_id: proof.host_id,
         predecessor_fingerprint: proof.predecessor_fingerprint,
         request_id: proof.request_id,
         csr_digest: proof.csr_digest,
+        request_signature,
     };
     write_request(&connection.channel, &challenge_request).await?;
     let challenge_response = read_response(&connection.channel).await?;
@@ -444,6 +482,26 @@ mod tests {
         assert!(base.starts_with(b"infraternal/remote-recovery/proof/v1\0"));
     }
 
+    #[test]
+    fn challenge_message_binds_every_request_field_under_its_own_domain() {
+        let host = Uuid::from_u128(42);
+        let old = [1; 32];
+        let csr = [2; 32];
+        let request = request_id(host, &old, &csr);
+        let base = challenge_message(host, &old, &request, &csr);
+        assert_eq!(base, challenge_message(host, &old, &request, &csr));
+        for changed in [
+            challenge_message(Uuid::from_u128(43), &old, &request, &csr),
+            challenge_message(host, &[3; 32], &request, &csr),
+            challenge_message(host, &old, &[3; 32], &csr),
+            challenge_message(host, &old, &request, &[3; 32]),
+        ] {
+            assert_ne!(base, changed);
+        }
+        // A challenge signature can never be replayed as a proof signature.
+        assert!(base.starts_with(b"infraternal/remote-recovery/challenge/v1\0"));
+    }
+
     struct Duplex(tokio::sync::Mutex<tokio::io::DuplexStream>);
 
     impl Channel for Duplex {
@@ -467,6 +525,7 @@ mod tests {
             predecessor_fingerprint: [1; 32],
             request_id: [2; 32],
             csr_digest: [3; 32],
+            request_signature: vec![4; 64],
         })
         .unwrap();
         unknown.pop();

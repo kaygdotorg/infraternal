@@ -223,15 +223,24 @@ fn recovery_challenge_request(
         .try_into()
         .unwrap();
     let digest = infraternal_plugin_remote::remote_recovery::csr_digest(&fixture.csr_der);
+    let request_id =
+        infraternal_plugin_remote::remote_recovery::request_id(fixture.host, &predecessor, &digest);
+    let message = infraternal_plugin_remote::remote_recovery::challenge_message(
+        fixture.host,
+        &predecessor,
+        &request_id,
+        &digest,
+    );
+    let request_signature = openssl::sign::Signer::new_without_digest(&fixture.expired.key)
+        .unwrap()
+        .sign_oneshot_to_vec(&message)
+        .unwrap();
     infraternal_plugin_remote::remote_recovery::RecoveryRequest::Challenge {
         host_id: fixture.host,
         predecessor_fingerprint: predecessor,
-        request_id: infraternal_plugin_remote::remote_recovery::request_id(
-            fixture.host,
-            &predecessor,
-            &digest,
-        ),
+        request_id,
         csr_digest: digest,
+        request_signature,
     }
 }
 

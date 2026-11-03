@@ -186,16 +186,22 @@ terminal, enrollment or action paths. Normal mTLS verification continues to
 reject expired leaves.
 
 The host submits a stable host UUID, the expired leaf fingerprint, a unique
-request ID and a CSR for the already registered Ed25519 identity key. The server
-returns a short-lived, single-use challenge bound to those values, the current
-registered key, CA generation and CSR digest. The host signs the canonical,
+request ID and a CSR digest for the already registered Ed25519 identity key. It
+signs these four fields with the registered identity private key under their own
+domain-separated message (`infraternal/remote-recovery/challenge/v1`). The
+server verifies that signature before it charges the per-host budget or records
+anything, so a party that knows only the public host fields cannot open, replace
+or crowd out an operation. At most four unproved operations per host are kept.
+The server returns a short-lived, single-use challenge bound to those values,
+the current registered key, CA generation and CSR digest. The host signs the canonical,
 domain-separated transcript with the registered identity private key. The
 server uses its clock and accepts only through exactly `not_after + 7,776,000`
 seconds, inclusive. It atomically checks the active host, certificate serial,
 key, challenge, CA generation and unlock state while consuming the challenge
 and recording issuance. Unknown, revoked, tombstoned, locked-CA and
-out-of-window hosts receive the same denial. Per-source and per-host limits run
-before signature work.
+out-of-window hosts receive the same denial. The per-source limit runs before
+any signature work. The per-host limit runs only after a request's signature
+verifies.
 
 Success returns only a seven-day leaf for the same host URI and key. It grants
 no enrollment, host session or other authority. The issued certificate is

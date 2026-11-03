@@ -8,7 +8,8 @@ use crate::{
 };
 use infraternal_agent::{channel::Channel, remote_tls::TcpTls};
 use infraternal_plugin_remote::remote_recovery::{
-    RecoveryRequest, RecoveryResponse, RecoveryTranscript, csr_digest, request_id, transcript,
+    RecoveryRequest, RecoveryResponse, RecoveryTranscript, challenge_message, csr_digest,
+    request_id, transcript,
 };
 use openssl::{
     hash::MessageDigest,
@@ -26,6 +27,9 @@ use uuid::Uuid;
 
 const RECOVERY_GRACE: i64 = 90 * 24 * 60 * 60;
 const CHALLENGE_LIFETIME: i64 = 5 * 60;
+/// Only the predecessor key can open an operation, so this cap bounds one host's own
+/// retries with different CSRs. It is not what keeps other parties out.
+const MAX_PENDING_OPERATIONS_PER_HOST: i64 = 4;
 const MAX_SOURCE_ATTEMPTS: u16 = 24;
 const MAX_HOST_ATTEMPTS: u16 = 12;
 const RATE_WINDOW: Duration = Duration::from_secs(60);
@@ -33,7 +37,11 @@ const MAX_SOURCE_BUCKETS: usize = 4096;
 const MAX_HOST_BUCKETS: usize = 10_000;
 const MAX_SIGNATURE_BYTES: usize = 64;
 
-/// Bound unauthenticated recovery traffic before CSR signature verification or CA signing.
+/// Bound recovery traffic in two stages.
+///
+/// The per-source budget runs before any work. The per-host budget runs only after a
+/// request is signed by that host's predecessor key, so a party that knows the public
+/// host fields cannot spend it and lock the real host out.
 #[derive(Default)]
 pub(crate) struct Limiter {
     sources: Mutex<HashMap<IpAddr, Bucket>>,
@@ -47,15 +55,25 @@ struct Bucket {
 }
 
 impl Limiter {
-    fn admit(&self, source: IpAddr, host: Uuid) -> bool {
-        let now = Instant::now();
+    fn admit_source(&self, source: IpAddr) -> bool {
         bucket_admits(
             &self.sources,
             source,
-            now,
+            Instant::now(),
             MAX_SOURCE_BUCKETS,
             MAX_SOURCE_ATTEMPTS,
-        ) && bucket_admits(&self.hosts, host, now, MAX_HOST_BUCKETS, MAX_HOST_ATTEMPTS)
+        )
+    }
+
+    /// Charge a host only for requests its predecessor key has signed.
+    fn admit_host(&self, host: Uuid) -> bool {
+        bucket_admits(
+            &self.hosts,
+            host,
+            Instant::now(),
+            MAX_HOST_BUCKETS,
+            MAX_HOST_ATTEMPTS,
+        )
     }
 }
 
@@ -104,12 +122,13 @@ pub(crate) struct Service {
     limiter: Arc<Limiter>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ChallengeInput {
     host: Uuid,
     predecessor: [u8; 32],
     request: [u8; 32],
     digest: [u8; 32],
+    signature: Vec<u8>,
     now: i64,
 }
 
@@ -206,12 +225,7 @@ impl Service {
     }
 
     async fn process(&self, source: IpAddr, request: RecoveryRequest) -> RecoveryResponse {
-        let host = match &request {
-            RecoveryRequest::Challenge { host_id, .. } | RecoveryRequest::Prove { host_id, .. } => {
-                *host_id
-            }
-        };
-        if !self.limiter.admit(source, host) {
+        if !self.limiter.admit_source(source) {
             return RecoveryResponse::Denied;
         }
         let Some(now) = self.clock.current_epoch() else {
@@ -234,12 +248,14 @@ impl Service {
                 predecessor_fingerprint,
                 request_id,
                 csr_digest,
+                request_signature,
             } => {
                 self.challenge_at(ChallengeInput {
                     host: host_id,
                     predecessor: predecessor_fingerprint,
                     request: request_id,
                     digest: csr_digest,
+                    signature: request_signature,
                     now,
                 })
                 .await
@@ -272,48 +288,48 @@ impl Service {
         if input.request != request_id(input.host, &input.predecessor, &input.digest) {
             return Err(Denied);
         }
+        // Authenticate before any per-host state changes: the host ID and predecessor
+        // fingerprint are public, so an unsigned request could otherwise fill the
+        // pending operations and the host budget, and lock the real host out.
+        self.authenticate_challenge(&input).await?;
+        if !self.limiter.admit_host(input.host) {
+            return Err(Denied);
+        }
         let pool = &self.store.0;
         let mut transaction = infraternal_plugin_api::storage::begin_immediate(pool)
             .await
             .map_err(|_| Denied)?;
-        let identity: Option<(Vec<u8>, i64)> = sqlx::query_as(
-            "SELECT c.public_key,c.not_after FROM remote_certificates c \
-             JOIN remote_hosts h ON h.id=c.host_id \
-             WHERE c.fingerprint=? AND c.host_id=? AND c.not_before<=? \
-             AND c.revoked_at IS NULL AND h.revoked_at IS NULL",
+        let identity = registered_identity(&mut transaction, &input).await?;
+        sqlx::query(
+            "DELETE FROM remote_certificate_recovery WHERE host_id=? \
+             AND certificate_der IS NULL AND expires_at<=?",
         )
-        .bind(input.predecessor.as_slice())
         .bind(input.host.as_bytes().as_slice())
         .bind(input.now)
-        .fetch_optional(&mut *transaction)
+        .execute(&mut *transaction)
         .await
         .map_err(|_| Denied)?;
-        let (public_key, not_after) = identity.ok_or(Denied)?;
-        let public_key: [u8; 32] = public_key.try_into().map_err(|_| Denied)?;
-        let identity = RegisteredIdentity {
-            fingerprint: openssl::sha::sha256(&public_key),
-            not_after,
-        };
-        let expires_at = input.now.checked_add(CHALLENGE_LIFETIME).ok_or(Denied)?;
-        let existing: Option<ChallengeOperationRow> = sqlx::query_as(
-            "SELECT request_id,csr_digest,challenge,issuer_fingerprint,issuer_generation, \
-             predecessor_not_after,expires_at,certificate_der,certificate_fingerprint \
-             FROM remote_certificate_recovery WHERE predecessor_fingerprint=?",
-        )
-        .bind(input.predecessor.as_slice())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(|_| Denied)?;
-        if let Some(existing) = existing
-            && let Some(response) = self
-                .resume_challenge(&mut transaction, input, &identity, existing)
-                .await?
-        {
-            return Ok(response);
+        if let Some(operation) = existing_operation(&mut transaction, &input).await? {
+            let response = self
+                .resume_challenge(&mut transaction, &input, &identity, operation)
+                .await;
+            transaction.commit().await.map_err(|_| Denied)?;
+            return response;
         }
-        if !eligible(input.now, identity.not_after) {
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM remote_certificate_recovery \
+             WHERE host_id=? AND certificate_der IS NULL AND expires_at>?",
+        )
+        .bind(input.host.as_bytes().as_slice())
+        .bind(input.now)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| Denied)?;
+        if pending >= MAX_PENDING_OPERATIONS_PER_HOST {
+            transaction.commit().await.map_err(|_| Denied)?;
             return Err(Denied);
         }
+        let expires_at = input.now.checked_add(CHALLENGE_LIFETIME).ok_or(Denied)?;
         let issuer = active_issuer(self.source.as_ref())?;
         let nonce = rand::random::<[u8; 32]>();
         sqlx::query(
@@ -345,13 +361,54 @@ impl Service {
         ))
     }
 
+    /// Verify the predecessor key's signature over the challenge request.
+    ///
+    /// This plain read takes no write lock, so unsigned traffic, already bounded per
+    /// source, cannot serialize writers. The transactional lookup in `challenge_at`
+    /// still rechecks revocation and the validity window before it records anything.
+    async fn authenticate_challenge(&self, input: &ChallengeInput) -> Result<(), Denied> {
+        if input.signature.len() != 64 {
+            return Err(Denied);
+        }
+        let public_key: Vec<u8> = sqlx::query_scalar(
+            "SELECT c.public_key FROM remote_certificates c \
+             JOIN remote_hosts h ON h.id=c.host_id \
+             WHERE c.fingerprint=? AND c.host_id=? \
+             AND c.revoked_at IS NULL AND h.revoked_at IS NULL",
+        )
+        .bind(input.predecessor.as_slice())
+        .bind(input.host.as_bytes().as_slice())
+        .fetch_optional(&self.store.0)
+        .await
+        .map_err(|_| Denied)?
+        .ok_or(Denied)?;
+        let public_key =
+            PKey::public_key_from_raw_bytes(&public_key, Id::ED25519).map_err(|_| Denied)?;
+        let message = challenge_message(
+            input.host,
+            &input.predecessor,
+            &input.request,
+            &input.digest,
+        );
+        let mut verifier = Verifier::new_without_digest(&public_key).map_err(|_| Denied)?;
+        // Ed25519 verifies the complete message in one operation; streaming updates are unsupported.
+        if verifier
+            .verify_oneshot(&input.signature, &message)
+            .map_err(|_| Denied)?
+        {
+            Ok(())
+        } else {
+            Err(Denied)
+        }
+    }
+
     async fn resume_challenge(
         &self,
         connection: &mut sqlx::SqliteConnection,
-        input: ChallengeInput,
+        input: &ChallengeInput,
         identity: &RegisteredIdentity,
         existing: ChallengeOperationRow,
-    ) -> Result<Option<RecoveryResponse>, Denied> {
+    ) -> Result<RecoveryResponse, Denied> {
         if existing.certificate_der.is_some() {
             if existing.request_id.as_slice() != input.request.as_slice()
                 || existing.csr_digest.as_slice() != input.digest.as_slice()
@@ -383,13 +440,13 @@ impl Service {
                 .try_into()
                 .map_err(|_| Denied)?;
             let generation = u64::try_from(existing.issuer_generation).map_err(|_| Denied)?;
-            return Ok(Some(challenge_response(
+            return Ok(challenge_response(
                 challenge,
                 identity.fingerprint,
                 issuer_fingerprint,
                 generation,
                 identity.not_after,
-            )));
+            ));
         }
         let issuer = active_issuer(self.source.as_ref())?;
         if existing.request_id.as_slice() == input.request.as_slice()
@@ -404,25 +461,15 @@ impl Service {
                 .as_slice()
                 .try_into()
                 .map_err(|_| Denied)?;
-            return Ok(Some(challenge_response(
+            return Ok(challenge_response(
                 challenge,
                 identity.fingerprint,
                 issuer.fingerprint,
                 issuer.generation,
                 identity.not_after,
-            )));
+            ));
         }
-        // An unproved challenge cannot reserve this predecessor. A malformed replacement
-        // is discarded only when it has no completed certificate.
-        sqlx::query(
-            "DELETE FROM remote_certificate_recovery WHERE predecessor_fingerprint=? \
-             AND certificate_der IS NULL",
-        )
-        .bind(input.predecessor.as_slice())
-        .execute(&mut *connection)
-        .await
-        .map_err(|_| Denied)?;
-        Ok(None)
+        Err(Denied)
     }
 
     async fn prove_at(&self, request: ProofRequest, now: i64) -> Result<RecoveryResponse, Denied> {
@@ -434,6 +481,10 @@ impl Service {
         let verified = self
             .verify_proof(&request, &operation, &public_key, now)
             .await?;
+        // Charged only after the proof verifies; see `Limiter`.
+        if !self.limiter.admit_host(request.host) {
+            return Err(Denied);
+        }
         if let Some(certificate_der) = operation.certificate_der {
             let fingerprint = operation.certificate_fingerprint.ok_or(Denied)?;
             self.require_issued_certificate(&request, &fingerprint)
@@ -680,6 +731,16 @@ impl Service {
         if inserted != 1 {
             return Err(Denied);
         }
+        sqlx::query(
+            "DELETE FROM remote_certificate_recovery WHERE host_id=? AND predecessor_fingerprint=? \
+             AND request_id<>? AND certificate_der IS NULL",
+        )
+        .bind(request.host.as_bytes().as_slice())
+        .bind(request.predecessor.as_slice())
+        .bind(request.request.as_slice())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| Denied)?;
         transaction.commit().await.map_err(|_| Denied)?;
         self.store.2.publish();
         Ok(RecoveryResponse::Certificate {
@@ -754,6 +815,69 @@ struct ActiveIssuer {
     generation: u64,
 }
 
+/// Read the registered, unrevoked predecessor identity inside the challenge transaction
+/// and require the server-time recovery window.
+async fn registered_identity(
+    connection: &mut sqlx::SqliteConnection,
+    input: &ChallengeInput,
+) -> Result<RegisteredIdentity, Denied> {
+    let (public_key, not_after): (Vec<u8>, i64) = sqlx::query_as(
+        "SELECT c.public_key,c.not_after FROM remote_certificates c \
+         JOIN remote_hosts h ON h.id=c.host_id \
+         WHERE c.fingerprint=? AND c.host_id=? AND c.not_before<=? \
+         AND c.revoked_at IS NULL AND h.revoked_at IS NULL",
+    )
+    .bind(input.predecessor.as_slice())
+    .bind(input.host.as_bytes().as_slice())
+    .bind(input.now)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| Denied)?
+    .ok_or(Denied)?;
+    let public_key: [u8; 32] = public_key.try_into().map_err(|_| Denied)?;
+    if !eligible(input.now, not_after) {
+        return Err(Denied);
+    }
+    Ok(RegisteredIdentity {
+        fingerprint: openssl::sha::sha256(&public_key),
+        not_after,
+    })
+}
+
+/// Find the operation this challenge resumes: the exact request first, then the one
+/// committed certificate for its predecessor, which only an identical request may read.
+async fn existing_operation(
+    connection: &mut sqlx::SqliteConnection,
+    input: &ChallengeInput,
+) -> Result<Option<ChallengeOperationRow>, Denied> {
+    let exact: Option<ChallengeOperationRow> = sqlx::query_as(
+        "SELECT request_id,csr_digest,challenge,issuer_fingerprint,issuer_generation, \
+         predecessor_not_after,expires_at,certificate_der,certificate_fingerprint \
+         FROM remote_certificate_recovery WHERE host_id=? AND predecessor_fingerprint=? \
+         AND request_id=?",
+    )
+    .bind(input.host.as_bytes().as_slice())
+    .bind(input.predecessor.as_slice())
+    .bind(input.request.as_slice())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| Denied)?;
+    if exact.is_some() {
+        return Ok(exact);
+    }
+    sqlx::query_as(
+        "SELECT request_id,csr_digest,challenge,issuer_fingerprint,issuer_generation, \
+         predecessor_not_after,expires_at,certificate_der,certificate_fingerprint \
+         FROM remote_certificate_recovery WHERE host_id=? AND predecessor_fingerprint=? \
+         AND certificate_der IS NOT NULL",
+    )
+    .bind(input.host.as_bytes().as_slice())
+    .bind(input.predecessor.as_slice())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| Denied)
+}
+
 fn challenge_response(
     challenge: [u8; 32],
     public_key_fingerprint: [u8; 32],
@@ -817,6 +941,351 @@ pub fn eligible(now: i64, not_after: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openssl::{
+        pkey::Private,
+        sign::Signer,
+        x509::{X509NameBuilder, X509Req},
+    };
+    use std::sync::Arc;
+
+    const TEST_PENDING_LIMIT: usize = 4;
+
+    struct Unlocked(crate::ca::CaMaterial);
+
+    impl crate::ca_memory::AdministratorCaUnlock for Unlocked {
+        fn unlock(&self) -> Result<crate::ca::CaMaterial, crate::ca::CaError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct RecoveryFixture {
+        service: Service,
+        pool: sqlx::SqlitePool,
+        host: Uuid,
+        predecessor: [u8; 32],
+        identity_key: PKey<Private>,
+        csr_der: Vec<u8>,
+        now: i64,
+    }
+
+    async fn recovery_fixture() -> RecoveryFixture {
+        let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        let clock = Arc::new(ClockHealth::default());
+        clock.start_monitor();
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        let material = crate::ca::tests::test_material();
+        let source = Arc::new(crate::ca_memory::MemoryCaSource::cold_start(
+            material.issuer().clone(),
+        ));
+        source.unlock_from(&Unlocked(material.clone())).unwrap();
+
+        let identity_key = PKey::generate_ed25519().unwrap();
+        let mut request = X509Req::builder().unwrap();
+        request
+            .set_subject_name(&X509NameBuilder::new().unwrap().build())
+            .unwrap();
+        request.set_pubkey(&identity_key).unwrap();
+        request.sign(&identity_key, MessageDigest::null()).unwrap();
+        let csr_der = request.build().to_der().unwrap();
+        let csr = ValidatedCsr::parse(&csr_der).unwrap();
+        let signed = CertificateAuthority::from_material(material.clone())
+            .unwrap()
+            .sign_host(host, &csr, now - 604_800)
+            .unwrap();
+        sqlx::query("DELETE FROM remote_certificates WHERE host_id=?")
+            .bind(host.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(?,?,?,?,?,?)")
+            .bind(signed.record.fingerprint.as_slice())
+            .bind(host.as_bytes().as_slice())
+            .bind(signed.record.issuer_fingerprint.as_slice())
+            .bind(signed.record.public_key.as_slice())
+            .bind(signed.record.not_before)
+            .bind(signed.record.not_after)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let service = Service::new(store, source, clock.clone(), Arc::new(Limiter::default()));
+        tokio::time::timeout(std::time::Duration::from_secs(6), async {
+            while !clock.is_healthy() {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        RecoveryFixture {
+            service,
+            pool,
+            host,
+            predecessor: signed.record.fingerprint,
+            identity_key,
+            csr_der,
+            now,
+        }
+    }
+
+    /// A challenge signed by `key`; the registered predecessor key unless a test forges one.
+    fn challenge_signed_by(
+        fixture: &RecoveryFixture,
+        key: &PKey<Private>,
+        digest: [u8; 32],
+    ) -> ChallengeInput {
+        let request = request_id(fixture.host, &fixture.predecessor, &digest);
+        let message = challenge_message(fixture.host, &fixture.predecessor, &request, &digest);
+        let signature = Signer::new_without_digest(key)
+            .unwrap()
+            .sign_oneshot_to_vec(&message)
+            .unwrap();
+        ChallengeInput {
+            host: fixture.host,
+            predecessor: fixture.predecessor,
+            request,
+            digest,
+            signature,
+            now: fixture.now,
+        }
+    }
+
+    fn challenge_input(fixture: &RecoveryFixture, digest: [u8; 32]) -> ChallengeInput {
+        challenge_signed_by(fixture, &fixture.identity_key, digest)
+    }
+
+    fn challenge_receipt(response: &RecoveryResponse) -> ([u8; 32], [u8; 32], u64, i64) {
+        match response {
+            RecoveryResponse::Challenge {
+                challenge,
+                issuer_fingerprint,
+                issuer_generation,
+                not_after,
+                ..
+            } => (
+                *challenge,
+                *issuer_fingerprint,
+                *issuer_generation,
+                *not_after,
+            ),
+            RecoveryResponse::Denied => panic!("eligible identity did not receive a challenge"),
+            RecoveryResponse::Certificate { .. } => {
+                panic!("challenge request returned a certificate")
+            }
+        }
+    }
+
+    async fn accepted_challenge(service: &Service, input: ChallengeInput) -> RecoveryResponse {
+        match service.challenge_at(input).await {
+            Ok(response) => response,
+            Err(Denied) => panic!("eligible challenge request was denied"),
+        }
+    }
+
+    fn challenge_request(input: &ChallengeInput) -> RecoveryRequest {
+        RecoveryRequest::Challenge {
+            host_id: input.host,
+            predecessor_fingerprint: input.predecessor,
+            request_id: input.request,
+            csr_digest: input.digest,
+            request_signature: input.signature.clone(),
+        }
+    }
+
+    async fn pending_count(fixture: &RecoveryFixture) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM remote_certificate_recovery WHERE host_id=? AND certificate_der IS NULL AND expires_at>? ")
+            .bind(fixture.host.as_bytes().as_slice())
+            .bind(fixture.now)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_different_unproved_challenge_preserves_the_original_operation() {
+        let fixture = recovery_fixture().await;
+        let original_digest = csr_digest(&fixture.csr_der);
+        let original = challenge_input(&fixture, original_digest);
+        let original_response = accepted_challenge(&fixture.service, original.clone()).await;
+        let (original_nonce, _, _, _) = challenge_receipt(&original_response);
+
+        let replacement = challenge_input(&fixture, [9; 32]);
+        let replacement_response = accepted_challenge(&fixture.service, replacement).await;
+        assert!(matches!(
+            replacement_response,
+            RecoveryResponse::Challenge { .. }
+        ));
+        assert_eq!(pending_count(&fixture).await, 2);
+
+        let stored_nonce: Vec<u8> = sqlx::query_scalar(
+            "SELECT challenge FROM remote_certificate_recovery WHERE host_id=? AND request_id=?",
+        )
+        .bind(fixture.host.as_bytes().as_slice())
+        .bind(original.request.as_slice())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(stored_nonce.as_slice(), original_nonce.as_slice());
+    }
+
+    #[tokio::test]
+    async fn a_challenge_not_signed_by_the_predecessor_key_records_nothing() {
+        let fixture = recovery_fixture().await;
+        let digest = csr_digest(&fixture.csr_der);
+        let stranger = PKey::generate_ed25519().unwrap();
+        let forged = challenge_signed_by(&fixture, &stranger, digest);
+        assert!(fixture.service.challenge_at(forged).await.is_err());
+        let mut truncated = challenge_input(&fixture, digest);
+        truncated.signature.truncate(32);
+        assert!(fixture.service.challenge_at(truncated).await.is_err());
+        assert_eq!(pending_count(&fixture).await, 0);
+    }
+
+    #[tokio::test]
+    async fn forged_challenges_cannot_lock_the_registered_host_out() {
+        let fixture = recovery_fixture().await;
+        let stranger = PKey::generate_ed25519().unwrap();
+        // Every forged request arrives from its own address, so only per-host state
+        // (rate budget and pending operations) could be exhausted by them.
+        for index in 0..=u32::from(MAX_HOST_ATTEMPTS) {
+            let digest = [u8::try_from(index + 1).unwrap(); 32];
+            let forged = challenge_signed_by(&fixture, &stranger, digest);
+            let source = IpAddr::V4(std::net::Ipv4Addr::from(0x0a00_0000 + index));
+            fixture
+                .service
+                .process(source, challenge_request(&forged))
+                .await;
+        }
+        let genuine = challenge_input(&fixture, csr_digest(&fixture.csr_der));
+        let response = fixture
+            .service
+            .process(
+                IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                challenge_request(&genuine),
+            )
+            .await;
+        assert!(
+            matches!(response, RecoveryResponse::Challenge { .. }),
+            "forged challenges locked the registered host out of recovery"
+        );
+        assert_eq!(pending_count(&fixture).await, 1);
+    }
+
+    #[tokio::test]
+    async fn pending_challenges_are_bounded_per_host_without_evicting_existing_ones() {
+        let fixture = recovery_fixture().await;
+        for index in 0..TEST_PENDING_LIMIT {
+            let digest = [u8::try_from(index + 1).unwrap(); 32];
+            let result = fixture
+                .service
+                .challenge_at(challenge_input(&fixture, digest))
+                .await;
+            assert!(matches!(result, Ok(RecoveryResponse::Challenge { .. })));
+        }
+
+        let overflow = fixture
+            .service
+            .challenge_at(challenge_input(&fixture, [99; 32]))
+            .await;
+        assert!(
+            overflow.is_err(),
+            "the per-host pending limit must reject overflow"
+        );
+        assert_eq!(
+            pending_count(&fixture).await,
+            i64::try_from(TEST_PENDING_LIMIT).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_valid_proof_replaces_other_pending_challenges_for_its_predecessor() {
+        let fixture = recovery_fixture().await;
+        let digest = csr_digest(&fixture.csr_der);
+        let input = challenge_input(&fixture, digest);
+        let response = accepted_challenge(&fixture.service, input.clone()).await;
+        let (challenge, issuer_fingerprint, issuer_generation, not_after) =
+            challenge_receipt(&response);
+
+        let sibling_digest = [77; 32];
+        let sibling_request = request_id(fixture.host, &fixture.predecessor, &sibling_digest);
+        let public_key = fixture.identity_key.raw_public_key().unwrap();
+        let public_key_fingerprint = openssl::sha::sha256(&public_key);
+        sqlx::query("INSERT INTO remote_certificate_recovery(host_id,predecessor_fingerprint,request_id,csr_digest,challenge,public_key_fingerprint,issuer_fingerprint,issuer_generation,predecessor_not_after,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
+            .bind(fixture.host.as_bytes().as_slice())
+            .bind(fixture.predecessor.as_slice())
+            .bind(sibling_request.as_slice())
+            .bind(sibling_digest.as_slice())
+            .bind([88; 32].as_slice())
+            .bind(public_key_fingerprint.as_slice())
+            .bind(issuer_fingerprint.as_slice())
+            .bind(i64::try_from(issuer_generation).unwrap())
+            .bind(not_after)
+            .bind(fixture.now + CHALLENGE_LIFETIME)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+
+        let proof_transcript = transcript(RecoveryTranscript {
+            host_id: fixture.host,
+            predecessor_fingerprint: &fixture.predecessor,
+            request_id: &input.request,
+            csr_digest: &digest,
+            challenge: &challenge,
+            public_key_fingerprint: &public_key_fingerprint,
+            issuer_fingerprint: &issuer_fingerprint,
+            issuer_generation,
+            not_after,
+        });
+        let mut signer = Signer::new_without_digest(&fixture.identity_key).unwrap();
+        let signature = signer.sign_oneshot_to_vec(&proof_transcript).unwrap();
+        let proof = ProofRequest {
+            host: fixture.host,
+            predecessor: fixture.predecessor,
+            request: input.request,
+            challenge,
+            csr_der: fixture.csr_der.clone(),
+            signature,
+        };
+        let Ok((_, public_key)) = validate_proof_request(&proof) else {
+            panic!("proof request should be valid");
+        };
+        let Ok(operation) = fixture.service.load_proof_operation(&proof).await else {
+            panic!("proof challenge should still exist");
+        };
+        let Ok(verified) = fixture
+            .service
+            .verify_proof(&proof, &operation, &public_key, fixture.now)
+            .await
+        else {
+            panic!("proof transcript should match its stored challenge");
+        };
+        let Ok(issuer) = active_issuer(fixture.service.source.as_ref()) else {
+            panic!("the test CA should remain available");
+        };
+        assert_eq!(issuer.fingerprint, verified.issuer_fingerprint);
+        assert_eq!(issuer.generation, verified.issuer_generation);
+        let result = fixture.service.prove_at(proof, fixture.now).await;
+        assert!(matches!(result, Ok(RecoveryResponse::Certificate { .. })));
+
+        let sibling: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM remote_certificate_recovery WHERE host_id=? AND request_id=?",
+        )
+        .bind(fixture.host.as_bytes().as_slice())
+        .bind(sibling_request.as_slice())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            sibling, 0,
+            "a verified proof should retire sibling challenges"
+        );
+        assert_eq!(pending_count(&fixture).await, 0);
+    }
 
     #[test]
     fn recovery_uses_server_time_and_accepts_the_exact_ninety_day_boundary() {
@@ -874,6 +1343,7 @@ mod tests {
                     predecessor_fingerprint: predecessor,
                     request_id: request_id(host, &predecessor, &digest),
                     csr_digest: digest,
+                    request_signature: vec![0; 64],
                 },
             )
             .await;
