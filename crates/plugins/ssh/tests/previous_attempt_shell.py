@@ -34,6 +34,10 @@ class EarlierSetup(unittest.TestCase):
         self.unit = self.home / '.config/systemd/user/infraternal-agent.service'
         self.launcher = self.home / '.local/bin/infraternal'
         self.manager_log = Path.cwd() / self.temp / 'manager.log'
+        # The mock service manager keeps state: enabled is the wants link it
+        # creates and removes, active is this file. So "put back as it was
+        # found" is checked against the state, not only against the calls.
+        self.manager_active = Path.cwd() / self.temp / 'manager.active'
         self.children = []
         helper = Path(os.environ['INFRATERNAL_TEST_RUNTIME_HELPER'])
         cache = Path(str(self.base) + '.bootstrap-cache')
@@ -78,7 +82,23 @@ unit="{self.unit}"
 launcher="{self.launcher}"
 manager=mock_manager
 manager_log="{self.manager_log}"
-mock_manager() {{ printf '%s\\n' "$*" >> "$manager_log"; }}
+manager_active="{self.manager_active}"
+mock_manager() {{
+ printf '%s\\n' "$*" >> "$manager_log"
+ mock_wants="${{unit%/*}}/default.target.wants/infraternal-agent.service"
+ case "$1" in
+  is-enabled) [ -L "$mock_wants" ];;
+  is-active) [ -e "$manager_active" ];;
+  enable)
+   [ -f "$unit" ] || return 1
+   mkdir -p "${{mock_wants%/*}}"
+   [ -L "$mock_wants" ] || ln -s "$unit" "$mock_wants"
+   [ "$2" != --now ] || : >| "$manager_active";;
+  disable) rm -f "$mock_wants";;
+  stop) rm -f "$manager_active";;
+  start) [ -f "$unit" ] || return 1; : >| "$manager_active";;
+ esac
+}}
 host={HOST}
 transaction={TRANSACTION}
 ''' + INSPECT + body
@@ -158,7 +178,14 @@ transaction={TRANSACTION}
         lifetime.chmod(0o600)
         self.socket = runtime / 'sessions' / ('3' * 32 + '.sock')
         self.manager_log.unlink(missing_ok=True)
+        # As on the field host: the stuck install's service is enabled and running.
+        self.manager_active.touch()
         return stage, payload
+
+    def service_state(self):
+        """(enabled, active) as the mock service manager holds it."""
+        wants = self.unit.parent / 'default.target.wants/infraternal-agent.service'
+        return wants.is_symlink(), self.manager_active.exists()
 
     def recover(self, expected=None):
         if expected is None:
@@ -688,9 +715,9 @@ replace_stuck_install "$observed"
             'enable infraternal-agent.service',
             'start infraternal-agent.service',
         ])
-        # The service was already disabled; a later add-host must still see the
-        # same stuck install instead of an ownership refusal (#305).
-        (self.unit.parent / 'default.target.wants/infraternal-agent.service').unlink()
+        self.assertEqual(self.service_state(), (True, True))
+        # A later add-host must still see the same stuck install instead of an
+        # ownership refusal (#305).
         child.terminate()
         child.wait(timeout=5)
         retry = self.run_shell('\ninspect_previous')
@@ -768,6 +795,7 @@ replace_stuck_install "$observed"
             'daemon-reload',
         ])
         self.assertNotIn('start infraternal-agent.service', log)
+        self.assertEqual(self.service_state(), (False, False))
         self.manager_log.unlink()
         restore = self.run_shell(f'\nrestore_superseded_install {TRANSACTION}\n')
         self.assertEqual(restore.returncode, 0, restore.stderr.decode())
@@ -782,6 +810,18 @@ replace_stuck_install "$observed"
             'enable infraternal-agent.service',
             'start infraternal-agent.service',
         ])
+        self.assertEqual(self.service_state(), (True, True), 'enabled and running, as found')
+
+    def test_a_disabled_stopped_install_is_put_back_disabled_and_stopped(self):
+        self.make_upgrade_fixture()
+        (self.unit.parent / 'default.target.wants/infraternal-agent.service').unlink()
+        self.manager_active.unlink()
+        self.assertEqual(self.confirm('supersede_stuck_install').returncode, 0)
+        aside = Path(f'{self.base}.bootstrap-superseded-{TRANSACTION}')
+        self.assertEqual((aside / '.superseded-service').read_text(), 'no no\n')
+        restore = self.run_shell(f'\nrestore_superseded_install {TRANSACTION}\n')
+        self.assertEqual(restore.returncode, 0, restore.stderr.decode())
+        self.assertEqual(self.service_state(), (False, False), 'as found, not "fixed"')
 
     def test_restore_refuses_while_a_new_install_is_in_place(self):
         self.make_upgrade_fixture()
