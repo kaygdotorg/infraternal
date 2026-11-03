@@ -736,6 +736,15 @@ mock_manager() {{
         key.chmod(0o600)
         return stage
 
+    def test_fresh_attempt_stopped_at_connect_is_recoverable(self):
+        stage = self.make_fresh_connect_stage()
+        result = self.run_shell('\ninspect_previous')
+        self.assertEqual(result.returncode, 0, result.stdout.decode())
+        self.assertEqual(result.stdout.decode(), f'INFRATERNAL_SETUP_STALE {HOST} {TRANSACTION} {self.identity} 1\n')
+        self.assertEqual(self.recover().returncode, 0)
+        self.assertFalse(stage.exists())
+        self.assertFalse(self.base.exists())
+
     def test_check_names_the_refusal_cause_without_mutating(self):
         stage = self.make_fresh_connect_stage()
         foreign = stage / 'personal.txt'

@@ -429,6 +429,10 @@ inspect_previous() {
     case "${entry##*/}" in
      transaction|kind) private_file "$entry";;
      lease) private_file "$entry";;
+     activating|failed|stopping|stop-refused|had-binary|had-state|had-launcher|was-active|was-enabled|replacing-binary|replacing-state|replacing-unit|replacing-launcher|linger-requested)
+      private_file "$entry"
+      [ "$(stat -c '%s' "$entry")" = 0 ] || refuse marker;;
+     state|cache) private_tree "$entry";;
      payload)
       [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] || exit 71
       case "$(stat -c '%a' "$entry")" in 600|700) :;; *) exit 71;; esac;;

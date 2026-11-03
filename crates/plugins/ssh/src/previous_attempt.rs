@@ -30,7 +30,10 @@ use crate::{
 // An interrupted fresh lock is recoverable through its original journal.
 // An upgrade owns previous enrolled data and is never a start-fresh target.
 // Receipt and any surviving lock must describe the same fresh attempt.
-// Fresh acquisition receipts own only these staging artifacts.
+// Fresh acquisition receipts own only these staging artifacts. Since D291 a
+// fresh attempt that stops at Connect also holds its private state copy and
+// payload cache, and one that stops during activation holds the same empty
+// progress markers its rollback already understands (#305).
 // More advanced/unknown layouts need their original rollback; do not
 // recursively delete foreign files just because a lock is marked ours.
 // Only the acquisition journal proves an otherwise empty lock.
