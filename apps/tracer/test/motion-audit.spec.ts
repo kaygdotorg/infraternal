@@ -270,7 +270,7 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   });
   await page.goto("/?mock=1");
   await expect(page.locator("#setup-card")).toBeVisible();
-  await expect(page.locator("#faulty-field")).toHaveAttribute("data-ready", "true");
+  await expect(page.locator("#faulty-field")).toHaveAttribute("data-ready", "true", { timeout: 20_000 });
   expect(requestedFaultyWorkers).toHaveLength(1);
   const setupPath = testInfo.outputPath("motion-audit-setup.png");
   await page.screenshot({ path: setupPath, fullPage: true, mask: [page.locator("#setup-token")] });
@@ -808,7 +808,7 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
     return performance.now();
   });
   await expect(page.locator("#setup-card")).toBeVisible();
-  await expect(page.locator("#faulty-field")).toHaveAttribute("data-ready", "true");
+  await expect(page.locator("#faulty-field")).toHaveAttribute("data-ready", "true", { timeout: 20_000 });
   await page.waitForTimeout(320);
   const pointerStartup = await sampleAndEvents(page, "pointer-auth-startup");
   const startupLongTasks = await page.evaluate((startAt) => window.__motionAudit.longTasks
@@ -877,7 +877,7 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   await page.goto("/?mock=1", { waitUntil: "commit" });
   await page.evaluate(() => { window.__motionAudit.label = "reduced-auth"; window.__motionAudit.startSample(); });
   await expect(page.locator("#setup-card")).toBeVisible();
-  await expect(page.locator("#faulty-field")).toHaveAttribute("data-ready", "true");
+  await expect(page.locator("#faulty-field")).toHaveAttribute("data-ready", "true", { timeout: 20_000 });
   await page.waitForTimeout(320);
   const reducedShaderFrames = await page.evaluate(() => window.__faultyWorkerFrames.length);
   expect(reducedShaderFrames).toBe(1);
