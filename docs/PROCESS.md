@@ -493,6 +493,20 @@ Reviews and fixes run at the same time as the next lane's build.
 - The job launcher provides `sccache` through `RUSTC_WRAPPER`; keep the cache
   enabled for repeated builds. Put Rust build output in a job-specific
   `CARGO_TARGET_DIR` under `$HOME/.cache/codex-scratch/` rather than `/tmp`.
+- Machine-local compiler cache on the build VMs (#329), opt-in. `nix develop`
+  provides `sccache`. When the machine sets `INFRATERNAL_SCCACHE_DIR` (the
+  build VMs: `~/.cache/sccache`), the dev shell exports `SCCACHE_DIR`, the
+  size cap `SCCACHE_CACHE_SIZE` (`INFRATERNAL_SCCACHE_SIZE`, default 30G) and
+  `RUSTC_WRAPPER=sccache`. With the variable unset, which is CI, releases and
+  every other machine, nothing changes. The cache stores compiler outputs by
+  their exact inputs: a static release binary built with and without it has
+  the same SHA-256 (receipts on #329), and nothing enters a shipped artifact.
+  Measured limit: sccache hashes every `CARGO_*` variable, including each
+  job's own `CARGO_TARGET_DIR`, and `scripts/static-cargo` puts the checkout,
+  Cargo home and target roots into the keys of static builds on purpose
+  (#246). So hits need the same target path (and, for static builds, the same
+  checkout path): a rebuild after `rm -rf target` or a sweep hits, a second
+  job in its own target does not.
 - Native x86_64 GNU development and test links use mold when installed, with
   `cc` as the fallback. Static musl release links continue to use the pinned
   Rust toolchain's LLD. The checksum-pinned Zig toolchain is used for vendored
