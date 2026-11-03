@@ -1098,7 +1098,7 @@ impl Default for Node {
 impl Node {
     /// Restore accepted public intent, clean only old utun routes, and resume before coordinator dialing.
     /// # Errors
-    /// Refuses unsafe state, unavailable System Keychain access or failed utun/device startup.
+    /// Refuses unsafe state, an unreadable node key or failed utun/device startup.
     pub fn restore(path: &Path) -> io::Result<Self> {
         let path = path.join(PUBLIC_STATE);
         let state = read_public_state(&path)?.unwrap_or_default();
@@ -1152,7 +1152,7 @@ impl Node {
 
     /// Return the persistent key's current public identity and the stable UDP listen port.
     /// # Errors
-    /// Refuses a non-root keychain caller or any failed utun, UDP bind or state update.
+    /// Refuses a non-root caller, a missing state directory or any failed utun, UDP bind or state update.
     pub fn up(&mut self) -> io::Result<crate::dataplane::Identity> {
         if !self.enabled && self.worker.is_some() {
             self.down()?;
@@ -1160,7 +1160,13 @@ impl Node {
         if let Some(identity) = &self.identity {
             return Ok(identity.clone());
         }
-        let (private_key, public_key) = crate::macos_keychain::load_or_create()?;
+        // The key lives beside the public state; a node without a state directory has no key.
+        let state = self
+            .path
+            .as_deref()
+            .and_then(Path::parent)
+            .ok_or(io::ErrorKind::NotFound)?;
+        let (private_key, public_key) = crate::macos_key::load_or_create(state)?;
         let open = OpenUtun::open()?;
         let desired_routes = self
             .config
@@ -1217,7 +1223,7 @@ impl Node {
 
     /// Start an enabled node before the coordinator reconnect loop uses its saved Mesh route.
     /// # Errors
-    /// Reports keychain, utun, persistent state, and WireGuard setup errors.
+    /// Reports node key, utun, persistent state, and `WireGuard` setup errors.
     pub fn ensure(&mut self) -> io::Result<Option<crate::dataplane::Identity>> {
         if self.enabled {
             self.up().map(Some)

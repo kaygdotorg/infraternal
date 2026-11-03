@@ -74,7 +74,7 @@ mod node_presentation;
 pub mod macos_service;
 
 #[cfg(all(feature = "agent", target_os = "macos"))]
-pub mod macos_keychain;
+pub mod macos_key;
 
 #[cfg(all(feature = "agent", target_os = "macos"))]
 pub mod macos_node;
