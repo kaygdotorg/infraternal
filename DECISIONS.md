@@ -3757,3 +3757,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        its structure is grilled first.
      - No `hosts remove --retain`: "this makes no sense. what situation
        would this be helpful in? isn't our agent already small enough".
+335. **Mac shells and re-adding a machine from another server (owner,
+     2026-11-03):**
+     - On macOS, a shell runs inside the person's own login session while
+       they are logged in, with their keychain, ssh-agent and privacy
+       permissions. Otherwise it is a plain shell started by the root
+       daemon as their user: "correct".
+     - Add-host on a machine whose stuck install belongs to another server
+       asks for confirmation, sets the old state aside, enrolls the machine
+       as a new host with a new key and retires the old infraternal agent
+       (#305). The owner treats the failing re-add of `code` as a bug ("bug
+       is not fixed?"), so this path is built.
