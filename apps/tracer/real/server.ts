@@ -17,7 +17,7 @@ import { request as httpRequest } from "node:http";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { WebSocket, WebSocketServer } from "ws";
+import { WebSocket, WebSocketServer, type ClientOptions } from "ws";
 import { WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -290,7 +290,13 @@ export async function startRealServer(options: {
     }
     front.handleUpgrade(request, socket, head, (browser) => {
       activeBrowsers.add(browser);
-      const upstream = new WebSocket(backend.replace("http:", "ws:") + (request.url ?? "/v1/ws"), { headers: { Origin: origin, Cookie: request.headers.cookie ?? "" } });
+      // The relay passes WebSocket control frames through instead of answering them itself, so the browser answers the
+      // server's liveness pings, as it does behind a proxy that forwards frames. They take the same one-way delay as data.
+      // `autoPong` is in ws 8.13+, which we ship, but not yet in the pinned @types/ws.
+      const upstreamOptions: ClientOptions & { autoPong: boolean } = { headers: { Origin: origin, Cookie: request.headers.cookie ?? "" }, autoPong: false };
+      const upstream = new WebSocket(backend.replace("http:", "ws:") + (request.url ?? "/v1/ws"), upstreamOptions);
+      upstream.on("ping", (data) => later(() => { if (!bridge.closed && browser.readyState === WebSocket.OPEN) browser.ping(data); }));
+      browser.on("pong", (data) => later(() => { if (!bridge.closed && upstream.readyState === WebSocket.OPEN) upstream.pong(data); }));
       const bridge: Bridge = { id: bridges.length, closed: false, attached: new Map(), output: new Map(), acked: new Map(), replays: 0, replyAttempts: 0, detached: [], control: [], cookie: request.headers.cookie ?? "" };
       // Harness stage markers contain only fixed labels and timestamps, never terminal text.
       bridge.markers = [];
