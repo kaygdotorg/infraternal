@@ -27,8 +27,8 @@ pub const LOCK: &str = ".lifetime-lock";
 /// The cleanup script compares it with the level it needs, so a cached helper that predates
 /// a mode asks for a refresh (76) instead of refusing the mode. Helpers before levels print
 /// nothing and read as 0. Level 1: `inspect`/`retire`; level 2: `sessions`; level 3: `sessions-stop`;
-/// level 4: `sessions-count`; level 5: `enrolled`.
-pub const LEVEL: &[u8] = b"5\n";
+/// level 4: `sessions-count`; level 5: `enrolled`; level 6: `stage-processes`.
+pub const LEVEL: &[u8] = b"6\n";
 
 fn refused() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
@@ -168,6 +168,8 @@ struct SocketOwner {
     inode: u32,
     /// Superblock device in the kernel's internal encoding (major << 20 | minor).
     device: u32,
+    /// The socket's own inode, the `N` in a holder's `socket:[N]` descriptor link.
+    socket: u32,
 }
 #[derive(Debug, PartialEq, Eq)]
 enum DumpRecord {
@@ -226,6 +228,7 @@ fn dump_record(data: &[u8]) -> Option<DumpRecord> {
         uid: u32::from_ne_bytes([data[56], data[57], data[58], data[59]]),
         inode: u32::from_ne_bytes([data[36], data[37], data[38], data[39]]),
         device: u32::from_ne_bytes([data[40], data[41], data[42], data[43]]),
+        socket: u32::from_ne_bytes([data[20], data[21], data[22], data[23]]),
     }))
 }
 // Split one kernel datagram into records. Every record this request yields is
@@ -303,6 +306,28 @@ fn mount_devices(files: &[(PathBuf, fs::Metadata)]) -> Vec<Option<u32>> {
 #[cold]
 #[inline(never)]
 fn kernel_bound(files: &[(PathBuf, fs::Metadata)]) -> Option<bool> {
+    dump_bound(files, |_| true)
+}
+
+/// The socket inodes of every socket bound to one of the given files.
+#[cold]
+#[inline(never)]
+fn bound_sockets(files: &[(PathBuf, fs::Metadata)]) -> Option<Vec<u32>> {
+    let mut sockets = Vec::new();
+    dump_bound(files, |socket| {
+        sockets.push(socket);
+        false
+    })?;
+    Some(sockets)
+}
+
+/// Walk the kernel's socket dump. `found` sees the socket inode of each socket
+/// bound to one of `files` and returns true to stop early. The result says
+/// whether any socket matched.
+fn dump_bound(
+    files: &[(PathBuf, fs::Metadata)],
+    mut found: impl FnMut(u32) -> bool,
+) -> Option<bool> {
     use nix::sys::socket::{
         MsgFlags, NetlinkAddr, SockProtocol, recvfrom, sendto, setsockopt, sockopt,
     };
@@ -334,6 +359,7 @@ fn kernel_bound(files: &[(PathBuf, fs::Metadata)]) -> Option<bool> {
     }
     // Kernel dump datagrams stay below 32 KiB; a full buffer may be truncated.
     let mut response = vec![0_u8; 64 * 1024];
+    let mut any = false;
     loop {
         let (count, source) = recvfrom::<NetlinkAddr>(query.as_raw_fd(), &mut response).ok()?;
         if count == response.len()
@@ -341,25 +367,103 @@ fn kernel_bound(files: &[(PathBuf, fs::Metadata)]) -> Option<bool> {
         {
             return None;
         }
-        let (mut bound, mut done) = (false, false);
+        let (mut stop, mut done) = (false, false);
         dump_datagram(&response[..count], |record| match record {
             DumpRecord::Bound(owner) => {
-                bound |= files.iter().zip(&devices).any(|((_, file), device)| {
+                if files.iter().zip(&devices).any(|((_, file), device)| {
                     owner.uid == file.uid()
                         && u64::from(owner.inode) == file.ino() & 0xffff_ffff
                         && device.is_none_or(|device| device == owner.device)
-                });
+                }) {
+                    any = true;
+                    stop |= found(owner.socket);
+                }
             }
             DumpRecord::Unbound => {}
             DumpRecord::Done => done = true,
         })?;
-        if bound {
+        if stop {
             return Some(true);
         }
         if done {
-            return Some(false);
+            return Some(any);
         }
     }
+}
+
+/// Refuse (73) while a process of this user runs the staged payload
+/// (`.bootstrap-lock/payload`) without holding a socket bound to one of this
+/// install's session endpoints. A shim serves such an endpoint, and a
+/// replacement stops it through that endpoint. Any other payload process (a
+/// crashed attempt's agent or key preparation) has no endpoint to stop it
+/// through, and it is never signalled. So a replacement checks this before
+/// it stops anything, and the service and sessions stay as they are (#305
+/// P2-3). Read-only. A process whose `exe` the caller cannot see is skipped:
+/// it cannot be inspected or signalled by this user either.
+#[cold]
+#[inline(never)]
+fn stage_processes(root: &File) -> Result<(), u8> {
+    let payload = match fs::symlink_metadata(at(root, ".bootstrap-lock/payload")) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => return Err(71),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(77),
+    };
+    let endpoints = match directory(&at(root, "sessions")) {
+        Ok(runtime) => session_sockets(&runtime)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return Err(71),
+    };
+    let endpoint_sockets = if endpoints.is_empty() {
+        Vec::new()
+    } else {
+        bound_sockets(&endpoints).ok_or(77)?
+    };
+    let uid = nix::unistd::Uid::effective().as_raw();
+    let me = std::process::id();
+    let mut processes = 0_u32;
+    for entry in fs::read_dir("/proc").map_err(|_| 77)? {
+        let entry = entry.map_err(|_| 77)?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        processes += 1;
+        if processes > 65_536 {
+            return Err(77);
+        }
+        let process = entry.path();
+        if pid == me || !fs::metadata(&process).is_ok_and(|owner| owner.uid() == uid) {
+            continue;
+        }
+        let Ok(exe) = fs::metadata(process.join("exe")) else {
+            continue;
+        };
+        if !same(&exe, &payload) {
+            continue;
+        }
+        let serves = match fs::read_dir(process.join("fd")) {
+            Ok(descriptors) => descriptors.filter_map(Result::ok).any(|descriptor| {
+                fs::read_link(descriptor.path()).is_ok_and(|link| {
+                    link.to_str()
+                        .and_then(|link| link.strip_prefix("socket:["))
+                        .and_then(|link| link.strip_suffix(']'))
+                        .and_then(|inode| inode.parse::<u32>().ok())
+                        .is_some_and(|inode| endpoint_sockets.contains(&inode))
+                })
+            }),
+            // It exited during the scan: nothing runs the payload any more.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => false,
+        };
+        if !serves && process.join("exe").exists() {
+            return Err(73);
+        }
+    }
+    Ok(())
 }
 #[cold]
 #[inline(never)]
@@ -868,6 +972,9 @@ pub fn command(arguments: &mut dyn Iterator<Item = std::ffi::OsString>) -> Optio
         // The identity report needs no runtime directory and changes nothing.
         if mode == "enrolled" {
             return writeln!(io::stdout(), "{}", enrolled(&root)).map_err(|_| 77);
+        }
+        if mode == "stage-processes" {
+            return stage_processes(&root);
         }
         let runtime = directory(&at(&root, "sessions")).map_err(|_| 71)?;
         // Session inspection takes no lock and never removes anything.

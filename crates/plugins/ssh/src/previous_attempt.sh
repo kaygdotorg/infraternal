@@ -530,6 +530,8 @@ stop_stage_shims() {
  # Shims were stopped above through their authenticated session sockets. A
  # process still running the journaled payload has no such endpoint and is
  # never signalled: refuse (73), keep the install and let the caller retry.
+ # The read-only stage-processes check already refused before the stop; this
+ # catches one that started since.
  for setup_process in /proc/[0-9]*; do
   [ -O "$setup_process" ] || continue
   [ "${setup_process##*/}" != "$$" ] || continue
@@ -549,9 +551,14 @@ retire_stuck_service() {
  set -- $replace_expected
  [ "$#" = 11 ] && [ "$1" = INFRATERNAL_SETUP_UPGRADE ] || exit 75
  replace_transaction=$3
+ replace_identity=$4
  stage="$base/.bootstrap-lock"
  runtime_helper
  scan_holders service
+ # A payload process that serves no session endpoint cannot be stopped
+ # through one: refuse now, while the service and sessions are untouched
+ # (#305 P2-3). stop_stage_shims repeats the check after the stop.
+ "$helper" --bootstrap-runtime "$base" "$replace_identity" stage-processes </dev/null || exit $?
  replace_enabled=no
  replace_active=no
  if $manager is-enabled --quiet infraternal-agent.service >/dev/null 2>&1; then replace_enabled=yes; fi

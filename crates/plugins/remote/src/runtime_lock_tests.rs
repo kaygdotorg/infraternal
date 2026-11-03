@@ -162,6 +162,7 @@ fn dump_records_accept_only_known_shapes() {
         uid: 1001,
         inode: 4321,
         device: 123,
+        socket: 1234,
     };
     for (length, expected, checked) in [
         (
@@ -341,6 +342,49 @@ fn open_session_count_includes_only_bound_endpoints() {
     drop(first);
     assert_eq!(after_close(&Ok(2), || open_sessions(&runtime)), Ok(1));
     drop((second, control));
+}
+
+/// A process running the staged payload counts as a shim only while it holds
+/// a socket bound to one of the install's session endpoints. Any other one is
+/// refused before a replacement stops anything (#305 P2-3).
+#[test]
+fn a_payload_process_without_a_session_endpoint_is_refused_before_any_stop() {
+    let fixture = Fixture::short();
+    let base = fixture.0.join("base");
+    let stage = base.join(".bootstrap-lock");
+    fs::create_dir(&stage).unwrap();
+    fs::set_permissions(&stage, fs::Permissions::from_mode(0o700)).unwrap();
+    let payload = stage.join("payload");
+    fs::copy("/bin/sleep", &payload).unwrap();
+    fs::set_permissions(&payload, fs::Permissions::from_mode(0o700)).unwrap();
+    let root = directory(&base).unwrap();
+    assert_eq!(stage_processes(&root), Ok(()), "nothing runs the payload");
+
+    let nested = fixture.state().join("sessions");
+    fs::create_dir(&nested).unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
+    let listener =
+        std::os::unix::net::UnixListener::bind(nested.join(format!("{}.sock", "3".repeat(32))))
+            .unwrap();
+    // dup clears close-on-exec, so the payload process inherits the endpoint.
+    let inherited = nix::unistd::dup(&listener).unwrap();
+    let mut shim = std::process::Command::new(&payload)
+        .arg("30")
+        .spawn()
+        .unwrap();
+    drop(inherited);
+    assert_eq!(stage_processes(&root), Ok(()), "a shim serves its endpoint");
+
+    let mut stray = std::process::Command::new(&payload)
+        .arg("30")
+        .spawn()
+        .unwrap();
+    assert_eq!(stage_processes(&root), Err(73), "a stray payload process");
+    for child in [&mut shim, &mut stray] {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    drop(listener);
 }
 
 /// A non-dumpable legacy shim can be retired only through its owned session socket.

@@ -703,18 +703,9 @@ replace_stuck_install "$observed"
         self.assertTrue(stage.exists())
         self.assertTrue((self.base / 'bin/live').exists())
         self.assertTrue(self.identity_path.exists())
-        # The refusal came after the stop, so the service is put back as it was
-        # found: enabled and running (#305 P1-2).
-        self.assertEqual(self.manager_log.read_text().splitlines(), [
-            'is-enabled --quiet infraternal-agent.service',
-            'is-active --quiet infraternal-agent.service',
-            'stop infraternal-agent.service',
-            'disable infraternal-agent.service',
-            'daemon-reload',
-            'daemon-reload',
-            'enable infraternal-agent.service',
-            'start infraternal-agent.service',
-        ])
+        # The read-only check refuses before the stop: the service and its
+        # sessions are never touched (#305 P2-3).
+        self.assertFalse(self.manager_log.exists(), 'the service is never stopped for a refusal a read-only check can see')
         self.assertEqual(self.service_state(), (True, True))
         # A later add-host must still see the same stuck install instead of an
         # ownership refusal (#305).
