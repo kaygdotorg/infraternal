@@ -229,6 +229,8 @@ mod durable_state {
         target: infraternal_plugin_api::Target::Node,
         dry_run: infraternal_plugin_api::DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
     };
     const SPEC: PluginDescriptor = PluginDescriptor {
         actions: &[REPLACE],

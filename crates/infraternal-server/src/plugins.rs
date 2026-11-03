@@ -28,6 +28,8 @@ const CONTROL_ACTIONS: &[ActionDef] = &[
         target: infraternal_plugin_api::Target::Global,
         dry_run: infraternal_plugin_api::DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
         id: "plugins.list",
         summary: "List compiled features",
         instructions: &[
@@ -43,6 +45,8 @@ const CONTROL_ACTIONS: &[ActionDef] = &[
         target: infraternal_plugin_api::Target::Global,
         dry_run: infraternal_plugin_api::DryRun::Required,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
         id: "plugins.set_enabled",
         summary: "Switch a server feature",
         instructions: &[

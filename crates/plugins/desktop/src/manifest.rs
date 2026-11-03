@@ -19,6 +19,8 @@ pub const UP: ActionDef = ActionDef {
     target: Target::Node,
     dry_run: DryRun::Unsupported,
     opens: None,
+    api_scope: None,
+    fresh_passkey: false,
 };
 pub const DOWN: ActionDef = ActionDef {
     id: "desktop.down",
@@ -34,6 +36,8 @@ pub const DOWN: ActionDef = ActionDef {
     target: Target::Node,
     dry_run: DryRun::Unsupported,
     opens: None,
+    api_scope: None,
+    fresh_passkey: false,
 };
 pub const STATUS: ActionDef = ActionDef {
     id: "desktop.status",
@@ -49,6 +53,8 @@ pub const STATUS: ActionDef = ActionDef {
     target: Target::Node,
     dry_run: DryRun::Unsupported,
     opens: None,
+    api_scope: None,
+    fresh_passkey: false,
 };
 pub const LIST: ActionDef = ActionDef {
     id: "desktop.list",
@@ -65,6 +71,8 @@ pub const LIST: ActionDef = ActionDef {
     target: Target::Node,
     dry_run: DryRun::Unsupported,
     opens: None,
+    api_scope: None,
+    fresh_passkey: false,
 };
 pub const CAPTURE: ActionDef = ActionDef {
     id: "desktop.capture",
@@ -82,6 +90,8 @@ pub const CAPTURE: ActionDef = ActionDef {
     target: Target::Node,
     dry_run: DryRun::Unsupported,
     opens: None,
+    api_scope: None,
+    fresh_passkey: false,
 };
 pub const SESSION_STATUS: ActionDef = ActionDef {
     id: "desktop.capture.status",
@@ -97,6 +107,8 @@ pub const SESSION_STATUS: ActionDef = ActionDef {
     target: Target::Node,
     dry_run: DryRun::Unsupported,
     opens: None,
+    api_scope: None,
+    fresh_passkey: false,
 };
 pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     id: "desktop",

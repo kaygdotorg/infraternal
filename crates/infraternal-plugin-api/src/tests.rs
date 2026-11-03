@@ -7,6 +7,8 @@ const ACTIONS: &[ActionDef] = &[ActionDef {
     target: crate::Target::Node,
     dry_run: crate::DryRun::Unsupported,
     opens: None,
+    api_scope: None,
+    fresh_passkey: false,
     id: "example.read",
     summary: "Read example state",
     input: crate::SchemaRef("{}"),

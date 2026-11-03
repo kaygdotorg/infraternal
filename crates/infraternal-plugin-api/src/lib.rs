@@ -69,7 +69,42 @@ pub struct ActionDef {
     pub target: Target,
     pub dry_run: DryRun,
     pub opens: Option<&'static str>,
+    /// Narrow API-key scope for the API adapter; absent actions are not key-callable.
+    pub api_scope: Option<&'static str>,
+    /// This action still needs its own fresh owner passkey ceremony when a key starts it.
+    pub fresh_passkey: bool,
 }
+/// Server actions backed by existing health and session snapshot handlers [16][202].
+pub const CORE_API_ACTIONS: &[ActionDef] = &[
+    ActionDef {
+        id: "server.status",
+        summary: "Read server status",
+        instructions: &["Read whether the server is ready to accept actions."],
+        input: SchemaRef("Empty"),
+        output: SchemaRef("server.status"),
+        permission: Permission::One("authenticated"),
+        effect: Effect::Read,
+        target: Target::Global,
+        dry_run: DryRun::Unsupported,
+        opens: None,
+        api_scope: Some("status:read"),
+        fresh_passkey: false,
+    },
+    ActionDef {
+        id: "sessions.list",
+        summary: "List terminal sessions.",
+        instructions: &["Read the current person's session snapshot."],
+        input: SchemaRef("Empty"),
+        output: SchemaRef("sessions.snapshot"),
+        permission: Permission::One("authenticated"),
+        effect: Effect::Read,
+        target: Target::Global,
+        dry_run: DryRun::Unsupported,
+        opens: None,
+        api_scope: Some("sessions:read"),
+        fresh_passkey: false,
+    },
+];
 /// Read visibility may follow any management action without introducing a view-only role [187].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum Permission {
@@ -111,6 +146,10 @@ pub trait SocketHost: Send + Sync {
         false
     }
     fn token_hash(&self) -> &str;
+    /// A nonsecret label from the authenticated client credential, when one exists.
+    fn device_label(&self) -> Option<&str> {
+        None
+    }
     /// Public authenticated lifetime for binding pending layout requests. Test hosts may omit it.
     fn session_incarnation(&self) -> Option<&str> {
         None
@@ -493,6 +532,18 @@ pub trait ComponentPlugin: Send + Sync {
 pub type PluginOperation<'a, T> = Operation<'a, Result<T, &'static str>>;
 
 impl ActionDef {
+    /// Attach the narrow bearer scope and any separate fresh-passkey requirement to this action.
+    #[must_use]
+    pub const fn with_api_access(
+        mut self,
+        api_scope: Option<&'static str>,
+        fresh_passkey: bool,
+    ) -> Self {
+        self.api_scope = api_scope;
+        self.fresh_passkey = fresh_passkey;
+        self
+    }
+
     /// Render the declared steps for operator help without a second copy of the instructions.
     #[must_use]
     pub fn help(&self) -> String {
@@ -520,6 +571,8 @@ mod component_tests {
         permission: Permission::One("fixture.read"),
         dry_run: DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
     };
     const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
         id: "fixture",

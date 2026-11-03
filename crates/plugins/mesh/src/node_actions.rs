@@ -29,6 +29,8 @@ const fn action(
         target: Target::Node,
         dry_run: DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
     }
 }
 pub const ACTIONS: &[ActionDef] = &[

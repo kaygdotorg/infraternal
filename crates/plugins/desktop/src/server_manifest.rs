@@ -50,6 +50,8 @@ pub const ACTIONS: &[ActionDef] = &[
         target: Target::Session,
         dry_run: DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
     },
     ActionDef {
         id: "desktop.windows",
@@ -62,6 +64,8 @@ pub const ACTIONS: &[ActionDef] = &[
         target: Target::Host,
         dry_run: DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
     },
     ActionDef {
         id: "desktop.session.start",
@@ -74,6 +78,8 @@ pub const ACTIONS: &[ActionDef] = &[
         target: Target::Host,
         dry_run: DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
     },
     ActionDef {
         id: "desktop.session.stop",
@@ -86,6 +92,8 @@ pub const ACTIONS: &[ActionDef] = &[
         target: Target::Session,
         dry_run: DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
     },
     ActionDef {
         id: "desktop.session.control",
@@ -98,6 +106,8 @@ pub const ACTIONS: &[ActionDef] = &[
         target: Target::Session,
         dry_run: DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
     },
     ActionDef {
         id: "desktop.session.status",
@@ -110,6 +120,8 @@ pub const ACTIONS: &[ActionDef] = &[
         target: Target::Session,
         dry_run: DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
     },
     ActionDef {
         id: "desktop.session.clock",
@@ -122,6 +134,8 @@ pub const ACTIONS: &[ActionDef] = &[
         target: Target::Session,
         dry_run: DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
     },
 ];
 /// Server metadata cannot enable a node component or create a server [D201].
