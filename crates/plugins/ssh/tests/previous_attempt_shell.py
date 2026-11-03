@@ -558,10 +558,12 @@ observe_manager() {{
         self.assertEqual(fields[4], since)
         holder.communicate(b'done\n', timeout=5)
 
-    def test_replacement_stops_only_the_journaled_payload_process_and_keeps_host_state(self):
+    def test_replacement_keeps_an_unauthenticated_payload_process_and_stays_retryable(self):
         stage, payload = self.make_upgrade_fixture()
-        # A process launched through the journaled payload path has that exact
-        # executable inode in /proc; sleep gives the shell a real process to stop.
+        # A process running the journaled payload without a session endpoint
+        # cannot be stopped safely, so replacement refuses (73) and keeps the
+        # journal. Session shims are stopped through their socket; the Rust
+        # legacy-shim regressions cover that path.
         shutil.copyfile('/bin/sleep', payload)
         payload.chmod(0o700)
         child = subprocess.Popen(
@@ -585,16 +587,24 @@ observed=$(inspect_previous)
 replace_stuck_install "$observed"
 '''
         result = self.run_shell(body)
-        self.assertEqual(result.returncode, 0, result.stderr.decode())
-        child.wait(timeout=5)
-        self.assertFalse(stage.exists())
-        self.assertTrue((self.base / 'bin/live').exists(), 'the old binary remains available for transactional replacement')
-        self.assertTrue(self.identity_path.exists(), 'identity and state stay available for HTTPS re-enrollment')
+        self.assertEqual(result.returncode, 73, result.stderr.decode())
+        self.assertIsNone(child.poll(), 'an unauthenticated payload process is never signalled')
+        self.assertTrue(stage.exists())
+        self.assertTrue((self.base / 'bin/live').exists())
+        self.assertTrue(self.identity_path.exists())
         self.assertEqual(self.manager_log.read_text().splitlines(), [
             'stop infraternal-agent.service',
             'disable infraternal-agent.service',
             'daemon-reload',
         ])
+        # The service was already disabled; a later add-host must still see the
+        # same stuck install instead of an ownership refusal (#305).
+        (self.unit.parent / 'default.target.wants/infraternal-agent.service').unlink()
+        child.terminate()
+        child.wait(timeout=5)
+        retry = self.run_shell('\ninspect_previous')
+        self.assertEqual(retry.returncode, 0, retry.stdout.decode())
+        self.assertTrue(retry.stdout.decode().startswith(f'INFRATERNAL_SETUP_UPGRADE {HOST} {TRANSACTION} '))
 
     def test_replacement_does_not_signal_an_unrelated_process_with_a_host_file_open(self):
         stage, payload = self.make_upgrade_fixture()

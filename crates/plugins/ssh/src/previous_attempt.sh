@@ -239,12 +239,16 @@ validate_upgrade_root() {
  setup_wanted=$(sed -n 's/^WantedBy=//p' "$unit")
  case "$setup_wanted" in default.target|multi-user.target) :;; *) refuse unit;; esac
  setup_wants_dir="$(dirname "$unit")/$setup_wanted.wants"
- [ -d "$setup_wants_dir" ] && [ ! -L "$setup_wants_dir" ] && [ -O "$setup_wants_dir" ] || exit 71
- setup_wants_mode=$(stat -c '%a' "$setup_wants_dir")
- [ "$((0$setup_wants_mode & 022))" = 0 ] || exit 71
  setup_wants="$setup_wants_dir/infraternal-agent.service"
- [ -L "$setup_wants" ] || exit 71
- case "$(readlink "$setup_wants")" in "$unit"|../infraternal-agent.service) :;; *) exit 71;; esac
+ if [ -e "$setup_wants_dir" ] || [ -L "$setup_wants_dir" ]; then
+  [ -d "$setup_wants_dir" ] && [ ! -L "$setup_wants_dir" ] && [ -O "$setup_wants_dir" ] || exit 71
+  setup_wants_mode=$(stat -c '%a' "$setup_wants_dir")
+  [ "$((0$setup_wants_mode & 022))" = 0 ] || exit 71
+ fi
+ if [ -e "$setup_wants" ] || [ -L "$setup_wants" ]; then
+  [ -L "$setup_wants" ] || exit 71
+  case "$(readlink "$setup_wants")" in "$unit"|../infraternal-agent.service) :;; *) exit 71;; esac
+ fi
 }
 inspect_upgrade() {
  validate_upgrade_root
