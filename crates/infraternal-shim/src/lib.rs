@@ -262,6 +262,9 @@ pub use session::{run_with_login_group, run_with_prestarted_login};
 
 #[cfg(all(feature = "ca-handoff", target_os = "linux"))]
 pub mod locked_bytes;
+#[cfg(all(feature = "ca-handoff", not(target_os = "linux")))]
+#[path = "locked_bytes_refused.rs"]
+pub mod locked_bytes;
 
 #[cfg(all(test, feature = "host-login", target_os = "linux"))]
 #[path = "../tests/unit/login_lifecycle.rs"]
