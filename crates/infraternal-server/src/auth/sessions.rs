@@ -24,8 +24,17 @@ pub struct RecoveryPending {
     pub ready_at: i64,
 }
 impl Session {
+    /// The session's tap is recent enough to be spent on one per-action change (D333).
     pub(super) fn require_fresh(&self, now: i64) -> Result<()> {
         if self.fresh > now || now - self.fresh >= FRESH {
+            return Err(Error::Denied);
+        }
+        Ok(())
+    }
+
+    /// The session is inside the browser's 15-minute admin window that its tap started (D333).
+    pub(super) fn require_admin_window(&self, now: i64) -> Result<()> {
+        if self.fresh > now || now - self.fresh >= infraternal_plugin_api::ADMIN_WINDOW_SECONDS {
             return Err(Error::Denied);
         }
         Ok(())
@@ -121,10 +130,11 @@ impl Auth {
         Ok(())
     }
 
-    /// Authenticate a device and require a passkey tap within five minutes for destructive UI actions [28].
+    /// Authenticate a device inside the admin window its last tap started (D333: 15 minutes of
+    /// admin actions without taps) [28].
     pub async fn fresh_session(&self, token: &str, now: i64) -> Result<Session> {
         let session = self.session(token, now).await?;
-        session.require_fresh(now)?;
+        session.require_admin_window(now)?;
         Ok(session)
     }
 

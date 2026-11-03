@@ -3585,7 +3585,7 @@ impl SocketHost for PluginHost {
                     &self.hash,
                     &self.user,
                     unix_seconds().unwrap_or(i64::MAX),
-                    infraternal_plugin_api::FRESH_SECONDS,
+                    infraternal_plugin_api::ADMIN_WINDOW_SECONDS,
                 )
                 .await
                 .unwrap_or(false)

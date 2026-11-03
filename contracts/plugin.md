@@ -69,8 +69,13 @@ Rules:
 - `Effect::Destructive` requires `DryRun::Required` (DECISIONS 28).
   - MCP: the generated tool takes `dry_run: true` first. The real call must
     include the `plan_id` from a dry run made in the last 5 minutes.
-  - UI: a fresh passkey tap.
-  - CLI: `--yes`, or an interactive confirm.
+  - UI: inside the 15-minute admin window that one passkey tap opens (D333).
+  - CLI and API keys: inside the key's scope, no further tap; the dry run
+    comes first (D333).
+  - Per-action-tap actions (`fresh_passkey`: key creation or widening, admin
+    role changes and CA setup, recovery-key and passkey changes, account
+    deletion, turning these rules off) need their own tap for every run and
+    are never key-callable.
 - Each call is audited: who (user, device, adapter), the action, the
   target, the input digest, dry-run or not, and the result. The audit write
   happens before the side effect, and its outcome is updated after it.

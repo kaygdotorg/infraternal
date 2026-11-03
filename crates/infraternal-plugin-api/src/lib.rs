@@ -45,8 +45,13 @@ use tokio::sync::mpsc;
 
 /// The interface version compiled into every descriptor.
 pub const API_VERSION: u16 = 1;
-/// Fresh destructive confirmation window shared by host and plugins [28].
+/// How recent the tap must be that one per-action change spends (D333: key approval, passkey
+/// and recovery-key changes, security settings) [28].
 pub const FRESH_SECONDS: i64 = 300;
+/// D333: "In the browser, one tap starts 15 minutes of admin actions without taps." Admin
+/// actions (plugin switches, mesh and release settings, node approvals, key revocation) accept
+/// a session whose tap is at most this old. Per-action changes still spend their own tap.
+pub const ADMIN_WINDOW_SECONDS: i64 = 900;
 /// A plugin operation remains cancellable by the host's session watchdog.
 pub type Operation<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// Permission and confirmation semantics exposed to every adapter.

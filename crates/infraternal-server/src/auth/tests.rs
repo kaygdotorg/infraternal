@@ -3506,6 +3506,8 @@ mod logout_commit;
 
 #[path = "action_tap_tests.rs"]
 mod action_tap_tests;
+#[path = "admin_window_tests.rs"]
+mod admin_window_tests;
 #[path = "api_expiry_tests.rs"]
 mod api_expiry;
 #[path = "key_lifetime_tests.rs"]

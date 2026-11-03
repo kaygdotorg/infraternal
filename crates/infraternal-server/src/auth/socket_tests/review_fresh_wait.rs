@@ -47,8 +47,10 @@ async fn review_mesh_delete_refused_when_freshness_expires_during_writer_wait() 
     .await;
     read_welcome(&mut socket).await;
     let now = crate::websocket::now_seconds().unwrap();
+    // Two seconds before the browser's admin window (D333) closes.
+    let age = infraternal_plugin_api::ADMIN_WINDOW_SECONDS - 2;
     sqlx::query("UPDATE sessions SET fresh=?,expires=?")
-        .bind(now - 298)
+        .bind(now - age)
         .bind(now + 30 * 86400)
         .execute(&f.auth.pool)
         .await
@@ -99,8 +101,8 @@ async fn review_mesh_delete_refused_when_freshness_expires_during_writer_wait() 
     let completed = crate::websocket::now_seconds().unwrap();
     assert!(f.auth.fresh_session(&f.session, completed).await.is_err());
     println!(
-        "fresh_age_at_admission_s=298 fresh_age_at_completion_s={} ok={ok} result={} remaining={remaining} revision={revision} audits={audits}",
-        completed - (now - 298),
+        "fresh_age_at_admission_s={age} fresh_age_at_completion_s={} ok={ok} result={} remaining={remaining} revision={revision} audits={audits}",
+        completed - (now - age),
         String::from_utf8_lossy(json)
     );
     server.abort();

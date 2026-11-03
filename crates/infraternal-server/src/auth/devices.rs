@@ -251,7 +251,7 @@ impl Auth {
     /// stream rechecks the key and ends (J137 P3-4).
     pub async fn api_revoke(&self, session_token: &str, key_hash: &str, now: i64) -> Result<()> {
         let session = self.session(session_token, now).await?;
-        session.require_fresh(now)?;
+        session.require_admin_window(now)?;
         let revoked = sqlx::query(
             "UPDATE api_keys SET dead=1,expires_at=MIN(expires_at,?) WHERE token_hash=? AND user_id=?",
         )

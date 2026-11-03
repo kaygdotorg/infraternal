@@ -148,8 +148,8 @@ pre-edit host tag and the edited tag. Cascading tag renames also notify viewers
 of the other tags on affected hosts, because node tag metadata changes.
 
 Browser node/tag/grant deletion, membership removal, grant endpoint moves, and
-role definition/assignment require a passkey verification within the existing
-five-minute fresh-session window (D28). Freshness is checked at admission and
+role definition/assignment require a passkey tap within the browser's
+15-minute admin window (D28, D333: one tap starts 15 minutes of admin actions). Freshness is checked at admission and
 again inside the writer transaction, immediately before commit using the
 SQLite clock. Waiting for the writer cannot extend the confirmation window.
 If confirmation expires, the result says `confirm with your passkey again`;
