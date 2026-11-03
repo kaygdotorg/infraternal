@@ -286,11 +286,6 @@ not_live() {
   flock -n 8 || exit 73
   exec 8<&-
  fi
- if [ -e "$base" ] || [ -L "$base" ]; then
-  base_real=$(CDPATH= cd -P "$base" 2>/dev/null && pwd -P) || refuse tool
- else
-  base_real=$(CDPATH= cd -P "$(dirname "$base")" && pwd -P)/${base##*/}
- fi
  # Non-dumpable shims: the helper asks the kernel by owner+inode, never by name.
  for entry in "$base/sessions"/*.sock "$base/sessions/sessions"/*.sock; do
   [ -S "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] || continue
@@ -299,11 +294,31 @@ not_live() {
   "$helper" --bootstrap-runtime "$base" "$(stat -c '%d:%i' "$base")" sessions </dev/null || exit $?
   break
  done
+ scan_holders all
+}
+# Refuse (73) while a process of this user runs from or holds a file under
+# $base. "service" skips the enrolled unit's own processes and the journaled
+# payload's shims, which a replacement is about to stop itself (#305).
+scan_holders() {
+ scan_skip=$1
+ if [ -e "$base" ] || [ -L "$base" ]; then
+  base_real=$(CDPATH= cd -P "$base" 2>/dev/null && pwd -P) || refuse tool
+ else
+  base_real=$(CDPATH= cd -P "$(dirname "$base")" && pwd -P)/${base##*/}
+ fi
  case "$base" in *[\*\?\[]*) refuse tool;; esac
  case "$base_real" in *[\*\?\[]*) refuse tool;; esac
  set --
  for process in /proc/[0-9]*; do
   [ -O "$process" ] || continue
+  if [ "$scan_skip" = service ]; then
+   [ ! "$base/.bootstrap-lock/payload" -ef "$process/exe" ] || continue
+   scan_unit=no
+   { while IFS= read -r scan_cgroup; do
+      case "$scan_cgroup" in */infraternal-agent.service|*/infraternal-agent.service/*) scan_unit=yes;; esac
+     done < "$process/cgroup"; } 2>/dev/null || :
+   [ "$scan_unit" = no ] || continue
+  fi
   set -- "$@" "$process/exe" "$process/fd"
   [ "$#" -le 8192 ] || refuse size
  done
@@ -315,7 +330,6 @@ not_live() {
   [ "$?" = 1 ] || refuse tool
  fi
  [ -z "$live" ] || exit 73
-
 }
 no_redirect() {
  path=
@@ -504,15 +518,26 @@ stop_stage_shims() {
   [ ! "$stage/payload" -ef "$setup_process/exe" ] || exit 73
  done
 }
-replace_stuck_install() {
- setup_guard
+# Stop the stuck install's service and shims for the exact confirmed record.
+# Every read-only proof runs first; after the stop, any failure puts the
+# service back as it was found (#305 P1-2). Callers clear the EXIT trap only
+# once the old install is moved out of the way.
+retire_stuck_service() {
  replace_expected=$1
+ setup_guard
  replace_observed=$(inspect_previous)
  [ "$replace_observed" = "$replace_expected" ] || exit 75
  set -- $replace_expected
  [ "$#" = 9 ] && [ "$1" = INFRATERNAL_SETUP_UPGRADE ] || exit 75
  stage="$base/.bootstrap-lock"
+ runtime_helper
+ scan_holders service
+ replace_enabled=no
+ replace_active=no
+ if $manager is-enabled --quiet infraternal-agent.service >/dev/null 2>&1; then replace_enabled=yes; fi
+ if $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1; then replace_active=yes; fi
  retire_setup_lease
+ trap 'replace_status=$?; trap - EXIT; restore_stuck_service; exit "$replace_status"' EXIT
  $manager stop infraternal-agent.service >/dev/null 2>&1 || exit 73
  $manager disable infraternal-agent.service >/dev/null 2>&1 || exit 73
  $manager daemon-reload >/dev/null 2>&1 || exit 73
@@ -521,5 +546,16 @@ replace_stuck_install() {
  not_live
  exec 7< "$stage"
  flock -n 7 || exit 73
+}
+# Undo retire_stuck_service: re-enable and restart the service if it was so found.
+restore_stuck_service() {
+ $manager daemon-reload >/dev/null 2>&1 || :
+ [ "$replace_enabled" != yes ] || $manager enable infraternal-agent.service >/dev/null 2>&1 || :
+ [ "$replace_active" != yes ] || $manager start infraternal-agent.service >/dev/null 2>&1 || :
+}
+# Replace a stuck upgrade this server enrolled.
+replace_stuck_install() {
+ retire_stuck_service "$1"
  rm -rf "$stage"
+ trap - EXIT
 }

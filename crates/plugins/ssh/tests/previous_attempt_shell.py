@@ -636,10 +636,17 @@ replace_stuck_install "$observed"
         self.assertTrue(stage.exists())
         self.assertTrue((self.base / 'bin/live').exists())
         self.assertTrue(self.identity_path.exists())
+        # The refusal came after the stop, so the service is put back as it was
+        # found: enabled and running (#305 P1-2).
         self.assertEqual(self.manager_log.read_text().splitlines(), [
+            'is-enabled --quiet infraternal-agent.service',
+            'is-active --quiet infraternal-agent.service',
             'stop infraternal-agent.service',
             'disable infraternal-agent.service',
             'daemon-reload',
+            'daemon-reload',
+            'enable infraternal-agent.service',
+            'start infraternal-agent.service',
         ])
         # The service was already disabled; a later add-host must still see the
         # same stuck install instead of an ownership refusal (#305).
@@ -666,6 +673,8 @@ replace_stuck_install "$observed"
         self.assertEqual(result.returncode, 73, result.stderr.decode())
         self.assertIsNone(unrelated.poll(), 'a process that only has a host file open is not an infraternal agent')
         self.assertTrue(stage.exists(), 'uncertain host activity keeps the journal for retry')
+        # Found by the read-only scan, before the service was touched (#305 P1-2).
+        self.assertFalse(self.manager_log.exists(), 'the service is never stopped for a refusal the scan can see')
 
     def test_reused_lease_pid_with_a_different_start_time_is_never_signalled(self):
         stage, _ = self.make_upgrade_fixture(f'{os.getpid()} 1\n')
