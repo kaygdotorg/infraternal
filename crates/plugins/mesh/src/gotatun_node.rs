@@ -19,7 +19,11 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io,
     net::IpAddr,
-    sync::{Arc, mpsc as sync},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc as sync,
+    },
     thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -27,6 +31,7 @@ use tokio::{
     runtime::Builder as RuntimeBuilder,
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task::JoinSet,
+    time::Instant,
 };
 
 use crate::{dataplane::Config, gotatun_tun::LinuxTun, policy::model::PublicKey};
@@ -131,6 +136,40 @@ pub(crate) struct Engine {
     commands: UnboundedSender<WorkerCommand>,
     join: Option<JoinHandle<()>>,
     info: RuntimeInfo,
+    health: Arc<Health>,
+}
+
+/// How long a stopped engine waits before it is rebuilt. A cause that persists, such as a deleted
+/// TUN, then costs one rebuild a second instead of a busy loop.
+const RESTART_DELAY: Duration = Duration::from_secs(1);
+
+/// Engine health shared between the worker and `mesh status`.
+#[derive(Default)]
+struct Health {
+    /// Times the worker rebuilt the device after a fatal error.
+    restarts: AtomicU64,
+    /// The device stopped on a fatal error and is not rebuilt yet.
+    stopped: AtomicBool,
+    /// Outbound frames the TUN adapter could not decode and dropped.
+    refused: Arc<AtomicU64>,
+}
+
+impl Health {
+    fn snapshot(&self) -> EngineHealth {
+        EngineHealth {
+            stopped: self.stopped.load(Ordering::Relaxed),
+            restarts: self.restarts.load(Ordering::Relaxed),
+            refused_frames: self.refused.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// The public view of [`Health`], reported by `mesh status` for the `GotaTun` engine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineHealth {
+    pub stopped: bool,
+    pub restarts: u64,
+    pub refused_frames: u64,
 }
 
 impl Engine {
@@ -146,6 +185,9 @@ impl Engine {
     ) -> io::Result<Self> {
         let (info_tx, info_rx) = sync::sync_channel(1);
         let (commands, receiver) = mpsc::unbounded_channel();
+        let health = Arc::new(Health::default());
+        let worker_health = Arc::clone(&health);
+        let refused = Arc::clone(&health.refused);
         let join = thread::Builder::new()
             .name("infraternal-mesh-gotatun".to_owned())
             .spawn(move || {
@@ -156,62 +198,20 @@ impl Engine {
                         return;
                     }
                 };
-                let startup_config = config.clone();
-                let initialized = runtime.block_on(async move {
-                    let kernel_owned = crate::wireguard::Device::owned()?;
-                    let tun_owned = crate::wireguard::Device::owned_tun()?;
-                    if kernel_owned || tun_owned {
-                        return Err(io::ErrorKind::AlreadyExists.into());
-                    }
-                    let tun = LinuxTun::create(crate::wireguard::INTERFACE, Arc::default())?;
-                    let interface = tun.name().to_owned();
-                    if interface != crate::wireguard::INTERFACE {
-                        return Err(io::ErrorKind::InvalidData.into());
-                    }
-                    let offloads_enabled = tun.offloads_enabled();
-                    if !offloads_enabled {
-                        return Err(io::Error::other(
-                            "Linux TUN checksum and TCP segmentation offloads are unavailable.",
-                        ));
-                    }
-                    crate::wireguard::Device::mark_tun(local_public_key)?;
-                    crate::wireguard::Device::activate_tun()?;
-                    let tun = LinuxPacketIo::new(tun);
-                    let (factory, port) = bind_udp(requested_port).await?;
-                    let peers = startup_config
-                        .as_ref()
-                        .map(peers_for_config)
-                        .transpose()?
-                        .unwrap_or_default();
-                    // GotaTun starts its packet workers only when the builder has peers.
-                    // Node::up precedes the coordinator's first snapshot, so keep the bound
-                    // transport and key until that first nonempty peer set is available.
-                    let (device, pending) = if peers.is_empty() {
-                        (
-                            None,
-                            Some(PendingDevice {
-                                factory,
-                                private_key,
-                            }),
-                        )
-                    } else {
-                        (
-                            Some(Arc::new(
-                                build_device(factory, private_key, port, peers, tun.clone())
-                                    .await?,
-                            )),
-                            None,
-                        )
-                    };
-                    let info = RuntimeInfo {
-                        interface,
-                        port,
-                        thp_disabled,
-                        offloads_enabled,
-                    };
-                    Ok((tun, device, pending, info))
-                });
-                let (tun, device, pending, info) = match initialized {
+                let initialized = runtime.block_on(initialize(
+                    private_key,
+                    local_public_key,
+                    requested_port,
+                    config.as_ref(),
+                    refused,
+                    thp_disabled,
+                ));
+                let Started {
+                    tun,
+                    device,
+                    pending,
+                    info,
+                } = match initialized {
                     Ok(initialized) => initialized,
                     Err(error) => {
                         let _ = info_tx.send(Err(error));
@@ -231,6 +231,8 @@ impl Engine {
                     pending,
                     config,
                     info,
+                    health: worker_health,
+                    restart_at: None,
                 };
                 runtime.block_on(run_worker(receiver, state));
             })?;
@@ -245,7 +247,14 @@ impl Engine {
             commands,
             join: Some(join),
             info,
+            health,
         })
+    }
+
+    /// Whether the engine is running, how often it was rebuilt, and what it dropped.
+    #[must_use]
+    pub(crate) fn health(&self) -> EngineHealth {
+        self.health.snapshot()
     }
 
     /// The assigned TUN name, bound UDP port and THP state of the worker thread.
@@ -347,6 +356,84 @@ impl Drop for Engine {
     }
 }
 
+/// What a successful start hands to the worker loop.
+struct Started {
+    tun: LinuxPacketIo,
+    device: Option<Arc<GotaDevice>>,
+    pending: Option<PendingDevice>,
+    info: RuntimeInfo,
+}
+
+/// Open, mark and activate the TUN, bind the engine socket, and build the device when the startup
+/// config already has peers. Runs on the engine's runtime, which also runs the TUN writer.
+async fn initialize(
+    private_key: StaticSecret,
+    local_public_key: PublicKey,
+    requested_port: u16,
+    config: Option<&Config>,
+    refused: Arc<AtomicU64>,
+    thp_disabled: bool,
+) -> io::Result<Started> {
+    let kernel_owned = crate::wireguard::Device::owned()?;
+    let tun_owned = crate::wireguard::Device::owned_tun()?;
+    if kernel_owned || tun_owned {
+        return Err(io::ErrorKind::AlreadyExists.into());
+    }
+    let tun = LinuxTun::create(crate::wireguard::INTERFACE, refused)?;
+    let interface = tun.name().to_owned();
+    if interface != crate::wireguard::INTERFACE {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let offloads_enabled = tun.offloads_enabled();
+    if !offloads_enabled {
+        return Err(io::Error::other(
+            "Linux TUN checksum and TCP segmentation offloads are unavailable.",
+        ));
+    }
+    crate::wireguard::Device::mark_tun(local_public_key)?;
+    crate::wireguard::Device::activate_tun()?;
+    let tun = LinuxPacketIo::new(tun);
+    let (factory, port) = bind_udp(requested_port).await?;
+    let peers = config
+        .map(peers_for_config)
+        .transpose()?
+        .unwrap_or_default();
+    // GotaTun starts its packet workers only when the builder has peers.
+    // Node::up precedes the coordinator's first snapshot, so the bound
+    // transport and key wait for that first nonempty peer set; they also stay
+    // for rebuilding a device that stops on a fatal error.
+    let device = if peers.is_empty() {
+        None
+    } else {
+        Some(Arc::new(
+            build_device(
+                factory.clone(),
+                private_key.clone(),
+                port,
+                peers,
+                tun.clone(),
+            )
+            .await?,
+        ))
+    };
+    let pending = Some(PendingDevice {
+        factory,
+        private_key,
+    });
+    let info = RuntimeInfo {
+        interface,
+        port,
+        thp_disabled,
+        offloads_enabled,
+    };
+    Ok(Started {
+        tun,
+        device,
+        pending,
+        info,
+    })
+}
+
 /// Most worker threads the engine runtime uses. `GotaTun` runs UDP receive and decryption, TUN
 /// reads, TUN writes, and encryption as separate tasks joined by channels; on one thread those
 /// hand-offs only add work (#260 R4b). The bound keeps a large host from giving the mesh every
@@ -378,14 +465,36 @@ struct RuntimeState {
     /// Device operations take `GotaTun`'s own lock briefly; no command waits on a session.
     device: Option<Arc<GotaDevice>>,
     handshakes: JoinSet<()>,
+    /// Kept for the worker's life: a device that stopped on a fatal error is rebuilt from it.
+    /// The live device holds its own copy of the key; `stop` drops this one (zeroized on drop).
     pending: Option<PendingDevice>,
     config: Option<Config>,
     info: RuntimeInfo,
+    health: Arc<Health>,
+    /// When a device that stopped on a fatal error is rebuilt.
+    restart_at: Option<Instant>,
 }
 
 struct PendingDevice {
     factory: BoundUdpFactory,
     private_key: StaticSecret,
+}
+
+/// Wait for the device's fatal error. `GotaTun` reports it only through `wait(&mut self)`, so this
+/// waits only while no handshake task shares the device. An error raised in the meantime is
+/// still seen afterwards: `wait` returns at once for an error that is already set.
+async fn fatal_error(device: Option<&mut Arc<GotaDevice>>) {
+    match device.and_then(Arc::get_mut) {
+        Some(device) => device.wait().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn restart_due(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
 }
 
 async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
@@ -418,6 +527,14 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
             },
             // Reap finished handshake tasks; their result is visible in the peer counters.
             Some(_) = state.handshakes.join_next(), if !state.handshakes.is_empty() => {}
+            // A packet task that ends on an error ends that direction of traffic for good while
+            // the node still looks up (#260 J143 P2-1). Stop the device and rebuild it.
+            () = fatal_error(state.device.as_mut()), if state.handshakes.is_empty() => {
+                state.engine_stopped().await;
+            }
+            () = restart_due(state.restart_at), if state.restart_at.is_some() => {
+                state.restart().await;
+            }
         }
     }
 }
@@ -488,30 +605,62 @@ impl RuntimeState {
         Ok(())
     }
 
+    /// Build the device for `config` from the retained key, sockets and TUN. `GotaTun` runs packet
+    /// workers only with peers, so an empty peer set leaves no device.
+    async fn start_device(&mut self, config: &Config) -> io::Result<()> {
+        let peers = peers_for_config(config)?;
+        if peers.is_empty() {
+            // Nothing left to rebuild: a stopped engine with no peers carries no traffic.
+            self.restart_at = None;
+            self.health.stopped.store(false, Ordering::Relaxed);
+            return Ok(());
+        }
+        let pending = self.pending.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        let tun = self
+            .tun
+            .as_ref()
+            .ok_or(io::ErrorKind::NotConnected)?
+            .clone();
+        let device = build_device(
+            pending.factory.clone(),
+            pending.private_key.clone(),
+            self.info.port,
+            peers,
+            tun,
+        )
+        .await?;
+        self.device = Some(Arc::new(device));
+        self.restart_at = None;
+        if self.health.stopped.swap(false, Ordering::Relaxed) {
+            self.health.restarts.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// The device reported a fatal error: one of its packet tasks has ended. Stop the rest and
+    /// schedule a rebuild; `mesh status` shows the engine stopped until then.
+    async fn engine_stopped(&mut self) {
+        // Called only while no handshake task holds a clone, so this handle is the last one.
+        if let Some(device) = self.device.take().and_then(Arc::into_inner) {
+            device.stop().await;
+        }
+        self.health.stopped.store(true, Ordering::Relaxed);
+        self.restart_at = Some(Instant::now() + RESTART_DELAY);
+    }
+
+    async fn restart(&mut self) {
+        self.restart_at = None;
+        let Some(config) = self.config.clone() else {
+            return;
+        };
+        if self.start_device(&config).await.is_err() {
+            self.restart_at = Some(Instant::now() + RESTART_DELAY);
+        }
+    }
+
     async fn apply(&mut self, config: Config) -> io::Result<RuntimeInfo> {
         if self.device.is_none() {
-            let peers = peers_for_config(&config)?;
-            if peers.is_empty() {
-                self.config = Some(config);
-                return Ok(self.info.clone());
-            }
-            let pending = self.pending.as_ref().ok_or(io::ErrorKind::NotConnected)?;
-            let tun = self
-                .tun
-                .as_ref()
-                .ok_or(io::ErrorKind::NotConnected)?
-                .clone();
-            let device = build_device(
-                pending.factory.clone(),
-                pending.private_key.clone(),
-                self.info.port,
-                peers,
-                tun,
-            )
-            .await?;
-            self.device = Some(Arc::new(device));
-            // The live device owns its copies; drop deferred startup material.
-            self.pending.take();
+            self.start_device(&config).await?;
             self.config = Some(config);
             return Ok(self.info.clone());
         }
@@ -599,6 +748,7 @@ impl RuntimeState {
         self.pending.take();
         self.tun.take();
         self.config = None;
+        self.restart_at = None;
     }
 }
 
@@ -794,10 +944,93 @@ mod tests {
         );
     }
 
-    #[test]
-    fn peer_conversion_uses_coordinator_keys_endpoints_and_host_allowed_ips() {
-        let endpoint: SocketAddr = "192.0.2.4:51831".parse().expect("endpoint");
-        let config = Config {
+    /// The worker rebuilds a device whose packet task ended on a fatal error, and `mesh status`
+    /// sees it stopped in between (#260 J143 P2-1). A sequenced-packet pair plays the TUN; closing
+    /// the kernel's side ends `GotaTun`'s TUN reader with EOF, its fatal TUN error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worker_rebuilds_the_device_after_a_fatal_error() {
+        use super::{
+            Health, LinuxPacketIo, PendingDevice, RuntimeInfo, RuntimeState, WorkerCommand,
+            bind_udp, build_device, run_worker,
+        };
+        use gotatun::x25519::StaticSecret;
+        use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
+        use std::sync::{Arc, mpsc as sync};
+        let (kernel, device) = socketpair(
+            AddressFamily::Unix,
+            SockType::SeqPacket,
+            None,
+            SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
+        )
+        .expect("TUN stand-in");
+        let health = Arc::new(Health::default());
+        let tun = LinuxPacketIo::new(
+            crate::gotatun_tun::LinuxTun::from_fd(device, true, Arc::clone(&health.refused))
+                .expect("TUN stand-in registers"),
+        );
+        let (factory, port) = bind_udp(0).await.expect("engine socket");
+        let private_key = StaticSecret::from([7; 32]);
+        let config = one_peer_config(None);
+        let peers = peers_for_config(&config).expect("peers");
+        let device = build_device(
+            factory.clone(),
+            private_key.clone(),
+            port,
+            peers,
+            tun.clone(),
+        )
+        .await
+        .expect("device");
+        let state = RuntimeState {
+            tun: Some(tun),
+            device: Some(Arc::new(device)),
+            handshakes: tokio::task::JoinSet::new(),
+            pending: Some(PendingDevice {
+                factory,
+                private_key,
+            }),
+            config: Some(config),
+            info: RuntimeInfo {
+                interface: "test-tun".to_owned(),
+                port,
+                thp_disabled: true,
+                offloads_enabled: true,
+            },
+            health: Arc::clone(&health),
+            restart_at: None,
+        };
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let worker = tokio::spawn(run_worker(receiver, state));
+        assert_eq!(health.snapshot(), super::EngineHealth::default());
+
+        drop(kernel);
+        let mut seen_stopped = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while health.snapshot().restarts == 0 {
+            seen_stopped |= health.snapshot().stopped;
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the worker never rebuilt the stopped device: {:?}",
+                health.snapshot()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            seen_stopped,
+            "mesh status sees the engine stopped before it is rebuilt"
+        );
+
+        let (reply, stopped) = sync::sync_channel(1);
+        commands
+            .send(WorkerCommand::Stop(reply))
+            .map_err(|_| "worker ended")
+            .expect("stop");
+        worker.await.expect("worker");
+        stopped.recv().expect("stop reply");
+    }
+
+    fn one_peer_config(endpoint: Option<SocketAddr>) -> Config {
+        Config {
             local_key: Some(PublicKey([1; 32])),
             server: Some(NodeId(1)),
             node: NodeId(2),
@@ -821,7 +1054,7 @@ mod tests {
                             ipv4: "10.254.0.1".parse().expect("peer IPv4"),
                             ipv6: "fd01::1".parse().expect("peer IPv6"),
                         },
-                        endpoint: Some(endpoint),
+                        endpoint,
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
@@ -829,7 +1062,13 @@ mod tests {
             )]),
             #[cfg(feature = "mesh-dns-spike")]
             peer_names: BTreeMap::new(),
-        };
+        }
+    }
+
+    #[test]
+    fn peer_conversion_uses_coordinator_keys_endpoints_and_host_allowed_ips() {
+        let endpoint: SocketAddr = "192.0.2.4:51831".parse().expect("endpoint");
+        let config = one_peer_config(Some(endpoint));
         let peers = peers_for_config(&config).expect("convert coordinator peer");
 
         assert_eq!(peers.len(), 1);

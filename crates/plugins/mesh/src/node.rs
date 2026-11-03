@@ -476,6 +476,12 @@ impl Node {
         self.peer_counters()
     }
 
+    /// Health of the running `GotaTun` engine; `None` under kernel `WireGuard` or when stopped.
+    #[must_use]
+    pub fn engine_health(&self) -> Option<crate::gotatun_node::EngineHealth> {
+        self.gotatun.as_ref().map(Engine::health)
+    }
+
     /// Return a relay callback that starts a handshake through this node's selected engine.
     #[cfg(feature = "relay")]
     pub(crate) fn relay_handshake_starter(
