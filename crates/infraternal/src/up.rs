@@ -204,19 +204,30 @@ impl Drop for ApprovedInvitation {
     }
 }
 
-/// The invoking user's copy of the pending machine key. Once it has been
-/// prepared, `up` deletes it on every exit: after a successful handoff root
-/// holds its own copy, and after a refusal, an expired approval, a sudo denial
-/// or a partial install it must not stay readable in the user's home
-/// (#263, J134 P3-5). Rejected: generating the key as root, which would need
-/// the sudo prompt before the server request and restructure the flow.
+/// The invoking user's on-disk copy of the pending machine key, between its
+/// preparation and [`take_join_key`]. A failure in that short window deletes
+/// it on return or unwind (#263, J134 P3-5). A signal does not run `Drop`, so
+/// the copy must not outlive that window: see [`take_join_key`].
 struct PendingKeyCopy<'a>(&'a Path);
 
 impl Drop for PendingKeyCopy<'_> {
     fn drop(&mut self) {
-        // Best effort on failure paths; success checks the deletion itself.
+        // Best effort; take_join_key has normally removed it already.
         let _ = crate::remote::retire_prepared_join_key(self.0);
     }
+}
+
+/// Read the prepared machine key into zeroizing memory and delete its file at
+/// once, before the code is shown. Nothing is then on disk during the
+/// ten-minute wait or the root helper run, so Ctrl-C, a closed terminal or
+/// SIGTERM cannot leave a root service's key readable in the user's home
+/// (#263, J145 P3-1). A retry needs a new approval anyway, so it gets a new
+/// key. Rejected: a signal handler that deletes the file, which adds async
+/// signal-safety and still loses to SIGKILL.
+fn take_join_key(data: &Path) -> Result<Zeroizing<Vec<u8>>, Failure> {
+    let key = crate::remote::prepared_join_key_pkcs8(data).map_err(|_| Failure::LocalState)?;
+    crate::remote::retire_prepared_join_key(data).map_err(|_| Failure::LocalState)?;
+    Ok(key)
 }
 
 /// Request a fresh machine approval, wait for its one-use enrollment receipt, and install it.
@@ -261,10 +272,10 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
         Ok(digest) => digest,
         Err(error) => return fail(json_output, map_remote_failure(&error)),
     };
-    // From here on, every return deletes the invoking user's copy of the key.
     let _key_copy = PendingKeyCopy(&data);
-    let Ok(key_pkcs8) = crate::remote::prepared_join_key_pkcs8(&data) else {
-        return fail(json_output, Failure::LocalState);
+    let key_pkcs8 = match take_join_key(&data) {
+        Ok(key) => key,
+        Err(failure) => return fail(json_output, failure),
     };
     if crate::remote::key_digest_from_pkcs8(&key_pkcs8).ok() != Some(key_digest) {
         return fail(json_output, Failure::LocalState);
@@ -297,9 +308,6 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
     invitation.wipe();
     if let Err(failure) = invoke_sudo(&mut sudo, &payload) {
         return fail(json_output, failure);
-    }
-    if crate::remote::retire_prepared_join_key(&data).is_err() {
-        return fail(json_output, Failure::Partial);
     }
     emit(
         CommandResult::new(
@@ -1501,6 +1509,65 @@ mod tests {
         assert_eq!(mode(&base.join("bin")), 0o755);
         assert_eq!(mode(&base.join("bin/infraternal")), 0o755);
         assert_eq!(mode(&base.join("agent")), 0o700, "state stays private");
+    }
+
+    /// Child half of `a_signal_during_up_leaves_no_copy_of_the_machine_key`:
+    /// takes the key the way `up` does, then waits like `up` waits.
+    #[test]
+    #[ignore = "run only as a child process that the parent signals"]
+    fn hold_a_taken_join_key() {
+        let data = Path::new(&std::env::var_os("UP_TEST_KEY_DIR").unwrap()).to_path_buf();
+        let _copy = super::PendingKeyCopy(&data);
+        let key = super::take_join_key(&data).unwrap();
+        assert!(!key.is_empty());
+        println!("\nKEY_TAKEN");
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_signal_during_up_leaves_no_copy_of_the_machine_key() {
+        // J145 P3-1: Ctrl-C, a closed terminal or SIGTERM skip Drop.
+        use nix::sys::signal::{Signal, kill};
+        use std::io::BufRead;
+        for signal in [Signal::SIGINT, Signal::SIGHUP, Signal::SIGTERM] {
+            let temporary = TemporaryDirectory::new();
+            let data = temporary.0.join("data");
+            fs::create_dir(&data).unwrap();
+            fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+            // The key `up` prepared before the code is shown.
+            crate::remote::prepared_join_key_pkcs8(&data).unwrap();
+            assert_eq!(fs::read_dir(&data).unwrap().count(), 1);
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "up::tests::hold_a_taken_join_key",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("UP_TEST_KEY_DIR", &data)
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+            let ready = stdout
+                .lines()
+                .map_while(Result::ok)
+                .any(|line| line == "KEY_TAKEN");
+            assert!(ready, "the child never took the key");
+            kill(
+                nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap()),
+                signal,
+            )
+            .unwrap();
+            let status = child.wait().unwrap();
+            assert!(!status.success(), "{signal:?}: the child was not stopped");
+            assert_eq!(
+                fs::read_dir(&data).unwrap().count(),
+                0,
+                "{signal:?}: the key copy survived the signal"
+            );
+        }
     }
 
     #[test]
