@@ -587,7 +587,12 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
     shaderFramesAfterSignIn: window.__faultyWorkerFrames.length - shaderFramesAtSignIn,
   }), { startFrame: idleStartFrame, shaderFramesAtSignIn: shaderFramesAfterSignIn });
   expect(idle.rafCallbacks).toEqual([]);
-  expect(idle.pending).toEqual([]);
+  // A connected screen keeps exactly one timer for the link's liveness probe (D265, D300, #234; its cadence and counts are held
+  // by connection-idle.test.ts). The signed-out screens above and below still allow no timer at all. Anything else pending here is
+  // the screen's own idle work and must not exist.
+  const isLinkLiveness = (work: { stack: string }): boolean => /scheduleLiveness|checkLiveness/.test(work.stack);
+  expect(idle.pending.filter((work) => !isLinkLiveness(work))).toEqual([]);
+  expect(idle.pending.filter(isLinkLiveness).length).toBeLessThanOrEqual(1);
   expect(idle.idleRafFrames).toBe(0);
   console.log(`MOTION_AUDIT core-idle ${JSON.stringify(idle)}`);
 

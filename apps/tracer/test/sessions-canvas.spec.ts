@@ -16,7 +16,8 @@ async function open(browser: Browser, viewport: Viewport, scene = 0, theme = "in
   const context = await browser.newContext({ viewport: { width: viewport.width, height: viewport.height }, hasTouch: !!viewport.touch, isMobile: !!viewport.touch });
   await context.addInitScript(([n, block]) => {
     if (block) { Storage.prototype.getItem = () => { throw new Error("blocked"); }; Storage.prototype.setItem = () => { throw new Error("blocked"); }; return; }
-    if (!localStorage.getItem("tracer.hints.mock")) localStorage.setItem("tracer.hints.mock", JSON.stringify({ signIns: n, shown: {} }));
+    // The teaching counters are device-wide and carry no account in their key (D312, R250-03; src/hints.ts).
+    if (!localStorage.getItem("tracer.hints")) localStorage.setItem("tracer.hints", JSON.stringify({ signIns: n, shown: {} }));
   }, [signIns, blockStorage] as const);
   const page = await context.newPage();
   await page.goto(`/?mock=1&proto=clusters&scene=3&theme=${theme}&bg=none${scene ? `&sessions=${scene}` : ""}`);
@@ -446,9 +447,14 @@ test("the manager's code is on demand, fetched at idle so the first open never w
   // Not part of the first screen: it arrives after the page has gone idle, and before anyone asks for it.
   const atFirstScreen = scripts.length;
   await expect.poll(() => scripts.length, { timeout: 10_000 }).toBeGreaterThan(atFirstScreen);
-  await page.waitForTimeout(500);
+  // The pointer entering a window loads the Option-key morph for its split buttons (#280, window-alt.on-demand.ts), and a click
+  // moves the pointer there first. Enter the window, and let the network settle, before counting; what the click on Sessions
+  // fetches after that is the manager's own.
+  const sessions = windowOf(page, "build-01").locator("[data-action='sessions']");
+  await sessions.hover();
+  await page.waitForLoadState("networkidle");
   const settled = scripts.length;
-  await windowOf(page, "build-01").locator("[data-action='sessions']").click();
+  await sessions.click();
   await expect(page.locator(".cl-sx-pop")).toBeVisible();
   expect(scripts.length, "opening the manager fetches nothing").toBe(settled);
   await context.close();

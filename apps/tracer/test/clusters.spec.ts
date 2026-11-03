@@ -711,9 +711,11 @@ test("motion rule: the work of a view jump, a window step and a column step fini
     await new Promise((r) => setTimeout(r, 600));
     out.canvasLockToggle = time(() => document.querySelector<HTMLElement>('[data-cv="canvas-lock"]')!.click());
     await new Promise((r) => setTimeout(r, 1400));
-    // A keyboard view jump uses the short flight: it has landed well inside 400 ms.
+    // A keyboard view jump uses the short flight: it has landed well inside 400 ms. The view chord is a physical digit key (D222):
+    // ⌘3 on a Mac, Ctrl+Shift+3 elsewhere.
     const before = api.camera().cx;
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "3", ctrlKey: true, bubbles: true, cancelable: true }));
+    const mac = /mac|iphone|ipad/i.test(navigator.platform);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "3", code: "Digit3", metaKey: mac, ctrlKey: !mac, shiftKey: !mac, bubbles: true, cancelable: true }));
     await new Promise((r) => setTimeout(r, 450));
     out.keyJumpMoved = Math.abs(api.camera().cx - before);
     return out;
@@ -837,13 +839,15 @@ test("closing the last window of a column removes the column, its neighbours clo
 test("settings is a view: a gear after a divider, one window per section, admin windows only for operators, nothing modal", async ({ page }) => {
   await open(page, 1);
   const sections = async (): Promise<string[]> => (await probe(page, (p) => p.views())).find((v) => v.id === "settings")!.windows;
-  expect(await sections()).toEqual(["s-appearance", "s-windows", "s-toolbar", "s-shortcuts", "s-devices", "s-account", "s-about", "s-users", "s-grants", "s-discovery"]);
+  // "Hosts" is a built-in section after Window Sizes: the Extended info switch moved out of Appearance (cc0966858, D157).
+  expect(await sections()).toEqual(["s-appearance", "s-windows", "s-hosts", "s-toolbar", "s-shortcuts", "s-devices", "s-account", "s-about", "s-users", "s-grants", "s-discovery"]);
   // The sidebar lists it last, after a divider; the gear in the sidebar footer flies there.
   await page.locator("#sidebar-toggle").click();
   await expect(page.locator('#tree .bm-sec[data-id="view:settings"].cl-divided')).toHaveCount(1);
   await page.locator(".ui-sidebar-foot .ui-sidebar-settings").click();
-  await expect.poll(async () => (await probe(page, (p) => p.canvasLock())).view, { timeout: 4000 }).toBe("settings");
-  expect((await probe(page, (p) => p.canvasLock())).on).toBe(true);
+  // The mockup opens on the Settings view, so the view name alone is true before the gear has done anything; the fly that the gear
+  // starts turns the snap on a moment later (a probe sees on=false at the click and on=true 400 ms after). Wait for both together.
+  await expect.poll(async () => { const lock = await probe(page, (p) => p.canvasLock()); return `${lock.view}:${lock.on}`; }, { timeout: 4000 }).toBe("settings:true");
   await expect(page.locator(".ui-settings")).toHaveCount(0); // the overlay shell is gone
   // The palette goes straight to a section's window.
   await page.keyboard.press("Control+Shift+K");
@@ -858,7 +862,7 @@ test("settings is a view: a gear after a divider, one window per section, admin 
   await expect(page.locator("html")).toHaveAttribute("data-theme", "ink");
   // Viewers get no admin windows.
   await page.evaluate(() => (window as unknown as { __tracerClusters: { setRole(r: string): void } }).__tracerClusters.setRole("viewer"));
-  await expect.poll(sections, { timeout: 4000 }).toEqual(["s-appearance", "s-windows", "s-toolbar", "s-shortcuts", "s-devices", "s-account", "s-about"]);
+  await expect.poll(sections, { timeout: 4000 }).toEqual(["s-appearance", "s-windows", "s-hosts", "s-toolbar", "s-shortcuts", "s-devices", "s-account", "s-about"]);
 });
 
 test("devices: the name edits in place, a sign-out asks first, and a device switch offers to continue once", async ({ page }) => {

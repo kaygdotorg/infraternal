@@ -302,7 +302,9 @@ test("desktop: the live terminal refits once on release, not on every frame, and
 test("touch: press and hold on a header reveals corner handles; a handle resizes; a tap outside ends it", async ({ browser }) => {
   const context = await browser.newContext({ hasTouch: true, isMobile: true, deviceScaleFactor: 3, viewport: { width: 393, height: 852 } });
   const page = await touchContext(context);
-  await openCanvas(page);
+  // The preview's frame meter rests in the bottom-right corner, which on a phone is where the first window's lower-right grip is,
+  // and takes the touch that is meant for the grip. This spec is about the grips, so it runs without the meter (`fps=0`).
+  await openCanvas(page, "&fps=0");
   const cdp = await context.newCDPSession(page);
   const touch = (type: "touchStart" | "touchMove" | "touchEnd", points: Array<{ x: number; y: number; id: number }>) =>
     cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points });
@@ -323,6 +325,9 @@ test("touch: press and hold on a header reveals corner handles; a handle resizes
   await page.waitForTimeout(650);
   await expect(window0).toHaveAttribute("data-resize", "touch");
   await touch("touchEnd", []);
+  // The hold ends with a 220 ms settle from scale(0.985) back to rest (window-resize.ts). A rect read inside it is still scaled
+  // (a 44 px grip measures 43.99994), so wait for the state, no running animation on the window, not for a time.
+  await expect.poll(() => window0.evaluate((node) => node.getAnimations().length)).toBe(0);
   const before = await windowBox(page, 0);
   const grip = (await window0.locator(".ui-window-resize[data-edge='se']").boundingBox())!;
   expect(grip.width).toBeGreaterThanOrEqual(44);
@@ -380,6 +385,10 @@ test("sidebar footer: the person and settings pills line up, press, and open Set
   await page.mouse.down();
   await expect.poll(() => user.evaluate((node) => getComputedStyle(node).transform)).not.toBe("none");
   await page.mouse.up();
+  // The person's pill is their account menu (#171, TASTE "You can always sign yourself out"): Settings and Sign out. Its Settings row opens Settings.
+  const accountMenu = page.locator(".ui-anchored-popover[aria-label='Account']");
+  await expect(accountMenu.getByRole("menuitem")).toHaveText(["Settings", "Sign out"]);
+  await accountMenu.getByRole("menuitem", { name: "Settings" }).click();
   await expect(page.locator(".ui-settings")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.locator(".ui-settings")).toHaveCount(0);
@@ -633,7 +642,9 @@ test("shortcuts: the palette offers Keyboard shortcuts, lock shortcuts are liste
   await page.keyboard.press("Enter");
   const panel = page.locator(".ui-shortcuts");
   await expect(panel).toBeVisible();
-  await expect(panel.locator(".ui-shortcuts-row", { hasText: "Lock or unlock" }).locator("kbd")).toHaveText(["Ctrl", "Shift", "L"]);
+  // Key labels follow the platform (#121, TASTE "Every platform sees its own conventions"): on an Apple keyboard the written
+  // "Ctrl+Shift+L" is drawn as the glyphs ⌃ ⇧ L, one cap each; the words stay on Windows and Linux (the next test).
+  await expect(panel.locator(".ui-shortcuts-row", { hasText: "Lock or unlock" }).locator("kbd")).toHaveText(["⌃", "⇧", "L"]);
   await expect(panel.locator(".ui-shortcuts-row", { hasText: "command palette" }).locator("kbd")).toHaveText(["⌘", "K", "⌘", "⇧", "P"]);
   await page.keyboard.press("Escape");
   await expect(panel).toHaveCount(0);

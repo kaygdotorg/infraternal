@@ -3,6 +3,7 @@
  * one field, quiet selection, consent, outcomes, motion, and the window-card integration.
  */
 import { expect, test, type Browser, type BrowserContext, type Page } from "playwright/test";
+import { uiFactor } from "./ui-factor";
 
 const port = Number(process.env.TRACER_TEST_PORT ?? "4173");
 const origin = `http://localhost:${port}`;
@@ -198,7 +199,8 @@ test("the wizard floats over a dimmed window that becomes the host's terminal", 
       return hits;
     });
     expect(settled).toEqual([]);
-    await expect(page.locator(".ui-toast-message")).toHaveCSS("font-size", "13px");
+    // The toast's type is drawn in rem: 13 px at the standard size times the UI size's factor (#283, TASTE "The size of the whole UI").
+    await expect(page.locator(".ui-toast-message")).toHaveCSS("font-size", `${13 * await uiFactor(page)}px`);
   } finally {
     await context.close();
   }
@@ -272,11 +274,13 @@ test("the shared confirmation is compact, icon-only and quiet on open", async ({
     });
     expect(surface.tip).toEqual(surface.card);
     expect(surface.inside).toBe(true);
-    expect(metrics.sizes).toEqual([28, 28]);
+    // The icon buttons are 28 px at the standard size and drawn in rem, so they grow with the UI size's factor (#283).
+    const factor = await uiFactor(page);
+    expect(metrics.sizes).toEqual([Math.round(28 * factor), Math.round(28 * factor)]);
     expect(metrics.labels).toEqual(["Cancel", "Install as root"]);
     expect(metrics.text).toEqual(["", ""]);
     expect(metrics.outline).toEqual(["none", "none"]);
-    expect(metrics.title).toBe("13px");
+    expect(metrics.title).toBe(`${13 * factor}px`);
   } finally {
     await context.close();
   }
