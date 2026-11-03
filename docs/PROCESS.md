@@ -36,7 +36,21 @@ Definition of Done (it is in every job prompt):
 2. Atomic commits. Each commit builds, is formatted and lint-clean
    (`cargo fmt --check`, `cargo clippy` for the touched crates, `bun run
    check` for touched TypeScript) and passes the tests of the code it
-   touches. Between commits, iterate with `scripts/verify iterate` (#204): the
+   touches. Before any other run, run `scripts/verify quick` (#329): a
+   few-minute pre-check that stops at the first failure of `cargo fmt
+   --check`, then `cargo clippy --workspace` (the gate's own flags, so the
+   gate reuses its artifacts) and the unit tests (lib and bin targets) of the
+   packages changed against the merge base with `origin/dev` (all packages
+   when a root manifest, the lockfile, the toolchain file, `.cargo/` or
+   `vendor/` changed), and the tracer typecheck when TypeScript changed.
+   Clippy is not limited to the changed packages: a narrower feature set
+   makes feature-dependent lints fire in untouched crates that the gate never
+   reports.
+   It does not cover dependents of a changed crate, integration tests, the
+   static builds, cargo-deny or the repository checks, so it never replaces
+   `iterate` or `fast` and is never quoted as the gate. Set
+   `VERIFY_QUICK_BASE` to compare against another ref. Between commits,
+   iterate with `scripts/verify iterate` (#204): the
    same fmt, VT fmt, clippy, tests, cargo-deny, plugin compile-out,
    TypeScript and repository artifact checks, without the two static release
    builds, linkage, D244 key-heap and D243 size checks. The full
@@ -479,6 +493,20 @@ Reviews and fixes run at the same time as the next lane's build.
 - The job launcher provides `sccache` through `RUSTC_WRAPPER`; keep the cache
   enabled for repeated builds. Put Rust build output in a job-specific
   `CARGO_TARGET_DIR` under `$HOME/.cache/codex-scratch/` rather than `/tmp`.
+- Machine-local compiler cache on the build VMs (#329), opt-in. `nix develop`
+  provides `sccache`. When the machine sets `INFRATERNAL_SCCACHE_DIR` (the
+  build VMs: `~/.cache/sccache`), the dev shell exports `SCCACHE_DIR`, the
+  size cap `SCCACHE_CACHE_SIZE` (`INFRATERNAL_SCCACHE_SIZE`, default 30G) and
+  `RUSTC_WRAPPER=sccache`. With the variable unset, which is CI, releases and
+  every other machine, nothing changes. The cache stores compiler outputs by
+  their exact inputs: a static release binary built with and without it has
+  the same SHA-256 (receipts on #329), and nothing enters a shipped artifact.
+  Measured limit: sccache hashes every `CARGO_*` variable, including each
+  job's own `CARGO_TARGET_DIR`, and `scripts/static-cargo` puts the checkout,
+  Cargo home and target roots into the keys of static builds on purpose
+  (#246). So hits need the same target path (and, for static builds, the same
+  checkout path): a rebuild after `rm -rf target` or a sweep hits, a second
+  job in its own target does not.
 - Native x86_64 GNU development and test links use mold when installed, with
   `cc` as the fallback. Static musl release links continue to use the pinned
   Rust toolchain's LLD. The checksum-pinned Zig toolchain is used for vendored
