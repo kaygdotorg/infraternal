@@ -6,15 +6,28 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 #[path = "../../../infraternal-shim/tests/unit/fixture_state.rs"]
 mod fixture_state;
 
-struct Fixture(fixture_state::FixtureState);
+/// The root path, plus the shared fixture state that owns it when one is used.
+struct Fixture(PathBuf, Option<fixture_state::FixtureState>);
 impl Fixture {
     fn new() -> Self {
-        let root = fixture_state::fixture_state();
+        let state = fixture_state::fixture_state();
+        Self::prepare(state.to_path_buf(), Some(state))
+    }
+
+    /// Session shims bind `base/sessions/sessions/<32 hex>.sock`, which is
+    /// longer than the shared fixture's AF_UNIX budget allows for, so these
+    /// tests take a private directory directly under /tmp.
+    fn short() -> Self {
+        let root = nix::unistd::mkdtemp("/tmp/rl-XXXXXX").unwrap();
+        Self::prepare(root, None)
+    }
+
+    fn prepare(root: PathBuf, state: Option<fixture_state::FixtureState>) -> Self {
         fs::create_dir_all(root.join("base/sessions")).unwrap();
         for path in [&root, &root.join("base"), &root.join("base/sessions")] {
             fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
         }
-        Self(root)
+        Self(root, state)
     }
     fn state(&self) -> PathBuf {
         self.0.join("base/sessions")
@@ -380,7 +393,7 @@ fn stale_session_cleanup_reaps_legacy_shell_before_stopping_its_shim() {
         os::unix::process::ExitStatusExt,
     };
 
-    let fixture = Fixture::new();
+    let fixture = Fixture::short();
     let nested = fixture.state().join("sessions");
     fs::create_dir(&nested).unwrap();
     fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
@@ -417,7 +430,7 @@ fn stale_session_cleanup_reaps_legacy_shell_before_stopping_its_shim() {
 fn session_cleanup_refuses_a_hello_that_names_another_peer_process() {
     use std::os::unix::process::ExitStatusExt;
 
-    let fixture = Fixture::new();
+    let fixture = Fixture::short();
     let nested = fixture.state().join("sessions");
     fs::create_dir(&nested).unwrap();
     fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
