@@ -16,7 +16,8 @@
 
   outputs = { self, nixpkgs, rust-overlay }:
     let
-      # aarch64-darwin is included but untested; verify fast targets Linux.
+      # verify fast targets Linux; on aarch64-darwin, scripts/macos-build-check
+      # is the build and portable-test check (#320).
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
       forAll = f: nixpkgs.lib.genAttrs systems (system:
         f (import nixpkgs { inherit system; overlays = [ rust-overlay.overlays.default ]; }));

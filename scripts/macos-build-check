@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# macOS arm64 build check for the infraternal CLI and infraternal agent (#320).
+#
+# Run on the Mac build machine from the repository's nix shell:
+#   nix develop -c scripts/macos-build-check
+# It is not part of `scripts/verify fast`, which runs on the Linux build VMs.
+#
+# Checks, in order:
+# 1. the pinned Zig (D213, D328) resolves on this host: same version and
+#    checksum table as Linux;
+# 2. the default-feature release build of `-p infraternal` links;
+# 3. the tests of the crates meant to be portable pass.
+# The Linux-only session engine (shim PTY/VT, session bridge) is compiled
+# out on macOS and has no macOS tests here.
+set -euo pipefail
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+[[ "$(uname -s)-$(uname -m)" == Darwin-arm64 ]] || {
+    printf 'macos-build-check runs on macOS arm64 only\n' >&2; exit 2; }
+
+target_root="${CARGO_TARGET_DIR:-$root/target}"
+[[ "$target_root" = /* ]] || target_root="$root/$target_root"
+# Some suites keep fixture state under the target directory, as in verify.
+export CARGO_TARGET_DIR="$target_root"
+scripts/auth-toolchain
+printf 'zig %s\n' "$("$target_root/auth-tools/zig/zig" version)"
+
+cargo build --locked --release -p infraternal
+binary="$target_root/release/infraternal"
+"$binary" --version
+# A root LaunchDaemon may load only libraries that macOS ships (#265).
+if otool -L "$binary" | tail -n +2 | grep -v -E '^\s+(/usr/lib/|/System/Library/)'; then
+    printf 'infraternal links a library macOS does not ship\n' >&2
+    exit 1
+fi
+
+# Portable crates: the ones whose whole test suite is expected to pass here.
+portable=(
+    infraternal-plugin-api
+    infraternal-status
+    infraternal-mesh
+    infraternal-plugin-mesh
+    infraternal-plugin-release
+    infraternal-plugin-relay
+    infraternal-plugin-backup
+    infraternal-plugin-host-facts
+)
+for crate in "${portable[@]}"; do
+    cargo test --locked -p "$crate"
+done
+# The SSH plugin's integration tests drive the Linux installer and its
+# runtime guard; its library tests (including the unreaped child-exit check)
+# are portable.
+cargo test --locked -p infraternal-plugin-ssh --lib
+printf 'macos-build-check: PASS\n'
