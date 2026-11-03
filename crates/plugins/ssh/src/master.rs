@@ -7,10 +7,7 @@ use crate::{
     prompt::{PromptLease, PromptParent},
     transport::Secret,
 };
-use nix::{
-    sys::wait::{Id, WaitPidFlag, WaitStatus, waitid},
-    unistd::Pid,
-};
+use nix::unistd::Pid;
 use std::os::unix::process::CommandExt;
 use std::{
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
@@ -157,12 +154,8 @@ impl Master {
             .ok_or_else(|| {
                 Failure::new(FailureKind::Unreachable, "The SSH connection has closed.")
             })?;
-        match waitid(
-            Id::Pid(id),
-            WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
-        ) {
-            Ok(WaitStatus::StillAlive) => Ok(true),
-            Ok(_) => Ok(false),
+        match crate::child_exit::exited(id) {
+            Ok(exited) => Ok(!exited),
             Err(_) => Err(Failure::new(
                 FailureKind::Unreachable,
                 "The SSH connection has closed.",

@@ -6,6 +6,7 @@ pub mod auth_evidence;
 pub mod auth_once;
 pub mod auth_order;
 pub mod bootstrap;
+mod child_exit;
 pub mod cli;
 pub mod config;
 pub mod credentials;
