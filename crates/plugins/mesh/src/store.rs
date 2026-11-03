@@ -323,10 +323,9 @@ pub(crate) async fn make_room(
 ) -> Result<Vec<i64>, crate::api::MeshApiError> {
     let unavailable = |_| storage_error("Mesh storage unavailable.");
     let nodes = named_nodes(tx).await.map_err(unavailable)?;
-    // `server` is how every viewer without host facts reads the server's node, so no other node may carry it:
-    // nobody sees two `server` nodes and `server.<suffix>` never points at a remote. The server's hostname is an
-    // automatic name like any other: refusing it would confirm a hidden hostname, and whoever may move the
-    // server's node aside may rename it directly anyway.
+    // `server` is reserved for the server's node, so no other node may carry it: nobody sees two machines a
+    // viewer could take for the server and `server.<suffix>` never points at a remote. The server's hostname is
+    // an automatic name like any other, and only global node managers (who see every name) reach this code.
     // Before the server's node exists, `server` is still kept for it.
     if name == SERVER_LABEL
         && !nodes

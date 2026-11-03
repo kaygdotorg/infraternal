@@ -437,10 +437,11 @@ async fn rewind_reconciles_same_spelling_choices_without_freezing_untouched_name
     assert_eq!(name_of(&pool, untouched).await, "new-record");
 }
 
-/// A global manager cannot see reported hostnames either. Filling all ordinary suffixes and the old fixed
-/// fallback must not make a hidden name conflict while a free guess succeeds.
+/// A global manager reads every machine's real name (D327, D329, #331). Filling all ordinary suffixes and the old
+/// fixed fallback must still not make taking a machine's reported name conflict where a free name succeeds: the
+/// holder moves aside to a name nobody holds.
 #[tokio::test]
-async fn a_global_manager_cannot_probe_a_hidden_name_by_exhausting_move_aside_names() {
+async fn exhausting_move_aside_names_does_not_make_a_reported_name_conflict() {
     let pool = pool().await;
     add_host(&pool, A, "root@10.69.69.5").await;
     add_host(&pool, B, "root@10.69.69.6").await;
@@ -476,7 +477,7 @@ async fn a_global_manager_cannot_probe_a_hidden_name_by_exhausting_move_aside_na
         .await
         .unwrap();
     assert!(
-        !before
+        before
             .nodes
             .iter()
             .any(|node| node.node.host == "private-machine")
@@ -485,7 +486,7 @@ async fn a_global_manager_cannot_probe_a_hidden_name_by_exhausting_move_aside_na
     let hidden_guess = rename(&service, "global-admin", own, "private-machine").await;
     assert_eq!(
         hidden_guess, free,
-        "exhausted fallback confirmed a hidden name"
+        "exhausted fallback made a reported name conflict"
     );
     assert_eq!(hidden_guess, Ok(()));
     let moved = name_of(&pool, hidden).await;
