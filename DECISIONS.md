@@ -971,7 +971,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      while the canvas is locked. With the canvas unlocked, a pinch over the
      canvas zooms the canvas. Inside a window, pinch belongs to that window's
      content: a terminal changes its font size, and an app window passes the
-     pinch to the app. The browser's own page zoom never triggers.
+     pinch to the app. On the canvas, the browser's own page zoom never
+     triggers. Standalone docs pages keep the browser's zoom, which readers
+     need for accessibility. Zoomed out to thumbnails on an unlocked canvas,
+     a pinch zooms the canvas so you can get back in.
 160. **One reusable, per-instance-extensible component per UI concept:**
      every UI concept (overlay/popover/sheet material, pill, capsule tabs,
      rows, tooltip, tick and copy swap, toast, buttons, spring) exists
