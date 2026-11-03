@@ -690,7 +690,7 @@ fn stop_session(path: &Path, before: &fs::Metadata) -> Result<(), u8> {
             _ => return Err(77),
         }
     }
-    write_session_frame(&mut stream, &Frame::ExitAck).map_err(|_| 77)?;
+    acknowledge_exit(&mut stream)?;
     drop(stream);
     // ExitAck proves that the shim has reaped its shell. The pidfd pins only the
     // same verified shim if it has not already retired itself.
@@ -704,6 +704,26 @@ fn stop_session(path: &Path, before: &fs::Metadata) -> Result<(), u8> {
         return Err(77);
     }
     wait_for_session_exit(path, before, pid, birth)
+}
+
+/// Acknowledge the shim's Exited frame. A shim from an older release (the
+/// b-0.1.0 one on the #305 field host) closes its socket right after sending
+/// Exited, without waiting for the ack, so the write fails with EPIPE. A
+/// closed peer here already means the session is over. The caller still
+/// proves that the process exited and that the endpoint is unbound.
+fn acknowledge_exit(stream: &mut UnixStream) -> Result<(), u8> {
+    match write_session_frame(stream, &Frame::ExitAck) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            Ok(())
+        }
+        Err(_) => Err(77),
+    }
 }
 
 /// Wait for the verified shim to exit, then retire its unbound endpoint.

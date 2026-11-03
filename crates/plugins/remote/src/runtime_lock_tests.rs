@@ -373,7 +373,7 @@ def read_frame():
         body += peer.recv(size - len(body))
     return body
 hello = b'\x01' + struct.pack('<H', 1) + struct.pack('<Q', 0)
-pid = os.getpid() if reported_pid == 'self' else os.getpid() + 1
+pid = os.getpid() if reported_pid in ('self', 'close') else os.getpid() + 1
 hello += bytes.fromhex(session) + struct.pack('<I', pid)
 hello += struct.pack('<HHQQQ', 80, 24, 0, 0, 0)
 peer.sendall(frame(hello))
@@ -381,6 +381,10 @@ assert read_frame() == b'\x02' + struct.pack('<Q', 0)
 assert read_frame() == b'\x13' + struct.pack('<Q', 0)
 assert read_frame() == b'\x16\x01'
 peer.sendall(frame(b'\x20' + struct.pack('<iQ', 0, 0)))
+if reported_pid == 'close':
+    # An older shim closes as soon as Exited is sent and never reads ExitAck.
+    peer.close()
+    sys.exit(0)
 assert read_frame() == b'\x21'
 while True:
     peer.recv(1)
@@ -448,6 +452,52 @@ fn stale_session_cleanup_reaps_legacy_shell_before_stopping_its_shim() {
         "legacy session cleanup was refused: {stderr_text}"
     );
     assert_eq!(status.signal(), Some(nix::libc::SIGTERM));
+    assert!(!path.exists(), "retired session socket was left behind");
+}
+
+/// The #305 field shim closes right after Exited; its session is over, not uncertain.
+#[test]
+fn exit_ack_to_a_shim_that_already_closed_counts_as_acknowledged() {
+    let (mut helper, shim) = UnixStream::pair().unwrap();
+    drop(shim);
+    assert_eq!(acknowledge_exit(&mut helper), Ok(()));
+    let (mut helper, _shim) = UnixStream::pair().unwrap();
+    assert_eq!(acknowledge_exit(&mut helper), Ok(()));
+}
+
+#[test]
+fn stale_session_cleanup_accepts_a_legacy_shim_that_closes_after_exited() {
+    let fixture = Fixture::short();
+    let nested = fixture.state().join("sessions");
+    fs::create_dir(&nested).unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
+    let id = uuid::Uuid::new_v4();
+    let path = nested.join(format!("{}.sock", id.simple()));
+    let mut server = start_legacy_shim(&path, &id.simple().to_string(), "close");
+    let base = fixture.0.join("base");
+    let root = fs::metadata(&base).unwrap();
+    let args = [
+        "--bootstrap-runtime".into(),
+        base.as_os_str().to_owned(),
+        format!("{}:{}", root.dev(), root.ino()).into(),
+        "sessions-stop".into(),
+    ];
+    let result = command(&mut args.into_iter());
+    if result != Some(0) {
+        let _ = server.kill();
+    }
+    let status = server.wait().unwrap();
+    assert_eq!(
+        result,
+        Some(0),
+        "a shim that closed after Exited was not retired"
+    );
+    // It exits on its own; the verified pidfd may still deliver SIGTERM first.
+    assert!(
+        status.success()
+            || std::os::unix::process::ExitStatusExt::signal(&status) == Some(nix::libc::SIGTERM),
+        "{status}"
+    );
     assert!(!path.exists(), "retired session socket was left behind");
 }
 
