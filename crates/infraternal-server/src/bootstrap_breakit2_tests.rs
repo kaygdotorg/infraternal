@@ -23,7 +23,9 @@ impl Drop for LiveFixtureDirectory {
 struct TestHttpsRoot(PathBuf);
 impl TestHttpsRoot {
     fn write(root: &openssl::x509::X509Ref) -> Self {
-        let path = std::env::temp_dir().join(format!(
+        // Not std::env::temp_dir(): a dev shell points TMPDIR at a private
+        // directory that the ordinary target account cannot traverse.
+        let path = std::path::Path::new("/tmp").join(format!(
             "infraternal-breakit2-root-{}-{}.pem",
             std::process::id(),
             uuid::Uuid::new_v4()
