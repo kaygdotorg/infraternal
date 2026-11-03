@@ -469,7 +469,9 @@ impl Failure {
             // An empty name: the host could not read its identity file, so
             // nothing shows that another server enrolled it (#305 P2-2).
             if server.is_empty() {
-                text.push_str(" This server did not enroll this machine, and its identity cannot be read.");
+                text.push_str(
+                    " This server did not enroll this machine, and its identity cannot be read.",
+                );
             } else {
                 let _ = write!(
                     text,
@@ -477,7 +479,11 @@ impl Failure {
                 );
             }
             if lock.live {
-                let other = if server.is_empty() { "the server that enrolled it" } else { server.as_str() };
+                let other = if server.is_empty() {
+                    "the server that enrolled it"
+                } else {
+                    server.as_str()
+                };
                 let _ = write!(
                     text,
                     " Its infraternal agent is running and may be connected to {other} now. Joining it here disconnects it from {other}; remove it there afterwards."

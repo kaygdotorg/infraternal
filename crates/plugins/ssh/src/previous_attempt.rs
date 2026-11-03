@@ -203,43 +203,43 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
             }),
         }));
     }
-    let (host, transaction, identity, sockets, lease_owner, enrolled, live) = match fields.as_slice()
-    {
-        [
-            "INFRATERNAL_SETUP_STALE",
-            host,
-            transaction,
-            identity,
-            sockets,
-        ] => (*host, *transaction, *identity, *sockets, None, None, false),
-        [
-            "INFRATERNAL_SETUP_UPGRADE",
-            host,
-            transaction,
-            identity,
-            machine,
-            pid,
-            birth,
-            since,
-            sockets,
-            digest,
-            server,
-            live,
-        ] => (
-            *host,
-            *transaction,
-            *identity,
-            *sockets,
-            Some(parse_lease_owner(machine, pid, birth, since)?),
-            parse_enrolled(digest, server)?,
-            match *live {
-                "live" => true,
-                "idle" => false,
-                _ => return Err(refused()),
-            },
-        ),
-        _ => return Err(refused()),
-    };
+    let (host, transaction, identity, sockets, lease_owner, enrolled, live) =
+        match fields.as_slice() {
+            [
+                "INFRATERNAL_SETUP_STALE",
+                host,
+                transaction,
+                identity,
+                sockets,
+            ] => (*host, *transaction, *identity, *sockets, None, None, false),
+            [
+                "INFRATERNAL_SETUP_UPGRADE",
+                host,
+                transaction,
+                identity,
+                machine,
+                pid,
+                birth,
+                since,
+                sockets,
+                digest,
+                server,
+                live,
+            ] => (
+                *host,
+                *transaction,
+                *identity,
+                *sockets,
+                Some(parse_lease_owner(machine, pid, birth, since)?),
+                parse_enrolled(digest, server)?,
+                match *live {
+                    "live" => true,
+                    "idle" => false,
+                    _ => return Err(refused()),
+                },
+            ),
+            _ => return Err(refused()),
+        };
     let host = canonical_id(host)?;
     let transaction = canonical_id(transaction)?;
     let (device, inode) = identity.split_once(':').ok_or_else(refused)?;
@@ -500,8 +500,12 @@ impl PreviousAttempt {
                 Cow::Borrowed("Nothing was deleted; it goes back where it was"),
                 Cow::Borrowed(match (enabled, active) {
                     (true, true) => "Its service is enabled and started again, as it was found",
-                    (true, false) => "Its service is enabled again but not started, as it was found",
-                    (false, true) => "Its service is started again but not enabled, as it was found",
+                    (true, false) => {
+                        "Its service is enabled again but not started, as it was found"
+                    }
+                    (false, true) => {
+                        "Its service is started again but not enabled, as it was found"
+                    }
                     (false, false) => "Its service stays stopped and disabled, as it was found",
                 }),
             ],

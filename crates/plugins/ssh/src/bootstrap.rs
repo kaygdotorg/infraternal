@@ -1488,7 +1488,7 @@ impl Bootstrap {
                         check.architecture,
                         early,
                     )
-                        .await?
+                    .await?
                 }
             };
             if resources.installation.is_none() {
@@ -2095,7 +2095,9 @@ struct AttemptResources {
 impl AttemptResources {
     /// The attempt's current deadline, or `fallback` before the attempt set one.
     fn until(&self, fallback: Instant) -> Instant {
-        self.deadline.as_ref().map_or(fallback, |deadline| *deadline.borrow())
+        self.deadline
+            .as_ref()
+            .map_or(fallback, |deadline| *deadline.borrow())
     }
 }
 
