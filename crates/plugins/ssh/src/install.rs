@@ -418,11 +418,16 @@ impl Installation {
             .run(&self.script(&payload.body), payload.input())
             .await
             .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
+        // retire_setup_lease stops the staged lease but keeps its record, and
+        // start_setup_lease creates a new one under `set -C`. Remove the record
+        // first, as handoff_setup_lease does; this shell keeps the stage flock
+        // on fd 7 in between (#305).
         let body = format!(
             r#"stage="$base/.bootstrap-lock"
 [ -f "$stage/kind" ] && [ ! -L "$stage" ] || exit 71
 [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
 retire_setup_lease
+rm -f "$stage/lease"
 if [ -e "$base/state" ] || [ -L "$base/state" ]; then
     [ -d "$base/state" ] && [ ! -L "$base/state" ] && [ -O "$base/state" ] && [ "$(stat -c '%a' "$base/state")" = 700 ] || exit 71
     cp -a "$base/state" "$stage/state"
