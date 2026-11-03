@@ -46,7 +46,9 @@ test("measure deployed motion at 4x CPU and capture production screens", async (
     if (pathname.endsWith("/backdrop.worker.js")) requestedWorkers.push(request.url());
     if (pathname.endsWith("/faulty-terminal.worker.js")) requestedFaultyWorkers.push(request.url());
   });
-  await page.route("**/faulty-terminal.worker.js", async (route) => {
+  // On the context, not the page: a page route intercepts the first document's worker and, measured on dev-02, not the workers
+  // of the documents loaded after it (the route handler never ran for them), so the reduced-motion page counted 0 frames.
+  await context.route("**/faulty-terminal.worker.js", async (route) => {
     const response = await route.fetch();
     const source = await response.text();
     // Count actual WebGL shader draws in the real worker, without changing app code.
