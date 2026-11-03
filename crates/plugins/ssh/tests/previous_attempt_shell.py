@@ -688,6 +688,25 @@ replace_stuck_install "$observed"
         self.assertTrue(Path(f'/proc/{os.getpid()}').exists(), 'the reused PID belongs to this test process')
         self.assertFalse(stage.exists())
 
+    def confirm(self, action):
+        expected = self.run_shell('\ninspect_previous').stdout.decode().strip()
+        self.assertTrue(expected.startswith('INFRATERNAL_SETUP_UPGRADE '), expected)
+        return self.run_shell(f'\n{action} "{expected}"\n')
+
+    def test_replacement_keeps_rollback_copies_until_the_next_commit(self):
+        stage, _ = self.make_upgrade_fixture()
+        previous = stage / 'previous-binary'
+        previous.write_bytes(b'old agent')
+        previous.chmod(0o700)
+        result = self.confirm('replace_stuck_install')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        replaced = Path(f'{self.base}.bootstrap-replaced-{TRANSACTION}')
+        self.assertFalse(stage.exists())
+        self.assertEqual((replaced / 'previous-binary').read_bytes(), b'old agent', 'rollback copies survive replacement (#305 P2-3)')
+        commit = self.run_shell('\n' + CONSTANTS['RETIRE_REPLACED'])
+        self.assertEqual(commit.returncode, 0, commit.stderr.decode())
+        self.assertFalse(replaced.exists(), 'the next commit retires them')
+
     def test_failed_upgrade_rollback_replaces_activating_with_failed_before_stop(self):
         stage, _ = self.make_upgrade_fixture()
         body = f'''\nstage="$base/.bootstrap-lock"

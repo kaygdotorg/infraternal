@@ -1074,11 +1074,11 @@ fi
     }
 
     async fn commit_with_timeout(&self, timeout: Option<Duration>) -> Result<(), Failure> {
-        let script = self.script(r#"[ -f "$base/.bootstrap-lock/activating" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$transaction" ] || exit 71
+        let script = self.script(&format!(r#"[ -f "$base/.bootstrap-lock/activating" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$transaction" ] || exit 71
 stage="$base/.bootstrap-lock"
 retire_setup_lease
 rm -rf "$stage"
-"#);
+{RETIRE_REPLACED}"#));
         let result = if let Some(timeout) = timeout {
             self.session
                 .run_with_timeout(&script, Input::Empty, timeout)
@@ -1124,7 +1124,7 @@ setup_guard
 [ -f "$stage/activating" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 71
 retire_setup_lease
 rm -rf "$stage"
-"#
+{RETIRE_REPLACED}"#
             ),
         );
         let result = if let Some(timeout) = timeout {
@@ -1355,6 +1355,15 @@ pub fn parse_refusal(receipt: &[u8], step: InstallStep) -> Option<Failure> {
 // token (#305). The read-only check sets setup_check=yes, so the record reaches
 // parse_check and the person sees the cause; every mutating caller still exits 75.
 pub(crate) const RUNTIME_CLEANUP: &str = include_str!("runtime_cleanup.sh");
+
+// A replaced stuck upgrade keeps its journal and rollback copies beside the
+// base until this host's next enrollment commits (#305 P2-3). Only our own
+// private directories under that fixed name are removed.
+const RETIRE_REPLACED: &str = r#"for replaced in "$base".bootstrap-replaced-*; do
+    [ -d "$replaced" ] && [ ! -L "$replaced" ] && [ -O "$replaced" ] || continue
+    rm -rf "$replaced"
+done
+"#;
 
 // Cache records contain only public executable content. Every lookup repeats
 // ownership, link, private-parent and fixed-marker checks before any content read.

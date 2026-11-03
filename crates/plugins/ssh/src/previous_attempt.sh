@@ -529,6 +529,7 @@ retire_stuck_service() {
  [ "$replace_observed" = "$replace_expected" ] || exit 75
  set -- $replace_expected
  [ "$#" = 9 ] && [ "$1" = INFRATERNAL_SETUP_UPGRADE ] || exit 75
+ replace_transaction=$3
  stage="$base/.bootstrap-lock"
  runtime_helper
  scan_holders service
@@ -553,9 +554,13 @@ restore_stuck_service() {
  [ "$replace_enabled" != yes ] || $manager enable infraternal-agent.service >/dev/null 2>&1 || :
  [ "$replace_active" != yes ] || $manager start infraternal-agent.service >/dev/null 2>&1 || :
 }
-# Replace a stuck upgrade this server enrolled.
+# Replace a stuck upgrade this server enrolled. The journal moves aside with
+# its rollback copies (previous-binary, -state, -unit); the next commit of
+# this host removes it, so nothing is lost before a new enrollment commits.
 replace_stuck_install() {
  retire_stuck_service "$1"
- rm -rf "$stage"
+ replaced="$base.bootstrap-replaced-$replace_transaction"
+ [ ! -e "$replaced" ] && [ ! -L "$replaced" ] || exit 72
+ mv -T "$stage" "$replaced"
  trap - EXIT
 }
