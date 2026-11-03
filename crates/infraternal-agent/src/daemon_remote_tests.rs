@@ -10,7 +10,11 @@ use std::time::Duration;
 struct State(PathBuf);
 impl State {
     fn new() -> Self {
-        let path = crate::test_state_root().join(format!("daemon-{}", uuid::Uuid::new_v4()));
+        // The dispatcher binds `<state>/plugins.sock`; Linux bounds that path to
+        // 108 bytes including NUL. A full hyphenated UUID spent 43 of them and
+        // overflowed under a 52-byte INFRATERNAL_TEST_STATE_ROOT (#332).
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let path = crate::test_state_root().join(format!("d-{}", &id[..8]));
         Self(path)
     }
 }
@@ -228,10 +232,18 @@ async fn cancelling_remote_dispatch_retires_the_borrowed_authenticated_channel()
         .send(&control, 0, &hello())
         .await
         .unwrap();
-    assert!(matches!(
-        Receive::default().next(&control).await.unwrap().frame,
-        Frame::Hello { version: 1, .. }
-    ));
+    // `spare` keeps the host socket open, so a dispatcher that fails before
+    // its greeting never gives the peer EOF. Wait on both: the greeting, or
+    // the dispatcher's own result (#332).
+    let mut daemon = daemon;
+    let mut receive = Receive::default();
+    tokio::select! {
+        greeting = receive.next(&control) => assert!(matches!(
+            greeting.unwrap().frame,
+            Frame::Hello { version: 1, .. }
+        )),
+        ended = &mut daemon => panic!("dispatcher ended before its greeting: {ended:?}"),
+    }
     daemon.abort();
     let _ = daemon.await;
     assert_eq!(
