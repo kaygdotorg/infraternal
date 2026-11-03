@@ -4,6 +4,18 @@
 # clients; capture, Accessibility and event posting are granted through TCC.
 # No JIT or unsigned-memory exceptions are needed, so all executables use the
 # hardened runtime without entitlements.
+#
+# Prerequisites, all on the Mac build machine and none in the repository:
+# - ~/.config/infraternal-signing/ holds keychain.pass and op-service-account-token
+#   (mode 0600). The dedicated keychain gets the Developer ID on the first run.
+# - A notarytool profile (default name infraternal-notary) in that keychain. Create
+#   it once with an App Store Connect API key kept in a 0600 file, so that no
+#   secret appears in argv:
+#     xcrun notarytool store-credentials infraternal-notary --keychain <keychain> \
+#       --key <AuthKey.p8> --key-id <KEY_ID> --issuer <ISSUER_UUID>
+# - The `infraternal` crate must build on macOS: today it does not (the session
+#   shim is Linux-only, #320, and scripts/auth-toolchain has no macOS host, D213),
+#   so a full run stops at the first cargo build. --skip-notarize still stops there.
 set -euo pipefail
 
 usage() {
