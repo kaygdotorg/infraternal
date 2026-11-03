@@ -3,6 +3,9 @@ import { expect, test } from "playwright/test";
 import { terminalScenario } from "./terminal-scenario";
 
 test("first run, passkey login, terminal resume, and the latency probe", async ({ page }, info) => {
+  // One long scenario (sign-in, resume, predictions with deliberate 1.5 s echo delays, a 20-key probe at 300 ms RTT) that
+  // takes 75-95 s even on an idle host, so the config's 90 s default expired mid-run (a disposed request context).
+  test.setTimeout(240_000);
   await terminalScenario(page, info);
 });
 
