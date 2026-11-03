@@ -23,7 +23,8 @@ for (const [name, width, height, scheme] of [
     await page.evaluate(() => document.fonts.ready);
     // Exclude the time-dependent shader only; all sign-in pixels and geometry remain.
     await page.addStyleTag({ content: "#faulty-field { visibility: hidden !important; }" });
-    await expect(page).toHaveScreenshot(`signin-${name}.png`, { animations: "disabled", maxDiffPixels: 0, threshold: 0 });
+    // Expected pixels are test fixtures; raw captures remain in the evidence directory.
+    await expect(page).toHaveScreenshot(["fixtures", `signin-${name}.png`], { animations: "disabled", maxDiffPixels: 0, threshold: 0 });
     const path = info.outputPath(`production-signin-${name}.png`);
     await page.screenshot({ path, animations: "disabled" });
     await info.attach(`production-signin-${name}`, { path, contentType: "image/png" });
