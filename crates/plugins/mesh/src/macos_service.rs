@@ -14,7 +14,8 @@ const PLIST_DIRECTORY: &str = "/Library/LaunchDaemons";
 const LAUNCHCTL: &str = "/bin/launchctl";
 const SUDO: &str = "/usr/bin/sudo";
 const DATA_DIRECTORY: &str = "/var/lib/infraternal/agent";
-const STATE_DIRECTORY: &str = "/var/lib/infraternal/state";
+/// The system service's mesh state directory; `agent join` clears it when no `--state` is given.
+pub const STATE_DIRECTORY: &str = "/var/lib/infraternal/state";
 
 /// Public launchd state; it contains no enrollment or key material.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

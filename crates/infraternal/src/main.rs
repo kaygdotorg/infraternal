@@ -2295,6 +2295,14 @@ fn run_remote_agent(
                 &runtime,
                 Box::pin(remote::join(&url, &data, &invitation)),
             )?;
+            // A new enrolment must not inherit the previous one's mesh peers or
+            // WireGuard key (#265, #325). The Mac node runs only as root.
+            #[cfg(all(target_os = "macos", feature = "plugin-mesh"))]
+            if nix::unistd::Uid::effective().is_root() {
+                infraternal_plugin_mesh::node::forget(state.as_deref().unwrap_or(
+                    std::path::Path::new(infraternal_plugin_mesh::macos_service::STATE_DIRECTORY),
+                ))?;
+            }
             // SSH publishes staged state only after enrollment returns. Running
             // here would hold its transaction until the service was cancelled.
             if enroll_only {

@@ -145,10 +145,14 @@ struct Owner {
 impl Owner {
     fn node(&mut self) -> Result<&mut Node, PluginError> {
         if self.node.is_none() {
-            self.node = Some(
-                Node::restore(self.path.as_deref().ok_or(PluginError::Rejected)?)
-                    .map_err(|_| PluginError::Rejected)?,
-            );
+            let path = self.path.as_deref().ok_or(PluginError::Rejected)?;
+            #[cfg(target_os = "linux")]
+            let node = Node::restore(path);
+            // The Mac registry restores eagerly with its enrolment (`from_node`);
+            // only Linux reaches this lazy path, through `new`.
+            #[cfg(target_os = "macos")]
+            let node = Node::restore(path, None);
+            self.node = Some(node.map_err(|_| PluginError::Rejected)?);
         }
         self.node.as_mut().ok_or(PluginError::Rejected)
     }

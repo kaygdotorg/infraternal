@@ -20,7 +20,13 @@ const DESCRIPTORS: &[&PluginDescriptor] = &[
 ];
 #[cfg(all(feature = "remote", target_os = "linux"))]
 pub(crate) type Installation = infraternal_plugin_remote::uninstall::Context;
-#[cfg(not(all(feature = "remote", target_os = "linux")))]
+/// The Mac node binds its saved mesh state to this enrolment (#265, #325).
+#[cfg(all(feature = "mesh", target_os = "macos"))]
+pub(crate) type Installation = infraternal_plugin_mesh::node::Enrolment;
+#[cfg(not(any(
+    all(feature = "remote", target_os = "linux"),
+    all(feature = "mesh", target_os = "macos")
+)))]
 pub(crate) type Installation = ();
 
 /// Host role bound to one infraternal agent process.
@@ -137,12 +143,15 @@ pub(crate) fn registry_at(
             ),
         ))?;
     }
-    #[cfg(not(all(feature = "remote", target_os = "linux")))]
+    #[cfg(not(any(
+        all(feature = "remote", target_os = "linux"),
+        all(feature = "mesh", target_os = "macos")
+    )))]
     let _ = installation;
     #[cfg(all(feature = "mesh", target_os = "linux"))]
     registry.register(Box::new(mesh_plugin))?;
     #[cfg(all(feature = "mesh", target_os = "macos"))]
-    registry.register(Box::new(darwin_mesh_plugin(state)?))?;
+    registry.register(Box::new(darwin_mesh_plugin(state, installation)?))?;
     #[cfg(not(all(feature = "mesh", any(target_os = "linux", target_os = "macos"))))]
     let _ = state;
     Ok(registry)
@@ -154,12 +163,13 @@ pub(crate) fn registry_at(
 #[cfg(all(feature = "mesh", target_os = "macos"))]
 fn darwin_mesh_plugin(
     state: Option<&std::path::Path>,
+    enrolment: Option<&Installation>,
 ) -> Result<infraternal_plugin_mesh::node_actions::MeshNodePlugin, PluginError> {
     eprintln!("Infraternal Mesh daemon restoring local node");
     let node = state
         .map_or_else(
             || Ok(infraternal_plugin_mesh::node::Node::default()),
-            infraternal_plugin_mesh::node::Node::restore,
+            |state| infraternal_plugin_mesh::node::Node::restore(state, enrolment),
         )
         .map_err(|error| {
             eprintln!(

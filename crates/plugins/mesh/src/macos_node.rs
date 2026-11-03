@@ -332,6 +332,92 @@ struct SavedState {
     /// Linux-only legacy metadata is accepted as an opaque public value for cross-platform state reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     backend: Option<serde_json::Value>,
+    /// The enrolment that issued `config`; absent only in state written by slice-1 builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binding: Option<Enrolment>,
+}
+
+/// The enrolment a saved configuration belongs to (#265 P2-1, #325).
+///
+/// A configuration is trusted only for the coordinator, host and infraternal
+/// agent identity that received it. If the Mac is re-enrolled (another
+/// coordinator, another host id or a new agent key) while its state directory
+/// survives, restoring the old peers would re-install another mesh's keys and
+/// routes and refuse every update from the new coordinator. Each field is
+/// public: a SHA-256 of a certificate or public key, or the host id.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Enrolment {
+    /// SHA-256 (hex) of the issuing coordinator's CA certificate, DER.
+    coordinator: String,
+    /// Host id the coordinator issued at enrolment.
+    host: String,
+    /// SHA-256 (hex) of the infraternal agent's mTLS public key, DER.
+    agent_key: String,
+}
+
+impl Enrolment {
+    /// Bind to the identity in `identity.json`, given its public parts.
+    #[must_use]
+    pub fn new(coordinator_ca_der: &[u8], host: &str, agent_public_key_der: &[u8]) -> Self {
+        Self {
+            coordinator: hex(&openssl::sha::sha256(coordinator_ca_der)),
+            host: host.to_owned(),
+            agent_key: hex(&openssl::sha::sha256(agent_public_key_der)),
+        }
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
+}
+
+/// Apply the binding rule to restored state; `true` means the key must rotate.
+///
+/// State bound to another enrolment loses its configuration and the key that
+/// enrolment knew; the node then registers a new key with its coordinator.
+/// Unbound state comes from a slice-1 build and is adopted once, so an
+/// upgrade keeps its key and peers. Without a current enrolment (no
+/// `identity.json`), nothing is compared.
+fn reconcile(mut state: SavedState, enrolment: Option<&Enrolment>) -> (SavedState, bool) {
+    let Some(enrolment) = enrolment else {
+        return (state, false);
+    };
+    let rotate = state
+        .binding
+        .as_ref()
+        .is_some_and(|binding| binding != enrolment);
+    if rotate {
+        state.config = None;
+        // The old utun closed with the old process, which retired its routes.
+        state.routes.clear();
+        state.interface = None;
+    }
+    state.binding = Some(enrolment.clone());
+    (state, rotate)
+}
+
+/// Forget this node's mesh state and key so the next start registers afresh (`agent join`).
+/// # Errors
+/// Refuses an exposed state directory and reports failed removals.
+pub fn forget(state: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(state) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+        Ok(_) => {}
+    }
+    crate::macos_key::remove(state)?;
+    match fs::remove_file(state.join(PUBLIC_STATE)) {
+        Ok(()) => File::open(state)?.sync_all(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 impl Default for SavedState {
@@ -343,6 +429,7 @@ impl Default for SavedState {
             interface: None,
             port: 0,
             backend: None,
+            binding: None,
         }
     }
 }
@@ -1097,6 +1184,7 @@ pub struct Node {
     interface: Option<String>,
     port: u16,
     path: Option<PathBuf>,
+    binding: Option<Enrolment>,
 }
 
 impl Default for Node {
@@ -1111,17 +1199,26 @@ impl Default for Node {
             interface: None,
             port: 0,
             path: None,
+            binding: None,
         }
     }
 }
 
 impl Node {
     /// Restore accepted public intent, clean only old utun routes, and resume before coordinator dialing.
+    ///
+    /// State that another enrolment issued is discarded first (see [`reconcile`]).
     /// # Errors
     /// Refuses unsafe state, an unreadable node key or failed utun/device startup.
-    pub fn restore(path: &Path) -> io::Result<Self> {
-        let path = path.join(PUBLIC_STATE);
-        let state = read_public_state(&path)?.unwrap_or_default();
+    pub fn restore(state_directory: &Path, enrolment: Option<&Enrolment>) -> io::Result<Self> {
+        let path = state_directory.join(PUBLIC_STATE);
+        let (state, rotate) = reconcile(read_public_state(&path)?.unwrap_or_default(), enrolment);
+        if rotate {
+            tracing::warn!(
+                "Mesh state belongs to an earlier enrolment; discarding its peers and starting with a new WireGuard key"
+            );
+            crate::macos_key::remove(state_directory)?;
+        }
         let mut stale_routes = state.routes.clone();
         if let Some(config) = &state.config {
             stale_routes.extend(route_addresses(config));
@@ -1140,6 +1237,7 @@ impl Node {
             config: state.config,
             port: state.port,
             path: Some(path),
+            binding: state.binding,
             ..Self::default()
         };
         if node.enabled {
@@ -1345,6 +1443,7 @@ impl Node {
                     interface,
                     port: self.port,
                     backend: None,
+                    binding: self.binding.clone(),
                 },
             )?;
         }
@@ -1379,9 +1478,9 @@ mod tests {
     //! Checks that the Mac adapter maps authenticated peers to WireGuard host routes.
 
     use super::{
-        BoundUdpFactory, Node, PUBLIC_STATE, SavedState, UdpSocketFactory,
+        BoundUdpFactory, Enrolment, Node, PUBLIC_STATE, SavedState, UdpSocketFactory,
         UdpTransportFactoryParams, parse_utun_payload, peers_for_config, read_public_state,
-        route_addresses, stage_chunk, utun_family, valid_utun_name, validate_config,
+        reconcile, route_addresses, stage_chunk, utun_family, valid_utun_name, validate_config,
         validate_underlay_routes, write_public_state,
     };
     use crate::{
@@ -1630,6 +1729,7 @@ mod tests {
             interface: Some("utun7".to_owned()),
             port: 51831,
             backend: None,
+            binding: None,
         };
 
         write_public_state(&path, &state).expect("persist public config");
@@ -1669,13 +1769,109 @@ mod tests {
             interface: None,
             port: 0,
             backend: None,
+            binding: None,
         };
         write_public_state(&directory.join(PUBLIC_STATE), &state).expect("write public state");
 
-        let restored = Node::restore(&directory.0).expect("restore from agent state directory");
+        let restored =
+            Node::restore(&directory.0, None).expect("restore from agent state directory");
 
         assert!(!restored.enabled());
         assert!(directory.join(PUBLIC_STATE).is_file());
+    }
+
+    fn enrolment(coordinator: &[u8]) -> Enrolment {
+        Enrolment::new(coordinator, "8c1f0d2e-host", b"agent public key")
+    }
+
+    fn bound_state(binding: Option<Enrolment>) -> SavedState {
+        SavedState {
+            enabled: false,
+            config: Some(config()),
+            routes: route_addresses(&config()),
+            interface: Some("utun7".to_owned()),
+            port: 51831,
+            backend: None,
+            binding,
+        }
+    }
+
+    fn write_key(directory: &TestDirectory) {
+        let path = directory.join(crate::macos_key::KEY_FILE);
+        fs::write(&path, [9_u8; 32]).expect("write key");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("key mode");
+    }
+
+    /// #265 P2-1 / #325: another coordinator's peers must never be restored.
+    #[test]
+    fn state_from_another_enrolment_is_discarded_and_the_key_rotates() {
+        let old = enrolment(b"coordinator A");
+        let new = enrolment(b"coordinator B");
+        let (state, rotate) = reconcile(bound_state(Some(old.clone())), Some(&new));
+        assert!(rotate);
+        assert!(state.config.is_none());
+        assert!(state.routes.is_empty());
+        assert!(state.interface.is_none());
+        assert_eq!(state.binding, Some(new.clone()));
+
+        for changed in [
+            Enrolment::new(b"coordinator A", "another-host", b"agent public key"),
+            Enrolment::new(b"coordinator A", "8c1f0d2e-host", b"new agent key"),
+        ] {
+            assert!(reconcile(bound_state(Some(old.clone())), Some(&changed)).1);
+        }
+
+        let (same, rotate) = reconcile(bound_state(Some(old.clone())), Some(&old));
+        assert!(!rotate);
+        assert_eq!(same.config, Some(config()));
+    }
+
+    #[test]
+    fn unbound_slice_one_state_is_adopted_once() {
+        let current = enrolment(b"coordinator A");
+        let (state, rotate) = reconcile(bound_state(None), Some(&current));
+        assert!(!rotate);
+        assert_eq!(state.config, Some(config()));
+        assert_eq!(state.binding, Some(current));
+        let (state, rotate) = reconcile(bound_state(None), None);
+        assert!(!rotate);
+        assert!(state.binding.is_none());
+    }
+
+    #[test]
+    fn restore_under_a_new_enrolment_removes_the_old_key_and_records_the_binding() {
+        let directory = test_directory();
+        let old = enrolment(b"coordinator A");
+        let new = enrolment(b"coordinator B");
+        write_public_state(
+            &directory.join(PUBLIC_STATE),
+            &bound_state(Some(old.clone())),
+        )
+        .expect("write old state");
+        write_key(&directory);
+
+        Node::restore(&directory.0, Some(&old)).expect("restore same enrolment");
+        assert!(directory.join(crate::macos_key::KEY_FILE).is_file());
+
+        Node::restore(&directory.0, Some(&new)).expect("restore new enrolment");
+        assert!(!directory.join(crate::macos_key::KEY_FILE).exists());
+        let persisted = read_public_state(&directory.join(PUBLIC_STATE))
+            .expect("read state")
+            .expect("state persisted");
+        assert_eq!(persisted.binding, Some(new));
+        assert!(persisted.config.is_none());
+    }
+
+    #[test]
+    fn forgetting_removes_the_public_state_and_the_key() {
+        let directory = test_directory();
+        write_public_state(&directory.join(PUBLIC_STATE), &bound_state(None)).expect("state");
+        write_key(&directory);
+        super::forget(&directory.0).expect("forget");
+        assert!(!directory.join(PUBLIC_STATE).exists());
+        assert!(!directory.join(crate::macos_key::KEY_FILE).exists());
+        super::forget(&directory.0).expect("forgetting twice succeeds");
+        super::forget(&directory.join("absent")).expect("an absent directory is fine");
     }
 
     #[test]
@@ -1722,10 +1918,11 @@ mod tests {
             interface: Some("utun99999".to_owned()),
             port: 0,
             backend: None,
+            binding: None,
         };
         write_public_state(&directory.join(PUBLIC_STATE), &state).expect("save old intent");
 
-        let restored = Node::restore(&directory.0).expect("restore after utun release");
+        let restored = Node::restore(&directory.0, None).expect("restore after utun release");
 
         assert!(!restored.enabled());
         let persisted = read_public_state(&directory.join(PUBLIC_STATE))

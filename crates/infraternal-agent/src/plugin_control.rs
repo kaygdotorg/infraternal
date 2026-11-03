@@ -564,9 +564,15 @@ impl Service {
             }
             // Compiled metadata is validated by registry tests; construct its
             // process-owned instances only when a caller needs an action.
-            #[cfg(all(feature = "remote", target_os = "linux"))]
+            #[cfg(any(
+                all(feature = "remote", target_os = "linux"),
+                all(feature = "mesh", target_os = "macos")
+            ))]
             let installation = installation.cloned();
-            #[cfg(not(all(feature = "remote", target_os = "linux")))]
+            #[cfg(not(any(
+                all(feature = "remote", target_os = "linux"),
+                all(feature = "mesh", target_os = "macos")
+            )))]
             let installation = installation.copied();
             #[cfg(any(test, feature = "native-streams"))]
             let registry = supplied
