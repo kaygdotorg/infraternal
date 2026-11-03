@@ -308,6 +308,7 @@ fn xml_escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
     use super::{checked_launchctl, render_plist, trusted_binary_metadata};
     use std::path::Path;
     use std::{os::unix::process::ExitStatusExt, process::Output};
@@ -357,10 +358,10 @@ mod tests {
 
     #[test]
     fn elevation_requires_a_root_owned_non_writable_regular_binary() {
-        assert!(trusted_binary_metadata(0, 0o100755, true));
-        assert!(!trusted_binary_metadata(0, 0o100775, true));
-        assert!(!trusted_binary_metadata(501, 0o100755, true));
-        assert!(!trusted_binary_metadata(0, 0o120777, false));
+        assert!(trusted_binary_metadata(0, 0o100_755, true));
+        assert!(!trusted_binary_metadata(0, 0o100_775, true));
+        assert!(!trusted_binary_metadata(501, 0o100_755, true));
+        assert!(!trusted_binary_metadata(0, 0o120_777, false));
     }
 
     #[test]

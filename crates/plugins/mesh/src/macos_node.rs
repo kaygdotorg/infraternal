@@ -1475,7 +1475,8 @@ fn validate_config(config: &Config, identity: crate::policy::model::PublicKey) -
 
 #[cfg(test)]
 mod tests {
-    //! Checks that the Mac adapter maps authenticated peers to WireGuard host routes.
+    //! Checks that the Mac adapter maps authenticated peers to `WireGuard` host routes.
+    #![allow(clippy::expect_used)]
 
     use super::{
         BoundUdpFactory, Enrolment, Node, PUBLIC_STATE, SavedState, UdpSocketFactory,
