@@ -490,6 +490,28 @@ transaction={TRANSACTION}
         self.assertEqual(fields[8], '1')
         self.assertEqual(self.identity_path.read_text(), '{"endpoint":"127.0.0.1:7443"}\n')
 
+    def test_upgrade_with_a_running_old_agents_control_socket_is_classified(self):
+        # The real b-0.1.0 binary, running against the restored #305 fixture,
+        # bound sessions/plugins.sock as 0775 inside the 0700 sessions directory.
+        self.make_upgrade_fixture()
+        control = self.base / 'sessions/plugins.sock'
+        listener = socket.socket(socket.AF_UNIX)
+        previous = Path.cwd()
+        try:
+            os.chdir(control.parent)
+            listener.bind(control.name)
+        finally:
+            os.chdir(previous)
+        listener.close()
+        control.chmod(0o775)
+        result = self.run_shell('\ninspect_previous')
+        self.assertEqual(result.returncode, 0, result.stdout.decode())
+        self.assertTrue(result.stdout.decode().startswith(f'INFRATERNAL_SETUP_UPGRADE {HOST} {TRANSACTION} '))
+        # A control socket that is not the user's own socket stays refused.
+        control.unlink()
+        control.symlink_to(self.base / 'state')
+        self.assertEqual(self.run_shell('\ninspect_previous').returncode, 71)
+
     def test_upgrade_with_lifetime_lock_requests_helper_refresh_before_confirmation(self):
         stage, _ = self.make_upgrade_fixture()
         shutil.rmtree(Path(str(self.base) + '.bootstrap-cache'))

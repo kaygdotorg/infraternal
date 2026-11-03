@@ -133,7 +133,7 @@ validate_upgrade_sessions() {
    .lifetime-lock)
     [ -f "$setup_runtime_entry" ] && [ ! -L "$setup_runtime_entry" ] && [ -O "$setup_runtime_entry" ] && [ "$(stat -c '%a:%h' "$setup_runtime_entry")" = 600:1 ] || exit 71;;
    plugins.sock)
-    [ -S "$setup_runtime_entry" ] && [ ! -L "$setup_runtime_entry" ] && [ -O "$setup_runtime_entry" ] && [ "$(stat -c '%a' "$setup_runtime_entry")" = 600 ] || exit 71;;
+    [ -S "$setup_runtime_entry" ] && [ ! -L "$setup_runtime_entry" ] && [ -O "$setup_runtime_entry" ] || exit 71;;
    sessions) validate_upgrade_socket_dir "$setup_runtime_entry";;
    *)
     [ -S "$setup_runtime_entry" ] && [ ! -L "$setup_runtime_entry" ] && [ -O "$setup_runtime_entry" ] && [ "$(stat -c '%a' "$setup_runtime_entry")" = 600 ] || exit 71

@@ -12,6 +12,10 @@ use crate::{
 // no_redirect has already permitted only the home alias and symlinks above
 // it. Resolve that alias so /proc descriptor links under the real home are
 // still recognized as live setup state.
+// A running b-0.1.0 infraternal agent binds sessions/plugins.sock as 0775 (#305).
+// Its parent sessions directory must be 0700 and owned by this user, so the
+// socket's own mode grants no access; an upgrade check requires only that it
+// is a real socket owned by the user.
 // UUID session sockets retain their existing liveness checks. The fixed control
 // socket is probed directly; a global basename never proves it belongs here.
 // Inspect executable and open-descriptor links in one native traversal,
