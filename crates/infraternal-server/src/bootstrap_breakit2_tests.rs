@@ -902,12 +902,16 @@ pub(super) struct ObservedBackend(
 
 /// Seed the prior host record only after the real target presents its existing key digest.
 /// The live fixture owns the user files; the disposable server owns this matching ledger row.
+/// It is seeded at Check time, where the server decides whether to offer replacement (#305).
 async fn seed_replacement_host(
     backend: &RemoteBackend,
     authority: &Authority,
-    request: &StuckInstallRequest<'_>,
+    request: &StuckInstallCheck<'_>,
 ) {
-    assert_eq!(request.host, request.binding.host);
+    let digest = request
+        .enrolled
+        .expect("the live replacement fixture reports its enrolled identity")
+        .digest;
     let (mode, execution_uid) = match request.target.mode {
         InstallMode::Rootless => (Mode::Rootless, i64::from(request.check.uid)),
         InstallMode::Root => (Mode::Rootful, 0),
@@ -943,7 +947,7 @@ async fn seed_replacement_host(
             request.host,
             mode,
             now,
-            &request.binding.digest,
+            &digest,
         )
         .await
         .unwrap();
@@ -987,24 +991,29 @@ impl Backend for ObservedBackend {
             self.0.reissue_invitation(a, h),
         ))
     }
+    fn check_stuck_install<'a>(
+        &'a self,
+        authority: &'a Authority,
+        request: StuckInstallCheck<'a>,
+    ) -> Operation<'a, StuckInstall> {
+        let backend = self.0.clone();
+        Box::pin(async move {
+            // BREAKIT2_REPLACE_STUCK replays a stuck install this server enrolled.
+            if std::env::var_os("BREAKIT2_REPLACE_STUCK").is_some() {
+                seed_replacement_host(&backend, authority, &request).await;
+            }
+            let verdict = backend.check_stuck_install(authority, request).await;
+            println!("STUCK breakit2 verdict={verdict:?}");
+            verdict
+        })
+    }
     fn reissue_stuck_install<'a>(
         &'a self,
         authority: &'a Authority,
         request: StuckInstallRequest<'a>,
         register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
     ) -> Operation<'a, JoinMaterial> {
-        let backend = self.0.clone();
-        if std::env::var_os("BREAKIT2_REPLACE_STUCK").is_some() {
-            Box::pin(async move {
-                seed_replacement_host(&backend, authority, &request).await;
-                backend
-                    .reissue_stuck_install(authority, request, register)
-                    .await
-            })
-        } else {
-            self.0
-                .reissue_stuck_install(authority, request, register)
-        }
+        self.0.reissue_stuck_install(authority, request, register)
     }
     fn stop(&self) -> Operation<'_, ()> {
         self.0.stop()

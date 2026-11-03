@@ -42,6 +42,26 @@ pub struct StuckInstallRequest<'a> {
     pub binding: PreparedHostKey,
 }
 
+/// What the server will do with a stuck upgrade journal. It decides at Check
+/// time, before anything on the host is stopped, offered or changed (#305).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StuckInstall {
+    /// This server enrolled the host, the key matches and the CA can reissue:
+    /// replace the stuck install and keep its host identity.
+    Replace,
+}
+
+/// The stuck upgrade as the read-only check saw it.
+pub struct StuckInstallCheck<'a> {
+    pub target: &'a Target,
+    pub check: &'a Check,
+    /// The host id in the journal's owner record.
+    pub host: uuid::Uuid,
+    pub lookup: Option<String>,
+    /// The enrolled key digest and issuing server, if the identity was readable.
+    pub enrolled: Option<&'a previous_attempt::Enrolled>,
+}
+
 /// Trusted request authority stays in memory and is never Debug or serialized.
 /// Browser enrollment must recheck this exact session atomically, not owner id alone.
 pub struct Authority {
@@ -85,6 +105,19 @@ pub trait Backend: Send + Sync {
         _: uuid::Uuid,
     ) -> Operation<'a, JoinMaterial> {
         Box::pin(async { Err(Failure::unsupported("Host setup retry is unavailable.")) })
+    }
+    /// Decide what a stuck upgrade journal allows before anything is offered or stopped.
+    /// Implementations check the host record, the enrolled key digest and CA readiness.
+    fn check_stuck_install<'a>(
+        &'a self,
+        _: &'a Authority,
+        _: StuckInstallCheck<'a>,
+    ) -> Operation<'a, StuckInstall> {
+        Box::pin(async {
+            Err(Failure::unsupported(
+                "Replacing a stuck install needs a compatible server enrollment path.",
+            ))
+        })
     }
     /// Rejoin an enrolled host after the person explicitly replaces its stuck upgrade.
     fn reissue_stuck_install<'a>(
@@ -1115,13 +1148,43 @@ impl Bootstrap {
             }
             let lookup = session.trust_lookup();
             let replacement_host = if let Some(previous) = previous {
-                // Only this server's durable failed-host binding finishes the
-                // earlier setup without asking; replacing a stuck upgrade still
-                // requires explicit confirmation (#230).
-                let automatic = if previous.replacement_host().is_some() {
-                    false
+                if let Some(host) = previous.replacement_host() {
+                    // The server decides before anything is offered or stopped:
+                    // a stuck upgrade is replaced only when this server can
+                    // re-enroll the same identity (#305).
+                    let verdict = self
+                        .backend
+                        .check_stuck_install(
+                            &batch.authority,
+                            StuckInstallCheck {
+                                target,
+                                check: &check,
+                                host,
+                                lookup: lookup.clone(),
+                                enrolled: previous.enrolled(),
+                            },
+                        )
+                        .await?;
+                    match verdict {
+                        StuckInstall::Replace => {
+                            self.await_start_fresh(
+                                batch,
+                                target,
+                                attempt,
+                                started,
+                                session.as_ref(),
+                                &previous,
+                                false,
+                            )
+                            .await?;
+                            Some(host)
+                        }
+                    }
                 } else {
-                    self.backend
+                    // Only this server's durable failed-host binding finishes the
+                    // earlier setup without asking (#230).
+                    let automatic = self
+                        .backend
                         .owns_failed_setup(
                             &batch.authority,
                             target,
@@ -1129,19 +1192,19 @@ impl Bootstrap {
                             previous.host,
                             lookup.clone(),
                         )
-                        .await?
-                };
-                self.await_start_fresh(
-                    batch,
-                    target,
-                    attempt,
-                    started,
-                    session.as_ref(),
-                    &previous,
-                    automatic,
-                )
-                .await?;
-                previous.replacement_host()
+                        .await?;
+                    self.await_start_fresh(
+                        batch,
+                        target,
+                        attempt,
+                        started,
+                        session.as_ref(),
+                        &previous,
+                        automatic,
+                    )
+                    .await?;
+                    None
+                }
             } else {
                 None
             };

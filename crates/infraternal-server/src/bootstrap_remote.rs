@@ -7,7 +7,10 @@ use crate::{
     remote_runtime::RemoteHosts,
 };
 use infraternal_plugin_ssh::{
-    bootstrap::{Authority, Backend, PreparedHostKey, Resolved, StuckInstallRequest},
+    bootstrap::{
+        Authority, Backend, PreparedHostKey, Resolved, StuckInstall, StuckInstallCheck,
+        StuckInstallRequest,
+    },
     install::JoinMaterial,
     model::{Failure, InstallMode, InstallStep, Target},
     probe::Check,
@@ -607,6 +610,48 @@ impl Backend for RemoteBackend {
                 .await
         })
     }
+    fn check_stuck_install<'a>(
+        &'a self,
+        authority: &'a Authority,
+        request: StuckInstallCheck<'a>,
+    ) -> Operation<'a, StuckInstall> {
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            let infraternal_plugin_ssh::model::TargetAddress::Manual(address) =
+                &request.target.address
+            else {
+                return Err(unavailable());
+            };
+            let lookup = request.lookup.as_deref();
+            // (owner, revoked, matches this destination) for the journal's host id.
+            let row: Option<(String, bool, bool)> = sqlx::query_as("SELECT h.owner_id, h.revoked_at IS NOT NULL, EXISTS(SELECT 1 FROM remote_host_bootstrap b WHERE b.host_id=h.id AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?))) FROM remote_hosts h WHERE h.id=?")
+                .bind(address)
+                .bind(lookup)
+                .bind(lookup)
+                .bind(request.host.as_bytes().as_slice())
+                .fetch_optional(&self.issuer.store().0)
+                .await
+                .map_err(|_| unavailable())?;
+            let Some((owner, revoked, matches)) = row else {
+                // No server enrolled this host id here: another server did.
+                // Whether it may join as a new host is the owner's decision;
+                // until then it is refused by name and left untouched.
+                return Err(another_server());
+            };
+            let stored = self
+                .issuer
+                .store()
+                .host_key_digest(request.host)
+                .await
+                .map_err(|_| unavailable())?;
+            decide_stuck_install(&StuckFacts {
+                ours: owner == authority.owner && !revoked && matches,
+                stored,
+                reported: request.enrolled.map(|enrolled| enrolled.digest),
+                ca_ready: self.issuer.ready(),
+            })
+        })
+    }
     fn reissue_stuck_install<'a>(
         &'a self,
         authority: &'a Authority,
@@ -879,6 +924,42 @@ async fn wait_installed_actor(
     .await
     .map_err(|_| route_unavailable())?
 }
+/// The stuck install's host id is unknown here: another server enrolled it.
+fn another_server() -> Failure {
+    Failure::unsupported(
+        "This machine is enrolled with another server. Host provisioning left its infraternal agent untouched.",
+    )
+}
+
+/// What the server knows about a stuck upgrade's host id that it has a record for.
+struct StuckFacts {
+    /// Same owner, not revoked, and this destination.
+    ours: bool,
+    stored: Option<[u8; 32]>,
+    reported: Option<[u8; 32]>,
+    ca_ready: bool,
+}
+
+/// Replace only what this server can re-enroll with the same key (#305 P1-1).
+fn decide_stuck_install(facts: &StuckFacts) -> Result<StuckInstall, Failure> {
+    if !facts.ours {
+        return Err(Failure::unsupported(
+            "The interrupted install no longer matches this enrolled host.",
+        ));
+    }
+    if facts.stored.is_none() || facts.stored != facts.reported {
+        return Err(Failure::install(
+            "The interrupted install's host identity does not match its enrolled key.",
+        ));
+    }
+    if !facts.ca_ready {
+        return Err(Failure::install(
+            "Set up or unlock host connections with an administrator passkey before adding a host.",
+        ));
+    }
+    Ok(StuckInstall::Replace)
+}
+
 fn route_unavailable() -> Failure {
     Failure::install("The infraternal agent did not connect. Check the host's service and network.")
 }
@@ -1946,7 +2027,8 @@ mod tests {
         let host = f.prior.simple();
         let transaction = Uuid::new_v4().simple();
         let check = format!(
-            "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_UPGRADE {host} {transaction} 1:2 fixture 99999999 1 2026-11-02T04:05:06Z 0\n"
+            "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_UPGRADE {host} {transaction} 1:2 fixture 99999999 1 2026-11-02T04:05:06Z 0 {} remote.example.test\n",
+            hex(&digest)
         )
         .into_bytes();
         let scripts = Arc::new(Mutex::new(Vec::new()));
@@ -1999,6 +2081,7 @@ mod tests {
             .unwrap();
         let event = finished(&batch).await;
         assert_eq!(event.step, Step::Failed);
+        assert!(!event.message.contains("interrupted install"), "{event:?}");
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM remote_hosts")
                 .fetch_one(&f.pool)
@@ -2036,6 +2119,166 @@ mod tests {
         assert!(scripts.iter().all(|script| !script.contains(":7443")));
         assert!(f.backend.attempts.lock().unwrap().is_empty());
     }
+    fn hex(digest: &[u8; 32]) -> String {
+        use std::fmt::Write as _;
+        digest
+            .iter()
+            .fold(String::with_capacity(64), |mut text, byte| {
+                let _ = write!(text, "{byte:02x}");
+                text
+            })
+    }
+
+    /// A stuck-upgrade check record for `host`, enrolled with `server` under `digest`.
+    fn stuck_check(host: Uuid, digest: &[u8; 32], server: &str) -> Vec<u8> {
+        format!(
+            "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_UPGRADE {} {} 1:2 fixture 99999999 1 2026-11-02T04:05:06Z 2 {} {server}\n",
+            host.simple(),
+            Uuid::new_v4().simple(),
+            hex(digest)
+        )
+        .into_bytes()
+    }
+
+    /// Run add-host against a scripted stuck upgrade, confirming any offered action.
+    async fn run_stuck(f: &Fixture, check: Vec<u8>) -> (Vec<Event>, Vec<String>) {
+        let scripts = Arc::new(Mutex::new(Vec::new()));
+        let binary = std::env::current_exe().unwrap();
+        let runner = Bootstrap::new(
+            Arc::new(RejoinSession {
+                check,
+                digest: [7; 32],
+                scripts: scripts.clone(),
+            }),
+            f.backend.clone(),
+            BinaryPaths {
+                x86_64: binary.clone(),
+                aarch64: binary,
+            },
+        );
+        let batch = runner
+            .start_authenticated(
+                "owner".into(),
+                Secret::new(f.cookie.as_bytes().to_vec()),
+                vec![Target {
+                    id: "one".into(),
+                    address: TargetAddress::Manual("user@fixture".into()),
+                    credential: None,
+                    mode: InstallMode::Rootless,
+                    root_consent: false,
+                }],
+                None,
+            )
+            .unwrap();
+        let mut changed = batch.subscribe();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut confirmed = false;
+            loop {
+                let events = batch.events(0).1;
+                if events.iter().any(|event| event.step == Step::Failed) {
+                    break;
+                }
+                if !confirmed
+                    && let Some(leftovers) =
+                        events.iter().find_map(|event| event.leftovers.as_ref())
+                {
+                    confirmed = true;
+                    runner
+                        .start_fresh(&batch, "owner", "one", leftovers.challenge)
+                        .unwrap();
+                }
+                changed.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let events = batch.events(0).1;
+        let scripts = scripts.lock().unwrap().clone();
+        (events, scripts)
+    }
+
+    fn mutating(scripts: &[String]) -> Vec<&'static str> {
+        ["\nreplace_stuck_install ", "prepare-join-key"]
+            .into_iter()
+            .filter(|action| scripts.iter().any(|script| script.contains(action)))
+            .collect()
+    }
+
+    #[test]
+    fn stuck_install_verdict_follows_record_key_link_and_ca() {
+        let facts = |ours, stored: Option<[u8; 32]>, reported, ca_ready| StuckFacts {
+            ours,
+            stored,
+            reported,
+            ca_ready,
+        };
+        let key = Some([1; 32]);
+        assert_eq!(
+            decide_stuck_install(&facts(true, key, key, true)).unwrap(),
+            StuckInstall::Replace
+        );
+        for (refused, text) in [
+            (facts(false, key, key, true), "no longer matches"),
+            (
+                facts(true, key, Some([2; 32]), true),
+                "does not match its enrolled key",
+            ),
+            (
+                facts(true, key, None, true),
+                "does not match its enrolled key",
+            ),
+            (
+                facts(true, None, None, true),
+                "does not match its enrolled key",
+            ),
+            (facts(true, key, key, false), "administrator passkey"),
+        ] {
+            let error = decide_stuck_install(&refused).unwrap_err();
+            assert!(error.message.contains(text), "{}", error.message);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_machine_another_server_enrolled_is_refused_by_name_before_anything_changes() {
+        let f = fixture(true).await;
+        let (events, scripts) =
+            run_stuck(&f, stuck_check(Uuid::new_v4(), &[9; 32], "old.example")).await;
+        let failed = events
+            .iter()
+            .find(|event| event.step == Step::Failed)
+            .unwrap();
+        assert!(
+            failed.message.contains("enrolled with another server"),
+            "{}",
+            failed.message
+        );
+        assert!(events.iter().all(|event| event.leftovers.is_none()));
+        assert_eq!(mutating(&scripts), Vec::<&str>::new());
+    }
+
+    #[tokio::test]
+    async fn a_foreign_key_for_this_servers_host_is_refused_before_anything_changes() {
+        let f = fixture(true).await;
+        sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,'user@fixture',NULL)")
+            .bind(f.prior.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (events, scripts) =
+            run_stuck(&f, stuck_check(f.prior, &[9; 32], "remote.example.test")).await;
+        let failed = events
+            .iter()
+            .find(|event| event.step == Step::Failed)
+            .unwrap();
+        assert!(
+            failed.message.contains("does not match its enrolled key"),
+            "{}",
+            failed.message
+        );
+        assert!(events.iter().all(|event| event.leftovers.is_none()));
+        assert_eq!(mutating(&scripts), Vec::<&str>::new());
+    }
+
     #[tokio::test]
     async fn foreign_or_revoked_authority_never_opens_ssh() {
         let f = fixture(true).await;

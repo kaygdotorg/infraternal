@@ -59,6 +59,15 @@ pub struct PreviousAttempt {
     identity: String,
     sockets: u16,
     lease_owner: Option<LeaseOwner>,
+    /// An upgrade journal's enrolled identity, if the host could read it.
+    enrolled: Option<Enrolled>,
+}
+
+/// The stuck install's enrolled key digest and the server that issued it (#305).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Enrolled {
+    pub digest: [u8; 32],
+    pub server: String,
 }
 
 /// The old lease coordinates remain bound into the replacement confirmation.
@@ -91,7 +100,8 @@ pub fn check_script(mode: InstallMode) -> String {
 /// # Errors
 /// Refuses unknown output, invalid identifiers and unsupported ownership formats.
 pub fn parse_check(bytes: &[u8]) -> Result<(Check, Option<PreviousAttempt>), Failure> {
-    if bytes.len() > 512 {
+    // The check lines plus an upgrade record with two host names stay below 1 KiB.
+    if bytes.len() > 1024 {
         return Err(refused());
     }
     let end = bytes
@@ -127,14 +137,14 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
     if let ["INFRATERNAL_SETUP_REFUSED", cause] = fields.as_slice() {
         return Err(Failure::install(refusal_message(cause)));
     }
-    let (host, transaction, identity, sockets, lease_owner) = match fields.as_slice() {
+    let (host, transaction, identity, sockets, lease_owner, enrolled) = match fields.as_slice() {
         [
             "INFRATERNAL_SETUP_STALE",
             host,
             transaction,
             identity,
             sockets,
-        ] => (*host, *transaction, *identity, *sockets, None),
+        ] => (*host, *transaction, *identity, *sockets, None, None),
         [
             "INFRATERNAL_SETUP_UPGRADE",
             host,
@@ -145,12 +155,15 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
             birth,
             since,
             sockets,
+            digest,
+            server,
         ] => (
             *host,
             *transaction,
             *identity,
             *sockets,
             Some(parse_lease_owner(machine, pid, birth, since)?),
+            parse_enrolled(digest, server)?,
         ),
         _ => return Err(refused()),
     };
@@ -178,6 +191,32 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
         identity: (*identity).into(),
         sockets,
         lease_owner,
+        enrolled,
+    }))
+}
+
+fn parse_enrolled(digest: &str, server: &str) -> Result<Option<Enrolled>, Failure> {
+    if digest == "-" && server == "-" {
+        return Ok(None);
+    }
+    let bytes = digest.as_bytes();
+    if bytes.len() != 64 || !bytes.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(refused());
+    }
+    let mut parsed = [0_u8; 32];
+    for (index, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {
+        let nibble = |b: u8| {
+            if b.is_ascii_digit() {
+                b - b'0'
+            } else {
+                b - b'a' + 10
+            }
+        };
+        parsed[index] = (nibble(pair[0]) << 4) | nibble(pair[1]);
+    }
+    Ok(Some(Enrolled {
+        digest: parsed,
+        server: parse_machine(server)?,
     }))
 }
 
@@ -337,6 +376,60 @@ impl PreviousAttempt {
         }
     }
 
+    /// The enrolled identity the host reported for an upgrade journal.
+    #[must_use]
+    pub(crate) fn enrolled(&self) -> Option<&Enrolled> {
+        self.enrolled.as_ref()
+    }
+
+    /// The exact upgrade record every mutating step recompares on the host.
+    fn upgrade_record(&self) -> String {
+        let owner = self.lease_owner.as_ref();
+        let (pid, birth) = owner.map_or((0, 0), |owner| (owner.pid, owner.birth));
+        let mut enrolled = String::from("- -");
+        if let Some(identity) = &self.enrolled {
+            enrolled.clear();
+            for byte in identity.digest {
+                let _ = std::fmt::Write::write_fmt(&mut enrolled, format_args!("{byte:02x}"));
+            }
+            enrolled.push(' ');
+            enrolled.push_str(&identity.server);
+        }
+        format!(
+            "INFRATERNAL_SETUP_UPGRADE {} {} {} {} {pid} {birth} {} {} {enrolled}",
+            self.host.simple(),
+            self.transaction.simple(),
+            self.identity,
+            owner.map_or("", |owner| owner.machine.as_str()),
+            owner.map_or("", |owner| owner.since.as_str()),
+            self.sockets,
+        )
+    }
+
+    /// Run one upgrade-journal routine for this exact observed record (#305).
+    async fn upgrade_action(
+        &self,
+        session: &dyn SshSession,
+        target: &Target,
+        action: &str,
+    ) -> Result<(), Failure> {
+        target.validate()?;
+        let body = format!(
+            "{}\n{}\n{INSPECT}\n{action} {}\n",
+            crate::install::SETUP_LOCK,
+            crate::install::RUNTIME_CLEANUP,
+            crate::transport::shell_quote(&self.upgrade_record())
+        );
+        session
+            .run(
+                &Installation::script_for(target.mode, self.host, self.transaction, &body),
+                Input::Empty,
+            )
+            .await
+            .map_err(classify)?;
+        Ok(())
+    }
+
     /// Recover only the exact observed attempt, using its existing rollback implementation.
     /// # Errors
     /// Refuses changed ownership, live setup, foreign contents and unknown journal formats.
@@ -348,31 +441,10 @@ impl PreviousAttempt {
         target.validate()?;
         // Confirmation mutates: it needs the lease routines as well as the guard.
         let setup_lock = crate::install::SETUP_LOCK;
-        if let Some(owner) = &self.lease_owner {
-            let expected = format!(
-                "INFRATERNAL_SETUP_UPGRADE {} {} {} {} {} {} {} {}",
-                self.host.simple(),
-                self.transaction.simple(),
-                self.identity,
-                owner.machine,
-                owner.pid,
-                owner.birth,
-                owner.since,
-                self.sockets
-            );
-            let body = format!(
-                "{setup_lock}\n{}\n{INSPECT}\nreplace_stuck_install {}\n",
-                crate::install::RUNTIME_CLEANUP,
-                crate::transport::shell_quote(&expected)
-            );
-            session
-                .run(
-                    &Installation::script_for(target.mode, self.host, self.transaction, &body),
-                    Input::Empty,
-                )
-                .await
-                .map_err(classify)?;
-            return Ok(());
+        if self.lease_owner.is_some() {
+            return self
+                .upgrade_action(session, target, "replace_stuck_install")
+                .await;
         }
         let expected = format!(
             "INFRATERNAL_SETUP_STALE {} {} {} {}",
@@ -490,7 +562,7 @@ mod tests {
 
     fn upgrade(sockets: u16) -> PreviousAttempt {
         let record = format!(
-            "INFRATERNAL_SETUP_UPGRADE {} {} 1:2 host 99 1 2026-11-02T07:48:26Z {sockets}\n",
+            "INFRATERNAL_SETUP_UPGRADE {} {} 1:2 host 99 1 2026-11-02T07:48:26Z {sockets} - -\n",
             "1".repeat(32),
             "2".repeat(32)
         );
@@ -508,5 +580,37 @@ mod tests {
         assert_eq!(finding(0), "No open terminal sessions");
         assert_eq!(finding(1), "1 open terminal session will end");
         assert_eq!(finding(3), "3 open terminal sessions will end");
+    }
+
+    #[test]
+    fn upgrade_record_round_trips_with_its_enrolled_identity() {
+        let digest = "ab".repeat(32);
+        let record = format!(
+            "INFRATERNAL_SETUP_UPGRADE {} {} 1:2 host 99 1 2026-11-02T07:48:26Z 2 {digest} old.example\n",
+            "1".repeat(32),
+            "2".repeat(32)
+        );
+        let previous = parse(record.as_bytes()).unwrap().unwrap();
+        assert_eq!(
+            previous.enrolled(),
+            Some(&Enrolled {
+                digest: [0xab; 32],
+                server: "old.example".into()
+            })
+        );
+        assert_eq!(format!("{}\n", previous.upgrade_record()), record);
+        assert!(upgrade(0).upgrade_record().ends_with(" 0 - -"));
+        for bad in [
+            format!("{} old.example", "AB".repeat(32)),
+            "- old.example".into(),
+            format!("{digest} -bad"),
+        ] {
+            let record = format!(
+                "INFRATERNAL_SETUP_UPGRADE {} {} 1:2 host 99 1 2026-11-02T07:48:26Z 2 {bad}\n",
+                "1".repeat(32),
+                "2".repeat(32)
+            );
+            assert!(parse(record.as_bytes()).is_err(), "{bad}");
+        }
     }
 }

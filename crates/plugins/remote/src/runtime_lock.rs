@@ -27,8 +27,8 @@ pub const LOCK: &str = ".lifetime-lock";
 /// The cleanup script compares it with the level it needs, so a cached helper that predates
 /// a mode asks for a refresh (76) instead of refusing the mode. Helpers before levels print
 /// nothing and read as 0. Level 1: `inspect`/`retire`; level 2: `sessions`; level 3: `sessions-stop`;
-/// level 4: `sessions-count`.
-pub const LEVEL: &[u8] = b"4\n";
+/// level 4: `sessions-count`; level 5: `enrolled`.
+pub const LEVEL: &[u8] = b"5\n";
 
 fn refused() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
@@ -440,6 +440,76 @@ fn open_sessions(runtime: &File) -> Result<u16, u8> {
     Ok(open)
 }
 
+/// The enrolled identity in `state/identity.json`, as `<digest> <server>`:
+/// the SHA-256 of its raw Ed25519 public key (the value join-key preparation
+/// binds to an invitation) and the server name it was issued for. The server
+/// matches both before a stuck install is replaced or re-enrolled, so this
+/// runs before anything on the host changes (#305, D335). A missing or
+/// unreadable identity reads as `- -`; the private key never leaves memory.
+#[cold]
+#[inline(never)]
+fn enrolled(root: &File) -> String {
+    enrolled_record(root).unwrap_or_else(|| "- -".to_owned())
+}
+fn enrolled_record(root: &File) -> Option<String> {
+    let state = directory(&at(root, "state")).ok()?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(at(&state, "identity.json"))
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.mode() & 0o077 != 0
+        || metadata.len() > 8192
+    {
+        return None;
+    }
+    let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(8192));
+    (&mut file).take(8193).read_to_end(&mut bytes).ok()?;
+    if bytes.len() > 8192 {
+        return None;
+    }
+    let stored: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let server = stored.get("server_name")?.as_str()?;
+    if server.is_empty()
+        || server.len() > 253
+        || server.starts_with(['-', '.'])
+        || !server
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return None;
+    }
+    // Identities store DER as unpadded URL-safe base64; OpenSSL decodes the
+    // standard alphabet with padding.
+    let mut key = zeroize::Zeroizing::new(
+        stored
+            .get("key_der")?
+            .as_str()?
+            .replace('-', "+")
+            .replace('_', "/"),
+    );
+    while key.len() % 4 != 0 {
+        key.push('=');
+    }
+    let der = zeroize::Zeroizing::new(openssl::base64::decode_block(&key).ok()?);
+    let public = openssl::pkey::PKey::private_key_from_pkcs8(&der)
+        .ok()?
+        .raw_public_key()
+        .ok()?;
+    let digest = openssl::sha::sha256(&public);
+    let mut record = String::with_capacity(65 + server.len());
+    for byte in digest {
+        record.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
+        record.push(char::from(b"0123456789abcdef"[usize::from(byte & 0x0f)]));
+    }
+    record.push(' ');
+    record.push_str(server);
+    Some(record)
+}
+
 /// The user's own `*.sock` files in the runtime and its nested sessions
 /// directory, except the control socket; at most 1024 of them.
 fn session_sockets(runtime: &File) -> Result<Vec<(PathBuf, fs::Metadata)>, u8> {
@@ -774,6 +844,10 @@ pub fn command(arguments: &mut dyn Iterator<Item = std::ffi::OsString>) -> Optio
         let metadata = root.metadata().map_err(|_| 71)?;
         if identity != format!("{}:{}", metadata.dev(), metadata.ino()).as_str() {
             return Err(71);
+        }
+        // The identity report needs no runtime directory and changes nothing.
+        if mode == "enrolled" {
+            return writeln!(io::stdout(), "{}", enrolled(&root)).map_err(|_| 77);
         }
         let runtime = directory(&at(&root, "sessions")).map_err(|_| 71)?;
         // Session inspection takes no lock and never removes anything.

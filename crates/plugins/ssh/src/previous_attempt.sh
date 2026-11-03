@@ -268,17 +268,21 @@ inspect_upgrade() {
    return
   fi
  fi
+ # Discover an old or missing helper before offering replacement. The public
+ # recovery path can refresh it now, before stopping the enrolled service.
+ runtime_helper
  setup_sockets=0
  if [ -d "$base/sessions" ]; then
-  # Discover an old or missing helper before offering replacement. The public
-  # recovery path can refresh it now, before stopping the enrolled service.
-  runtime_helper
   # Only an endpoint a live shim still serves is an open terminal session; the
   # confirmation names how many the replacement ends (#305).
   setup_sockets=$("$helper" --bootstrap-runtime "$base" "$identity" sessions-count </dev/null) || exit $?
   case "$setup_sockets" in ''|*[!0-9]*) exit 77;; esac
  fi
- printf 'INFRATERNAL_SETUP_UPGRADE %s %s %s %s %s %s %s %s\n' "$previous_host" "$previous_transaction" "$identity" "$setup_locked_machine" "$setup_upgrade_lease_pid" "$setup_upgrade_lease_birth" "$setup_since" "$setup_sockets"
+ # The server matches the enrolled key digest and server name before it
+ # offers anything; "- -" means the identity cannot be read (#305).
+ setup_enrolled=$("$helper" --bootstrap-runtime "$base" "$identity" enrolled </dev/null) || exit $?
+ case "$setup_enrolled" in *[!0-9a-zA-Z._\ -]*|*\ *\ *) exit 77;; esac
+ printf 'INFRATERNAL_SETUP_UPGRADE %s %s %s %s %s %s %s %s %s\n' "$previous_host" "$previous_transaction" "$identity" "$setup_locked_machine" "$setup_upgrade_lease_pid" "$setup_upgrade_lease_birth" "$setup_since" "$setup_sockets" "$setup_enrolled"
 }
 not_live() {
  if [ -d "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ]; then
@@ -528,7 +532,7 @@ retire_stuck_service() {
  replace_observed=$(inspect_previous)
  [ "$replace_observed" = "$replace_expected" ] || exit 75
  set -- $replace_expected
- [ "$#" = 9 ] && [ "$1" = INFRATERNAL_SETUP_UPGRADE ] || exit 75
+ [ "$#" = 11 ] && [ "$1" = INFRATERNAL_SETUP_UPGRADE ] || exit 75
  replace_transaction=$3
  stage="$base/.bootstrap-lock"
  runtime_helper
