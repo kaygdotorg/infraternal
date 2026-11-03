@@ -3627,6 +3627,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      is one horizontally scrollable strip of preset cards. The last card has
      a dotted border and a large +, which adds a preset. The person can edit
      the built-in presets and reset them ("a reset button placed somewhere
-     nicer"). "Themes" is renamed **Colors**. Still open: whether floating
-     cards follow the preset or keep one overlay material, whether light
-     mode uses the same numbers, and the default preset.
+     nicer"). "Themes" is renamed **Colors**.
+     **Answers (owner, 2026-11-03):** floating cards (popovers, palette,
+     sidebar) follow the preset: "yes". A preset's tint and blur are one set
+     of values for both modes: "when choosing a card, show the card half in
+     dark and half in light mode - basically the theme they chose comes
+     first to the left and its respective inverse shows up on the right. so
+     they can choose values that fit both. of course our presets should be
+     a great default/starting point for both of them." The default preset
+     is **Tinted**.
