@@ -29,7 +29,7 @@ test("device approval link reviews the exact laptop and scopes before approval",
   } }));
   await page.route("**/auth/device-inspect", route => route.fulfill({ json: {
     device: "kayg-laptop",
-    scopes: ["hosts:read", "terminal:connect", "actions:dry-run"],
+    scopes: ["hosts:read", "sessions:read", "status:read"],
   } }));
   await page.route("**/auth/login-start", async route => {
     loginStarts += 1;
@@ -53,8 +53,8 @@ test("device approval link reviews the exact laptop and scopes before approval",
   await expect(page.getByRole("heading", { name: "Approve device sign-in" })).toBeVisible();
   await expect(page.getByText("kayg-laptop", { exact: true })).toBeVisible();
   await expect(page.getByText("hosts:read", { exact: true })).toBeVisible();
-  await expect(page.getByText("terminal:connect", { exact: true })).toBeVisible();
-  await expect(page.getByText("actions:dry-run", { exact: true })).toBeVisible();
+  await expect(page.getByText("sessions:read", { exact: true })).toBeVisible();
+  await expect(page.getByText("status:read", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Approve with passkey" })).toBeVisible();
 
   const expectApprovalAlignment = async (): Promise<void> => {
@@ -86,7 +86,7 @@ test("device approval link reviews the exact laptop and scopes before approval",
     withinHalfPixel(alignment.approveIcon.centerY, alignment.approveText.centerY);
   };
 
-  const evidenceDirectory = process.env.INFRATERAL_SIGNIN_EVIDENCE_DIR;
+  const evidenceDirectory = process.env.INFRATERNAL_SIGNIN_EVIDENCE_DIR;
   if (evidenceDirectory) {
     await mkdir(evidenceDirectory, { recursive: true });
     for (const theme of ["dark", "light"] as const) {
@@ -105,6 +105,8 @@ test("device approval link reviews the exact laptop and scopes before approval",
         await page.screenshot({
           path: join(evidenceDirectory, `${theme}-${viewport.name}.png`),
           animations: "disabled",
+          mask: [page.locator("#device-approval-code")],
+          maskColor: "#222222",
         });
       }
     }
@@ -130,7 +132,7 @@ test("approval page shows the code so a person can match it with the CLI", async
   } }));
   await page.route("**/auth/device-inspect", route => route.fulfill({ json: {
     device: "kayg-laptop",
-    scopes: ["hosts:read", "terminal:connect", "actions:dry-run"],
+    scopes: ["hosts:read", "sessions:read", "status:read"],
   } }));
 
   await page.goto(`/?device_code=${code}`);
@@ -198,7 +200,7 @@ test("a fresh virtual passkey tap approves the reviewed device request", async (
   });
   await page.route("**/auth/device-inspect", (route) => route.fulfill({ json: {
     device: "new-developer-workstation",
-    scopes: ["hosts:read", "terminal:connect", "actions:dry-run"],
+    scopes: ["hosts:read", "sessions:read", "status:read"],
   } }));
   let approvals = 0;
   await page.route("**/auth/device-approve", async (route) => {
@@ -231,7 +233,7 @@ test("a signed-out browser must sign in before it can inspect a device request",
   await page.route("**/auth/session", route => route.fulfill({ status: 401, json: { error: "signed out" } }));
   await page.route("**/auth/device-inspect", async route => {
     inspections += 1;
-    await route.fulfill({ json: { device: "kayg-laptop", scopes: ["hosts:read", "terminal:connect", "actions:dry-run"] } });
+    await route.fulfill({ json: { device: "kayg-laptop", scopes: ["hosts:read", "sessions:read", "status:read"] } });
   });
   await page.route("**/auth/login-start", async route => {
     loginStarts += 1;
@@ -302,11 +304,241 @@ test("device names are rendered as text, never as server-provided markup", async
   } }));
   await page.route("**/auth/device-inspect", route => route.fulfill({ json: {
     device,
-    scopes: ["hosts:read", "terminal:connect", "actions:dry-run"],
+    scopes: ["hosts:read", "sessions:read", "status:read"],
   } }));
 
   await page.goto("/?device_code=AbCdEfGhIjKlMnOp");
   await expect(page.getByRole("heading", { name: "Approve device sign-in" })).toBeVisible();
   await expect(page.getByText(device, { exact: true })).toBeVisible();
   await expect(page.locator("img")).toHaveCount(0);
+});
+
+test("device approval displays each additional scope requested by the CLI", async ({ page }) => {
+  await page.route("**/auth/status", route => route.fulfill({ json: { setup_required: false } }));
+  await page.route("**/auth/session", route => route.fulfill({ json: {
+    user_id: "11111111-1111-4111-8111-111111111111",
+    username: "fixture_owner",
+    display_name: "Fixture owner",
+    device: "Browser",
+    fresh: Math.floor(Date.now() / 1000),
+  } }));
+  await page.route("**/auth/device-inspect", route => route.fulfill({ json: {
+    device: "cli-laptop",
+    scopes: ["hosts:read", "sessions:read", "status:read", "hosts:write"],
+  } }));
+
+  await page.goto("/?device_code=AbCdEfGhIjKlMnOp");
+  await expect(page.getByRole("heading", { name: "Approve device sign-in" })).toBeVisible();
+  await expect(page.getByText("hosts:write", { exact: true })).toBeVisible();
+  await expect(page.getByText("sessions:write", { exact: true })).toHaveCount(0);
+});
+
+test("removal action code uses the approval page and explains the uninstall before refusal", async ({ page }) => {
+  let inspected = 0;
+  let declined = 0;
+  await page.route("**/auth/status", route => route.fulfill({ json: { setup_required: false } }));
+  await page.route("**/auth/session", route => route.fulfill({ json: {
+    user_id: "11111111-1111-4111-8111-111111111111",
+    username: "fixture_owner",
+    display_name: "Fixture owner",
+    device: "Browser",
+    fresh: Math.floor(Date.now() / 1000),
+  } }));
+  await page.route("**/remote/hosts/remove/approval/inspect", async route => {
+    inspected += 1;
+    await route.fulfill({ json: {
+      kind: "action",
+      action: {
+        id: "remote.host.remove",
+        label: "Remove ci-host",
+        host: "ci-host.example.org",
+        uninstall: true,
+        uninstall_effect: "The infraternal agent, its service, and its data will be removed from this host.",
+      },
+      ceremony: "removal-passkey-fixture",
+      options: { publicKey: {
+        challenge: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        rpId: "localhost",
+        allowCredentials: [],
+        timeout: 30_000,
+        userVerification: "required",
+      } },
+      expires_in: 300,
+    } });
+  });
+  await page.route("**/remote/hosts/remove/approval/decline", async route => {
+    declined += 1;
+    await route.fulfill({ json: { state: "denied" } });
+  });
+
+  await page.goto("/?action_code=AbCdEfGhIjKlMnOp");
+  await expect.poll(() => page.evaluate(() => location.search)).toBe("");
+  await expect(page.getByText("Remove ci-host", { exact: true })).toBeVisible();
+  await expect(page.getByText("ci-host.example.org", { exact: true })).toBeVisible();
+  await expect(page.getByText("The infraternal agent, its service, and its data will be removed from this host.", { exact: true })).toBeVisible();
+  const alignment = await page.evaluate(() => {
+    const rect = (selector: string) => {
+      const element = document.querySelector<HTMLElement>(selector);
+      if (!element) throw new Error(`Missing removal approval alignment element: ${selector}`);
+      const bounds = element.getBoundingClientRect();
+      return { left: bounds.left, centerY: bounds.top + bounds.height / 2 };
+    };
+    return {
+      label: rect(".auth-label"),
+      code: rect("#removal-approval-code"),
+      hint: rect(".auth-hint"),
+      confirmation: rect(".auth-check"),
+      checkbox: rect("#removal-approval-code-match"),
+      confirmationText: rect(".auth-check span"),
+      approveIcon: rect("#removal-approval-approve svg"),
+      approveText: rect("#removal-approval-approve > span:not(.busy-count)"),
+    };
+  });
+  const pairs: Array<[number, number]> = [
+    [alignment.code.left, alignment.label.left],
+    [alignment.hint.left, alignment.label.left],
+    [alignment.confirmation.left, alignment.label.left],
+    [alignment.checkbox.centerY, alignment.confirmationText.centerY],
+    [alignment.approveIcon.centerY, alignment.approveText.centerY],
+  ];
+  for (const [actual, expected] of pairs) expect(Math.abs(actual - expected)).toBeLessThanOrEqual(0.5);
+  const evidenceDirectory = process.env.INFRATERNAL_REMOVAL_EVIDENCE_DIR;
+  if (evidenceDirectory) {
+    await mkdir(evidenceDirectory, { recursive: true });
+    for (const theme of ["dark", "light"] as const) {
+      await page.emulateMedia({ colorScheme: theme });
+      for (const viewport of [
+        { name: "desktop", width: 1440, height: 900 },
+        { name: "phone", width: 393, height: 852 },
+        { name: "phone-small", width: 375, height: 667 },
+      ]) {
+        await page.setViewportSize({ width: viewport.width, height: viewport.height });
+        await page.screenshot({
+          path: join(evidenceDirectory, `${theme}-${viewport.name}.png`),
+          animations: "disabled",
+          mask: [page.locator("#removal-approval-code")],
+          maskColor: "#222222",
+        });
+      }
+    }
+  }
+  expect(inspected).toBe(1);
+  await page.getByRole("button", { name: "Decline" }).click();
+  await expect(page.getByRole("heading", { name: "Request declined" })).toBeVisible();
+  expect(declined).toBe(1);
+});
+
+test("host removal submits the inspected challenge and fresh passkey assertion once", async ({ page }) => {
+  let submitted: Record<string, unknown> | undefined;
+  await page.addInitScript(() => {
+    class FixtureAssertionResponse {
+      clientDataJSON = new TextEncoder().encode("{}").buffer;
+      authenticatorData = new Uint8Array(37).buffer;
+      signature = new Uint8Array([7, 8, 9]).buffer;
+      userHandle = null;
+    }
+    class FixturePublicKeyCredential {
+      id = "fixture-credential";
+      rawId = new Uint8Array([1, 2, 3]).buffer;
+      type = "public-key";
+      response = new FixtureAssertionResponse();
+      getClientExtensionResults() { return {}; }
+    }
+    Object.defineProperty(window, "AuthenticatorAssertionResponse", { configurable: true, value: FixtureAssertionResponse });
+    Object.defineProperty(window, "PublicKeyCredential", { configurable: true, value: FixturePublicKeyCredential });
+    Object.defineProperty(navigator.credentials, "get", {
+      configurable: true,
+      value: async () => new FixturePublicKeyCredential(),
+    });
+  });
+  await page.route("**/auth/status", route => route.fulfill({ json: { setup_required: false } }));
+  await page.route("**/auth/session", route => route.fulfill({ json: {
+    user_id: "11111111-1111-4111-8111-111111111111",
+    username: "fixture_owner",
+    display_name: "Fixture owner",
+    device: "Browser",
+    fresh: Math.floor(Date.now() / 1000),
+  } }));
+  await page.route("**/remote/hosts/remove/approval/inspect", route => route.fulfill({ json: {
+    kind: "action",
+    action: {
+      id: "remote.host.remove",
+      label: "Remove ci-host",
+      host: "ci-host.example.org",
+      uninstall: true,
+      uninstall_effect: "The infraternal agent, its service, and its data will be removed from this host.",
+    },
+    ceremony: "removal-passkey-fixture",
+    options: { publicKey: {
+      challenge: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      rpId: "localhost",
+      allowCredentials: [],
+      timeout: 30_000,
+      userVerification: "required",
+    } },
+    expires_in: 300,
+  } }));
+  await page.route("**/remote/hosts/remove/approval/approve", async route => {
+    submitted = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({ json: { state: "complete" } });
+  });
+
+  await page.goto("/?action_code=AbCdEfGhIjKlMnOp");
+  await page.getByText("I checked that this code matches the code in my terminal").click();
+  await page.getByRole("button", { name: "Approve removal with passkey" }).click();
+  await expect(page.getByRole("heading", { name: "Removal approved" })).toBeVisible();
+  expect(submitted?.code).toBe("AbCdEfGhIjKlMnOp");
+  expect(submitted?.ceremony).toBe("removal-passkey-fixture");
+  expect((submitted?.proof as Record<string, unknown>)?.id).toBe("fixture-credential");
+});
+
+test("host removal calls for a fresh passkey before approval and never proceeds when cancelled", async ({ page }) => {
+  let approvals = 0;
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator.credentials, "get", {
+      configurable: true,
+      value: () => {
+        Object.defineProperty(window, "__removalPasskeyPrompted", { configurable: true, value: true });
+        return Promise.reject(new DOMException("cancelled", "NotAllowedError"));
+      },
+    });
+  });
+  await page.route("**/auth/status", route => route.fulfill({ json: { setup_required: false } }));
+  await page.route("**/auth/session", route => route.fulfill({ json: {
+    user_id: "11111111-1111-4111-8111-111111111111",
+    username: "fixture_owner",
+    display_name: "Fixture owner",
+    device: "Browser",
+    fresh: Math.floor(Date.now() / 1000),
+  } }));
+  await page.route("**/remote/hosts/remove/approval/inspect", route => route.fulfill({ json: {
+    kind: "action",
+    action: {
+      id: "remote.host.remove",
+      label: "Remove ci-host",
+      host: "ci-host.example.org",
+      uninstall: true,
+      uninstall_effect: "The infraternal agent, its service, and its data will be removed from this host.",
+    },
+    ceremony: "removal-passkey-fixture",
+    options: { publicKey: {
+      challenge: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      rpId: "localhost",
+      allowCredentials: [],
+      timeout: 30_000,
+      userVerification: "required",
+    } },
+    expires_in: 300,
+  } }));
+  await page.route("**/remote/hosts/remove/approval/approve", async route => {
+    approvals += 1;
+    await route.fulfill({ json: { state: "complete" } });
+  });
+
+  await page.goto("/?action_code=AbCdEfGhIjKlMnOp");
+  await page.getByText("I checked that this code matches the code in my terminal").click();
+  await page.getByRole("button", { name: "Approve removal with passkey" }).click();
+  await expect(page.getByRole("alert")).toContainText("passkey prompt was cancelled");
+  expect(await page.evaluate(() => Reflect.get(window, "__removalPasskeyPrompted"))).toBe(true);
+  expect(approvals).toBe(0);
 });

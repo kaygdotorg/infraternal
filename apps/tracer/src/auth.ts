@@ -68,7 +68,15 @@ export interface DeviceApprovalReview {
   scopes: string[];
 }
 
-const DEVICE_APPROVAL_SCOPES = ["hosts:read", "terminal:connect", "actions:dry-run"] as const;
+const DEVICE_APPROVAL_SCOPES = new Set([
+  "hosts:read",
+  "hosts:write",
+  "sessions:read",
+  "sessions:write",
+  "status:read",
+  "terminal:connect",
+  "actions:dry-run",
+]);
 
 /** Server-generated user codes are 12 random bytes encoded as unpadded base64url. */
 export function isDeviceUserCode(code: string): boolean {
@@ -84,17 +92,19 @@ export async function inspectDeviceApproval(code: string): Promise<DeviceApprova
   } catch (error: unknown) {
     throw deviceApprovalError(error);
   }
-  const scopes = review?.scopes;
+  const scopes: unknown[] = Array.isArray(review?.scopes) ? review.scopes : [];
   if (typeof review?.device !== "string"
     || review.device.length === 0
     || review.device.length > 128
     || /[\u0000-\u001f\u007f]/.test(review.device)
     || !Array.isArray(scopes)
-    || scopes.length !== DEVICE_APPROVAL_SCOPES.length
-    || !DEVICE_APPROVAL_SCOPES.every((scope, index) => scopes[index] === scope)) {
+    || scopes.length === 0
+    || scopes.length > 32
+    || new Set(scopes).size !== scopes.length
+    || !scopes.every((scope) => typeof scope === "string" && DEVICE_APPROVAL_SCOPES.has(scope))) {
     throw new AuthError("The server's sign-in request could not be reviewed. Check that the server is up to date, then ask for a new link.");
   }
-  return { device: review.device, scopes: [...DEVICE_APPROVAL_SCOPES] };
+  return { device: review.device, scopes: [...scopes] as string[] };
 }
 
 /** Approves only after the caller has completed a fresh passkey login from a user action. */
@@ -104,6 +114,86 @@ export async function approveDeviceApproval(code: string): Promise<void> {
     await post("device-approve", { code });
   } catch (error: unknown) {
     throw deviceApprovalError(error);
+  }
+}
+
+/** The existing device-approval page can also review a one-time host removal. */
+export interface RemovalApprovalReview {
+  label: string;
+  host: string;
+  uninstall: boolean;
+  uninstallEffect: string;
+  ceremony: string;
+  options: { publicKey: Record<string, unknown> };
+}
+
+export async function inspectRemovalApproval(code: string): Promise<RemovalApprovalReview> {
+  if (!isDeviceUserCode(code)) throw invalidDeviceApprovalLink();
+  const value = record(await removalApprovalPost("inspect", code), "removal approval");
+  const action = record(value.action, "removal action");
+  const ceremony = requiredString(value.ceremony, "removal passkey ceremony");
+  const options = record(value.options, "removal passkey options");
+  const publicKey = record(options.publicKey, "removal passkey challenge");
+  if (value.kind !== "action"
+    || action.id !== "remote.host.remove"
+    || ceremony.length > 128
+    || typeof action.uninstall !== "boolean") {
+    throw new AuthError("The server's removal request could not be reviewed. Start the request again.");
+  }
+  const label = requiredString(action.label, "removal label");
+  const host = requiredString(action.host, "removal host");
+  const uninstallEffect = requiredString(action.uninstall_effect, "removal effect");
+  if (label.length > 256 || host.length > 512 || uninstallEffect.length > 1024) {
+    throw new AuthError("The server's removal request could not be reviewed. Start the request again.");
+  }
+  return { label, host, uninstall: action.uninstall, uninstallEffect, ceremony, options: { publicKey } };
+}
+
+/** Only the action-bound WebAuthn assertion from this approval page can remove the host. */
+export async function approveRemovalApproval(
+  code: string,
+  ceremony: string,
+  proof: Record<string, unknown>,
+): Promise<void> {
+  if (!isDeviceUserCode(code)) throw invalidDeviceApprovalLink();
+  await removalApprovalPost("approve", code, { ceremony, proof });
+}
+
+/** A signed-in owner can refuse a pending request without starting a passkey ceremony. */
+export async function declineRemovalApproval(code: string): Promise<void> {
+  if (!isDeviceUserCode(code)) throw invalidDeviceApprovalLink();
+  await removalApprovalPost("decline", code);
+}
+
+async function removalApprovalPost(
+  action: "inspect" | "approve" | "decline",
+  code: string,
+  extra: Readonly<Record<string, unknown>> = {},
+): Promise<unknown> {
+  let response: Response;
+  try {
+    response = await fetch(`/remote/hosts/remove/approval/${action}`, {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, ...extra }),
+    });
+  } catch {
+    throw new AuthError("The infraternal server could not be reached.");
+  }
+  if (!response.ok) {
+    const message = response.status === 429 ? "Too many attempts. Wait a minute and try again."
+      : response.status === 401 || response.status === 403 ? "This removal request expired or is no longer available. Start removal again."
+      : response.status >= 500 ? "The server could not complete the request. Try again."
+      : "The removal request could not be accepted. Check the link and try again.";
+    throw new AuthError(message, response.status);
+  }
+  if (response.status === 204) return undefined;
+  try {
+    return await response.json();
+  } catch {
+    throw new AuthError("The server sent a response this browser could not use. Try again.");
   }
 }
 
