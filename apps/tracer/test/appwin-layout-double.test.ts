@@ -4,11 +4,8 @@ import type { WebSocket } from "ws";
 import { decodeMuxedFrame, type WireFrame } from "../../../packages/protocol/src/codec";
 
 test("layout initialization, ordered edits, duplicate receipts and reconnect snapshots", async () => {
-  const previous = process.env.TRACER_DOUBLE_APPWIN;
-  process.env.TRACER_DOUBLE_APPWIN = "1";
+  // The layout is served in every mode (the product canvas needs it to connect), so no app-window variable is set here.
   const { appwinLayoutFrame, appwinSocketClosed } = await import("./appwin-double");
-  if (previous === undefined) delete process.env.TRACER_DOUBLE_APPWIN;
-  else process.env.TRACER_DOUBLE_APPWIN = previous;
   const frames: WireFrame[] = [];
   const socket = { readyState: 1, send(bytes: Uint8Array) { frames.push(decodeMuxedFrame(bytes).frame); } } as unknown as WebSocket;
   const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
@@ -30,4 +27,23 @@ test("layout initialization, ordered edits, duplicate receipts and reconnect sna
   appwinLayoutFrame(socket, subscribe);
   expect(events().at(-1)).toMatchObject({ revision: 2, document: { views: [{ name: "Renamed" }] } });
   appwinSocketClosed(socket);
+});
+
+test("a check can read the saved layout and replace it as another device would", async () => {
+  const { appwinLayoutFrame, appwinLayoutRead, appwinLayoutReplace, appwinLayoutReset, appwinSocketClosed } = await import("./appwin-double");
+  appwinLayoutReset();
+  const frames: WireFrame[] = [];
+  const socket = { readyState: 1, send(bytes: Uint8Array) { frames.push(decodeMuxedFrame(bytes).frame); } } as unknown as WebSocket;
+  const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
+  const events = (): Array<Record<string, unknown>> => frames.flatMap((frame) => frame.type === "Event" ? [JSON.parse(new TextDecoder().decode(frame.eventJson)) as Record<string, unknown>] : []);
+  expect(appwinLayoutRead().initialized).toBe(false);
+  appwinLayoutFrame(socket, { type: "Subscribe", subId: 9, filterJson: json({ topic: "canvas.layout" }) });
+  const document = { format: "infraternal.canvas", version: 1, revision: 0, views: [{ id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [] } }] };
+  expect(appwinLayoutReplace({ views: "not a layout" }), "an invalid document is refused and changes nothing").toBe(false);
+  expect(appwinLayoutRead().initialized).toBe(false);
+  expect(appwinLayoutReplace(document)).toBe(true);
+  expect(appwinLayoutRead()).toMatchObject({ initialized: true, document: { revision: 1, views: [{ id: "console" }] } });
+  expect(events().at(-1), "subscribers receive the replaced layout").toMatchObject({ type: "canvas.layout.snapshot", initialized: true, revision: 1 });
+  appwinSocketClosed(socket);
+  appwinLayoutReset();
 });

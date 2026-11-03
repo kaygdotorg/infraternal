@@ -5,6 +5,8 @@
  * are level with their neighbours, and closing a half gives back the layout it came from.
  */
 import { expect, test, type Page } from "playwright/test";
+import { PEEK } from "../src/canvas/window-sizes";
+import { uiFactor } from "./ui-factor";
 
 const VIEW = '.cl[data-view="console"]';
 
@@ -48,36 +50,63 @@ const grid = (page: Page): Promise<Grid> => page.evaluate((view) => {
   };
 }, VIEW);
 
+const windowCount = (page: Page): Promise<number> => page.evaluate((view) => document.querySelectorAll(`${view} .ui-window`).length, VIEW);
+
+/**
+ * Waits for an action's effect, not for a time: the view has `before + delta` windows. A fixed pause after a key, a menu row
+ * or a palette row was shorter than a loaded build host needed (two of three consecutive runs on a shared VM lost a split
+ * to it); the pauses that remain only let the layout's own animation finish once the change has happened.
+ */
+async function windowsChanged(page: Page, before: number, delta: number): Promise<void> {
+  if (delta !== 0) await expect.poll(() => windowCount(page), { timeout: 20_000, message: `the view has ${before + delta} windows` }).toBe(before + delta);
+}
+
 /** A narrow window's action, through its ⋯ menu (the same action as the header button of a wide window). */
-async function windowMenu(page: Page, id: string, action: string): Promise<void> {
+async function windowMenu(page: Page, id: string, action: string, delta: number): Promise<void> {
+  const before = await windowCount(page);
   // The menu's module loads on the first press, so its rows are awaited; the presses are DOM clicks (a window partly off
   // the screen is still a window the person pressed).
   await page.locator(`${VIEW} .ui-window[data-window-id="${id}"] .ui-window-more`).evaluate((b) => (b as HTMLElement).click());
   const item = page.locator(`.ui-window-menu .ui-window-menu-item[data-action="${action}"]`);
-  await expect(item).toHaveCount(1, { timeout: 5000 });
+  await expect(item).toHaveCount(1, { timeout: 20_000 });
   await item.evaluate((b) => (b as HTMLElement).click());
+  await windowsChanged(page, before, delta);
   await page.waitForTimeout(300);
 }
 
 const activate = (page: Page, id: string): Promise<void> => page.locator(`${VIEW} .ui-window[data-window-id="${id}"] .ui-window-body`).first().click({ position: { x: 20, y: 40 } }).then(() => page.waitForTimeout(400));
 
-async function press(page: Page, chord: string[]): Promise<void> {
+// The default chords off a Mac (D222, shortcuts.ts): Ctrl+Alt is AltGr on many layouts, so no default uses it. These replace
+// the D212 chords (Ctrl+Shift+Alt+D, Ctrl+Alt+R, Ctrl+Alt+D) that the keymap left in 2026-10-10 (d0aacfa1e).
+const SPLIT_RIGHT = ["Control", "Shift", "KeyD"];
+const SPLIT_DOWN = ["Control", "Shift", "KeyE"];
+const NEW_RIGHT = ["Control", "Shift", "Enter"];
+const NEW_BELOW = ["Control", "Shift", "Alt", "Enter"];
+
+async function press(page: Page, chord: string[], delta: number): Promise<void> {
+  const before = await windowCount(page);
   for (const k of chord) await page.keyboard.down(k);
   for (const k of [...chord].reverse()) await page.keyboard.up(k);
+  await windowsChanged(page, before, delta);
   await page.waitForTimeout(450);
 }
 
 /** The canvas-action event the palette and the key handlers send: the same path, without a key chord. */
-const act = (page: Page, action: string): Promise<void> => page.evaluate((a) => {
-  window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: a, source: "pointer" } }));
-}, action).then(() => page.waitForTimeout(900));
+const act = async (page: Page, action: string, delta: number): Promise<void> => {
+  const before = await windowCount(page);
+  await page.evaluate((a) => {
+    window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: a, source: "pointer" } }));
+  }, action);
+  await windowsChanged(page, before, delta);
+  await page.waitForTimeout(900);
+};
 
 /** A three-window stack in the middle column: edge-arm is split down, then the middle window is split right. */
 async function stacked(page: Page): Promise<void> {
   await activate(page, "w-edge-arm");
-  await press(page, ["Control", "Shift", "Alt", "KeyD"]);
+  await press(page, SPLIT_DOWN, 1);
   await activate(page, "w-edge-arm");
-  await press(page, ["Control", "Shift", "KeyD"]);
+  await press(page, SPLIT_RIGHT, 1);
 }
 
 function expectNoOverlap(g: Grid): void {
@@ -109,7 +138,7 @@ test.describe("split right in a stacked column (D212)", () => {
   test("by ⌘K: Split right on the stacked window gives the same layout", async ({ page }) => {
     await boot(page);
     await activate(page, "w-edge-arm");
-    await press(page, ["Control", "Shift", "Alt", "KeyD"]);
+    await press(page, SPLIT_DOWN, 1);
     await activate(page, "w-edge-arm");
     const before = await grid(page);
     await page.keyboard.press("Control+Shift+K");
@@ -117,6 +146,7 @@ test.describe("split right in a stacked column (D212)", () => {
     await page.locator("#palette-input").fill("Split right");
     await expect(page.locator("#palette-results .result").first()).toContainText("Split right");
     await page.keyboard.press("Enter");
+    await windowsChanged(page, before.windows, 1);
     await page.waitForTimeout(900);
     const after = await grid(page);
     expect(after.groups).toBe(1);
@@ -128,11 +158,11 @@ test.describe("split right in a stacked column (D212)", () => {
   test("by mouse: the header pill's split right on the middle window divides it the same way", async ({ page }) => {
     await boot(page);
     await activate(page, "w-edge-arm");
-    await press(page, ["Control", "Shift", "Alt", "KeyD"]);
+    await press(page, SPLIT_DOWN, 1);
     await activate(page, "w-edge-arm");
     const before = await grid(page);
     // A half is narrow: its actions sit behind the ⋯ (TASTE: title first), and the menu holds the same action.
-    await windowMenu(page, "w-edge-arm", "split-right");
+    await windowMenu(page, "w-edge-arm", "split-right", 1);
     await page.waitForTimeout(1500);
     const after = await grid(page);
     expect(after.groups).toBe(1);
@@ -144,12 +174,12 @@ test.describe("split right in a stacked column (D212)", () => {
   test("closing the new half gives back the layout it came from, widths and heights", async ({ page }) => {
     await boot(page);
     await activate(page, "w-edge-arm");
-    await press(page, ["Control", "Shift", "Alt", "KeyD"]);
+    await press(page, SPLIT_DOWN, 1);
     const beforeSplit = await grid(page);
     await activate(page, "w-edge-arm");
-    await press(page, ["Control", "Shift", "KeyD"]);
+    await press(page, SPLIT_RIGHT, 1);
     const newId = (await grid(page)).active!;
-    await windowMenu(page, newId, "close");
+    await windowMenu(page, newId, "close", -1);
     await page.waitForTimeout(1000);
     const back = await grid(page);
     expect(back.groups).toBe(0);
@@ -164,7 +194,7 @@ test.describe("split right in a stacked column (D212)", () => {
     await boot(page);
     await stacked(page);
     const g = await grid(page);
-    await windowMenu(page, "w-edge-arm", "close");
+    await windowMenu(page, "w-edge-arm", "close", -1);
     await page.waitForTimeout(1000);
     const after = await grid(page);
     expect(after.groups).toBe(0);
@@ -173,7 +203,8 @@ test.describe("split right in a stacked column (D212)", () => {
     expectNoOverlap(after);
     const c2 = after.cols.find((c) => c.wins.some((w) => w.id === "w-nix-cache"))!;
     expect(c2.wins.map((w) => w.id)).toContain("w-edge-arm-s2");
-    expect(c2.w).toBe(459);
+    // The default desktop column is 459 px at the standard UI size and grows with it (#283, TASTE "windows grow with it").
+    expect(c2.w).toBe(Math.round(459 * (await uiFactor(page))));
   });
 
   test("split right of a spanning window halves its span inside the existing columns", async ({ page }) => {
@@ -181,7 +212,7 @@ test.describe("split right in a stacked column (D212)", () => {
     await stacked(page);
     const before = await grid(page);
     await activate(page, "w-nix-cache");
-    await press(page, ["Control", "Shift", "KeyD"]);
+    await press(page, SPLIT_RIGHT, 1);
     const after = await grid(page);
     expect(after.total).toBe(before.total);
     expect(after.windows).toBe(before.windows + 1);
@@ -196,7 +227,7 @@ test.describe("split right in a stacked column (D212)", () => {
     await stacked(page);
     await activate(page, "w-edge-arm");
     const before = await grid(page);
-    await press(page, ["Control", "Alt", "KeyR"]);
+    await press(page, NEW_RIGHT, 1);
     const after = await grid(page);
     expect(after.groups, "the group is untouched").toBe(1);
     expect(after.cols.length).toBe(before.cols.length + 1);
@@ -209,7 +240,7 @@ test.describe("split right in a stacked column (D212)", () => {
     await stacked(page);
     await activate(page, "w-edge-arm");
     const before = await grid(page);
-    await press(page, ["Control", "Alt", "KeyD"]);
+    await press(page, NEW_BELOW, 1);
     const after = await grid(page);
     expect(after.windows).toBe(before.windows + 1);
     expect(after.total).toBe(before.total);
@@ -222,7 +253,7 @@ test.describe("split right in a stacked column (D212)", () => {
     await stacked(page);
     await activate(page, "w-edge-arm-s2");
     const before = await grid(page);
-    await press(page, ["Control", "Shift", "Alt", "KeyD"]);
+    await press(page, SPLIT_DOWN, 1);
     const after = await grid(page);
     expect(after.windows).toBe(before.windows + 1);
     expectNoOverlap(after);
@@ -270,9 +301,9 @@ test.describe("phone 393x852 with a group (D212)", () => {
     // The phone starts from the window on screen (as the other phone specs do); a split leaves the new window active.
     await page.locator(`${VIEW} .ui-window .ui-window-body`).first().click({ position: { x: 20, y: 40 } });
     await page.waitForTimeout(400);
-    await act(page, "canvas:split:down");
+    await act(page, "canvas:split:down", 1);
     const before = await grid(page);
-    await act(page, "canvas:split:right");
+    await act(page, "canvas:split:right", 1);
     const after = await grid(page);
     expect(after.groups).toBe(1);
     expect(after.windows).toBe(before.windows + 1);
@@ -330,9 +361,11 @@ test.describe("title first in a narrow half (TASTE, D212)", () => {
     expect(m.width).toBeLessThan(260);
     expect(m.moreShown, "the ⋯ shows").toBe(true);
     expect(m.visible, "no action button shows in the header").toEqual([]);
-    // The pill stops short of the lock at the frame's centre (TASTE: window chrome), so a 224 px half leaves about 43 px for
-    // the title: four or five characters of the host, where five actions left it one.
-    expect(m.titleW, "the title keeps room for the host").toBeGreaterThanOrEqual(40);
+    // The pill stops short of the lock at the frame's centre (TASTE: window chrome), so a 224 px half keeps room for the title:
+    // four characters of the host, where five actions left it one. The pill carries a 14 px connection icon since #212 (owner,
+    // 2026-11-01: "connection states is approved"), which took about 9 px of the 43 the title had; measured 34.3 px at a UI size
+    // of 0.99 and 39.1 px at 1.1, so the room is 34 px at the standard size and grows with the UI (#283).
+    expect(m.titleW, "the title keeps room for the host").toBeGreaterThanOrEqual(Math.floor(34 * (await uiFactor(page))));
     await half.locator(".ui-window-more").evaluate((b) => (b as HTMLElement).click());
     await expect(page.locator(".ui-window-menu .ui-window-menu-item")).toHaveCount(4, { timeout: 5000 });
     const items = await page.locator(".ui-window-menu .ui-window-menu-item").evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.action));
@@ -357,16 +390,18 @@ test.describe("the phone after a split in a group (TASTE: chrome is never clippe
     await boot(page, 393, 852);
     await page.locator(`${VIEW} .ui-window .ui-window-body`).first().click({ position: { x: 20, y: 40 } });
     await page.waitForTimeout(400);
-    await act(page, "canvas:split:down");
-    await act(page, "canvas:split:right");
+    await act(page, "canvas:split:down", 1);
+    await act(page, "canvas:split:right", 1);
     const pills = await page.evaluate((v) => [...document.querySelectorAll<HTMLElement>(`${v} .ui-window`)].map((w) => {
       const head = w.querySelector<HTMLElement>(".ui-window-head")!.getBoundingClientRect();
       const r = w.getBoundingClientRect();
       return { id: w.dataset.windowId, left: Math.round(r.left), right: Math.round(r.right), headLeft: Math.round(head.left), span: Number(w.dataset.span) || 1 };
     }), VIEW);
     const vw = await page.evaluate(() => document.documentElement.clientWidth);
-    // The windows that the camera frames (those on screen at all) show their header whole: the header's left edge is not off the screen.
-    const framed = pills.filter((p) => p.right > 0 && p.left < vw);
+    // The windows that the camera frames show their header whole: the header's left edge is not off the screen. A neighbour's
+    // slice at the screen edge (TASTE "Neighbouring windows peek on phones", owner 2026-10-11, the default "Edge to edge") is
+    // not framed: it is meant to run past the edge, so only a window with more than that slice on the screen counts.
+    const framed = pills.filter((p) => Math.min(p.right, vw) - Math.max(p.left, 0) > PEEK + 2);
     expect(framed.length).toBeGreaterThan(0);
     for (const p of framed) expect(p.headLeft, `${p.id} header left edge`).toBeGreaterThanOrEqual(-1);
     for (const p of framed) expect(p.right, `${p.id} right edge`).toBeLessThanOrEqual(vw + 1);

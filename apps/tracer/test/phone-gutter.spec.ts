@@ -13,6 +13,11 @@ const URL = "/?mock=1&proto=clusters&scene=3&theme=ink&bg=soft";
 
 async function phone(browser: Browser, width: number, height: number): Promise<{ page: Page; close(): Promise<void> }> {
   const context = await browser.newContext({ ...devices["iPhone 15"], baseURL: `http://localhost:${process.env.TRACER_TEST_PORT ?? "4621"}`, viewport: { width, height }, deviceScaleFactor: 2 });
+  // The 16 px gutter belongs to the "Comfortable" phone size. Since 2026-10-12 (owner: "edge to edge (the default) should allow
+  // peeking of the neighbour windows"; TASTE "Full width means full width; edge to edge peeks", D191) the default is "Edge to
+  // edge", where the canvas runs to the safe areas and a lone window is the screen width. This spec picks the size that keeps
+  // the gutter, as the person who wants it would (Settings, Window Sizes); phone-window-width.spec.ts holds the other two sizes.
+  await context.addInitScript(() => localStorage.setItem("tracer.window-size.phone", "comfortable"));
   const page = await context.newPage();
   await page.goto(URL);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });

@@ -46,7 +46,9 @@ test("measure deployed motion at 4x CPU and capture production screens", async (
     if (pathname.endsWith("/backdrop.worker.js")) requestedWorkers.push(request.url());
     if (pathname.endsWith("/faulty-terminal.worker.js")) requestedFaultyWorkers.push(request.url());
   });
-  await page.route("**/faulty-terminal.worker.js", async (route) => {
+  // On the context, not the page: a page route intercepts the first document's worker and, measured on dev-02, not the workers
+  // of the documents loaded after it (the route handler never ran for them), so the reduced-motion page counted 0 frames.
+  await context.route("**/faulty-terminal.worker.js", async (route) => {
     const response = await route.fetch();
     const source = await response.text();
     // Count actual WebGL shader draws in the real worker, without changing app code.
@@ -267,8 +269,8 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
     },
   });
   await page.goto("/?mock=1");
-  await expect(page.locator("#setup-card")).toBeVisible();
-  await expect(page.locator("#faulty-field")).toHaveAttribute("data-ready", "true");
+  await expect(page.locator("#setup-card")).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator("#faulty-field")).toHaveAttribute("data-ready", "true", { timeout: 20_000 });
   expect(requestedFaultyWorkers).toHaveLength(1);
   const setupPath = testInfo.outputPath("motion-audit-setup.png");
   await page.screenshot({ path: setupPath, fullPage: true, mask: [page.locator("#setup-token")] });
@@ -400,13 +402,14 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   expect(copyMorph.doneFilter === "none" || (doneBlur !== undefined && Number(doneBlur) < 0.01)).toBe(true);
   console.log(`MOTION_AUDIT copy-feedback ${JSON.stringify({ ...copy, copyMorph })}`);
 
-  await page.waitForTimeout(520);
-  await expect(page.locator("#copy-recovery")).toHaveAttribute("data-done", "");
+  // The confirmation lasts 900 ms (copy-feedback.ts) and then returns. The return is sampled from here and awaited by its own
+  // end, not by a fixed wait that has to land inside the 900 ms: at 4x CPU on a shared host that margin (about 160 ms) was lost
+  // to the sampling work in between, which failed the step although the feedback was right.
   await page.evaluate(() => { window.__motionAudit.label = "copy-feedback-return"; window.__motionAudit.startSample(); });
+  await expect(page.locator("#copy-recovery")).not.toHaveAttribute("data-done");
   await page.waitForTimeout(230);
   const copyReturn = await sampleAndEvents(page, "copy-feedback-return");
   expect(copyReturn.events.find((event) => event.selector === "svg.is-done" && event.property === "filter")?.duration).toBe("0.15s, 0.15s, 0.15s");
-  await expect(page.locator("#copy-recovery")).not.toHaveAttribute("data-done");
   console.log(`MOTION_AUDIT copy-feedback-return ${JSON.stringify(copyReturn)}`);
 
   // Keep both recovery actions in view so the browser does not scroll and reset
@@ -538,8 +541,11 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   ]);
   console.log(`MOTION_AUDIT reduced-copy ${JSON.stringify({ reducedCopy, reducedCopyStyles })}`);
   await page.emulateMedia({ reducedMotion: "no-preference" });
+  // Finish the reduced-copy hold before sampling the keyboard download: wait for the confirmation to end, then for its 150 ms
+  // return. The confirmation holds 900 ms and returns by 1050 ms after the click; the fixed waits that stood here (240 + 220 +
+  // 500 ms) ended at about 960 ms, inside that return, so a slower host sampled the copy button's return as the download's.
+  await expect(page.locator("#copy-recovery")).not.toHaveAttribute("data-done");
   await page.waitForTimeout(220);
-  await page.waitForTimeout(500); // finish the reduced-copy hold before sampling the keyboard download
 
   await page.locator("#download-recovery").focus();
   await page.evaluate(() => { window.__motionAudit.label = "keyboard-download"; window.__motionAudit.startSample(); });
@@ -624,7 +630,7 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   await page.keyboard.press("Escape");
 
   await page.keyboard.press("Control+Shift+K");
-  await page.locator("#palette-input").fill("Mesh from the theme");
+  await page.locator("#palette-input").fill("Background: Mesh");
   const backdropStartAt = await page.evaluate(() => performance.now());
   await page.evaluate(() => { window.__motionAudit.label = "keyboard-backdrop"; window.__motionAudit.startSample(); });
   await page.keyboard.press("Enter");
@@ -647,7 +653,7 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   await testInfo.attach("production mesh", { path: meshPath, contentType: "image/png" });
   console.log(`MOTION_AUDIT keyboard-backdrop ${JSON.stringify({ ...keyboardBackdrop, ...backdropTiming, requestedWorkers })}`);
   await page.keyboard.press("Control+Shift+K");
-  await page.locator("#palette-input").fill("None");
+  await page.locator("#palette-input").fill("Background: Plain");
   await page.keyboard.press("Enter");
   await page.waitForTimeout(260);
 
@@ -801,8 +807,8 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
     window.__motionAudit.startSample();
     return performance.now();
   });
-  await expect(page.locator("#setup-card")).toBeVisible();
-  await expect(page.locator("#faulty-field")).toHaveAttribute("data-ready", "true");
+  await expect(page.locator("#setup-card")).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator("#faulty-field")).toHaveAttribute("data-ready", "true", { timeout: 20_000 });
   await page.waitForTimeout(320);
   const pointerStartup = await sampleAndEvents(page, "pointer-auth-startup");
   const startupLongTasks = await page.evaluate((startAt) => window.__motionAudit.longTasks
@@ -870,8 +876,8 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
   await page.goto("/?mock=1", { waitUntil: "commit" });
   await page.evaluate(() => { window.__motionAudit.label = "reduced-auth"; window.__motionAudit.startSample(); });
-  await expect(page.locator("#setup-card")).toBeVisible();
-  await expect(page.locator("#faulty-field")).toHaveAttribute("data-ready", "true");
+  await expect(page.locator("#setup-card")).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator("#faulty-field")).toHaveAttribute("data-ready", "true", { timeout: 20_000 });
   await page.waitForTimeout(320);
   const reducedShaderFrames = await page.evaluate(() => window.__faultyWorkerFrames.length);
   expect(reducedShaderFrames).toBe(1);

@@ -15,7 +15,7 @@ import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
 import { sessionDevices, sessionHosts } from "./session-fixtures";
 import { renameDataset } from "../docs-dataset";
 import { createPerfSink } from "./perf-sink";
-import { appwinCall, appwinEnabled, appwinFrame, appwinHosts, appwinHttp, appwinSocketClosed, appwinLayoutFrame } from "./appwin-double";
+import { appwinCall, appwinEnabled, appwinFrame, appwinHosts, appwinHttp, appwinSocketClosed, appwinLayoutFrame, appwinLayoutRead, appwinLayoutReplace, appwinLayoutReset } from "./appwin-double";
 
 /**
  * Run for the docs' figures (`TRACER_DATASET=docs`, #302): every JSON answer carries the plain names of docs-dataset.ts, and the
@@ -626,6 +626,11 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     publishSessionInventory();
     for (const connection of connections) connection.socket.close(1011, "test-double host restarted");
     return sendJson(response, 200, { session_id: session.sessionIdText });
+  }
+  if (request.method === "GET" && url.pathname === "/__mock/layout") return sendJson(response, 200, appwinLayoutRead());
+  if (request.method === "POST" && url.pathname === "/__mock/layout") {
+    const body = await readJson(request);
+    return sendJson(response, appwinLayoutReplace(body?.document) ? 200 : 400, {});
   }
   if (request.method === "POST" && url.pathname === "/__mock/seed-ended-sessions") {
     const body = await readJson(request);
@@ -1376,6 +1381,7 @@ function resetMockState(): void {
   attachCount = 0;
   attachHistory.length = 0;
   traceEvents.length = 0;
+  appwinLayoutReset();
   session = createSession();
   unclaimedSessionId = session.sessionIdText;
 }
