@@ -21,6 +21,10 @@ test("status failure, invalid setup token, and cancelled passkey have distinct g
       await page.goto("/");
       await expect(page.getByRole("alert")).toHaveText("The server could not complete the request. Try again.");
       await page.evaluate(() => document.fonts.ready);
+      const leftEdges = await page.locator("#unavailable-title, #status-error, #retry-status")
+        .evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().left));
+      expect(leftEdges).toHaveLength(3);
+      for (const left of leftEdges) expect(Math.abs(left - leftEdges[0]!)).toBeLessThanOrEqual(0.5);
       const path = info.outputPath(`unavailable-${width}-${colorScheme}.png`);
       await page.screenshot({ path, animations: "disabled" });
       await info.attach(`unavailable-${width}-${colorScheme}`, { path, contentType: "image/png" });
