@@ -336,7 +336,11 @@ struct GroSegment {
 fn gro_segment(packet: &[u8]) -> Option<GroSegment> {
     let (ipv4, ip_header_len, total_len, protocol) = match packet.first()? >> 4 {
         4 if packet.len() >= 20 && packet[0] & 0x0f == 5 => {
-            if u16::from_be_bytes([packet[6], packet[7]]) & 0x3fff != 0 {
+            // A merged frame gets a fresh header checksum, so a bad one must not merge: alone, the
+            // segment reaches the kernel's IP input, which drops it (#260 J143 P3-2).
+            if u16::from_be_bytes([packet[6], packet[7]]) & 0x3fff != 0
+                || internet_checksum(&[&packet[..20]]) != 0
+            {
                 return None;
             }
             let total = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
@@ -1206,6 +1210,9 @@ mod tests {
         for (field, offset, value) in header_changes {
             let mut run = pair((1000, 1000, ack));
             run[1][offset..offset + value.len()].copy_from_slice(value);
+            // Keep the header checksum valid, so the field itself is what ends the frame.
+            let details = ip_details(&run[1]).unwrap();
+            recompute_ipv4_checksum(&mut run[1], details);
             assert_eq!(
                 coalescible_run(&run, 0),
                 1,
@@ -1276,6 +1283,22 @@ mod tests {
             47,
             "a frame stays within one IP packet"
         );
+    }
+
+    /// A merged frame gets a fresh IPv4 header checksum, so a segment with a bad one goes out
+    /// alone for the kernel to judge (#260 J143 P3-2).
+    #[test]
+    fn gro_never_merges_a_bad_ipv4_header_checksum() {
+        for corrupted in [0, 1] {
+            let mut run = ipv4_run(&[(0, 1000, TCP_ACK), (1000, 1000, TCP_ACK)]);
+            assert_eq!(coalescible_run(&run, 0), 2, "the intact pair merges");
+            run[corrupted][10] ^= 0x01;
+            assert_eq!(
+                coalescible_run(&run, 0),
+                1,
+                "a bad IPv4 header checksum on segment {corrupted} never merges"
+            );
+        }
     }
 
     #[tokio::test]
