@@ -7,7 +7,7 @@
 
 use infraternal_plugin_mesh::{
     dataplane::{Chunk, DefaultPolicy, Peer, PeerPolicy},
-    node::Node,
+    node::{EngineKind, Node},
     policy::{
         model::{Addresses, NodeId, PublicKey},
         rules::TrafficPolicy,
@@ -205,7 +205,10 @@ fn install_deny_policy(node: &mut Node, local_key: PublicKey) -> std::io::Result
 #[ignore = "Run as root in a disposable network namespace with WireGuard and nft."]
 fn retire_removes_the_interface_and_filter_this_installation_created() {
     let state = fresh_state("retire-own");
-    Node::restore(&state).unwrap().up().unwrap();
+    Node::restore_with_engine(&state, EngineKind::Kernel)
+        .unwrap()
+        .up()
+        .unwrap();
     owned_table();
     let result = Node::retire(&state);
     let (link, table) = (link_present(), table_present());
@@ -222,9 +225,15 @@ fn retire_leaves_another_installations_interface_and_filter() {
     let other = fresh_state("retire-other-owner");
     let ours = fresh_state("retire-other-ours");
     // Ours once made an interface (its record names that key), since replaced.
-    Node::restore(&ours).unwrap().up().unwrap();
+    Node::restore_with_engine(&ours, EngineKind::Kernel)
+        .unwrap()
+        .up()
+        .unwrap();
     assert!(ip(&["link", "delete", "infraternal0"]));
-    Node::restore(&other).unwrap().up().unwrap();
+    Node::restore_with_engine(&other, EngineKind::Kernel)
+        .unwrap()
+        .up()
+        .unwrap();
     owned_table();
     let result = Node::retire(&ours);
     let (link, table) = (link_present(), table_present());
@@ -245,12 +254,18 @@ fn retire_does_not_remove_another_installations_live_gotatun_tun() {
     let ours = fresh_state("retire-gotatun-old-owner");
     let other = fresh_state("retire-gotatun-live-owner");
     let result = (|| {
-        let mut old = traced("restore old", Node::restore(&ours))?;
+        let mut old = traced(
+            "restore old",
+            Node::restore_with_engine(&ours, EngineKind::GotaTun),
+        )?;
         traced("start old", old.up())?;
         assert!(traced("query old TUN", Device::owned_tun())?);
         drop(old);
 
-        let mut current = traced("restore current", Node::restore(&other))?;
+        let mut current = traced(
+            "restore current",
+            Node::restore_with_engine(&other, EngineKind::GotaTun),
+        )?;
         traced("start current", current.up())?;
         let retired = traced("retire old", Node::retire(&ours))?;
         let current_tun_survived = traced("query current TUN", Device::owned_tun())?;
@@ -280,11 +295,17 @@ fn down_does_not_remove_another_installations_replacement_gotatun_tun() {
     let old_state = fresh_state("down-gotatun-old-owner");
     let current_state = fresh_state("down-gotatun-live-owner");
     let result = (|| {
-        let mut old = traced("restore old", Node::restore(&old_state))?;
+        let mut old = traced(
+            "restore old",
+            Node::restore_with_engine(&old_state, EngineKind::GotaTun),
+        )?;
         traced("start old", old.up())?;
         assert!(ip(&["link", "delete", "infraternal0"]));
 
-        let mut current = traced("restore current", Node::restore(&current_state))?;
+        let mut current = traced(
+            "restore current",
+            Node::restore_with_engine(&current_state, EngineKind::GotaTun),
+        )?;
         traced("start current", current.up())?;
         let old_stopped = old.down();
         let current_tun_survived = traced("query current TUN", Device::owned_tun())?;
@@ -316,11 +337,17 @@ fn disabled_restore_leaves_another_gotatun_nodes_installed_policy() {
     let old_state = fresh_state("restore-disabled-gotatun-old-owner");
     let current_state = fresh_state("restore-disabled-gotatun-live-owner");
     let result = (|| {
-        let mut old = traced("restore old", Node::restore(&old_state))?;
+        let mut old = traced(
+            "restore old",
+            Node::restore_with_engine(&old_state, EngineKind::GotaTun),
+        )?;
         traced("start old", old.up())?;
         traced("stop old", old.down())?;
 
-        let mut current = traced("restore current", Node::restore(&current_state))?;
+        let mut current = traced(
+            "restore current",
+            Node::restore_with_engine(&current_state, EngineKind::GotaTun),
+        )?;
         let identity = traced("start current", current.up())?;
         traced(
             "install current policy",
@@ -331,7 +358,10 @@ fn disabled_restore_leaves_another_gotatun_nodes_installed_policy() {
             "the current node must own an installed policy"
         );
 
-        let restored_old = traced("restore disabled old", Node::restore(&old_state))?;
+        let restored_old = traced(
+            "restore disabled old",
+            Node::restore_with_engine(&old_state, EngineKind::GotaTun),
+        )?;
         let table_survived = table_present();
         let current_tun_survived = traced("query current TUN", Device::owned_tun())?;
         drop(restored_old);
@@ -361,7 +391,10 @@ fn disabled_restore_leaves_another_gotatun_nodes_installed_policy() {
 #[ignore = "Run as root in a disposable network namespace with WireGuard and nft."]
 fn retire_with_a_record_leaves_a_foreign_interface_and_names_it() {
     let state = fresh_state("retire-record-foreign");
-    Node::restore(&state).unwrap().up().unwrap();
+    Node::restore_with_engine(&state, EngineKind::Kernel)
+        .unwrap()
+        .up()
+        .unwrap();
     assert!(ip(&["link", "delete", "infraternal0"]));
     assert!(ip(&["link", "add", "infraternal0", "type", "dummy"]));
     let result = Node::retire(&state);
@@ -377,7 +410,10 @@ fn retire_with_a_record_leaves_a_foreign_interface_and_names_it() {
 #[ignore = "Run as root in a disposable network namespace with WireGuard and nft."]
 fn retire_decides_every_object_and_leaves_a_foreign_table() {
     let state = fresh_state("retire-record-table");
-    Node::restore(&state).unwrap().up().unwrap();
+    Node::restore_with_engine(&state, EngineKind::Kernel)
+        .unwrap()
+        .up()
+        .unwrap();
     assert!(
         Command::new("nft")
             .args(["add", "table", "inet", "infraternal_mesh"])

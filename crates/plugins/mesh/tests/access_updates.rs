@@ -139,7 +139,11 @@ fn nf_tables_compact_delta_preserves_identity_and_refuses_invalid_bases() {
 }
 
 fn kernel_case(fallback: bool) {
-    use infraternal_plugin_mesh::{access_updates, node::Node, wireguard::Device};
+    use infraternal_plugin_mesh::{
+        access_updates,
+        node::{EngineKind, Node},
+        wireguard::Device,
+    };
     assert_eq!(
         std::fs::read_to_string("/proc/self/uid_map")
             .unwrap()
@@ -152,7 +156,8 @@ fn kernel_case(fallback: bool) {
         Node::with_firewall(infraternal_plugin_mesh::firewall::Firewall::nf_tables())
     } else {
         Node::default()
-    };
+    }
+    .with_engine(EngineKind::Kernel);
     let identity = node.up().unwrap();
     assert!(identity.compact_access);
     let mut old = config();

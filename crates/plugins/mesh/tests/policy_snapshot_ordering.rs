@@ -6,7 +6,7 @@ use infraternal_plugin_mesh::{
     configuration,
     dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
     firewall::Firewall,
-    node::Node,
+    node::{EngineKind, Node},
     policy::{
         model::{Addresses, NodeId},
         rules::TrafficPolicy,
@@ -27,7 +27,8 @@ fn install(fallback: bool) -> (Node, Config) {
         Firewall::nf_tables()
     } else {
         Firewall::default()
-    });
+    })
+    .with_engine(EngineKind::Kernel);
     node.up().unwrap();
     let config = Config {
         local_key: None,

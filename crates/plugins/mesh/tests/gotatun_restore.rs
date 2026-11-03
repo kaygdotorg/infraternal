@@ -4,7 +4,7 @@
 
 use infraternal_plugin_mesh::{
     dataplane::{Chunk, DefaultPolicy, Peer, PeerPolicy},
-    node::Node,
+    node::{EngineKind, Node},
     policy::{
         model::{Addresses, NodeId},
         rules::TrafficPolicy,
@@ -26,13 +26,13 @@ fn restart_recreates_the_tun_and_persisted_mesh_identity() {
     fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
 
     let result = (|| {
-        let mut first = Node::restore(&state)?;
+        let mut first = Node::restore_with_engine(&state, EngineKind::GotaTun)?;
         let identity = first.up()?;
         assert!(Device::owned_tun()?);
         drop(first);
 
         assert!(!Device::owned_tun()?);
-        let mut restarted = Node::restore(&state)?;
+        let mut restarted = Node::restore_with_engine(&state, EngineKind::GotaTun)?;
         let restored = restarted.up()?;
         assert_eq!(restored.public_key, identity.public_key);
         assert!(Device::owned_tun()?);
@@ -56,7 +56,7 @@ fn failed_gotatun_replay_keeps_the_accepted_coordinator_config() {
     fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
 
     let first = (|| {
-        let mut node = Node::restore(&state)?;
+        let mut node = Node::restore_with_engine(&state, EngineKind::GotaTun)?;
         let identity = node.up()?;
         let (_, peer_key) = Key::generate()?;
         let chunk = Chunk {
@@ -129,7 +129,7 @@ fn failed_gotatun_replay_keeps_the_accepted_coordinator_config() {
     drop(public_file);
 
     let replay_failed = matches!(
-        Node::restore(&state),
+        Node::restore_with_engine(&state, EngineKind::GotaTun),
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData
     );
     let after: serde_json::Value =

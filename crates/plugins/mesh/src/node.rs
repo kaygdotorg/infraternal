@@ -1,8 +1,9 @@
 //! Owns the root-only Mesh node, staged public configuration and synchronous data-plane lifecycle [163,166,198].
+pub use crate::gotatun_node::EngineKind;
 use crate::{
     dataplane::Config,
     firewall::Firewall,
-    gotatun_node::{Engine, EngineKind},
+    gotatun_node::Engine,
     wireguard::{Client, Device, Key},
 };
 #[cfg(feature = "relay")]
@@ -135,12 +136,37 @@ impl Node {
         }
     }
 
+    /// Use an explicitly selected data-plane engine instead of the default.
+    ///
+    /// Engine-specific tests and fixtures name their engine, so they keep testing it when the
+    /// default changes. The `INFRATERNAL_MESH_ENGINE` override still applies at `up`.
+    #[must_use]
+    pub fn with_engine(mut self, engine: EngineKind) -> Self {
+        self.engine_kind = engine;
+        self
+    }
+
     /// Restore public intent and the selected, marked mesh data plane.
     /// # Errors
     /// Refuses unsafe state, unrelated interface ownership or failed policy recovery.
     pub fn restore(path: &std::path::Path) -> io::Result<Self> {
+        Self::restore_requesting(path, EngineKind::from_environment()?)
+    }
+
+    /// Restore with an explicitly requested engine in place of the environment override.
+    /// # Errors
+    /// The same as [`Node::restore`].
+    pub fn restore_with_engine(path: &std::path::Path, engine: EngineKind) -> io::Result<Self> {
+        Self::restore_requesting(path, Some(engine))
+    }
+
+    // The requested engine wins over the recorded one; neither may replace a live link of the
+    // other kind.
+    fn restore_requesting(
+        path: &std::path::Path,
+        requested_engine: Option<EngineKind>,
+    ) -> io::Result<Self> {
         let (store, state) = crate::node_state::Store::open(path)?;
-        let requested_engine = EngineKind::from_environment()?;
         let recorded_engine = store.recorded_engine()?;
         let mut engine_kind = requested_engine.or(recorded_engine).unwrap_or_default();
         let active_engine = Device::active_engine()?;
@@ -1434,7 +1460,7 @@ mod tests {
                 rules::TrafficPolicy,
             },
         };
-        let mut node = Node::default();
+        let mut node = Node::default().with_engine(EngineKind::Kernel);
         node.up().expect("start");
         let addresses = |id: u32| Addresses {
             ipv4: std::net::Ipv4Addr::from(0x0afe_0000 + id),

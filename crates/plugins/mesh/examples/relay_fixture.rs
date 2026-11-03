@@ -21,7 +21,7 @@ use infraternal_mesh::{
 use infraternal_plugin_mesh::{
     configuration,
     dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
-    node::Node,
+    node::{EngineKind, Node},
     policy::rules::TrafficPolicy,
     relay_path::{self, Observer, RelayPaths, RelaySpec},
     seam::Seam,
@@ -201,7 +201,7 @@ enum Command {
 async fn node() {
     let mut input = lines();
     let config: NodeConfig = serde_json::from_str(&input.recv().await.unwrap()).unwrap();
-    let mut node = Node::default();
+    let mut node = Node::default().with_engine(EngineKind::GotaTun);
     let identity = node.up().unwrap();
     assert!(
         Device::owned_tun().unwrap(),

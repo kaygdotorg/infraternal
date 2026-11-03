@@ -42,7 +42,7 @@ const HANDSHAKE_WAIT: Duration = Duration::from_secs(5);
 /// Selects the node's data plane; kernel `WireGuard` remains an explicit migration fallback.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum EngineKind {
+pub enum EngineKind {
     #[default]
     GotaTun,
     Kernel,
