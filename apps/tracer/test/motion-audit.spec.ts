@@ -624,7 +624,7 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   await page.keyboard.press("Escape");
 
   await page.keyboard.press("Control+Shift+K");
-  await page.locator("#palette-input").fill("Mesh from the theme");
+  await page.locator("#palette-input").fill("Background: Mesh");
   const backdropStartAt = await page.evaluate(() => performance.now());
   await page.evaluate(() => { window.__motionAudit.label = "keyboard-backdrop"; window.__motionAudit.startSample(); });
   await page.keyboard.press("Enter");
@@ -647,7 +647,7 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   await testInfo.attach("production mesh", { path: meshPath, contentType: "image/png" });
   console.log(`MOTION_AUDIT keyboard-backdrop ${JSON.stringify({ ...keyboardBackdrop, ...backdropTiming, requestedWorkers })}`);
   await page.keyboard.press("Control+Shift+K");
-  await page.locator("#palette-input").fill("None");
+  await page.locator("#palette-input").fill("Background: Plain");
   await page.keyboard.press("Enter");
   await page.waitForTimeout(260);
 
