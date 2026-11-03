@@ -16,9 +16,9 @@ import { attachWindowResize, type ResizeFrame, type ResizeStart, type WindowResi
 import type { Ctx, ViewRec, WinRec } from "../context";
 import type { WindowModel } from "../model/types";
 import { ICON, SESSION_ICON, iconFor } from "../views/icons";
+import { openWindowDocs } from "./docs-action";
 import { isInteractive, isTerminal, makeBody } from "../views/body";
 import { onDemand, whenIdle } from "../../on-demand";
-import { openWindowDocs } from "./docs-action";
 import { coarse } from "../dom";
 import { scrollerOf } from "../layout/columns";
 import { drawnWidthOf, setColumnWidth } from "../layout/column-els";

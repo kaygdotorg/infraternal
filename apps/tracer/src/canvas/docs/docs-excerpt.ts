@@ -10,7 +10,7 @@
  * needs no extra marker for the usual case: three short sentences in a `[!FACTS]` block are a lead and two bullets. A table is read from the
  * block when the docs build provides one (`factsTable`), so a window whose answer is a few figures shows them as figures.
  */
-import type { DocsPreviewContent } from "../../../../../packages/ui/src/docs-preview";
+import type { DocsPreviewContent } from "../../../../../packages/ui/src/docs-preview.on-demand";
 import type { DocsHeading, DocsIndexPage } from "./docs-source";
 
 /** At most this many bullets: a preview that scrolls is not a preview. */

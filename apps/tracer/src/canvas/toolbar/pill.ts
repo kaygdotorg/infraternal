@@ -9,7 +9,8 @@
  */
 import { Spring } from "../../../../../packages/ui/src/spring";
 import { createConnectionIndicator } from "../../../../../packages/ui/src/connection-indicator";
-import { createCrumbs, type Crumbs } from "./crumbs";
+import { onDemand } from "../../on-demand";
+import type { Crumbs } from "./crumbs.on-demand";
 import type { ViewId } from "../model/types";
 import type { Ctx } from "../context";
 import { ICON, lineIcon, viewIcon } from "../views/icons";
@@ -39,7 +40,10 @@ export function createPill(cx: Ctx): PillModule {
   if (rttEl) rttWatch.observe(rttEl, { childList: true, characterData: true, subtree: true });
 
   // Settings as rows of windows (#304): the capsule gives way to the breadcrumb Settings › Mesh › Keys while one of its windows is focused.
-  const crumbs: Crumbs | undefined = cx.adapters.settings.outline ? createCrumbs(cx) : undefined;
+  // The breadcrumb is only for a screen that has the outline (the mockup today), so its code is fetched only there (D188).
+  let crumbs: Crumbs | undefined;
+  let crumbsGone = false;
+  if (cx.adapters.settings.outline) void onDemand(() => import("./crumbs.on-demand")).then((m) => { if (crumbsGone) return; crumbs = m.createCrumbs(cx); crumbs.paint(); });
   let hold = false;
   const paint = (): void => {
     if (hold) return;
@@ -118,5 +122,5 @@ export function createPill(cx: Ctx): PillModule {
   capsule.addEventListener("pointerup", end, { signal });
   capsule.addEventListener("pointercancel", end, { signal });
 
-  return { capsule, paint, dispose() { crumbs?.dispose(); conn.dispose(); rttWatch.disconnect(); linkWatch.disconnect(); } };
+  return { capsule, paint, dispose() { crumbsGone = true; crumbs?.dispose(); conn.dispose(); rttWatch.disconnect(); linkWatch.disconnect(); } };
 }
