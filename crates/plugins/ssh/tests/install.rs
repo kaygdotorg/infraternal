@@ -322,6 +322,35 @@ async fn join_key_preparation_restarts_the_staged_setup_lease() {
     transaction.rollback().await.unwrap();
 }
 
+/// The person sees the HTTPS cause the staged infraternal agent reported, not
+/// only the generic Connect remedy (#305).
+#[tokio::test]
+async fn join_key_preflight_refusal_keeps_its_https_cause() {
+    let fixture = Fixture::new();
+    let binary = fixture.root.join("prepare-payload");
+    executable(
+        &binary,
+        "#!/bin/sh\ncase \"$1\" in --bootstrap-runtime*) exec runtime-helper \"$@\";; esac\n# Synthetic CLI contract, not an infraternal daemon.\n[ \"$1 $2 $4\" = 'agent --data prepare-join-key' ] || exit 1\nprintf 'PREPARE-REFUSED TLS\\n'\n",
+    );
+    let transaction = fixture.transaction();
+    let failure = transaction
+        .prepare_join_key(&binary, "https://fixture.invalid")
+        .await
+        .unwrap_err();
+    assert!(
+        failure
+            .message
+            .contains("cannot verify the server's public HTTPS certificate"),
+        "{}",
+        failure.message
+    );
+    assert!(matches!(
+        failure.failed_step,
+        Some(infraternal_plugin_ssh::model::InstallStep::Connect)
+    ));
+    transaction.rollback().await.unwrap();
+}
+
 #[tokio::test]
 async fn framed_upload_keeps_invitation_after_verified_raw_and_compressed_payloads() {
     for compressed in [false, true] {

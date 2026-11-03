@@ -1704,7 +1704,11 @@ fn parse_join_key_receipt(bytes: &[u8]) -> Result<[u8; 32], Failure> {
         }
         _ => return Err(invalid_setup()),
     };
-    Err(Failure::install(message).at(InstallStep::Connect))
+    // Failure::at replaces Install text with the generic per-step remedy; these
+    // fixed receipts already name the exact HTTPS cause, so only record the step.
+    let mut failure = Failure::install(message);
+    failure.failed_step = Some(InstallStep::Connect);
+    Err(failure)
 }
 
 fn hex_nibble(byte: u8) -> Result<u8, Failure> {
