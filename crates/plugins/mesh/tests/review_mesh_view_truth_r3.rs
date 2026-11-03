@@ -146,13 +146,11 @@ async fn a_scoped_manager_cannot_rename_a_node_outside_their_scope_by_taking_its
     );
 }
 
-/// `make_room`'s own rule: "a name a machine reported (a host fact, hidden from viewers who are not the owner)
-/// never refuses anything", so a refusal is no oracle. The server's hostname is such a host fact: a non-owner sees
-/// the server's node only as `server` (`decode_host`). Yet renaming a node to the server's hostname answers
-/// "reserved for the server", while an unused name succeeds, so any non-owner manager can confirm a guess of the
-/// server's hidden hostname with one call (and undo the rename with another).
+/// `make_room`'s own rule: a name a machine reported never refuses anything, so a refusal is no oracle. Renaming
+/// is for global node managers, who see every machine under its real name (D327, D329, #331): the server's
+/// hostname is in their view, and a right guess answers exactly as a wrong one.
 #[tokio::test]
-async fn a_non_owner_cannot_confirm_the_servers_hidden_hostname() {
+async fn a_global_manager_reads_the_servers_hostname_and_a_guess_is_no_oracle() {
     let pool = pool().await;
     add_host(&pool, A, "root@10.69.69.5").await;
     add_manager(&pool, "guest", None).await;
@@ -175,7 +173,7 @@ async fn a_non_owner_cannot_confirm_the_servers_hidden_hostname() {
         .map(|node| node.node.host)
         .collect();
     assert!(
-        !seen.iter().any(|name| name == "monitor01"),
+        seen.iter().any(|name| name == "monitor01"),
         "precondition: {seen:?}"
     );
     let wrong_guess = rename(&service, "guest", a, "monitor02").await;
