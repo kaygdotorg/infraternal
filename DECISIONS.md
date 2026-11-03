@@ -3726,3 +3726,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        aimed at the 11–14 MiB per endpoint that stays after load: "yes
        please, we gotta really optimise it."
      - Testing: "please extensively test it on linux and macos".
+332. **When GotaTun becomes the Linux default (owner, 2026-11-03, #260;
+     amends D163):** kernel WireGuard stays the Linux default until the
+     integrated GotaTun engine matches it on both throughput and loaded
+     latency counting lost probes (D331): "yes agreed". The owner wants it
+     prioritised: "that is the mesh data plane so it should prioritised
+     tonight". The userspace interface survives an infraternal agent
+     restart, as kernel WireGuard's does, so routes the person added and
+     open flows are kept: "correct!".
