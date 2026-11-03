@@ -42,6 +42,22 @@ test("product copy names the host and counters and never renders untrusted serve
   expect(terminalRefusal(new ActionRefused(undefined, "invalid")).sessionList).toBe(false);
 });
 
+test("a rootless server says why it cannot open a shell and what to do (#327)", async () => {
+  const { terminalRefusal } = await import("../../terminal-refusal");
+  const permission = terminalRefusal(await refusal({ error: "terminal unavailable", reason: "permission" }), "test");
+  const noLogin = terminalRefusal(await refusal({ error: "terminal unavailable", reason: "no_login" }), "test");
+  expect(permission).toEqual({
+    message: "This server runs without root, so it can only open shells as its own user. Add a host to work elsewhere.",
+    sessionList: false,
+  });
+  expect(noLogin).toEqual({
+    message: "This server runs without root and has no user account matching your name, so it cannot open a shell for you. Add a host to work elsewhere.",
+    sessionList: false,
+  });
+  // A genuinely malformed request keeps its own wording.
+  expect(terminalRefusal(await refusal({ reason: "invalid" })).message).toBe("This terminal request is not valid. Try opening a new window.");
+});
+
 test("oversized refusal JSON is ignored before parsing", async () => {
   expect((await refusal({ reason: "host_memory_low", available_mib: 180, session_count: 212, extra: "x".repeat(32768) })).reason).toBeUndefined();
 });

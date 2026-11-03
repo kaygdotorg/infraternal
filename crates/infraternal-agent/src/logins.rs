@@ -14,6 +14,40 @@ use tokio::{
     net::UnixStream,
 };
 
+/// Why a rootless host refused a login. A root host never produces either: it switches accounts, or falls back to
+/// root when the person has none. The browser must tell these apart from every other `PermissionDenied` (a revoked
+/// person, a worker owned by another account), because only these two mean "this server runs without root" (#327).
+/// The error carries a type so the daemon never matches on message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RootlessRefusal {
+    /// The person's name is no account here, and a rootless host cannot fall back to root.
+    NoMatchingLogin,
+    /// The account exists but is not the one this infraternal agent runs as.
+    OtherAccount,
+}
+
+impl std::fmt::Display for RootlessRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NoMatchingLogin => "preferred account is absent on a rootless host",
+            Self::OtherAccount => "rootless host cannot change account",
+        })
+    }
+}
+
+impl std::error::Error for RootlessRefusal {}
+
+impl RootlessRefusal {
+    fn denied(self) -> io::Error {
+        io::Error::new(io::ErrorKind::PermissionDenied, self)
+    }
+
+    /// The rootless refusal inside `error`, if it is one.
+    pub(crate) fn of(error: &io::Error) -> Option<Self> {
+        error.get_ref()?.downcast_ref::<Self>().copied()
+    }
+}
+
 /// Resolve account names on the host, where its account database is authoritative.
 /// # Errors
 /// Rootless hosts refuse account switching and absent fallback identities.
@@ -46,17 +80,11 @@ pub fn account(preferred: &str) -> io::Result<(User, bool)> {
             .map_err(io::Error::from)?
             .ok_or_else(|| io::Error::other("root account absent"))?,
         None => {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "preferred account is absent on a rootless host",
-            ));
+            return Err(RootlessRefusal::NoMatchingLogin.denied());
         }
     };
     if !Uid::effective().is_root() && user.uid != Uid::effective() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "rootless host cannot change account",
-        ));
+        return Err(RootlessRefusal::OtherAccount.denied());
     }
     Ok((user, fallback))
 }
@@ -124,10 +152,7 @@ pub async fn ensure(
         // D18 allows only that account: asking su to authenticate it again
         // requires interactive credentials and breaks rootless terminals.
         if user.uid != Uid::effective() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "rootless host cannot change account",
-            ));
+            return Err(RootlessRefusal::OtherAccount.denied());
         }
         return Ok(None);
     }

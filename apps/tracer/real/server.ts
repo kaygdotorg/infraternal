@@ -15,12 +15,22 @@ import { cp, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { createServer as createHttpsServer } from "node:https";
 import { request as httpRequest } from "node:http";
 import { createServer, type AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { resolve } from "node:path";
-import { WebSocket, WebSocketServer, type ClientOptions } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 import { WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 
 const root = resolve(import.meta.dirname, "../../..");
+
+/**
+ * The username to sign up with in a real-server spec. A person's login account is their username (D231). The
+ * fixture's server and infraternal agent run as the test user: a root host falls back to root for a username with no
+ * account, but a rootless one cannot and refuses the terminal (#327). So unless the fixture runs as root, the person
+ * is named after the account it runs as, and `name` only labels the spec.
+ */
+export function personName(name: string): string {
+  return process.getuid?.() === 0 ? name : userInfo().username;
+}
 
 /** A server leader can exit before its embedded children release resources needed by the replacement. */
 function processGroupExists(group: number): boolean {
@@ -290,13 +300,7 @@ export async function startRealServer(options: {
     }
     front.handleUpgrade(request, socket, head, (browser) => {
       activeBrowsers.add(browser);
-      // The relay passes WebSocket control frames through instead of answering them itself, so the browser answers the
-      // server's liveness pings, as it does behind a proxy that forwards frames. They take the same one-way delay as data.
-      // `autoPong` is in ws 8.13+, which we ship, but not yet in the pinned @types/ws.
-      const upstreamOptions: ClientOptions & { autoPong: boolean } = { headers: { Origin: origin, Cookie: request.headers.cookie ?? "" }, autoPong: false };
-      const upstream = new WebSocket(backend.replace("http:", "ws:") + (request.url ?? "/v1/ws"), upstreamOptions);
-      upstream.on("ping", (data) => later(() => { if (!bridge.closed && browser.readyState === WebSocket.OPEN) browser.ping(data); }));
-      browser.on("pong", (data) => later(() => { if (!bridge.closed && upstream.readyState === WebSocket.OPEN) upstream.pong(data); }));
+      const upstream = new WebSocket(backend.replace("http:", "ws:") + (request.url ?? "/v1/ws"), { headers: { Origin: origin, Cookie: request.headers.cookie ?? "" } });
       const bridge: Bridge = { id: bridges.length, closed: false, attached: new Map(), output: new Map(), acked: new Map(), replays: 0, replyAttempts: 0, detached: [], control: [], cookie: request.headers.cookie ?? "" };
       // Harness stage markers contain only fixed labels and timestamps, never terminal text.
       bridge.markers = [];

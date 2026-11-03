@@ -15,7 +15,7 @@
 import { chromium, expect, test, type CDPSession, type Page } from "playwright/test";
 import { WebSocket } from "ws";
 import { WebSocketFrameDecoder, encodeMuxedFrame, type WireFrame } from "../../../packages/protocol/src/codec";
-import { startRealServer, type RealServer } from "./server";
+import { personName, startRealServer, type RealServer } from "./server";
 
 const ENABLED = process.env.REAL_SCALE === "1";
 /** `REAL_REMOTE_ORIGIN` + `REAL_REMOTE_TOKEN`: the server runs elsewhere (another machine, standalone TLS), the browser here. */
@@ -90,7 +90,7 @@ async function enrol(p: Page): Promise<void> {
   await p.goto(server.origin + "/?theme=ink&bg=none");
   await p.locator("#setup-token").fill(server.token);
   await p.getByRole("button", { name: "Continue", exact: true }).click();
-  await p.locator("#setup-username").fill("scale_real");
+  await p.locator("#setup-username").fill(personName("scale_real"));
   await p.locator("#setup-display-name").fill("Scale real");
   await p.getByRole("button", { name: "Continue", exact: true }).click();
   await p.getByRole("button", { name: "Create passkey" }).click();

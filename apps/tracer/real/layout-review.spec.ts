@@ -7,7 +7,7 @@ import { WebSocket } from "ws";
 import { isMacPlatform } from "../../../packages/ui/src/platform";
 import { encodeMuxedFrame, WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
 import { LAYOUT_SESSION_INCARNATION } from "../src/connection";
-import { startRealServer, type RealServer } from "./server";
+import { personName, startRealServer, type RealServer } from "./server";
 import { tracerEvidencePath } from "../test/evidence-path";
 import type { CanvasDocument } from "../src/canvas/model/schema";
 import { writeFile } from "node:fs/promises";
@@ -31,7 +31,7 @@ async function enrol(page: Page, server: RealServer): Promise<void> {
   await page.goto(server.origin + "/?theme=ink&bg=none");
   await page.locator("#setup-token").fill(server.token);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await page.locator("#setup-username").fill("layout_review");
+  await page.locator("#setup-username").fill(personName("layout_review"));
   await page.locator("#setup-display-name").fill("Layout review");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("button", { name: "Create passkey" }).click();

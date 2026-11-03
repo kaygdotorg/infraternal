@@ -1,7 +1,7 @@
 /** Production-browser liveness measurements for #245; run only on the locked perf VM. */
 import { expect, test, type Page } from "playwright/test";
 import { loadavg } from "node:os";
-import { startRealServer } from "./server";
+import { personName, startRealServer } from "./server";
 import type { CanvasDocument } from "../src/canvas/model/document";
 
 test.skip(process.env.BUSY_PAGE_MEASURE !== "1", "explicit perf-VM measurement only");
@@ -18,7 +18,7 @@ async function enrol(page: Page, origin: string, token: string): Promise<void> {
   await page.goto(url).catch(async () => { await page.waitForTimeout(250); await page.goto(url); });
   await page.locator("#setup-token").fill(token);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await page.locator("#setup-username").fill("busy_page");
+  await page.locator("#setup-username").fill(personName("busy_page"));
   await page.locator("#setup-display-name").fill("Busy page");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("button", { name: "Create passkey" }).click();

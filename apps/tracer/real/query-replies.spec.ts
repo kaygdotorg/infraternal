@@ -7,7 +7,7 @@ import { encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../.
 import { Ghostty } from "../vendor/ghostty-web/dist/ghostty-web.js";
 import { terminalQueryCorpus } from "../test/terminal-query-corpus";
 import { TerminalQueries } from "../src/terminal-queries";
-import { startRealServer, type RealServer } from "./server";
+import { personName, startRealServer, type RealServer } from "./server";
 import { tracerEvidencePath } from "../test/evidence-path";
 
 // The fixture runs in Node, so use fetchable bytes rather than the browser-only file shim.
@@ -22,7 +22,7 @@ async function enrol(page: Page, server: RealServer): Promise<void> {
   await page.goto(server.origin + "/");
   await page.locator("#setup-token").fill(server.token);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await page.locator("#setup-username").fill("query_test");
+  await page.locator("#setup-username").fill(personName("query_test"));
   await page.locator("#setup-display-name").fill("Query test");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("button", { name: "Create passkey" }).click();
