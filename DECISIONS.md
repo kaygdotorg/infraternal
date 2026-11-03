@@ -1782,10 +1782,15 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      **Settings rows (owner, 2026-11-03, #304):** "Settings - Appearance is
      one row which scrolls down to let's say Setting - Access, no per window
      scrolling. they scroll up and down as groups." Each Settings component
-     is one horizontal row of its windows. Scrolling down moves to the next
-     component's row as a group, and no window scrolls on its own. The grid
-     therefore groups windows into rows without needing a window that spans
-     columns. Rejected: one column per component.
+     is one horizontal row of its windows. Moving the canvas moves a whole
+     row at once: two fingers (or the wheel once a window's content is at its
+     end, D275) pan sideways within a row and vertically from one
+     component's row to the next. One finger scrolls the content inside the
+     window under it (D159). Rows never split apart: no window shifts on its
+     own while its neighbours stay put. The grid therefore groups windows
+     into rows without needing a window that spans columns. Rejected: one
+     column per component. *(Corrected 2026-11-03: an earlier wording said
+     "no scrolling inside a window", which the owner did not say.)*
 213. **Zig is the C toolchain for static builds (owner, 2026-10-10):** the
      C dependencies of the static musl binaries (OpenSSL, SQLite, and
      libghostty-vt, which is written in Zig per D94) are compiled with `zig
