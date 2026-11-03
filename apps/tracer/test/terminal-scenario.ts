@@ -1,12 +1,15 @@
 /** Shared access, input and resume scenario; performance budgets are enforced only by the perf-VM suite (#314). */
 import { writeFile } from "node:fs/promises";
-import { expect, test, type Page, type TestInfo } from "playwright/test";
+import { expect as baseExpect, test, type Page, type TestInfo } from "playwright/test";
 
-export async function terminalScenario(page: Page, testInfo: TestInfo) {
+// A fresh proxied document loads assets before access is ready; its readiness wait is independent of speed budgets.
+const expect = baseExpect.configure({ timeout: 30_000 });
+
+export async function terminalScenario(page: Page, testInfo: TestInfo, { performanceSamples = false }: { performanceSamples?: boolean } = {}) {
   test.setTimeout(180_000);
   const context = page.context();
   const testRttMs = Number(process.env.INFRATERNAL_TEST_RTT ?? "300");
-  const signinTrials = Number(process.env.INFRATERNAL_SIGNIN_SAMPLES ?? "10");
+  const signinTrials = performanceSamples ? Number(process.env.INFRATERNAL_SIGNIN_SAMPLES ?? "10") : 1;
   if (!Number.isInteger(signinTrials) || signinTrials < 1 || signinTrials > 30) {
     throw new Error("INFRATERNAL_SIGNIN_SAMPLES must be an integer from 1 to 30");
   }
@@ -340,7 +343,7 @@ export async function terminalScenario(page: Page, testInfo: TestInfo) {
   await expect.poll(async () => (await page.locator("#probe-results").textContent()) ?? "")
     .toMatch(/Time to resume: [0-9.]+ ms/);
   const resumeSamples = [readResumeDuration(await page.locator("#probe-results").textContent())];
-  const reconnectTrials = 20;
+  const reconnectTrials = performanceSamples ? 20 : 1;
   for (let attempt = 1; attempt < reconnectTrials; attempt += 1) {
     await expect(page.locator("#probe-drop")).toBeEnabled();
     await page.locator("#probe-drop").click();

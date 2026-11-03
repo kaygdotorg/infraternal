@@ -31,6 +31,8 @@ The moved thresholds remain unchanged:
 
 The functional suite retains the corresponding access, input, resume,
 renderer-canary and incident-recording checks without asserting elapsed speed.
+Its access/resume scenario uses one returning sign-in and one reconnect;
+the perf scenario retains the original ten sign-ins and twenty reconnects for p99 samples.
 
 The terminal scenario and paired throughput samples use the default 300 ms
 proxy profile. The access first-paint check uses the direct backend (0 ms

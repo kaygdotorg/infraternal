@@ -3,7 +3,7 @@ import { expect, test } from "playwright/test";
 import { terminalScenario } from "../test/terminal-scenario";
 
 test("first run, passkey login, terminal resume, and the latency probe", async ({ page }, info) => {
-  const metrics = await terminalScenario(page, info);
+  const metrics = await terminalScenario(page, info, { performanceSamples: true });
   expect.soft(metrics.returningSigninP99).toBeLessThanOrEqual(metrics.returningSigninBudgetMs);
   expect.soft(metrics.predictedP99).toBeLessThanOrEqual(17);
   expect.soft(metrics.resumeP99).toBeLessThanOrEqual(metrics.resumeBudgetMs);
