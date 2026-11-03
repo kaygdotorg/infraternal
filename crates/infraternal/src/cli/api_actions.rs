@@ -492,20 +492,27 @@ async fn remove_host(
             "The server did not return a removal request ID.",
         )
     })?;
-    let code = start["user_code"].as_str().ok_or_else(|| {
-        ActionFailure::new(
-            Exit::Failed,
-            "The server did not return a removal approval code.",
-        )
-    })?;
+    let code = start["user_code"]
+        .as_str()
+        .and_then(approval_code)
+        .ok_or_else(|| {
+            ActionFailure::new(
+                Exit::Failed,
+                "The server did not return a valid removal approval code.",
+            )
+        })?;
     let link = removal_approval_link(server, code);
-    let approval = json!({
-        "server": server.origin().ascii_serialization(),
-        "code": code,
-        "verification_url": link,
-        "action": start["action"],
-        "expires_in_seconds": start["expires_in"],
-    });
+    // Everything the server returned is cleaned before it reaches the terminal or JSON.
+    let approval = scrub_value(
+        json!({
+            "server": server.origin().ascii_serialization(),
+            "code": code,
+            "verification_url": link,
+            "action": start["action"],
+            "expires_in_seconds": start["expires_in"],
+        }),
+        api_key,
+    );
     let mut progress = CommandResult::new(
         command,
         CommandState::Pending,
@@ -548,6 +555,16 @@ async fn remove_host(
             return Ok(result);
         }
     }
+}
+
+/// The server issues 12 random bytes as unpadded base64url. Anything else is refused
+/// before it is printed or placed in the approval link.
+fn approval_code(code: &str) -> Option<&str> {
+    (code.len() == 16
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'))
+    .then_some(code)
 }
 
 fn removal_approval_link(server: &Url, code: &str) -> String {
@@ -777,9 +794,16 @@ fn scrub_value(mut value: Value, api_key: &str) -> Value {
             }
         }
         Value::Object(fields) => {
-            for item in fields.values_mut() {
-                *item = scrub_value(std::mem::replace(item, Value::Null), api_key);
-            }
+            // Keys come from the server too and are printed by the human renderer.
+            *fields = std::mem::take(fields)
+                .into_iter()
+                .map(|(key, item)| {
+                    (
+                        terminal_safe(&redact(&key, api_key)),
+                        scrub_value(item, api_key),
+                    )
+                })
+                .collect();
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
@@ -800,14 +824,47 @@ fn terminal_safe(text: &str) -> String {
         if safe.len() >= MAX_DIAGNOSTIC {
             break;
         }
-        // A bare carriage return would let remote output overwrite the line it follows.
-        if character == '\n' || character == '\t' || !character.is_control() {
+        // A bare carriage return would let remote output overwrite the line it follows, and
+        // bidi controls or invisible format characters would reorder or hide what is read.
+        if character == '\n'
+            || character == '\t'
+            || !(character.is_control() || invisible(character))
+        {
             safe.push(character);
         } else {
             let _ = write!(safe, "\\u{{{:04x}}}", u32::from(character));
         }
     }
     safe
+}
+
+/// Unicode format (Cf) characters that reorder or hide text, plus the line and paragraph
+/// separators: bidi embeddings, overrides and isolates, zero-width characters, the BOM,
+/// interlinear annotation marks and tag characters.
+fn invisible(character: char) -> bool {
+    matches!(
+        u32::from(character),
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x08E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x2028..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
 }
 
 struct Connection(tokio::task::JoinHandle<()>);
@@ -821,8 +878,8 @@ impl Drop for Connection {
 #[cfg(test)]
 mod tests {
     use super::{
-        Exit, bootstrap_event_failure, expired_removal_failure, host_setup_failure,
-        removal_approval_link, removal_status_result, scrub_failure, status_failure,
+        Exit, approval_code, bootstrap_event_failure, expired_removal_failure, host_setup_failure,
+        removal_approval_link, removal_status_result, scrub_failure, scrub_value, status_failure,
     };
     use hyper::StatusCode;
     use serde_json::json;
@@ -889,5 +946,58 @@ mod tests {
         assert!(details.contains("Permission denied for [redacted]"));
         assert!(!details.contains(key));
         assert!(!serde_json::to_string(&failure.data).unwrap().contains(key));
+    }
+
+    /// J137 P3-2: server-supplied text cannot reorder or hide what the operator reads. Bidi
+    /// overrides, invisible format characters and escapes are shown as code points, in
+    /// values and in object keys alike.
+    #[test]
+    fn bidi_invisible_and_escape_characters_are_escaped_in_values_and_keys() {
+        let key = "fixture-api-key-never-print";
+        let failure = host_setup_failure(json!({
+            "step":"failed",
+            "message":"Remote setup failed",
+            "failure":{
+                "kind":"install",
+                "message":"SSH command failed",
+                "captured_stderr":format!("ok\u{202e}txt.exe \u{1b}[2J\u{2066}x\u{200b}y\u{feff}z {key}")
+            }
+        }));
+        let details = scrub_failure(failure, key).details.unwrap();
+        for hidden in ['\u{202e}', '\u{1b}', '\u{2066}', '\u{200b}', '\u{feff}'] {
+            assert!(!details.contains(hidden), "{hidden:?} reached the terminal");
+        }
+        assert!(details.contains("\\u{202e}"));
+        assert!(details.contains("\\u{001b}"));
+        assert!(!details.contains(key));
+
+        let data = scrub_value(
+            json!({format!("na\u{202e}me\u{1b}]0;{key}"): {"inner\u{2069}": "v\u{2028}"}}),
+            key,
+        );
+        let printed = serde_json::to_string(&data).unwrap();
+        for hidden in ['\u{202e}', '\u{1b}', '\u{2069}', '\u{2028}'] {
+            assert!(
+                !printed.contains(hidden),
+                "{hidden:?} survived in {printed}"
+            );
+        }
+        assert!(!printed.contains(key));
+    }
+
+    /// J137 P3-2: only a code of the shape the server issues is printed or put in the link.
+    #[test]
+    fn removal_codes_must_have_the_issued_shape() {
+        assert!(approval_code("AbCdEfGhIjKl-n_p").is_some());
+        for code in [
+            "",
+            "short",
+            "AbCdEfGhIjKlMnOpQ",
+            "AbCdEfGhIjKl\u{1b}nOp",
+            "AbCdEfGhIjKl Mn",
+            "AbCdEfGh/jKlMnOp",
+        ] {
+            assert!(approval_code(code).is_none(), "{code:?}");
+        }
     }
 }
