@@ -126,6 +126,10 @@ test(`predicted cursor pixels sit on the cell edge after backspace at DPR ${dpr}
     window.__tracerTestDouble?.isConnected() === true
       && window.__tracerTestDouble.predictiveEcho()?.enabled === true,
   ), { timeout: 30_000 }).toBe(true);
+  // Font loading must finish before the prediction: screenshot waits for fonts.
+  await page.evaluate(() => document.fonts.ready);
+  // Keep the echo behind the screenshot so this oracle reads speculative pixels.
+  await context.request.post("/__mock/echo-mode", { data: { mode: "normal", delay_ms: 300 } });
   const geometry = await page.evaluate(() => {
     const d = window.__tracerTestDouble!;
     // Capture the pending cursor in the same task as the keys, before an echo
@@ -143,9 +147,11 @@ test(`predicted cursor pixels sit on the cell edge after backspace at DPR ${dpr}
       overlayLeft: overlay.getBoundingClientRect().x, overlayTop: overlay.getBoundingClientRect().y,
       sourceOffsetLeft: source.offsetLeft, sourceOffsetTop: source.offsetTop };
   });
-  console.log("PREDICTED_CURSOR_GEOMETRY", JSON.stringify(geometryEvidence));
+  console.log("PREDICTED_CURSOR_GEOMETRY", JSON.stringify({ ...geometryEvidence, ...geometry }));
   const screenshotPath = info.outputPath("predicted-backspace-cursor.png");
   const png = await page.screenshot({ path: screenshotPath, scale: "device" });
+  const capturedCursor = await page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.overlay?.cursor);
+  expect(capturedCursor).toBeDefined();
   await info.attach("predicted-backspace-cursor", { path: screenshotPath, contentType: "image/png" });
   expect(geometryEvidence.overlayLeft).toBeCloseTo(geometryEvidence.sourceLeft, 2);
   expect(geometryEvidence.overlayTop).toBeCloseTo(geometryEvidence.sourceTop, 2);
@@ -160,10 +166,13 @@ test(`predicted cursor pixels sit on the cell edge after backspace at DPR ${dpr}
     context.drawImage(image, 0, 0);
     const y = Math.round((geometry.top + geometry.height / 2) * dpr);
     const read = (px: number) => Array.from(context.getImageData(px, y, 1, 1).data.slice(0, 3));
-    const left = Math.round(geometry.left * dpr);
+    // Chromium rasterises the canvas from the containing device pixel. Rounding
+    // its fractional origin up moves the oracle one pixel right at DPR 3.
+    const left = Math.floor(geometry.left * dpr);
     const barPixels = Math.round(geometry.width * dpr);
     return { left: read(left), beforeLeft: read(left - 1), lastInside: read(left + barPixels - 1), afterRight: read(left + barPixels) };
   }, { base64: png.toString("base64"), geometry, dpr });
+  console.log("PREDICTED_CURSOR_EDGES", JSON.stringify(edges));
   const distance = (a: number[], b: number[]) => Math.abs(a[0]! - b[0]!) + Math.abs(a[1]! - b[1]!) + Math.abs(a[2]! - b[2]!);
   // The bar's first and last device pixel carry the cursor colour; the pixels just outside do not.
   expect(distance(edges.left, edges.lastInside)).toBeLessThan(30);
