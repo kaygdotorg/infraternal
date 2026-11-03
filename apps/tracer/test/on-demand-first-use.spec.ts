@@ -133,3 +133,78 @@ test("the modules are fetched by the page itself when it is idle, without anyone
   }
   console.log(`idle preloads, ms after navigation start: ${shown.join("; ")}`);
 });
+
+// The account model and the card's mount are on demand (#330). They run on the product screen (`proto=product`), where the real
+// `product.ts` builds them, not on the clusters mockup.
+const PRODUCT = "/?mock=1&proto=product&fresh=1&bg=none&theme=ink";
+/** A string only the account model's chunk holds, and one only the card mount's chunk holds. */
+const ACCOUNT_MODEL = "Follow the passkey prompts";
+const ACCOUNT_MOUNT = "ac-badge";
+
+/** The summary the server would send, for the signed-in user of the preview server. */
+async function stubSummary(page: Page): Promise<void> {
+  let userId = "";
+  await page.route("**/auth/session", async (route) => {
+    const response = await route.fetch();
+    userId = ((await response.json()) as { user_id: string }).user_id;
+    await route.fulfill({ response });
+  });
+  await page.route("**/auth/account-summary", (route) => route.fulfill({ json: { user_id: userId, session_incarnation: "fixture", passkeys: 1, recovery_set_up: true } }));
+}
+
+test("a press on the person pill before the account chunks have arrived opens the card once they have", async ({ page }) => {
+  test.setTimeout(60_000);
+  await stubSummary(page);
+  const held = await hold(page, chunkWith(ACCOUNT_MODEL));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(PRODUCT);
+  await expect(page.locator("#sidebar-toggle")).toBeVisible({ timeout: 20_000 });
+  await page.waitForTimeout(1500);
+  await page.locator("#sidebar-toggle").click();
+  await page.locator(".ui-sidebar-user").click();
+  await page.waitForTimeout(500);
+  await expect(page.locator('.ac[data-open="true"]'), "the card is not open before it can be built").toHaveCount(0);
+  await expect(page.locator(".ui-sidebar-user[aria-expanded='true']"), "and the pill's old small menu did not open instead").toHaveCount(0);
+  const t0 = Date.now();
+  held.release();
+  await expect(page.locator('.ac[data-open="true"]')).toBeVisible();
+  console.log(`person pill pressed before the account chunks arrived: ${Date.now() - t0} ms from the transfer starting to the open card`);
+});
+
+test("Settings, Account opened before the account chunk has arrived shows its rows when it does", async ({ page }) => {
+  test.setTimeout(60_000);
+  await stubSummary(page);
+  const held = await hold(page, chunkWith(ACCOUNT_MODEL));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(PRODUCT);
+  await expect(page.locator("#sidebar-toggle")).toBeVisible({ timeout: 20_000 });
+  await page.waitForTimeout(1500);
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:settings:account", source: "pointer" } })));
+  const settings = page.locator('[data-window-id="s-account"]');
+  await expect(settings).toBeVisible();
+  await page.waitForTimeout(500);
+  await expect(settings.locator('[data-kind="passkeys"]'), "no row with words it cannot know yet").toBeHidden();
+  await expect(settings.getByRole("button", { name: "This device" }).or(settings.locator('[data-kind="this-device"]')), "the rest of the pane is there").toBeVisible();
+  const t0 = Date.now();
+  held.release();
+  await expect(settings.getByRole("button", { name: "Add a second", exact: true })).toBeVisible();
+  await expect(settings.locator('[data-kind="recovery"]')).toContainText("verification history unavailable");
+  console.log(`Settings, Account opened before the account chunk arrived: rows ${Date.now() - t0} ms after the transfer starts`);
+});
+
+test("the account chunks are fetched by the page itself when it is idle, so the first press finds them", async ({ page }) => {
+  test.setTimeout(60_000);
+  const files = { "account model": chunkWith(ACCOUNT_MODEL), "card mount": chunkWith(ACCOUNT_MOUNT) };
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(PRODUCT);
+  await expect(page.locator(".ui-sidebar-user")).toBeAttached({ timeout: 20_000 });
+  await expect(page.locator(".ac")).toBeAttached({ timeout: 20_000 });
+  const seen = await page.evaluate(() => performance.getEntriesByType("resource").map((e) => ({ name: e.name.split("/").at(-1)!, start: Math.round(e.startTime), end: Math.round((e as PerformanceResourceTiming).responseEnd) })));
+  const shown: string[] = [];
+  for (const [name, file] of Object.entries(files)) {
+    const entry = seen.find((e) => e.name === file);
+    expect(entry, `${name} (${file}) was fetched without being asked`).toBeTruthy();
+    shown.push(`${name} requested at ${entry!.start} ms, arrived ${entry!.end} ms`);
+  }
+  console.log(`account preloads, ms after navigation start: ${shown.join("; ")}`);
+});
