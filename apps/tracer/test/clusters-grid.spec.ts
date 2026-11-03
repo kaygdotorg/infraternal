@@ -5,6 +5,7 @@
  * are level with their neighbours, and closing a half gives back the layout it came from.
  */
 import { expect, test, type Page } from "playwright/test";
+import { uiFactor } from "./ui-factor";
 
 const VIEW = '.cl[data-view="console"]';
 
@@ -180,7 +181,8 @@ test.describe("split right in a stacked column (D212)", () => {
     expectNoOverlap(after);
     const c2 = after.cols.find((c) => c.wins.some((w) => w.id === "w-nix-cache"))!;
     expect(c2.wins.map((w) => w.id)).toContain("w-edge-arm-s2");
-    expect(c2.w).toBe(459);
+    // The default desktop column is 459 px at the standard UI size and grows with it (#283, TASTE "windows grow with it").
+    expect(c2.w).toBe(Math.round(459 * (await uiFactor(page))));
   });
 
   test("split right of a spanning window halves its span inside the existing columns", async ({ page }) => {
