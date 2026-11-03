@@ -400,13 +400,14 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   expect(copyMorph.doneFilter === "none" || (doneBlur !== undefined && Number(doneBlur) < 0.01)).toBe(true);
   console.log(`MOTION_AUDIT copy-feedback ${JSON.stringify({ ...copy, copyMorph })}`);
 
-  await page.waitForTimeout(520);
-  await expect(page.locator("#copy-recovery")).toHaveAttribute("data-done", "");
+  // The confirmation lasts 900 ms (copy-feedback.ts) and then returns. The return is sampled from here and awaited by its own
+  // end, not by a fixed wait that has to land inside the 900 ms: at 4x CPU on a shared host that margin (about 160 ms) was lost
+  // to the sampling work in between, which failed the step although the feedback was right.
   await page.evaluate(() => { window.__motionAudit.label = "copy-feedback-return"; window.__motionAudit.startSample(); });
+  await expect(page.locator("#copy-recovery")).not.toHaveAttribute("data-done");
   await page.waitForTimeout(230);
   const copyReturn = await sampleAndEvents(page, "copy-feedback-return");
   expect(copyReturn.events.find((event) => event.selector === "svg.is-done" && event.property === "filter")?.duration).toBe("0.15s, 0.15s, 0.15s");
-  await expect(page.locator("#copy-recovery")).not.toHaveAttribute("data-done");
   console.log(`MOTION_AUDIT copy-feedback-return ${JSON.stringify(copyReturn)}`);
 
   // Keep both recovery actions in view so the browser does not scroll and reset
@@ -538,8 +539,11 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   ]);
   console.log(`MOTION_AUDIT reduced-copy ${JSON.stringify({ reducedCopy, reducedCopyStyles })}`);
   await page.emulateMedia({ reducedMotion: "no-preference" });
+  // Finish the reduced-copy hold before sampling the keyboard download: wait for the confirmation to end, then for its 150 ms
+  // return. The confirmation holds 900 ms and returns by 1050 ms after the click; the fixed waits that stood here (240 + 220 +
+  // 500 ms) ended at about 960 ms, inside that return, so a slower host sampled the copy button's return as the download's.
+  await expect(page.locator("#copy-recovery")).not.toHaveAttribute("data-done");
   await page.waitForTimeout(220);
-  await page.waitForTimeout(500); // finish the reduced-copy hold before sampling the keyboard download
 
   await page.locator("#download-recovery").focus();
   await page.evaluate(() => { window.__motionAudit.label = "keyboard-download"; window.__motionAudit.startSample(); });
