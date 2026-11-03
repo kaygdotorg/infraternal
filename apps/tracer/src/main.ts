@@ -174,7 +174,7 @@ async function start(): Promise<void> {
   } catch (error: unknown) {
     await fontsReady;
     installTooltips();
-    renderUnavailable("Connect to load your layout");
+    renderUnavailable(safeMessage(error));
   }
 }
 
