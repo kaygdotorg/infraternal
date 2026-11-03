@@ -3684,3 +3684,27 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - A second, limited account for testing runs on a throwaway test
        server, not through invites: "test server because invites would then
        belong to EE".
+329. **Presets round 2 answers, colour schemes, fonts, names (owner,
+     2026-11-03):**
+     - Floating cards follow the preset's tint but keep at least the shared
+       16 px overlay blur, so Tinted shows no ghost text behind the palette
+       or sidebar (#323): "agreed".
+     - Anything that can scroll sideways takes a sideways swipe first; the
+       canvas gets it once that content cannot scroll further (amends
+       D275): "agreed".
+     - More colour schemes: Solarized, Everforest, Kanagawa (Wave and
+       Lotus), Ayu, GitHub, Flexoki, Gruvbox Light, Tokyo Night Day,
+       Catppuccin Frappé and Macchiato, Night Owl and Light Owl, each under
+       a free licence and through the D80 contrast audit. Schemes with a
+       light and a dark version are one entry: "if you can, merge themes
+       that have a light/dark theme by proviing a light / dark colour icon
+       to the right of that theme".
+     - More fonts: Iosevka, Victor Mono, Recursive Mono, Martian Mono,
+       Intel One Mono, Fantasque Sans Mono, Hack, Inconsolata, 0xProto,
+       Lilex and the other four Monaspace faces ("yes"), each OFL or MIT.
+     - The production server ships the desktop feature (app windows, D200):
+       "yes pleaes i would love to test it". VNC stays after app windows:
+       "yeah no prolbem there".
+     - The `unnamed-<id>` naming scheme goes away everywhere: "just lose
+       this naming scheme. we already have default dns decided" (D327: a
+       peer sees a name only if it may reach that machine).
