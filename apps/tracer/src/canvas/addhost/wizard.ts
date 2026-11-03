@@ -531,7 +531,7 @@ export class Wizard {
       if (!this.alive || this.closing) return;
       this.authorityRoot = root;
       this.authorityInitialized = status.initialized;
-      if (status.locked) this.go("authority");
+      if (status.locked !== false) this.go("authority");
       else { this.authorityReady = true; this.beginBatch(root); }
     } catch (error: unknown) {
       if (this.alive && !this.closing) this.showError(error instanceof ServiceError ? error.message : "Host connections could not be checked. Try again.");

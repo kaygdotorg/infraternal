@@ -6,8 +6,7 @@
 /** Shown when the ceremony fails without a more specific reason; the same words in the wizard, the palette and Settings. */
 export const UNLOCK_FAILED = "Passkey confirmation did not finish. Try again.";
 import type { CoreScreen } from "../../core-screen";
-import type { AuthorityState } from "./authority-unlock";
-import { ServiceError, type ProvisioningService } from "./service";
+import { ServiceError, type AuthorityStatus, type ProvisioningService } from "./service";
 
 export const UNLOCKED = "Host connections unlocked";
 export const ACTION_UNLOCK = "canvas:unlockauthority";
@@ -22,12 +21,11 @@ export async function runUnlock(service: ProvisioningService): Promise<UnlockRes
   catch (error: unknown) { return { ok: false, message: error instanceof ServiceError ? error.message : UNLOCK_FAILED }; }
 }
 
-/** What the server says about the lock; "unknown" when it refuses (not an administrator) or has no authority. */
-export async function readState(service: ProvisioningService): Promise<AuthorityState> {
+/** Full public status for administrators; unavailable or refused status clears any previously displayed warning. */
+export async function readStatus(service: ProvisioningService): Promise<AuthorityStatus | undefined> {
   try {
-    const status = await service.authorityStatus?.();
-    return status ? status.locked ? "locked" : "unlocked" : "unknown";
-  } catch { return "unknown"; }
+    return await service.authorityStatus?.();
+  } catch { return undefined; }
 }
 
 /** Tells the person how the ceremony ended, in the words every surface shares. */

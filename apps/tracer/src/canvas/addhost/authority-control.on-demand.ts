@@ -25,13 +25,19 @@
  * page becoming visible again, which is how another tab's unlock reaches this one) make the card and the dot
  * vanish by themselves. Nothing polls.
  *
+ * The same status carries each CA root's expiry warning level (#285). Administrators see a warning in Settings → Hosts
+ * and as an inbox card at 365, 90, 30 and 7 days before a root expires, once it has expired, and when the server cannot
+ * trust its own clock. The card's "Review" opens Settings → Hosts.
+ *
  * A status the server refuses (a non-administrator, a server without the remote component) leaves the state
- * "unknown": nothing is offered and nothing is shown, because a control that cannot act is not drawn.
+ * "unknown": no lock or expiry data is shown, because the server is the authority for administrator visibility.
  */
 import type { CoreScreen } from "../../core-screen";
 import type { AuthorityControl, AuthorityOptions, AuthorityState } from "./authority-unlock";
 import { ACTION_UNLOCK } from "./authority-run.on-demand";
+import type { AuthorityRootStatus, AuthorityStatus } from "./service";
 import { ICONS } from "../../../../../packages/ui/src/icons";
+import type { InboxItem } from "../../../../../packages/ui/src/inbox";
 import { onDemand } from "../../on-demand";
 import { existingInbox, inboxFor } from "../inbox-host";
 
@@ -48,15 +54,36 @@ export const LOCKED_TITLE = "The server restarted. Confirm your passkey once to 
 export const UNLOCK_TITLE = "Unlock host connections";
 export const LOCKED_DETAIL = "The server restarted, so it needs your passkey once to reconnect your hosts.";
 
+/** A compact countdown for Settings and Inbox, based on the server's remaining lifetime. */
+export function expiryWarningTitle(root: AuthorityRootStatus): string {
+  if (root.warning_level === "expired") return "CA root expired";
+  if (root.warning_level === "unknown" || root.remaining_seconds === null) return "CA expiry unknown";
+  const days = Math.max(1, Math.ceil(Math.max(0, root.remaining_seconds) / 86_400));
+  return `CA expires: ${days} days`;
+}
+
 /** `createdAt`: when the handle was made; the first status check keeps its place in time (1.2 s after it) however late this module arrived. */
 export function makeAuthorityControl(core: CoreScreen, options: AuthorityOptions, createdAt = Date.now()): AuthorityControl {
   let state: AuthorityState = "unknown";
+  let status: AuthorityStatus | undefined;
   let busy = false;
   let checkedAt = 0;
   let pending: Promise<void> | undefined;
   const listeners = new Set<() => void>();
   const emit = (): void => { for (const listener of [...listeners]) listener(); };
   const service = options.service;
+  const canUnlock = options.canUnlock ?? ((): boolean => true);
+
+  const warningRoots = (): AuthorityRootStatus[] => {
+    if (!status?.initialized || !canUnlock()) return [];
+    return (status.roots ?? []).filter((root) => root.warning_level !== "none");
+  };
+  const review = (): void => {
+    if (!canUnlock()) return;
+    window.dispatchEvent(new CustomEvent("tracer:canvas-action", {
+      detail: { action: "canvas:settings:hosts", source: "pointer" },
+    }));
+  };
 
   // The item waits in the inbox only once the sign-in toast is over (dismissed, expired, replaced or used), and not
   // while the ceremony runs, so the card never flickers behind the passkey prompt.
@@ -67,14 +94,24 @@ export function makeAuthorityControl(core: CoreScreen, options: AuthorityOptions
   let toastId: string | undefined;
   const publish = (): void => {
     const waiting = state === "locked" && toastOver && !busy;
-    const inbox = waiting ? inboxFor(core) : existingInbox(core);
-    inbox?.set("authority", waiting ? [{
-      id: "authority-locked", icon: ICONS.lock, title: UNLOCK_TITLE, body: LOCKED_DETAIL, canAct: options.canUnlock?.() ?? true,
+    const items: InboxItem[] = warningRoots().map((root) => ({
+      id: `authority-expiry-${root.generation}`,
+      icon: ICONS.warning,
+      title: expiryWarningTitle(root),
+      body: root.warning_level === "unknown" || root.remaining_seconds === null
+        ? "Check server time, then review the root in Settings → Hosts."
+        : "Review the root in Settings → Hosts.",
+      actions: [{ label: "Review", run: review }],
+    }));
+    if (waiting && canUnlock()) items.unshift({
+      id: "authority-locked", icon: ICONS.lock, title: UNLOCK_TITLE, body: LOCKED_DETAIL, canAct: true,
       actions: [{ label: "Unlock", primary: true, run: () => { void unlock(); } }],
-    }] : []);
+    });
+    const inbox = items.length ? inboxFor(core) : existingInbox(core);
+    inbox?.set("authority", items);
   };
   const offerToast = (): void => {
-    if (offered || state !== "locked" || !(options.canUnlock?.() ?? true)) return;
+    if (offered || state !== "locked" || !canUnlock()) return;
     offered = true;
     toastOpen = true;
     toastId = core.toast.show({
@@ -86,15 +123,19 @@ export function makeAuthorityControl(core: CoreScreen, options: AuthorityOptions
 
   const run = () => onDemand(() => import("./authority-run.on-demand"));
   const refresh = (): Promise<void> => pending ??= run().then(async (m) => {
-    const next = await m.readState(await service());
+    // Root warnings can change while the lock state stays the same, so every answer republishes.
+    status = await m.readStatus(await service());
+    state = status?.locked === true ? "locked" : status?.locked === false ? "unlocked" : "unknown";
     checkedAt = Date.now();
-    if (next !== state) {
-      state = next;
-      // Unlocked elsewhere while the sign-in toast is still up: it has nothing left to offer.
-      if (state === "unlocked" && toastOpen) core.toast.dismiss(toastId);
-      offerToast(); publish(); emit();
-    }
-  }).catch(() => undefined).then(() => { pending = undefined; });
+    // Unlocked elsewhere while the sign-in toast is still up: it has nothing left to offer.
+    if (state === "unlocked" && toastOpen) core.toast.dismiss(toastId);
+    offerToast(); publish(); emit();
+  }).catch(() => {
+    status = undefined;
+    state = "unknown";
+    checkedAt = Date.now();
+    publish(); emit();
+  }).then(() => { pending = undefined; });
 
   const unlock = async (): Promise<void> => {
     if (busy || state !== "locked") return;
@@ -107,7 +148,6 @@ export function makeAuthorityControl(core: CoreScreen, options: AuthorityOptions
     publish();
   };
 
-  const canUnlock = options.canUnlock ?? ((): boolean => true);
   const removeProvider = core.addPaletteProvider(() => {
     if (Date.now() - checkedAt > STALE_MS) void refresh();
     if (state !== "locked" || !canUnlock()) return [];
@@ -127,7 +167,7 @@ export function makeAuthorityControl(core: CoreScreen, options: AuthorityOptions
   const first = window.setTimeout(() => { void refresh(); }, Math.max(0, FIRST_CHECK_MS - (Date.now() - createdAt)));
 
   return {
-    state: () => state, canUnlock, refresh, unlock,
+    state: () => state, canUnlock, expiryWarnings: () => warningRoots().map(expiryWarningTitle), review, refresh, unlock,
     onChange(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     dispose() { window.clearTimeout(first); window.removeEventListener("tracer:canvas-action", onAction); document.removeEventListener("visibilitychange", onVisible); removeProvider(); existingInbox(core)?.set("authority", []); listeners.clear(); },
   };

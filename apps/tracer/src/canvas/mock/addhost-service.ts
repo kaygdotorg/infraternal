@@ -17,9 +17,18 @@ export function createMockProvisioning(options: { savedKey: boolean; authority?:
   const remembered = (): boolean => { try { return sessionStorage.getItem(UNLOCKED_KEY) === "1"; } catch { return false; } };
   const scripted = options.authority === "fresh" || options.authority === "locked";
   const isLocked = (): boolean => scripted && !remembered();
+  const warningLevel = options.authority?.startsWith("warning-") ? options.authority.slice("warning-".length) : undefined;
+  const warningSeconds: Record<string, number | null> = { "365d": 365 * 86_400, "90d": 90 * 86_400, "30d": 30 * 86_400, "7d": 7 * 86_400, expired: 0, unknown: null };
+  const roots = warningLevel && Object.hasOwn(warningSeconds, warningLevel) ? [{
+    generation: 1,
+    fingerprint: `sha256:${"a".repeat(64)}`,
+    not_after: Math.floor(Date.now() / 1000) + (warningSeconds[warningLevel] ?? 0),
+    remaining_seconds: warningSeconds[warningLevel] ?? null,
+    warning_level: warningLevel as "365d" | "90d" | "30d" | "7d" | "expired" | "unknown",
+  }] : [];
   return {
     ...real,
-    authorityStatus: async () => ({ initialized: options.authority !== "fresh", locked: isLocked() }),
+    authorityStatus: async () => ({ initialized: options.authority !== "fresh", locked: isLocked(), roots }),
     unlockAuthority: async () => { try { sessionStorage.setItem(UNLOCKED_KEY, "1"); } catch { /* the double stays locked */ } },
     async savedKey() {
       return options.savedKey ? { label: "work laptop key", unwrap: async () => "mock-saved-key-text" } : undefined;

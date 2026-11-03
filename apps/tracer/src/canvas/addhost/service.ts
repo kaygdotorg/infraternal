@@ -43,6 +43,24 @@ export interface ServerKey {
   locked: boolean;
 }
 
+/** Public root metadata returned with CA lock state; the root certificate body stays unused by status surfaces. */
+export interface AuthorityRootStatus {
+  generation: number;
+  fingerprint: string;
+  not_after: number;
+  remaining_seconds: number | null;
+  warning_level: "none" | "365d" | "90d" | "30d" | "7d" | "expired" | "unknown";
+}
+
+/** Public-only CA status for administrators. Older servers may return only initialization and lock state. */
+export interface AuthorityStatus {
+  available?: boolean;
+  initialized: boolean;
+  locked: boolean | null;
+  clock_healthy?: boolean;
+  roots?: AuthorityRootStatus[];
+}
+
 /** What the person typed once for one connection. It is consumed once by the authenticated bootstrap socket. */
 export type OneTimeSecret =
   | { kind: "private-key"; text: string; passphrase?: string }
@@ -71,8 +89,8 @@ export class ServiceError extends Error {
 export interface ProvisioningService {
   /** Hosts this server can reach and the person may add. Empty when discovery is off or finds nothing. */
   discover(): Promise<DiscoveredHost[]>;
-  /** Checks whether signing is ready before SSH; absent only in adapters that supply their own authority. */
-  authorityStatus?(): Promise<{ initialized: boolean; locked: boolean }>;
+  /** Checks CA lock and public expiry status before SSH; the server restricts root metadata to administrators. */
+  authorityStatus?(): Promise<AuthorityStatus>;
   unlockAuthority?(): Promise<void>;
   /** The dedicated server key, or undefined when this server has none to show (no custody yet). */
   serverKey(): Promise<ServerKey | undefined>;

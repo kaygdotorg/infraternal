@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
- * The canvas's handle on the client's view of the certificate authority's lock (D168, D217, D234).
+ * The canvas's handle on the client's view of the certificate authority: its lock and its roots' expiry warnings
+ * (D168, D217, D234, #285).
  *
  * The control itself (the status check, the sign-in toast, the inbox card, the palette row) is
  * `authority-control.on-demand.ts`. Nothing about it is needed for the first screen or the first interaction: it learns
@@ -21,6 +22,13 @@ export interface AuthorityControl {
   state(): AuthorityState;
   /** False for a viewer who is not an administrator: the state is shown, nothing can be done about it. */
   canUnlock(): boolean;
+  /**
+   * One line per CA root inside a warning window (365/90/30/7 days, expired, or unknown time), already worded.
+   * Empty for viewers who are not administrators: the server is the authority on who may see root expiry.
+   */
+  expiryWarnings(): readonly string[];
+  /** Opens Settings → Hosts, where the warning is shown next to the lock. */
+  review(): void;
   /** Asks the server again; listeners hear it when the answer changes. */
   refresh(): Promise<void>;
   /** Runs the ceremony, tells the person the outcome, and refreshes. */
@@ -56,6 +64,8 @@ export function createAuthorityControl(core: CoreScreen, options: AuthorityOptio
   return {
     state: () => real?.state() ?? "unknown",
     canUnlock: () => real?.canUnlock() ?? options.canUnlock?.() ?? true,
+    expiryWarnings: () => real?.expiryWarnings() ?? [],
+    review: () => { void load().then((control) => control?.review(), () => undefined); },
     refresh: () => load().then((control) => control?.refresh(), () => undefined),
     unlock: () => load().then((control) => control?.unlock(), () => undefined),
     onChange(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },

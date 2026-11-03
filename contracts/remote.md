@@ -368,8 +368,13 @@ returns 429. Finish parser errors return an empty 400; oversized finish bodies
 return 413.
 Responses never set a session cookie or include private CA material.
 
-- `/remote/ca/status`, body `{}`: returns `{"locked":true}` or
-  `{"locked":false}`. Existing administrator session liveness is required; a
+- `/remote/ca/status`, body `{}`: returns the public `CaStatus` shape with
+  `available`, `initialized`, `locked` (`true` or `false`), `clock_healthy`,
+  and up to two `roots`. Each root contains `generation`, `fingerprint`, public
+  `certificate_der`, `not_after`, `remaining_seconds` (`null` when server time
+  is uncertain), and `warning_level`. Levels are `none`, `365d`, `90d`, `30d`,
+  `7d`, `expired`, and `unknown`; each threshold is inclusive and calculated
+  from server time. Existing administrator session liveness is required; a
   stale freshness timestamp does not prevent starting a new passkey proof.
 - `/remote/ca/unlock/start`, body `{}`: returns the existing `login_start`
   ceremony/options plus public `ca` metadata: `member`, positive `generation`,
