@@ -15,26 +15,26 @@ const retry = <T>(call: () => Promise<T>): Promise<T> => call().catch(() => call
 type MockState = { attach_count: number; session_id: string; echoed_text: string };
 const mockState = async (request: APIRequestContext): Promise<MockState> => (await (await retry(() => request.get("/__mock/state"))).json()) as MockState;
 
-/** Boots the product, then saves a two-window layout on sessions the host has already lost, and reloads into it. */
+/** Saves a two-window layout on sessions the host has already lost, then boots the product into it. */
 async function restoreEnded(page: Page, width = 1440, height = 900): Promise<void> {
   const request = page.context().request;
   await retry(() => request.post("/__mock/reset"));
   await retry(() => request.post("/__mock/open-terminal"));
   await page.setViewportSize({ width, height });
-  await page.goto("/?theme=ink&bg=none");
-  await expect.poll(() => page.locator("#terminal-screen").getAttribute("data-connected"), { timeout: 30_000 }).toBe("true");
-  const { session_ids: ids } = (await (await retry(() => request.post("/__mock/seed-ended-sessions", { data: { count: 2 } }))).json()) as { session_ids: string[] };
-  // The layout is server-owned (D312): the page keeps no document in its storage to edit, and it saves one only on an edit.
-  // So the spec writes the saved layout itself, two windows on the lost sessions, and lets the server push it as another
-  // device would, then reloads into it.
+  // The layout is server-owned (D312): the page keeps no document in its storage to edit. So the spec writes the saved layout
+  // itself, two windows on the lost sessions, as another device would. It does so before the app has loaded: a page that is
+  // already running saves its own first layout, and that save can reach the server after ours and replace it (seen under load:
+  // "Console, 3 windows" instead of two). The identity is read from a page of the double that is not the app.
+  await page.goto("/__mock/state");
   const { hostname } = await page.evaluate(async () => {
     const response = await fetch("/auth/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     return await response.json() as { hostname: string };
   });
+  const { session_ids: ids } = (await (await retry(() => request.post("/__mock/seed-ended-sessions", { data: { count: 2 } }))).json()) as { session_ids: string[] };
   const win = (n: number) => ({ id: `t-restored-${n}`, target: { type: "session", id: ids[n], host: hostname, name: "shell" } });
   const document = { format: FORMAT, version: VERSION, revision: 0, views: [{ id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [{ id: "c1", weight: 1, windows: [win(0)] }, { id: "c2", weight: 1, windows: [win(1)] }] } }] };
   expect((await retry(() => request.post("/__mock/layout", { data: { document } }))).ok(), "the double accepts the restored layout").toBe(true);
-  await page.reload();
+  await page.goto("/?theme=ink&bg=none");
   await expect(page.locator(".cl-sx-strip")).toHaveCount(2, { timeout: 30_000 });
 }
 
