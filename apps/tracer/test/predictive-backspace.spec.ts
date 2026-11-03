@@ -122,24 +122,25 @@ test(`predicted cursor pixels sit on the cell edge after backspace at DPR ${dpr}
   const typed = await runKeys(page, [..."pixel check"], 10);
   expect(typed.violations).toEqual([]);
   expect(typed.settled).toBe(true);
-  await expect.poll(() => page.evaluate(() =>
-    window.__tracerTestDouble?.isConnected() === true
-      && window.__tracerTestDouble.predictiveEcho()?.enabled === true,
-  ), { timeout: 30_000 }).toBe(true);
   // Font loading must finish before the prediction: screenshot waits for fonts.
   await page.evaluate(() => document.fonts.ready);
   // Keep the echo behind the screenshot so this oracle reads speculative pixels.
   await context.request.post("/__mock/echo-mode", { data: { mode: "normal", delay_ms: 300 } });
-  const geometry = await page.evaluate(() => {
-    const d = window.__tracerTestDouble!;
+  const geometryHandle = await page.waitForFunction(() => {
+    const d = window.__tracerTestDouble;
+    if (!d?.isConnected() || d.predictiveEcho()?.enabled !== true) return null;
     // Capture the pending cursor in the same task as the keys, before an echo
     // or a route change can clear this particular prediction.
     for (const key of ["\x7f", "\x7f", "\x7f"]) d.injectInput(key);
     const canvas = document.querySelector<HTMLCanvasElement>("#terminal-host canvas")!;
     const box = canvas.getBoundingClientRect();
-    const cursor = d.predictiveEcho()!.overlay!.cursor!;
+    const cursor = d.predictiveEcho()!.overlay?.cursor;
+    if (!cursor) throw new Error(`Backspace did not predict: ${d.predictiveEcho()!.reason}`);
     return { left: box.x + cursor.x, top: box.y + cursor.y, width: cursor.width, height: cursor.height, cw: d.rendererMetrics()!.cellWidth };
-  });
+  }, undefined, { timeout: 30_000 });
+  const geometry = await geometryHandle.jsonValue();
+  await geometryHandle.dispose();
+  if (!geometry) throw new Error("Prediction geometry was not captured");
   const geometryEvidence = await page.evaluate(() => {
     const source = document.querySelector<HTMLCanvasElement>("#terminal-host canvas")!;
     const overlay = document.querySelector<HTMLCanvasElement>("#terminal-host .terminal-text-overlay")!;
