@@ -2,7 +2,9 @@
 //!
 //! One non-persistent queue is attached to the owned mesh interface. The kernel sends coalesced
 //! TCP packets with virtio metadata; this adapter validates and segments them before `GotaTun` sees
-//! them. The same interface writes complete IP packets back to the host stack.
+//! them. Decrypted packets go back to the host stack through one writer task, which merges
+//! consecutive segments of a TCP flow into virtio GSO frames (GRO), so the kernel takes a run of
+//! segments in one write and one pass through its stack.
 
 use bytes::BytesMut;
 use gotatun::{
@@ -10,13 +12,32 @@ use gotatun::{
     tun::{IpRecv, IpSend, MtuWatcher},
 };
 use infraternal_linux_tun::Device as TunDevice;
-use std::{fs::File, io, sync::Arc};
-use tokio::{io::unix::AsyncFd, sync::Mutex};
+use nix::errno::Errno;
+use std::{
+    fs::File,
+    io,
+    sync::{Arc, OnceLock},
+};
+use tokio::{
+    io::unix::AsyncFd,
+    sync::{Mutex, mpsc},
+};
 
 const VNET_HEADER_LEN: usize = 10;
 const MESH_MTU: u16 = 1380;
 const MAX_IP_PACKET_LEN: usize = 40 + u16::MAX as usize;
 const MAX_TUN_FRAME_LEN: usize = VNET_HEADER_LEN + MAX_IP_PACKET_LEN;
+/// Decrypted packets queued for the TUN writer.
+const WRITE_QUEUE: usize = 256;
+/// Most queued packets the writer takes in one pass.
+const GRO_BATCH: usize = 64;
+/// Most TCP segments merged into one GSO frame.
+const GRO_MAX_SEGMENTS: usize = 64;
+const TCP_PSH: u8 = 0x08;
+const TCP_ACK: u8 = 0x10;
+const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 0x01;
+const VIRTIO_NET_HDR_GSO_TCPV4: u8 = 1;
+const VIRTIO_NET_HDR_GSO_TCPV6: u8 = 4;
 
 /// Owns the TUN descriptor, its async registration, and reusable packet buffers.
 #[derive(Clone)]
@@ -27,11 +48,12 @@ pub(crate) struct LinuxTun {
     offloads_enabled: bool,
     mtu: MtuWatcher,
     read_buffer: Arc<Mutex<Vec<u8>>>,
-    write_buffer: Arc<Mutex<Vec<u8>>>,
+    writer: TunWriter,
 }
 
 impl LinuxTun {
-    /// Create one non-persistent Linux TUN queue, preferring virtio TSO offloads.
+    /// Create one non-persistent Linux TUN queue, preferring virtio TSO offloads. Must run inside
+    /// the engine's Tokio runtime, which also runs the TUN writer task.
     ///
     /// # Errors
     /// Reports device, ioctl, and async-registration failures. Permission errors name the
@@ -44,17 +66,15 @@ impl LinuxTun {
         // The safe Tokio constructor remains the adapter's only API under the workspace's
         // unsafe-code prohibition; the underlying descriptor was opened nonblocking.
         #[allow(deprecated)]
-        let fd = AsyncFd::new(device.into_file())?;
+        let fd = Arc::new(AsyncFd::new(device.into_file())?);
         Ok(Self {
-            fd: Arc::new(fd),
+            writer: TunWriter::spawn(Arc::clone(&fd), vnet_header),
+            fd,
             name: Arc::from(name),
             vnet_header,
             offloads_enabled,
             mtu: MtuWatcher::new(MESH_MTU),
             read_buffer: Arc::new(Mutex::new(vec![0; MAX_TUN_FRAME_LEN])),
-            write_buffer: Arc::new(Mutex::new(Vec::with_capacity(
-                MESH_MTU as usize + VNET_HEADER_LEN,
-            ))),
         })
     }
 
@@ -76,23 +96,7 @@ impl LinuxTun {
             // packet cannot be delivered, but dropping it must not stop later valid traffic.
             return Ok(());
         }
-        let mut buffer = self.write_buffer.lock().await;
-        buffer.clear();
-        if self.vnet_header {
-            buffer.extend_from_slice(&[0; VNET_HEADER_LEN]);
-        }
-        buffer.extend_from_slice(packet.as_ref());
-        loop {
-            let mut ready = self.fd.writable().await?;
-            match ready
-                .try_io(|fd| nix::unistd::write(fd.get_ref(), &buffer).map_err(io::Error::from))
-            {
-                Err(_) => {}
-                Ok(Err(error)) => return Err(error),
-                Ok(Ok(written)) if written == buffer.len() => return Ok(()),
-                Ok(Ok(_)) => return Err(io::ErrorKind::WriteZero.into()),
-            }
-        }
+        self.writer.send(packet).await
     }
 
     async fn recv_packets(
@@ -138,6 +142,330 @@ impl IpRecv for LinuxTun {
     fn mtu(&self) -> MtuWatcher {
         self.mtu()
     }
+}
+
+/// Hands decrypted packets to the task that owns every TUN write.
+///
+/// `GotaTun` calls the adapter one packet at a time from its own send task, so the adapter cannot
+/// see what follows a packet. The writer takes whatever is queued when it runs: a busy link fills
+/// a batch for GRO, and a single packet on an idle link is written at once, without a timer.
+#[derive(Clone)]
+struct TunWriter {
+    packets: mpsc::Sender<Packet<[u8]>>,
+    /// The device error that ended the writer; `GotaTun` stops its send task on it too.
+    failure: Arc<OnceLock<Errno>>,
+}
+
+impl TunWriter {
+    /// Spawn the writer on the current Tokio runtime.
+    fn spawn(fd: Arc<AsyncFd<File>>, vnet_header: bool) -> Self {
+        let (packets, queue) = mpsc::channel(WRITE_QUEUE);
+        let failure = Arc::new(OnceLock::new());
+        tokio::spawn(write_queued(fd, vnet_header, queue, Arc::clone(&failure)));
+        Self { packets, failure }
+    }
+
+    /// Queue one packet; its pool buffer returns once the writer has written it.
+    async fn send(&self, packet: Packet<[u8]>) -> io::Result<()> {
+        if self.packets.send(packet).await.is_ok() {
+            return Ok(());
+        }
+        Err(self
+            .failure
+            .get()
+            .map_or_else(|| io::ErrorKind::BrokenPipe.into(), |errno| (*errno).into()))
+    }
+}
+
+async fn write_queued(
+    fd: Arc<AsyncFd<File>>,
+    vnet_header: bool,
+    mut queue: mpsc::Receiver<Packet<[u8]>>,
+    failure: Arc<OnceLock<Errno>>,
+) {
+    let mut batch = Vec::with_capacity(GRO_BATCH);
+    let mut frame = Vec::with_capacity(MAX_TUN_FRAME_LEN);
+    while queue.recv_many(&mut batch, GRO_BATCH).await != 0 {
+        if let Err(errno) = write_batch(&fd, vnet_header, &batch, &mut frame).await {
+            let _ = failure.set(errno);
+            return;
+        }
+        batch.clear();
+    }
+}
+
+/// Write one batch in order. A frame the kernel refuses is dropped, as on a congested link; only a
+/// device that is gone ends the writer.
+async fn write_batch(
+    fd: &AsyncFd<File>,
+    vnet_header: bool,
+    batch: &[Packet<[u8]>],
+    frame: &mut Vec<u8>,
+) -> Result<(), Errno> {
+    let mut start = 0;
+    while start < batch.len() {
+        let run = if vnet_header {
+            coalescible_run(batch, start)
+        } else {
+            1
+        };
+        let segments = &batch[start..start + run];
+        let result = if run == 1 {
+            frame.clear();
+            if vnet_header {
+                frame.extend_from_slice(&[0; VNET_HEADER_LEN]);
+            }
+            frame.extend_from_slice(&segments[0]);
+            write_frame(fd, frame).await
+        } else {
+            match build_gso_frame(segments, frame) {
+                Ok(()) => match write_frame(fd, frame).await {
+                    // The kernel refused the merged frame: deliver its segments one at a time.
+                    Err(error) if error.raw_os_error() == Some(Errno::EINVAL as i32) => {
+                        write_each(fd, segments, frame).await
+                    }
+                    written => written,
+                },
+                Err(_) => write_each(fd, segments, frame).await,
+            }
+        };
+        if let Err(error) = result
+            && let Some(errno) = device_gone(&error)
+        {
+            return Err(errno);
+        }
+        start += run;
+    }
+    Ok(())
+}
+
+async fn write_each(
+    fd: &AsyncFd<File>,
+    segments: &[Packet<[u8]>],
+    frame: &mut Vec<u8>,
+) -> io::Result<()> {
+    for segment in segments {
+        frame.clear();
+        frame.extend_from_slice(&[0; VNET_HEADER_LEN]);
+        frame.extend_from_slice(segment);
+        if let Err(error) = write_frame(fd, frame).await
+            && device_gone(&error).is_some()
+        {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+async fn write_frame(fd: &AsyncFd<File>, frame: &[u8]) -> io::Result<()> {
+    loop {
+        let mut ready = fd.writable().await?;
+        match ready.try_io(|fd| nix::unistd::write(fd.get_ref(), frame).map_err(io::Error::from)) {
+            Err(_) => {}
+            Ok(Err(error)) => return Err(error),
+            Ok(Ok(written)) if written == frame.len() => return Ok(()),
+            Ok(Ok(_)) => return Err(io::ErrorKind::WriteZero.into()),
+        }
+    }
+}
+
+/// The TUN write errors after which the device takes no more packets, as `GotaTun` judges them.
+fn device_gone(error: &io::Error) -> Option<Errno> {
+    let errno = Errno::from_raw(error.raw_os_error()?);
+    matches!(errno, Errno::EBADF | Errno::EBADFD | Errno::ENODEV).then_some(errno)
+}
+
+/// The fields of one decrypted TCP segment that decide whether it can join a GSO frame.
+#[derive(Clone, Copy)]
+struct GroSegment {
+    ipv4: bool,
+    ip_header_len: usize,
+    /// IP and TCP headers together.
+    header_len: usize,
+    payload_len: usize,
+    sequence: u32,
+    /// The IPv4 identification; zero for IPv6, which has none outside a fragment header.
+    identification: u16,
+    flags: u8,
+}
+
+/// A segment the writer may merge: TCP over IPv4 without options or fragmentation, or over IPv6
+/// without extension headers, carrying payload, with only ACK and PSH set. SYN, FIN, RST, URG,
+/// ECE and CWR change connection state or carry congestion signals, so those go out alone.
+fn gro_segment(packet: &[u8]) -> Option<GroSegment> {
+    let (ipv4, ip_header_len, total_len, protocol) = match packet.first()? >> 4 {
+        4 if packet.len() >= 20 && packet[0] & 0x0f == 5 => {
+            if u16::from_be_bytes([packet[6], packet[7]]) & 0x3fff != 0 {
+                return None;
+            }
+            let total = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
+            (true, 20, total, packet[9])
+        }
+        6 if packet.len() >= 40 => {
+            let total = 40 + usize::from(u16::from_be_bytes([packet[4], packet[5]]));
+            (false, 40, total, packet[6])
+        }
+        _ => return None,
+    };
+    if protocol != 6 || total_len != packet.len() {
+        return None;
+    }
+    let tcp = &packet[ip_header_len..];
+    let tcp_header_len = usize::from(*tcp.get(12)? >> 4) * 4;
+    if tcp_header_len < 20 || tcp_header_len >= tcp.len() {
+        return None;
+    }
+    let flags = tcp[13];
+    if flags & !(TCP_ACK | TCP_PSH) != 0 || flags & TCP_ACK == 0 {
+        return None;
+    }
+    Some(GroSegment {
+        ipv4,
+        ip_header_len,
+        header_len: ip_header_len + tcp_header_len,
+        payload_len: tcp.len() - tcp_header_len,
+        sequence: u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]),
+        identification: if ipv4 {
+            u16::from_be_bytes([packet[4], packet[5]])
+        } else {
+            0
+        },
+        flags,
+    })
+}
+
+/// Whether `next` carries `first`'s flow with every header byte that re-segmentation copies from
+/// the first segment equal. Re-segmentation rewrites only the IP lengths, the IPv4 identification
+/// (the caller checks it counts up) and header checksum, the sequence number, PSH and the TCP
+/// checksum. This covers what the kernel's own GRO compares (TOS or traffic class and flow label,
+/// TTL or hop limit, the IPv4 flags, addresses, ports, acknowledgement, data offset, window and
+/// options) plus the urgent pointer, so differing ECN marks or a window update never merge.
+fn continues_flow(first: &[u8], head: GroSegment, next: &[u8], segment: GroSegment) -> bool {
+    if head.ipv4 != segment.ipv4 || head.header_len != segment.header_len {
+        return false;
+    }
+    // IPv4: TOS; flags, fragment offset, TTL and protocol; addresses. IPv6: version, traffic
+    // class and flow label; next header, hop limit and addresses.
+    let ip_matches = if head.ipv4 {
+        first[1] == next[1] && first[6..10] == next[6..10] && first[12..20] == next[12..20]
+    } else {
+        first[..4] == next[..4] && first[6..40] == next[6..40]
+    };
+    let tcp = head.ip_header_len;
+    ip_matches
+        && first[tcp..tcp + 4] == next[tcp..tcp + 4]
+        && first[tcp + 8..tcp + 13] == next[tcp + 8..tcp + 13]
+        && first[tcp + 14..tcp + 16] == next[tcp + 14..tcp + 16]
+        && first[tcp + 18..head.header_len] == next[tcp + 18..head.header_len]
+}
+
+/// How many packets from `start` form one GSO frame: consecutive in-sequence segments of one flow,
+/// each the size of the first except a shorter or pushed last one, within one IP packet's length.
+///
+/// The kernel re-segments a GSO frame by copying the first segment's headers and counting the
+/// IPv4 identification up by one per segment, so an IPv4 run also needs consecutive
+/// identifications, as the kernel's own GRO requires. Re-segmentation then gives back every
+/// original segment byte for byte. Senders that randomise the identification do not merge.
+fn coalescible_run(batch: &[Packet<[u8]>], start: usize) -> usize {
+    let first = &batch[start];
+    let Some(head) = gro_segment(first) else {
+        return 1;
+    };
+    if head.flags & TCP_PSH != 0 {
+        return 1;
+    }
+    let mut length = head.header_len + head.payload_len;
+    let mut next_sequence = head
+        .sequence
+        .wrapping_add(payload_sequence(head.payload_len));
+    let mut next_identification = head.identification.wrapping_add(1);
+    let mut run = 1;
+    for next in &batch[start + 1..] {
+        if run == GRO_MAX_SEGMENTS {
+            break;
+        }
+        let Some(segment) = gro_segment(next) else {
+            break;
+        };
+        if !continues_flow(first, head, next, segment)
+            || segment.sequence != next_sequence
+            || (head.ipv4 && segment.identification != next_identification)
+            || segment.payload_len > head.payload_len
+            || length + segment.payload_len > usize::from(u16::MAX)
+        {
+            break;
+        }
+        length += segment.payload_len;
+        next_sequence = next_sequence.wrapping_add(payload_sequence(segment.payload_len));
+        next_identification = next_identification.wrapping_add(1);
+        run += 1;
+        if segment.payload_len < head.payload_len || segment.flags & TCP_PSH != 0 {
+            break;
+        }
+    }
+    run
+}
+
+/// A segment payload fits in one IP packet, so its length always fits the sequence space.
+fn payload_sequence(payload_len: usize) -> u32 {
+    u32::try_from(payload_len).unwrap_or(u32::MAX)
+}
+
+/// Lay out `segments`, a run from `coalescible_run`, as one virtio GSO frame: the first segment's
+/// headers with the lengths, the IPv4 header checksum and the last segment's PSH updated, then
+/// every payload in order. The TCP checksum holds the pseudo-header sum for the kernel to complete
+/// (`NEEDS_CSUM`), as for any GSO frame; `WireGuard` already authenticated every payload.
+fn build_gso_frame(segments: &[Packet<[u8]>], frame: &mut Vec<u8>) -> io::Result<()> {
+    let first = segments
+        .first()
+        .ok_or_else(|| invalid_tun("empty GRO run"))?;
+    let head = gro_segment(first).ok_or_else(|| invalid_tun("GRO run without a TCP segment"))?;
+    let field =
+        |value: usize| u16::try_from(value).map_err(|_| invalid_tun("GSO frame is too large"));
+    frame.clear();
+    frame.push(VIRTIO_NET_HDR_F_NEEDS_CSUM);
+    frame.push(if head.ipv4 {
+        VIRTIO_NET_HDR_GSO_TCPV4
+    } else {
+        VIRTIO_NET_HDR_GSO_TCPV6
+    });
+    frame.extend_from_slice(&field(head.header_len)?.to_ne_bytes());
+    frame.extend_from_slice(&field(head.payload_len)?.to_ne_bytes());
+    frame.extend_from_slice(&field(head.ip_header_len)?.to_ne_bytes());
+    frame.extend_from_slice(&16_u16.to_ne_bytes());
+    frame.extend_from_slice(&first[..head.header_len]);
+    for segment in segments {
+        let payload = segment
+            .get(head.header_len..)
+            .ok_or_else(|| invalid_tun("GRO segment is shorter than the run's headers"))?;
+        frame.extend_from_slice(payload);
+    }
+    let length = frame.len() - VNET_HEADER_LEN;
+    let packet = &mut frame[VNET_HEADER_LEN..];
+    let tcp = head.ip_header_len;
+    let last_flags = segments.last().map_or(0, |last| last[tcp + 13]);
+    packet[tcp + 13] |= last_flags & TCP_PSH;
+    let transport_len = length - tcp;
+    let pseudo_sum = if head.ipv4 {
+        packet[2..4].copy_from_slice(&field(length)?.to_be_bytes());
+        packet[10..12].fill(0);
+        let checksum = internet_checksum(&[&packet[..20]]);
+        packet[10..12].copy_from_slice(&checksum.to_be_bytes());
+        let mut pseudo = [0_u8; 12];
+        pseudo[..8].copy_from_slice(&packet[12..20]);
+        pseudo[9] = 6;
+        pseudo[10..12].copy_from_slice(&field(transport_len)?.to_be_bytes());
+        !internet_checksum(&[&pseudo])
+    } else {
+        packet[4..6].copy_from_slice(&field(transport_len)?.to_be_bytes());
+        let mut pseudo = [0_u8; 40];
+        pseudo[..32].copy_from_slice(&packet[8..40]);
+        pseudo[34..36].copy_from_slice(&field(transport_len)?.to_be_bytes());
+        pseudo[39] = 6;
+        !internet_checksum(&[&pseudo])
+    };
+    packet[tcp + 16..tcp + 18].copy_from_slice(&pseudo_sum.to_be_bytes());
+    Ok(())
 }
 
 fn rootless_tun_error(error: io::Error) -> io::Error {
@@ -581,12 +909,25 @@ fn invalid_tun_owned(message: String) -> io::Error {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{LinuxTun, decode_frame, internet_checksum};
+    use super::{
+        GRO_MAX_SEGMENTS, LinuxTun, TCP_ACK, TCP_PSH, TunWriter, build_gso_frame, coalescible_run,
+        decode_frame, internet_checksum, ip_details, recompute_ipv4_checksum,
+        recompute_transport_checksum,
+    };
+    use bytes::BytesMut;
     use gotatun::{
         packet::{Ip, Packet, PacketBufPool},
         tun::MtuWatcher,
     };
-    use std::{fs::File, io::Read as _, os::unix::net::UnixStream, sync::Arc};
+    use std::{
+        fs::File,
+        io::Read as _,
+        os::{
+            fd::OwnedFd,
+            unix::net::{UnixDatagram, UnixStream},
+        },
+        sync::Arc,
+    };
     use tokio::{io::unix::AsyncFd, sync::Mutex};
 
     fn ipv4_packet(length: usize) -> Packet<Ip> {
@@ -604,17 +945,17 @@ mod tests {
     async fn oversized_decrypted_packet_does_not_stop_the_next_valid_send() {
         let (mut reader, writer) = UnixStream::pair().unwrap();
         writer.set_nonblocking(true).unwrap();
-        let writer: std::os::fd::OwnedFd = writer.into();
+        let writer: OwnedFd = writer.into();
         #[allow(deprecated)]
-        let fd = AsyncFd::new(File::from(writer)).unwrap();
+        let fd = Arc::new(AsyncFd::new(File::from(writer)).unwrap());
         let mut tun = LinuxTun {
-            fd: Arc::new(fd),
+            writer: TunWriter::spawn(Arc::clone(&fd), false),
+            fd,
             name: Arc::from("test-tun"),
             vnet_header: false,
             offloads_enabled: true,
             mtu: MtuWatcher::new(1380),
             read_buffer: Arc::new(Mutex::new(Vec::new())),
-            write_buffer: Arc::new(Mutex::new(Vec::new())),
         };
 
         assert!(
@@ -624,9 +965,264 @@ mod tests {
         let expected = ipv4_packet(20).into_bytes().to_vec();
         tun.send_packet(ipv4_packet(20)).await.unwrap();
 
-        let mut actual = vec![0; expected.len()];
-        reader.read_exact(&mut actual).unwrap();
+        // Read off the runtime thread so the writer task can run.
+        let length = expected.len();
+        let actual = tokio::task::spawn_blocking(move || {
+            let mut actual = vec![0; length];
+            reader.read_exact(&mut actual).unwrap();
+            actual
+        })
+        .await
+        .unwrap();
         assert_eq!(actual, expected);
+    }
+
+    /// One TCP segment with valid checksums, 40000 -> 443 on the documentation addresses, with a
+    /// payload that continues the flow's byte stream at `sequence`.
+    fn tcp_segment(ipv4: bool, sequence: u32, payload_len: usize, flags: u8, id: u16) -> BytesMut {
+        let tcp = if ipv4 { 20 } else { 40 };
+        let mut packet = vec![0_u8; tcp + 20 + payload_len];
+        if ipv4 {
+            packet[0] = 0x45;
+            let length = u16::try_from(packet.len()).unwrap();
+            packet[2..4].copy_from_slice(&length.to_be_bytes());
+            packet[4..6].copy_from_slice(&id.to_be_bytes());
+            packet[6] = 0x40;
+            packet[8] = 64;
+            packet[9] = 6;
+            packet[12..16].copy_from_slice(&[10, 1, 0, 1]);
+            packet[16..20].copy_from_slice(&[10, 1, 0, 2]);
+        } else {
+            packet[0] = 0x60;
+            let length = u16::try_from(packet.len() - 40).unwrap();
+            packet[4..6].copy_from_slice(&length.to_be_bytes());
+            packet[6] = 6;
+            packet[7] = 64;
+            packet[8..24]
+                .copy_from_slice(&[0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+            packet[24..40]
+                .copy_from_slice(&[0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        }
+        packet[tcp..tcp + 2].copy_from_slice(&40000_u16.to_be_bytes());
+        packet[tcp + 2..tcp + 4].copy_from_slice(&443_u16.to_be_bytes());
+        packet[tcp + 4..tcp + 8].copy_from_slice(&sequence.to_be_bytes());
+        packet[tcp + 8..tcp + 12].copy_from_slice(&7_u32.to_be_bytes());
+        packet[tcp + 12] = 0x50;
+        packet[tcp + 13] = flags;
+        packet[tcp + 14..tcp + 16].copy_from_slice(&1024_u16.to_be_bytes());
+        for (index, byte) in packet[tcp + 20..].iter_mut().enumerate() {
+            *byte = u8::try_from((usize::try_from(sequence).unwrap() + index) % 251).unwrap();
+        }
+        let details = ip_details(&packet).unwrap();
+        recompute_transport_checksum(&mut packet, details, tcp, 16).unwrap();
+        recompute_ipv4_checksum(&mut packet, details);
+        BytesMut::from(packet.as_slice())
+    }
+
+    fn packets(segments: &[BytesMut]) -> Vec<Packet<[u8]>> {
+        segments.iter().cloned().map(Packet::from_bytes).collect()
+    }
+
+    fn flow(ipv4: bool, count: u32) -> Vec<BytesMut> {
+        (0..count)
+            .map(|index| {
+                let flags = if index + 1 == count {
+                    TCP_ACK | TCP_PSH
+                } else {
+                    TCP_ACK
+                };
+                let id = 37 + u16::try_from(index).unwrap();
+                tcp_segment(ipv4, 50_000 + 1000 * index, 1000, flags, id)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gro_frame_resegments_to_the_original_segments() {
+        for ipv4 in [true, false] {
+            let segments = flow(ipv4, 3);
+            assert_eq!(coalescible_run(&packets(&segments), 0), 3);
+            let mut frame = Vec::new();
+            build_gso_frame(&packets(&segments), &mut frame).unwrap();
+            let ip = if ipv4 { 20 } else { 40 };
+            let header =
+                |offset: usize| usize::from(u16::from_ne_bytes([frame[offset], frame[offset + 1]]));
+            assert_eq!(frame[0], 1, "the checksum is left partial");
+            assert_eq!(frame[1], if ipv4 { 1 } else { 4 });
+            assert_eq!(header(2), ip + 20);
+            assert_eq!(header(4), 1000);
+            assert_eq!(header(6), ip);
+            assert_eq!(header(8), 16);
+            let packet = &frame[10..];
+            if ipv4 {
+                assert_eq!(
+                    internet_checksum(&[&packet[..20]]),
+                    0,
+                    "IPv4 header checksum"
+                );
+            }
+            // The kernel completes the partial checksum over the TCP bytes; that must equal the
+            // checksum of the merged segment computed from scratch.
+            let mut full = packet.to_vec();
+            let details = ip_details(&full).unwrap();
+            recompute_transport_checksum(&mut full, details, ip, 16).unwrap();
+            assert_eq!(
+                internet_checksum(&[&packet[ip..]]).to_be_bytes(),
+                full[ip + 16..ip + 18]
+            );
+            let pool = PacketBufPool::new(4);
+            let resegmented = decode_frame(&frame, true, &pool).unwrap();
+            assert_eq!(resegmented.len(), 3);
+            for (packet, original) in resegmented.into_iter().zip(&segments) {
+                assert_eq!(packet.into_bytes().as_ref(), original.as_ref());
+            }
+        }
+    }
+
+    /// IPv4 segments of one flow as a sender emits them, with consecutive identifications from 1:
+    /// `(sequence, payload length, flags)` each.
+    fn ipv4_run(shape: &[(u32, usize, u8)]) -> Vec<Packet<[u8]>> {
+        shape
+            .iter()
+            .zip(1_u16..)
+            .map(|(&(sequence, length, flags), id)| {
+                Packet::from_bytes(tcp_segment(true, sequence, length, flags, id))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gro_merges_only_in_sequence_segments_of_one_flow() {
+        let ack = TCP_ACK;
+        let pair = |second| ipv4_run(&[(0, 1000, ack), second]);
+        assert_eq!(coalescible_run(&pair((1000, 1000, ack)), 0), 2);
+        assert_eq!(
+            coalescible_run(&pair((1001, 1000, ack)), 0),
+            1,
+            "a sequence gap ends the frame"
+        );
+        // Every header byte that re-segmentation copies from the first segment must match, and
+        // the IPv4 identification must count up.
+        let header_changes: [(&str, usize, &[u8]); 8] = [
+            ("port", 22, &444_u16.to_be_bytes()),
+            ("acknowledgement", 28, &8_u32.to_be_bytes()),
+            ("ECN mark", 1, &[0x03]),
+            ("don't-fragment bit", 6, &[0x00]),
+            ("TTL", 8, &[63]),
+            ("window", 34, &2048_u16.to_be_bytes()),
+            ("urgent pointer", 38, &1_u16.to_be_bytes()),
+            ("identification", 4, &5_u16.to_be_bytes()),
+        ];
+        for (field, offset, value) in header_changes {
+            let mut run = pair((1000, 1000, ack));
+            run[1][offset..offset + value.len()].copy_from_slice(value);
+            assert_eq!(
+                coalescible_run(&run, 0),
+                1,
+                "a different {field} ends the frame"
+            );
+        }
+        assert_eq!(coalescible_run(&packets(&flow(false, 2)), 0), 2);
+        for (field, offset) in [("flow label", 3), ("hop limit", 7)] {
+            let mut run = packets(&flow(false, 2));
+            run[1][offset] ^= 1;
+            assert_eq!(
+                coalescible_run(&run, 0),
+                1,
+                "a different IPv6 {field} ends the frame"
+            );
+        }
+        let wrapping = packets(&[
+            tcp_segment(true, u32::MAX - 999, 1000, ack, u16::MAX),
+            tcp_segment(true, 0, 1000, ack, 0),
+        ]);
+        assert_eq!(
+            coalescible_run(&wrapping, 0),
+            2,
+            "sequence numbers and identifications wrap"
+        );
+        let short = ipv4_run(&[
+            (0, 1000, ack),
+            (1000, 1000, ack),
+            (2000, 500, ack),
+            (2500, 1000, ack),
+        ]);
+        assert_eq!(
+            coalescible_run(&short, 0),
+            3,
+            "a shorter segment ends the frame"
+        );
+        assert_eq!(coalescible_run(&short, 3), 1);
+        let pushed = ipv4_run(&[
+            (0, 1000, ack),
+            (1000, 1000, ack | TCP_PSH),
+            (2000, 1000, ack),
+        ]);
+        assert_eq!(
+            coalescible_run(&pushed, 0),
+            2,
+            "a pushed segment ends the frame"
+        );
+        assert_eq!(
+            coalescible_run(&ipv4_run(&[(0, 500, ack), (500, 1000, ack)]), 0),
+            1
+        );
+        for state in [0x01, 0x02, 0x04, 0x20, 0x40, 0x80] {
+            assert_eq!(
+                coalescible_run(&pair((1000, 1000, ack | state)), 0),
+                1,
+                "flag {state:#x} never merges"
+            );
+        }
+        assert_eq!(
+            coalescible_run(&ipv4_run(&[(0, 0, ack), (0, 1000, ack)]), 0),
+            1
+        );
+        let many: Vec<_> = (0..70).map(|index| (index * 1000, 1000, ack)).collect();
+        assert_eq!(coalescible_run(&ipv4_run(&many), 0), GRO_MAX_SEGMENTS);
+        let large: Vec<_> = (0..64).map(|index| (index * 1380, 1380, ack)).collect();
+        assert_eq!(
+            coalescible_run(&ipv4_run(&large), 0),
+            47,
+            "a frame stays within one IP packet"
+        );
+    }
+
+    #[tokio::test]
+    async fn writer_merges_queued_segments_and_writes_a_lone_packet_unchanged() {
+        let (reader, writer) = UnixDatagram::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        let writer: OwnedFd = writer.into();
+        #[allow(deprecated)]
+        let fd = Arc::new(AsyncFd::new(File::from(writer)).unwrap());
+        let tun_writer = TunWriter::spawn(Arc::clone(&fd), true);
+        let segments = flow(true, 3);
+        let lone = tcp_segment(true, 90_000, 10, TCP_ACK | TCP_PSH, 9);
+        // The writer runs only once this task waits, so it finds all four queued.
+        for packet in packets(&segments)
+            .into_iter()
+            .chain(packets(std::slice::from_ref(&lone)))
+        {
+            tun_writer.send(packet).await.unwrap();
+        }
+        let frames = tokio::task::spawn_blocking(move || {
+            (0..2)
+                .map(|_| {
+                    let mut frame = vec![0; 70_000];
+                    let length = reader.recv(&mut frame).unwrap();
+                    frame.truncate(length);
+                    frame
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap();
+        let mut merged = Vec::new();
+        build_gso_frame(&packets(&segments), &mut merged).unwrap();
+        assert_eq!(frames[0], merged);
+        let mut plain = vec![0; 10];
+        plain.extend_from_slice(&lone);
+        assert_eq!(frames[1], plain);
     }
 
     fn ipv4_tcp_frame(payload_len: usize) -> Vec<u8> {
