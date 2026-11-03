@@ -83,20 +83,18 @@ cleanup() {
 trap cleanup EXIT
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/infraternal-macos-release.XXXXXX")"
 
+# A non-login shell (ssh, launchd) has neither Homebrew's op nor rustup's cargo.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"
+
 signing_dir="$HOME/.config/infraternal-signing"
-identity_file="$signing_dir/identity.sha1"
 password_file="$signing_dir/keychain.pass"
-[[ -r "$identity_file" && -r "$password_file" ]] || {
+token_file="$signing_dir/op-service-account-token"
+[[ -r "$password_file" && -n "$keychain" && -e "$keychain" ]] || {
     printf 'dedicated signing-keychain setup is incomplete\n' >&2
     exit 1
 }
 [[ "$(/usr/bin/stat -f '%Lp' "$password_file")" = 600 ]] || {
     printf 'dedicated signing-keychain password file must have mode 0600\n' >&2
-    exit 1
-}
-identity="$(/usr/bin/tr -d '\r\n' < "$identity_file")"
-[[ "$identity" =~ ^[[:xdigit:]]{40}$ ]] || {
-    printf 'dedicated signing identity fingerprint is malformed\n' >&2
     exit 1
 }
 
@@ -141,24 +139,68 @@ SWIFT
 /usr/bin/swift "$scratch/unlock-keychain.swift" "$keychain" "$password_file" >/dev/null
 keychain_unlocked=1
 
-# Keep certificate names and fingerprints out of logs while requiring the exact
-# identity pinned by the existing setup file in the explicit keychain.
-identity_check="$(
-    /usr/bin/security find-identity -v -p codesigning "$keychain" 2>/dev/null |
+# The dedicated keychain also holds a self-signed development identity (pinned in
+# identity.sha1) that gives local builds a stable TCC identity. A release must not
+# use it: Gatekeeper and the notary service accept only a Developer ID. So the
+# identity is chosen by kind, never by that pin, and exactly one must exist.
+# Names and fingerprints stay out of the log.
+developer_id_fingerprints() {
+    { /usr/bin/security find-identity -v -p codesigning "$keychain" 2>/dev/null || true; } |
         /usr/bin/python3 -I -c '
 import re, sys
-expected = open(sys.argv[1], encoding="ascii").read().strip().lower()
-output = sys.stdin.read()
-identities = re.findall(
-    r"^\s*\d+\)\s+([0-9A-Fa-f]{40})\s+\"([^\"]+)\"", output, re.MULTILINE
-)
-matching = [name for fingerprint, name in identities if fingerprint.lower() == expected]
-if not matching or not all(name.startswith("Developer ID Application:") for name in matching):
-    sys.exit("pinned Developer ID identity is unavailable in the dedicated keychain")
-print("matching")
-' "$identity_file"
-    )"
-[[ "$identity_check" = matching ]] || exit 1
+for fingerprint, name in re.findall(
+    r"^\s*\d+\)\s+([0-9A-Fa-f]{40})\s+\"([^\"]+)\"", sys.stdin.read(), re.MULTILINE
+):
+    if name.startswith("Developer ID Application:"):
+        print(fingerprint.lower())
+'
+}
+
+# First run on a Mac: take the Developer ID certificate from the owner's
+# 1Password through the service account whose token lives only on this machine
+# and put it in the dedicated keychain. Neither the p12 password nor the
+# keychain password may reach argv, so both go to `security -i` on stdin
+# (printf is a shell builtin, so nothing is executed with them). `security -i`
+# exits 0 even when a command fails; the caller re-checks the keychain.
+# The partition list lets codesign use the key without a GUI prompt.
+import_developer_id() {
+    [[ -r "$token_file" && "$(/usr/bin/stat -f '%Lp' "$token_file")" = 600 ]] || {
+        printf 'no Developer ID in the keychain and no mode-0600 1Password service-account token to import it\n' >&2
+        return 1
+    }
+    command -v op >/dev/null || { printf '1Password CLI (op) is missing\n' >&2; return 1; }
+    (
+        umask 077
+        OP_SERVICE_ACCOUNT_TOKEN="$(< "$token_file")"
+        export OP_SERVICE_ACCOUNT_TOKEN
+        ids="$(op item list --format json | /usr/bin/python3 -I -c '
+import json, sys
+found = [i for i in json.load(sys.stdin) if i["title"] == "Apple Certificates"]
+if len(found) != 1: sys.exit("expected exactly one Apple Certificates item, found %d" % len(found))
+print(found[0]["vault"]["id"], found[0]["id"])
+')"
+        read -r vault_id item_id <<<"$ids"
+        p12="$scratch/developer-id.p12"
+        op read "op://$vault_id/$item_id/Developer ID Application.p12" --out-file "$p12" >/dev/null
+        p12_password="$(op read "op://$vault_id/$item_id/password")"
+        keychain_password="$(/usr/bin/tr -d '\r\n' < "$password_file")"
+        printf 'import %s -k %s -P %s -T /usr/bin/codesign\n' \
+            "$p12" "$keychain" "$p12_password" | /usr/bin/security -i >/dev/null 2>&1
+        printf 'set-key-partition-list -S apple-tool:,apple:,codesign: -s -k %s %s\n' \
+            "$keychain_password" "$keychain" | /usr/bin/security -i >/dev/null 2>&1
+        rm -f -- "$p12"
+    )
+}
+
+identity="$(developer_id_fingerprints)"
+if [[ -z "$identity" ]]; then
+    import_developer_id
+    identity="$(developer_id_fingerprints)"
+fi
+[[ "$(printf '%s\n' "$identity" | /usr/bin/grep -c .)" -eq 1 ]] || {
+    printf 'expected exactly one valid Developer ID Application identity in the dedicated keychain\n' >&2
+    exit 1
+}
 
 # Fail before the long build when the notary credential is missing.
 if [[ "$skip_notarize" -eq 0 ]] && ! /usr/bin/xcrun notarytool history \
