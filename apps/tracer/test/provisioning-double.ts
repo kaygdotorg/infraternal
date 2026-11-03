@@ -25,6 +25,7 @@
  *   `failure.kind: "stale_previous_attempt"` and `leftovers` (challenge, mode, findings); `start-fresh` with that challenge
  *   continues the same attempt to done. Closing the socket cancels the pause (contracts/ssh-bootstrap.md, #169)
  * - `stuck*`: an interrupted upgrade carries its validated lock coordinates and resumes through the explicit replacement action
+ * - `foreign*`: the interrupted upgrade belongs to another server; it resumes by joining as a new host (D335)
  * - `added*`: the host is already added: an `install` failure with `already_added` and the existing `host_id`, no details
  * - `running*`: `setup_running` once; the retry succeeds
  * - `unsupported*`: reported after sign-in, never succeeds; `broken*`: install fails, the retry works
@@ -65,7 +66,7 @@ interface BootstrapEvent {
   host_id?: string;
   session_id?: string;
   leftovers?: { challenge: string; mode: "rootless" | "root"; findings: string[] };
-  failure?: { failed_step?: "connect" | "start"; kind: FailureKind; message: string; log_tail: string[]; setup_lock?: { machine: string; pid?: number; since: string; active: boolean }; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string };
+  failure?: { failed_step?: "connect" | "start"; kind: FailureKind; message: string; log_tail: string[]; setup_lock?: { machine: string; pid?: number; since: string; active: boolean; attempt?: string; sessions?: number; enrolled_with?: string }; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string };
   authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
 }
 
@@ -266,13 +267,29 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
             target.resume = () => walk(1);
             emit(target, "check", "A stuck infraternal agent was found", {
               kind: "stale_previous_attempt",
-              message: "The failed setup on build-node left a lease last held by process 254 since 2026-11-02T04:05:06Z. Replace the stuck install to continue.",
+              message: "The failed setup on build-node left a lease last held by setup attempt d831a93a (process 254) since 2026-11-02T04:05:06Z. Replace the stuck install to continue. 1 open terminal session will end.",
               log_tail: [],
-              setup_lock: { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false },
+              setup_lock: { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false, attempt: "d831a93a", sessions: 1 },
             }, undefined, {
               challenge: target.challenge,
               mode: target.mode,
-              findings: ["An interrupted upgrade journal", "The enrolled host identity is kept", "Local sockets with no listener"],
+              findings: ["An interrupted upgrade journal", "The enrolled host identity is kept", "1 open terminal session will end"],
+            });
+            return;
+          }
+          // Hosts named `foreign*`: the stuck install was enrolled by another server; confirming joins it as a new host (D335).
+          if (/^foreign/.test(target.name) && !target.fresh) {
+            target.challenge = challengeOf(target.id);
+            target.resume = () => walk(1);
+            emit(target, "check", "This host has leftovers from an earlier setup", {
+              kind: "stale_previous_attempt",
+              message: "The failed setup on build-node left a lease last held by setup attempt d831a93a (process 254) since 2026-11-02T04:05:06Z. This machine is enrolled with another server, monitor01.example. Joining it to this server makes it a new host with a new key; its old infraternal agent is set aside, not deleted. 1 open terminal session will end.",
+              log_tail: [],
+              setup_lock: { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false, attempt: "d831a93a", sessions: 1, enrolled_with: "monitor01.example" },
+            }, undefined, {
+              challenge: target.challenge,
+              mode: target.mode,
+              findings: ["Enrolled with another server: monitor01.example", "It joins this server as a new host; the old install is set aside, not deleted", "1 open terminal session will end"],
             });
             return;
           }
