@@ -190,7 +190,7 @@ impl Lifecycle {
 pub fn redact_log_line(line: &str, secrets: &[&str]) -> String {
     let mut secrets: Vec<_> = secrets
         .iter()
-        .copied()
+        .flat_map(|secret| [*secret, secret.trim_end_matches(['\r', '\n'])])
         .filter(|secret| !secret.is_empty())
         .collect();
     secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
