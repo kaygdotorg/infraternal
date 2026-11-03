@@ -3581,3 +3581,38 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        candidate pages.
      - Open: where docs media lives, and whether docs ship detached from
        the app (owner refining, 2026-11-02).
+318. **One event route, thin adapters (owner, 2026-11-03, #303, #313):** "one
+     event route/path, everything else is a thin adapter: CLI, API, MCP,
+     apple native apps". Every action goes through one dispatch path that
+     checks authority once. The CLI, the HTTP API, MCP and the Apple native
+     apps are thin adapters over it. MCP is our own small server over the
+     action registry. Rejected: an MCP library with its own dispatch, and
+     any second authorisation path.
+319. **Access rules: name matching and onward connections (owner,
+     2026-11-03, #186 R3S-01, R3S-02):**
+     - **Name matching:** your infraternal name logs you in as the host
+       account of the same name only on machines you added, or where an
+       admin marked "Names match people here". Elsewhere you confirm once.
+       Owner: "whenever in doubt, ask for passkey if connecting from the
+       machine directly." A direct connection whose identity is in doubt
+       asks for a fresh passkey.
+     - **Onward connections:** someone controlling your session cannot
+       connect to other machines with your access by default. You can allow
+       it explicitly ("They can connect to other machines using your
+       access"). If you lose access, everyone controlling your sessions
+       loses it too.
+320. **Secrets: infraternal runs its own OpenBao (owner, 2026-11-03, #287;
+     replaces the "connect to your existing OpenBao" proposal):** "more
+     like traefik where infraternal can deploy its own openbao and use it
+     for its secrets + provide it to the user as an easy way to save
+     infrastructure secrets." OpenBao is a managed component that
+     infraternal deploys and runs on demand, the way it runs Traefik
+     (D316, #281). infraternal stores its own secrets there (DNS tokens,
+     signing material) and offers people a simple interface for their
+     infrastructure secrets. OpenBao is MPL-2.0 and runs as a separate
+     process, not linked.
+321. **macOS releases are signed and notarized (owner, 2026-11-03):** an
+     arm64 macOS infraternal CLI/agent and the capture helper ship signed
+     with the owner's Apple Developer ID and notarized. Signing material
+     comes from the owner's 1Password via a service account, only on the
+     Mac build machine, never in the repo, logs or argv.
