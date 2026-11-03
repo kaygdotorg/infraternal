@@ -299,13 +299,14 @@ impl SshSession for CorruptUpload {
 /// Staging starts a setup lease; key preparation retires it and must start a new
 /// one under `set -C`. A leftover lease file made the restart fail (dash: status 2)
 /// on every HTTPS add-host, after which only a stuck lock remained (#305).
+/// Enrollment then has to accept the state copy that preparation left.
 #[tokio::test]
-async fn join_key_preparation_restarts_the_staged_setup_lease() {
+async fn join_key_preparation_restarts_the_lease_and_feeds_enrollment() {
     let fixture = Fixture::new();
     let binary = fixture.root.join("prepare-payload");
     executable(
         &binary,
-        "#!/bin/sh\ncase \"$1\" in --bootstrap-runtime*) exec runtime-helper \"$@\";; esac\n# Synthetic CLI contract, not an infraternal daemon.\n[ \"$1 $2 $4\" = 'agent --data prepare-join-key' ] || exit 1\nprintf 'KEY-DIGEST %064d\\n' 0\n",
+        "#!/bin/sh\ncase \"$1\" in --bootstrap-runtime*) exec runtime-helper \"$@\";; esac\n# Synthetic CLI contract, not an infraternal daemon.\n[ \"$1 $2\" = 'agent --data' ] || exit 1\nstate=$3\nif [ \"$4\" = prepare-join-key ]; then : > \"$state/join-key.pk8\"; printf 'KEY-DIGEST %064d\\n' 0; exit 0; fi\n[ \"$4\" = join ] && [ \"$6\" = --enroll-only ] && [ -f \"$state/join-key.pk8\" ] || exit 1\nprintf 'public-fixture-state\\n' > \"$state/proof\"\ncat >/dev/null\n",
     );
     let transaction = fixture.transaction();
     let digest = transaction
@@ -319,7 +320,11 @@ async fn join_key_preparation_restarts_the_staged_setup_lease() {
         std::path::Path::new("/proc").join(pid).exists(),
         "the setup lease must be held again after key preparation"
     );
-    transaction.rollback().await.unwrap();
+    // Enrollment must use the state copy that holds the prepared key, not
+    // refuse it as a leftover (#305).
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    assert!(fixture.base().join("state/join-key.pk8").exists());
+    transaction.commit().await.unwrap();
 }
 
 /// The person sees the HTTPS cause the staged infraternal agent reported, not

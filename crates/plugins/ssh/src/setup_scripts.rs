@@ -6,7 +6,6 @@ pub(super) fn join(url: &str) -> String {
 stage="$base/.bootstrap-lock"
 [ -f "$stage/kind" ] && [ ! -L "$stage" ] || exit 71
 [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
-[ ! -e "$stage/state" ] && [ ! -L "$stage/state" ] || exit 71
 # Retain the host's existing identity for immutable same-key re-enrollment.
 # A preflight-prepared state copy already contains the proved private key.
 # The copy stays in its private host-local transaction, never crossing SSH.
