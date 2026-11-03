@@ -20,6 +20,9 @@ mod account_summary_tests;
 #[cfg(test)]
 #[path = "http_hostname_tests.rs"]
 mod hostname_tests;
+#[cfg(test)]
+#[path = "http_logout_tests.rs"]
+mod logout_tests;
 
 /// Mount the POST-only `/auth/{action}` API. TLS terminates at the configured public origin.
 pub fn router(auth: Auth) -> Router {
@@ -561,7 +564,16 @@ async fn execute(
                 // A delayed cleanup reply must not clear a later login's cookie.
                 return Ok(Json(json!({"ok":true})).into_response());
             }
-            auth.logout(cookie(headers)?).await?;
+            // The browser may hold several login generations while old requests
+            // are still in flight. Revoke every valid presented capability so
+            // those replies cannot refresh an older session after logout.
+            let tokens = super::cookies::session_tokens(headers);
+            if tokens.is_empty() {
+                return Err(Error::Denied);
+            }
+            for token in tokens {
+                auth.logout(token).await?;
+            }
             return Ok(Json(json!({"ok":true})).into_response());
         }
         _ => return Err(Error::Invalid),

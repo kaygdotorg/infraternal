@@ -122,6 +122,31 @@ pub(crate) fn observed_session_names(headers: &HeaderMap) -> Vec<&str> {
     names
 }
 
+/// Return every distinct valid session bearer present in a logout request.
+///
+/// A browser can send several login generations while an older request is
+/// still in flight. Logout revokes all of those capabilities so a delayed
+/// response cannot make an older live session usable again.
+pub(crate) fn session_tokens(headers: &HeaderMap) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    for field in headers.get_all(header::COOKIE) {
+        let Ok(field) = field.to_str() else {
+            continue;
+        };
+        for pair in field.split(';') {
+            let Some((name, value)) = pair.trim().split_once('=') else {
+                continue;
+            };
+            let session_name = name == LEGACY_SESSION_NAME
+                || (name.starts_with(SESSION_NAME_PREFIX) && parse_session_name(name).is_some());
+            if session_name && valid_token(value) && !tokens.contains(&value) {
+                tokens.push(value);
+            }
+        }
+    }
+    tokens
+}
+
 fn parse_session_name(name: &str) -> Option<(i64, i64)> {
     let suffix = name.strip_prefix(SESSION_NAME_PREFIX)?;
     let (sequence, expires_text) = suffix.split_once('-')?;
