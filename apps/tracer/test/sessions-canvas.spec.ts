@@ -377,6 +377,10 @@ test("another device typed last: scaled to fit, a badge says so, typing takes th
     const scale = await preview.evaluate((n) => new DOMMatrix(getComputedStyle(n).transform).a);
     expect(scale).toBeGreaterThan(0.5);
     expect(scale).toBeLessThan(1);
+    // Typing goes to the window whose terminal has the focus. After the load the DOM focus can sit in the first terminal that
+    // attached (build-01) while nix-cache is the active window (it did on dev too: this check passed only when the focus was
+    // still on the page), so the test puts the focus where a person typing into this window has it.
+    await windowOf(page, "nix-cache").locator("textarea").first().focus();
     await page.keyboard.press("l");
     await expect(badge).toHaveCount(0);
     await expect(preview).not.toHaveAttribute("data-scaled", "");
