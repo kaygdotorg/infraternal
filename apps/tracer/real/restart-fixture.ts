@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { encodeMuxedFrame, WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
 import { startRealServer } from "./server";
-import type { RealServer } from "./server";
+import { personName, type RealServer } from "./server";
 
 /** Adds private PTYs; optional attached scale uses the production per-socket cap and answers real probes. */
 async function populate(server: RealServer, count: number): Promise<() => void> {
@@ -107,7 +107,7 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
     await page.goto(server.origin);
     await page.locator("#setup-token").fill(server.token);
     await page.getByRole("button", { name: "Continue", exact: true }).click();
-    await page.locator("#setup-username").fill("restart_test");
+    await page.locator("#setup-username").fill(personName("restart_test"));
     await page.locator("#setup-display-name").fill("Restart test");
     await page.getByRole("button", { name: "Continue", exact: true }).click();
     await page.getByRole("button", { name: "Create passkey" }).click();

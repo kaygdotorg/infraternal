@@ -4,7 +4,7 @@ import { WebSocket } from "ws";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { WebSocketFrameDecoder, encodeMuxedFrame, type WireFrame } from "../../../packages/protocol/src/codec";
-import { startRealServer, type RealServer } from "./server";
+import { personName, startRealServer, type RealServer } from "./server";
 import { tracerEvidencePath } from "../test/evidence-path";
 let server: RealServer;
 let page: Page;
@@ -20,7 +20,7 @@ test.beforeAll(async ({ browser }) => {
   await page.goto(server.origin + "/");
   await page.locator("#setup-token").fill(server.token);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await page.locator("#setup-username").fill("mesh_real");
+  await page.locator("#setup-username").fill(personName("mesh_real"));
   await page.locator("#setup-display-name").fill("Mesh real");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("button", { name: "Create passkey" }).click();

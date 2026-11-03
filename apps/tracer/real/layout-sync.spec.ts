@@ -3,7 +3,7 @@ import { cache } from "./layout-observer";
 import { watchLayout } from "./layout-observer";
 import { devices, expect, test, type Page } from "playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
-import { startRealServer, type RealServer } from "./server";
+import { personName, startRealServer, type RealServer } from "./server";
 import { WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
 import { tracerEvidencePath } from "../test/evidence-path";
 
@@ -29,7 +29,7 @@ async function enrol(page: Page, server: RealServer): Promise<void> {
   await page.goto(server.origin + "/?theme=ink&bg=none");
   await page.locator("#setup-token").fill(server.token);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await page.locator("#setup-username").fill("layout_sync");
+  await page.locator("#setup-username").fill(personName("layout_sync"));
   await page.locator("#setup-display-name").fill("Layout sync");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("button", { name: "Create passkey" }).click();

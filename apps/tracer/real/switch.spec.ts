@@ -15,7 +15,7 @@ import { expect, test, type Page } from "playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { loadavg } from "node:os";
 import { resolve } from "node:path";
-import { startRealServer, type RealServer } from "./server";
+import { personName, startRealServer, type RealServer } from "./server";
 
 test.describe.configure({ mode: "serial" });
 
@@ -49,7 +49,7 @@ async function enrol(p: Page): Promise<void> {
   await p.goto(server.origin + "/");
   await p.locator("#setup-token").fill(server.token);
   await p.getByRole("button", { name: "Continue", exact: true }).click();
-  await p.locator("#setup-username").fill("switch_real");
+  await p.locator("#setup-username").fill(personName("switch_real"));
   await p.locator("#setup-display-name").fill("Switch real");
   await p.getByRole("button", { name: "Continue", exact: true }).click();
   await p.getByRole("button", { name: "Create passkey" }).click();

@@ -9,7 +9,7 @@ import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { WebSocket } from "ws";
 import { WebSocketFrameDecoder, encodeMuxedFrame, type WireFrame } from "../../../packages/protocol/src/codec";
-import { startRealServer, type RealServer } from "./server";
+import { personName, startRealServer, type RealServer } from "./server";
 
 test.describe.configure({ mode: "serial" });
 
@@ -61,7 +61,7 @@ async function enrol(page: Page): Promise<void> {
   await page.goto(server.origin + "/");
   await page.locator("#setup-token").fill(server.token);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await page.locator("#setup-username").fill("canvas_real");
+  await page.locator("#setup-username").fill(personName("canvas_real"));
   await page.locator("#setup-display-name").fill("Canvas real");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("button", { name: "Create passkey" }).click();

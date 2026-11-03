@@ -2,7 +2,7 @@
 import { expect, test } from "playwright/test";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
-import { startRealServer } from "./server";
+import { personName, startRealServer } from "./server";
 import { tracerEvidencePath } from "../test/evidence-path";
 
 test("hidden mobile page keeps its terminal and a refused resume attaches afresh once", async ({ browser }) => {
@@ -21,7 +21,7 @@ test("hidden mobile page keeps its terminal and a refused resume attaches afresh
       element.dispatchEvent(new Event("input", { bubbles: true }));
     }, server.token);
     await page.getByRole("button", { name: "Continue", exact: true }).click();
-    await page.locator("#setup-username").fill("mobile_lease");
+    await page.locator("#setup-username").fill(personName("mobile_lease"));
     await page.locator("#setup-display-name").fill("Mobile lease");
     await page.getByRole("button", { name: "Continue", exact: true }).click();
     await page.getByRole("button", { name: "Create passkey" }).click();

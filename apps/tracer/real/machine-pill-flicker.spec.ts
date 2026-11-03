@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { startRealServer, type RealServer } from "./server";
+import { personName, startRealServer, type RealServer } from "./server";
 
 let server: RealServer;
 let context: BrowserContext;
@@ -109,7 +109,7 @@ test.beforeAll(async ({ browser }) => {
   await page.goto(server.origin + "/");
   await page.locator("#setup-token").fill(server.token);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await page.locator("#setup-username").fill("pill_flicker");
+  await page.locator("#setup-username").fill(personName("pill_flicker"));
   await page.locator("#setup-display-name").fill("Pill Flicker");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("button", { name: "Create passkey" }).click();
