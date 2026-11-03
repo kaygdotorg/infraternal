@@ -248,6 +248,9 @@ test("predictive echo draws only when Ghostty reports a visible normal-screen cu
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
   await resetScreen();
   await page.evaluate(() => window.__tracerTestDouble?.seedPrompt());
+  // This is a fresh client: attachment precedes the RTT proof that enables prediction.
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.enabled ?? false))
+    .toBe(true);
   await inject("x");
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.pendingText ?? ""))
     .toBe("x");
@@ -266,6 +269,12 @@ test("mutes when the host stops echoing, then resumes after an echo proof", asyn
     .toBeGreaterThan(60);
   await context.request.post("/__mock/echo-mode", { data: { mode: "none" } });
   await page.evaluate(() => window.__tracerTestDouble?.seedPrompt());
+  // Fixture control can overlap a route recovery; begin this prediction test
+  // only once the current terminal is attached and has its RTT proof.
+  await expect.poll(() => page.evaluate(() =>
+    window.__tracerTestDouble?.isConnected() === true
+      && window.__tracerTestDouble.predictiveEcho()?.enabled === true,
+  ), { timeout: 30_000 }).toBe(true);
 
   const noEchoPrediction = await page.evaluate(() => {
     window.__tracerTestDouble?.injectInput("p");
