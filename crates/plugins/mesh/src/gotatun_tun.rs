@@ -16,7 +16,10 @@ use nix::errno::Errno;
 use std::{
     fs::File,
     io,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tokio::{
     io::unix::AsyncFd,
@@ -49,6 +52,7 @@ pub(crate) struct LinuxTun {
     mtu: MtuWatcher,
     read_buffer: Arc<Mutex<Vec<u8>>>,
     writer: TunWriter,
+    refused: Arc<AtomicU64>,
 }
 
 impl LinuxTun {
@@ -58,7 +62,7 @@ impl LinuxTun {
     /// # Errors
     /// Reports device, ioctl, and async-registration failures. Permission errors name the
     /// `CAP_NET_ADMIN` requirement and the existing rootless own-traffic limit.
-    pub(crate) fn create(name: &str) -> io::Result<Self> {
+    pub(crate) fn create(name: &str, refused: Arc<AtomicU64>) -> io::Result<Self> {
         let device = TunDevice::open(name).map_err(rootless_tun_error)?;
         let name = device.name().to_owned();
         let vnet_header = device.has_vnet_header();
@@ -75,6 +79,28 @@ impl LinuxTun {
             offloads_enabled,
             mtu: MtuWatcher::new(MESH_MTU),
             read_buffer: Arc::new(Mutex::new(vec![0; MAX_TUN_FRAME_LEN])),
+            refused,
+        })
+    }
+
+    /// A `LinuxTun` over any nonblocking descriptor, so tests can play the kernel's side.
+    #[cfg(test)]
+    pub(crate) fn from_fd(
+        device: std::os::fd::OwnedFd,
+        vnet_header: bool,
+        refused: Arc<AtomicU64>,
+    ) -> io::Result<Self> {
+        #[allow(deprecated)]
+        let fd = Arc::new(AsyncFd::new(File::from(device))?);
+        Ok(Self {
+            writer: TunWriter::spawn(Arc::clone(&fd), vnet_header),
+            fd,
+            name: Arc::from("test-tun"),
+            vnet_header,
+            offloads_enabled: true,
+            mtu: MtuWatcher::new(MESH_MTU),
+            read_buffer: Arc::new(Mutex::new(vec![0; MAX_TUN_FRAME_LEN])),
+            refused,
         })
     }
 
@@ -99,6 +125,13 @@ impl LinuxTun {
         self.writer.send(packet).await
     }
 
+    /// Read the next decodable frame from the host stack.
+    ///
+    /// `GotaTun` treats any error from here as the TUN being deleted and stops all outbound
+    /// traffic for good, and it counts `InvalidData`, which every decode refusal uses, among those.
+    /// Anything on the host that can write a raw packet to a mesh route can produce a frame this
+    /// adapter refuses (#260 J143 P2-1). So a refused frame is dropped and counted, as the kernel
+    /// would drop a malformed packet, and only EOF or a device-gone errno reaches `GotaTun`.
     async fn recv_packets(
         &mut self,
         pool: &mut PacketBufPool,
@@ -110,12 +143,18 @@ impl LinuxTun {
                 .try_io(|fd| nix::unistd::read(fd.get_ref(), &mut buffer).map_err(io::Error::from));
             match result {
                 Err(_) => {}
-                Ok(Err(error)) => return Err(error),
-                Ok(Ok(0)) => return Err(io::ErrorKind::UnexpectedEof.into()),
-                Ok(Ok(length)) => {
-                    let packets = decode_frame(&buffer[..length], self.vnet_header, pool)?;
-                    return Ok(packets.into_iter());
+                Ok(Err(error)) if device_gone(&error).is_some() => return Err(error),
+                // Any other read error concerns one frame; the next read decides again.
+                Ok(Err(_)) => {
+                    self.refused.fetch_add(1, Ordering::Relaxed);
                 }
+                Ok(Ok(0)) => return Err(io::ErrorKind::UnexpectedEof.into()),
+                Ok(Ok(length)) => match decode_frame(&buffer[..length], self.vnet_header, pool) {
+                    Ok(packets) => return Ok(packets.into_iter()),
+                    Err(_) => {
+                        self.refused.fetch_add(1, Ordering::Relaxed);
+                    }
+                },
             }
         }
     }
@@ -915,10 +954,7 @@ mod tests {
         recompute_transport_checksum,
     };
     use bytes::BytesMut;
-    use gotatun::{
-        packet::{Ip, Packet, PacketBufPool},
-        tun::MtuWatcher,
-    };
+    use gotatun::packet::{Ip, Packet, PacketBufPool};
     use std::{
         fs::File,
         io::Read as _,
@@ -928,7 +964,7 @@ mod tests {
         },
         sync::Arc,
     };
-    use tokio::{io::unix::AsyncFd, sync::Mutex};
+    use tokio::io::unix::AsyncFd;
 
     fn ipv4_packet(length: usize) -> Packet<Ip> {
         let mut bytes = vec![0; length];
@@ -941,22 +977,69 @@ mod tests {
             .unwrap()
     }
 
+    fn test_tun(device: OwnedFd, vnet_header: bool) -> LinuxTun {
+        LinuxTun::from_fd(device, vnet_header, Arc::default()).unwrap()
+    }
+
+    /// The frame J143 had the 6.12 kernel hand to this adapter's TUN: a raw IPv6 packet whose
+    /// destination-options header claims (200 + 1) × 8 = 1,608 bytes while 8 are present, behind an
+    /// all-zero virtio header.
+    fn truncated_destination_options_frame() -> Vec<u8> {
+        let mut frame = vec![0_u8; 10 + 40 + 8];
+        let packet = &mut frame[10..];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&8_u16.to_be_bytes());
+        packet[6] = 60;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&[0xfd, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        packet[24..40].copy_from_slice(&[0xfd, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        packet[40] = 59;
+        packet[41] = 200;
+        frame
+    }
+
+    #[tokio::test]
+    async fn refused_outbound_frame_is_dropped_and_the_next_valid_frame_is_read() {
+        use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
+        // A sequenced-packet pair keeps frame boundaries, as a TUN does, and reads EOF once the
+        // kernel's side closes.
+        let (kernel, device) = socketpair(
+            AddressFamily::Unix,
+            SockType::SeqPacket,
+            None,
+            SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
+        )
+        .unwrap();
+        let mut tun = test_tun(device, true);
+        let bad = truncated_destination_options_frame();
+        assert!(
+            decode_frame(&bad, true, &PacketBufPool::new(1)).is_err(),
+            "the fixture is a frame the adapter refuses"
+        );
+        let good = ipv4_packet(20).into_bytes().to_vec();
+        let mut good_frame = vec![0_u8; 10];
+        good_frame.extend_from_slice(&good);
+        nix::unistd::write(&kernel, &bad).unwrap();
+        nix::unistd::write(&kernel, &good_frame).unwrap();
+
+        let mut pool = PacketBufPool::new(4);
+        let packets: Vec<_> = match tun.recv_packets(&mut pool).await {
+            Ok(packets) => packets.map(|packet| packet.into_bytes().to_vec()).collect(),
+            Err(error) => panic!("a refused frame must not end GotaTun's TUN reader: {error:?}"),
+        };
+        assert_eq!(packets, [good]);
+        assert_eq!(tun.refused.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        drop(kernel);
+        let closed = tun.recv_packets(&mut pool).await.map(|_| ()).unwrap_err();
+        assert_eq!(closed.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
     #[tokio::test]
     async fn oversized_decrypted_packet_does_not_stop_the_next_valid_send() {
         let (mut reader, writer) = UnixStream::pair().unwrap();
         writer.set_nonblocking(true).unwrap();
-        let writer: OwnedFd = writer.into();
-        #[allow(deprecated)]
-        let fd = Arc::new(AsyncFd::new(File::from(writer)).unwrap());
-        let mut tun = LinuxTun {
-            writer: TunWriter::spawn(Arc::clone(&fd), false),
-            fd,
-            name: Arc::from("test-tun"),
-            vnet_header: false,
-            offloads_enabled: true,
-            mtu: MtuWatcher::new(1380),
-            read_buffer: Arc::new(Mutex::new(Vec::new())),
-        };
+        let mut tun = test_tun(writer.into(), false);
 
         assert!(
             tun.send_packet(ipv4_packet(1381)).await.is_ok(),

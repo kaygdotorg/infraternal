@@ -163,7 +163,7 @@ impl Engine {
                     if kernel_owned || tun_owned {
                         return Err(io::ErrorKind::AlreadyExists.into());
                     }
-                    let tun = LinuxTun::create(crate::wireguard::INTERFACE)?;
+                    let tun = LinuxTun::create(crate::wireguard::INTERFACE, Arc::default())?;
                     let interface = tun.name().to_owned();
                     if interface != crate::wireguard::INTERFACE {
                         return Err(io::ErrorKind::InvalidData.into());
