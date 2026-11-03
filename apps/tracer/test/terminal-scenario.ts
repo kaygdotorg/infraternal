@@ -242,8 +242,12 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
     .toContain("pasted words");
   await expect.poll(async () => Number(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.outputSequence ?? "0")))
     .toBeGreaterThanOrEqual(beforeTyping + 12);
-  await inject("ok");
-  await waitForPendingText("ok");
+  // The host echoes this one after a single round trip (about 300 ms), so the pending prediction lives only that long and
+  // a polling wait can miss it entirely on a loaded host. Read it in the same browser task as the input instead.
+  expect(await page.evaluate((data) => {
+    window.__tracerTestDouble?.injectInput(data);
+    return window.__tracerTestDouble?.predictiveEcho()?.pendingText ?? "";
+  }, "ok")).toBe("ok");
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain("ok");
   await waitForPendingText("");
   await context.request.post("/__mock/echo-mode", { data: { mode: "normal" } });
