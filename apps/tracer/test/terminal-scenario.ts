@@ -327,6 +327,9 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
       `measured_ms=${measuredRttMs.toFixed(2)} http_clock_sample_ms=${clockCalibration.roundTripMs.toFixed(2)}`,
   );
   await expect(page.locator("#probe-run")).toBeEnabled();
+  // The clock calibration above takes about two seconds, long enough for the attachment to be confirmed again after a
+  // route refresh; the probe refuses to start on an unconfirmed terminal, so wait for the state it checks, then click.
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
   await page.locator("#probe-run").click();
   await expect.poll(
     async () => (await page.locator("#probe-results").textContent()) ?? "",
