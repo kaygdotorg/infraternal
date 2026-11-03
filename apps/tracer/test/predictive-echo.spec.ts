@@ -553,9 +553,16 @@ test("predictive echo captures pending and confirmed glyphs across production vi
       await capturePage.evaluate(() => window.__tracerTestDouble?.seedPrompt());
       await expect.poll(() => capturePage.evaluate(() => window.__tracerTestDouble?.screenText() ?? ""))
         .toContain("$");
-      await capturePage.evaluate((value) => {
-        for (const character of value) window.__tracerTestDouble?.injectInput(character);
-      }, captureText);
+      // Prepare the screenshot before input; font loading must not consume the pending frame.
+      await capturePage.evaluate(() => document.fonts.ready);
+      await context.request.post("/__mock/echo-mode", { data: { mode: "normal", delay_ms: 300 } });
+      const injected = await capturePage.waitForFunction((value) => {
+        const terminal = window.__tracerTestDouble;
+        if (!terminal?.isConnected() || terminal.predictiveEcho()?.enabled !== true) return false;
+        for (const character of value) terminal.injectInput(character);
+        return true;
+      }, captureText, { timeout: 30_000 });
+      await injected.dispose();
       await expect.poll(() => capturePage.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.pendingText ?? ""))
         .toBe(captureText);
 
