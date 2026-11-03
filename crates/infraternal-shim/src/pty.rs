@@ -1587,6 +1587,32 @@ pub(super) fn process_exit_descriptor(pid: u32) -> io::Result<std::os::fd::Owned
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
 }
 
+/// Send `signal` to the process a pidfd names. Unlike `kill(pid)`, this can't reach a later
+/// process that reused the PID: once the named process is gone the call fails with `ESRCH`.
+#[cfg(target_os = "linux")]
+pub(super) fn signal_process_descriptor(
+    process: std::os::fd::BorrowedFd<'_>,
+    signal: nix::sys::signal::Signal,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    // SAFETY: pidfd_send_signal takes a borrowed descriptor that outlives the call, a signal
+    // number, a null siginfo pointer (the kernel then fills in a kill-like siginfo) and zero
+    // flags. It reads no memory from us and returns 0 or -1 with errno.
+    let result = unsafe {
+        nix::libc::syscall(
+            nix::libc::SYS_pidfd_send_signal,
+            process.as_raw_fd(),
+            signal as nix::libc::c_int,
+            std::ptr::null::<nix::libc::siginfo_t>(),
+            0_u32,
+        )
+    };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod child_signal_tests {
     use super::*;

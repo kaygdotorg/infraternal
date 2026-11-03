@@ -890,29 +890,59 @@ fn the_parent_death_signal_survives_the_credential_drop() {
 fn a_new_supervisor_stops_an_orphan_that_holds_the_child_lock() {
     let root = std::env::temp_dir().join(format!("proxy-orphan-{}", uuid::Uuid::new_v4()));
     let (state, lock_directory) = supervisor_fixture(&root);
+    // The orphan check compares the running executable's inode, so the fake must be a real
+    // program rather than a script run by an interpreter.
     let executable = root.join("fake-traefik");
-    fake_traefik(&executable, b"#!/bin/sh\nexec /bin/sleep 60\n");
-    // Plant an orphan exactly as an agent crash leaves one: a process that still holds the
-    // child lock through an inherited descriptor after its owner is gone.
+    fake_traefik(
+        &executable,
+        &std::fs::read("/bin/sleep").expect("read sleep"),
+    );
     let lock_path = lock_directory.join(".traefik-child.lock");
     std::fs::write(&lock_path, b"").expect("create child lock");
     std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
         .expect("private child lock");
-    let mut orphan = Command::new("/bin/sh")
-        .args([
-            "-c",
-            "exec 9<\"$1\" && flock -n 9 && echo held && exec /bin/sleep 60",
-            "orphan",
-        ])
-        .arg(&lock_path)
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("start planted orphan");
-    let mut held = String::new();
-    std::io::BufReader::new(orphan.stdout.as_mut().expect("orphan output"))
-        .read_line(&mut held)
-        .expect("orphan holds the lock");
-    assert_eq!(held.trim(), "held");
+    // Rootful, a real child has dropped to the proxy account before exec.
+    let as_child: Vec<String> = if crate::identity::rootful() {
+        let (user, group) = crate::identity::child_ids().expect("proxy identity");
+        vec![
+            "setpriv".into(),
+            format!("--reuid={user}"),
+            format!("--regid={group}"),
+            "--clear-groups".into(),
+        ]
+    } else {
+        Vec::new()
+    };
+    let plant = |flock: &str, program: &[String]| {
+        let mut process = Command::new("/bin/sh")
+            .args([
+                "-c",
+                &format!("exec 9<\"$1\" && {flock} echo held && shift && exec \"$@\""),
+                "holder",
+            ])
+            .arg(&lock_path)
+            .args(program)
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("start planted lock holder");
+        let mut held = String::new();
+        std::io::BufReader::new(process.stdout.as_mut().expect("holder output"))
+            .read_line(&mut held)
+            .expect("holder opened the lock");
+        assert_eq!(held.trim(), "held");
+        process
+    };
+    // An orphan exactly as an agent crash leaves one: our Traefik, as the child identity,
+    // still holding the child lock through an inherited descriptor.
+    let program = [
+        as_child.clone(),
+        vec![executable.display().to_string(), "60".into()],
+    ];
+    let mut orphan = plant("flock -n 9 &&", &program.concat());
+    // A bystander that only holds a descriptor to the same file, as one passed over a socket
+    // would. Same identity, different program: it must survive.
+    let program = [as_child, vec!["/bin/sleep".into(), "60".into()]];
+    let mut bystander = plant("", &program.concat());
 
     let probe = generation_probe_server(state.join(DYNAMIC_CONFIG_FILENAME), false);
     let started = TraefikSupervisor::start(
@@ -931,13 +961,21 @@ fn a_new_supervisor_stops_an_orphan_that_holds_the_child_lock() {
         }
         thread::sleep(Duration::from_millis(10));
     };
-    drop(started);
+    let bystander_exit = bystander.try_wait().expect("observe bystander");
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+    let started = started.map(drop);
     drop(probe);
     std::fs::remove_dir_all(root).expect("remove orphan fixture");
     assert!(
         orphan_exit.is_some(),
         "a stale proxy child holding the child lock must be stopped on start"
     );
+    assert!(
+        bystander_exit.is_none(),
+        "a process that only shares the lock's file, but is not our Traefik, must not be killed: {bystander_exit:?}"
+    );
+    started.expect("the supervisor starts once the orphan is gone");
 }
 
 #[test]

@@ -209,6 +209,17 @@ mod login_lifecycle;
 pub fn process_exit_descriptor(pid: u32) -> std::io::Result<std::os::fd::OwnedFd> {
     pty::process_exit_descriptor(pid)
 }
+/// Signal the process behind a descriptor from [`process_exit_descriptor`].
+/// A PID reused after the named process exited is never signalled.
+/// # Errors
+/// Returns `ESRCH` once the process has exited, or a permission error.
+#[cfg(target_os = "linux")]
+pub fn signal_process_descriptor(
+    process: std::os::fd::BorrowedFd<'_>,
+    signal: nix::sys::signal::Signal,
+) -> std::io::Result<()> {
+    pty::signal_process_descriptor(process, signal)
+}
 #[cfg(feature = "ca-handoff")]
 pub mod openssl_secure;
 

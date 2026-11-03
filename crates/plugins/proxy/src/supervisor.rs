@@ -1054,9 +1054,16 @@ impl TraefikSupervisor {
             ));
         }
         let lock = acquire_supervisor_lock(&settings.lock_directory)?;
-        // Holding the owner lock proves no other agent is live, so any holder of the child
-        // lock is an orphan from a crashed agent. Stop it before it can keep our listeners.
-        let child_lock = Arc::new(acquire_child_lock(&settings.lock_directory)?);
+        // Holding the owner lock proves no other agent is live, so a holder of the child lock
+        // that runs our Traefik as the child identity is an orphan from a crashed agent. Stop it
+        // before it can keep our listeners.
+        let orphan = OrphanIdentity {
+            uid: child_identity()?.0,
+            executable: fs::metadata(&settings.executable)
+                .ok()
+                .map(|metadata| (metadata.dev(), metadata.ino())),
+        };
+        let child_lock = Arc::new(acquire_child_lock(&settings.lock_directory, &orphan)?);
         let worker_child_lock = Arc::clone(&child_lock);
         let (sender, receiver) = mpsc::sync_channel(4);
         let worker = thread::Builder::new()
@@ -1593,12 +1600,21 @@ fn trusted_health_owners(child: u32) -> Vec<u32> {
 const CHILD_LOCK_NAME: &str = ".traefik-child.lock";
 const ORPHAN_REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// What an orphaned Traefik child looks like: the child identity's UID, running the installed
+/// executable (device and inode; `None` when it is not installed, so nothing matches).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct OrphanIdentity {
+    uid: u32,
+    executable: Option<(u64, u64)>,
+}
+
 /// Take the lock every Traefik child inherits, stopping orphans that still hold it.
 ///
-/// The caller must already hold the supervisor lock: only then is every other holder known to
-/// be a child of an agent that is gone. The child receives a read-only descriptor, so it can
-/// hold the lock but never change the file.
-fn acquire_child_lock(directory: &Path) -> io::Result<Flock<File>> {
+/// The caller must already hold the supervisor lock: only then is a holder that also matches
+/// `orphan` known to be a child of an agent that is gone. The child receives a read-only
+/// descriptor, so it can hold the lock but never change the file. A holder that is not an
+/// orphan is never signalled; while it holds the lock this fails with `AlreadyExists`.
+fn acquire_child_lock(directory: &Path, orphan: &OrphanIdentity) -> io::Result<Flock<File>> {
     let path = directory.join(CHILD_LOCK_NAME);
     match OpenOptions::new()
         .write(true)
@@ -1635,7 +1651,7 @@ fn acquire_child_lock(directory: &Path) -> io::Result<Flock<File>> {
                     || error == nix::errno::Errno::EAGAIN =>
             {
                 file = returned;
-                stop_lock_holders(&file)?;
+                stop_lock_holders(&file, orphan)?;
                 if Instant::now() >= deadline {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
@@ -1649,12 +1665,21 @@ fn acquire_child_lock(directory: &Path) -> io::Result<Flock<File>> {
     }
 }
 
-// Only a process holding a descriptor for this exact agent-only file is stopped. That file
-// is reachable only through our own directory or an inherited descriptor, so a match
-// identifies an orphaned child, never an unrelated process.
+// Holding the lock's inode is not enough to be stopped: a descriptor can reach an unrelated
+// process (passed over a socket, opened by a root backup tool), and a PID can be reused
+// between the scan and the signal. So each candidate is pinned with a pidfd, then checked
+// again through /proc: it still holds the lock, every UID is the child identity's, and it
+// runs the installed Traefik. The signal goes through the pidfd. If it lands, the pinned
+// process was alive from opening to signalling, so its PID was not reused and every /proc read
+// in between described it; if it had exited, the signal fails and nothing else is hit.
 #[cfg(target_os = "linux")]
-fn stop_lock_holders(lock: &File) -> io::Result<()> {
+fn stop_lock_holders(lock: &File, orphan: &OrphanIdentity) -> io::Result<()> {
+    use std::os::fd::AsFd as _;
     let metadata = lock.metadata()?;
+    let lock = (metadata.dev(), metadata.ino());
+    let Some(executable) = orphan.executable else {
+        return Ok(());
+    };
     let own = std::process::id();
     for entry in fs::read_dir("/proc")? {
         let Some(pid) = entry?
@@ -1664,20 +1689,19 @@ fn stop_lock_holders(lock: &File) -> io::Result<()> {
         else {
             continue;
         };
-        if pid == own {
+        if pid == own || !holds_inode(pid, lock) {
             continue;
         }
-        let Ok(descriptors) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+        let Ok(process) = infraternal_shim::process_exit_descriptor(pid) else {
             continue;
         };
-        let holds_lock = descriptors.flatten().any(|descriptor| {
-            fs::metadata(descriptor.path()).is_ok_and(|candidate| {
-                candidate.dev() == metadata.dev() && candidate.ino() == metadata.ino()
-            })
-        });
-        if holds_lock && let Ok(pid) = i32::try_from(pid) {
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid),
+        if holds_inode(pid, lock)
+            && runs_only_as(pid, orphan.uid)
+            && fs::metadata(format!("/proc/{pid}/exe"))
+                .is_ok_and(|exe| (exe.dev(), exe.ino()) == executable)
+        {
+            let _ = infraternal_shim::signal_process_descriptor(
+                process.as_fd(),
                 nix::sys::signal::Signal::SIGKILL,
             );
         }
@@ -1685,8 +1709,32 @@ fn stop_lock_holders(lock: &File) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn holds_inode(pid: u32, inode: (u64, u64)) -> bool {
+    fs::read_dir(format!("/proc/{pid}/fd")).is_ok_and(|descriptors| {
+        descriptors.flatten().any(|descriptor| {
+            fs::metadata(descriptor.path())
+                .is_ok_and(|candidate| (candidate.dev(), candidate.ino()) == inode)
+        })
+    })
+}
+
+// Real, effective, saved and file-system UIDs must all be `uid`.
+#[cfg(target_os = "linux")]
+fn runs_only_as(pid: u32, uid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/status")).is_ok_and(|status| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("Uid:"))
+            .is_some_and(|values| {
+                let values: Vec<_> = values.split_whitespace().collect();
+                values.len() == 4 && values.iter().all(|value| value.parse() == Ok(uid))
+            })
+    })
+}
+
 #[cfg(not(target_os = "linux"))]
-fn stop_lock_holders(_lock: &File) -> io::Result<()> {
+fn stop_lock_holders(_lock: &File, _orphan: &OrphanIdentity) -> io::Result<()> {
     Ok(())
 }
 
