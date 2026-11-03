@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# Run `up` with the public HTTPS listener available and legacy 7443 traffic blocked (#263, #291).
+set -euo pipefail
+: "${INFRATERNAL_BIN:?set the compiled CLI/server binary}"
+: "${TRACER_DIST:?set the production tracer build from J82's join-approval-ui branch}"
+: "${J82_WORKTREE:?set the J82 join-approval-ui worktree used to build TRACER_DIST}"
+: "${CARGO_TARGET_DIR:?set this job's target directory}"
+
+expected_j82=6e11b71bf48042dddcbf295b9746d3977bb246e8
+actual_j82="$(git -C "$J82_WORKTREE" rev-parse HEAD)"
+if [[ "$actual_j82" != "$expected_j82" ]]; then
+    printf 'J82 worktree HEAD mismatch: expected %s, found %s\n' "$expected_j82" "$actual_j82" >&2
+    exit 1
+fi
+expected_dist="$(realpath "$J82_WORKTREE/apps/tracer/dist")"
+actual_dist="$(realpath "$TRACER_DIST")"
+if [[ "$actual_dist" != "$expected_dist" ]]; then
+    printf 'TRACER_DIST must be the production dist built from the verified J82 worktree\n' >&2
+    exit 1
+fi
+
+repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+control="$(mktemp -d /tmp/up.XXXXXX)"
+chmod 700 "$control"
+mkdir -m 700 "$control/bin" "$control/runtime" "$control/root"
+mkdir -p -m 700 "$control/root/usr/local/bin" "$control/root/var/lib" \
+    "$control/root/etc/systemd/system" "$control/root/etc/ssl/certs"
+mkdir -p -m 700 "$control/root/bin" "$control/root/nix/store" \
+    "$control/root/tmp" "$control/root/proc" "$control/root/dev"
+touch "$control/root/bin/sh" "$control/root/infraternal"
+touch "$control/root/dev/null"
+mkdir -m 755 "$control/root/run"
+mkdir -m 700 "$control/root/run/infraternal"
+mkdir -m 700 "$control/shared"
+touch "$control/shared/service-systemctl-calls" "$control/root/tmp/systemctl-calls" \
+    "$control/systemctl-calls"
+printf '127.0.0.1 localhost\n::1 localhost\n' > "$control/root/etc/hosts"
+printf 'hosts: files dns\n' > "$control/root/etc/nsswitch.conf"
+cp -- /etc/ssl/certs/ca-certificates.crt \
+    "$control/root/etc/ssl/certs/ca-certificates.crt"
+export UP_E2E_CONTROL_DIR="$control"
+export UP_SUDO_CALLS="$control/sudo-calls"
+export UP_SYSTEMCTL_CALLS="$control/systemctl-calls"
+export UP_SERVICE_SYSTEMCTL_CALLS="$control/shared/service-systemctl-calls"
+export UP_HELPER_OUTPUT="$control/helper-output"
+export UP_TEST_CA_BUNDLE="$control/root/etc/ssl/certs/ca-certificates.crt"
+export UP_PRIVATE_ROOT="$control/root"
+export INFRATERAL_TEST_STATE_ROOT="$control/test-state"
+export INFRATERAL_UP_EVIDENCE_DIR="${INFRATERAL_UP_EVIDENCE_DIR:-$control/evidence}"
+mkdir -m 700 "$INFRATERAL_TEST_STATE_ROOT"
+mkdir -p -m 700 "$INFRATERAL_UP_EVIDENCE_DIR"
+trap 'rm -rf -- "$control"' EXIT
+
+cat >"$control/bin/sudo" <<'SUDO'
+#!/bin/sh
+set -eu
+printf 'sudo\n' >> "$UP_SUDO_CALLS"
+[ "${1-}" = "--" ] || exit 2
+shift
+[ "$#" -ge 2 ] || exit 2
+shift
+if /usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_DIR=/etc/ssl/certs TMPDIR=/tmp \
+    UP_SYSTEMCTL_CALLS=/tmp/systemctl-calls \
+    /usr/bin/unshare --pid --fork --mount-proc="$UP_PRIVATE_ROOT/proc" \
+    /usr/sbin/chroot "$UP_PRIVATE_ROOT" /infraternal "$@" >"$UP_HELPER_OUTPUT"; then
+    status=0
+else
+    status=$?
+fi
+cat "$UP_HELPER_OUTPUT"
+exit "$status"
+SUDO
+cat >"$control/bin/systemctl" <<'SYSTEMCTL'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$UP_SYSTEMCTL_CALLS"
+if [ "${1-}" = "is-active" ]; then printf 'active\n'; fi
+SYSTEMCTL
+chmod 700 "$control/bin/sudo" "$control/bin/systemctl"
+cp -- "$control/bin/systemctl" "$control/root/usr/local/bin/systemctl"
+chmod 755 "$control/root/usr/local/bin/systemctl"
+export PATH="$control/bin:$PATH"
+
+unshare --user --map-root-user --net --mount --uts \
+    bash -s -- "$control" "$repo_dir" <<'NAMESPACE'
+set -euo pipefail
+control="$1"
+repo_dir="$2"
+mount --make-rprivate /
+ip link set lo up
+ip rule del pref 0
+ip rule add pref 10 ipproto tcp dport 7443 blackhole
+ip rule add pref 11 ipproto tcp sport 7443 blackhole
+ip rule add pref 12 ipproto udp dport 7443 blackhole
+ip rule add pref 13 ipproto udp sport 7443 blackhole
+ip rule add pref 100 lookup local
+hostname up-e2e-node
+# Keep every installer ancestor under this mapped-UID-0 root; do not relax its ownership checks.
+mount --bind /nix/store "$control/root/nix/store"
+bash_path="$(readlink -f "$(command -v bash)")"
+mount --bind "$bash_path" "$control/root/bin/sh"
+mount --bind "$INFRATERNAL_BIN" "$control/root/infraternal"
+mount --bind "$UP_SERVICE_SYSTEMCTL_CALLS" "$control/root/tmp/systemctl-calls"
+# Command::output redirects child stdin from /dev/null inside the chroot.
+mount --bind /dev/null "$control/root/dev/null"
+mount --bind "$control/root/run/infraternal" /run/infraternal
+run_state="$(stat -c '%u:%a' /run/infraternal)"
+if [[ "$run_state" != "0:700" ]]; then
+    printf 'namespace runtime preflight: /run/infraternal expected 0:700, found %s\n' "$run_state" >&2
+    exit 1
+fi
+mount --bind "$control/root/usr/local" /usr/local
+mount --bind "$control/root/var/lib" /var/lib
+mount --bind "$control/root/etc/systemd/system" /etc/systemd/system
+mount --bind "$control/root/etc/ssl/certs" /etc/ssl/certs
+printf 'namespace_network app_listener=tcp443 blocked_agent_port=tcp_udp7443\n'
+cd "$repo_dir/apps/tracer"
+bun x playwright test -c playwright.real.config.ts real/up-approval.spec.ts
+NAMESPACE
