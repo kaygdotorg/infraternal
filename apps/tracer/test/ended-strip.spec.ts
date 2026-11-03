@@ -9,6 +9,7 @@ import { tracerEvidencePath } from "./evidence-path";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, test, type APIRequestContext, type Page } from "playwright/test";
+import { FORMAT, VERSION } from "../src/canvas/model/schema";
 
 const retry = <T>(call: () => Promise<T>): Promise<T> => call().catch(() => call());
 type MockState = { attach_count: number; session_id: string; echoed_text: string };
@@ -23,14 +24,16 @@ async function restoreEnded(page: Page, width = 1440, height = 900): Promise<voi
   await page.goto("/?theme=ink&bg=none");
   await expect.poll(() => page.locator("#terminal-screen").getAttribute("data-connected"), { timeout: 30_000 }).toBe("true");
   const { session_ids: ids } = (await (await retry(() => request.post("/__mock/seed-ended-sessions", { data: { count: 2 } }))).json()) as { session_ids: string[] };
-  await page.evaluate((gone) => {
-    const key = Object.keys(localStorage).find((k) => k.startsWith("infraternal.canvas."))!;
-    const doc = JSON.parse(localStorage.getItem(key)!);
-    const host = doc.views[0].layout.columns[0].windows[0].target.host as string;
-    const win = (n: number) => ({ id: `t-restored-${n}`, target: { type: "session", id: gone[n], host, name: "shell" } });
-    doc.views[0].layout.columns = [{ id: "c1", weight: 1, windows: [win(0)] }, { id: "c2", weight: 1, windows: [win(1)] }];
-    localStorage.setItem(key, JSON.stringify(doc));
-  }, ids);
+  // The layout is server-owned (D312): the page keeps no document in its storage to edit, and it saves one only on an edit.
+  // So the spec writes the saved layout itself, two windows on the lost sessions, and lets the server push it as another
+  // device would, then reloads into it.
+  const { hostname } = await page.evaluate(async () => {
+    const response = await fetch("/auth/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    return await response.json() as { hostname: string };
+  });
+  const win = (n: number) => ({ id: `t-restored-${n}`, target: { type: "session", id: ids[n], host: hostname, name: "shell" } });
+  const document = { format: FORMAT, version: VERSION, revision: 0, views: [{ id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [{ id: "c1", weight: 1, windows: [win(0)] }, { id: "c2", weight: 1, windows: [win(1)] }] } }] };
+  expect((await retry(() => request.post("/__mock/layout", { data: { document } }))).ok(), "the double accepts the restored layout").toBe(true);
   await page.reload();
   await expect(page.locator(".cl-sx-strip")).toHaveCount(2, { timeout: 30_000 });
 }

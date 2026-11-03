@@ -44,6 +44,22 @@ export function appwinLayoutReset(): void {
   layout = { format: FORMAT, version: VERSION, revision: 0, views: [] };
   layoutInitialized = false; layoutSubscribers.clear(); layoutReceipts.clear();
 }
+/** The account layout as the server holds it, for a check that wants to see what the product saved (`/__mock/layout`). */
+export function appwinLayoutRead(): { initialized: boolean; document: CanvasDocument } {
+  return { initialized: layoutInitialized, document: layout };
+}
+/**
+ * Replaces the account layout as if another device had saved it, and pushes the new snapshot to every subscriber. A check
+ * uses it to put windows on sessions the host has lost: the layout is server-owned (D312), so the page's own storage no
+ * longer holds a document to edit. False when the document is not a valid layout.
+ */
+export function appwinLayoutReplace(candidate: unknown): boolean {
+  const document = parseDocument(candidate);
+  if (!document) return false;
+  layout = { ...document, revision: layout.revision + 1 }; layoutInitialized = true;
+  publishLayout(layoutSnapshot());
+  return true;
+}
 function publishLayout(event: Record<string, unknown>): void {
   for (const [socket, subscriptions] of layoutSubscribers) for (const subId of subscriptions) {
     if (socket.readyState === 1) socket.send(encodeMuxedFrame(0, { type: "Event", subId, eventJson: text(event) }));
