@@ -1472,12 +1472,13 @@ async fn review_invalid_device_polling_exhausts_browser_budget() {
             .body(axum::body::Body::from(r#"{"token":"invalid"}"#))
             .unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
-        if index < 60 {
-            assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
-        } else {
-            assert_eq!(response.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
-            assert_eq!(response.headers()["retry-after"], "60");
-        }
+        // No process-wide device bucket exists to exhaust (#263); per-source
+        // limits are the runtime middleware's, which this router omits.
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::UNAUTHORIZED,
+            "poll {index}"
+        );
     }
     let request = axum::http::Request::builder()
         .method("POST")

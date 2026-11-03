@@ -998,10 +998,18 @@ async fn source_admission(
     let Ok(now) = unix_seconds() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    // Public device-code requests have no process-wide ceiling (one caller
+    // could spend it for everyone, #263), so this per-network budget is their
+    // only request limit and must not reset when an IPv6 caller rotates hosts.
+    let principal = if device {
+        device_source(source)
+    } else {
+        source
+    };
     let mut buckets = policy.buckets.lock().await;
     if let Err(response) = admit_temporal_request(
         &mut buckets,
-        (source, device),
+        (principal, device),
         now,
         if device { 10 } else { 30 },
     ) {
@@ -1009,6 +1017,19 @@ async fn source_admission(
     }
     drop(buckets);
     next.run(request).await
+}
+
+/// The network a public device-code caller is accounted to: the IPv4 address,
+/// or the /64 of an IPv6 address (one interface allocation; hosts inside it
+/// rotate freely). IPv4-mapped IPv6 addresses count as their IPv4 address.
+pub(crate) fn device_source(source: IpAddr) -> IpAddr {
+    match source {
+        IpAddr::V4(_) => source,
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or_else(
+            || IpAddr::V6((u128::from(v6) & !u128::from(u64::MAX)).into()),
+            IpAddr::V4,
+        ),
+    }
 }
 
 /// Bounded refusal reasons share ordinary auth's exact HTTP response without
@@ -1623,6 +1644,144 @@ mod reviewer_admission {
         );
         println!(
             "REVIEW production source admission: 30 browser / 10 device, five recovery actions covered, untrusted XFF cannot reset budget, logout exempt"
+        );
+    }
+}
+
+#[cfg(test)]
+mod device_code_admission_tests {
+    //! Public device-code requests: one caller must not refuse another (#263, J122 P2).
+    use super::*;
+    use axum::body::Body;
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    async fn post(app: &Router, action: &str, source: &str, body: &Value) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/auth/{action}"))
+                    .header("content-type", "application/json")
+                    .header("x-forwarded-for", source)
+                    .extension(ConnectInfo(SocketAddr::from(([192, 0, 2, 1], 5000))))
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    async fn app() -> Router {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let auth = Auth::new(pool, "auth.example.test", "https://auth.example.test")
+            .await
+            .unwrap();
+        let admission = SourceAdmission {
+            behind_proxy: true,
+            trusted_proxies: vec!["192.0.2.0/24".parse().unwrap()],
+            buckets: Arc::default(),
+        };
+        auth::router(auth).layer(from_fn_with_state(admission, source_admission))
+    }
+
+    fn join_start() -> Value {
+        json!({
+            "kind": "join_machine",
+            "device": "workstation",
+            "request": {
+                "host_id": "00000000-0000-0000-0000-000000000001",
+                "hostname": "workstation",
+                "mode": "system",
+                "execution_uid": 0,
+                "key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn device_floods_from_other_sources_leave_a_new_source_its_whole_budget() {
+        let app = app().await;
+        // Six sources spend their full per-source device budget on guessed tokens.
+        for source in 1..=6 {
+            for _ in 0..10 {
+                let (status, _) = post(
+                    &app,
+                    "device-redeem",
+                    &format!("198.51.100.{source}"),
+                    &json!({"token": "A".repeat(43)}),
+                )
+                .await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+            }
+        }
+        // A seventh caller still starts and polls both sign-in and machine join.
+        let fresh = "203.0.113.7";
+        let (status, started) = post(&app, "device-start", fresh, &join_start()).await;
+        assert_eq!(status, StatusCode::OK, "machine join start was refused");
+        let poll = json!({"token": started["poll_token"]});
+        assert_eq!(
+            post(&app, "device-redeem", fresh, &poll).await.0,
+            StatusCode::UNAUTHORIZED,
+            "a pending machine join poll must not be throttled by other sources"
+        );
+        let sign_in = json!({"device": "laptop", "scopes": ["hosts:read"]});
+        let (status, started) = post(&app, "device-start", fresh, &sign_in).await;
+        assert_eq!(status, StatusCode::OK, "sign-in start was refused");
+        assert_eq!(
+            post(
+                &app,
+                "device-redeem",
+                fresh,
+                &json!({"token": started["poll_token"]})
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn one_ipv6_network_shares_one_device_budget() {
+        let app = app().await;
+        let guess = json!({"token": "A".repeat(43)});
+        for host in 1..=10 {
+            let (status, _) = post(
+                &app,
+                "device-redeem",
+                &format!("2001:db8:1:2::{host}"),
+                &guess,
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        // Rotating the interface identifier inside the same /64 does not buy more requests.
+        assert_eq!(
+            post(&app, "device-redeem", "2001:db8:1:2::ffff", &guess)
+                .await
+                .0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        // A different /64 keeps its own budget.
+        assert_eq!(
+            post(&app, "device-redeem", "2001:db8:1:3::1", &guess)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
         );
     }
 }

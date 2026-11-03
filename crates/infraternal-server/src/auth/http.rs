@@ -523,8 +523,15 @@ async fn ingress(auth: &Auth, action: &str, headers: &HeaderMap, now: i64) -> su
     if action == "logout" {
         return Ok(());
     }
-    // Two fixed partitions keep the aggregate ceiling at 180/minute. No device
-    // caller can spend the 120 browser slots; IP/proxy headers are never trusted.
+    // Public device-code requests share no process-wide bucket: any caller could
+    // spend it and refuse every other `up` and sign-in (#263, J122 P2). They are
+    // limited per source network by the runtime's source admission, and the
+    // state they create is bounded by the pending-approval caps instead.
+    if matches!(action, "device-start" | "device-redeem") {
+        return Ok(());
+    }
+    // Browser actions keep one fixed 120/minute partition that device callers
+    // cannot spend; IP/proxy headers are never trusted here.
     let mut budget = auth.ingress.lock().await;
     if now - budget.window >= 60 {
         *budget = Ingress {
@@ -532,24 +539,18 @@ async fn ingress(auth: &Auth, action: &str, headers: &HeaderMap, now: i64) -> su
             ..Ingress::default()
         };
     }
-    let (used, limit) = if matches!(action, "device-start" | "device-redeem") {
-        (&mut budget.devices, 60)
-    } else {
-        (&mut budget.browser, 120)
-    };
-    if *used >= limit {
+    if budget.browser >= 120 {
         return Err(Error::Throttled);
     }
-    *used += 1;
+    budget.browser += 1;
     Ok(())
 }
 
-/// Fixed-size admission partitions; all HTTP actions count, including authenticated reads.
+/// Fixed-size browser admission partition; every browser action counts, including authenticated reads.
 #[derive(Default)]
 pub(super) struct Ingress {
     window: i64,
     browser: u32,
-    devices: u32,
 }
 
 /// Keep the unauthenticated response limited to first-run state and its local command.
@@ -600,19 +601,17 @@ mod tests {
             ingress(&auth, "login-start", &headers, now).await,
             Err(Error::Throttled)
         ));
-        for _ in 0..60 {
+        // Device-code requests skip the shared browser partition, and have no
+        // process-wide partition of their own (per-source limits live in runtime).
+        for _ in 0..1000 {
             ingress(&auth, "device-redeem", &HeaderMap::new(), now)
                 .await
                 .unwrap();
         }
-        assert!(matches!(
-            ingress(&auth, "device-start", &HeaderMap::new(), now).await,
-            Err(Error::Throttled)
-        ));
-        ingress(&auth, "login-start", &headers, now + 60)
+        ingress(&auth, "device-start", &HeaderMap::new(), now)
             .await
             .unwrap();
-        ingress(&auth, "device-redeem", &HeaderMap::new(), now + 60)
+        ingress(&auth, "login-start", &headers, now + 60)
             .await
             .unwrap();
     }
