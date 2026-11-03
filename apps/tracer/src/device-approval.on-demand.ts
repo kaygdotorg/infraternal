@@ -7,8 +7,10 @@ import {
   inspectDeviceApproval,
   inspectRemovalApproval,
   isDeviceUserCode,
+  keyLifetimeLabel,
   loginWithPasskey,
   recoveryAuth,
+  type DeviceApprovalReview,
   type RemovalApprovalReview,
 } from "./auth";
 import { deviceName, safeAuthMessage } from "./onboarding";
@@ -105,7 +107,7 @@ function renderChecking(host: HTMLElement): void {
 function renderReview(
   host: HTMLElement,
   code: string,
-  review: { device: string; scopes: string[] },
+  review: DeviceApprovalReview,
   onApproved: () => void,
 ): void {
   host.innerHTML = `<section class="auth-screen" aria-label="Device sign-in approval">
@@ -119,6 +121,7 @@ function renderReview(
       <label class="auth-check"><input id="device-approval-code-match" type="checkbox" /><span>I checked that this code matches the code in my terminal</span></label>
       <dl class="device-approval-facts">
         <div><dt>Device</dt><dd id="device-approval-device"></dd></div>
+        <div><dt>Valid for</dt><dd id="device-approval-lifetime"></dd></div>
       </dl>
       <section class="device-approval-access" aria-labelledby="device-approval-access-title">
         <h2 id="device-approval-access-title">Access</h2>
@@ -133,6 +136,7 @@ function renderReview(
 
   host.querySelector<HTMLOutputElement>("#device-approval-code")!.textContent = code;
   host.querySelector<HTMLElement>("#device-approval-device")!.textContent = review.device;
+  host.querySelector<HTMLElement>("#device-approval-lifetime")!.textContent = keyLifetimeLabel(review.lifetimeSeconds);
   const scopes = host.querySelector<HTMLUListElement>(".device-approval-scopes")!;
   for (const scope of review.scopes) {
     const item = document.createElement("li");

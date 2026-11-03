@@ -1,20 +1,30 @@
 //! API key inactivity deadlines, bounded renewal writes and upgrade grace (#269, D311).
 use super::*;
 
+/// These tests cover J90's policy mechanics (sliding renewal, clamping, tombstones), so each
+/// key behaves like one approved before D333: no approved end. The approved end is covered in
+/// `key_lifetime_tests`.
 async fn key(f: &Fixture) -> String {
     let approval = f
         .auth
-        .device_start("cli", vec!["hosts:read".into()], NOW)
+        .device_start_for("cli", vec!["hosts:read".into()], Some(30 * 86_400), NOW)
         .await
         .unwrap();
     f.auth
         .device_approve(&f.session, str_field(&approval, "user_code"), NOW)
         .await
         .unwrap();
-    f.auth
+    let key = f
+        .auth
         .device_redeem(str_field(&approval, "poll_token"), NOW)
         .await
-        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE api_keys SET hard_expires_at=NULL WHERE token_hash=?")
+        .bind(hash(&key))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    key
 }
 
 async fn expiry(auth: &Auth, key: &str) -> i64 {

@@ -3506,3 +3506,5 @@ mod logout_commit;
 
 #[path = "api_expiry_tests.rs"]
 mod api_expiry;
+#[path = "key_lifetime_tests.rs"]
+mod key_lifetime_tests;

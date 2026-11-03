@@ -66,6 +66,20 @@ export interface AuthStatus {
 export interface DeviceApprovalReview {
   device: string;
   scopes: string[];
+  /** How long the approved key lasts; the tap approves this together with the scopes (D333). */
+  lifetimeSeconds: number;
+}
+
+/** Bounds the server applies to a requested key lifetime: 1 hour up to the 365-day policy maximum. */
+const MIN_KEY_LIFETIME_SECONDS = 3_600;
+const MAX_KEY_LIFETIME_SECONDS = 365 * 86_400;
+
+/** A key lifetime as a person reads it: hours up to two days ("24 hours"), whole days after. */
+export function keyLifetimeLabel(seconds: number): string {
+  const hours = Math.floor(seconds / 3_600);
+  if (seconds < 2 * 86_400 || seconds % 86_400 !== 0) return hours === 1 ? "1 hour" : `${hours} hours`;
+  const days = seconds / 86_400;
+  return `${days} days`;
 }
 
 const DEVICE_APPROVAL_SCOPES = new Set([
@@ -85,7 +99,7 @@ export function isDeviceUserCode(code: string): boolean {
 /** Reads the requested device and scopes; the browser session is required by the server. */
 export async function inspectDeviceApproval(code: string): Promise<DeviceApprovalReview> {
   if (!isDeviceUserCode(code)) throw invalidDeviceApprovalLink();
-  let review: { device?: unknown; scopes?: unknown };
+  let review: { device?: unknown; scopes?: unknown; lifetime_seconds?: unknown };
   try {
     review = await post("device-inspect", { code });
   } catch (error: unknown) {
@@ -100,10 +114,14 @@ export async function inspectDeviceApproval(code: string): Promise<DeviceApprova
     || scopes.length === 0
     || scopes.length > 32
     || new Set(scopes).size !== scopes.length
-    || !scopes.every((scope) => typeof scope === "string" && DEVICE_APPROVAL_SCOPES.has(scope))) {
+    || !scopes.every((scope) => typeof scope === "string" && DEVICE_APPROVAL_SCOPES.has(scope))
+    || typeof review.lifetime_seconds !== "number"
+    || !Number.isInteger(review.lifetime_seconds)
+    || review.lifetime_seconds < MIN_KEY_LIFETIME_SECONDS
+    || review.lifetime_seconds > MAX_KEY_LIFETIME_SECONDS) {
     throw new AuthError("The server's sign-in request could not be reviewed. Check that the server is up to date, then ask for a new link.");
   }
-  return { device: review.device, scopes: [...scopes] as string[] };
+  return { device: review.device, scopes: [...scopes] as string[], lifetimeSeconds: review.lifetime_seconds };
 }
 
 /** Approves only after the caller has completed a fresh passkey login from a user action. */

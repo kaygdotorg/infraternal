@@ -1,10 +1,40 @@
 //! Single-use device approval and exact-scope API key authorization [27,28].
 use super::{Auth, B64, Engine, Error, Result, Row, Value, hash, json, random, require_session_tx};
 
+/// A key's lifetime when the request names none (D333: "short by default, for example 24
+/// hours"), and the shortest lifetime a request may ask for.
+pub(crate) const DEFAULT_KEY_LIFETIME_SECONDS: i64 = 86_400;
+const MIN_KEY_LIFETIME_SECONDS: i64 = 3_600;
+
 #[allow(clippy::missing_errors_doc)]
 impl Auth {
-    /// Start device-code approval. Only the high-entropy polling token can redeem approval.
+    /// Start device-code approval with the default key lifetime.
     pub async fn device_start(&self, device: &str, scopes: Vec<String>, now: i64) -> Result<Value> {
+        self.device_start_for(device, scopes, None, now).await
+    }
+
+    /// Start device-code approval. Only the high-entropy polling token can redeem approval.
+    ///
+    /// D333: the passkey tap that approves the key also approves its lifetime. The request
+    /// carries it (default 24 h, at least 1 h, at most the owner's key-lifetime policy), the
+    /// approval page shows it next to the exact scopes, and the redeemed key ends at that
+    /// time however often it is renewed.
+    pub async fn device_start_for(
+        &self,
+        device: &str,
+        scopes: Vec<String>,
+        lifetime: Option<i64>,
+        now: i64,
+    ) -> Result<Value> {
+        let lifetime = lifetime.unwrap_or(DEFAULT_KEY_LIFETIME_SECONDS);
+        let policy: i64 = sqlx::query_scalar(
+            "SELECT api_key_lifetime_days*86400 FROM server_settings WHERE id=1",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        if !(MIN_KEY_LIFETIME_SECONDS..=policy.max(MIN_KEY_LIFETIME_SECONDS)).contains(&lifetime) {
+            return Err(Error::Invalid);
+        }
         if device.is_empty()
             || device.len() > 128
             || scopes.is_empty()
@@ -30,15 +60,18 @@ impl Auth {
         let token = random();
         let code = B64.encode(rand::random::<[u8; 12]>());
         sqlx::query(
-            "INSERT INTO approvals(token_hash,code_hash,scopes,device,expires) VALUES (?,?,?,?,?)",
+            "INSERT INTO approvals(token_hash,code_hash,scopes,device,expires,lifetime) VALUES (?,?,?,?,?,?)",
         )
         .bind(hash(&token))
         .bind(hash(&code))
         .bind(serde_json::to_string(&scopes)?)
         .bind(device)
         .bind(now + 600)
+        .bind(lifetime)
         .execute(&self.pool)
         .await?;
+        // The start response keeps its shape: released CLIs refuse unknown fields here. The
+        // lifetime is shown where it is approved, on the review page (`device_inspect`).
         Ok(json!({"poll_token":token,"user_code":code,"expires_in":600}))
     }
 
@@ -72,32 +105,38 @@ impl Auth {
     /// Inspect requested device and scopes before approval (a code alone never grants access).
     pub async fn device_inspect(&self, token: &str, code: &str, now: i64) -> Result<Value> {
         self.session(token, now).await?;
-        let row =
-            sqlx::query("SELECT device,scopes FROM approvals WHERE code_hash=? AND expires>?")
-                .bind(hash(code))
-                .bind(now)
-                .fetch_optional(&self.pool)
-                .await?
-                .ok_or(Error::Denied)?;
-        Ok(
-            json!({"device":row.get::<String,_>("device"),"scopes":serde_json::from_str::<Value>(row.get("scopes"))?}),
+        let row = sqlx::query(
+            "SELECT device,scopes,lifetime FROM approvals WHERE code_hash=? AND expires>?",
         )
+        .bind(hash(code))
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(Error::Denied)?;
+        Ok(json!({
+            "device": row.get::<String, _>("device"),
+            "scopes": serde_json::from_str::<Value>(row.get("scopes"))?,
+            "lifetime_seconds": row.get::<i64, _>("lifetime"),
+        }))
     }
 
     /// Redeem approval once. The API key is returned only here and stored as a hash.
     pub async fn device_redeem(&self, token: &str, now: i64) -> Result<String> {
         let mut tx = self.pool.begin().await?;
-        let row = sqlx::query("DELETE FROM approvals WHERE token_hash=? AND expires>? AND user_id IS NOT NULL RETURNING user_id,device,scopes")
+        let row = sqlx::query("DELETE FROM approvals WHERE token_hash=? AND expires>? AND user_id IS NOT NULL RETURNING user_id,device,scopes,lifetime")
             .bind(hash(token)).bind(now).fetch_optional(&mut *tx).await?.ok_or(Error::Denied)?;
         let now = api_key_time(&mut tx, now).await?;
+        let hard_expires_at = now.saturating_add(row.get::<i64, _>("lifetime"));
         let key = random();
-        sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at) VALUES (?,?,?,?,?,?+(SELECT api_key_lifetime_days*86400 FROM server_settings WHERE id=1))")
+        sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,hard_expires_at) VALUES (?,?,?,?,?,MIN(?,?+(SELECT api_key_lifetime_days*86400 FROM server_settings WHERE id=1)),?)")
             .bind(hash(&key))
             .bind(row.get::<String, _>("user_id"))
             .bind(row.get::<String, _>("device"))
             .bind(row.get::<String, _>("scopes"))
             .bind(now)
+            .bind(hard_expires_at)
             .bind(now)
+            .bind(hard_expires_at)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -156,7 +195,7 @@ impl Auth {
     ) -> Result<Option<String>> {
         // Serialize expiry, policy clamping, renewal and revocation. A dead row
         // remains dead even if the owner subsequently lengthens the policy.
-        let row = sqlx::query("SELECT user_id,scopes,renewed_at,expires_at,dead,api_key_lifetime_days FROM api_keys CROSS JOIN server_settings WHERE server_settings.id=1 AND token_hash=?")
+        let row = sqlx::query("SELECT user_id,scopes,renewed_at,expires_at,hard_expires_at,dead,api_key_lifetime_days FROM api_keys CROSS JOIN server_settings WHERE server_settings.id=1 AND token_hash=?")
             .bind(token_hash).fetch_optional(&mut **tx).await?;
         // Sample only after the caller acquired the writer and the key was read.
         let wall_time = match wall_time {
@@ -170,7 +209,11 @@ impl Auth {
         let renewed_at: i64 = row.get("renewed_at");
         let stored_expiry: i64 = row.get("expires_at");
         let lifetime = row.get::<i64, _>("api_key_lifetime_days") * 86400;
-        let deadline = stored_expiry.min(renewed_at + lifetime);
+        // The approved lifetime (D333) is an absolute end; renewal slides only up to it.
+        let hard_end: Option<i64> = row.get("hard_expires_at");
+        let deadline = stored_expiry
+            .min(renewed_at + lifetime)
+            .min(hard_end.unwrap_or(i64::MAX));
         if row.get::<bool, _>("dead") || deadline <= now {
             sqlx::query("UPDATE api_keys SET dead=1,expires_at=? WHERE token_hash=? AND dead=0")
                 .bind(deadline)
@@ -186,7 +229,7 @@ impl Auth {
                 "UPDATE api_keys SET renewed_at=?,expires_at=? WHERE token_hash=? AND dead=0",
             )
             .bind(now)
-            .bind(now + lifetime)
+            .bind((now + lifetime).min(hard_end.unwrap_or(i64::MAX)))
             .bind(token_hash)
             .execute(&mut **tx)
             .await?;

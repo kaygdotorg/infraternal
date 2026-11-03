@@ -29,7 +29,7 @@ test("device approval link reviews the exact laptop and scopes before approval",
   } }));
   await page.route("**/auth/device-inspect", route => route.fulfill({ json: {
     device: "kayg-laptop",
-    scopes: ["hosts:read", "sessions:read", "status:read"],
+    scopes: ["hosts:read", "sessions:read", "status:read"], lifetime_seconds: 86400,
   } }));
   await page.route("**/auth/login-start", async route => {
     loginStarts += 1;
@@ -55,6 +55,8 @@ test("device approval link reviews the exact laptop and scopes before approval",
   await expect(page.getByText("hosts:read", { exact: true })).toBeVisible();
   await expect(page.getByText("sessions:read", { exact: true })).toBeVisible();
   await expect(page.getByText("status:read", { exact: true })).toBeVisible();
+  // D333: the tap approves the key's lifetime with its scopes, so the review states it.
+  await expect(page.locator("#device-approval-lifetime")).toHaveText("24 hours");
   await expect(page.getByRole("button", { name: "Approve with passkey" })).toBeVisible();
 
   const expectApprovalAlignment = async (): Promise<void> => {
@@ -63,7 +65,7 @@ test("device approval link reviews the exact laptop and scopes before approval",
         const element = document.querySelector<HTMLElement>(selector);
         if (!element) throw new Error(`Missing approval alignment element: ${selector}`);
         const bounds = element.getBoundingClientRect();
-        return { left: bounds.left, centerY: bounds.top + bounds.height / 2 };
+        return { left: bounds.left, centerY: bounds.top + bounds.height / 2, height: bounds.height };
       };
       return {
         label: rect(".auth-label"),
@@ -74,6 +76,10 @@ test("device approval link reviews the exact laptop and scopes before approval",
         confirmationText: rect(".auth-check span"),
         approveIcon: rect("#device-approval-approve svg"),
         approveText: rect("#device-approval-approve > span:not(.busy-count)"),
+        deviceLabel: rect(".device-approval-facts > div:first-child dt"),
+        deviceValue: rect("#device-approval-device"),
+        lifetimeLabel: rect(".device-approval-facts > div:nth-child(2) dt"),
+        lifetimeValue: rect("#device-approval-lifetime"),
       };
     });
     const withinHalfPixel = (actual: number, expected: number): void => {
@@ -84,6 +90,10 @@ test("device approval link reviews the exact laptop and scopes before approval",
     withinHalfPixel(alignment.confirmation.left, alignment.label.left);
     withinHalfPixel(alignment.checkbox.centerY, alignment.confirmationText.centerY);
     withinHalfPixel(alignment.approveIcon.centerY, alignment.approveText.centerY);
+    // D333's lifetime row lines up with the device row and its label stays on one line.
+    withinHalfPixel(alignment.lifetimeLabel.left, alignment.deviceLabel.left);
+    withinHalfPixel(alignment.lifetimeValue.left, alignment.deviceValue.left);
+    withinHalfPixel(alignment.lifetimeLabel.height, alignment.deviceLabel.height);
   };
 
   const evidenceDirectory = process.env.INFRATERNAL_SIGNIN_EVIDENCE_DIR;
@@ -132,7 +142,7 @@ test("approval page shows the code so a person can match it with the CLI", async
   } }));
   await page.route("**/auth/device-inspect", route => route.fulfill({ json: {
     device: "kayg-laptop",
-    scopes: ["hosts:read", "sessions:read", "status:read"],
+    scopes: ["hosts:read", "sessions:read", "status:read"], lifetime_seconds: 86400,
   } }));
 
   await page.goto(`/?device_code=${code}`);
@@ -200,7 +210,7 @@ test("a fresh virtual passkey tap approves the reviewed device request", async (
   });
   await page.route("**/auth/device-inspect", (route) => route.fulfill({ json: {
     device: "new-developer-workstation",
-    scopes: ["hosts:read", "sessions:read", "status:read"],
+    scopes: ["hosts:read", "sessions:read", "status:read"], lifetime_seconds: 86400,
   } }));
   let approvals = 0;
   await page.route("**/auth/device-approve", async (route) => {
@@ -233,7 +243,7 @@ test("a signed-out browser must sign in before it can inspect a device request",
   await page.route("**/auth/session", route => route.fulfill({ status: 401, json: { error: "signed out" } }));
   await page.route("**/auth/device-inspect", async route => {
     inspections += 1;
-    await route.fulfill({ json: { device: "kayg-laptop", scopes: ["hosts:read", "sessions:read", "status:read"] } });
+    await route.fulfill({ json: { device: "kayg-laptop", scopes: ["hosts:read", "sessions:read", "status:read"], lifetime_seconds: 86400 } });
   });
   await page.route("**/auth/login-start", async route => {
     loginStarts += 1;
@@ -304,7 +314,7 @@ test("device names are rendered as text, never as server-provided markup", async
   } }));
   await page.route("**/auth/device-inspect", route => route.fulfill({ json: {
     device,
-    scopes: ["hosts:read", "sessions:read", "status:read"],
+    scopes: ["hosts:read", "sessions:read", "status:read"], lifetime_seconds: 86400,
   } }));
 
   await page.goto("/?device_code=AbCdEfGhIjKlMnOp");
@@ -324,7 +334,7 @@ test("device approval displays each additional scope requested by the CLI", asyn
   } }));
   await page.route("**/auth/device-inspect", route => route.fulfill({ json: {
     device: "cli-laptop",
-    scopes: ["hosts:read", "sessions:read", "status:read", "hosts:write"],
+    scopes: ["hosts:read", "sessions:read", "status:read", "hosts:write"], lifetime_seconds: 86400,
   } }));
 
   await page.goto("/?device_code=AbCdEfGhIjKlMnOp");

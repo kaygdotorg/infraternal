@@ -90,9 +90,12 @@ struct Token {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Device {
+struct DeviceStart {
     device: String,
     scopes: Vec<String>,
+    /// Requested key lifetime in seconds; the server default applies when absent (D333).
+    #[serde(default)]
+    lifetime_seconds: Option<i64>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -341,8 +344,9 @@ async fn execute(
             json!({"ok":true})
         }
         "device-start" => {
-            let b: Device = body(value)?;
-            auth.device_start(&b.device, b.scopes, now).await?
+            let b: DeviceStart = body(value)?;
+            auth.device_start_for(&b.device, b.scopes, b.lifetime_seconds, now)
+                .await?
         }
         "device-inspect" => {
             let b: Code = body(value)?;
