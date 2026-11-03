@@ -128,8 +128,13 @@ fn traefik_child_receives_only_credential_file_paths_and_redacts_its_logs() {
     fs::write(
         &executable,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$DNS_API_TOKEN_FILE\" \"$DNS_API_TOKEN\" \"$@\" > '{}'\nprintf '%s\\n' 'Authorization: Bearer header-secret Cookie: session=cookie-secret url=https://dns.invalid/?api_key=query-secret raw token-value-canary' >&2\nexec /bin/sleep 60\n",
-            capture.display()
+            // The capture goes through the custody directory descriptor the child inherits. As
+            // root the child runs as the proxy account, which can't traverse a private TMPDIR.
+            "#!/bin/sh\nprintf '%s\\n' \"$DNS_API_TOKEN_FILE\" \"$DNS_API_TOKEN\" \"$@\" > \"${{DNS_API_TOKEN_FILE%/*}}/{}\"\nprintf '%s\\n' 'Authorization: Bearer header-secret Cookie: session=cookie-secret url=https://dns.invalid/?api_key=query-secret raw token-value-canary' >&2\nexec /bin/sleep 60\n",
+            capture
+                .file_name()
+                .expect("capture name")
+                .to_string_lossy()
         ),
     )
     .expect("write fake executable");
