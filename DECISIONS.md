@@ -3636,3 +3636,51 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      they can choose values that fit both. of course our presets should be
      a great default/starting point for both of them." The default preset
      is **Tinted**.
+     **Round 2 (owner, 2026-11-03, #323; replaces the split card):**
+     "remove the dark/light pattern, just make the preset specific to the
+     items chosen so if dark show dark cards, if light then show light cards
+     in that theme. the cards also need to show the background chosen."
+     "background should be part of presets and we need to offer better
+     backgrounds here. change Plain to Solid, remove Soft, rename Mesh to
+     Gradient and offer many gradients". A preset now also holds its
+     background: **Solid** or **Gradient**, with many gradients that match
+     each colour scheme by default and the person's own gradient. The strip
+     fades at its left and right edges ("please add fade").
+323. **Settings in rows of windows approved (owner, 2026-11-03, #304):**
+     "304 is aproved". The breadcrumb follows the row in view ("yes"). A
+     resize drag changes "only its own window", never its whole column.
+324. **Machine cards wait for containers (owner, 2026-11-03, #94):**
+     "machine cards grid is way better but it needs way more taste! the
+     cards needs to be a bento grid with very careful parsing of what
+     information to show. please defer this to when we have containers at
+     least." Structure B (grid) is the direction; the work is deferred.
+325. **Website and docs (owner, 2026-11-03):** infraternal.com, docs
+     included, is built by us and deployed to Cloudflare Pages with
+     Wrangler ("agreed"). It is one site with the docs under /docs ("agreed
+     but needs its own grill"). Docs are versioned by commit id until there
+     are releases ("since we don't have any versions now, just commit ids
+     now"). Media lives in a separate media repository ("agreed"). The app
+     bundles the docs text but not their media: "I think text is cheap
+     enough to include. Media, I don't think so. They need to be pulled on
+     demand. and of course our /docs page would include everything."
+326. **Small UI answers (owner, 2026-11-03):**
+     - No palette entry for resetting one shortcut (#306): "what would that
+       action even do wihtout context?"
+     - The connection icon stays in narrow half windows (#212): "agreed".
+     - A pinch over an app window is sent to the machine whenever the
+       window is active (#316): "whenever it's active".
+327. **Mesh DNS uses Hickory (owner, 2026-11-03, #266; records the choice
+     merged in d1ec515e4):** "didn't we pick hickory because it could do
+     adblocking / filter lists as well?" Names stay visible only to peers
+     allowed to reach them (owner, 2026-11-01): "just don't respond to
+     lookups the peer is not allowed to do. no denial." A name a peer may
+     not reach does not exist for that peer; nothing says it was refused,
+     and there is no unnamed-<id> projection.
+328. **Small infrastructure answers (owner, 2026-11-03):**
+     - The flake fetches the same pinned Zig tarball, with the same SHA-256,
+       as a nix fixed-output derivation (#264; amends D213): "sure".
+     - Shims opt out of transparent huge pages, after their CPU and latency
+       cost is measured (#24): "sure".
+     - A second, limited account for testing runs on a throwaway test
+       server, not through invites: "test server because invites would then
+       belong to EE".
