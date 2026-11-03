@@ -1,4 +1,4 @@
-//! Verifies that a restarted infraternal agent recreates its `GotaTun` TUN with the persisted key [163,169].
+//! Verifies that a restarted infraternal agent reattaches its persisted `GotaTun` TUN with the persisted key [163,169], D332.
 #![cfg(all(feature = "agent", target_os = "linux"))]
 #![allow(clippy::unwrap_used)]
 
@@ -18,9 +18,85 @@ use std::{
     os::unix::fs::PermissionsExt,
 };
 
+/// `ip -o link show infraternal0` in this namespace. `/sys/class/net` shows the network namespace
+/// that mounted sysfs, which in a test namespace can be the host's.
+fn link_line() -> String {
+    let output = std::process::Command::new("ip")
+        .args(["-o", "link", "show", "infraternal0"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "no infraternal0 in this namespace");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn index() -> u32 {
+    link_line()
+        .split(':')
+        .next()
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+fn private_state(name: &str) -> std::path::PathBuf {
+    let state = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&state);
+    fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    state
+}
+
+/// The owner fence for a persisted TUN (D332): another installation can neither adopt it nor
+/// take its name, and only the installation whose recorded key and private key match its marker
+/// reattaches it.
 #[test]
 #[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
-fn restart_recreates_the_tun_and_persisted_mesh_identity() {
+fn another_installation_never_adopts_a_persisted_tun() {
+    let ours = private_state("gotatun-persist-ours");
+    let other = private_state("gotatun-persist-other");
+    let result = (|| {
+        let mut first = Node::restore_with_engine(&ours, EngineKind::GotaTun)?;
+        first.up()?;
+        let link = index();
+        drop(first);
+
+        let refused = Node::restore_with_engine(&other, EngineKind::GotaTun)
+            .and_then(|mut node| node.up().map(|_| node));
+        let refused_kind = refused.as_ref().err().map(std::io::Error::kind);
+        drop(refused);
+        let survived = Device::owned_tun()? && index() == link;
+
+        let mut restarted = Node::restore_with_engine(&ours, EngineKind::GotaTun)?;
+        restarted.up()?;
+        let reattached = index() == link;
+        restarted.down()?;
+        Ok::<_, std::io::Error>((refused_kind, survived, reattached))
+    })();
+    if Device::owned_tun().unwrap_or(false) {
+        let _ = Device::delete();
+    }
+    fs::remove_dir_all(&ours).unwrap();
+    fs::remove_dir_all(&other).unwrap();
+    let (refused_kind, survived, reattached) = result.unwrap();
+    assert_eq!(
+        refused_kind,
+        Some(std::io::ErrorKind::AlreadyExists),
+        "another installation must not take a persisted TUN"
+    );
+    assert!(
+        survived,
+        "the refused installation changed the persisted TUN"
+    );
+    assert!(
+        reattached,
+        "the owning installation did not reattach its TUN"
+    );
+}
+
+#[test]
+#[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
+fn restart_reattaches_the_persisted_tun_and_mesh_identity() {
     let state = std::env::temp_dir().join(format!("gotatun-restore-{}", std::process::id()));
     fs::create_dir(&state).unwrap();
     fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
@@ -28,16 +104,22 @@ fn restart_recreates_the_tun_and_persisted_mesh_identity() {
     let result = (|| {
         let mut first = Node::restore_with_engine(&state, EngineKind::GotaTun)?;
         let identity = first.up()?;
-        assert!(Device::owned_tun()?);
+        let link = index();
+        // A process end, as an infraternal agent restart: the TUN stays (D332).
         drop(first);
+        assert!(Device::owned_tun()?, "the TUN outlives its process");
+        assert_eq!(index(), link);
 
-        assert!(!Device::owned_tun()?);
         let mut restarted = Node::restore_with_engine(&state, EngineKind::GotaTun)?;
         let restored = restarted.up()?;
         assert_eq!(restored.public_key, identity.public_key);
-        assert!(Device::owned_tun()?);
+        assert_eq!(
+            index(),
+            link,
+            "the restarted engine reattaches the same link"
+        );
         restarted.down()?;
-        assert!(!Device::owned_tun()?);
+        assert!(!Device::owned_tun()?, "down removes the persisted TUN");
         Ok::<_, std::io::Error>(())
     })();
 

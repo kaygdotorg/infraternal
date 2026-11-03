@@ -48,6 +48,35 @@ fn restore_routes(
     Ok(routes)
 }
 
+/// The key that proves a live `GotaTun` link is this installation's: the state recorded the
+/// `GotaTun` engine, it names the interface key (or, for older state, the accepted snapshot's key),
+/// and the private key on disk derives that same key. Retirement, firewall adoption and TUN
+/// adoption all use this one proof (#235, D332).
+fn gotatun_owner_proof(
+    store: &crate::node_state::Store,
+    snapshot_key: Option<crate::policy::model::PublicKey>,
+) -> io::Result<Option<crate::policy::model::PublicKey>> {
+    if store.recorded_engine()? != Some(EngineKind::GotaTun) {
+        return Ok(None);
+    }
+    let Some(recorded) = store.recorded_interface()?.or(snapshot_key) else {
+        return Ok(None);
+    };
+    let private_public = store
+        .read_private_key()?
+        .map(|bytes| crate::gotatun_node::secret_from_bytes(&bytes).map(|pair| pair.1))
+        .transpose()?;
+    Ok((private_public == Some(recorded)).then_some(recorded))
+}
+
+/// Whether `link` is the `GotaTun` TUN that `proof` (from [`gotatun_owner_proof`]) owns.
+fn proven_gotatun_link(
+    link: &crate::wireguard::ActiveLink,
+    proof: Option<crate::policy::model::PublicKey>,
+) -> bool {
+    link.engine == EngineKind::GotaTun && proof.is_some() && link.gotatun_owner == proof
+}
+
 fn restore_gotatun(node: &mut Node, saved_config: Option<Config>) -> io::Result<()> {
     if let Some(bound) = saved_config.as_ref().and_then(|config| config.local_key) {
         let bytes = node
@@ -175,7 +204,8 @@ impl Node {
         let (store, state) = crate::node_state::Store::open(path)?;
         let recorded_engine = store.recorded_engine()?;
         let mut engine_kind = requested_engine.or(recorded_engine).unwrap_or_default();
-        let active_engine = Device::active_engine()?;
+        let active_link = Device::active_link()?;
+        let active_engine = active_link.map(|link| link.engine);
         if active_engine == Some(EngineKind::Kernel)
             && recorded_engine.is_none()
             && requested_engine.is_none()
@@ -189,6 +219,8 @@ impl Node {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
         let routes = restore_routes(&store, &state)?;
+        let proof = gotatun_owner_proof(&store, state.config.as_ref().and_then(|c| c.local_key))?;
+        let persisted = active_link.filter(|link| proven_gotatun_link(link, proof));
         let mut node = Self {
             engine_kind,
             routes,
@@ -199,11 +231,10 @@ impl Node {
                 .map_or_else(Firewall::default, Firewall::for_backend),
             ..Self::default()
         };
-        // A GotaTun TUN exists only while the engine that created it holds its
-        // descriptor, and this node has not started one. A live GotaTun link is
-        // therefore another running node's, and so is the shared filter that
-        // enforces its policy: never adopt it here (#260).
-        if active_engine != Some(EngineKind::GotaTun) {
+        // A GotaTun TUN outlives its process (D332). A live one is this installation's only
+        // under the ownership proof; otherwise it is another node's, and so is the shared
+        // filter that enforces its policy: never adopt either (#260). One proof decides both.
+        if active_engine != Some(EngineKind::GotaTun) || persisted.is_some() {
             node.firewall.adopt()?;
         }
         if active_engine == Some(EngineKind::Kernel) {
@@ -257,6 +288,10 @@ impl Node {
             }
         } else if engine_kind == EngineKind::GotaTun && node.enabled {
             restore_gotatun(&mut node, state.config.clone())?;
+        } else if let Some(link) = persisted.filter(|_| !node.enabled) {
+            // A stop inside down left our persisted TUN behind with disabled intent: finish
+            // that down. The filter and routes follow below, as for any disabled node.
+            Device::delete_ifindex(link.ifindex)?;
         }
         if !node.owned {
             node.routes.clear();
@@ -301,31 +336,16 @@ impl Node {
     /// # Errors
     /// Reports unsafe state or a failed kernel or packet-filter query.
     pub fn plan_retirement(path: &std::path::Path) -> io::Result<Retirement> {
-        let (recorded, backend, saved_engine, private_public, store) =
-            match crate::node_state::Store::open(path) {
-                Ok((store, state)) => {
-                    let recorded = store
-                        .recorded_interface()?
-                        .or_else(|| state.config.and_then(|config| config.local_key));
-                    let private_public = store
-                        .read_private_key()?
-                        .map(|bytes| {
-                            crate::gotatun_node::secret_from_bytes(&bytes).map(|pair| pair.1)
-                        })
-                        .transpose()?;
-                    (
-                        recorded,
-                        state.backend,
-                        store.recorded_engine()?,
-                        private_public,
-                        Some(store),
-                    )
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    (None, None, None, None, None)
-                }
-                Err(error) => return Err(error),
-            };
+        let (recorded, backend, gotatun_proof, store) = match crate::node_state::Store::open(path) {
+            Ok((store, state)) => {
+                let snapshot_key = state.config.and_then(|config| config.local_key);
+                let recorded = store.recorded_interface()?.or(snapshot_key);
+                let gotatun_proof = gotatun_owner_proof(&store, snapshot_key)?;
+                (recorded, state.backend, gotatun_proof, Some(store))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (None, None, None, None),
+            Err(error) => return Err(error),
+        };
         let mut left = Vec::new();
         let mut interface_index = None;
         // None: no interface with our name. Some(ours?) otherwise. Ownership of the userspace
@@ -337,13 +357,7 @@ impl Node {
                     EngineKind::Kernel => recorded.is_some_and(|recorded| {
                         Device::identity().is_ok_and(|(key, _)| key == recorded)
                     }),
-                    EngineKind::GotaTun => {
-                        saved_engine == Some(EngineKind::GotaTun)
-                            && recorded.is_some_and(|recorded| {
-                                link.gotatun_owner == Some(recorded)
-                                    && private_public == Some(recorded)
-                            })
-                    }
+                    EngineKind::GotaTun => proven_gotatun_link(&link, gotatun_proof),
                 };
                 if owned {
                     interface_index = Some(link.ifindex);
@@ -579,6 +593,15 @@ impl Node {
         }
         Ok((key, public_key))
     }
+    /// The index of this installation's persisted `GotaTun` TUN, if a live one passes the
+    /// ownership proof (D332); the engine reattaches only that link.
+    fn persisted_tun_to_adopt(&self) -> io::Result<Option<u32>> {
+        let (Some(store), Some(link)) = (&self.store, Device::active_link()?) else {
+            return Ok(None);
+        };
+        let proof = gotatun_owner_proof(store, self.config.as_ref().and_then(|c| c.local_key))?;
+        Ok(proven_gotatun_link(&link, proof).then_some(link.ifindex))
+    }
     /// Start the selected data plane with a node-local key and advertise its UDP port.
     /// # Errors
     /// Refuses missing privilege or any kernel error; never returns private material.
@@ -640,7 +663,8 @@ impl Node {
                 }
             }
             EngineKind::GotaTun => {
-                let engine = Engine::start(key.gotatun_secret()?, public_key, 0, None)?;
+                let adopt = self.persisted_tun_to_adopt()?;
+                let engine = Engine::start(key.gotatun_secret()?, public_key, 0, None, adopt)?;
                 let (interface, port, thp_disabled, offloads_enabled) = engine.info();
                 if interface != crate::wireguard::INTERFACE
                     || port == 0
@@ -686,6 +710,21 @@ impl Node {
             self.dns_resolver = None;
         }
         let mut foreign_live_link = false;
+        if !self.owned && self.engine_kind == EngineKind::GotaTun {
+            // A restore that failed after the TUN was proven ours never marked it owned, yet the
+            // TUN outlives the process (D332). Down still removes it, under the same proof.
+            if let (Some(store), Ok(Some(link))) = (&self.store, Device::active_link())
+                && proven_gotatun_link(
+                    &link,
+                    gotatun_owner_proof(store, self.config.as_ref().and_then(|c| c.local_key))?,
+                )
+            {
+                if let Some(mut engine) = self.gotatun.take() {
+                    engine.stop()?;
+                }
+                Device::delete_ifindex(link.ifindex)?;
+            }
+        }
         if self.owned {
             match Device::active_link()? {
                 Some(active) if active.engine == self.engine_kind => {

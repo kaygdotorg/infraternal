@@ -261,6 +261,9 @@ fn retire_does_not_remove_another_installations_live_gotatun_tun() {
         traced("start old", old.up())?;
         assert!(traced("query old TUN", Device::owned_tun())?);
         drop(old);
+        // The old TUN outlives its process (D332); the other installation takes the name only
+        // once that TUN is gone.
+        assert!(ip(&["link", "delete", "infraternal0"]));
 
         let mut current = traced(
             "restore current",

@@ -114,6 +114,11 @@ impl LinuxTun {
         self.offloads_enabled
     }
 
+    /// Keep the interface, with its addresses and routes, after this process ends (D332).
+    pub(crate) fn persist(&self) -> io::Result<()> {
+        TunDevice::set_persistent(self.fd.get_ref(), true)
+    }
+
     /// The authenticated, decrypted packet delivery seam for future in-process services.
     /// Any interception belongs before the final TUN write; relay framing remains ciphertext-only.
     async fn send_packet(&mut self, packet: Packet<Ip>) -> io::Result<()> {

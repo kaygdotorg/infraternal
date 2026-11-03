@@ -175,13 +175,22 @@ pub struct EngineHealth {
 impl Engine {
     /// Start `GotaTun` with the fork's Linux TUN adapter and offload handling.
     /// The worker thread disables THP before constructing the runtime or engine state.
+    ///
+    /// The TUN is persistent (D332): it outlives this process, as a kernel `WireGuard` link does,
+    /// so the addresses, the routes a person added and open flows survive an infraternal agent
+    /// restart. `adopt` names the live link that the caller proved is this installation's
+    /// (`Node::restore`); it is reattached only while it still has that index and owner. With no
+    /// `adopt`, any marked link refuses the start. A new TUN becomes persistent only once it is
+    /// marked and the engine is up, so a failed start leaves no interface behind.
     /// # Errors
-    /// Reports TUN registration, UDP bind, runtime or device initialization failures.
+    /// Reports TUN registration, UDP bind, runtime or device initialization failures, and
+    /// `AlreadyExists` for a link this start may not take, including one another process holds.
     pub(crate) fn start(
         private_key: StaticSecret,
         local_public_key: PublicKey,
         requested_port: u16,
         config: Option<Config>,
+        adopt: Option<u32>,
     ) -> io::Result<Self> {
         let (info_tx, info_rx) = sync::sync_channel(1);
         let (commands, receiver) = mpsc::unbounded_channel();
@@ -205,6 +214,7 @@ impl Engine {
                     config.as_ref(),
                     refused,
                     thp_disabled,
+                    adopt,
                 ));
                 let Started {
                     tun,
@@ -373,13 +383,40 @@ async fn initialize(
     config: Option<&Config>,
     refused: Arc<AtomicU64>,
     thp_disabled: bool,
+    adopt: Option<u32>,
 ) -> io::Result<Started> {
-    let kernel_owned = crate::wireguard::Device::owned()?;
-    let tun_owned = crate::wireguard::Device::owned_tun()?;
-    if kernel_owned || tun_owned {
+    let ours = |link: Option<crate::wireguard::ActiveLink>| {
+        adopt.is_some()
+            && link.is_some_and(|link| {
+                link.engine == EngineKind::GotaTun
+                    && Some(link.ifindex) == adopt
+                    && link.gotatun_owner == Some(local_public_key)
+            })
+    };
+    let before = crate::wireguard::Device::active_link()?;
+    if before.is_some() && !ours(before) {
         return Err(io::ErrorKind::AlreadyExists.into());
     }
-    let tun = LinuxTun::create(crate::wireguard::INTERFACE, refused)?;
+    // A persistent TUN another process holds refuses this attach with EBUSY.
+    let tun =
+        LinuxTun::create(crate::wireguard::INTERFACE, refused).map_err(|error| {
+            match error.raw_os_error() {
+                Some(code) if code == nix::libc::EBUSY => {
+                    io::Error::from(io::ErrorKind::AlreadyExists)
+                }
+                _ => error,
+            }
+        })?;
+    // The check above and the attach are two steps: confirm the attached link is still the
+    // proven one, or a fresh one under this name.
+    let attached = crate::wireguard::Device::active_link();
+    let fresh = adopt.is_none()
+        && attached
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::AlreadyExists);
+    if !fresh && !attached.is_ok_and(ours) {
+        return Err(io::ErrorKind::AlreadyExists.into());
+    }
     let interface = tun.name().to_owned();
     if interface != crate::wireguard::INTERFACE {
         return Err(io::ErrorKind::InvalidData.into());
@@ -426,6 +463,8 @@ async fn initialize(
         thp_disabled,
         offloads_enabled,
     };
+    // Marked and running: from here the interface outlives this process (D332).
+    tun.tun.persist()?;
     Ok(Started {
         tun,
         device,
