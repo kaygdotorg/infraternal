@@ -728,7 +728,9 @@
 .ui-pill-icon { width: var(--pill-h, 2.375rem); padding: 0; color: var(--fg-2); }
 .ui-pill-icon svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.6; }
 @media (hover: hover) and (pointer: fine) { .ui-pill:hover:not(:disabled) { background: var(--overlay-solid); } }
-@media (prefers-reduced-motion: reduce) { .ui-pill:active:not(:disabled) { transform: none; } }
+/* Reduced motion: a pill never moves. This sheet loads after the app's, so the base transition above beats an instance's own
+   `transition: none` (the sidebar toggle's, in style.css) at equal specificity; it is switched off here, where it is set. */
+@media (prefers-reduced-motion: reduce) { .ui-pill { transition: none; } .ui-pill:active:not(:disabled) { transform: none; } }
 
 /* Window: see the window card block above; terminals draw into a block canvas. */
 .ui-window canvas { display: block; }
