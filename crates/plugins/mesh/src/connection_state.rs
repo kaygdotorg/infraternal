@@ -6,11 +6,17 @@
 //! indexes; removing it retires both directions, regardless of which endpoint
 //! initiated it. Fresh TCP acceptance requires SYN so reverse continuation
 //! cannot recreate that object. No namespace-wide removal request is constructed.
+//!
+//! A flow to the proxy's selected Mesh listener pair is judged by the proxy
+//! source test the firewall uses, not by a per-port grant: the pair is never a
+//! grant, so a port-granted peer's proxied flows would otherwise be retired on
+//! every unrelated narrowing [#281].
 use crate::{
-    dataplane::Config,
+    dataplane::{Config, PeerPolicy},
     netlink::{self, ConnectionTuple, Socket},
     policy::rules::{Port, Protocol, TrafficPolicy},
 };
+use infraternal_mesh::proxy_ports::MeshProxyIngress;
 use nix::sys::socket::SockProtocol;
 use std::{collections::BTreeMap, io, net::IpAddr};
 
@@ -47,11 +53,19 @@ fn permits(rules: &TrafficPolicy, tuple: ConnectionTuple) -> bool {
         }
     }
 }
+// An incoming TCP flow to the selected listener pair from a current proxy source.
+fn proxied(peer: &PeerPolicy, tuple: ConnectionTuple, ingress: &MeshProxyIngress) -> bool {
+    tuple.protocol == 6
+        && tuple.destination_port.is_some_and(|port| {
+            crate::proxy_access::selected_ports(ingress).is_some_and(|pair| pair.contains(&port))
+        })
+        && !crate::proxy_access::routes(peer, ingress).is_empty()
+}
 /// Remove only entries with an owned local mesh endpoint and a retired initiating service.
 /// # Errors
 /// Reports interrupted dumps, ambiguous kernel selectors or deletion errors;
 /// already-expired entries are idempotent. Current rules refuse traffic before this runs.
-pub fn retire(old: Option<&Config>, next: &Config) -> io::Result<()> {
+pub fn retire(old: Option<&Config>, next: &Config, ingress: &MeshProxyIngress) -> io::Result<()> {
     if old.is_some_and(|old| unchanged_reach(old, next)) {
         return Ok(());
     }
@@ -108,7 +122,7 @@ pub fn retire(old: Option<&Config>, next: &Config) -> io::Result<()> {
                         &peer.outbound
                     },
                     tuple,
-                )
+                ) || incoming && proxied(peer, tuple, ingress)
             })
         {
             return Ok(());
@@ -138,6 +152,7 @@ pub fn retire(old: Option<&Config>, next: &Config) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
     use super::*;
     use std::collections::BTreeSet;
     #[test]
@@ -186,5 +201,54 @@ mod tests {
             }
         ));
         assert!(!permits(&TrafficPolicy::None, tuple));
+    }
+
+    #[test]
+    fn a_port_granted_peer_keeps_its_proxied_flows_while_it_is_a_proxy_source() {
+        let selected = infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS[1];
+        let ingress = MeshProxyIngress {
+            listener_pair: Some(selected),
+            backend_ports: BTreeSet::from([8080]),
+            ..MeshProxyIngress::default()
+        };
+        let granted = |numbers: &[u16]| PeerPolicy {
+            peer: crate::dataplane::Peer {
+                key: crate::policy::model::PublicKey([1; 32]),
+                addresses: crate::policy::model::Addresses {
+                    ipv4: "10.254.0.3".parse().expect("IPv4"),
+                    ipv6: "fd01::3".parse().expect("IPv6"),
+                },
+                endpoint: None,
+            },
+            inbound: TrafficPolicy::Ports(
+                numbers
+                    .iter()
+                    .map(|number| Port {
+                        protocol: Protocol::Tcp,
+                        number: *number,
+                    })
+                    .collect(),
+            ),
+            outbound: TrafficPolicy::None,
+        };
+        let tuple = ConnectionTuple {
+            source: IpAddr::from([10, 254, 0, 3]),
+            destination: IpAddr::from([10, 254, 0, 1]),
+            protocol: 6,
+            destination_port: Some(selected.https),
+        };
+        let peer = granted(&[8080]);
+        assert!(!permits(&peer.inbound, tuple), "the pair is never a grant");
+        assert!(proxied(&peer, tuple, &ingress));
+        assert!(!proxied(&granted(&[22]), tuple, &ingress));
+        assert!(!proxied(
+            &peer,
+            ConnectionTuple {
+                destination_port: Some(selected.https + 1),
+                ..tuple
+            },
+            &ingress
+        ));
+        assert!(!proxied(&peer, tuple, &MeshProxyIngress::default()));
     }
 }

@@ -175,7 +175,7 @@ impl Firewall {
         self.install(config, &[], false, config, &proxy_ingress)
     }
     pub(crate) fn complete(&mut self, config: &Config) -> io::Result<()> {
-        crate::connection_state::retire(self.accepted.as_ref(), config)?;
+        crate::connection_state::retire(self.accepted.as_ref(), config, &self.proxy_ingress)?;
         self.accepted = Some(config.clone());
         Ok(())
     }
@@ -362,20 +362,9 @@ fn render_with_aliases(
         script,
         "table inet {TABLE} {{\n comment \"infraternal.mesh.v1\";"
     );
-    let proxy_ingress_ports = proxy_ingress
-        .listener_pair
-        .filter(|pair| {
-            !proxy_ingress.backend_ports.is_empty()
-                && pair.http != pair.https
-                && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
-                    .iter()
-                    .any(|range| range.contains(pair.http))
-                && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
-                    .iter()
-                    .any(|range| range.contains(pair.https))
-        })
-        .map_or_else(String::new, |pair| {
-            format!(" elements = {{ {}, {} }};", pair.http, pair.https)
+    let proxy_ingress_ports = crate::proxy_access::selected_ports(proxy_ingress)
+        .map_or_else(String::new, |[http, https]| {
+            format!(" elements = {{ {http}, {https} }};")
         });
     // nft rejects an empty `elements = { }` list, so an empty set omits the clause.
     let _ = writeln!(
@@ -430,29 +419,16 @@ fn render_with_aliases(
                 );
             }
             if inbound {
-                let mut proxy_sources = Vec::new();
-                if proxy_ingress.listener_pair.is_some() && !proxy_ingress.backend_ports.is_empty()
-                {
-                    for peer in connections.peers.values() {
-                        let has_published_route_grant = match &peer.inbound {
-                            TrafficPolicy::All => true,
-                            TrafficPolicy::Ports(ports) => ports.iter().any(|port| {
-                                port.protocol == Protocol::Tcp
-                                    && proxy_ingress.backend_ports.contains(&port.number)
-                            }),
-                            TrafficPolicy::None => false,
-                        };
-                        if !has_published_route_grant {
-                            continue;
-                        }
-                        let address = if ipv6 {
-                            peer.peer.addresses.ipv6.to_string()
-                        } else {
-                            peer.peer.addresses.ipv4.to_string()
-                        };
-                        proxy_sources.push(address);
-                    }
-                }
+                let proxy_sources: Vec<_> =
+                    crate::proxy_access::sources(connections, proxy_ingress)
+                        .map(|peer| {
+                            if ipv6 {
+                                peer.peer.addresses.ipv6.to_string()
+                            } else {
+                                peer.peer.addresses.ipv4.to_string()
+                            }
+                        })
+                        .collect();
                 let elements = if proxy_sources.is_empty() {
                     String::new()
                 } else {
@@ -593,6 +569,15 @@ fn render_connection_checks(script: &mut String, config: &Config) {
                     script,
                     "  {selector} ct original {family} {field} @{direction}{suffix}_all accept"
                 );
+                if direction == "incoming" {
+                    // A proxied flow was admitted by the listener-pair exception, not by a
+                    // per-port grant. Its later packets in both directions need the same test,
+                    // or only the initiating SYN would pass [#281].
+                    let _ = writeln!(
+                        script,
+                        "  {selector} ct original protocol tcp ct original {family} saddr @incoming{suffix}_proxy_sources ct original proto-dst @proxy_ingress_ports accept"
+                    );
+                }
                 for protocol in ["tcp", "udp"] {
                     let _ = writeln!(
                         script,
@@ -686,7 +671,7 @@ mod tests {
         let rules = render(&config, false);
         assert_eq!(
             rules.matches(" accept").count(),
-            42,
+            46,
             "the fixed rule set includes proxy listener accepts for IPv4 and IPv6"
         );
         assert_eq!(rules.matches(" drop").count(), 14);
@@ -794,6 +779,44 @@ mod tests {
         );
         assert!(!rules.contains("10082"));
         assert!(rules.contains("ct original protocol tcp ct original ip saddr @incoming4_proxy_sources ct original proto-dst @proxy_ingress_ports accept"));
+    }
+
+    #[test]
+    fn proxied_flows_keep_passing_the_state_chains_after_their_syn() {
+        let mut config = config();
+        for peer in config.peers.values_mut() {
+            peer.inbound = TrafficPolicy::None;
+        }
+        config.peers.get_mut(&NodeId(3)).expect("peer").inbound =
+            TrafficPolicy::Ports(std::collections::BTreeSet::from([
+                crate::policy::rules::Port {
+                    protocol: Protocol::Tcp,
+                    number: 8080,
+                },
+            ]));
+        let ingress = infraternal_mesh::proxy_ports::MeshProxyIngress {
+            listener_pair: Some(infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS[1]),
+            backend_ports: std::collections::BTreeSet::from([8080]),
+            ..Default::default()
+        };
+        let rules = super::render_with_aliases(&config, false, &[], false, &config, &ingress);
+        let chain = |name: &str| {
+            let start = rules
+                .find(&format!(" chain {name} {{"))
+                .expect("state chain");
+            let end = start + rules[start..].find("  drop\n }").expect("chain end");
+            rules[start..end].to_owned()
+        };
+        for (name, direction) in [("incoming_state", "original"), ("outgoing_state", "reply")] {
+            for (family, suffix, local) in [("ip", "4", "10.254.0.1"), ("ip6", "6", "fd01::1")] {
+                assert!(
+                    chain(name).contains(&format!(
+                        "ct direction {direction} ct original {family} daddr {local} ct original protocol tcp ct original {family} saddr @incoming{suffix}_proxy_sources ct original proto-dst @proxy_ingress_ports accept"
+                    )),
+                    "{name} must admit {direction} packets of a proxied {family} flow"
+                );
+            }
+        }
     }
 
     #[test]

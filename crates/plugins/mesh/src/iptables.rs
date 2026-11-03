@@ -393,28 +393,27 @@ fn render_with_aliases(
             }
         }
     }
-    let mut proxy_sources = std::collections::BTreeSet::new();
-    if proxy_ingress.listener_pair.is_some() && !proxy_ingress.backend_ports.is_empty() {
-        for peer in connections.peers.values() {
-            let has_published_route_grant = match &peer.inbound {
-                TrafficPolicy::All => true,
-                TrafficPolicy::Ports(ports) => ports.iter().any(|port| {
-                    port.protocol == Protocol::Tcp
-                        && proxy_ingress.backend_ports.contains(&port.number)
-                }),
-                TrafficPolicy::None => false,
-            };
-            if has_published_route_grant {
-                let address = if ipv6 {
+    let proxy_sources: std::collections::BTreeSet<u128> =
+        crate::proxy_access::sources(connections, proxy_ingress)
+            .map(|peer| {
+                if ipv6 {
                     u128::from(peer.peer.addresses.ipv6)
                 } else {
                     u128::from(u32::from(peer.peer.addresses.ipv4))
-                };
-                proxy_sources.insert(address);
-            }
-        }
-    }
+                }
+            })
+            .collect();
+    let selected_ports: Vec<u16> = crate::proxy_access::selected_ports(proxy_ingress)
+        .map(Vec::from)
+        .unwrap_or_default();
     render_connection_checks(&mut script, connections, ipv6, &groups);
+    render_proxy_connection_checks(
+        &mut script,
+        connections,
+        ipv6,
+        &proxy_sources,
+        &selected_ports,
+    );
     for chain in &CHAINS[..2] {
         // Retired original and reply indexes must not be recreated by loose
         // tracking of a continuation packet. Preserve established permitted
@@ -479,28 +478,14 @@ fn render_with_aliases(
                 let _ = writeln!(script, "-A {chain} {selector}{service} -j ACCEPT");
             }
         }
-        for (start, end) in address_ranges(proxy_sources) {
+        for (start, end) in address_ranges(proxy_sources.iter().copied()) {
             let display = |address| display_address(address, ipv6);
             let selector = if start == end {
                 format!("-s {}", display(start))
             } else {
                 format!("-m iprange --src-range {}-{}", display(start), display(end))
             };
-            let selected_ports = proxy_ingress
-                .listener_pair
-                .filter(|pair| {
-                    !proxy_ingress.backend_ports.is_empty()
-                        && pair.http != pair.https
-                        && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
-                            .iter()
-                            .any(|range| range.contains(pair.http))
-                        && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
-                            .iter()
-                            .any(|range| range.contains(pair.https))
-                })
-                .map(|pair| [pair.http, pair.https])
-                .unwrap_or_default();
-            for destination_port in selected_ports {
+            for destination_port in &selected_ports {
                 let _ = writeln!(
                     script,
                     "-A {} {selector} -p tcp -m conntrack --ctorigdstport {destination_port} -j ACCEPT",
@@ -570,6 +555,34 @@ fn prefixes(mut start: u128, end: u128, ipv6: bool) -> Vec<String> {
         start += size;
     }
     result
+}
+// A proxied flow is admitted by the listener-pair exception, not by a per-port
+// grant. Its later packets in both directions need the same source test, or
+// only the initiating SYN would pass [#281].
+fn render_proxy_connection_checks(
+    script: &mut String,
+    config: &Config,
+    ipv6: bool,
+    sources: &std::collections::BTreeSet<u128>,
+    ports: &[u16],
+) {
+    let local = if ipv6 {
+        config.addresses.ipv6.to_string()
+    } else {
+        config.addresses.ipv4.to_string()
+    };
+    for (start, end) in address_ranges(sources.iter().copied()) {
+        for prefix in prefixes(start, end, ipv6) {
+            for port in ports {
+                for (chain, packet_direction) in [(CHAINS[0], "ORIGINAL"), (CHAINS[1], "REPLY")] {
+                    let _ = writeln!(
+                        script,
+                        "-A {chain} -m conntrack --ctstate ESTABLISHED,RELATED --ctdir {packet_direction} --ctorigsrc {prefix} --ctorigdst {local} --ctproto tcp --ctorigdstport {port} -j ACCEPT"
+                    );
+                }
+            }
+        }
+    }
 }
 fn render_connection_checks(script: &mut String, config: &Config, ipv6: bool, groups: &Groups) {
     let local = if ipv6 {
@@ -777,6 +790,49 @@ mod tests {
             selected.http
         )));
         assert!(!rules.contains("--ctorigdstport 10082"));
+    }
+
+    #[test]
+    fn proxied_flows_keep_passing_the_state_checks_after_their_syn() {
+        let mut config = config(&[2, 3]);
+        for peer in config.peers.values_mut() {
+            peer.inbound = TrafficPolicy::None;
+        }
+        config.peers.get_mut(&NodeId(3)).expect("peer").inbound =
+            TrafficPolicy::Ports(std::collections::BTreeSet::from([
+                crate::policy::rules::Port {
+                    protocol: Protocol::Tcp,
+                    number: 8080,
+                },
+            ]));
+        let selected = infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS[1];
+        let ingress = infraternal_mesh::proxy_ports::MeshProxyIngress {
+            listener_pair: Some(selected),
+            backend_ports: std::collections::BTreeSet::from([8080]),
+            ..Default::default()
+        };
+        let rules = super::render_with_aliases(
+            &config,
+            false,
+            Ownership::default(),
+            &[],
+            false,
+            &config,
+            &ingress,
+        );
+        let state_drop = "-A IFM_IN -m conntrack --ctstate ESTABLISHED,RELATED -j DROP";
+        let before_drop = &rules[..rules.find(state_drop).expect("state drop")];
+        for port in [selected.http, selected.https] {
+            for (chain, direction) in [("IFM_IN", "ORIGINAL"), ("IFM_OUT", "REPLY")] {
+                assert!(
+                    before_drop.contains(&format!(
+                        "-A {chain} -m conntrack --ctstate ESTABLISHED,RELATED --ctdir {direction} --ctorigsrc 10.254.0.3/32 --ctorigdst 10.254.0.1 --ctproto tcp --ctorigdstport {port} -j ACCEPT"
+                    )),
+                    "{chain} must admit {direction} packets of a proxied flow to {port}"
+                );
+            }
+        }
+        assert!(!rules.contains("--ctorigsrc 10.254.0.2/32 --ctorigdst 10.254.0.1 --ctproto tcp"));
     }
 
     #[test]
