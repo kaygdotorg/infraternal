@@ -44,20 +44,20 @@ for (const attached of [false, true]) test(`a fully answered browser route survi
     sockets[0]!.receive(encodeMuxedFrame(0, { type: "Welcome", connectionId: new Uint8Array(16), resumeToken: new Uint8Array(32), resumeWindowSeconds: 120 }));
     if (attached) connection.streamAttached(true, 1);
     connection.sampleRoundTrip();
-    expect(probes).toBe(1);
+    // The Welcome sample and this one are both answered at once.
+    expect(probes).toBe(2);
     expect(connection.isWelcomed).toBe(true);
 
-    // Before terminal attachment the server has no active-route probe timer.
-    // No outstanding reply exists. Advance the clock without executing timers,
-    // then deliver the delayed timer as a browser event loop would. This is a
-    // deterministic scheduling oracle, never a host latency measurement.
+    // A fully answered route owns no liveness timer at all [#317], so a delayed
+    // browser task has nothing to misread as peer loss. The clock then jumps,
+    // as after a long renderer stall, and the next probe is still answered.
+    // A deterministic scheduling oracle, never a host latency measurement.
+    expect(timers.size).toBe(0);
     now = 1000;
-    const next = [...timers].sort((a, b) => a[1].at - b[1].at)[0]!;
-    timers.delete(next[0]);
-    next[1].callback();
+    connection.sampleRoundTrip();
     expect(disconnected).toBe(0);
     expect(connection.isWelcomed).toBe(true);
-    expect(probes).toBe(2);
+    expect(probes).toBe(3);
   } finally {
     connection?.dispose();
     for (const [key, value] of Object.entries(original)) { if (value === undefined) delete globals[key]; else globals[key] = value; }
