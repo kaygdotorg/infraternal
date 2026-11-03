@@ -9,6 +9,9 @@
  */
 import { mountConfirmTip } from "../../../../../packages/ui/src/tooltip";
 import { createWindowCard } from "../../../../../packages/ui/src/window-card";
+import { renameHost, takePendingRename } from "./rename.on-demand";
+import { onDoubleActivate } from "../../../../../packages/ui/src/double-activate";
+import { beginInlineRename, placeOverName, type InlineRename } from "../../../../../packages/ui/src/inline-rename.on-demand";
 import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
 import { clamp } from "../camera/camera";
 import type { Ctx, ViewRec, WinRec } from "../context";
@@ -31,6 +34,8 @@ export interface GraphViewModule {
   refresh(c: ViewRec): void;
   /** A grant that was just made: its arrow fades in and its head pulses once. */
   pulseNew(c: ViewRec, g: Grant): void;
+  /** Opens the name field on a host's card (waits for the card if it is not drawn yet). */
+  beginRename(id: string): void;
   /** The camera moved (the next frame after it). */
   cull(): void;
   /** The camera came to rest. */
@@ -160,7 +165,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
   const bindNode = (rec: WinRec, n: NodeModel): void => {
     // A drag belongs to a node, not to a card: a card rebound to another node (the pool reuses cards) must not carry it.
     // The same id with a new model (a refresh) keeps the drag.
-    if (boundTo.get(rec)?.id !== n.id) endDrag.get(rec)?.();
+    if (boundTo.get(rec)?.id !== n.id) { endDrag.get(rec)?.(); renaming.get(rec)?.finish(false); }
     boundTo.set(rec, n);
     rec.model.id = `n-${n.id}`;
     rec.model.host = n.label;
@@ -198,6 +203,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
   };
   const dropNode = (rec: WinRec): void => {
     endDrag.get(rec)?.();
+    renaming.get(rec)?.finish(false); // a card that leaves the screen takes an open name field with it
     rec.card.root.remove();
     for (const flag of ["data-lifted", "data-drop", "data-linking", "data-active"]) rec.card.root.removeAttribute(flag);
     boundTo.delete(rec);
@@ -231,8 +237,48 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       cx.nav.goStop(c, cx.nav.nearestStop(c, cx.view.contentRect(c).x + dropped.x + state.metrics.nodeW / 2));
     }
   };
+  // ---- renaming a host: double click or double tap on its name, or the palette -----------------------------------------
+  const renaming = new WeakMap<WinRec, InlineRename>();
+  /** The card's name field is open, so the card does not drag from it and a refresh does not rebuild the title under it. */
+  const nameOf = (rec: WinRec): HTMLElement => rec.card.pill.querySelector<HTMLElement>(".ui-window-host")!;
+  const beginRenameOn = (rec: WinRec): boolean => {
+    const n = boundTo.get(rec);
+    // Tags are renamed elsewhere (a tag is not a host); far zoom shows no card to rename.
+    if (!n || n.kind !== "host" || renaming.has(rec) || camera.lod === "thumb") return false;
+    endDrag.get(rec)?.();
+    const name = nameOf(rec);
+    let restore = (): void => undefined;
+    renaming.set(rec, beginInlineRename({
+      value: n.label,
+      label: "Host name",
+      className: "cl-node-rename",
+      place: (input) => { restore = placeOverName(name, rec.card.header, input, cam.z); },
+      commit: (value) => {
+        const next = value.trim();
+        if (!next || next === n.label) return;
+        // The new name shows at once and the card says it is waiting; a refusal puts the old one back (the toast says why).
+        rec.card.setTitle({ host: next });
+        rec.card.root.dataset.renaming = "pending";
+        const settle = (): void => { if (rec.card.root.dataset.renaming === "pending") delete rec.card.root.dataset.renaming; };
+        void renameHost(cx, n.id, next).then(settle, () => { if (boundTo.get(rec)?.id === n.id) rec.card.setTitle({ host: n.label }); settle(); });
+      },
+      close: () => { restore(); renaming.delete(rec); },
+    }));
+    return true;
+  };
+  /** A rename asked for before its card was drawn: tried again as cards come and go, until it opens or the host is gone. */
+  let wanted: string | undefined;
+  const tryWanted = (): void => {
+    if (wanted === undefined) return;
+    for (const c of views.values()) {
+      const rec = c.view.layout === "graph" ? graphOf(c)?.card(wanted) : undefined;
+      if (rec) { wanted = undefined; beginRenameOn(rec); return; }
+    }
+    if (![...views.values()].some((c) => c.view.layout === "graph" && c.view.nodes.some((n) => n.id === wanted))) wanted = undefined;
+  };
   const wireNode = (rec: WinRec): void => {
     const pill = rec.card.pill;
+    onDoubleActivate(pill, () => { beginRenameOn(rec); }, signal);
     pill.style.touchAction = "none";
     pill.dataset.grab = "";
     // The drag is anchored in pin space (`px`,`py`: the pin at pointerdown), not in drawn coordinates: the drawn shift
@@ -554,7 +600,9 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     if (state.canvasLock && state.currentView === c.view.id && cx.camera.target) cx.nav.flyView(c.view.id);
   };
 
-  return {
+  // A name field the palette asked for before this code had loaded opens once the card is on screen.
+  queueMicrotask(() => { const early = takePendingRename(); if (early) api.beginRename(early); });
+  const api: GraphViewModule = {
     buildGraph,
     refresh: refreshGraph,
     pulseNew,
@@ -563,9 +611,12 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       // Handles on arrows exist only for people who may use them (D187): arrows are made again when that changes.
       if (rightsChanged) for (const c of views.values()) graphOf(c)?.reset();
       for (const c of views.values()) if (c.view.layout === "graph") refreshGraph(c);
+      tryWanted();
     },
-    cull() { for (const c of views.values()) if (c.view.layout === "graph") graphOf(c)?.cull(); },
+    beginRename(id) { wanted = id; tryWanted(); },
+    cull() { for (const c of views.values()) if (c.view.layout === "graph") graphOf(c)?.cull(); tryWanted(); },
     rest() { redrawMesh(); },
     stats() { const c = views.get("mesh"); const g = c && graphOf(c); if (!g) return undefined; return { level: g.level(), ...g.stats() }; },
   };
+  return api;
 }

@@ -11,6 +11,9 @@
  * - Motion: a pointer open grows from the anchor (scale 0.96 → 1 with opacity, 200 ms strong ease-out); closing
  *   is quicker (130 ms). Keyboard opens and closes are instant. Web Animations without fill leave nothing
  *   transformed at rest, so text stays crisp (TASTE section 5).
+ * - At a point: `at` places it at a pointer position (a right-click) instead of under the anchor: it opens down and
+ *   right of the point, flips to the other side when it would leave the screen, and is kept one inset inside the
+ *   screen. The anchor then only names the thing the menu is about (it gets `aria-expanded` and the focus back).
  * - Dismissal: a press outside (the anchor toggles it itself) or Escape closes it.
  */
 import { currentUiScale } from "./ui-scale";
@@ -37,6 +40,8 @@ export interface AnchoredPopoverOptions {
    */
   hug?: boolean;
   maxWidth?: number;
+  /** Opens at this point (client coordinates) instead of under the anchor; see the module doc. */
+  at?: { x: number; y: number };
   /** The y below which the popover must not reach (a key tray's top); read on every placement. */
   bottomLimit?(): number | undefined;
 }
@@ -62,7 +67,24 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
   root.setAttribute("aria-label", options.label);
 
   const above = options.side === "above";
+  const placeAt = (at: { x: number; y: number }): void => {
+    const screen = stage.getBoundingClientRect();
+    const view = window.visualViewport;
+    const right = Math.min(screen.right, view ? view.offsetLeft + view.width : innerWidth) - INSET;
+    const bottom = Math.min(screen.bottom, view ? view.offsetTop + view.height : innerHeight) - INSET;
+    root.style.maxWidth = `${Math.round(Math.min(options.maxWidth ?? 400, right - screen.left - INSET))}px`;
+    const width = root.offsetWidth, height = root.offsetHeight;
+    const left = Math.round(Math.max(screen.left + INSET, Math.min(at.x, right - width)));
+    // Flips above the point when the room below is smaller than the menu and the room above is larger.
+    const flip = at.y + height > bottom && at.y - screen.top > bottom - at.y;
+    const top = Math.round(Math.max(screen.top + INSET, flip ? at.y - height : Math.min(at.y, bottom - height)));
+    root.style.left = `${left - screen.left}px`;
+    root.style.top = `${top - screen.top}px`;
+    root.style.maxHeight = `${Math.max(0, Math.floor(bottom - top))}px`;
+    root.style.transformOrigin = `${Math.round(at.x - left)}px ${flip ? "100%" : "0"}`;
+  };
   const place = (): void => {
+    if (options.at) { placeAt(options.at); return; }
     const box = anchor.getBoundingClientRect();
     const host = anchor.closest(".ui-window");
     const screen = stage.getBoundingClientRect();

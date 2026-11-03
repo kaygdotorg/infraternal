@@ -28,7 +28,7 @@
  * the list stays the shared one, and the pane is this card's own.
  */
 import { ICONS } from "../../../../../packages/ui/src/icons";
-import { inlineRename } from "../../../../../packages/ui/src/inline-rename";
+import { inlineRename } from "../../../../../packages/ui/src/inline-rename.on-demand";
 import { decorateKeyValueRow } from "../../../../../packages/ui/src/kv-decorate";
 import { createKeyValueList, type KeyValueList, type KeyValueRow } from "../../../../../packages/ui/src/kv-list";
 import { createSidebarCard } from "../../../../../packages/ui/src/sidebar-card";
@@ -128,7 +128,7 @@ export function createAccountPanel(env: AccountPanelEnv): AccountPanel {
 
   // ---- editing in place --------------------------------------------------------------------------------------------------
   const rename = (): void => {
-    if (!editable() || !nameText.isConnected || card.root.querySelector(".ac-nameline .ui-rename-input")) return;
+    if (!editable() || !nameText.isConnected || card.root.querySelector(".ac-nameline .ui-inline-rename")) return;
     inlineRename(nameText, {
       value: model.person().name, label: "Name", placeholder: "Your name",
       done(value) {
@@ -281,7 +281,7 @@ export function createAccountPanel(env: AccountPanelEnv): AccountPanel {
   const onKey = (event: KeyboardEvent): void => {
     if (event.key !== "Escape" || !card.isOpen()) return;
     // A name or an email being edited takes its own Escape.
-    if ((event.target as Element | null)?.closest(".ui-rename-input")) return;
+    if ((event.target as Element | null)?.closest(".ui-inline-rename")) return;
     event.preventDefault();
     event.stopPropagation();
     // The "Logs in as" pane is the innermost thing that is open: Escape closes it first, the card after it.

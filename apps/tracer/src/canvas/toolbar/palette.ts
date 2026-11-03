@@ -1,6 +1,6 @@
 /**
  * The canvas in the command palette (⌘K): go to a view, open Settings sections, canvas actions (lock, overview,
- * split, share), and "Open shell on <host>" for every host the sessions adapter lists. Rows are computed each
+ * split, share), "Open shell on <host>" for every host the sessions adapter lists, and "Rename <host>" for the Mesh's hosts. Rows are computed each
  * time the palette opens, so they follow the state (the lock, the active window, the hosts that exist).
  *
  * Every row carries a `canvas:` action; the core screen forwards them as `tracer:canvas-action` events, which
@@ -37,6 +37,15 @@ export function viewRecentWindows(cx: Ctx, c: ViewRec, n: number): WinRec[] {
 
 export function installPalette(cx: Ctx): () => void {
   const { core, signal, state, views } = cx;
+  // The rows that act on a host (remove, rename, full access) come from an on-demand module the palette fetches as it is installed (D188).
+  let hostRows: ((cx: Ctx) => PaletteEntry[]) | undefined;
+  let hostRowsLoading = false;
+  const loadHostRows = (): void => {
+    if (hostRows || hostRowsLoading) return;
+    hostRowsLoading = true;
+    void onDemand(() => import("./palette-hosts.on-demand")).then((m) => { if (!signal.aborted) hostRows = m.hostEntries; }, () => { hostRowsLoading = false; });
+  };
+  loadHostRows(); // a small chunk, fetched as the canvas comes up, so the rows are there by the time anyone presses ⌘K
   const removeProvider = core.addPaletteProvider(() => {
     const out: PaletteEntry[] = [];
     [...views.values()].forEach((c, i) => {
@@ -78,9 +87,10 @@ export function installPalette(cx: Ctx): () => void {
     out.push({ group: "Canvas", glyph: "▦", icon: cx.inputLock.state ? withLockBadge(ICONS.terminal) : ICONS.terminal, label: cx.inputLock.state ? "Input lock off" : "Input lock on", hint: `the active window only · ${bindingText("input-lock")}`, action: "canvas:inputlock" });
     // Any host's shell by name. Keywords ride in the hint so "ssh", "terminal" and "console" find them.
     for (const host of cx.adapters.sessions.hosts()) {
-      if (host.id !== "embedded" && cx.adapters.hostRemoval?.label()) out.push({ group: "Hosts", glyph: "×", label: `${cx.adapters.hostRemoval.label()}: ${host.name}`, hint: "revoke access · uninstall", action: `canvas:removehost:${host.id}` });
       out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${host.name}`, hint: `terminal · ssh · console${host.online === false ? " · offline" : ""}`, action: `canvas:open:${host.id}` });
     }
+    // Remove, rename and full-access rows for hosts: built by an on-demand module that loads at idle (D188).
+    if (hostRows) out.push(...hostRows(cx)); else loadHostRows();
     for (const row of cx.adapters.containers?.rows() ?? []) out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${row.name}`, hint: "container · terminal · console", action: `canvas:ctr:${row.name}` });
     // Every session on every host (D178), by name, with its state in the hint so "detached" or "exited" finds them.
     const inv = cx.adapters.inventory;

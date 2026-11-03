@@ -47,6 +47,7 @@ export function createLazyMeshApi(options: MeshApiOptions): MeshSource {
     moveGrant: (g, to) => need().moveGrant(g, to),
     renameGrant: (g, name) => need().renameGrant(g, name),
     removeGrant: (g) => need().removeGrant(g),
+    renameNode: (name, newName) => need().renameNode(name, newName),
     pin: (id, x, y) => need().pin(id, x, y),
     onChange(l) { listeners.add(l); return () => { listeners.delete(l); }; },
     onFailure(l) { failures.add(l); return () => { failures.delete(l); }; },

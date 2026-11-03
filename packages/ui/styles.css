@@ -511,8 +511,56 @@
   background: none; color: var(--fg-2); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; text-align: left; cursor: pointer;
 }
 .ui-window-menu-item svg { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-window-menu-rule { height: 1px; margin: 0.1875rem 0.375rem; background: var(--line); }
+.ui-window-menu-item.is-danger { color: var(--danger); }
+/* A menu opened from the keyboard lands on its first row without a ring (rings are for Tab, TASTE 1); a quiet fill shows where it is. */
+.ui-window-menu-item:focus-visible { background: var(--hover); color: var(--fg); }
+.ui-window-menu-item.is-danger:focus-visible { color: var(--danger); }
 @media (pointer: coarse) { .ui-window-menu-item { height: 2.75rem; } }
-@media (hover: hover) and (pointer: fine) { .ui-window-menu-item:hover { background: var(--hover); color: var(--fg); } }
+@media (hover: hover) and (pointer: fine) { .ui-window-menu-item:hover { background: var(--hover); color: var(--fg); } .ui-window-menu-item.is-danger:hover { color: var(--danger); } }
+/* Row swipes (row-menu.ts): the row's leaf and the revealed buttons move together with one transform each; the row clips them. */
+.ui-swipe-row { position: relative; overflow: hidden; border-radius: 0.5rem; touch-action: pan-y; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.ui-row-swipe-act { text-shadow: none; position: absolute; top: 0; bottom: 0; display: flex; align-items: center; width: 100%; overflow: hidden; pointer-events: auto; cursor: pointer; background: color-mix(in oklab, var(--fg) 14%, transparent); color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); }
+.ui-row-swipe-act[data-side="left"] { left: 100%; justify-content: flex-start; }
+.ui-row-swipe-act[data-side="right"] { right: 100%; justify-content: flex-end; }
+.ui-row-swipe-act[data-tone="danger"] { background: var(--danger); color: #fff; }
+.ui-row-swipe-in { display: flex; flex: none; box-sizing: border-box; align-items: center; gap: 0.375rem; padding: 0 0.875rem; white-space: nowrap; will-change: transform, opacity; }
+/* The cue that a release will act builds over the last stretch of the pull (--arm, 0 to 1, written by row-menu.ts): the
+   button's fill takes the accent, and at the threshold the icon pops with a little overshoot. Opacity and transform only. */
+.ui-row-swipe-act::before { content: ""; position: absolute; inset: 0; background: var(--accent); opacity: calc(var(--arm, 0) * 0.34); pointer-events: none; }
+.ui-row-swipe-act[data-tone="danger"]::before { background: #000; opacity: calc(var(--arm, 0) * 0.18); }
+.ui-row-swipe-in { position: relative; }
+.ui-row-swipe-icon { display: grid; place-items: center; transition: transform 240ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
+.ui-row-swipe-icon svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-row-swipe-act[data-armed] .ui-row-swipe-icon { transform: scale(1.22); }
+@media (prefers-reduced-motion: reduce) { .ui-row-swipe-icon { transition: none; } }
+.ui-row-edit { flex: 1; min-width: 0; height: 1.375rem; margin: 0 -0.25rem; padding: 0 0.25rem; border: 0; border-radius: 0.375rem; background: var(--hover); color: var(--fg); font: inherit; letter-spacing: inherit; outline: none; }
+/* The in-row question (row-confirm.ts): over the row's leaf, at the leaf's own height, so the row never changes size. The leaf
+   keeps its box and its marker (the status dot); only its words fade, and the question fades in over them, starting where the
+   label started (row-confirm.ts sets the padding from the label's own offset). */
+.bm-row[data-asking] { position: relative; }
+.bm-row > .bm-leaf { transition: transform 140ms var(--ease-out, ease-out), opacity 150ms var(--ease-out, ease-out); }
+.bm-row > .bm-leaf > * { transition: opacity 150ms var(--ease-out, ease-out); }
+.bm-row[data-asking] > .bm-leaf { pointer-events: none; }
+.bm-row[data-asking] > .bm-leaf > :not(.glyph) { opacity: 0; }
+.ui-row-ask { position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; gap: 0; padding: 0 2px 0 0.375rem; opacity: 0; color: var(--fg-2); font: inherit; letter-spacing: inherit; white-space: nowrap; transition: opacity 150ms var(--ease-out, ease-out); }
+.ui-row-ask[data-open] { opacity: 1; }
+.ui-row-ask:not([data-open]) { pointer-events: none; }
+.ui-row-ask[data-instant] { transition: none; }
+.ui-row-ask-q { flex: none; margin-right: 0.1875rem; color: var(--fg); font-weight: var(--fw-body, 500); } /* the label's own weight: same text, turned into a question */
+.ui-row-ask-effect { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.ui-row-ask-dot { color: var(--fg-3); }
+.ui-row-ask button { position: relative; flex: none; height: calc(100% - 0.375rem); padding: 0 0.1875rem; border: 0; border-radius: 0.375rem; background: none; color: var(--fg-2); font: inherit; font-weight: var(--fw-label, 500); letter-spacing: inherit; cursor: pointer; transition: background-color 120ms ease, color 120ms ease, transform 120ms var(--ease-out, ease-out); }
+.ui-row-ask button::after { content: ""; position: absolute; inset: -0.1875rem -0.25rem; } /* the hit area keeps to the row's own height */
+.ui-row-ask button:active { transform: scale(var(--ui-press-scale)); }
+.ui-row-ask .ui-row-ask-yes { color: var(--danger); }
+@media (hover: hover) and (pointer: fine) { .ui-row-ask button:hover { background: var(--hover); color: var(--fg); } .ui-row-ask .ui-row-ask-yes:hover { color: var(--danger); } }
+.ui-row-ask button:focus { outline: none; }
+[data-focus-ring="on"] .ui-row-ask button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ui-row-ask button:focus-visible { background: var(--hover); }
+@media (pointer: coarse) { .ui-row-ask button { padding: 0 0.375rem; } } /* the 44 px target is the ::after, not the padding: a phone row has 253 px for the question and its answers */
+@media (prefers-reduced-motion: reduce) { .ui-row-ask, .bm-row > .bm-leaf, .bm-row > .bm-leaf > * { transition: none; } .ui-row-ask button { transition: none; } }
+.bm-row { touch-action: pan-y; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .ui-window-body { position: relative; flex: 1; min-height: 0; overflow: hidden; border-radius: 0 0 calc(var(--r-lg, 1.125rem) - 1px) calc(var(--r-lg, 1.125rem) - 1px); }
 @media (hover: hover) and (pointer: fine) {
   .ui-window-pill:hover { background: var(--hover); }
@@ -542,6 +590,8 @@
   min-height: var(--ui-row-h); padding: 0.25rem 0; border-bottom: 1px solid var(--line);
 }
 .ui-kv-row:last-child { border-bottom: 0; }
+/* A row's pane (`panel` in kv-list.ts) takes the whole row under the key and the value. */
+.ui-kv-row > .ui-kv-panel { grid-column: 1 / -1; min-width: 0; }
 /* Titled sections inside one list: the quiet eyebrow of the settings headings, no box or rule of its own. */
 .ui-kv-section + .ui-kv-section { margin-top: 0.75rem; }
 .ui-kv-rows { display: flex; flex-direction: column; }
@@ -724,6 +774,16 @@
 .ui-window[data-resize="touch"] .ui-window-resize[data-edge="se"]::after { bottom: 0.375rem; right: 0.375rem; border-width: 0 0.1875rem 0.1875rem 0; border-bottom-right-radius: 0.875rem; }
 .ui-window[data-resize="touch"] .ui-window-resize[data-edge="sw"]::after { bottom: 0.375rem; left: 0.375rem; border-width: 0 0 0.1875rem 0.1875rem; border-bottom-left-radius: 0.875rem; }
 @keyframes ui-grip-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* Renaming in place (inline-rename.ts): a flat field in the name's own type, tinted like a hovered row. No ring from
+   mouse or touch (TASTE §1); the tint and the caret say where you are. Surfaces add only size and position. */
+.ui-inline-rename {
+  box-sizing: border-box; min-width: 0; height: 22px; padding: 0 6px; border: 0; border-radius: 6px; outline: 0;
+  background: var(--hover); color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking);
+  -webkit-user-select: text; user-select: text; text-shadow: none;
+}
+/* 16 px on touch so iOS never zooms into the field (the one type scale, TASTE §2). */
+@media (pointer: coarse) { .ui-inline-rename { height: 32px; font-size: var(--text-input, 16px); } }
 
 /* Sidebar footer (sidebar-foot.ts): the person's pill and the settings pill share one height, so
    their centres sit on one line. Pills are the shared `.ui-pill`; only layout lives here. */
@@ -1089,7 +1149,9 @@
 .ui-sidebar-card, .ui-sidebar-card * { text-shadow: none; }
 .ui-sidebar-card[hidden] { display: none; }
 .ui-sidebar-card[data-open="false"] { opacity: 0; transform: translateY(0.375rem); pointer-events: none; }
-/* The first card shown pushes itself and what follows to the bottom; a card after it, and the footer, follow it directly. */
+/* The first card shown pushes itself and what follows to the bottom; a card after it, and the footer, follow it directly.
+   Only a card that takes part in the layout counts: one that was shown and then hidden stays in the DOM as `display: none`,
+   and matching it would leave nothing to push the footer down (#259). */
 .ui-sidebar-card:not([hidden]) ~ .ui-sidebar-card, .ui-sidebar-card:not([hidden]) ~ .ui-sidebar-foot { margin-top: 0; }
 .ui-sidebar-card-header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; min-height: 1.375rem; padding: 2px 0.375rem 0; color: var(--ui-text-secondary); font-size: var(--text-caption); font-weight: var(--fw-label); line-height: 1.4; }
 /* The card's close control: an icon button, 24 px on desktop; its hit area is 44 px on touch without making the header taller. */
@@ -1141,11 +1203,9 @@
 .ui-scroll-fade[data-fade~="top"] { -webkit-mask-image: linear-gradient(transparent, #000 1.375rem); mask-image: linear-gradient(transparent, #000 1.375rem); }
 .ui-scroll-fade[data-fade="top bottom"] { -webkit-mask-image: linear-gradient(transparent, #000 1.375rem, #000 calc(100% - 1.375rem), transparent); mask-image: linear-gradient(transparent, #000 1.375rem, #000 calc(100% - 1.375rem), transparent); }
 
-/* The field a name turns into while it is renamed where it stands (inline-rename.ts). Quiet fill, no border, no ring; the
-   font comes from the text it replaces. */
-.ui-rename-input { min-width: 0; width: 100%; height: 1.375rem; margin: 0 -0.375rem; padding: 0 0.375rem; border: 0; border-radius: 0.375rem; background: var(--hover); color: var(--fg); }
-.ui-rename-input:focus { outline: none; }
-.ui-rename-input::placeholder { color: var(--fg-3); }
+/* A field that takes the place of a name in its parent's flow (`inlineRename`): the width of the name, the text where the name's text was. */
+.ui-inline-rename-flow { width: 100%; margin: 0 -0.375rem; }
+.ui-inline-rename::placeholder { color: var(--fg-3); }
 
 /* A value run (kv-decorate.ts `parts`): small items that wrap only between them; each is one unit, tinted, with its note one
    step quieter than the name but still readable (--fg-2 clears 4.5:1 on the tint). */

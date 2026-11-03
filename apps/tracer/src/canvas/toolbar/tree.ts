@@ -10,7 +10,7 @@
  * order. Tapping an open session flies to its window; tapping a detached or exited one opens it in a new
  * window and flies there. A closed sidebar is not rebuilt; it is brought up to date when it opens.
  */
-import type { BranchSection } from "../../../../../packages/ui/src/branched";
+import type { BranchedMenu, BranchSection } from "../../../../../packages/ui/src/branched";
 import type { Ctx } from "../context";
 import type { ViewId } from "../model/types";
 import { coarse } from "../dom";
@@ -44,7 +44,7 @@ export function createTree(cx: Ctx): TreeModule {
       // A big graph lists no nodes: a thousand rows would be the cost of the sidebar, and its cards are not all in the
       // DOM. The section still flies to the view, where the clusters are.
       leaves: graph
-        ? (isFreeView(c.view) ? [] : c.view.nodes).map((n) => ({ id: `n-${n.id}`, label: n.label, glyph: n.kind === "tag" ? "#" : "◦" }))
+        ? (isFreeView(c.view) ? [] : c.view.nodes).map((n) => ({ id: `n-${n.id}`, label: n.label, glyph: n.kind === "tag" ? "#" : "◦", ...(n.kind === "host" && c.view.id === "mesh" ? { renamable: true } : {}) }))
         : [...c.wins.values()].map((w) => ({ id: w.model.id, label: w.model.kind === "terminal" || w.model.kind === "app" || w.model.kind === "screen" ? `${w.model.host}${w.model.session ? ` · ${w.model.session}` : ""}` : w.model.kind === "settings" || w.model.kind === "docs" ? w.model.host : (w.model.session ?? w.model.kind), glyph: w.model.kind === "terminal" ? "›_" : w.model.kind === "app" || w.model.kind === "screen" ? "▢" : "▤" })),
     };
   });
@@ -64,7 +64,25 @@ export function createTree(cx: Ctx): TreeModule {
   };
   let queued = false;
   let stale = false;
+  /** A host's name is being edited in the tree: it is not rebuilt under the person's hands (it is, once they are done). */
+  let editing = false;
+  /** A second tap on a host's name renames it; the sidebar on a phone therefore waits this long before it closes. */
+  const DOUBLE_TAP_WAIT_MS = 360;
   let marks = new Set<string>();
+  /** The shared tree behind the sidebar; the row menu's Rename and F2 open its inline-rename field through it. */
+  let treeMenu: BranchedMenu | undefined;
+  /** The row menu, swipes and pill (D309, #215): their code loads the first time the sidebar is shown (D188). */
+  let rows: { openRename(row: HTMLElement): boolean; dispose(): void } | undefined;
+  let rowsLoading: Promise<unknown> | undefined;
+  const closeSidebar = (): void => { stage.querySelector<HTMLButtonElement>("#sidebar-toggle[aria-expanded='true']")?.click(); };
+  const loadRows = (): void => {
+    rowsLoading ??= onDemand(() => import("./row-actions.on-demand")).then((m) => { if (!signal.aborted) rows = m.createRowActions(cx, stage.querySelector<HTMLElement>("#tree")!, { closeSidebar, rename: (id) => treeMenu?.rename(id) ?? false, editing: (open) => { editing = open; if (!open) render(); } }); });
+  };
+  /** On a phone something that was chosen closes the sidebar; a row whose name a second tap renames waits out the double tap first. */
+  const chosen = (id: string): void => {
+    if (!coarse.matches) return;
+    if (stage.querySelector(`#tree [data-renamable][data-id="${CSS.escape(id)}"]`)) window.setTimeout(() => { if (!editing) closeSidebar(); }, DOUBLE_TAP_WAIT_MS); else closeSidebar();
+  };
   const sidebar = stage.querySelector<HTMLElement>("#sidebar");
   const render = (): void => {
     if (queued) return;
@@ -74,20 +92,22 @@ export function createTree(cx: Ctx): TreeModule {
       if (signal.aborted) return;
       // A closed sidebar costs a rebuild and a layout for nothing; it is rebuilt when it opens.
       if (sidebar?.hidden) { stale = true; return; }
+      if (editing) return;
       stale = false;
-      core.setHostTree(sections(), current(), (id) => {
+      loadRows();
+      treeMenu = core.setHostTree(sections(), current(), (id) => {
         if (id.startsWith("s:")) {
           const [host, sid] = id.slice(2).split("/");
           if (host && sid) cx.win.openSession(host, sid);
-          if (coarse.matches) stage.querySelector<HTMLButtonElement>("#sidebar-toggle[aria-expanded='true']")?.click();
+          chosen(id);
           return;
         }
         const target = [...views.values()].flatMap((c) => [...c.wins.values()]).find((w) => w.model.id === id);
         if (!target) return;
         cx.win.setActive(target);
         if (target.model.kind === "node") cx.nav.flyView("mesh"); else cx.nav.focusWindow(target);
-        if (coarse.matches) stage.querySelector<HTMLButtonElement>("#sidebar-toggle[aria-expanded='true']")?.click();
-      });
+        chosen(id);
+      }, { openRename: (row) => rows?.openRename(row) ?? false });
       // A mark that was not on the last tree draws in; the others stay still.
       const now = new Set<string>();
       for (const leaf of stage.querySelectorAll<HTMLElement>("#tree .bm-leaf")) {
@@ -114,5 +134,5 @@ export function createTree(cx: Ctx): TreeModule {
   if (tree) observer!.observe(tree, { childList: true });
   const sideTitle = stage.querySelector<HTMLElement>(".sidebar-title");
   if (sideTitle) sideTitle.textContent = "Views";
-  return { render, dispose() { observer?.disconnect(); shown?.disconnect(); } };
+  return { render, dispose() { observer?.disconnect(); shown?.disconnect(); rows?.dispose(); } };
 }

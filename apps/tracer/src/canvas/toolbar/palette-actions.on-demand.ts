@@ -1,5 +1,6 @@
 /** Dispatches canvas palette actions on first selection; inventory rows stay synchronous and current at sign-in (D188). */
 import type { Ctx, WinRec } from "../context";
+import { beginRename } from "../mesh/rename.on-demand";
 import type { ViewId } from "../model/types";
 import { isTerminal } from "../views/body";
 
@@ -36,6 +37,32 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
   else if (kind === "removehost" && value) {
     const host = cx.adapters.sessions.hosts().find((entry) => entry.id === value);
     if (host) cx.adapters.hostRemoval?.remove(host.id, host.name, active?.card.pill ?? core.stage);
+  }
+  else if (kind === "rename" && value) {
+    // Goes to the Mesh view, where the host's card opens its name field as soon as the card is on screen.
+    const host = decodeURIComponent(value);
+    if (detail?.source === "keyboard") cx.camera.keyFlight(() => cx.nav.flyView("mesh")); else cx.nav.flyView("mesh");
+    beginRename(cx, host);
+  }
+  else if (kind === "access" && value) {
+    // The machine's details open on the Host tab with the consent under "Access level": a window of the host comes into view,
+    // its popover opens, and the row is pressed once it has been drawn.
+    const host = decodeURIComponent(value);
+    const rec = [...views.values()].flatMap((c) => [...c.wins.values()]).find((w) => w.model.kind === "terminal" && w.model.host === host);
+    if (!rec) { core.toast.show({ message: `${host} has no window open. Open a shell on it first.` }); return; }
+    cx.win.setActive(rec);
+    cx.nav.focusWindow(rec);
+    cx.details?.close(true);
+    window.setTimeout(() => {
+      cx.details?.toggle(rec, "keyboard");
+      const t0 = performance.now();
+      const press = (): void => {
+        const row = [...document.querySelectorAll<HTMLElement>(".canvas-popover .ui-kv-row")].find((r) => r.textContent?.includes("Access level"));
+        const button = row?.querySelector<HTMLElement>(".ui-kv-press");
+        if (button) button.click(); else if (performance.now() - t0 < 2500) requestAnimationFrame(press);
+      };
+      press();
+    }, 350);
   }
   else if (kind === "open" && value) cx.win.open(value);
   else if (kind === "appwin" && value) {
