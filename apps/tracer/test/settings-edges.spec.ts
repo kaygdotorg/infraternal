@@ -81,9 +81,10 @@ const measure = (page: Page, id: string): Promise<SectionEdges | undefined> => p
     add("status", row, row.querySelector(".ui-sp-label")!.textContent!, text(row.querySelector(".ui-sp-label")), action ? { m: rect(icon ?? action), kind: icon ? "glyph" : "button" } : null);
   }
   for (const row of pane.querySelectorAll(".ui-ts-item")) add("toolbar", row, row.querySelector(".ui-ts-label")!.textContent!, rect(row.querySelector(".ui-ts-grip svg")), { m: track(row.querySelector(".ui-ts-switch")), kind: "switch" });
-  for (const row of pane.querySelectorAll(".ui-ss-row")) {
-    const caps = row.querySelectorAll("kbd"), reset = row.querySelector(".ui-ss-reset svg");
-    add("shortcut", row, row.querySelector(".ui-ss-label")!.textContent!, text(row.querySelector(".ui-ss-label")), { m: reset ? rect(reset) : caps.length ? rect(caps[caps.length - 1]) : text(row.querySelector(".ui-ss-keys")), kind: reset ? "reset" : "keys" });
+  // A changed row keeps its caps on the edge too (its mark is a dot on the caps, not a button beside them); "Reset all" has no caps.
+  for (const row of pane.querySelectorAll(".ui-ss-row:not([data-reset-all])")) {
+    const caps = row.querySelectorAll("kbd");
+    add("shortcut", row, row.querySelector(".ui-ss-label")!.textContent!, text(row.querySelector(".ui-ss-label")), { m: caps.length ? rect(caps[caps.length - 1]) : text(row.querySelector(".ui-ss-keys")), kind: "keys" });
   }
   for (const row of pane.querySelectorAll(".ui-sp-device")) {
     const buttons = row.querySelectorAll(".ui-window-action svg");
