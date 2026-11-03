@@ -379,6 +379,8 @@ pub enum CliHandler {
     Skill,
     /// Sign this CLI device into a server through fresh passkey approval.
     SignIn,
+    /// Adapt one shared hosted action to the API-key HTTP or bootstrap WebSocket transport.
+    HostedAction,
     /// Run the configured server in the foreground.
     ServerRun,
     /// Create and start a server service.

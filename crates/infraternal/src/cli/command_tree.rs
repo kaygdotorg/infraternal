@@ -31,8 +31,15 @@ pub fn build(registry: &ActionRegistry) -> Command {
         .arg(
             Arg::new("json")
                 .long("json")
-                .help("Print the stable versioned JSON result envelope.")
+                .help("Print the stable JSON result envelope.")
                 .action(ArgAction::SetTrue)
+                .global(true),
+        )
+        .arg(
+            Arg::new("server_override")
+                .long("server")
+                .help("Use the signed-in server for this action.")
+                .action(ArgAction::Set)
                 .global(true),
         );
     let tree = command_tree(registry);
@@ -165,6 +172,11 @@ fn build_node(node: &CommandNode<'_>, inherited: &[Arg]) -> Command {
             if action.command == ["skill"] && name == "command" {
                 continue;
             }
+            // `remove-host` uses the root server override for the same HTTPS origin. Keeping a
+            // second generated `--server` here would collide with the shared global option.
+            if action.command == ["remove-host"] && name == "server" {
+                continue;
+            }
             let mut argument = input_argument(
                 name,
                 schema,
@@ -175,6 +187,9 @@ fn build_node(node: &CommandNode<'_>, inherited: &[Arg]) -> Command {
                     .any(|field| field == name),
                 action.visible && !action.cli_hidden_inputs.contains(name),
             );
+            if action.command == ["remove-host"] && name == "host" {
+                argument = argument.requires("server_override");
+            }
             if let Some(required) = action.cli_requires.get(name) {
                 argument = argument.requires(required.clone());
             }
@@ -339,6 +354,100 @@ mod tests {
                 .map(String::as_str),
             Some("https://mesh.example.org")
         );
+    }
+
+    #[test]
+    fn sign_in_accepts_repeated_additional_scopes() {
+        let registry = registry().expect("action registry");
+        let matches = build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "sign-in",
+                "https://mesh.example.org",
+                "--scope",
+                "hosts:write",
+                "--scope",
+                "sessions:write",
+            ])
+            .expect("repeated scope options");
+        let selected = selected(&matches);
+        assert_eq!(
+            selected
+                .matches
+                .get_many::<String>("scope")
+                .expect("scope values")
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["hosts:write", "sessions:write"]
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "remote")]
+    fn server_action_commands_use_the_shared_action_definitions() {
+        let registry = registry().expect("action registry");
+        for (path, action_id, example_argument) in [
+            (&["hosts", "list"][..], "remote.host.list", None),
+            (
+                &["hosts", "add"][..],
+                "ssh.start",
+                Some("operator@host.example"),
+            ),
+            (
+                &["hosts", "remove"][..],
+                "remote.host.remove",
+                Some("00000000-0000-0000-0000-000000000001"),
+            ),
+            (&["sessions", "list"][..], "sessions.list", None),
+        ] {
+            let mut args = vec!["infraternal", "--server", "https://mesh.example.org"];
+            args.extend_from_slice(path);
+            args.push("--json");
+            if let Some(argument) = example_argument {
+                args.push(argument);
+            }
+            let matches = build(&registry)
+                .try_get_matches_from(args)
+                .unwrap_or_else(|error| panic!("parse {}: {error}", path.join(" ")));
+            let selected = selected(&matches);
+            assert_eq!(selected.path, path);
+            assert_eq!(
+                selected
+                    .matches
+                    .get_one::<String>("server_override")
+                    .map(String::as_str),
+                Some("https://mesh.example.org")
+            );
+            let hosted = registry
+                .find(path)
+                .and_then(|registered| registered.action.hosted.as_ref())
+                .unwrap_or_else(|| {
+                    panic!("{} must carry its shared hosted definition", path.join(" "))
+                });
+            assert_eq!(hosted.id, action_id);
+            assert_eq!(
+                hosted.fresh_passkey,
+                action_id == "remote.host.remove",
+                "only removal among these actions needs a fresh tap"
+            );
+        }
+
+        let matches = build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "--server",
+                "https://mesh.example.org",
+                "status",
+                "--json",
+            ])
+            .expect("server status command");
+        let hosted = registry
+            .find(&["status"])
+            .and_then(|registered| registered.action.hosted.as_ref())
+            .expect("status uses the shared core action");
+        assert_eq!(selected(&matches).path, ["status"]);
+        assert_eq!(hosted.id, "server.status");
+        assert!(!hosted.fresh_passkey);
     }
 
     #[test]
@@ -752,8 +861,26 @@ mod backmerge_tests {
             .unwrap();
         assert_eq!(selected(&matches).path, ["remove-host"]);
         assert_eq!(
+            selected(&matches)
+                .matches
+                .get_one::<String>("server_override")
+                .map(String::as_str),
+            Some("https://localhost")
+        );
+        assert_eq!(
             registry.find(&["remove-host"]).unwrap().action.cli_handler,
             CliHandler::RemoveHost
+        );
+        let missing_server = build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "remove-host",
+                "00000000-0000-0000-0000-000000000001",
+            ])
+            .expect_err("host removal still requires a server address");
+        assert_eq!(
+            missing_server.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
         );
         let matches = build(&registry)
             .try_get_matches_from([

@@ -54,13 +54,15 @@ process do not change its Running state. Repeated starts without a comparable
 monotonic timestamp remain Unknown. Queries use raw properties available to
 older systemd clients, without requiring a timestamp-format option.
 
-Status reads local state only. Each unit has independent observations and a
-query deadline; concurrent queries keep a stalled unit or manager from hiding
-another unit's state. A failed query remains Unknown, with a scoped diagnostic
-next step; it does not by itself prove the service is down. Retained server
-data without a readable service unit is Stopped, exits 5, and asks the operator
-to restore the service. Masking, disabling or removing a unit cannot create a
-Running headline without evidence of a running service.
+Without a server credential, `status` reads local state. With `--server` or one
+unambiguous stored server credential, it reads that server's status instead.
+Local checks give each unit an independent observation and query deadline; a
+stalled unit or manager cannot hide another unit's state. A failed local query
+remains Unknown, with a scoped diagnostic next step; it does not by itself
+prove the service is down. Retained server data without a readable service
+unit is Stopped, exits 5, and asks the operator to restore the service.
+Masking, disabling or removing a unit cannot create a Running headline without
+evidence of a running service.
 
 Exit codes (D303): 0 done, 1 failed, 2 wrong command line, 3 not allowed,
 4 not found, 5 off or unreachable, 6 partly done, 130 interrupted by Ctrl-C
@@ -106,12 +108,20 @@ The `mesh` Cargo feature remains an alias for `plugin-mesh`.
 link and short code, and waits for a fresh passkey approval. It stores the
 resulting server credential in the user's private config directory; the
 polling token and API key are never printed. Terminal QR output is a measured
-follow-up. The stored credential is not yet used by hosted CLI actions, which
-remain hidden until the authenticated device-session transport is implemented.
+follow-up. Read-only scopes are requested by default; repeat `--scope <scope>`
+to request additional authority, which the approval screen displays before the
+passkey tap. The stored credential powers hosted actions through
+`Authorization: Bearer`. `--server https://…` selects a stored server
+credential when more than one is present.
 
-The authenticated CLI device-session transport is not implemented yet, so
-hosted actions that need it are hidden placeholders (see above); they cannot
-bypass authorization or change a temporary local collector.
+The hosted key actions are `status`, `hosts list`, `hosts add`, `hosts remove`
+and `sessions list`. `hosts add` streams each setup step and the captured
+remote setup failure detail. `hosts remove` opens an action-bound request on
+the device-approval page and waits for a fresh owner passkey tap. The key alone
+never authorizes removal; refusal or expiry exits 3.
+
+Hosted actions without an explicit API scope remain unavailable to the CLI;
+they cannot bypass authorization or change a temporary local collector.
 Their real server handlers, durable switches and subscription topics continue to
 run through the generic plugin host. `infraternal server init` remains the only
 CLI service-creation path.
