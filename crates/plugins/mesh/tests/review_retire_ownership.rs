@@ -5,8 +5,17 @@
 #![cfg(all(feature = "agent", target_os = "linux"))]
 #![allow(clippy::unwrap_used)]
 
-use infraternal_plugin_mesh::{node::Node, wireguard::Device};
+use infraternal_plugin_mesh::{
+    dataplane::{Chunk, DefaultPolicy, Peer, PeerPolicy},
+    node::Node,
+    policy::{
+        model::{Addresses, NodeId, PublicKey},
+        rules::TrafficPolicy,
+    },
+    wireguard::{Device, Key},
+};
 use std::{
+    collections::BTreeMap,
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -142,6 +151,55 @@ fn table_present() -> bool {
         .success()
 }
 
+fn addresses(id: u32) -> Addresses {
+    Addresses {
+        ipv4: (0x0afe_0000 + id).into(),
+        ipv6: ((0xfd01_u128 << 112) + u128::from(id)).into(),
+    }
+}
+
+fn install_deny_policy(node: &mut Node, local_key: PublicKey) -> std::io::Result<()> {
+    let (_, peer_key) = Key::generate()?;
+    let chunk = Chunk {
+        local_key: Some(local_key),
+        server: Some(NodeId(1)),
+        node: NodeId(2),
+        #[cfg(feature = "mesh-dns-spike")]
+        name: None,
+        #[cfg(feature = "mesh-dns-spike")]
+        dns_suffix: "internal".to_owned(),
+        from_version: None,
+        version: 1,
+        index: 0,
+        last: true,
+        addresses: addresses(2),
+        default_policy: DefaultPolicy::Deny,
+        exposure: None,
+        upserted: BTreeMap::from([(
+            NodeId(1),
+            PeerPolicy {
+                peer: Peer {
+                    key: peer_key,
+                    addresses: addresses(1),
+                    endpoint: None,
+                },
+                inbound: TrafficPolicy::All,
+                outbound: TrafficPolicy::All,
+            },
+        )]),
+        merged: BTreeMap::new(),
+        removed: Vec::new(),
+        #[cfg(feature = "mesh-dns-spike")]
+        peer_names: BTreeMap::new(),
+        #[cfg(feature = "mesh-dns-spike")]
+        removed_peer_names: Vec::new(),
+        access_updates: Vec::new(),
+    };
+    let applied = node.chunk(chunk)?;
+    assert!(applied, "the policy chunk must be applied");
+    Ok(())
+}
+
 /// The interface and filter this installation's node created go with it (#235).
 #[test]
 #[ignore = "Run as root in a disposable network namespace with WireGuard and nft."]
@@ -247,6 +305,53 @@ fn down_does_not_remove_another_installations_replacement_gotatun_tun() {
     assert!(
         current_stopped.is_ok(),
         "the current installation could not stop: {current_stopped:?}"
+    );
+}
+
+/// Restoring a disabled installation must not adopt and remove another live
+/// `GotaTun` node's shared policy table.
+#[test]
+#[ignore = "Run as root in a disposable network namespace with CAP_NET_ADMIN and nft."]
+fn disabled_restore_leaves_another_gotatun_nodes_installed_policy() {
+    let old_state = fresh_state("restore-disabled-gotatun-old-owner");
+    let current_state = fresh_state("restore-disabled-gotatun-live-owner");
+    let result = (|| {
+        let mut old = traced("restore old", Node::restore(&old_state))?;
+        traced("start old", old.up())?;
+        traced("stop old", old.down())?;
+
+        let mut current = traced("restore current", Node::restore(&current_state))?;
+        let identity = traced("start current", current.up())?;
+        traced(
+            "install current policy",
+            install_deny_policy(&mut current, identity.public_key),
+        )?;
+        assert!(
+            table_present(),
+            "the current node must own an installed policy"
+        );
+
+        let restored_old = traced("restore disabled old", Node::restore(&old_state))?;
+        let table_survived = table_present();
+        let current_tun_survived = traced("query current TUN", Device::owned_tun())?;
+        drop(restored_old);
+        let stopped = current.down();
+        Ok::<_, std::io::Error>((table_survived, current_tun_survived, stopped))
+    })();
+    cleanup(&old_state);
+    cleanup(&current_state);
+    let (table_survived, current_tun_survived, stopped) = result.unwrap();
+    assert!(
+        table_survived,
+        "restoring the disabled old node removed the live node's policy table"
+    );
+    assert!(
+        current_tun_survived,
+        "restoring the disabled old node removed the live GotaTun interface"
+    );
+    assert!(
+        stopped.is_ok(),
+        "the current node could not stop: {stopped:?}"
     );
 }
 

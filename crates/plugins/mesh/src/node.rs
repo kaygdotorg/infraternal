@@ -167,7 +167,13 @@ impl Node {
                 .map_or_else(Firewall::default, Firewall::for_backend),
             ..Self::default()
         };
-        node.firewall.adopt()?;
+        // A GotaTun TUN exists only while the engine that created it holds its
+        // descriptor, and this node has not started one. A live GotaTun link is
+        // therefore another running node's, and so is the shared filter that
+        // enforces its policy: never adopt it here (#260).
+        if active_engine != Some(EngineKind::GotaTun) {
+            node.firewall.adopt()?;
+        }
         if active_engine == Some(EngineKind::Kernel) {
             node.owned = true;
             let identity = Device::identity();
@@ -224,13 +230,31 @@ impl Node {
             node.routes.clear();
         }
         if !node.owned && !node.enabled {
-            node.firewall.remove()?;
             // A stopped process may already have deleted the link but not the
             // policy or journal. Disabled intent fences adoption; finish that
             // cleanup instead of leaving durable ownership behind forever.
+            node.remove_unshared_filter()?;
             node.retire_routes()?;
         }
         Ok(node)
+    }
+    /// Remove an adopted mesh filter that no live link depends on.
+    ///
+    /// Every installation uses the same interface name and filter table, so
+    /// the table cannot name its owner. For a node without a live link of its
+    /// own, a live mesh link belongs to another running node whose policy the
+    /// filter enforces (#260). An unmarked interface with the shared name
+    /// counts as live: it may be another node's TUN before it is marked.
+    fn remove_unshared_filter(&mut self) -> io::Result<()> {
+        if !self.firewall.installed() {
+            return Ok(());
+        }
+        match Device::active_link() {
+            Ok(None) => self.firewall.remove(),
+            Ok(Some(_)) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error),
+        }
     }
     /// Decide, changing nothing, which kernel objects host uninstall removes.
     ///
@@ -622,6 +646,7 @@ impl Node {
             self.dns_resolver = None;
         }
         let mut foreign_live_link = false;
+        let owned_link = self.owned;
         if self.owned {
             match Device::active_link()? {
                 Some(active) if active.engine == self.engine_kind => {
@@ -658,7 +683,10 @@ impl Node {
             }
             self.owned = false;
         }
-        if !foreign_live_link {
+        if !owned_link {
+            // A failed `up` can leave another live node's filter adopted.
+            self.remove_unshared_filter()?;
+        } else if !foreign_live_link {
             self.firewall.remove()?;
         }
         self.retire_routes()?;
