@@ -39,12 +39,13 @@ type CounterMap = BTreeMap<PublicKey, crate::wireguard::Counters>;
 #[cfg(feature = "relay")]
 const HANDSHAKE_WAIT: Duration = Duration::from_secs(5);
 
-/// Selects the node's data plane; kernel `WireGuard` remains an explicit migration fallback.
+/// Selects the node's data plane. Kernel `WireGuard` stays the default until the integrated
+/// `GotaTun` engine reaches kernel throughput in R4b (#260); `GotaTun` is selectable per node.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EngineKind {
-    #[default]
     GotaTun,
+    #[default]
     Kernel,
 }
 
@@ -54,7 +55,8 @@ impl EngineKind {
     /// Refuses unknown values instead of silently selecting a different engine.
     pub fn parse(value: Option<&str>) -> io::Result<Self> {
         match value {
-            None | Some("gotatun") => Ok(Self::GotaTun),
+            None => Ok(Self::default()),
+            Some("gotatun") => Ok(Self::GotaTun),
             Some("kernel") => Ok(Self::Kernel),
             Some(_) => Err(io::ErrorKind::InvalidInput.into()),
         }
@@ -721,8 +723,16 @@ mod tests {
     use std::{collections::BTreeMap, net::SocketAddr};
 
     #[test]
-    fn linux_defaults_to_gotatun() {
-        assert_eq!(EngineKind::default(), EngineKind::GotaTun);
+    fn linux_defaults_to_kernel_until_gotatun_reaches_parity() {
+        assert_eq!(EngineKind::default(), EngineKind::Kernel);
+        assert_eq!(
+            EngineKind::parse(None).expect("default"),
+            EngineKind::Kernel
+        );
+        assert_eq!(
+            EngineKind::parse(Some("gotatun")).expect("selectable engine"),
+            EngineKind::GotaTun
+        );
     }
 
     /// The engine socket asks for the large buffers (D331). The kernel doubles only an explicit
@@ -750,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn kernel_engine_is_available_as_a_transition_fallback() {
+    fn kernel_engine_is_selectable() {
         assert_eq!(
             EngineKind::parse(Some("kernel")).expect("known engine"),
             EngineKind::Kernel
