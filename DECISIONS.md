@@ -3708,3 +3708,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - The `unnamed-<id>` naming scheme goes away everywhere: "just lose
        this naming scheme. we already have default dns decided" (D327: a
        peer sees a name only if it may reach that machine).
+330. **Rootless proxy may still publish publicly (owner, 2026-11-03,
+     #281):** "can't userspace daemons bind to public IPs for ports >1024?
+     I think we can still do --public but just alert the user that the
+     firewall may yet block the connection." Without root, `--public`
+     binds the unprivileged public pair (10080/10443 or the next free pair)
+     on all addresses. The person is told the port, and that this
+     machine's firewall or router may still block it. The Mesh pair stays
+     on the mesh address, and rootful behaviour (80/443 behind the managed
+     firewall gate) is unchanged.
