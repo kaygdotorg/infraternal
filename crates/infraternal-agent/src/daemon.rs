@@ -1550,6 +1550,19 @@ async fn terminal_run(
                         deadline = output
                             .pending(Instant::now())
                             .map(tokio::time::Instant::from_std);
+                        // This relay stops reading the shim while a frame is
+                        // pending, and re-enters `pending` only at the top of
+                        // this loop. After a pass that forwarded bytes, the remainder
+                        // may be affordable at once: the replay fence that
+                        // limited this pass is gone, or credit remains. Waiting
+                        // for the select below would leave it parked until an
+                        // unrelated command arrives (#324). A pass that forwarded
+                        // nothing is credit-starved, has armed `deadline`, and
+                        // must wait; looping there would spin. Each repeat
+                        // consumes at least one byte of a finite frame.
+                        if length > 0 {
+                            continue;
+                        }
                     }
                 }
                 frame @ (Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)) => {
@@ -1807,6 +1820,10 @@ mod readiness_exit_tests;
 #[cfg(test)]
 #[path = "daemon_liveness_tests.rs"]
 mod liveness_tests;
+
+#[cfg(test)]
+#[path = "daemon_replay_fence_tests.rs"]
+mod replay_fence_tests;
 
 #[cfg(test)]
 #[path = "daemon_authenticated_tests.rs"]
