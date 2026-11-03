@@ -355,6 +355,24 @@ fn newline_terminated_provider_values_are_redacted_after_log_normalization() {
 }
 
 #[test]
+fn provider_values_are_redacted_as_the_dns_client_trims_them() {
+    // The DNS client trims all surrounding whitespace from a `*_FILE` value before use.
+    let line = "provider error included secret-value-123 in its request";
+    for secret in [
+        "secret-value-123 \n",
+        "\tsecret-value-123",
+        " secret-value-123\u{a0}",
+        "\u{2003}secret-value-123\r\n ",
+    ] {
+        let redacted = redact_log_line(line, &[secret]);
+        assert!(
+            !redacted.contains("secret-value-123"),
+            "{secret:?} leaked: {redacted}"
+        );
+    }
+}
+
+#[test]
 fn authorization_cookie_and_query_credentials_are_redacted_without_known_values() {
     let line = "request failed Authorization: Bearer header-secret Cookie: session=cookie-secret url=https://dns.invalid/?api_key=query-secret";
     let redacted = redact_log_line(line, &[]);

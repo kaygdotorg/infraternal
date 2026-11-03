@@ -190,7 +190,15 @@ impl Lifecycle {
 pub fn redact_log_line(line: &str, secrets: &[&str]) -> String {
     let mut secrets: Vec<_> = secrets
         .iter()
-        .flat_map(|secret| [*secret, secret.trim_end_matches(['\r', '\n'])])
+        // Traefik's DNS client trims all leading and trailing (Unicode) whitespace from a
+        // `*_FILE` value, so the trimmed form is what it can echo back.
+        .flat_map(|secret| {
+            [
+                *secret,
+                secret.trim_end_matches(['\r', '\n']),
+                secret.trim(),
+            ]
+        })
         .filter(|secret| !secret.is_empty())
         .collect();
     secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
