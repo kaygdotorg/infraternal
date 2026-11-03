@@ -922,8 +922,11 @@ fi
             "default.target"
         };
         // Existing data must be private to the execution uid before any read or write.
+        // The shared routines read their control flags with defaults; a login
+        // environment must never preset them (an inherited setup_check=yes would
+        // turn every refusal into success), so the prelude fixes them (#305).
         format!(
-            "set -euC\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] && [ \"$(stat -c '%a' \"$base\")\" = 700 ] || exit 71\nfi\n{body}",
+            "set -euC\nsetup_check=no setup_blocked=no setup_guarded=no setup_allow_locked_inspection=no runtime_locked=no lease_runtime=no preserve_session=no previous_kind= parent=\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] && [ \"$(stat -c '%a' \"$base\")\" = 700 ] || exit 71\nfi\n{body}",
             shell_quote(&host),
             shell_quote(&transaction.simple().to_string()),
             shell_quote(manager)
@@ -1890,6 +1893,41 @@ mod tests {
         ] {
             assert_eq!(TransferCaps::parse(invalid.as_bytes()), None, "{invalid:?}");
         }
+    }
+
+    #[test]
+    fn inherited_control_variables_cannot_change_a_setup_program() {
+        // The login environment can carry any of these names. A mutating
+        // program must still refuse with 75, never report success (#305).
+        let body = format!(
+            "{RUNTIME_CLEANUP}\nprintf '%s ' \"$setup_check\" \"$setup_blocked\" \"$setup_guarded\" \"$setup_allow_locked_inspection\" \"$runtime_locked\" \"$lease_runtime\" \"$preserve_session\" \"${{previous_kind:-unset}}\" \"${{parent:-unset}}\"\nrefuse kind"
+        );
+        let script = Installation::script_for(
+            InstallMode::Rootless,
+            uuid::Uuid::nil(),
+            uuid::Uuid::nil(),
+            &body,
+        );
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .env("HOME", "/nonexistent/j93d-prelude")
+            .env("setup_check", "yes")
+            .env("setup_blocked", "yes")
+            .env("setup_guarded", "yes")
+            .env("setup_allow_locked_inspection", "yes")
+            .env("runtime_locked", "yes")
+            .env("lease_runtime", "yes")
+            .env("preserve_session", "yes")
+            .env("previous_kind", "upgrade")
+            .env("parent", "/tmp")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(75));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "no no no no no no no unset unset INFRATERNAL_SETUP_REFUSED kind\n"
+        );
     }
 
     #[test]
