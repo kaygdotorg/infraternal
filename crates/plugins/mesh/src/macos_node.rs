@@ -383,7 +383,8 @@ fn hex(bytes: &[u8]) -> String {
 /// State bound to another enrolment loses its configuration and the key that
 /// enrolment knew; the node then registers a new key with its coordinator.
 /// Unbound state comes from a slice-1 build and is adopted once, so an
-/// upgrade keeps its key and peers. Without a current enrolment (no
+/// upgrade keeps its peers; its key is retired separately (`macos_key`),
+/// because slice 1 exposed it to local users. Without a current enrolment (no
 /// `identity.json`), nothing is compared.
 fn reconcile(mut state: SavedState, enrolment: Option<&Enrolment>) -> (SavedState, bool) {
     let Some(enrolment) = enrolment else {

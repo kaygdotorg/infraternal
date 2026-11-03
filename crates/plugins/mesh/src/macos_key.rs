@@ -10,11 +10,10 @@
 //! Slice-1 builds kept the key in the System keychain. That store was given up
 //! because a keychain item's ACL trusts a code identity, not a uid: any local
 //! user could run the world-executable daemon binary with an injected library
-//! and read the item (J135's review, #265). A key that is still in the keychain
-//! is moved into the file once, and the item is deleted before the file is
-//! published, so it never stays readable that way. A rebuilt ad-hoc daemon may
-//! be refused by the old item's ACL. It then deletes the item and starts with a
-//! new key, and the rotation log asks for re-registration with the coordinator.
+//! and read the item (J135's review, #265). A slice-1 key is therefore treated
+//! as compromised and is never reused: on the first start without a key file,
+//! the old keychain item is deleted unread, a fresh key is generated into the
+//! file, and the rotation log asks for re-registration with the coordinator.
 //!
 //! Neither the CLI nor a UI process reads the private key: callers must be root,
 //! and the key never reaches JSON state, argv or logs.
@@ -39,26 +38,25 @@ const KEY_LENGTH: usize = 32;
 /// Why a key that the coordinator knew had to be replaced.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RotationReason {
-    /// The keychain item from an earlier build refused this build.
-    LegacyAccessDenied,
+    /// A slice-1 keychain key existed; it was exposed to local users and is retired.
+    LegacyKeyRetired,
 }
 
 impl RotationReason {
     fn as_str(self) -> &'static str {
         match self {
-            Self::LegacyAccessDenied => "legacy_keychain_access_denied",
+            Self::LegacyKeyRetired => "legacy_keychain_key_retired",
         }
     }
 }
 
-/// What the one-time keychain migration found.
+/// What retiring the slice-1 keychain item found. Its key is never read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Legacy {
-    /// No item exists: the normal state after the first start of this build.
+    /// No item exists: a node that never ran a slice-1 build.
     Absent,
-    /// The item was read and deleted; its key must be published now.
-    Moved(Zeroizing<[u8; KEY_LENGTH]>),
-    /// The item existed but refused this build, and it was deleted.
-    Denied,
+    /// An item existed and was deleted (or could not be); the node needs a new key.
+    Retired,
 }
 
 /// Load the node's key from `state`, creating it on the first start.
@@ -73,7 +71,7 @@ pub fn load_or_create(state: &Path) -> io::Result<(StaticSecret, PublicKey)> {
             "Mesh key access requires the system service.",
         ));
     }
-    load_or_create_with(state, legacy::take)
+    load_or_create_with(state, legacy::retire)
 }
 
 /// Delete the key so the next start generates a new one (`agent join`).
@@ -89,31 +87,24 @@ pub fn remove(state: &Path) -> io::Result<()> {
     }
 }
 
-/// The testable body of [`load_or_create`]; `take_legacy` performs the migration.
+/// The testable body of [`load_or_create`]; `retire_legacy` deletes the slice-1 item.
 fn load_or_create_with(
     state: &Path,
-    take_legacy: impl FnOnce() -> Legacy,
+    retire_legacy: impl FnOnce() -> Legacy,
 ) -> io::Result<(StaticSecret, PublicKey)> {
     check_directory(state)?;
     let path = state.join(KEY_FILE);
     if let Some(bytes) = read_key(&path)? {
         return Ok(identity(&bytes));
     }
-    let bytes = match take_legacy() {
-        Legacy::Moved(bytes) => bytes,
-        Legacy::Absent => generate()?,
-        Legacy::Denied => {
-            record_rotation(
-                &state.join(ROTATION_LOG),
-                RotationReason::LegacyAccessDenied,
-            )?;
-            tracing::warn!(
-                "The keychain item from an earlier build refused this daemon; starting with a new WireGuard key for coordinator registration"
-            );
-            generate()?
-        }
-    };
-    publish(state, &bytes)?;
+    if retire_legacy() == Legacy::Retired {
+        record_rotation(&state.join(ROTATION_LOG), RotationReason::LegacyKeyRetired)?;
+        tracing::warn!(
+            "Retired the slice-1 keychain WireGuard key; starting with a new key for coordinator registration"
+        );
+    }
+    let fresh = generate()?;
+    publish(state, &fresh)?;
     // Another start may have published first; the file on disk is authoritative.
     let bytes = read_key(&path)?.ok_or(io::ErrorKind::NotFound)?;
     Ok(identity(&bytes))
@@ -233,32 +224,24 @@ fn record_rotation(path: &Path, reason: RotationReason) -> io::Result<()> {
     file.sync_data()
 }
 
-/// One-time move of a slice-1 key out of the System keychain.
+/// One-time retirement of the slice-1 keychain item; its key is never read.
 mod legacy {
-    use super::{KEY_LENGTH, Legacy};
+    use super::Legacy;
     use security_framework::{
         item::{ItemClass, ItemSearchOptions},
         os::macos::keychain::SecKeychain,
     };
-    use zeroize::Zeroizing;
 
     const SYSTEM_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
-    const SERVICE: &str = "org.infraternal.mesh";
-    const ACCOUNT: &str = "wireguard-private-key";
-    const ERR_SEC_AUTH_FAILED: i32 = -25293;
+    pub(super) const SERVICE: &str = "org.infraternal.mesh";
+    pub(super) const ACCOUNT: &str = "wireguard-private-key";
     const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
-    const ERR_SEC_INTERACTION_NOT_ALLOWED: i32 = -25308;
 
-    /// Read and delete the old item. Runs only while no key file exists.
+    /// Delete the slice-1 item from the System keychain. Runs only while no key file exists.
     ///
-    /// The item is deleted before the caller publishes the file. A crash in
-    /// between loses the key and the node re-registers a new one; it never
-    /// leaves the key in a store that other local users can reach.
-    ///
-    /// Security returns the secret in a buffer it allocates and frees; zeroing
-    /// it would need unsafe code, which this workspace forbids. That copy
-    /// exists once, during this migration, and our own copy is zeroized.
-    pub(super) fn take() -> Legacy {
+    /// A failed deletion still counts as retired: the node never uses that key
+    /// again, and the warning says the item could not be removed.
+    pub(super) fn retire() -> Legacy {
         let Ok(_no_interaction) = SecKeychain::disable_user_interaction() else {
             return Legacy::Absent;
         };
@@ -268,59 +251,41 @@ mod legacy {
         // The System keychain may be locked on this host (lock-on-sleep); a
         // null-password unlock uses the system key.
         let _ = keychain.unlock(None);
-        let found = keychain.find_generic_password(SERVICE, ACCOUNT);
-        let outcome = match found {
-            Ok((password, _item)) => {
-                let password = password.as_ref();
-                if password.len() == KEY_LENGTH {
-                    let mut bytes = Zeroizing::new([0_u8; KEY_LENGTH]);
-                    bytes.copy_from_slice(password);
-                    Legacy::Moved(bytes)
-                } else {
-                    Legacy::Denied
-                }
+        match delete_item(&keychain) {
+            Ok(true) => Legacy::Retired,
+            Ok(false) => Legacy::Absent,
+            Err(code) => {
+                tracing::warn!(code, "The slice-1 Mesh keychain item could not be deleted");
+                Legacy::Retired
             }
-            Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => return Legacy::Absent,
-            Err(error)
-                if matches!(
-                    error.code(),
-                    ERR_SEC_AUTH_FAILED | ERR_SEC_INTERACTION_NOT_ALLOWED
-                ) =>
-            {
-                Legacy::Denied
-            }
-            // Any other failure: the keychain is unusable, so there is nothing to move.
-            Err(_) => return Legacy::Absent,
-        };
+        }
+    }
+
+    /// Delete exactly the Mesh item from `keychain`; `true` when one existed.
+    pub(super) fn delete_item(keychain: &SecKeychain) -> Result<bool, i32> {
         let mut options = ItemSearchOptions::new();
         options
-            .keychains(std::slice::from_ref(&keychain))
+            .keychains(std::slice::from_ref(keychain))
             .class(ItemClass::generic_password())
             .service(SERVICE)
             .account(ACCOUNT);
-        if let Err(error) = options.delete()
-            && error.code() != ERR_SEC_ITEM_NOT_FOUND
-        {
-            tracing::warn!(
-                code = error.code(),
-                "The old Mesh keychain item could not be deleted"
-            );
+        match options.delete() {
+            Ok(()) => Ok(true),
+            Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(false),
+            Err(error) => Err(error.code()),
         }
-        outcome
     }
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
-    use super::{KEY_FILE, Legacy, ROTATION_LOG, load_or_create_with, remove};
+    use super::{KEY_FILE, Legacy, ROTATION_LOG, legacy, load_or_create_with, remove};
     use std::{
         fs,
         os::unix::fs::{PermissionsExt, symlink},
         path::PathBuf,
     };
-    use zeroize::Zeroizing;
-
     struct TestDirectory(PathBuf);
     impl Drop for TestDirectory {
         fn drop(&mut self) {
@@ -371,32 +336,28 @@ mod tests {
         );
     }
 
+    /// The orchestrator's decision on #265: a slice-1 key is compromised and is never reused.
     #[test]
-    fn a_keychain_key_is_moved_into_the_file_once() {
+    fn a_slice_one_keychain_key_is_retired_and_a_fresh_key_is_generated() {
         let state = state();
-        let legacy = [7_u8; 32];
-        let (_, migrated) = load_or_create_with(&state.0, || Legacy::Moved(Zeroizing::new(legacy)))
-            .expect("migrate key");
-        assert_eq!(fs::read(state.0.join(KEY_FILE)).expect("key"), legacy);
-        let (_, again) = load_or_create_with(&state.0, never).expect("read migrated key");
-        assert_eq!(migrated, again);
-        assert!(!state.0.join(ROTATION_LOG).exists());
-    }
-
-    #[test]
-    fn a_refused_keychain_item_records_a_rotation_without_key_material() {
-        let state = state();
-        let (_, public) = load_or_create_with(&state.0, || Legacy::Denied).expect("new key");
+        let mut retired = 0;
+        let (_, public) = load_or_create_with(&state.0, || {
+            retired += 1;
+            Legacy::Retired
+        })
+        .expect("new key");
+        assert_eq!(retired, 1, "the slice-1 item is retired once");
         let log = fs::read_to_string(state.0.join(ROTATION_LOG)).expect("rotation log");
+        assert_eq!(log.lines().count(), 1);
         assert!(log.contains("event=mesh_key_rotation"));
-        assert!(log.contains("reason=legacy_keychain_access_denied"));
+        assert!(log.contains("reason=legacy_keychain_key_retired"));
         assert!(log.contains("action=register_with_coordinator"));
         let hex = public.0.iter().fold(String::new(), |mut hex, byte| {
             use std::fmt::Write as _;
             let _ = write!(hex, "{byte:02x}");
             hex
         });
-        assert!(!log.contains(&hex));
+        assert!(!log.contains(&hex), "the log carries no key material");
         assert_eq!(
             fs::metadata(state.0.join(ROTATION_LOG))
                 .expect("log metadata")
@@ -404,6 +365,62 @@ mod tests {
                 .mode()
                 & 0o777,
             0o600
+        );
+        // The fresh key is the one kept; later starts neither retire nor rotate again.
+        let (_, again) = load_or_create_with(&state.0, never).expect("reuse fresh key");
+        assert_eq!(public, again);
+        assert_eq!(
+            fs::read_to_string(state.0.join(ROTATION_LOG))
+                .expect("rotation log")
+                .lines()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_node_without_a_slice_one_item_records_no_rotation() {
+        let state = state();
+        load_or_create_with(&state.0, || Legacy::Absent).expect("create key");
+        assert!(!state.0.join(ROTATION_LOG).exists());
+    }
+
+    #[test]
+    fn retiring_deletes_exactly_the_mesh_item_without_reading_it() {
+        use security_framework::os::macos::keychain::CreateOptions;
+        const PASSWORD: &str = "j80d-test-only-keychain-password";
+        let state = state();
+        let mut keychain = CreateOptions::new()
+            .password(PASSWORD)
+            .create(state.0.join("retire-test.keychain"))
+            .expect("create temporary file keychain");
+        keychain
+            .unlock(Some(PASSWORD))
+            .expect("unlock temporary keychain");
+        keychain
+            .add_generic_password(legacy::SERVICE, legacy::ACCOUNT, &[7_u8; 32])
+            .expect("add slice-1 item");
+        keychain
+            .add_generic_password("org.infraternal.mesh.unrelated-test", "keep-me", b"keep")
+            .expect("add unrelated item");
+
+        assert_eq!(legacy::delete_item(&keychain), Ok(true));
+        assert_eq!(
+            keychain
+                .find_generic_password(legacy::SERVICE, legacy::ACCOUNT)
+                .map(|_| ())
+                .expect_err("the slice-1 item is gone")
+                .code(),
+            -25300
+        );
+        let (kept, _) = keychain
+            .find_generic_password("org.infraternal.mesh.unrelated-test", "keep-me")
+            .expect("the unrelated item stays");
+        assert_eq!(kept.as_ref(), b"keep");
+        assert_eq!(
+            legacy::delete_item(&keychain),
+            Ok(false),
+            "a second retire finds nothing"
         );
     }
 
