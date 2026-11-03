@@ -18,7 +18,7 @@ import { identityModel, type AccountModel } from "./model";
 export interface AccountSessionEnv {
   person: { name: string; username: string };
   accountId: string;
-  sessionIncarnation?: string;
+  sessionIncarnation?: string | undefined;
   toast: ToastController;
 }
 
