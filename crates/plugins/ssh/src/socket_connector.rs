@@ -8,6 +8,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+// A closed parent must surface as EPIPE, never as SIGPIPE. macOS has no
+// MSG_NOSIGNAL; there the Rust runtime's ignored SIGPIPE (set before main,
+// never reset by this binary) gives the same result.
+#[cfg(target_os = "linux")]
+const NO_SIGPIPE: MsgFlags = MsgFlags::MSG_NOSIGNAL;
+#[cfg(not(target_os = "linux"))]
+const NO_SIGPIPE: MsgFlags = MsgFlags::empty();
+
 /// This private helper receives only the configured public endpoint.
 /// OpenSSH retains host-key verification, authentication and connection ownership.
 /// # Errors
@@ -19,7 +27,7 @@ pub fn handoff(host: &str, port: u16, channel: &impl AsRawFd) -> io::Result<()> 
         channel.as_raw_fd(),
         &[IoSlice::new(b".")],
         &[ControlMessage::ScmRights(&descriptors)],
-        MsgFlags::MSG_NOSIGNAL,
+        NO_SIGPIPE,
         None,
     )
     .map_err(io::Error::from)?;

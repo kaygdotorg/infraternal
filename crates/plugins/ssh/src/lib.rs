@@ -20,7 +20,8 @@ pub mod mesh_login;
 #[cfg(target_os = "linux")]
 pub mod mesh_port;
 pub mod mesh_server;
-#[cfg(feature = "session-bridge")]
+// The bridge runs inside the Linux session daemon, which macOS does not build (#320).
+#[cfg(all(feature = "session-bridge", target_os = "linux"))]
 pub mod session_bridge;
 pub mod setup;
 pub mod stdio;

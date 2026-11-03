@@ -270,11 +270,11 @@ fn dispatch_action(
         #[cfg(not(target_os = "linux"))]
         CliHandler::SessionShim => run_unavailable(action, json_output),
         CliHandler::SshSession => {
-            #[cfg(all(feature = "ssh", feature = "remote"))]
+            #[cfg(all(feature = "ssh", feature = "remote", target_os = "linux"))]
             {
                 run_ssh_session(matches)
             }
-            #[cfg(not(all(feature = "ssh", feature = "remote")))]
+            #[cfg(not(all(feature = "ssh", feature = "remote", target_os = "linux")))]
             {
                 run_unavailable(action, json_output)
             }
@@ -541,7 +541,7 @@ fn run_up_system(matches: &ArgMatches, json_output: bool) -> ExitCode {
     up::run_helper(server, json_output)
 }
 
-#[cfg(all(feature = "ssh", feature = "remote"))]
+#[cfg(all(feature = "ssh", feature = "remote", target_os = "linux"))]
 fn run_ssh_session(matches: &ArgMatches) -> ExitCode {
     let (Some(state), session) = (
         matches.get_one::<String>("state"),
