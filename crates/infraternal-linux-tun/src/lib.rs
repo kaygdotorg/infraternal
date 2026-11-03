@@ -1,4 +1,8 @@
-//! Opens a non-persistent Linux TUN queue and negotiates virtio TSO offloads.
+//! Opens a Linux TUN queue, negotiates virtio TSO offloads and marks the interface persistent.
+//!
+//! A TUN is non-persistent when opened: it disappears with the last descriptor. The caller makes
+//! it persistent once it has marked it as its own, so the interface, its addresses and routes
+//! survive a process restart (D332), and reattaches to it by name after a restart.
 //!
 //! This crate is the narrow syscall boundary required by Linux TUN. The caller owns the returned
 //! file descriptor and handles packet framing; this crate never changes addresses, routes, or
@@ -19,6 +23,7 @@ const TUN_F_TSO4: libc::c_ulong = 0x02;
 const TUN_F_TSO6: libc::c_ulong = 0x04;
 const TUNSETIFF: libc::c_ulong = 0x4004_54ca;
 const TUNSETOFFLOAD: libc::c_ulong = 0x4004_54d0;
+const TUNSETPERSIST: libc::c_ulong = 0x4004_54cb;
 
 #[repr(C)]
 struct IfReq {
@@ -38,7 +43,8 @@ pub struct Device {
 }
 
 impl Device {
-    /// Attach one non-persistent TUN queue, preferring virtio metadata and TCP segmentation.
+    /// Attach one TUN queue, creating the interface if it does not exist, preferring virtio
+    /// metadata and TCP segmentation.
     ///
     /// If the kernel rejects the virtio header, this retries once with ordinary TUN frames. If
     /// the header works but TSO is unavailable, the caller can still segment in software.
@@ -49,6 +55,28 @@ impl Device {
             Ok(device) => Ok(device),
             Err(vnet_error) => Self::open_mode(name, false).map_err(|_| vnet_error),
         }
+    }
+
+    /// Keep the interface after its last descriptor closes (`on`), or let it go with it.
+    ///
+    /// Opening a persistent interface by name later attaches to it; the kernel refuses the attach
+    /// with `EBUSY` while another descriptor still holds its single queue.
+    /// # Errors
+    /// Reports a TUNSETPERSIST failure.
+    pub fn set_persistent(file: &File, on: bool) -> io::Result<()> {
+        // SAFETY: TUNSETPERSIST takes an integer value, not a pointer, on a TUN descriptor that
+        // TUNSETIFF attached; the kernel refuses any other descriptor.
+        let status = unsafe {
+            libc::ioctl(
+                file.as_raw_fd(),
+                TUNSETPERSIST as _,
+                libc::c_ulong::from(on),
+            )
+        };
+        if status < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     /// Consume this owner and return its nonblocking descriptor.
