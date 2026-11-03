@@ -4,7 +4,7 @@ use super::*;
 async fn key(f: &Fixture) -> String {
     let approval = f
         .auth
-        .device_start("cli", vec!["hosts:read".into()], NOW)
+        .device_start("cli", vec!["hosts:read".into()], TEST_SOURCE, NOW)
         .await
         .unwrap();
     f.auth

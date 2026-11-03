@@ -58,6 +58,9 @@ mod socket_backend;
 use socket_backend::read_terminal_open;
 const NOW: i64 = 1_800_000_000;
 const ORIGIN: &str = "https://auth.example.test";
+/// Trusted caller address for direct device-approval starts.
+const TEST_SOURCE: std::net::IpAddr =
+    std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 1));
 
 struct Software {
     key: PKey<Private>,
@@ -791,7 +794,7 @@ async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
     let f = fixture().await;
     let approval = f
         .auth
-        .device_start("cli", vec!["hosts:read".into()], NOW)
+        .device_start("cli", vec!["hosts:read".into()], TEST_SOURCE, NOW)
         .await
         .unwrap();
     assert!(
@@ -846,13 +849,13 @@ async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
     assert!(f.auth.api_authorize(&key, "hosts:read").await.is_err());
     assert!(
         f.auth
-            .device_start("cli", vec!["admin".into()], NOW)
+            .device_start("cli", vec!["admin".into()], TEST_SOURCE, NOW)
             .await
             .is_err()
     );
     let approval = f
         .auth
-        .device_start("cli", vec!["hosts:read".into()], NOW)
+        .device_start("cli", vec!["hosts:read".into()], TEST_SOURCE, NOW)
         .await
         .unwrap();
     assert!(
@@ -878,7 +881,7 @@ async fn sign_in_device_inspection_keeps_its_existing_unbounded_retry_behavior()
     let f = fixture().await;
     let approval = f
         .auth
-        .device_start("cli", vec!["hosts:read".into()], NOW)
+        .device_start("cli", vec!["hosts:read".into()], TEST_SOURCE, NOW)
         .await
         .unwrap();
     for attempt in 1..=6 {
@@ -1296,7 +1299,7 @@ async fn recovery_expiry_revocation_and_cross_user_isolation() {
     let mut f = fixture().await;
     let approval = f
         .auth
-        .device_start("cli", vec!["hosts:read".into()], NOW)
+        .device_start("cli", vec!["hosts:read".into()], TEST_SOURCE, NOW)
         .await
         .unwrap();
     f.auth
@@ -3693,3 +3696,6 @@ mod logout_commit;
 
 #[path = "api_expiry_tests.rs"]
 mod api_expiry;
+
+#[path = "device_pending_tests.rs"]
+mod device_pending;

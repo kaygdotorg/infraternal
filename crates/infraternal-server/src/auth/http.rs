@@ -2,14 +2,17 @@
 use super::{Auth, Error, Wrap};
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Extension, Path, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::post,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    net::{IpAddr, Ipv4Addr},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[cfg(test)]
 #[path = "account_summary_tests.rs"]
@@ -186,14 +189,22 @@ async fn dispatch(
     State(state): State<HttpState>,
     Path(action): Path<String>,
     headers: HeaderMap,
+    source: Option<Extension<crate::runtime::ClientAddress>>,
     Json(value): Json<Value>,
 ) -> Response {
+    // The runtime's source admission always attaches the trusted address in
+    // production (it refuses /auth/ requests without one). A router mounted
+    // without it accounts every caller to one shared source.
+    let source = source.map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |Extension(address)| {
+        address.0
+    });
     let result = execute(
         &state.auth,
         #[cfg(feature = "remote")]
         state.invitation_issuer.as_ref(),
         &action,
         &headers,
+        source,
         value,
     )
     .await;
@@ -264,6 +275,7 @@ async fn execute(
     #[cfg(feature = "remote")] invitation_issuer: Option<&crate::remote_http::InvitationIssuer>,
     action: &str,
     headers: &HeaderMap,
+    source: IpAddr,
     value: Value,
 ) -> super::Result<Response> {
     let now = current_time(auth)?;
@@ -390,10 +402,11 @@ async fn execute(
             let b: DeviceStart = body(value)?;
             match (b.kind.as_deref(), b.scopes, b.request) {
                 (None | Some("sign_in"), Some(scopes), None) => {
-                    auth.device_start(&b.device, scopes, now).await?
+                    auth.device_start(&b.device, scopes, source, now).await?
                 }
                 (Some("join_machine"), None, Some(request)) => {
-                    auth.device_join_start(&b.device, request, now).await?
+                    auth.device_join_start(&b.device, request, source, now)
+                        .await?
                 }
                 _ => return Err(Error::Invalid),
             }

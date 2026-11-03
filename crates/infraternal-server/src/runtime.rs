@@ -930,9 +930,7 @@ async fn health(State(pool): State<SqlitePool>) -> Response {
 /// Canonical client address from the listener and explicitly trusted proxy policy.
 /// Plugins may bound work by it; untrusted forwarding headers never set this value.
 #[derive(Clone, Copy)]
-pub(crate) struct ClientAddress(
-    #[cfg_attr(not(feature = "remote"), allow(dead_code))] pub(crate) IpAddr,
-);
+pub(crate) struct ClientAddress(pub(crate) IpAddr);
 
 /// Per-source auth admission trusts forwarding data only from configured peers.
 #[derive(Clone)]

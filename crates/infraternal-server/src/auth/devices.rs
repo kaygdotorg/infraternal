@@ -1,9 +1,33 @@
 //! Single-use device approval and exact-scope API key authorization [27,28].
+//!
+//! Starting an approval is public, so the rows it creates are bounded (#263):
+//! expired rows are deleted on every start, the server holds at most
+//! [`MAX_PENDING_APPROVALS`] unexpired approvals, and one source network at
+//! most [`MAX_PENDING_PER_SOURCE`]. The per-source count lives in memory only,
+//! so client addresses are never written to the database. A restart forgets
+//! it; the global cap still holds because it counts database rows.
 use super::{Auth, B64, Engine, Error, Result, Row, Value, hash, json, random, require_session_tx};
 use base64::engine::general_purpose::STANDARD_NO_PAD as FingerprintB64;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::{collections::HashMap, net::IpAddr};
 use uuid::Uuid;
+
+/// Most unexpired approvals (sign-in and machine join) the server holds at once.
+pub(crate) const MAX_PENDING_APPROVALS: i64 = 1024;
+/// Most unexpired approvals one source network may hold. A person retrying a
+/// sign-in or `up` a few times stays well under it; filling the global cap
+/// needs about 205 distinct networks.
+pub(crate) const MAX_PENDING_PER_SOURCE: usize = 5;
+/// Approval and receipt lifetime in seconds (D311).
+const APPROVAL_LIFETIME: i64 = 600;
+
+/// Expiry times of the approvals each source network started; a network's
+/// entry vanishes with its last unexpired approval. Each expiry was admitted
+/// under the global cap, and a row leaves the table before expiry only when an
+/// owner approves and redeems its sign-in, so the map tracks the cap.
+#[derive(Default)]
+pub(super) struct PendingSources(HashMap<IpAddr, Vec<i64>>);
 
 /// Public, bounded machine facts shown before a fresh passkey approves enrollment [#263].
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -86,7 +110,14 @@ impl JoinMachineRequest {
 #[allow(clippy::missing_errors_doc)]
 impl Auth {
     /// Start device-code approval. Only the high-entropy polling token can redeem approval.
-    pub async fn device_start(&self, device: &str, scopes: Vec<String>, now: i64) -> Result<Value> {
+    /// `source` is the caller's trusted address; it is accounted by network.
+    pub async fn device_start(
+        &self,
+        device: &str,
+        scopes: Vec<String>,
+        source: IpAddr,
+        now: i64,
+    ) -> Result<Value> {
         if device.is_empty()
             || device.len() > 128
             || scopes.is_empty()
@@ -100,22 +131,21 @@ impl Auth {
         {
             return Err(Error::Invalid);
         }
-        sqlx::query("DELETE FROM approvals WHERE expires<=?")
-            .bind(now)
-            .execute(&self.pool)
-            .await?;
         let token = random();
         let code = B64.encode(rand::random::<[u8; 12]>());
         let scopes = serde_json::to_string(&scopes)?;
-        self.insert_approval(ApprovalDraft {
-            token: &token,
-            code: &code,
-            kind: "sign_in",
-            scopes: &scopes,
-            device,
-            request: None,
-            now,
-        })
+        self.insert_approval(
+            ApprovalDraft {
+                token: &token,
+                code: &code,
+                kind: "sign_in",
+                scopes: &scopes,
+                device,
+                request: None,
+                now,
+            },
+            source,
+        )
         .await
     }
 
@@ -124,6 +154,7 @@ impl Auth {
         &self,
         device: &str,
         request: JoinMachineRequest,
+        source: IpAddr,
         now: i64,
     ) -> Result<Value> {
         if device.is_empty() || device.len() > 128 || now < 0 {
@@ -133,19 +164,47 @@ impl Auth {
         let token = random();
         let code = B64.encode(rand::random::<[u8; 12]>());
         let request = serde_json::to_string(&request)?;
-        self.insert_approval(ApprovalDraft {
-            token: &token,
-            code: &code,
-            kind: "join_machine",
-            scopes: "[]",
-            device,
-            request: Some(&request),
-            now,
-        })
+        self.insert_approval(
+            ApprovalDraft {
+                token: &token,
+                code: &code,
+                kind: "join_machine",
+                scopes: "[]",
+                device,
+                request: Some(&request),
+                now,
+            },
+            source,
+        )
         .await
     }
 
-    async fn insert_approval(&self, approval: ApprovalDraft<'_>) -> Result<Value> {
+    /// Store one approval within the pending caps (module docs), deleting expired rows first.
+    async fn insert_approval(&self, approval: ApprovalDraft<'_>, source: IpAddr) -> Result<Value> {
+        let network = crate::runtime::device_source(source);
+        let now = approval.now;
+        let expires = now + APPROVAL_LIFETIME;
+        // Held across the transaction: concurrent starts cannot both take the last slot.
+        let mut sources = self.device_sources.lock().await;
+        sources.0.retain(|_, expiries| {
+            expiries.retain(|&expiry| expiry > now);
+            !expiries.is_empty()
+        });
+        if sources.0.get(&network).map_or(0, Vec::len) >= MAX_PENDING_PER_SOURCE {
+            return Err(Error::Throttled);
+        }
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM approvals WHERE expires<=?")
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM approvals")
+            .fetch_one(&mut *tx)
+            .await?;
+        if pending >= MAX_PENDING_APPROVALS {
+            tx.commit().await?;
+            return Err(Error::Throttled);
+        }
         sqlx::query(
             "INSERT INTO approvals(token_hash,code_hash,scopes,device,expires,kind,request_json) \
              VALUES (?,?,?,?,?,?,?)",
@@ -154,12 +213,16 @@ impl Auth {
         .bind(hash(approval.code))
         .bind(approval.scopes)
         .bind(approval.device)
-        .bind(approval.now + 600)
+        .bind(expires)
         .bind(approval.kind)
         .bind(approval.request)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        Ok(json!({"poll_token":approval.token,"user_code":approval.code,"expires_in":600}))
+        tx.commit().await?;
+        sources.0.entry(network).or_default().push(expires);
+        Ok(
+            json!({"poll_token":approval.token,"user_code":approval.code,"expires_in":APPROVAL_LIFETIME}),
+        )
     }
 
     /// Signed-in browser approval requires a fresh passkey tap and binds exact requested scopes.
