@@ -7,7 +7,7 @@
 set -euo pipefail
 
 usage() {
-    printf 'usage: scripts/macos-release ABSOLUTE_OUTPUT_DIRECTORY [--notary-profile NAME]\n' >&2
+    printf 'usage: scripts/macos-release ABSOLUTE_OUTPUT_DIRECTORY [--notary-profile NAME | --skip-notarize]\n' >&2
     exit 2
 }
 
@@ -18,12 +18,21 @@ shift
 [[ "$output" != "/" ]] || usage
 output="${output%/}"
 notary_profile="${INFRATERNAL_NOTARY_PROFILE:-infraternal-notary}"
+# --skip-notarize builds, signs and verifies the signature only. Gatekeeper
+# rejects a Developer ID binary that Apple has not notarized, so the result is
+# named UNNOTARIZED and is never a release. It exists to prove the build and
+# signing path while the notarization credential is unavailable.
+skip_notarize=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --notary-profile)
             [[ $# -ge 2 && -n "$2" ]] || usage
             notary_profile="$2"
             shift 2
+            ;;
+        --skip-notarize)
+            skip_notarize=1
+            shift
             ;;
         *) usage ;;
     esac
@@ -151,8 +160,9 @@ print("matching")
     )"
 [[ "$identity_check" = matching ]] || exit 1
 
-if ! /usr/bin/xcrun notarytool history --keychain-profile "$notary_profile" \
-    --keychain "$keychain" >/dev/null 2>&1; then
+# Fail before the long build when the notary credential is missing.
+if [[ "$skip_notarize" -eq 0 ]] && ! /usr/bin/xcrun notarytool history \
+    --keychain-profile "$notary_profile" --keychain "$keychain" >/dev/null 2>&1; then
     printf 'notarytool profile %s is not available in the dedicated signing keychain\n' \
         "$notary_profile" >&2
     exit 1
@@ -179,8 +189,10 @@ print(next(package["version"] for package in json.load(sys.stdin)["packages"] if
 ')"
 commit="$(git rev-parse --verify HEAD)"
 short_commit="${commit:0:12}"
-archive_name="infraternal-macos-arm64-${version}-${short_commit}.zip"
-release_root="$scratch/infraternal-macos-arm64-${version}-${short_commit}"
+flavor=""
+[[ "$skip_notarize" -eq 0 ]] || flavor="-UNNOTARIZED"
+archive_name="infraternal-macos-arm64-${version}-${short_commit}${flavor}.zip"
+release_root="$scratch/infraternal-macos-arm64-${version}-${short_commit}${flavor}"
 mkdir -p "$release_root"
 install -m 0755 "$cli" "$release_root/infraternal"
 install -m 0755 "$rust_helper" "$release_root/infraternal-desktop-helper"
@@ -195,21 +207,25 @@ install -m 0755 "$rust_helper" "$release_root/infraternal-desktop-helper"
 /usr/bin/codesign --force --options runtime --timestamp --keychain "$keychain" \
     --sign "$identity" "$release_root/InfraternalCaptureHelper.app"
 
-/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$release_root" "$scratch/submission.zip"
-/usr/bin/xcrun notarytool submit "$scratch/submission.zip" \
-    --keychain-profile "$notary_profile" --keychain "$keychain" \
-    --wait --output-format json >"$scratch/notary-response.json"
-notary_status="$(/usr/bin/python3 -I -c '
+if [[ "$skip_notarize" -eq 0 ]]; then
+    /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$release_root" "$scratch/submission.zip"
+    /usr/bin/xcrun notarytool submit "$scratch/submission.zip" \
+        --keychain-profile "$notary_profile" --keychain "$keychain" \
+        --wait --output-format json >"$scratch/notary-response.json"
+    notary_status="$(/usr/bin/python3 -I -c '
 import json, sys
 print(json.load(open(sys.argv[1], encoding="utf-8")).get("status", ""))
 ' "$scratch/notary-response.json")"
-[[ "$notary_status" = Accepted ]] || {
-    printf 'notarization was not accepted (status: %s)\n' "${notary_status:-unknown}" >&2
-    exit 1
-}
-printf 'notarytool status: %s\n' "$notary_status"
+    [[ "$notary_status" = Accepted ]] || {
+        printf 'notarization was not accepted (status: %s)\n' "${notary_status:-unknown}" >&2
+        exit 1
+    }
+    printf 'notarytool status: %s\n' "$notary_status"
 
-/usr/bin/xcrun stapler staple "$release_root/InfraternalCaptureHelper.app"
+    # Only the app bundle can carry a ticket; the two bare executables are
+    # checked online by Gatekeeper.
+    /usr/bin/xcrun stapler staple "$release_root/InfraternalCaptureHelper.app"
+fi
 (
     cd "$release_root"
     /usr/bin/shasum -a 256 infraternal infraternal-desktop-helper \
@@ -222,14 +238,18 @@ printf 'codesign --verify --strict: infraternal-desktop-helper\n'
 /usr/bin/codesign --verify --strict --verbose=2 "$release_root/infraternal-desktop-helper"
 printf 'codesign --verify --strict: InfraternalCaptureHelper.app\n'
 /usr/bin/codesign --verify --strict --verbose=2 "$release_root/InfraternalCaptureHelper.app"
-printf 'spctl -a -vv: infraternal\n'
-/usr/sbin/spctl -a -vv "$release_root/infraternal"
-printf 'spctl -a -vv: infraternal-desktop-helper\n'
-/usr/sbin/spctl -a -vv "$release_root/infraternal-desktop-helper"
-printf 'spctl -a -vv: InfraternalCaptureHelper.app\n'
-/usr/sbin/spctl -a -vv "$release_root/InfraternalCaptureHelper.app"
-printf 'stapler validate: InfraternalCaptureHelper.app\n'
-/usr/bin/xcrun stapler validate "$release_root/InfraternalCaptureHelper.app"
+if [[ "$skip_notarize" -eq 0 ]]; then
+    printf 'spctl -a -vv: infraternal\n'
+    /usr/sbin/spctl -a -vv "$release_root/infraternal"
+    printf 'spctl -a -vv: infraternal-desktop-helper\n'
+    /usr/sbin/spctl -a -vv "$release_root/infraternal-desktop-helper"
+    printf 'spctl -a -vv: InfraternalCaptureHelper.app\n'
+    /usr/sbin/spctl -a -vv "$release_root/InfraternalCaptureHelper.app"
+    printf 'stapler validate: InfraternalCaptureHelper.app\n'
+    /usr/bin/xcrun stapler validate "$release_root/InfraternalCaptureHelper.app"
+else
+    printf 'NOT A RELEASE: --skip-notarize skipped notarization, stapling and Gatekeeper checks\n'
+fi
 
 mkdir -p "$(dirname "$output")"
 result_dir="$scratch/result"
