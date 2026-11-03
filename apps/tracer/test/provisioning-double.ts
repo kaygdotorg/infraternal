@@ -66,7 +66,7 @@ interface BootstrapEvent {
   host_id?: string;
   session_id?: string;
   leftovers?: { challenge: string; mode: "rootless" | "root"; findings: string[] };
-  failure?: { failed_step?: "connect" | "start"; kind: FailureKind; message: string; log_tail: string[]; setup_lock?: { machine: string; pid?: number; since: string; active: boolean; attempt?: string; sessions?: number; enrolled_with?: string }; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string };
+  failure?: { failed_step?: "connect" | "start"; kind: FailureKind; message: string; log_tail: string[]; setup_lock?: { machine: string; pid?: number; since: string; active: boolean; attempt?: string; sessions?: number; enrolled_with?: string; set_aside?: boolean; live?: boolean }; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string };
   authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
 }
 
@@ -274,6 +274,38 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
               challenge: target.challenge,
               mode: target.mode,
               findings: ["An interrupted upgrade journal", "The enrolled host identity is kept", "1 open terminal session will end"],
+            });
+            return;
+          }
+          // Hosts named `live*`: another server's stuck install whose infraternal agent is running since the lease (#305).
+          if (/^live/.test(target.name) && !target.fresh) {
+            target.challenge = challengeOf(target.id);
+            target.resume = () => walk(1);
+            emit(target, "check", "This host has leftovers from an earlier setup", {
+              kind: "stale_previous_attempt",
+              message: "The failed setup on build-node left a lease last held by setup attempt d831a93a (process 254) since 2026-11-02T04:05:06Z. This machine is enrolled with another server, monitor01.example. Its infraternal agent is running and may be connected to monitor01.example now. Joining it here disconnects it from monitor01.example; remove it there afterwards. Joining it to this server makes it a new host with a new key; its old infraternal agent is set aside, not deleted. 1 open terminal session will end.",
+              log_tail: [],
+              setup_lock: { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false, attempt: "d831a93a", sessions: 1, enrolled_with: "monitor01.example", live: true },
+            }, undefined, {
+              challenge: target.challenge,
+              mode: target.mode,
+              findings: ["Enrolled with another server: monitor01.example", "Its infraternal agent is running and may be connected to that server now; joining here disconnects it", "1 open terminal session will end"],
+            });
+            return;
+          }
+          // Hosts named `aside*`: an earlier add-host set the install aside and could not put it back (#305).
+          if (/^aside/.test(target.name) && !target.fresh) {
+            target.challenge = challengeOf(target.id);
+            target.resume = () => walk(1);
+            emit(target, "check", "This host has leftovers from an earlier setup", {
+              kind: "stale_previous_attempt",
+              message: "An earlier add-host on build-node set this machine's infraternal agent aside and did not put it back. Nothing was deleted. Put it back as it was found, then add the host again to continue.",
+              log_tail: [],
+              setup_lock: { machine: "build-node", since: "unknown", active: false, attempt: "d831a93a", set_aside: true },
+            }, undefined, {
+              challenge: target.challenge,
+              mode: target.mode,
+              findings: ["An infraternal agent an earlier add-host set aside", "Nothing was deleted; it goes back where it was", "Its service is enabled and started again, as it was found"],
             });
             return;
           }

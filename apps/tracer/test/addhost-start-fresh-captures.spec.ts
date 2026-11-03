@@ -154,3 +154,61 @@ for (const size of SIZES) {
     }
   });
 }
+
+// #305: a live install says joining disconnects it; a set-aside install is offered back.
+for (const size of SIZES) {
+  for (const scene of [
+    { host: "live.lab", heading: "live.lab is enrolled with another server", lede: /^Its infraternal agent is running and may be connected to monitor01\.example now\./, button: "Disconnect and join here", shot: "reenroll-live" },
+    { host: "aside.lab", heading: "aside.lab's infraternal agent was set aside", lede: /^An earlier add-host set it aside and could not put it back\. Nothing was deleted\.$/, button: "Put it back", shot: "set-aside" },
+  ]) {
+    test(`captures ${scene.shot} at ${size.name} and keeps its text aligned`, async ({ browser }) => {
+      test.setTimeout(180_000);
+      const context = await browser.newContext({
+        baseURL: `http://localhost:${PORT}`,
+        viewport: { width: size.width, height: size.height },
+        deviceScaleFactor: 2,
+        hasTouch: size.name === "phone",
+        isMobile: size.name === "phone",
+      });
+      const page = await context.newPage();
+      try {
+        await page.request.post("/__mock/bootstrap/reset", { maxRetries: 1 });
+        await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=none");
+        await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 45_000 });
+        await page.waitForTimeout(400);
+        await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:addhost", source: "keyboard" } })));
+        await expect(page.locator(".ah-page[data-page='discovery']")).toBeVisible({ timeout: 45_000 });
+        await page.locator(".ui-chip-text").click();
+        await page.keyboard.type(`${scene.host} `, { delay: 5 });
+        await page.locator(".ah-float").getByRole("button", { name: "Continue", exact: true }).click();
+
+        const failure = page.locator(".ah-page[data-page='failure']");
+        await expect(page.getByRole("heading", { name: scene.heading })).toBeVisible({ timeout: 30_000 });
+        await expect(failure.locator(".ah-lede")).toHaveText(scene.lede);
+        const edges = await failure.evaluate((page) => [".ah-title", ".ah-lede", ".ah-text"].flatMap((selector) => {
+          const node = page.querySelector(selector);
+          return node ? [node.getBoundingClientRect().left] : [];
+        }));
+        for (const edge of edges) expect(Math.abs(edge - edges[0]!)).toBeLessThanOrEqual(0.5);
+        const action = page.locator(".ah-float footer").getByRole("button", { name: scene.button, exact: true });
+        await expect(action).toBeVisible();
+        const alignment = await action.evaluate((button) => {
+          const label = button.querySelector("span");
+          if (!label) throw new Error("action button has no text label");
+          const buttonBounds = button.getBoundingClientRect();
+          const labelBounds = label.getBoundingClientRect();
+          return {
+            horizontal: Math.abs((buttonBounds.left + buttonBounds.right - labelBounds.left - labelBounds.right) / 2),
+            vertical: Math.abs((buttonBounds.top + buttonBounds.bottom - labelBounds.top - labelBounds.bottom) / 2),
+          };
+        });
+        expect(alignment.horizontal).toBeLessThanOrEqual(0.5);
+        expect(alignment.vertical).toBeLessThanOrEqual(0.5);
+        await page.waitForTimeout(600);
+        await page.screenshot({ path: resolve(OUT, `${scene.shot}-${size.name}-2x-ink.png`) });
+      } finally {
+        await context.close();
+      }
+    });
+  }
+}
