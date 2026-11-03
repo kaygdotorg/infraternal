@@ -109,3 +109,65 @@ async fn renewal_never_carries_a_key_past_its_approved_lifetime() {
         .unwrap();
     assert!(dead);
 }
+
+/// J154 P3-1: keys issued before D333 had no absolute end, so sliding renewal kept them alive
+/// forever. At upgrade each gets one: never later than its current deadline, and never later
+/// than 24 hours after the upgrade. (`api_keys` keeps no issue time, so the end cannot be
+/// counted from issuance.) Keys from D333 on keep the end approved with them.
+#[tokio::test]
+async fn keys_issued_before_d333_get_an_absolute_end_at_upgrade() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let mut before = sqlx::migrate!("./migrations");
+    before
+        .migrations
+        .to_mut()
+        .retain(|migration| migration.version <= 46);
+    before.run(&pool).await.unwrap();
+    let upgrade = crate::runtime::unix_seconds().unwrap();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES('owner','owner',1,'x')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (key, expires_at, hard) in [
+        ("long-sliding", upgrade + 30 * 86_400, None),
+        ("near-its-end", upgrade + 3_600, None),
+        (
+            "approved-under-d333",
+            upgrade + 30 * 86_400,
+            Some(upgrade + 7 * 86_400),
+        ),
+    ] {
+        sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead,hard_expires_at) VALUES(?,'owner','cli','[\"status:read\"]',?,?,0,?)")
+            .bind(key)
+            .bind(upgrade)
+            .bind(expires_at)
+            .bind(hard)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    let ends: Vec<(String, Option<i64>)> =
+        sqlx::query_as("SELECT token_hash,hard_expires_at FROM api_keys ORDER BY token_hash")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let [(_, d333), (_, long), (_, near)] = ends.as_slice() else {
+        panic!("{ends:?}")
+    };
+    assert_eq!(*d333, Some(upgrade + 7 * 86_400), "an approved end is kept");
+    assert_eq!(
+        *near,
+        Some(upgrade + 3_600),
+        "never later than the current deadline"
+    );
+    let long = long.expect("a pre-D333 key gets an end");
+    assert!(
+        (upgrade + 86_400..=upgrade + 86_400 + 5).contains(&long),
+        "24 hours after the upgrade: {long}"
+    );
+}
