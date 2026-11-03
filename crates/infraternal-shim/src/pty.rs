@@ -957,10 +957,12 @@ pub(crate) fn prepare_proxy_child(
             "proxy child descriptor mapping is outside policy",
         ));
     }
+    #[cfg(target_os = "linux")]
+    let owner = unistd::getpid();
     // SAFETY: the established shim hooks set signal defaults, close the trusted
     // control descriptor, and bind the process to its owner before this hook.
     // This hook only remaps pre-opened descriptors, enters the pinned working
-    // directory, and drops credentials before exec.
+    // directory, drops credentials and re-arms the parent-death signal before exec.
     unsafe {
         command.pre_exec(move || {
             for (source, target) in &descriptors {
@@ -983,6 +985,17 @@ pub(crate) fn prepare_proxy_child(
             }
             #[cfg(target_os = "linux")]
             set_no_new_privileges()?;
+            // Changing the effective UID clears the parent-death signal, so the earlier owner
+            // binding no longer holds after the drop. Re-arm it last, then recheck the parent:
+            // an owner that died before this point must not leave a listener behind. SIGKILL,
+            // because a graceful stop would keep the listeners open while it drains [#281].
+            #[cfg(target_os = "linux")]
+            {
+                nix::sys::prctl::set_pdeathsig(Signal::SIGKILL).map_err(io::Error::from)?;
+                if unistd::getppid() != owner {
+                    return Err(io::Error::other("proxy owner exited before child startup"));
+                }
+            }
             Ok(())
         });
     }

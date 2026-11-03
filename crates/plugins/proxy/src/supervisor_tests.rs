@@ -210,13 +210,37 @@ fn abrupt_infraternal_parent_exit_stops_the_traefik_child() {
         }
         thread::sleep(Duration::from_millis(10));
     };
-    if !stopped {
+    let survivor = if stopped {
+        String::new()
+    } else {
+        let status =
+            std::fs::read_to_string(child_proc.with_file_name("status")).unwrap_or_default();
         let _ = Command::new("kill")
             .args(["-KILL", &child_pid.to_string()])
             .status();
-    }
+        status
+            .lines()
+            .filter(|line| {
+                [
+                    "State",
+                    "PPid",
+                    "Uid",
+                    "Gid",
+                    "SigBlk",
+                    "SigIgn",
+                    "NoNewPrivs",
+                ]
+                .iter()
+                .any(|field| line.starts_with(field))
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
     std::fs::remove_dir_all(root).expect("remove crash fixture");
-    assert!(stopped, "Traefik kept serving after its parent exited");
+    assert!(
+        stopped,
+        "Traefik kept serving after its parent exited: {survivor}"
+    );
 }
 
 #[test]
@@ -788,4 +812,106 @@ fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state(
         b"{}"
     );
     std::fs::remove_dir_all(root).expect("remove supervisor fixture");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_parent_death_signal_survives_the_credential_drop() {
+    let root = std::env::temp_dir().join(format!("proxy-pdeathsig-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).expect("create probe fixture");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .expect("private probe fixture");
+    crate::controller::ensure_proxy_directory(&root).expect("child-readable probe fixture");
+    // The signal is per thread, so the probe must read it on the exec'd main thread: a small
+    // interpreter does, where a test harness would answer from a worker thread.
+    let python = std::env::var_os("PATH")
+        .and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|directory| directory.join("python3"))
+                .find(|candidate| candidate.is_file())
+        })
+        .expect("python3 on PATH");
+    let executable = root.join("fake-traefik");
+    fake_traefik(
+        &executable,
+        format!(
+            "#!/bin/sh\nexec '{}' -c 'import ctypes; value = ctypes.c_int(); ctypes.CDLL(None).prctl(2, ctypes.byref(value), 0, 0, 0); print(\"pdeathsig=%d\" % value.value, flush=True)'\n",
+            python.display()
+        )
+        .as_bytes(),
+    );
+    let config = root.join("traefik.toml");
+    crate::config::write_proxy_config_atomic(&config, b"{}").expect("write config fixture");
+    let (lines, received) = mpsc::channel();
+    let log = std::sync::Arc::new(move |line: String| {
+        // Match anywhere: a line may carry other output before the marker.
+        if let Some((_, signal)) = line.split_once("pdeathsig=") {
+            let _ = lines.send(signal.trim().to_owned());
+        }
+    });
+
+    let mut child = TraefikChild::spawn(&executable, &config, &[], log).expect("spawn probe");
+    let signal = received.recv_timeout(Duration::from_secs(10));
+    child.stop().expect("stop probe");
+    std::fs::remove_dir_all(root).expect("remove probe fixture");
+    assert_eq!(
+        signal.expect("probe reported its parent-death signal"),
+        (nix::sys::signal::Signal::SIGKILL as i32).to_string(),
+        "the child must die with the infraternal agent, also after dropping to the proxy identity"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_new_supervisor_stops_an_orphan_that_holds_the_child_lock() {
+    let root = std::env::temp_dir().join(format!("proxy-orphan-{}", uuid::Uuid::new_v4()));
+    let (state, lock_directory) = supervisor_fixture(&root);
+    let executable = root.join("fake-traefik");
+    fake_traefik(&executable, b"#!/bin/sh\nexec /bin/sleep 60\n");
+    // Plant an orphan exactly as an agent crash leaves one: a process that still holds the
+    // child lock through an inherited descriptor after its owner is gone.
+    let lock_path = lock_directory.join(".traefik-child.lock");
+    std::fs::write(&lock_path, b"").expect("create child lock");
+    std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
+        .expect("private child lock");
+    let mut orphan = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "exec 9<\"$1\" && flock -n 9 && echo held && exec /bin/sleep 60",
+            "orphan",
+        ])
+        .arg(&lock_path)
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("start planted orphan");
+    let mut held = String::new();
+    std::io::BufReader::new(orphan.stdout.as_mut().expect("orphan output"))
+        .read_line(&mut held)
+        .expect("orphan holds the lock");
+    assert_eq!(held.trim(), "held");
+
+    let probe = generation_probe_server(state.join(DYNAMIC_CONFIG_FILENAME), false);
+    let started = TraefikSupervisor::start(
+        generation_probe_settings(&root, &state, &lock_directory, executable, probe.address),
+        std::sync::Arc::new(|_: String| {}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let orphan_exit = loop {
+        if let Some(status) = orphan.try_wait().expect("observe orphan") {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = orphan.kill();
+            let _ = orphan.wait();
+            break None;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    drop(started);
+    drop(probe);
+    std::fs::remove_dir_all(root).expect("remove orphan fixture");
+    assert!(
+        orphan_exit.is_some(),
+        "a stale proxy child holding the child lock must be stopped on start"
+    );
 }

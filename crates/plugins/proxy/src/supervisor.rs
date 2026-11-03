@@ -10,7 +10,7 @@ use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpStream},
     os::{
-        fd::AsRawFd,
+        fd::{AsFd, AsRawFd},
         unix::{
             fs::{MetadataExt, OpenOptionsExt},
             process::CommandExt,
@@ -451,8 +451,41 @@ impl TraefikChild {
         provider_files: &[(&str, &Path)],
         log: Arc<ProxyLog>,
     ) -> io::Result<Self> {
+        Self::spawn_holding(executable, config, provider_files, None, log)
+    }
+
+    /// Start the child with a duplicate of the supervisor's child lock.
+    ///
+    /// The duplicate shares the lock's open file description, so the lock stays held for as
+    /// long as any child lives, even one orphaned by an agent crash. A later agent uses that to
+    /// find and stop the orphan before it binds the same listeners.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`TraefikChild::spawn`], or a failed descriptor duplication.
+    pub fn spawn_holding(
+        executable: &Path,
+        config: &Path,
+        provider_files: &[(&str, &Path)],
+        child_lock: Option<std::os::fd::BorrowedFd<'_>>,
+        log: Arc<ProxyLog>,
+    ) -> io::Result<Self> {
         let rootful = identity::rootful();
-        let prepared = prepare_child_files(executable, config, provider_files, rootful)?;
+        let mut prepared = prepare_child_files(executable, config, provider_files, rootful)?;
+        if let Some(lock) = child_lock {
+            let next_child_fd = prepared
+                .inherited_descriptors
+                .iter()
+                .map(|(_, target)| *target + 1)
+                .max()
+                .unwrap_or(FIRST_PROXY_CHILD_FD);
+            let mut next_child_fd = next_child_fd;
+            add_inherited_file(
+                File::from(lock.try_clone_to_owned()?),
+                &mut prepared.inherited_files,
+                &mut prepared.inherited_descriptors,
+                &mut next_child_fd,
+            )?;
+        }
         let (mut child, secrets) = spawn_proxy_command(prepared, rootful)?;
         let stdout = child
             .stdout
@@ -977,6 +1010,8 @@ pub struct TraefikSupervisor {
     sender: mpsc::SyncSender<SupervisorCommand>,
     worker: Option<JoinHandle<()>>,
     _lock: Flock<File>,
+    // Declared after the worker, so it is released only after the worker has stopped its child.
+    _child_lock: Arc<Flock<File>>,
 }
 
 impl TraefikSupervisor {
@@ -995,14 +1030,19 @@ impl TraefikSupervisor {
             ));
         }
         let lock = acquire_supervisor_lock(&settings.lock_directory)?;
+        // Holding the owner lock proves no other agent is live, so any holder of the child
+        // lock is an orphan from a crashed agent. Stop it before it can keep our listeners.
+        let child_lock = Arc::new(acquire_child_lock(&settings.lock_directory)?);
+        let worker_child_lock = Arc::clone(&child_lock);
         let (sender, receiver) = mpsc::sync_channel(4);
         let worker = thread::Builder::new()
             .name("proxy-supervisor".to_owned())
-            .spawn(move || run_supervisor(&settings, &log, &receiver))?;
+            .spawn(move || run_supervisor(&settings, &log, &receiver, &worker_child_lock))?;
         Ok(Self {
             sender,
             worker: Some(worker),
             _lock: lock,
+            _child_lock: child_lock,
         })
     }
 
@@ -1063,14 +1103,19 @@ struct SupervisorRuntime {
     services: Vec<PublishedService>,
     child: Option<TraefikChild>,
     listener_ports: Option<ListenerPorts>,
+    child_lock: Option<Arc<Flock<File>>>,
 }
 
 fn run_supervisor(
     settings: &SupervisorSettings,
     log: &Arc<ProxyLog>,
     receiver: &mpsc::Receiver<SupervisorCommand>,
+    child_lock: &Arc<Flock<File>>,
 ) {
-    let mut runtime = SupervisorRuntime::default();
+    let mut runtime = SupervisorRuntime {
+        child_lock: Some(Arc::clone(child_lock)),
+        ..SupervisorRuntime::default()
+    };
     loop {
         match receive_command(receiver, runtime.lifecycle.phase()) {
             Inbox::Command(SupervisorCommand::Replace(next, reply)) => {
@@ -1171,7 +1216,12 @@ fn start_runtime_child(
     log: &Arc<ProxyLog>,
     runtime: &mut SupervisorRuntime,
 ) -> io::Result<ListenerPorts> {
-    let (started, ports) = start_managed_child(settings, &mut runtime.services, Arc::clone(log))?;
+    let (started, ports) = start_managed_child(
+        settings,
+        &mut runtime.services,
+        runtime.child_lock.as_deref(),
+        Arc::clone(log),
+    )?;
     runtime.child = Some(started);
     runtime.listener_ports = Some(ports);
     let _ = runtime
@@ -1239,6 +1289,7 @@ fn receive_command(receiver: &mpsc::Receiver<SupervisorCommand>, phase: Lifecycl
 fn start_managed_child(
     settings: &SupervisorSettings,
     services: &mut [PublishedService],
+    child_lock: Option<&Flock<File>>,
     log: Arc<ProxyLog>,
 ) -> io::Result<(TraefikChild, ListenerPorts)> {
     let mut config = settings.static_config.clone();
@@ -1257,7 +1308,7 @@ fn start_managed_child(
         static_config.as_bytes(),
     )?;
     let generation = write_dynamic_snapshot(settings, services)?;
-    let mut child = TraefikChild::spawn(
+    let mut child = TraefikChild::spawn_holding(
         &settings.executable,
         &settings.static_config_path,
         &settings
@@ -1265,6 +1316,7 @@ fn start_managed_child(
             .iter()
             .map(|(name, path)| (name.as_str(), path.as_path()))
             .collect::<Vec<_>>(),
+        child_lock.map(|lock| lock.as_fd()),
         log,
     )?;
     let deadline = Instant::now() + settings.startup_timeout;
@@ -1389,6 +1441,106 @@ fn acquire_supervisor_lock(directory: &Path) -> io::Result<Flock<File>> {
             io::Error::from(error)
         }
     })
+}
+
+const CHILD_LOCK_NAME: &str = ".traefik-child.lock";
+const ORPHAN_REAP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Take the lock every Traefik child inherits, stopping orphans that still hold it.
+///
+/// The caller must already hold the supervisor lock: only then is every other holder known to
+/// be a child of an agent that is gone. The child receives a read-only descriptor, so it can
+/// hold the lock but never change the file.
+fn acquire_child_lock(directory: &Path) -> io::Result<Flock<File>> {
+    let path = directory.join(CHILD_LOCK_NAME);
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(PRIVATE_FILE_MODE)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(&path)
+    {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(&path)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.mode() & 0o7777 != PRIVATE_FILE_MODE
+        || metadata.nlink() != 1
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "proxy child lock has unsafe ownership or mode",
+        ));
+    }
+    let deadline = Instant::now() + ORPHAN_REAP_TIMEOUT;
+    loop {
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            Ok(lock) => return Ok(lock),
+            Err((returned, error))
+                if error == nix::errno::Errno::EWOULDBLOCK
+                    || error == nix::errno::Errno::EAGAIN =>
+            {
+                file = returned;
+                stop_lock_holders(&file)?;
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "an orphaned proxy process still holds its listeners",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err((_, error)) => return Err(io::Error::from(error)),
+        }
+    }
+}
+
+// Only a process holding a descriptor for this exact agent-only file is stopped. That file
+// is reachable only through our own directory or an inherited descriptor, so a match
+// identifies an orphaned child, never an unrelated process.
+#[cfg(target_os = "linux")]
+fn stop_lock_holders(lock: &File) -> io::Result<()> {
+    let metadata = lock.metadata()?;
+    let own = std::process::id();
+    for entry in fs::read_dir("/proc")? {
+        let Some(pid) = entry?
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == own {
+            continue;
+        }
+        let Ok(descriptors) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
+        let holds_lock = descriptors.flatten().any(|descriptor| {
+            fs::metadata(descriptor.path()).is_ok_and(|candidate| {
+                candidate.dev() == metadata.dev() && candidate.ino() == metadata.ino()
+            })
+        });
+        if holds_lock && let Ok(pid) = i32::try_from(pid) {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn stop_lock_holders(_lock: &File) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
