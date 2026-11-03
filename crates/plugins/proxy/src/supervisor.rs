@@ -427,6 +427,17 @@ fn wait_for_config_generation(
     }
 }
 
+/// The user and group a spawned Traefik child runs as on this host.
+///
+/// Rootful, this resolves (and on first use creates) the dedicated proxy account; rootless, it
+/// is the caller's own identity.
+///
+/// # Errors
+/// Returns an error when the proxy account can't be created or collides with another identity.
+pub fn child_identity() -> io::Result<(u32, u32)> {
+    identity::child_ids()
+}
+
 /// Bounded log output accepted from one managed Traefik child.
 pub type ProxyLog = dyn Fn(String) + Send + Sync + 'static;
 
@@ -573,35 +584,27 @@ struct ProxyChildFilePolicy {
     directory_mode: u32,
 }
 
-fn proxy_child_file_policy(rootful: bool) -> ProxyChildFilePolicy {
-    let (child_user, child_group) = identity::child_ids();
+fn proxy_child_file_policy(rootful: bool) -> io::Result<ProxyChildFilePolicy> {
+    let (child_user, child_group) = identity::child_ids()?;
     let host_group = nix::unistd::Gid::effective().as_raw();
-    ProxyChildFilePolicy {
+    Ok(ProxyChildFilePolicy {
         host_user: nix::unistd::Uid::effective().as_raw(),
         child_user,
         child_group,
-        executable_group: if rootful {
-            identity::TRAEFIK_GID
-        } else {
-            host_group
-        },
+        executable_group: if rootful { child_group } else { host_group },
         executable_mode: if rootful {
             ROOTFUL_EXECUTABLE_MODE
         } else {
             ROOTLESS_EXECUTABLE_MODE
         },
-        config_group: if rootful {
-            identity::TRAEFIK_GID
-        } else {
-            host_group
-        },
+        config_group: if rootful { child_group } else { host_group },
         config_mode: if rootful {
             PROXY_CONFIG_MODE
         } else {
             PRIVATE_FILE_MODE
         },
         directory_mode: if rootful { 0o750 } else { 0o700 },
-    }
+    })
 }
 
 fn validate_proxy_paths(
@@ -648,7 +651,7 @@ fn prepare_child_files(
     provider_files: &[(&str, &Path)],
     rootful: bool,
 ) -> io::Result<PreparedChildFiles> {
-    let policy = proxy_child_file_policy(rootful);
+    let policy = proxy_child_file_policy(rootful)?;
     let (working_directory_path, config_name) = validate_proxy_paths(executable, config, &policy)?;
     if provider_files.len() > 32 {
         return Err(io::Error::new(
@@ -813,7 +816,11 @@ fn spawn_proxy_command(
         // an exclusive file lock; no inherited numeric PID is used to identify an owner.
         command.process_group(0);
     }
-    let child_identity = rootful.then_some((identity::TRAEFIK_UID, identity::TRAEFIK_GID));
+    let child_identity = if rootful {
+        Some(identity::child_ids()?)
+    } else {
+        None
+    };
     infraternal_shim::prepare_child_without_control(&mut command);
     #[cfg(target_os = "linux")]
     infraternal_shim::prepare_parent_bound_child(&mut command);
@@ -1308,6 +1315,9 @@ fn start_managed_child(
         static_config.as_bytes(),
     )?;
     let generation = write_dynamic_snapshot(settings, services)?;
+    // Repeated before every start: a workload that later began running as the proxy account
+    // could trace or signal the child and read its credentials.
+    identity::verify_unshared()?;
     let mut child = TraefikChild::spawn_holding(
         &settings.executable,
         &settings.static_config_path,

@@ -162,11 +162,7 @@ fn installer_extracts_only_the_allowlisted_executable_with_private_mode() {
     );
     let metadata = fs::symlink_metadata(&path).expect("binary metadata");
     assert_eq!(metadata.uid(), nix::unistd::geteuid().as_raw());
-    let expected_gid = if nix::unistd::Uid::effective().is_root() {
-        65_532
-    } else {
-        nix::unistd::Gid::effective().as_raw()
-    };
+    let expected_gid = crate::identity::child_ids().expect("proxy identity").1;
     let expected_mode = if nix::unistd::Uid::effective().is_root() {
         0o550
     } else {

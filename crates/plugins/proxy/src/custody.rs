@@ -282,7 +282,7 @@ fn ensure_private_directory(path: &Path) -> io::Result<()> {
 
 fn validate_directory(path: &Path, expected_mode: u32) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
-    let (expected_user, expected_group) = identity::child_ids();
+    let (expected_user, expected_group) = identity::child_ids()?;
     if !metadata.file_type().is_dir()
         || metadata.uid() != expected_user
         || metadata.gid() != expected_group
@@ -296,7 +296,7 @@ fn validate_directory(path: &Path, expected_mode: u32) -> io::Result<()> {
 }
 
 fn validate_file_metadata(metadata: &fs::Metadata) -> io::Result<()> {
-    let (expected_user, expected_group) = identity::child_ids();
+    let (expected_user, expected_group) = identity::child_ids()?;
     if !metadata.file_type().is_file()
         || metadata.uid() != expected_user
         || metadata.gid() != expected_group
@@ -329,7 +329,7 @@ fn normalize_private_directory(path: &Path) -> io::Result<()> {
         .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
         .open(path)?;
     let metadata = directory.metadata()?;
-    let (expected_user, expected_group) = identity::child_ids();
+    let (expected_user, expected_group) = identity::child_ids()?;
     if metadata.uid() == expected_user && metadata.gid() == expected_group {
         return validate_directory(path, PRIVATE_DIRECTORY_MODE);
     }
@@ -353,7 +353,7 @@ fn normalize_private_directory(path: &Path) -> io::Result<()> {
 
 fn normalize_private_file(file: &File) -> io::Result<()> {
     let metadata = file.metadata()?;
-    let (expected_user, expected_group) = identity::child_ids();
+    let (expected_user, expected_group) = identity::child_ids()?;
     if metadata.uid() == expected_user && metadata.gid() == expected_group {
         return validate_file_metadata(&metadata);
     }
@@ -411,7 +411,7 @@ impl TemporaryPath {
             .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
             .open(&path)?;
         let temporary = Self { path, armed: true };
-        let (owner_user, owner_group) = identity::child_ids();
+        let (owner_user, owner_group) = identity::child_ids()?;
         if identity::rootful() {
             nix::unistd::fchown(
                 &file,

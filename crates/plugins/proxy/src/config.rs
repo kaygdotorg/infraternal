@@ -491,7 +491,7 @@ pub(crate) fn write_proxy_config_atomic(destination: &Path, bytes: &[u8]) -> io:
             destination,
             bytes,
             nix::unistd::Uid::effective().as_raw(),
-            identity::TRAEFIK_GID,
+            identity::child_group()?,
             PROXY_CONFIG_MODE,
             None,
         )

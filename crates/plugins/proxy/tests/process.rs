@@ -5,7 +5,7 @@
     reason = "Integration fixture failures should identify the exact operation that failed."
 )]
 
-use infraternal_plugin_proxy::supervisor::TraefikChild;
+use infraternal_plugin_proxy::supervisor::{TraefikChild, child_identity};
 use std::{
     collections::BTreeMap,
     fs,
@@ -13,9 +13,6 @@ use std::{
     sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
-
-const TRAEFIK_UID: u32 = 65_532;
-const TRAEFIK_GID: u32 = 65_532;
 
 fn rootful_permissions(path: &std::path::Path, rootful: bool, uid: u32, gid: u32) {
     if rootful {
@@ -32,15 +29,8 @@ fn proxy_mode(rootful: bool, rootful_mode: u32, rootless_mode: u32) -> u32 {
     if rootful { rootful_mode } else { rootless_mode }
 }
 
-fn proxy_child_ids(rootful: bool) -> (u32, u32) {
-    if rootful {
-        (TRAEFIK_UID, TRAEFIK_GID)
-    } else {
-        (
-            nix::unistd::Uid::effective().as_raw(),
-            nix::unistd::Gid::effective().as_raw(),
-        )
-    }
+fn proxy_child_ids() -> (u32, u32) {
+    child_identity().expect("resolve the proxy child identity")
 }
 
 fn read_child_process_status(
@@ -106,9 +96,10 @@ fn assert_proxy_file_identity(path: &std::path::Path, user: u32, group: u32, mod
 #[test]
 fn traefik_child_receives_only_credential_file_paths_and_redacts_its_logs() {
     let rootful = nix::unistd::Uid::effective().is_root();
+    let (child_user, child_group) = proxy_child_ids();
     let root = std::env::temp_dir().join(format!("proxy-child-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&root).expect("create process fixture");
-    rootful_permissions(&root, rootful, 0, TRAEFIK_GID);
+    rootful_permissions(&root, rootful, 0, child_group);
     fs::set_permissions(
         &root,
         fs::Permissions::from_mode(proxy_mode(rootful, 0o750, 0o700)),
@@ -118,20 +109,20 @@ fn traefik_child_receives_only_credential_file_paths_and_redacts_its_logs() {
     let config = root.join("static.toml");
     let secrets = root.join("secrets");
     fs::create_dir(&secrets).expect("create provider custody directory");
-    rootful_permissions(&secrets, rootful, TRAEFIK_UID, TRAEFIK_GID);
+    rootful_permissions(&secrets, rootful, child_user, child_group);
     fs::set_permissions(&secrets, fs::Permissions::from_mode(0o700))
         .expect("private provider custody directory");
     let token_path = secrets.join("dns-token");
     let capture = secrets.join("child-input.txt");
     fs::write(&config, b"private config").expect("write fixture config");
-    rootful_permissions(&config, rootful, 0, TRAEFIK_GID);
+    rootful_permissions(&config, rootful, 0, child_group);
     fs::set_permissions(
         &config,
         fs::Permissions::from_mode(proxy_mode(rootful, 0o640, 0o600)),
     )
     .expect("private fixture config");
     fs::write(&token_path, b"token-value-canary").expect("write fixture token");
-    rootful_permissions(&token_path, rootful, TRAEFIK_UID, TRAEFIK_GID);
+    rootful_permissions(&token_path, rootful, child_user, child_group);
     fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600))
         .expect("private fixture token");
     fs::write(
@@ -142,7 +133,7 @@ fn traefik_child_receives_only_credential_file_paths_and_redacts_its_logs() {
         ),
     )
     .expect("write fake executable");
-    rootful_permissions(&executable, rootful, 0, TRAEFIK_GID);
+    rootful_permissions(&executable, rootful, 0, child_group);
     fs::set_permissions(
         &executable,
         fs::Permissions::from_mode(proxy_mode(rootful, 0o550, 0o500)),
@@ -190,9 +181,10 @@ fn traefik_child_receives_only_credential_file_paths_and_redacts_its_logs() {
 #[test]
 fn traefik_child_obeys_the_rootful_identity_and_capability_boundary() {
     let rootful = nix::unistd::Uid::effective().is_root();
+    let (child_user, child_group) = proxy_child_ids();
     let root = std::env::temp_dir().join(format!("proxy-sandbox-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&root).expect("create process fixture");
-    rootful_permissions(&root, rootful, 0, TRAEFIK_GID);
+    rootful_permissions(&root, rootful, 0, child_group);
     fs::set_permissions(
         &root,
         fs::Permissions::from_mode(proxy_mode(rootful, 0o750, 0o700)),
@@ -202,19 +194,19 @@ fn traefik_child_obeys_the_rootful_identity_and_capability_boundary() {
     let config = root.join("static.toml");
     let secrets = root.join("secrets");
     fs::create_dir(&secrets).expect("create provider custody directory");
-    rootful_permissions(&secrets, rootful, TRAEFIK_UID, TRAEFIK_GID);
+    rootful_permissions(&secrets, rootful, child_user, child_group);
     fs::set_permissions(&secrets, fs::Permissions::from_mode(0o700))
         .expect("private provider custody directory");
     let token_path = secrets.join("dns-token");
     fs::write(&config, b"private config").expect("write fixture config");
-    rootful_permissions(&config, rootful, 0, TRAEFIK_GID);
+    rootful_permissions(&config, rootful, 0, child_group);
     fs::set_permissions(
         &config,
         fs::Permissions::from_mode(proxy_mode(rootful, 0o640, 0o600)),
     )
     .expect("private fixture config");
     fs::write(&token_path, b"token-value-canary").expect("write fixture token");
-    rootful_permissions(&token_path, rootful, TRAEFIK_UID, TRAEFIK_GID);
+    rootful_permissions(&token_path, rootful, child_user, child_group);
     fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600))
         .expect("private fixture token");
     fs::write(
@@ -222,7 +214,7 @@ fn traefik_child_obeys_the_rootful_identity_and_capability_boundary() {
         "#!/bin/sh\ncat \"$DNS_API_TOKEN_FILE\" >/dev/null\ncat /proc/self/status >&2\nexec /bin/sleep 60\n",
     )
     .expect("write fake executable");
-    rootful_permissions(&executable, rootful, 0, TRAEFIK_GID);
+    rootful_permissions(&executable, rootful, 0, child_group);
     fs::set_permissions(
         &executable,
         fs::Permissions::from_mode(proxy_mode(rootful, 0o550, 0o500)),
@@ -243,7 +235,7 @@ fn traefik_child_obeys_the_rootful_identity_and_capability_boundary() {
 
     let deadline = Instant::now() + Duration::from_secs(2);
     let status = read_child_process_status(&received, deadline);
-    let (expected_user, expected_group) = proxy_child_ids(rootful);
+    let (expected_user, expected_group) = (child_user, child_group);
     assert_eq!(status.get("NoNewPrivs").map(String::as_str), Some("1"));
     assert_proxy_child_ids(&status, expected_user, expected_group);
     assert_proxy_child_capabilities(&status, rootful);

@@ -91,19 +91,11 @@ fn custody_uses_private_state_provider_and_secret_modes() {
 }
 
 fn expected_proxy_uid() -> u32 {
-    if nix::unistd::Uid::effective().is_root() {
-        65_532
-    } else {
-        nix::unistd::Uid::effective().as_raw()
-    }
+    crate::identity::child_ids().expect("proxy identity").0
 }
 
 fn expected_proxy_gid() -> u32 {
-    if nix::unistd::Uid::effective().is_root() {
-        65_532
-    } else {
-        nix::unistd::Gid::effective().as_raw()
-    }
+    crate::identity::child_ids().expect("proxy identity").1
 }
 
 #[test]

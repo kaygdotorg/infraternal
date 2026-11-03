@@ -548,7 +548,7 @@ fn extract_allowlisted_executable<R: Read>(
         nix::unistd::fchown(
             &output,
             Some(nix::unistd::Uid::effective()),
-            Some(nix::unistd::Gid::from_raw(identity::TRAEFIK_GID)),
+            Some(nix::unistd::Gid::from_raw(identity::child_group()?)),
         )?;
     }
     output.set_permissions(fs::Permissions::from_mode(executable_mode()))?;
@@ -629,7 +629,7 @@ fn validate_installed(directory: &Path, verified: &VerifiedComponentManifest) ->
         nix::unistd::fchown(
             &file,
             Some(nix::unistd::Uid::effective()),
-            Some(nix::unistd::Gid::from_raw(identity::TRAEFIK_GID)),
+            Some(nix::unistd::Gid::from_raw(identity::child_group()?)),
         )?;
         file.set_permissions(fs::Permissions::from_mode(ROOTFUL_EXECUTABLE_MODE))?;
         file.sync_all()?;
@@ -654,7 +654,7 @@ fn executable_mode() -> u32 {
 
 fn validate_executable_metadata(metadata: &fs::Metadata) -> io::Result<()> {
     let expected_gid = if identity::rootful() {
-        identity::TRAEFIK_GID
+        identity::child_group()?
     } else {
         nix::unistd::Gid::effective().as_raw()
     };

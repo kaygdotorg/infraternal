@@ -110,7 +110,7 @@ fn supervisor_fixture(root: &Path) -> (PathBuf, PathBuf) {
 fn fake_traefik(path: &Path, script: &[u8]) {
     std::fs::write(path, script).expect("write fake Traefik");
     if crate::identity::rootful() {
-        let (_, group) = crate::identity::child_ids();
+        let (_, group) = crate::identity::child_ids().expect("proxy identity");
         nix::unistd::chown(path, None, Some(nix::unistd::Gid::from_raw(group)))
             .expect("hand fake Traefik to the child group");
     }

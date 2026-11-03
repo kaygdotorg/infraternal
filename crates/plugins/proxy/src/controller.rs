@@ -750,7 +750,7 @@ pub(crate) fn ensure_proxy_directory(path: &Path) -> io::Result<()> {
         .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
         .open(path)?;
     let metadata = directory.metadata()?;
-    let child_gid = identity::TRAEFIK_GID;
+    let child_gid = identity::child_group()?;
     if !metadata.file_type().is_dir() || metadata.uid() != nix::unistd::Uid::effective().as_raw() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -803,7 +803,7 @@ pub(crate) fn ensure_private_file(path: &Path) -> io::Result<()> {
     };
     let metadata = file.metadata()?;
     let path_metadata = fs::symlink_metadata(path)?;
-    let (owner_user, owner_group) = identity::child_ids();
+    let (owner_user, owner_group) = identity::child_ids()?;
     if !metadata.file_type().is_file()
         || metadata.nlink() != 1
         || !path_metadata.file_type().is_file()
@@ -1265,7 +1265,7 @@ mod tests {
         ensure_proxy_directory(&path).expect("accept the prepared directory again");
 
         let metadata = fs::symlink_metadata(&path).expect("inspect proxy directory");
-        let (_, child_group) = identity::child_ids();
+        let (_, child_group) = identity::child_ids().expect("proxy identity");
         assert_eq!(metadata.uid(), nix::unistd::Uid::effective().as_raw());
         assert_eq!(metadata.gid(), child_group);
         assert_eq!(
