@@ -106,8 +106,10 @@ fn identity(expired: bool) -> (Arc<runtime::Authority>, PrivateKey, Certificate)
     (runtime::Authority::new(&ca, &cert), user, cert)
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn optimistic_startup_and_negotiation_fallbacks_reach_the_prompt() {
+    // Every peer and transport runs in memory on this runtime. Virtual time
+    // bounds a stuck protocol state without timing debug cryptography on a busy host.
     timeout(Duration::from_secs(30), async {
         for mode in [0, 1, 2, 3, 5] {
             let (authority, user, certificate) = identity(false);

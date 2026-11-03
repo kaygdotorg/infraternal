@@ -297,7 +297,7 @@ fn session_inspection_finds_bound_endpoints_by_identity() {
     let control =
         std::os::unix::net::UnixListener::bind(fixture.state().join("plugins.sock")).unwrap();
     drop(std::os::unix::net::UnixListener::bind(nested.join("left.sock")).unwrap());
-    assert_eq!(sessions(&runtime), Ok(()));
+    assert_eq!(sessions_after_close(&runtime), Ok(()));
     let bound = std::os::unix::net::UnixDatagram::bind(nested.join("live.sock")).unwrap();
     assert_eq!(sessions(&runtime), Err(73));
     drop(bound);

@@ -117,6 +117,10 @@ impl Session {
         } else {
             panic!("no Hello");
         }
+        // Parallel fixture forks can retain this readiness connection until
+        // exec. Shut down its shared socket state so those inherited aliases
+        // cannot consume one of the peer-limit test's admission slots.
+        peer.shutdown(std::net::Shutdown::Both).unwrap();
         session
     }
     fn path(&self) -> PathBuf {

@@ -27,9 +27,26 @@ def run(binary):
             if select.select([client.sock], [], [], deadline - time.monotonic())[0]:
                 kind = client.process(credit=False)
                 assert kind == 0x13, f'unfunded attach emitted frame 0x{kind:02x}'
-        client.send(0, 0x08, struct.pack('<QQ', 66, 0))
-        stream, kind, _ = client.read()
+        probe = struct.pack('<QQ', 66, 0)
+        client.send(0, 0x08, probe)
+        # A parked writer can finish its input-state exchange after the
+        # observation window. Validate its Ack while awaiting the control Pong;
+        # neither Ack nor the unsolicited host census spends output credit.
+        timeout = client.sock.gettimeout()
+        deadline = time.monotonic() + timeout
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, 'credit-starved replay blocked sibling control'
+                client.sock.settimeout(remaining)
+                stream, kind, body = client.read_without_inventory()
+                if (stream, kind) != (1, 0x13):
+                    break
+                client.process(credit=False, frame=(stream, kind, body))
+        finally:
+            client.sock.settimeout(timeout)
         assert (stream, kind) == (0, 0x09), 'credit-starved replay blocked sibling control'
+        assert body == probe, 'control Pong did not match the request'
         # Cross the 250 ms starvation deadline, then fund retained replay.
         start = time.monotonic()
         client.send(1, 0x14, struct.pack('<I', 1))
