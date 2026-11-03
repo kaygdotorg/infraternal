@@ -36,8 +36,10 @@ const WRITE_QUEUE: usize = 256;
 const GRO_BATCH: usize = 64;
 /// Most TCP segments merged into one GSO frame.
 const GRO_MAX_SEGMENTS: usize = 64;
+const TCP_FIN: u8 = 0x01;
 const TCP_PSH: u8 = 0x08;
 const TCP_ACK: u8 = 0x10;
+const TCP_CWR: u8 = 0x80;
 const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 0x01;
 const VIRTIO_NET_HDR_GSO_TCPV4: u8 = 1;
 const VIRTIO_NET_HDR_GSO_TCPV6: u8 = 4;
@@ -817,8 +819,13 @@ fn append_tcp_segment(
     segment[plan.tcp_offset + 4..plan.tcp_offset + 8]
         .copy_from_slice(&plan.sequence.wrapping_add(sequence_offset).to_be_bytes());
     let segment_count = plan.payload_len.max(1).div_ceil(plan.segment_payload_len);
+    // As the kernel's own TCP segmentation does: FIN and PSH stay on the last segment, and CWR
+    // only on the first, so a receiver sees one congestion-window reduction per burst.
     if index + 1 != segment_count {
-        segment[plan.tcp_offset + 13] &= !(0x01 | 0x08);
+        segment[plan.tcp_offset + 13] &= !(TCP_FIN | TCP_PSH);
+    }
+    if index > 0 {
+        segment[plan.tcp_offset + 13] &= !TCP_CWR;
     }
     if plan.ipv4 {
         let total = u16::try_from(segment.len())
@@ -1404,6 +1411,22 @@ mod tests {
                 assert_eq!(bytes[33] & (0x01 | 0x08), 0x01 | 0x08);
             }
         }
+    }
+
+    /// A GSO frame with ECN (virtio's GSO ECN bit) and CWR set: only the first segment keeps CWR,
+    /// as the kernel's `tcp_gso_segment` leaves it (#260 J143 P3-1).
+    #[test]
+    fn tso_keeps_cwr_only_on_the_first_segment() {
+        let pool = PacketBufPool::new(1);
+        let mut frame = ipv4_tcp_frame(2300);
+        frame[1] |= 0x80;
+        frame[10 + 33] |= 0x80;
+        let flags: Vec<u8> = decode_frame(&frame, true, &pool)
+            .unwrap()
+            .into_iter()
+            .map(|packet| packet.into_bytes()[33])
+            .collect();
+        assert_eq!(flags, [0x90, 0x10, 0x19]);
     }
 
     #[test]
