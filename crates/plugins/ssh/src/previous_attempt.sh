@@ -499,16 +499,13 @@ inspect_previous() {
 stop_stage_shims() {
  runtime_helper
  "$helper" --bootstrap-runtime "$base" "$(stat -c '%d:%i' "$base")" sessions-stop </dev/null || exit $?
+ # Shims were stopped above through their authenticated session sockets. A
+ # process still running the journaled payload has no such endpoint and is
+ # never signalled: refuse (73), keep the install and let the caller retry.
  for setup_process in /proc/[0-9]*; do
   [ -O "$setup_process" ] || continue
-  setup_candidate=${setup_process##*/}
-  [ "$setup_candidate" != "$$" ] || continue
-  [ "$stage/payload" -ef "$setup_process/exe" ] || continue
-  # A leftover payload process without an authenticated session endpoint cannot
-  # be stopped safely. Keep the install intact and let the caller retry.
-  process_start_ticks "$setup_candidate" || exit 73
-  [ "$stage/payload" -ef "$setup_process/exe" ] || exit 73
-  exit 73
+  [ "${setup_process##*/}" != "$$" ] || continue
+  [ ! "$stage/payload" -ef "$setup_process/exe" ] || exit 73
  done
 }
 replace_stuck_install() {
