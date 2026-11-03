@@ -5,13 +5,13 @@ use crate::{
     gotatun_node::{Engine, EngineKind},
     wireguard::{Client, Device, Key},
 };
+#[cfg(feature = "relay")]
+use std::sync::Arc;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
     net::IpAddr,
 };
-#[cfg(feature = "relay")]
-use std::sync::Arc;
 
 pub use crate::dataplane::Chunk;
 struct Pending {
@@ -450,29 +450,6 @@ impl Node {
         self.peer_counters()
     }
 
-    /// Change one installed peer's UDP endpoint without changing its coordinator-owned key/routes.
-    /// This is the handoff used by the #220 relay shim; the next coordinator update remains authoritative.
-    /// # Errors
-    /// Reports a missing peer or a selected-engine update failure.
-    pub fn set_endpoint(
-        &mut self,
-        key: crate::policy::model::PublicKey,
-        endpoint: std::net::SocketAddr,
-    ) -> io::Result<()> {
-        match self.engine_kind {
-            EngineKind::Kernel => self
-                .client
-                .as_mut()
-                .ok_or(io::ErrorKind::NotConnected)?
-                .endpoint(key, endpoint),
-            EngineKind::GotaTun => self
-                .gotatun
-                .as_ref()
-                .ok_or(io::ErrorKind::NotConnected)?
-                .set_endpoint(key, endpoint),
-        }
-    }
-
     /// Return a relay callback that starts a handshake through this node's selected engine.
     #[cfg(feature = "relay")]
     pub(crate) fn relay_handshake_starter(
@@ -490,7 +467,28 @@ impl Node {
                 .gotatun
                 .as_ref()
                 .ok_or(io::ErrorKind::NotConnected)?
-                .handshake_starter(peer.key)),
+                .handshake_starter(peer.key, peer.endpoint.ok_or(io::ErrorKind::InvalidInput)?)),
+        }
+    }
+
+    /// Return a callback that preserves a completed session or clears an incomplete relay handshake.
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_handshake_preparer(
+        &self,
+        peer: &crate::dataplane::Peer,
+    ) -> io::Result<Arc<dyn Fn() -> io::Result<()> + Send + Sync>> {
+        match self.engine_kind {
+            EngineKind::Kernel => {
+                let peer = peer.clone();
+                Ok(Arc::new(move || {
+                    crate::relay_path::prepare_kernel_handshake(&peer)
+                }))
+            }
+            EngineKind::GotaTun => Ok(self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .handshake_preparer(peer.key, peer.endpoint.ok_or(io::ErrorKind::InvalidInput)?)),
         }
     }
     fn apply_peer_changes(

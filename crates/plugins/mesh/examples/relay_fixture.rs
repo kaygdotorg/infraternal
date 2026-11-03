@@ -426,6 +426,12 @@ async fn node() {
                     "received": stats.received,
                     "unlinked": stats.unlinked,
                     "too_large": stats.too_large,
+                    "inbound_datagrams": stats.inbound_datagrams,
+                    "malformed_datagrams": stats.malformed_datagrams,
+                    "unknown_links": stats.unknown_links,
+                    "unknown_peers": stats.unknown_peers,
+                    "injection_errors": stats.injection_errors,
+                    "receive_errors": stats.receive_errors,
                     "tap_delivered": observer.delivered(),
                     "peers": kernel,
                 }));

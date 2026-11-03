@@ -13,25 +13,31 @@ use gotatun::{
 use ipnetwork::IpNetwork;
 use nix::sys::prctl::{get_thp_disable, set_thp_disable};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "relay")]
+use std::net::SocketAddr;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
-    net::{IpAddr, SocketAddr},
-    sync::mpsc as sync,
+    net::IpAddr,
+    sync::{Arc, mpsc as sync},
     thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-#[cfg(feature = "relay")]
-use std::sync::Arc;
 use tokio::{
     runtime::Builder as RuntimeBuilder,
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    task::JoinSet,
 };
 
 use crate::{dataplane::Config, gotatun_tun::LinuxTun, policy::model::PublicKey};
 
 type GotaDevice = WireGuardDevice<(BoundUdpFactory, LinuxPacketIo, LinuxPacketIo)>;
 type CounterMap = BTreeMap<PublicKey, crate::wireguard::Counters>;
+
+/// How long a forced relay handshake may wait; `GotaTun`'s own wait has no deadline.
+/// One `WireGuard` handshake attempt is 5 s, after which the peer timers retry.
+#[cfg(feature = "relay")]
+const HANDSHAKE_WAIT: Duration = Duration::from_secs(5);
 
 /// Selects the node's data plane; kernel `WireGuard` remains an explicit migration fallback.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,7 +109,8 @@ enum WorkerCommand {
         reply: sync::SyncSender<io::Result<RuntimeInfo>>,
     },
     Counters(sync::SyncSender<io::Result<CounterMap>>),
-    Endpoint {
+    #[cfg(feature = "relay")]
+    PrepareHandshake {
         key: PublicKey,
         endpoint: SocketAddr,
         reply: sync::SyncSender<io::Result<()>>,
@@ -111,6 +118,7 @@ enum WorkerCommand {
     #[cfg(feature = "relay")]
     ForceHandshake {
         key: PublicKey,
+        endpoint: SocketAddr,
         reply: sync::SyncSender<io::Result<()>>,
     },
     Stop(sync::SyncSender<()>),
@@ -186,10 +194,10 @@ impl Engine {
                         )
                     } else {
                         (
-                            Some(
+                            Some(Arc::new(
                                 build_device(factory, private_key, port, peers, tun.clone())
                                     .await?,
-                            ),
+                            )),
                             None,
                         )
                     };
@@ -209,7 +217,7 @@ impl Engine {
                     }
                 };
                 if info_tx.send(Ok(info.clone())).is_err() {
-                    if let Some(device) = device {
+                    if let Some(device) = device.and_then(Arc::into_inner) {
                         runtime.block_on(device.stop());
                     }
                     return;
@@ -217,6 +225,7 @@ impl Engine {
                 let state = RuntimeState {
                     tun: Some(tun),
                     device,
+                    handshakes: JoinSet::new(),
                     pending,
                     config,
                     info,
@@ -270,33 +279,47 @@ impl Engine {
         result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
     }
 
-    /// Redirect one configured peer to the loopback relay shim without changing its key/routes.
-    /// # Errors
-    /// Reports a stopped worker, an unknown peer, or a failed device update.
-    pub(crate) fn set_endpoint(&self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
-        let (reply, result) = sync::sync_channel(1);
-        self.commands
-            .send(WorkerCommand::Endpoint {
-                key,
-                endpoint,
-                reply,
-            })
-            .map_err(|_| io::ErrorKind::BrokenPipe)?;
-        result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
-    }
-
     /// Return a relay callback that forces the selected `GotaTun` peer to start a handshake.
     #[cfg(feature = "relay")]
-    pub(crate) fn handshake_starter(&self, key: PublicKey) -> Arc<dyn Fn() + Send + Sync> {
+    pub(crate) fn handshake_starter(
+        &self,
+        key: PublicKey,
+        endpoint: SocketAddr,
+    ) -> Arc<dyn Fn() + Send + Sync> {
         let commands = self.commands.clone();
         Arc::new(move || {
             let (reply, result) = sync::sync_channel(1);
             if commands
-                .send(WorkerCommand::ForceHandshake { key, reply })
+                .send(WorkerCommand::ForceHandshake {
+                    key,
+                    endpoint,
+                    reply,
+                })
                 .is_ok()
             {
                 let _ = result.recv();
             }
+        })
+    }
+
+    /// Return a relay callback that clears an incomplete peer handshake without initiating one.
+    #[cfg(feature = "relay")]
+    pub(crate) fn handshake_preparer(
+        &self,
+        key: PublicKey,
+        endpoint: SocketAddr,
+    ) -> Arc<dyn Fn() -> io::Result<()> + Send + Sync> {
+        let commands = self.commands.clone();
+        Arc::new(move || {
+            let (reply, result) = sync::sync_channel(1);
+            commands
+                .send(WorkerCommand::PrepareHandshake {
+                    key,
+                    endpoint,
+                    reply,
+                })
+                .map_err(|_| io::ErrorKind::BrokenPipe)?;
+            result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
         })
     }
 
@@ -334,7 +357,10 @@ fn engine_runtime() -> io::Result<(tokio::runtime::Runtime, bool)> {
 
 struct RuntimeState {
     tun: Option<LinuxPacketIo>,
-    device: Option<GotaDevice>,
+    /// Shared only with forced-handshake tasks, which `stop` ends before stopping the device.
+    /// Device operations take `GotaTun`'s own lock briefly; no command waits on a session.
+    device: Option<Arc<GotaDevice>>,
+    handshakes: JoinSet<()>,
     pending: Option<PendingDevice>,
     config: Option<Config>,
     info: RuntimeInfo,
@@ -346,35 +372,41 @@ struct PendingDevice {
 }
 
 async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
-    while let Some(command) = commands.recv().await {
-        match command {
-            WorkerCommand::Apply { config, reply } => {
-                let _ = reply.send(state.apply(config).await);
-            }
-            WorkerCommand::Counters(reply) => {
-                let _ = reply.send(state.counters().await);
-            }
-            WorkerCommand::Endpoint {
-                key,
-                endpoint,
-                reply,
-            } => {
-                let _ = reply.send(state.set_endpoint(key, endpoint).await);
-            }
-            #[cfg(feature = "relay")]
-            WorkerCommand::ForceHandshake { key, reply } => {
-                let _ = reply.send(state.force_handshake(key).await);
-            }
-            WorkerCommand::Stop(reply) => {
-                state.stop().await;
-                let _ = reply.send(());
-                break;
-            }
+    loop {
+        tokio::select! {
+            command = commands.recv() => match command {
+                Some(WorkerCommand::Apply { config, reply }) => {
+                    let _ = reply.send(state.apply(config).await);
+                }
+                Some(WorkerCommand::Counters(reply)) => {
+                    let _ = reply.send(state.counters().await);
+                }
+                #[cfg(feature = "relay")]
+                Some(WorkerCommand::PrepareHandshake { key, endpoint, reply }) => {
+                    let _ = reply.send(state.prepare_handshake(key, endpoint).await);
+                }
+                #[cfg(feature = "relay")]
+                Some(WorkerCommand::ForceHandshake { key, endpoint, reply }) => {
+                    let _ = reply.send(state.force_handshake(key, endpoint).await);
+                }
+                Some(WorkerCommand::Stop(reply)) => {
+                    state.stop().await;
+                    let _ = reply.send(());
+                    return;
+                }
+                None => {
+                    state.stop().await;
+                    return;
+                }
+            },
+            // Reap finished handshake tasks; their result is visible in the peer counters.
+            Some(_) = state.handshakes.join_next(), if !state.handshakes.is_empty() => {}
         }
     }
 }
 
 impl RuntimeState {
+    #[cfg(feature = "relay")]
     async fn set_endpoint(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
         let policy = self
             .config
@@ -384,26 +416,59 @@ impl RuntimeState {
         let mut peer = peer_for_policy(policy)?;
         peer.endpoint = Some(endpoint);
         self.device
-            .as_mut()
+            .as_ref()
             .ok_or(io::ErrorKind::NotConnected)?
-            .add_or_update_peers(vec![peer])
+            .write(async |device| device.add_or_update_peers([peer]).await)
             .await
             .map_err(|_| io::Error::other("GotaTun relay endpoint could not be installed."))
     }
 
     #[cfg(feature = "relay")]
-    async fn force_handshake(&self, key: PublicKey) -> io::Result<()> {
-        let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
-        let key = X25519PublicKey::from(key.0);
-        tokio::time::timeout(Duration::from_secs(5), device.force_handshake(&key))
+    async fn prepare_handshake(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
+        // GotaTun records a handshake as soon as either side derives a session, including a
+        // responder that has just answered a relayed initiation. Keep that session.
+        let has_session = self
+            .counters()
+            .await?
+            .get(&key)
+            .is_some_and(|counters| counters.handshake_secs != 0);
+        if has_session {
+            return self.set_endpoint(key, endpoint).await;
+        }
+        let policy = self
+            .config
+            .as_ref()
+            .and_then(|config| config.peers.values().find(|peer| peer.peer.key == key))
+            .ok_or(io::ErrorKind::NotFound)?;
+        let mut peer = peer_for_policy(policy)?;
+        // Drop the direct-path attempt still in flight: GotaTun's forced handshake would wait
+        // for it rather than send a fresh initiation. An endpoint-less responder learns the
+        // relay shim's address from the authenticated initiation, so only one side initiates.
+        peer.endpoint = None;
+        let public_key = X25519PublicKey::from(key.0);
+        self.device
+            .as_ref()
+            .ok_or(io::ErrorKind::NotConnected)?
+            .write(async |device| {
+                device.remove_peer(&public_key).await;
+                device.add_or_update_peers([peer]).await;
+            })
             .await
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "GotaTun relay handshake did not complete within five seconds.",
-                )
-            })?
-            .map_err(|_| io::Error::other("GotaTun relay handshake failed."))
+            .map_err(|_| io::Error::other("GotaTun relay peer could not be reset."))
+    }
+
+    #[cfg(feature = "relay")]
+    async fn force_handshake(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
+        self.set_endpoint(key, endpoint).await?;
+        let device = Arc::clone(self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?);
+        let key = X25519PublicKey::from(key.0);
+        // GotaTun sends the initiation, then waits for the session without holding its device
+        // lock. Wait in a task: callers of this serialized loop block their own threads, and
+        // the relay shim that must deliver the response may run on one of them.
+        self.handshakes.spawn(async move {
+            let _ = tokio::time::timeout(HANDSHAKE_WAIT, device.force_handshake(&key)).await;
+        });
+        Ok(())
     }
 
     async fn apply(&mut self, config: Config) -> io::Result<RuntimeInfo> {
@@ -427,7 +492,7 @@ impl RuntimeState {
                 tun,
             )
             .await?;
-            self.device = Some(device);
+            self.device = Some(Arc::new(device));
             // The live device owns its copies; drop deferred startup material.
             self.pending.take();
             self.config = Some(config);
@@ -438,35 +503,37 @@ impl RuntimeState {
             .values()
             .map(|policy| policy.peer.key)
             .collect();
-        let device = self.device.as_mut().ok_or(io::ErrorKind::NotConnected)?;
-        let old_config = self.config.clone();
+        let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         let changed = config
             .peers
             .iter()
             .filter(|(id, policy)| {
-                old_config
+                self.config
                     .as_ref()
                     .and_then(|old| old.peers.get(id))
                     .is_none_or(|old| old.peer != policy.peer)
             })
             .map(|(_, policy)| peer_for_policy(policy))
             .collect::<io::Result<Vec<_>>>()?;
-        if !changed.is_empty() {
+        let retired: Vec<_> = self
+            .config
+            .iter()
+            .flat_map(|old| old.peers.values())
+            .map(|policy| policy.peer.key)
+            .filter(|key| !desired.contains(key))
+            .map(|key| X25519PublicKey::from(key.0))
+            .collect();
+        if !changed.is_empty() || !retired.is_empty() {
+            // One device transaction: packet workers never see a half-applied snapshot.
             device
-                .add_or_update_peers(changed)
+                .write(async |device| {
+                    device.add_or_update_peers(changed).await;
+                    for key in &retired {
+                        device.remove_peer(key).await;
+                    }
+                })
                 .await
                 .map_err(|_| io::Error::other("GotaTun peers could not be updated."))?;
-        }
-        if let Some(old) = &old_config {
-            for previous in old.peers.values().map(|policy| policy.peer.key) {
-                if !desired.contains(&previous) {
-                    let key = X25519PublicKey::from(previous.0);
-                    device
-                        .remove_peer(&key)
-                        .await
-                        .map_err(|_| io::Error::other("GotaTun peers could not be retired."))?;
-                }
-            }
         }
         self.config = Some(config);
         Ok(self.info.clone())
@@ -506,7 +573,10 @@ impl RuntimeState {
     }
 
     async fn stop(&mut self) {
-        if let Some(device) = self.device.take() {
+        // Ending every handshake task drops its device handle, so this one is the last.
+        self.handshakes.abort_all();
+        while self.handshakes.join_next().await.is_some() {}
+        if let Some(device) = self.device.take().and_then(Arc::into_inner) {
             device.stop().await;
         }
         self.pending.take();
