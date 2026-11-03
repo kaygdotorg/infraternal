@@ -1261,15 +1261,15 @@ impl Bootstrap {
                                 ));
                             }
                             let replaced = mode == FreshMode::Replace;
-                            if replaced {
-                                // Recorded before the stop: any later failure, even
-                                // a dropped attempt, puts the old install back (#305 P1-1).
-                                resources.set_aside = Some(SetAside {
-                                    session: session.clone(),
-                                    previous: previous.clone(),
-                                    replaced,
-                                });
-                            }
+                            // Recorded before the stop: any later failure, even an
+                            // attempt dropped while the script runs, puts the old
+                            // install back (#305 P1-1, P2-1). A restore of what was
+                            // never set aside reports "untouched" and changes nothing.
+                            resources.set_aside = Some(SetAside {
+                                session: session.clone(),
+                                previous: previous.clone(),
+                                replaced,
+                            });
                             let acted = self
                                 .act_start_fresh(
                                     batch,
@@ -1289,17 +1289,7 @@ impl Bootstrap {
                                 resources.set_aside = None;
                             }
                             acted?;
-                            if replaced {
-                                Some(host)
-                            } else {
-                                // A later failure puts the set-aside install back.
-                                resources.set_aside = Some(SetAside {
-                                    session: session.clone(),
-                                    previous,
-                                    replaced,
-                                });
-                                None
-                            }
+                            replaced.then_some(host)
                         }
                     }
                 } else {

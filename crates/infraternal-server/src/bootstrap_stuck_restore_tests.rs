@@ -14,6 +14,9 @@ enum Stop {
     /// Wait in key preparation, after the stuck install was set aside, until
     /// released (never, unless the test releases it).
     AfterSetAside,
+    /// Hang inside the set-aside script, after it moved the install: the
+    /// attempt is dropped before it learns the script's result.
+    InSetAside,
 }
 
 /// A private HOME holding a stuck rootless install and a mock service manager.
@@ -174,6 +177,10 @@ impl SshSession for HostSession {
                 Vec::new()
             } else if script.contains("\nsupersede_stuck_install ") {
                 self.home.supersede();
+                if self.stop == Stop::InSetAside {
+                    self.reached.notify_one();
+                    std::future::pending::<()>().await;
+                }
                 Vec::new()
             } else if script.contains("\nrestore_replaced_install ")
                 || script.contains("\nrestore_superseded_install ")
@@ -487,4 +494,25 @@ async fn a_reenroll_whose_join_fails_puts_the_whole_install_back_as_found() {
             .iter()
             .any(|event| event.message.contains("put back as it was found"))
     );
+}
+
+#[tokio::test]
+async fn a_reenroll_dropped_while_it_sets_the_install_aside_still_puts_it_back() {
+    let f = fixture(true).await;
+    let home = Arc::new(Home::new());
+    let check = home_check(&home, Uuid::new_v4(), &[9; 32], "old.example");
+    let run = Run::start_with(
+        &f,
+        &home,
+        check,
+        [7; 32],
+        Stop::InSetAside,
+        Some(Duration::from_secs(5)),
+    );
+    run.confirm(run.offer().await);
+    let event = finished(run.batch()).await;
+    assert!(event.message.contains("time limit"), "{}", event.message);
+    // Recorded before the script ran, so the restore runs anyway (#305 P2-1).
+    assert!(run.ran("\nrestore_superseded_install "));
+    home.assert_as_found();
 }
