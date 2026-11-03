@@ -451,6 +451,7 @@ fn live_process_without_a_healthy_private_ping_is_reported_unhealthy() {
         provider_files: Vec::new(),
         private_ping_address: health_address,
         startup_timeout: Duration::from_secs(2),
+        public_gate: None,
     };
     let log = std::sync::Arc::new(|_: String| {});
     let supervisor = TraefikSupervisor::start(settings, log).expect("start idle supervisor");
@@ -729,6 +730,7 @@ fn generation_probe_settings(
         provider_files: Vec::new(),
         private_ping_address: address,
         startup_timeout: Duration::from_secs(2),
+        public_gate: None,
     }
 }
 
@@ -772,6 +774,7 @@ fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state(
         provider_files: Vec::new(),
         private_ping_address: health_address,
         startup_timeout: Duration::from_secs(2),
+        public_gate: None,
     };
     let log = std::sync::Arc::new(|_: String| {});
     let supervisor = TraefikSupervisor::start(settings, log).expect("start idle supervisor");
@@ -931,5 +934,60 @@ fn a_new_supervisor_stops_an_orphan_that_holds_the_child_lock() {
     assert!(
         orphan_exit.is_some(),
         "a stale proxy child holding the child lock must be stopped on start"
+    );
+}
+
+#[test]
+fn the_public_gate_is_closed_before_a_child_starts_and_cleared_after_it_stops() {
+    type Calls = std::sync::Arc<std::sync::Mutex<Vec<(Option<u16>, bool)>>>;
+    let root = std::env::temp_dir().join(format!("proxy-gate-{}", uuid::Uuid::new_v4()));
+    let (state, lock_directory) = supervisor_fixture(&root);
+    let executable = root.join("fake-traefik");
+    let marker = root.join("child-started");
+    fake_traefik(&executable, b"#!/bin/sh\nexec /bin/sleep 60\n");
+    let probe = generation_probe_server(state.join(DYNAMIC_CONFIG_FILENAME), false);
+    let calls: Calls = std::sync::Arc::default();
+    let mut settings =
+        generation_probe_settings(&root, &state, &lock_directory, executable, probe.address);
+    let recorded = std::sync::Arc::clone(&calls);
+    let observed_marker = marker.clone();
+    settings.public_gate = Some(std::sync::Arc::new(move |pair| {
+        recorded
+            .lock()
+            .map_err(|_| std::io::Error::other("gate log"))?
+            .push((pair.map(|pair| pair.https), observed_marker.exists()));
+        // Mark the child as possibly running only once the gate is closed.
+        if pair.is_some() {
+            std::fs::write(&observed_marker, b"").map_err(std::io::Error::other)?;
+        }
+        Ok(())
+    }));
+    let supervisor = TraefikSupervisor::start(settings, std::sync::Arc::new(|_: String| {}))
+        .expect("start idle supervisor");
+    supervisor
+        .replace(vec![PublishedService {
+            id: "docs".to_owned(),
+            hostname: "docs.n1.example.test".to_owned(),
+            backend: "127.0.0.1:3000".parse().expect("backend"),
+            allowed_sources: Vec::new(),
+            public: true,
+            https_port: 10_443,
+            certificate: CertificateName::Wildcard("*.n1.example.test".to_owned()),
+        }])
+        .expect("start the child for a public route");
+    let while_running = calls.lock().expect("gate log").clone();
+    drop(supervisor);
+    let after_stop = calls.lock().expect("gate log").clone();
+    drop(probe);
+    std::fs::remove_dir_all(root).expect("remove gate fixture");
+    assert_eq!(
+        while_running,
+        [(Some(10_443), false)],
+        "the gate closes once, before the child exists"
+    );
+    assert_eq!(
+        after_stop,
+        [(Some(10_443), false), (None, true)],
+        "the gate is cleared after the child stops"
     );
 }

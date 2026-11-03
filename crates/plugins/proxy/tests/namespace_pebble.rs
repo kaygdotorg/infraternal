@@ -179,6 +179,7 @@ fn run_namespace_case() {
             provider_files: vec![("HTTPREQ_ENDPOINT".to_owned(), endpoint_file)],
             private_ping_address: SocketAddr::from(([127, 0, 0, 1], health_port)),
             startup_timeout: Duration::from_secs(20),
+            public_gate: None,
         },
         Arc::new(move |line| {
             if let Ok(mut lines) = captured_log_tail.lock() {

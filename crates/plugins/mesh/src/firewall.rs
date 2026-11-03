@@ -531,6 +531,9 @@ fn render_with_aliases(
         ("output", "output", "oifname", "outgoing"),
     ] {
         let guard = if hook == "input" { &delivery } else { "" };
+        // The proxy binds its public pair with Go's wildcard listener, which is one dual-stack
+        // socket for 0.0.0.0, so the gate matches both families in this inet table. It exists
+        // only while a proxy child holds that pair; the supervisor clears it after reaping.
         let public_gate = if hook == "input" && !proxy_ingress.public_route_active {
             proxy_ingress
                 .public_listener_pair

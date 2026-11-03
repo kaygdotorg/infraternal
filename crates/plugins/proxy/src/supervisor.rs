@@ -1009,6 +1009,9 @@ pub struct SupervisorSettings {
     pub private_ping_address: SocketAddr,
     /// Bounded time allowed for the first private health response after start.
     pub startup_timeout: Duration,
+    /// Rootful only: firewall gate for the wildcard public pair. Closed before each child
+    /// starts and cleared once that child is reaped.
+    pub public_gate: Option<crate::ingress::PublicGate>,
 }
 
 enum SupervisorCommand {
@@ -1152,13 +1155,13 @@ fn run_supervisor(
                 let _ = reply.send(running);
             }
             Inbox::Command(SupervisorCommand::Shutdown(reply)) => {
-                let _ = stop_child(&mut runtime.child);
+                let _ = stop_owned_child(settings, &mut runtime.child);
                 let _ = reply.send(());
                 break;
             }
             Inbox::Timeout => handle_supervisor_timeout(settings, log, &mut runtime),
             Inbox::Disconnected => {
-                let _ = stop_child(&mut runtime.child);
+                let _ = stop_owned_child(settings, &mut runtime.child);
                 break;
             }
         }
@@ -1180,7 +1183,7 @@ fn replace_services(
         LifecycleAction::BeginDrain => match apply_dynamic_snapshot(settings, &[]) {
             Ok(()) => Ok(runtime.listener_ports),
             Err(error) => {
-                let stop_result = stop_child(&mut runtime.child);
+                let stop_result = stop_owned_child(settings, &mut runtime.child);
                 runtime.listener_ports = None;
                 let _ = runtime.lifecycle.child_exited(0, Instant::now());
                 match stop_result {
@@ -1218,7 +1221,7 @@ fn replace_services(
             .child_exited(runtime.services.len(), Instant::now());
     }
     if result.is_err() && runtime.child.is_some() {
-        let _ = stop_child(&mut runtime.child);
+        let _ = stop_owned_child(settings, &mut runtime.child);
         let _ = runtime
             .lifecycle
             .child_exited(runtime.services.len(), Instant::now());
@@ -1231,12 +1234,21 @@ fn start_runtime_child(
     log: &Arc<ProxyLog>,
     runtime: &mut SupervisorRuntime,
 ) -> io::Result<ListenerPorts> {
-    let (started, ports) = start_managed_child(
+    let (started, ports) = match start_managed_child(
         settings,
         &mut runtime.services,
         runtime.child_lock.as_deref(),
         Arc::clone(log),
-    )?;
+    ) {
+        Ok(started) => started,
+        Err(error) => {
+            // A failed start has already reaped its child; its gate must not outlive it.
+            if let Some(gate) = &settings.public_gate {
+                let _ = gate(None);
+            }
+            return Err(error);
+        }
+    };
     runtime.child = Some(started);
     runtime.listener_ports = Some(ports);
     let _ = runtime
@@ -1255,7 +1267,7 @@ fn handle_supervisor_timeout(
         None => false,
     };
     if child_exited {
-        let _ = stop_child(&mut runtime.child);
+        let _ = stop_owned_child(settings, &mut runtime.child);
         let _ = runtime
             .lifecycle
             .child_exited(runtime.services.len(), Instant::now());
@@ -1265,7 +1277,7 @@ fn handle_supervisor_timeout(
         .tick(runtime.services.len(), Instant::now())
     {
         LifecycleAction::Stop => {
-            let _ = stop_child(&mut runtime.child);
+            let _ = stop_owned_child(settings, &mut runtime.child);
             runtime.listener_ports = None;
         }
         LifecycleAction::Start if start_runtime_child(settings, log, runtime).is_err() => {
@@ -1326,6 +1338,13 @@ fn start_managed_child(
     // Repeated before every start: a workload that later began running as the proxy account
     // could trace or signal the child and read its credentials.
     identity::verify_unshared()?;
+    if let Some(gate) = &settings.public_gate {
+        // The wildcard pair must be gated before the child can accept on it.
+        gate(Some(infraternal_mesh::proxy_ports::ListenerPortPair {
+            http: config.ports.http,
+            https: config.ports.https,
+        }))?;
+    }
     let mut child = TraefikChild::spawn_holding(
         &settings.executable,
         &settings.static_config_path,
@@ -1417,6 +1436,23 @@ fn stop_child(child: &mut Option<TraefikChild>) -> io::Result<()> {
         owned.stop()?;
     }
     Ok(())
+}
+
+// Reap the child first, then clear the public gate: a gate that outlived its listener would
+// silently drop any later service on the same ports.
+fn stop_owned_child(
+    settings: &SupervisorSettings,
+    child: &mut Option<TraefikChild>,
+) -> io::Result<()> {
+    let had_child = child.is_some();
+    let stopped = stop_child(child);
+    if had_child
+        && stopped.is_ok()
+        && let Some(gate) = &settings.public_gate
+    {
+        gate(None)?;
+    }
+    stopped
 }
 
 fn acquire_supervisor_lock(directory: &Path) -> io::Result<Flock<File>> {
