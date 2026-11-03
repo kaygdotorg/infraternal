@@ -325,6 +325,39 @@ async fn audit_rows_and_long_revoked_keys_are_pruned() {
     assert_eq!(keys, expected);
 }
 
+/// J154 P2-1: a flood of reads must not evict the record of an earlier change. Changing rows
+/// leave only at the 90-day bound; the row cap is for read summaries.
+#[tokio::test]
+async fn a_read_flood_never_evicts_an_earlier_removal_row() {
+    let f = fixture().await;
+    let now = crate::runtime::unix_seconds().unwrap();
+    sqlx::query("INSERT INTO api_action_audit(key_id,person_id,action_id,target_id,state,occurred_at,completed_at,result) VALUES('k',?,'remote.host.remove','h','complete',?,?,'removed')")
+        .bind(&f.user)
+        .bind(now - 86_400)
+        .bind(now - 86_400)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    // The rows a key at its full rate would have written in about 2.3 days of status calls.
+    sqlx::query("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<100000) INSERT INTO api_action_audit(key_id,person_id,action_id,state,occurred_at,completed_at) SELECT 'k',?,'server.status','complete',?+i/30,?+i/30 FROM n")
+        .bind(&f.user)
+        .bind(now - 80_000)
+        .bind(now - 80_000)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    crate::api_actions::prune_audit(&f.auth.pool, now)
+        .await
+        .unwrap();
+    let removals: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM api_action_audit WHERE action_id='remote.host.remove'",
+    )
+    .fetch_one(&f.auth.pool)
+    .await
+    .unwrap();
+    assert_eq!(removals, 1, "the removal row survives the read flood");
+}
+
 /// Revocation stamps the key's end of life, so retention counts from the revocation.
 #[tokio::test]
 async fn revocation_stamps_the_key_end_of_life() {
