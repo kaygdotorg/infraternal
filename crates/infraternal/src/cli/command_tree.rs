@@ -466,6 +466,26 @@ mod tests {
         assert!(command.matches.get_flag("dry_run"));
     }
 
+    /// D28: removal always shows its dry run first; `--yes` skips only the question, for
+    /// scripts that reviewed it already.
+    #[test]
+    #[cfg(feature = "remote")]
+    fn hosts_remove_takes_a_yes_flag() {
+        let registry = registry().expect("action registry");
+        let matches = build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "hosts",
+                "remove",
+                "00000000-0000-0000-0000-000000000001",
+                "--yes",
+            ])
+            .expect("hosts remove --yes");
+        let command = selected(&matches);
+        assert!(command.matches.get_flag("yes"));
+        assert!(!command.matches.get_flag("dry_run"));
+    }
+
     #[test]
     fn every_command_in_the_tree_takes_json() {
         // D299: no command is exempt, hidden internal ones included.
