@@ -204,6 +204,21 @@ impl Drop for ApprovedInvitation {
     }
 }
 
+/// The invoking user's copy of the pending machine key. Once it has been
+/// prepared, `up` deletes it on every exit: after a successful handoff root
+/// holds its own copy, and after a refusal, an expired approval, a sudo denial
+/// or a partial install it must not stay readable in the user's home
+/// (#263, J134 P3-5). Rejected: generating the key as root, which would need
+/// the sudo prompt before the server request and restructure the flow.
+struct PendingKeyCopy<'a>(&'a Path);
+
+impl Drop for PendingKeyCopy<'_> {
+    fn drop(&mut self) {
+        // Best effort on failure paths; success checks the deletion itself.
+        let _ = crate::remote::retire_prepared_join_key(self.0);
+    }
+}
+
 /// Request a fresh machine approval, wait for its one-use enrollment receipt, and install it.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
@@ -246,6 +261,8 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
         Ok(digest) => digest,
         Err(error) => return fail(json_output, map_remote_failure(&error)),
     };
+    // From here on, every return deletes the invoking user's copy of the key.
+    let _key_copy = PendingKeyCopy(&data);
     let Ok(key_pkcs8) = crate::remote::prepared_join_key_pkcs8(&data) else {
         return fail(json_output, Failure::LocalState);
     };
@@ -1484,6 +1501,29 @@ mod tests {
         assert_eq!(mode(&base.join("bin")), 0o755);
         assert_eq!(mode(&base.join("bin/infraternal")), 0o755);
         assert_eq!(mode(&base.join("agent")), 0o700, "state stays private");
+    }
+
+    #[test]
+    fn a_failed_up_leaves_no_copy_of_the_machine_key() {
+        // J134 P3-5: the key stayed in the user's home after any failure.
+        let temporary = TemporaryDirectory::new();
+        let data = temporary.0.join("data");
+        fs::create_dir(&data).unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+        // The same preparation `up` runs after its server preflight.
+        let key = crate::remote::prepared_join_key_pkcs8(&data).unwrap();
+        assert!(crate::remote::key_digest_from_pkcs8(&key).is_ok());
+        let before = fs::read_dir(&data).unwrap().count();
+        assert_eq!(before, 1, "one pending key file");
+        {
+            let _copy = super::PendingKeyCopy(&data);
+            // Any failure return happens here.
+        }
+        assert_eq!(
+            fs::read_dir(&data).unwrap().count(),
+            0,
+            "the key copy was left behind"
+        );
     }
 
     #[test]
