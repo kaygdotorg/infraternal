@@ -573,13 +573,20 @@ fn native_lanes_start_above_every_core_leg_b_bit() {
     assert!(MIN_NATIVE_STREAM_CAPABILITY > core);
 }
 
-/// J137 P2-2, D319: a destructive action is key-callable only behind its own fresh passkey.
+/// D333 reframes J137 P2-2: a key never starts a per-action-tap action, and a destructive
+/// action reaches a key only with a required dry run.
 #[test]
-fn destructive_actions_need_a_fresh_passkey_to_be_key_callable() {
+fn key_callable_follows_the_d333_tap_model() {
     let base = ACTIONS[0];
     let read = base.with_api_access(Some("hosts:read"), false);
     assert!(read.key_callable());
     assert!(!base.key_callable(), "no scope, no key");
+    assert!(
+        !read
+            .with_api_access(Some("hosts:read"), true)
+            .key_callable(),
+        "a per-action-tap action is never key-callable"
+    );
     let destructive = ActionDef {
         effect: Effect::Destructive,
         ..base
@@ -588,11 +595,23 @@ fn destructive_actions_need_a_fresh_passkey_to_be_key_callable() {
         !destructive
             .with_api_access(Some("hosts:write"), false)
             .key_callable(),
-        "a destructive action without a fresh passkey is never key-callable"
+        "a destructive action without a required dry run fails closed"
     );
     assert!(
-        destructive
-            .with_api_access(Some("hosts:write"), true)
-            .key_callable()
+        ActionDef {
+            dry_run: crate::DryRun::Required,
+            ..destructive
+        }
+        .with_api_access(Some("hosts:write"), false)
+        .key_callable(),
+        "inside its scope, a destructive action with a dry run needs no further tap"
+    );
+    assert!(
+        !ActionDef {
+            dry_run: crate::DryRun::Required,
+            ..destructive
+        }
+        .with_api_access(Some("hosts:write"), true)
+        .key_callable()
     );
 }

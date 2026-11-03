@@ -781,13 +781,17 @@ mod tests {
         );
     }
 
-    /// J137 P2-2, D319: walks every compiled action definition (core, server plugins and the
-    /// infraternal agent's descriptors). A destructive action reaches an API key only behind
-    /// its own fresh passkey. New descriptors (canvas, MCP-visible actions) are covered
-    /// without editing this test.
+    /// J137 P2-2, reframed by D333: walks every compiled action definition (core, server
+    /// plugins and the infraternal agent's descriptors), so new canvas or MCP-visible actions
+    /// are covered without editing this test.
+    /// - Actions in the per-action-tap categories carry `fresh_passkey` and no key can start
+    ///   them. Among compiled actions today that is CA setup; key creation, role changes and
+    ///   recovery or passkey changes are auth routes that spend a tap (`require_session_tx`).
+    /// - A destructive action that declares an API scope also declares a required dry run.
     #[tokio::test]
-    async fn every_compiled_destructive_action_needs_a_fresh_passkey_for_keys() {
-        use infraternal_plugin_api::{ActionDef, Effect};
+    async fn every_compiled_action_follows_the_d333_tap_model() {
+        use infraternal_plugin_api::{ActionDef, DryRun, Effect};
+        const PER_ACTION_TAP: &[&str] = &["remote.ca.bootstrap"];
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         let runtime = crate::plugins::compiled(&pool).await.unwrap();
@@ -808,26 +812,37 @@ mod tests {
             "the walk must see destructive actions"
         );
         assert!(actions.iter().any(|action| action.id == "remote.host.list"));
-        assert!(
-            actions
+        for id in PER_ACTION_TAP {
+            let action = actions
                 .iter()
-                .any(|action| action.id == "remote.host.remove")
+                .find(|action| action.id == *id)
+                .unwrap_or_else(|| panic!("{id} is compiled"));
+            assert!(action.fresh_passkey, "{id} needs a tap for each run");
+        }
+        let removal = actions
+            .iter()
+            .find(|action| action.id == "remote.host.remove")
+            .expect("removal is compiled");
+        assert!(
+            removal.key_callable(),
+            "inside its scope, removal needs no further tap"
         );
         for action in &actions {
-            if action.effect == Effect::Destructive {
+            if action.fresh_passkey {
                 assert!(
-                    action.fresh_passkey || action.api_scope.is_none(),
-                    "{} is destructive and key-callable without a fresh passkey",
+                    !action.key_callable(),
+                    "{} would let a key skip its tap",
                     action.id
                 );
             }
-            assert_eq!(
-                action.key_callable(),
-                action.api_scope.is_some()
-                    && (action.effect != Effect::Destructive || action.fresh_passkey),
-                "{}",
-                action.id
-            );
+            if action.effect == Effect::Destructive && action.api_scope.is_some() {
+                assert_eq!(
+                    action.dry_run,
+                    DryRun::Required,
+                    "{} is destructive and key-scoped without a required dry run",
+                    action.id
+                );
+            }
         }
     }
 

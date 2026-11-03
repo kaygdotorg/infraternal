@@ -224,6 +224,13 @@ impl Auth {
     }
 }
 
+/// Spend this session's passkey tap on one per-action change, inside that change's writer
+/// transaction (D333: "A tap for each action, even with a key: creating or widening a key,
+/// ... recovery-key and passkey changes ... turning these rules off").
+///
+/// The tap is the one that started the session (each sign-in or re-authentication is a new
+/// session) and must be recent (`FRESH`, 300 s). It is spent once: a second change needs a new
+/// tap, even inside the browser's admin window. A rollback leaves it unspent.
 pub(crate) async fn require_session_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     token_hash: &str,
@@ -231,6 +238,17 @@ pub(crate) async fn require_session_tx(
     now: i64,
 ) -> Result<()> {
     if !infraternal_plugin_api::fresh_session_tx(tx, token_hash, user, now, FRESH).await? {
+        return Err(Error::Denied);
+    }
+    let spent = sqlx::query(
+        "UPDATE sessions SET tap_spent=1 WHERE token_hash=? AND user_id=? AND tap_spent=0",
+    )
+    .bind(token_hash)
+    .bind(user)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    if spent != 1 {
         return Err(Error::Denied);
     }
     Ok(())

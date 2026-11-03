@@ -71,7 +71,8 @@ pub struct ActionDef {
     pub opens: Option<&'static str>,
     /// Narrow API-key scope for the API adapter; absent actions are not key-callable.
     pub api_scope: Option<&'static str>,
-    /// This action still needs its own fresh owner passkey ceremony when a key starts it.
+    /// D333 per-action tap: every run needs its own passkey ceremony, so no API key can start
+    /// it (see `key_callable`).
     pub fresh_passkey: bool,
 }
 /// Server actions backed by existing health and session snapshot handlers [16][202].
@@ -545,13 +546,19 @@ impl ActionDef {
     }
 
     /// Whether an API key may start this action at all. Every key adapter (HTTP route, MCP)
-    /// asks this one question. A destructive action needs its own fresh passkey ceremony to
-    /// be key-callable; a descriptor that forgets `fresh_passkey` fails closed instead of
-    /// running without a tap (D319: "whenever in doubt, ask for passkey").
+    /// asks this one question (D333):
+    /// - it needs an API scope; inside that scope there is no further tap;
+    /// - a per-action-tap action (`fresh_passkey`: key creation, role and CA setup, recovery
+    ///   and passkey changes, account deletion, turning these rules off) is never key-callable,
+    ///   because a key cannot tap;
+    /// - a destructive action is key-callable only with a required dry run (D28), so a
+    ///   descriptor that forgets one fails closed.
     #[must_use]
     pub const fn key_callable(&self) -> bool {
         self.api_scope.is_some()
-            && (!matches!(self.effect, Effect::Destructive) || self.fresh_passkey)
+            && !self.fresh_passkey
+            && (!matches!(self.effect, Effect::Destructive)
+                || matches!(self.dry_run, DryRun::Required))
     }
 
     /// Render the declared steps for operator help without a second copy of the instructions.

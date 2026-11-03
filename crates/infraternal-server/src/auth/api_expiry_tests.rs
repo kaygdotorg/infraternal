@@ -3,8 +3,9 @@ use super::*;
 
 /// These tests cover J90's policy mechanics (sliding renewal, clamping, tombstones), so each
 /// key behaves like one approved before D333: no approved end. The approved end is covered in
-/// `key_lifetime_tests`.
+/// `key_lifetime_tests`. Each approval gets its own tap, as D333 requires.
 async fn key(f: &Fixture) -> String {
+    retap(f).await;
     let approval = f
         .auth
         .device_start_for("cli", vec!["hosts:read".into()], Some(30 * 86_400), NOW)
@@ -25,6 +26,14 @@ async fn key(f: &Fixture) -> String {
         .await
         .unwrap();
     key
+}
+
+/// Stand-in for a new sign-in tap on the fixture session (D333 spends one per change).
+async fn retap(f: &Fixture) {
+    sqlx::query("UPDATE sessions SET tap_spent=0")
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
 }
 
 async fn expiry(auth: &Auth, key: &str) -> i64 {
@@ -187,6 +196,7 @@ async fn api_key_lifetime_settings_validate_and_apply_to_existing_keys() {
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
     for days in [365, 1] {
+        retap(&f).await;
         let (status, _, body) = http_post_json_with_cookie(
             &app,
             "security-settings-update",
