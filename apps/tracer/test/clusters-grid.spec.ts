@@ -339,9 +339,11 @@ test.describe("title first in a narrow half (TASTE, D212)", () => {
     expect(m.width).toBeLessThan(260);
     expect(m.moreShown, "the ⋯ shows").toBe(true);
     expect(m.visible, "no action button shows in the header").toEqual([]);
-    // The pill stops short of the lock at the frame's centre (TASTE: window chrome), so a 224 px half leaves about 43 px for
-    // the title: four or five characters of the host, where five actions left it one.
-    expect(m.titleW, "the title keeps room for the host").toBeGreaterThanOrEqual(40);
+    // The pill stops short of the lock at the frame's centre (TASTE: window chrome), so a 224 px half keeps room for the title:
+    // four characters of the host, where five actions left it one. The pill carries a 14 px connection icon since #212 (owner,
+    // 2026-11-01: "connection states is approved"), which took about 9 px of the 43 the title had; measured 34.3 px at a UI size
+    // of 0.99 and 39.1 px at 1.1, so the room is 34 px at the standard size and grows with the UI (#283).
+    expect(m.titleW, "the title keeps room for the host").toBeGreaterThanOrEqual(Math.floor(34 * (await uiFactor(page))));
     await half.locator(".ui-window-more").evaluate((b) => (b as HTMLElement).click());
     await expect(page.locator(".ui-window-menu .ui-window-menu-item")).toHaveCount(4, { timeout: 5000 });
     const items = await page.locator(".ui-window-menu .ui-window-menu-item").evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.action));
