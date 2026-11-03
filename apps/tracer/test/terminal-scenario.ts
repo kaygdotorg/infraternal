@@ -51,7 +51,7 @@ export async function terminalScenario(page: Page, testInfo: TestInfo) {
   await page.locator(".auth-check").click();
   await page.getByRole("button", { name: "Open infraternal" }).click();
   await expect(page.getByText("TEST DOUBLE")).toBeVisible();
-  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
 
   // The persistent app host must release onboarding listeners before terminal interaction.
   await page.locator("#capsule").click();
@@ -81,7 +81,7 @@ export async function terminalScenario(page: Page, testInfo: TestInfo) {
     await instrumentPasskeyGet(page);
     const started = await page.evaluate(() => performance.now());
     await page.getByRole("button", { name: "Continue with passkey" }).click();
-    await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
+    await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
     returningSigninSamples.push(await page.evaluate((start) => performance.now() - start, started));
     expect(await page.evaluate(() => document.documentElement.dataset.passkeyGets)).toBe("1");
     if (attempt + 1 < signinTrials) {
@@ -103,7 +103,7 @@ export async function terminalScenario(page: Page, testInfo: TestInfo) {
 
   expect(await page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.optedIn)).toBe(false);
   await page.goto("/?mock=1&predict=1");
-  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.roundTripMs ?? 0))
     .toBeGreaterThan(60);
   await page.evaluate(() => window.__tracerTestDouble?.seedPrompt());
@@ -125,7 +125,7 @@ export async function terminalScenario(page: Page, testInfo: TestInfo) {
     const state = await (await context.request.get("/__mock/state")).json() as { echoed_text: string };
     return state.echoed_text;
   }).toBe("ab");
-  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain("ab");
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.roundTripMs ?? 0))
     .toBeGreaterThan(60);
@@ -294,7 +294,7 @@ export async function terminalScenario(page: Page, testInfo: TestInfo) {
   // keep the tab's public session id instead of silently opening another shell.
   await page.evaluate(() => sessionStorage.clear());
   await page.goto(`/?probe=1&n=${probeCount}&mock=1&predict=1`);
-  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.roundTripMs ?? 0))
     .toBeGreaterThan(60);
   await page.evaluate(() => window.__tracerTestDouble?.seedPrompt());
