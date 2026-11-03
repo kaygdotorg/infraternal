@@ -28,8 +28,11 @@ const SIDE = PAD * 2;
  * Overflow scrolls the group, as an overfull plain column does.
  */
 function bandTrack(h: number | undefined): string {
-  if (h === undefined) return "minmax(160px, 1fr)";
-  return `max(160px, ${h <= 1 ? `calc(var(--clh) * ${h})` : `${h}px`})`;
+  // The floor is the window's own `min-height` (clusters.css, `.cl-group > .cl-col > .ui-window`: 10rem), so a row is never
+  // shorter than the window it holds. It was 160px, which equals 10rem only at a 16 px root; at the desktop base (#283: 110 %)
+  // the window drew 176 px in a 160 px row, and two bands split down in a group overlapped each other and the window below.
+  if (h === undefined) return "minmax(10rem, 1fr)";
+  return `max(10rem, ${h <= 1 ? `calc(var(--clh) * ${h})` : `${h}px`})`;
 }
 
 /** The height style of a window standing alone: a ratio of the column height, or pixels; none when it shares its column. */
