@@ -724,6 +724,7 @@ mod tests {
     fn mesh_peers_action_reads_counters_from_the_selected_gotatun_engine() {
         use crate::{
             dataplane::{DefaultPolicy, Peer, PeerPolicy},
+            node::EngineKind,
             policy::{
                 model::{Addresses, NodeId},
                 rules::TrafficPolicy,
@@ -738,6 +739,12 @@ mod tests {
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
             .expect("restrict state directory");
         let mut plugin = MeshNodePlugin::new(&directory);
+        // GotaTun is selectable but not the default, so select it here, before the first action
+        // would restore the node with the default engine.
+        plugin.owner.lock().expect("node owner").node = Some(
+            Node::restore_with_engine(&directory, EngineKind::GotaTun)
+                .expect("restore with GotaTun"),
+        );
         let (_, peer_key) = Key::generate().expect("peer key");
         let chunk = Chunk {
             local_key: None,
