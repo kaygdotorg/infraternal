@@ -272,6 +272,14 @@ pub fn signal_process_descriptor(
 ) -> std::io::Result<()> {
     pty::signal_process_descriptor(process, signal)
 }
+/// The start time (microseconds since the epoch) that identifies one lifetime
+/// of a macOS process; `Ok(None)` for a zombie [D81, #328].
+/// # Errors
+/// Returns `NotFound` for an absent process, or the kernel query error.
+#[cfg(target_os = "macos")]
+pub fn process_start(pid: u32) -> std::io::Result<Option<u64>> {
+    pty::process_start(pid)
+}
 #[cfg(feature = "ca-handoff")]
 pub mod openssl_secure;
 

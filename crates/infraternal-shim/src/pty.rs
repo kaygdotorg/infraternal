@@ -176,6 +176,56 @@ pub(crate) fn deny_debugger() -> io::Result<()> {
     Ok(())
 }
 
+/// A live process's start time in microseconds since the epoch, from
+/// `proc_pidinfo(PROC_PIDTBSDINFO)`: the macOS counterpart of the Linux
+/// `/proc/<pid>/stat` birth tick that ties a PID to one process lifetime.
+/// `Ok(None)` for a zombie; `NotFound` when no such process exists.
+#[cfg(target_os = "macos")]
+pub(crate) fn process_start(pid: u32) -> io::Result<Option<u64>> {
+    const ZOMBIE: u32 = 5; // <sys/proc.h> SZOMB
+    let pid = i32::try_from(pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    if pid <= 0 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let mut info = MaybeUninit::<nix::libc::proc_bsdinfo>::zeroed();
+    let size =
+        i32::try_from(std::mem::size_of::<nix::libc::proc_bsdinfo>()).map_err(io::Error::other)?;
+    // SAFETY: the kernel writes at most `size` bytes into this zeroed record
+    // and reports how many it wrote; no pointer is retained after the call.
+    let written = unsafe {
+        nix::libc::proc_pidinfo(
+            pid,
+            nix::libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written <= 0 {
+        let error = io::Error::last_os_error();
+        return Err(
+            if error.raw_os_error() == Some(nix::libc::ESRCH) || written == 0 {
+                io::ErrorKind::NotFound.into()
+            } else {
+                error
+            },
+        );
+    }
+    if written != size {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    // SAFETY: the record was zero-initialized and the kernel filled all of it.
+    let info = unsafe { info.assume_init() };
+    if info.pbi_status == ZOMBIE {
+        return Ok(None);
+    }
+    info.pbi_start_tvsec
+        .checked_mul(1_000_000)
+        .and_then(|micros| micros.checked_add(info.pbi_start_tvusec))
+        .map(Some)
+        .ok_or_else(|| io::ErrorKind::InvalidData.into())
+}
+
 fn errno(error: nix::errno::Errno) -> io::Error {
     io::Error::from_raw_os_error(error as i32)
 }
