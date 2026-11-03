@@ -4,11 +4,8 @@ import type { WebSocket } from "ws";
 import { decodeMuxedFrame, type WireFrame } from "../../../packages/protocol/src/codec";
 
 test("layout initialization, ordered edits, duplicate receipts and reconnect snapshots", async () => {
-  const previous = process.env.TRACER_DOUBLE_APPWIN;
-  process.env.TRACER_DOUBLE_APPWIN = "1";
+  // The layout is served in every mode (the product canvas needs it to connect), so no app-window variable is set here.
   const { appwinLayoutFrame, appwinSocketClosed } = await import("./appwin-double");
-  if (previous === undefined) delete process.env.TRACER_DOUBLE_APPWIN;
-  else process.env.TRACER_DOUBLE_APPWIN = previous;
   const frames: WireFrame[] = [];
   const socket = { readyState: 1, send(bytes: Uint8Array) { frames.push(decodeMuxedFrame(bytes).frame); } } as unknown as WebSocket;
   const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));

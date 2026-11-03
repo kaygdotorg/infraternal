@@ -15,7 +15,7 @@ import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
 import { sessionDevices, sessionHosts } from "./session-fixtures";
 import { renameDataset } from "../docs-dataset";
 import { createPerfSink } from "./perf-sink";
-import { appwinCall, appwinEnabled, appwinFrame, appwinHosts, appwinHttp, appwinSocketClosed, appwinLayoutFrame } from "./appwin-double";
+import { appwinCall, appwinEnabled, appwinFrame, appwinHosts, appwinHttp, appwinSocketClosed, appwinLayoutFrame, appwinLayoutReset } from "./appwin-double";
 
 /**
  * Run for the docs' figures (`TRACER_DATASET=docs`, #302): every JSON answer carries the plain names of docs-dataset.ts, and the
@@ -1376,6 +1376,7 @@ function resetMockState(): void {
   attachCount = 0;
   attachHistory.length = 0;
   traceEvents.length = 0;
+  appwinLayoutReset();
   session = createSession();
   unclaimedSessionId = session.sessionIdText;
 }

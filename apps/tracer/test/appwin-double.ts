@@ -28,8 +28,10 @@ export const appwinEnabled = process.env.TRACER_DOUBLE_APPWIN === "1";
 const FIXTURES = process.env.APPWIN_FIXTURE_DIR ?? join(homedir(), ".cache/codex-scratch/ui-app-windows/fixtures");
 const text = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
 
-// A production canvas requires its ordinary account layout subscription. Reuse
-// the actual reducer; this fixture supplies receipts, never a second layout engine.
+// A production canvas requires its ordinary account layout subscription (the layout is server-owned since #243), so the
+// double serves it in every mode, not only under `TRACER_DOUBLE_APPWIN=1`: without it the double closed each product
+// socket with 1002 "unexpected test-double subscription" and the page never connected. Reuse the actual reducer; this
+// fixture supplies receipts, never a second layout engine.
 let layout: CanvasDocument = { format: FORMAT, version: VERSION, revision: 0, views: [] };
 let layoutInitialized = false;
 const layoutSubscribers = new Map<WebSocket, Set<number>>();
@@ -37,13 +39,17 @@ const layoutReceipts = new Map<string, number>();
 function layoutSnapshot(): Record<string, unknown> {
   return { type: "canvas.layout.snapshot", initialized: layoutInitialized, revision: layout.revision, document: layout };
 }
+/** A new test source starts from an empty, uninitialized account layout: the next page seeds it from its own storage. */
+export function appwinLayoutReset(): void {
+  layout = { format: FORMAT, version: VERSION, revision: 0, views: [] };
+  layoutInitialized = false; layoutSubscribers.clear(); layoutReceipts.clear();
+}
 function publishLayout(event: Record<string, unknown>): void {
   for (const [socket, subscriptions] of layoutSubscribers) for (const subId of subscriptions) {
     if (socket.readyState === 1) socket.send(encodeMuxedFrame(0, { type: "Event", subId, eventJson: text(event) }));
   }
 }
 export function appwinLayoutFrame(socket: WebSocket, frame: WireFrame): boolean {
-  if (!appwinEnabled) return false;
   if (frame.type === "Subscribe" && JSON.parse(new TextDecoder().decode(frame.filterJson))?.topic === "canvas.layout") {
     const subscriptions = layoutSubscribers.get(socket) ?? new Set<number>();
     subscriptions.add(frame.subId); layoutSubscribers.set(socket, subscriptions);
@@ -318,8 +324,7 @@ export async function appwinHttp(request: IncomingMessage, response: ServerRespo
     // intentionally alive, so retire their timers and registrations as well.
     if (body.reset) {
       for (const session of sessions.values()) for (const viewer of [...session.viewers]) detach(viewer);
-      sessions.clear(); layout = { format: FORMAT, version: VERSION, revision: 0, views: [] };
-      layoutInitialized = false; layoutSubscribers.clear(); layoutReceipts.clear();
+      sessions.clear(); appwinLayoutReset();
     }
     if (body.reset) { Object.assign(config, { fps: 60, windows: defaults(), screenRecording: true, accessibility: true, viewOnly: false, controlContract: true, inputPauseMs: 0, refuseNextStart: false, windowsDelayMs: 0, startDelayMs: 0, dropInitialKeyframe: false, windowShape: undefined }); inputs.length = 0; sizes.length = 0; starts.length = 0; attaches = 0; repairs = 0; }
     for (const key of ["controlContract", "fps", "screenRecording", "accessibility", "viewOnly", "inputPauseMs", "refuseNextStart", "windowsDelayMs", "startDelayMs", "dropInitialKeyframe", "windowShape"] as const) if (key in body) (config as Record<string, unknown>)[key] = body[key];
