@@ -603,8 +603,18 @@ async fn build_device(
         .map_err(|_| io::Error::other("GotaTun device could not start."))
 }
 
+/// UDP socket buffers for the engine, the same request as the `GotaTun` CLI. With
+/// `CAP_NET_ADMIN` the fork forces them past `net.core.rmem_max`/`wmem_max` (D331); without it
+/// the kernel clamps them as before. The kernel default overflowed at the receiver under load
+/// (#260 R4b), losing packets that SSH must retransmit. The memory is kernel socket memory,
+/// used only while packets queue.
+const UDP_BUFFER_BYTES: usize = 7 * 1024 * 1024;
+
 async fn bind_udp(requested_port: u16) -> io::Result<(BoundUdpFactory, u16)> {
-    let mut factory = UdpSocketFactory::default();
+    let mut factory = UdpSocketFactory {
+        recv_buffer_size: Some(UDP_BUFFER_BYTES),
+        send_buffer_size: Some(UDP_BUFFER_BYTES),
+    };
     for _ in 0..16 {
         let params = UdpTransportFactoryParams {
             addr: None,
@@ -713,6 +723,30 @@ mod tests {
     #[test]
     fn linux_defaults_to_gotatun() {
         assert_eq!(EngineKind::default(), EngineKind::GotaTun);
+    }
+
+    /// The engine socket asks for the large buffers (D331). The kernel doubles only an explicit
+    /// request, so a socket left at its default stays below a clamped request of the same size,
+    /// even where `rmem_default` equals `rmem_max`. With `CAP_NET_ADMIN` the request is forced.
+    #[tokio::test]
+    async fn engine_udp_socket_requests_the_large_buffers() {
+        use nix::sys::socket::{getsockopt, setsockopt, sockopt};
+        let (factory, _) = super::bind_udp(0).await.expect("bound engine socket");
+        let reference = std::net::UdpSocket::bind("127.0.0.1:0").expect("reference socket");
+        setsockopt(&reference, sockopt::RcvBuf, &super::UDP_BUFFER_BYTES).expect("receive request");
+        setsockopt(&reference, sockopt::SndBuf, &super::UDP_BUFFER_BYTES).expect("send request");
+        let requested = (
+            getsockopt(&reference, sockopt::RcvBuf).expect("reference receive buffer"),
+            getsockopt(&reference, sockopt::SndBuf).expect("reference send buffer"),
+        );
+        let engine = (
+            getsockopt(&factory.receive, sockopt::RcvBuf).expect("engine receive buffer"),
+            getsockopt(&factory.send, sockopt::SndBuf).expect("engine send buffer"),
+        );
+        assert!(
+            engine.0 >= requested.0 && engine.1 >= requested.1,
+            "engine buffers {engine:?} are below an explicit request {requested:?}"
+        );
     }
 
     #[test]
