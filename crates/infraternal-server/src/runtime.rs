@@ -1324,6 +1324,71 @@ mod tests {
         std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
     }
 
+    /// J137 P3-1: a well-formed bearer that is not a key learns nothing about the catalogue.
+    /// Unknown, non-key-callable and key-callable ids all get the same 403; only a caller
+    /// whose key authenticates can tell an unknown action (404) from an out-of-scope one.
+    #[tokio::test]
+    async fn an_unknown_bearer_cannot_probe_action_ids() {
+        let data_dir = temp_dir();
+        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(agent_socket),
+        )
+        .await
+        .expect("server router startup");
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("reopen real SQLite");
+        let token = "fixture-probe-read-key-never-print";
+        let now = super::unix_seconds().expect("current time");
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES('owner','owner',1,'x')")
+            .execute(&pool)
+            .await
+            .expect("owner");
+        sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,'owner','fixture-cli','[\"status:read\"]',?,?,0)")
+            .bind(crate::auth::hash(token))
+            .bind(now)
+            .bind(now + 3600)
+            .execute(&pool)
+            .await
+            .expect("key");
+        let status = |bearer: &'static str, action: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/v1/actions/{action}"))
+                        .header("content-type", "application/json")
+                        .header("authorization", format!("Bearer {bearer}"))
+                        .body(Body::from("{}"))
+                        .expect("action request"),
+                )
+                .await
+                .expect("action response")
+                .status()
+            }
+        };
+        for action in ["no.such.action", "server.status", "remote.ca.bootstrap"] {
+            assert_eq!(
+                status("not-a-key", action).await,
+                axum::http::StatusCode::FORBIDDEN,
+                "{action}"
+            );
+        }
+        assert_eq!(
+            status(token, "no.such.action").await,
+            axum::http::StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status(token, "server.status").await,
+            axum::http::StatusCode::OK
+        );
+        pool.close().await;
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
     /// Host inventory is a server-side socket plugin, not an infraternal agent descriptor; the
     /// bearer route must find it in the same runtime the browser socket dispatches to.
     #[cfg(feature = "remote")]

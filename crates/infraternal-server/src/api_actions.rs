@@ -594,17 +594,25 @@ async fn action(
     Json(input): Json<Value>,
 ) -> Response {
     // This surface is bearer-only. Cookies do not establish API authority and need no CSRF path.
-    // The credential is checked before the catalogue so an anonymous caller cannot probe ids.
     let Some(token) = bearer_only(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    let Some(action) = shared_action(&api.sessions, &action_id) else {
+    // The key is admitted before the response depends on the catalogue: any bearer that is
+    // not a live stored key gets the same 403 (or 429) for every id, so it cannot tell which
+    // actions exist or are key-callable. The in-memory lookup only names the audit row.
+    let action = shared_action(&api.sessions, &action_id).filter(ActionDef::key_callable);
+    let admitted = match api
+        .guard
+        .admit_token(token, action.map_or("unknown", |action| action.id))
+        .await
+    {
+        Ok(admitted) => admitted,
+        Err(status) => return status.into_response(),
+    };
+    let Some(action) = action else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if !action.key_callable() {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let identity = match api.guard.authorize_token(token, &action).await {
+    let identity = match api.guard.authorize_admitted(admitted, &action).await {
         Ok(identity) => identity,
         Err(status) => return status.into_response(),
     };
