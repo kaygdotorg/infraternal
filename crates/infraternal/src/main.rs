@@ -109,7 +109,7 @@ fn run_invocation() -> ExitCode {
     {
         return ExitCode::from(result);
     }
-    #[cfg(feature = "remote")]
+    #[cfg(all(feature = "remote", target_os = "linux"))]
     if let Some(result) = remote::uninstall_if_requested() {
         return result;
     }
