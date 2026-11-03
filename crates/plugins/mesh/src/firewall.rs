@@ -523,9 +523,30 @@ fn render_with_aliases(
         ("output", "output", "oifname", "outgoing"),
     ] {
         let guard = if hook == "input" { &delivery } else { "" };
+        let public_gate = if hook == "input" && !proxy_ingress.public_route_active {
+            proxy_ingress
+                .public_listener_pair
+                .filter(|pair| {
+                    pair.http != pair.https
+                        && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
+                            .iter()
+                            .any(|range| range.contains(pair.http))
+                        && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
+                            .iter()
+                            .any(|range| range.contains(pair.https))
+                })
+                .map_or_else(String::new, |pair| {
+                    format!(
+                        "iifname != \"lo\" tcp dport {{ {}, {} }} drop;",
+                        pair.http, pair.https
+                    )
+                })
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             script,
-            " chain {name} {{ type filter hook {hook} priority -10; policy accept; {guard} {interface} \"{INTERFACE}\" jump {direction}; }}"
+            " chain {name} {{ type filter hook {hook} priority -10; policy accept; {guard} {public_gate} {interface} \"{INTERFACE}\" jump {direction}; }}"
         );
     }
     let _ = writeln!(
@@ -750,6 +771,8 @@ mod tests {
         }
         let selected = infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS[1];
         let ingress = infraternal_mesh::proxy_ports::MeshProxyIngress {
+            public_listener_pair: None,
+            public_route_active: false,
             listener_pair: Some(selected),
             backend_ports: std::collections::BTreeSet::from([8080]),
         };
@@ -769,6 +792,25 @@ mod tests {
         assert!(!rules.contains("10082"));
         assert!(rules.contains("ct original protocol tcp ct original ip saddr @incoming4_proxy_sources ct original proto-dst @proxy_ingress_ports accept"));
     }
+
+    #[test]
+    fn wildcard_public_listener_is_blocked_until_a_public_route_is_applied() {
+        let config = config();
+        let pair = infraternal_mesh::proxy_ports::CONVENTIONAL_LISTENER_PAIR;
+        let mut ingress = infraternal_mesh::proxy_ports::MeshProxyIngress {
+            public_listener_pair: Some(pair),
+            ..Default::default()
+        };
+        let gate = "iifname != \"lo\" tcp dport { 80, 443 } drop";
+
+        let closed = super::render_with_aliases(&config, false, &[], false, &config, &ingress);
+        assert!(closed.contains(gate));
+
+        ingress.public_route_active = true;
+        let open = super::render_with_aliases(&config, false, &[], false, &config, &ingress);
+        assert!(!open.contains(gate));
+    }
+
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn real_nft_ownership_atomicity_and_scaled_apply() {

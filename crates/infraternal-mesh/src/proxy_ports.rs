@@ -11,12 +11,17 @@ pub struct ListenerPortPair {
     pub https: u16,
 }
 
-/// Mesh-only listeners and local service ports for the currently applied route snapshot.
+/// Public listener gate and Mesh listeners for the currently applied route snapshot.
 ///
 /// The firewall derives source addresses from the accepted Mesh grants, so a peer is admitted
-/// only when its grant matches a published backend port on this selected listener pair.
+/// only when its grant matches a published backend port on the selected Mesh listener pair. The
+/// selected public pair is denied on non-loopback input until a public route has been applied.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MeshProxyIngress {
+    /// The selected public listener pair, when it is bound to wildcard addresses.
+    pub public_listener_pair: Option<ListenerPortPair>,
+    /// Whether at least one public route in the current snapshot is applied.
+    pub public_route_active: bool,
     /// The one listener pair Traefik selected for Mesh routes; absent when no Mesh route is live.
     pub listener_pair: Option<ListenerPortPair>,
     /// Backend ports of active, non-public Traefik routes.

@@ -1,11 +1,13 @@
 //! Turns authorized port publications into one supervised Traefik snapshot [#281, D303].
 
 use crate::{
-    config::{DnsChallenge, ListenerPorts, PublishedService, StaticConfig},
+    config::{
+        DnsChallenge, ListenerPorts, PublishedService, StaticConfig, detect_mixed_listener_ports,
+    },
     custody::{DnsTokenCustody, FileDnsTokenCustody},
     download::{ComponentDownloader, CurlTransport},
-    installer::ComponentInstaller,
     identity,
+    installer::ComponentInstaller,
     manifest::OpenSshManifestVerifier,
     mesh_context::AcceptedMeshContext,
     names::{CertificateName, NameShape, exposure_names},
@@ -101,6 +103,7 @@ struct Exposure {
 
 struct ControllerState {
     enabled: bool,
+    rootful: bool,
     mesh: Option<AcceptedMeshContext>,
     exposures: BTreeMap<u16, Exposure>,
     supervisor: Option<Box<dyn RouteSupervisor>>,
@@ -109,7 +112,8 @@ struct ControllerState {
     mesh_ingress_observer: Option<MeshIngressObserver>,
 }
 
-/// Callback that synchronizes confirmed Mesh route grants with the packet filter.
+/// Callback that synchronizes public listener gating and confirmed Mesh route grants with the
+/// packet filter.
 pub type MeshIngressObserver =
     Arc<dyn Fn(infraternal_mesh::proxy_ports::MeshProxyIngress) -> io::Result<()> + Send + Sync>;
 
@@ -140,11 +144,14 @@ impl RouteSupervisor for TraefikSupervisor {
 
 /// Starts the local runtime only when the first authorized exposure exists.
 pub trait SupervisorFactory: Send + Sync {
-    /// Create an idle supervisor for the accepted node context.
+    /// Prepare an idle supervisor and select its stable listener ports for the accepted context.
     ///
     /// # Errors
     /// Returns an error when the component, provider files, or private state cannot be prepared.
-    fn start(&self, context: &AcceptedMeshContext) -> io::Result<Box<dyn RouteSupervisor>>;
+    fn start(
+        &self,
+        context: &AcceptedMeshContext,
+    ) -> io::Result<(Box<dyn RouteSupervisor>, ListenerPorts)>;
 }
 
 /// Shares accepted Mesh identity with the action handler and its sibling observer.
@@ -159,6 +166,7 @@ impl Default for ProxyController {
         Self {
             state: Arc::new(Mutex::new(ControllerState {
                 enabled: true,
+                rootful: identity::rootful(),
                 mesh: None,
                 exposures: BTreeMap::new(),
                 supervisor: None,
@@ -338,6 +346,12 @@ impl ProxyController {
                 "Mesh identity is unavailable; turn Mesh on before publishing.",
             );
         };
+        if request.public && !state.rootful {
+            return error_reply(
+                "not_allowed",
+                "Rootless proxy listeners are loopback-only; public publishing requires rootful host firewall access.",
+            );
+        }
         let first_public = request.public
             && !state
                 .exposures
@@ -441,16 +455,24 @@ impl ProxyController {
     }
 
     fn reconcile(&self, state: &mut ControllerState) -> io::Result<()> {
-        let services = refresh_routes(state)?;
+        let mut services = refresh_routes(state)?;
+        if state.supervisor.is_some()
+            && state.mesh_proxy_ingress.public_route_active
+            && !services.iter().any(|service| service.public)
+        {
+            let mut closed = state.mesh_proxy_ingress.clone();
+            closed.public_route_active = false;
+            Self::apply_mesh_ingress(state, closed)?;
+        }
         if let Some(supervisor) = &state.supervisor {
             if let Some(ports) = supervisor.replace(services.clone())? {
                 state.listener_ports = ports;
             }
-            self.update_mesh_ingress(state, &services)?;
+            Self::update_mesh_ingress(state, &services, true)?;
             return Ok(());
         }
         if services.is_empty() {
-            self.update_mesh_ingress(state, &services)?;
+            Self::update_mesh_ingress(state, &services, false)?;
             return Ok(());
         }
         let factory = self.factory.as_ref().ok_or_else(|| {
@@ -465,20 +487,24 @@ impl ProxyController {
                 "accepted Mesh identity is unavailable",
             )
         })?;
-        let supervisor = factory.start(context)?;
+        let (supervisor, listener_ports) = factory.start(context)?;
+        state.listener_ports = listener_ports;
+        // Install the closed public-port gate before the first replace can spawn Traefik.
+        Self::update_mesh_ingress(state, &[], true)?;
+        services = refresh_routes(state)?;
         let listener_ports = supervisor.replace(services.clone())?;
         if let Some(ports) = listener_ports {
             state.listener_ports = ports;
         }
-        self.update_mesh_ingress(state, &services)?;
         state.supervisor = Some(supervisor);
+        Self::update_mesh_ingress(state, &services, true)?;
         Ok(())
     }
 
     fn update_mesh_ingress(
-        &self,
         state: &mut ControllerState,
         services: &[PublishedService],
+        listeners_selected: bool,
     ) -> io::Result<()> {
         let backend_ports = services
             .iter()
@@ -496,15 +522,38 @@ impl ProxyController {
                     |(http, https)| infraternal_mesh::proxy_ports::ListenerPortPair { http, https },
                 )
         };
+        let public_listener_pair = if state.rootful && listeners_selected {
+            Some(infraternal_mesh::proxy_ports::ListenerPortPair {
+                http: state.listener_ports.http,
+                https: state.listener_ports.https,
+            })
+        } else {
+            None
+        };
         let next = infraternal_mesh::proxy_ports::MeshProxyIngress {
+            public_listener_pair,
+            public_route_active: public_listener_pair.is_some()
+                && services.iter().any(|service| service.public),
             listener_pair,
             backend_ports,
         };
+        Self::apply_mesh_ingress(state, next)
+    }
+
+    fn apply_mesh_ingress(
+        state: &mut ControllerState,
+        next: infraternal_mesh::proxy_ports::MeshProxyIngress,
+    ) -> io::Result<()> {
         if next == state.mesh_proxy_ingress {
             return Ok(());
         }
         if let Some(observer) = &state.mesh_ingress_observer {
             observer(next.clone())?;
+        } else if next.public_listener_pair.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "public listener firewall gate is unavailable",
+            ));
         }
         state.mesh_proxy_ingress = next;
         Ok(())
@@ -539,7 +588,12 @@ struct DownloadedTraefikFactory {
 }
 
 impl SupervisorFactory for DownloadedTraefikFactory {
-    fn start(&self, context: &AcceptedMeshContext) -> io::Result<Box<dyn RouteSupervisor>> {
+    fn start(
+        &self,
+        context: &AcceptedMeshContext,
+    ) -> io::Result<(Box<dyn RouteSupervisor>, ListenerPorts)> {
+        let rootful = identity::rootful();
+        let listener_ports = detect_mixed_listener_ports(rootful, context.mesh_address)?;
         let profile = self.profile.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -573,12 +627,12 @@ impl SupervisorFactory for DownloadedTraefikFactory {
         let private_ping_port = loopback_port()?;
         let static_config = StaticConfig {
             mesh_address: context.mesh_address,
-            ports: ListenerPorts {
-                http: 10_080,
-                https: 10_443,
-                mesh_http: None,
-                mesh_https: None,
+            public_bind_address: if rootful {
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+            } else {
+                IpAddr::V4(Ipv4Addr::LOCALHOST)
             },
+            ports: listener_ports,
             private_ping_port,
             dynamic_directory: PathBuf::from("dynamic"),
             dns_challenge: DnsChallenge {
@@ -605,7 +659,7 @@ impl SupervisorFactory for DownloadedTraefikFactory {
             },
             Arc::clone(&self.log),
         )?;
-        Ok(Box::new(supervisor))
+        Ok((Box::new(supervisor), listener_ports))
     }
 }
 
@@ -689,8 +743,7 @@ fn ensure_proxy_directory(path: &Path) -> io::Result<()> {
         .open(path)?;
     let metadata = directory.metadata()?;
     let child_gid = identity::TRAEFIK_GID;
-    if !metadata.file_type().is_dir() || metadata.uid() != nix::unistd::Uid::effective().as_raw()
-    {
+    if !metadata.file_type().is_dir() || metadata.uid() != nix::unistd::Uid::effective().as_raw() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "proxy state directory has unsafe ownership or type",
@@ -935,15 +988,21 @@ mod tests {
     }
 
     impl SupervisorFactory for FakeFactory {
-        fn start(&self, context: &AcceptedMeshContext) -> io::Result<Box<dyn RouteSupervisor>> {
+        fn start(
+            &self,
+            context: &AcceptedMeshContext,
+        ) -> io::Result<(Box<dyn RouteSupervisor>, ListenerPorts)> {
             self.started_addresses
                 .lock()
                 .map_err(|_| io::Error::other("fixture start log is unavailable"))?
                 .push(context.mesh_address);
-            Ok(Box::new(FakeSupervisor {
-                snapshots: Arc::clone(&self.snapshots),
-                listener_ports: self.listener_ports,
-            }))
+            Ok((
+                Box::new(FakeSupervisor {
+                    snapshots: Arc::clone(&self.snapshots),
+                    listener_ports: self.listener_ports,
+                }),
+                self.listener_ports,
+            ))
         }
     }
 
@@ -1009,11 +1068,16 @@ mod tests {
             started_addresses: Arc::clone(&started_addresses),
             listener_ports,
         });
-        (
-            ProxyController::with_factory(factory),
-            snapshots,
-            started_addresses,
-        )
+        let controller = ProxyController::with_factory(factory);
+        controller
+            .state
+            .lock()
+            .expect("controller fixture state")
+            .rootful = true;
+        controller
+            .set_mesh_ingress_observer(Arc::new(|_| Ok(())))
+            .expect("install fake firewall observer");
+        (controller, snapshots, started_addresses)
     }
 
     #[test]
@@ -1071,18 +1135,114 @@ mod tests {
             .expect("publish public route");
 
         let updates = applied.lock().expect("firewall updates");
-        assert_eq!(updates.len(), 1, "public route does not widen Mesh ingress");
-        assert_eq!(updates[0].listener_pair, Some(selected));
-        assert_eq!(updates[0].backend_ports, [3000].into_iter().collect());
+        assert_eq!(updates.len(), 3);
+        assert_eq!(
+            updates[0].public_listener_pair,
+            Some(infraternal_mesh::proxy_ports::ListenerPortPair {
+                http: 10_080,
+                https: 10_443,
+            })
+        );
+        assert!(!updates[0].public_route_active);
+        assert_eq!(updates[1].listener_pair, Some(selected));
+        assert_eq!(updates[1].backend_ports, [3000].into_iter().collect());
+        assert!(updates[2].public_route_active);
+        assert_eq!(updates[2].backend_ports, [3000].into_iter().collect());
         drop(updates);
 
         controller
             .call("proxy.unpublish", br#"{"target":"3000"}"#)
             .expect("unpublish Mesh route");
         let updates = applied.lock().expect("firewall updates");
-        assert_eq!(updates.len(), 2);
-        assert!(updates[1].backend_ports.is_empty());
-        assert_eq!(updates[1].listener_pair, None);
+        assert_eq!(updates.len(), 4);
+        assert!(updates[3].backend_ports.is_empty());
+        assert_eq!(updates[3].listener_pair, None);
+        assert!(updates[3].public_route_active);
+    }
+
+    #[test]
+    fn public_listener_gate_is_installed_before_the_first_route_snapshot() {
+        let selected = infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS[1];
+        let (controller, snapshots) = controller_with_ports(ListenerPorts {
+            http: 10_080,
+            https: 10_443,
+            mesh_http: Some(selected.http),
+            mesh_https: Some(selected.https),
+        });
+        let snapshot_counts = Arc::new(Mutex::new(Vec::new()));
+        let observer: MeshIngressObserver = {
+            let snapshot_counts = Arc::clone(&snapshot_counts);
+            let snapshots = Arc::clone(&snapshots);
+            Arc::new(move |ingress| {
+                let count = snapshots
+                    .lock()
+                    .map_err(|_| io::Error::other("route fixture is unavailable"))?
+                    .len();
+                snapshot_counts
+                    .lock()
+                    .map_err(|_| io::Error::other("firewall fixture is unavailable"))?
+                    .push((count, ingress.public_route_active));
+                Ok(())
+            })
+        };
+        controller
+            .set_mesh_ingress_observer(observer)
+            .expect("install firewall observer");
+        controller
+            .set_mesh_context(Some(context(&[(3000, Ipv4Addr::new(10, 254, 0, 3))])))
+            .expect("accept Mesh grants");
+
+        controller
+            .call("proxy.publish", br#"{"port":3000}"#)
+            .expect("publish one Mesh route");
+        controller
+            .call(
+                "proxy.publish",
+                br#"{"port":4000,"public":true,"confirm_public":true}"#,
+            )
+            .expect("publish first public route");
+        controller
+            .call("proxy.unpublish", br#"{"target":"4000"}"#)
+            .expect("remove last public route");
+
+        assert_eq!(
+            *snapshot_counts.lock().expect("firewall updates"),
+            [(0, false), (1, false), (2, true), (2, false)],
+            "close before startup, open after apply, and close before removing the last public route"
+        );
+    }
+
+    #[test]
+    fn rootless_mode_rejects_public_publication() {
+        let (controller, snapshots) = controller_with_ports(ListenerPorts {
+            http: 10_080,
+            https: 10_443,
+            mesh_http: None,
+            mesh_https: None,
+        });
+        controller
+            .state
+            .lock()
+            .expect("controller fixture state")
+            .rootful = false;
+        controller
+            .set_mesh_context(Some(context(&[(3000, Ipv4Addr::new(10, 254, 0, 3))])))
+            .expect("accept Mesh grants");
+
+        let output = controller
+            .call(
+                "proxy.publish",
+                br#"{"port":3000,"public":true,"confirm_public":true}"#,
+            )
+            .expect("typed rootless publication result");
+        let value: Value = serde_json::from_slice(&output).expect("error result JSON");
+        assert_eq!(value["error"]["code"], "not_allowed");
+        assert!(
+            value["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("loopback-only"))
+        );
+        assert!(snapshots.lock().expect("route snapshots").is_empty());
     }
 
     #[test]

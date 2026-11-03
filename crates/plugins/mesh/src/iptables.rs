@@ -317,9 +317,30 @@ fn render_with_aliases(
     // Filter hooks see the translated destination. Run before conntrack or
     // peer grants, including packets which never entered the mesh interface.
     // Translation preserves the incoming interface; lo remains node-local [231].
+    let public_gate = if proxy_ingress.public_route_active {
+        String::new()
+    } else {
+        proxy_ingress
+            .public_listener_pair
+            .filter(|pair| {
+            pair.http != pair.https
+                && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
+                    .iter()
+                    .any(|range| range.contains(pair.http))
+                && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
+                    .iter()
+                    .any(|range| range.contains(pair.https))
+        })
+            .map_or_else(String::new, |pair| {
+                format!(
+                    "-A {DELIVERY} ! -i lo -m addrtype --dst-type LOCAL -p tcp -m multiport --dports {},{} -j DROP\n",
+                    pair.http, pair.https
+                )
+            })
+    };
     let _ = writeln!(
         script,
-        "-A {DELIVERY} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {DELIVERY} -i lo -j RETURN"
+        "{public_gate}-A {DELIVERY} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {DELIVERY} -i lo -j RETURN"
     );
     for address in &addresses {
         let _ = writeln!(script, "-A {DELIVERY} -d {address} -j DROP");
@@ -728,6 +749,8 @@ mod tests {
         }
         let selected = infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS[1];
         let ingress = infraternal_mesh::proxy_ports::MeshProxyIngress {
+            public_listener_pair: None,
+            public_route_active: false,
             listener_pair: Some(selected),
             backend_ports: std::collections::BTreeSet::from([8080]),
         };
@@ -755,6 +778,43 @@ mod tests {
         )));
         assert!(!rules.contains("--ctorigdstport 10082"));
     }
+
+    #[test]
+    fn wildcard_public_listener_is_blocked_until_a_public_route_is_applied() {
+        let config = config(&[]);
+        let pair = infraternal_mesh::proxy_ports::CONVENTIONAL_LISTENER_PAIR;
+        let mut ingress = infraternal_mesh::proxy_ports::MeshProxyIngress {
+            public_listener_pair: Some(pair),
+            ..Default::default()
+        };
+        let expected = format!(
+            "-A {DELIVERY} ! -i lo -m addrtype --dst-type LOCAL -p tcp -m multiport --dports {},{} -j DROP",
+            pair.http, pair.https
+        );
+        let closed = super::render_with_aliases(
+            &config,
+            false,
+            Ownership::default(),
+            &[],
+            false,
+            &config,
+            &ingress,
+        );
+        assert!(closed.contains(&expected));
+
+        ingress.public_route_active = true;
+        let open = super::render_with_aliases(
+            &config,
+            false,
+            Ownership::default(),
+            &[],
+            false,
+            &config,
+            &ingress,
+        );
+        assert!(!open.contains(&expected));
+    }
+
     #[test]
     fn replacement_retains_established_rules_and_does_not_duplicate_hooks() {
         let mut config = config(&[2]);

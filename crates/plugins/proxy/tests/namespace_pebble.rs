@@ -162,6 +162,7 @@ fn run_namespace_case() {
             dynamic_config_path: state.join(DYNAMIC_CONFIG_FILENAME),
             static_config: StaticConfig {
                 mesh_address,
+                public_bind_address: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
                 ports: listener_ports,
                 private_ping_port: health_port,
                 dynamic_directory: state.clone(),

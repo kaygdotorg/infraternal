@@ -349,6 +349,7 @@ fn live_process_without_a_healthy_private_ping_is_reported_unhealthy() {
         dynamic_config_path: state.join(DYNAMIC_CONFIG_FILENAME),
         static_config: StaticConfig {
             mesh_address: "10.77.0.1".parse().expect("mesh address"),
+            public_bind_address: "127.0.0.1".parse().expect("rootless public bind"),
             ports: ListenerPorts {
                 http: 10080,
                 https: 10443,
@@ -640,6 +641,7 @@ fn generation_probe_settings(
         dynamic_config_path: state.join(DYNAMIC_CONFIG_FILENAME),
         static_config: StaticConfig {
             mesh_address: "10.77.0.1".parse().expect("mesh address"),
+            public_bind_address: "127.0.0.1".parse().expect("rootless public bind"),
             ports: ListenerPorts {
                 http: 10_080,
                 https: 10_443,
@@ -691,6 +693,7 @@ fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state(
         dynamic_config_path: state.join(DYNAMIC_CONFIG_FILENAME),
         static_config: StaticConfig {
             mesh_address: "10.77.0.1".parse().expect("mesh address"),
+            public_bind_address: "127.0.0.1".parse().expect("rootless public bind"),
             ports: ListenerPorts {
                 http: 10080,
                 https: 10443,

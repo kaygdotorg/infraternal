@@ -1,12 +1,13 @@
 //! Renders stable public and mesh listeners plus exact-host dynamic routes atomically [#281].
-//! Mesh routes use the same accepted peer addresses as mesh DNS. The public listener pair always
-//! binds wildcard addresses and the mesh pair always binds the mesh address, so audience changes
-//! only replace dynamic routes and preserve active connections. Certificate state remains node-local.
+//! Mesh routes use the same accepted peer addresses as mesh DNS. Rootful public listeners keep a
+//! stable wildcard bind behind a firewall gate; rootless public entrypoints bind only to loopback.
+//! Audience changes only replace dynamic routes and preserve active connections. Certificate state
+//! remains node-local.
 //! A nonce-gated rawdata route on the loopback-only health entrypoint lets the supervisor acknowledge
 //! a dynamic snapshot only after Traefik has loaded that generation.
 
-use crate::names::CertificateName;
 use crate::identity;
+use crate::names::CertificateName;
 use serde_json::{Map, json};
 use std::{
     fmt::Write as _,
@@ -75,6 +76,8 @@ pub struct DnsChallenge {
 pub struct StaticConfig {
     /// Node's mesh address used by mesh listeners.
     pub mesh_address: IpAddr,
+    /// Address for the stable public entrypoints; rootless operation must use loopback.
+    pub public_bind_address: IpAddr,
     /// Public and mesh HTTP/HTTPS listener ports.
     pub ports: ListenerPorts,
     /// Loopback-only private ping port.
@@ -240,16 +243,8 @@ pub fn render_static_config(config: &StaticConfig) -> io::Result<String> {
 }
 
 fn render_entry_points(config: &StaticConfig, rendered: &mut String) -> io::Result<()> {
-    let plain_address = SocketAddr::new(
-        IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-        config.ports.http,
-    )
-    .to_string();
-    let tls_address = SocketAddr::new(
-        IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-        config.ports.https,
-    )
-    .to_string();
+    let plain_address = SocketAddr::new(config.public_bind_address, config.ports.http).to_string();
+    let tls_address = SocketAddr::new(config.public_bind_address, config.ports.https).to_string();
     writeln!(
         rendered,
         "[entryPoints.http]\naddress = {}",
@@ -774,7 +769,9 @@ impl TemporaryConfigFile {
             .mode(mode)
             .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
             .open(path)?;
-        if nix::unistd::Uid::effective().is_root() && group != nix::unistd::Gid::effective().as_raw() {
+        if nix::unistd::Uid::effective().is_root()
+            && group != nix::unistd::Gid::effective().as_raw()
+        {
             nix::unistd::fchown(&file, None, Some(nix::unistd::Gid::from_raw(group)))?;
         }
         file.set_permissions(fs::Permissions::from_mode(mode))?;

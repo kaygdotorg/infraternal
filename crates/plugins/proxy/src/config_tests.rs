@@ -31,6 +31,7 @@ fn mesh_service(sources: Vec<IpAddr>) -> PublishedService {
 fn static_config() -> StaticConfig {
     StaticConfig {
         mesh_address: "100.64.0.2".parse().expect("mesh address"),
+        public_bind_address: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
         ports: ListenerPorts {
             http: 10080,
             https: 10443,
@@ -186,6 +187,23 @@ fn static_config_binds_public_wildcard_and_mesh_listeners_to_the_mesh_ip() {
     assert!(rendered.contains("100.64.0.2:10080"));
     assert!(rendered.contains("[entryPoints.mesh-https]"));
     assert!(rendered.contains("100.64.0.2:10443"));
+}
+
+#[test]
+fn rootless_public_entrypoints_bind_to_loopback() {
+    let mut config = static_config();
+    config.public_bind_address = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+    config.ports = detect_mixed_listener_ports(false, IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        .expect("select rootless stable listener ports");
+    let rendered = render_static_config(&config).expect("rootless static config");
+
+    assert!(
+        rendered.contains("127.0.0.1:10080"),
+        "rootless mode cannot gate wildcard public ports with the host firewall"
+    );
+    assert!(rendered.contains("127.0.0.1:10443"));
+    assert!(!rendered.contains("0.0.0.0:10080"));
+    assert!(!rendered.contains("0.0.0.0:10443"));
 }
 
 #[test]
