@@ -62,7 +62,7 @@ security-framework = { version = "3.7.0", optional = true }
 # (#265). One dependency name cannot have a different source per target, so the fork has its own
 # name here and the crate root restores the `gotatun` path for the Linux code.
 [target.'cfg(target_os = "linux")'.dependencies]
-gotatun-fork = { package = "gotatun", version = "0.10.2", git = "https://github.com/kaygdotorg/gotatun", rev = "823133f828d8805f5ea17139f623395cc5cf7afa", default-features = false, features = ["device", "aws-lc-rs"], optional = true }
+gotatun-fork = { package = "gotatun", version = "0.10.2", git = "https://github.com/kaygdotorg/gotatun", rev = "47175889642b35b6832227c450725c1bd79ff11c", default-features = false, features = ["device", "aws-lc-rs"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [lints]
