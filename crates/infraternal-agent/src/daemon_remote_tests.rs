@@ -10,7 +10,11 @@ use std::time::Duration;
 struct State(PathBuf);
 impl State {
     fn new() -> Self {
-        let path = crate::test_state_root().join(format!("daemon-{}", uuid::Uuid::new_v4()));
+        // The dispatcher binds `<state>/plugins.sock`; Linux bounds that path to
+        // 108 bytes including NUL. A full hyphenated UUID spent 43 of them and
+        // overflowed under a 52-byte INFRATERNAL_TEST_STATE_ROOT (#332).
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let path = crate::test_state_root().join(format!("d-{}", &id[..8]));
         Self(path)
     }
 }
