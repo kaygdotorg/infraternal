@@ -167,41 +167,8 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
     if let ["INFRATERNAL_SETUP_REFUSED", cause] = fields.as_slice() {
         return Err(Failure::install(refusal_message(cause)));
     }
-    if let [
-        "INFRATERNAL_SETUP_SET_ASIDE",
-        kind,
-        host,
-        transaction,
-        machine,
-        enabled,
-        active,
-    ] = fields.as_slice()
-    {
-        let flag = |value: &str| match value {
-            "yes" => Ok(true),
-            "no" => Ok(false),
-            _ => Err(refused()),
-        };
-        let replaced = match *kind {
-            "replaced" => true,
-            "superseded" => false,
-            _ => return Err(refused()),
-        };
-        return Ok(Some(PreviousAttempt {
-            host: canonical_id(host)?,
-            transaction: canonical_id(transaction)?,
-            identity: String::new(),
-            sockets: 0,
-            lease_owner: None,
-            enrolled: None,
-            live: false,
-            set_aside: Some(SetAside {
-                replaced,
-                machine: parse_machine(machine)?,
-                enabled: flag(enabled)?,
-                active: flag(active)?,
-            }),
-        }));
+    if let ["INFRATERNAL_SETUP_SET_ASIDE", record @ ..] = fields.as_slice() {
+        return parse_set_aside(record).map(Some);
     }
     let (host, transaction, identity, sockets, lease_owner, enrolled, live) =
         match fields.as_slice() {
@@ -232,11 +199,7 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
                 *sockets,
                 Some(parse_lease_owner(machine, pid, birth, since)?),
                 parse_enrolled(digest, server)?,
-                match *live {
-                    "live" => true,
-                    "idle" => false,
-                    _ => return Err(refused()),
-                },
+                parse_liveness(live)?,
             ),
             _ => return Err(refused()),
         };
@@ -268,6 +231,48 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
         set_aside: None,
         live,
     }))
+}
+
+/// `<superseded|replaced> <host> <tx> <machine> <enabled> <active>`: an install
+/// an earlier Replace or Re-enroll set aside and did not put back (#305 P2-1).
+fn parse_set_aside(record: &[&str]) -> Result<PreviousAttempt, Failure> {
+    let [kind, host, transaction, machine, enabled, active] = record else {
+        return Err(refused());
+    };
+    let flag = |value: &str| match value {
+        "yes" => Ok(true),
+        "no" => Ok(false),
+        _ => Err(refused()),
+    };
+    let replaced = match *kind {
+        "replaced" => true,
+        "superseded" => false,
+        _ => return Err(refused()),
+    };
+    Ok(PreviousAttempt {
+        host: canonical_id(host)?,
+        transaction: canonical_id(transaction)?,
+        identity: String::new(),
+        sockets: 0,
+        lease_owner: None,
+        enrolled: None,
+        live: false,
+        set_aside: Some(SetAside {
+            replaced,
+            machine: parse_machine(machine)?,
+            enabled: flag(enabled)?,
+            active: flag(active)?,
+        }),
+    })
+}
+
+/// The upgrade record's last field: `live` or `idle` (#305 P2-2).
+fn parse_liveness(value: &str) -> Result<bool, Failure> {
+    match value {
+        "live" => Ok(true),
+        "idle" => Ok(false),
+        _ => Err(refused()),
+    }
 }
 
 fn parse_enrolled(digest: &str, server: &str) -> Result<Option<Enrolled>, Failure> {
