@@ -60,8 +60,12 @@ export interface WindowModel {
   };
 }
 
-/** A column. `half` names the two halves of one split (D212): closing one returns its width to the other. Runtime only. */
-export interface ColumnModel { id: string; w: number; half?: string; wins: WindowModel[] }
+/**
+ * A column. `half` names the two halves of one split (D212): closing one returns its width to the other. `group` names a row
+ * group (D212, amended 2026-11-03): adjacent columns with the same name are one grid, one band for each row of windows, with no
+ * window spanning columns. Both are runtime only; a generated view (Settings) declares its rows each time it is built.
+ */
+export interface ColumnModel { id: string; w: number; half?: string; group?: string; wins: WindowModel[] }
 
 export interface NodeModel {
   id: string; kind: "host" | "tag"; label: string; x: number; y: number; detail: string; sub: string; os?: HostPlatform;

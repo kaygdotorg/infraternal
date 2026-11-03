@@ -81,8 +81,8 @@ export function readColumns(cx: Ctx, c: ViewRec): ColumnModel[] {
       wins.push(m);
     }
     if (!wins.length && !colEl.querySelector(".cl-slot")) { colEl.remove(); continue; }
-    const half = colEl.dataset.half;
-    cols.push({ id: colEl.dataset.id ?? `c${++cx.state.serial}`, w: Number(colEl.dataset.w) || cx.state.metrics.colW, ...(half ? { half } : {}), wins });
+    const half = colEl.dataset.half, group = colEl.dataset.group;
+    cols.push({ id: colEl.dataset.id ?? `c${++cx.state.serial}`, w: Number(colEl.dataset.w) || cx.state.metrics.colW, ...(half ? { half } : {}), ...(group ? { group } : {}), wins });
   }
   return cols;
 }
@@ -192,6 +192,7 @@ export function applyCols(cx: Ctx, c: ViewRec, cols: ColumnModel[]): void {
     anchor = colEl;
     setColumnWidth(colEl, col.w, cx.state.metrics);
     if (col.half) colEl.dataset.half = col.half; else delete colEl.dataset.half;
+    if (col.group) colEl.dataset.group = col.group; else delete colEl.dataset.group;
     // Windows in the column's order: a window already in place is not moved.
     let prev: Element | null = null;
     for (const m of col.wins) {
@@ -214,7 +215,7 @@ export function applyCols(cx: Ctx, c: ViewRec, cols: ColumnModel[]): void {
  */
 export function fromGrid(c: ViewRec, cols: readonly Col[]): ColumnModel[] {
   return cols.map((col) => ({
-    id: col.id, w: col.w, ...(col.half !== undefined ? { half: col.half } : {}),
+    id: col.id, w: col.w, ...(col.half !== undefined ? { half: col.half } : {}), ...(col.group !== undefined ? { group: col.group } : {}),
     wins: col.wins.flatMap((w): WindowModel[] => {
       const rec = c.wins.get(w.id);
       if (!rec) return [];
@@ -242,10 +243,12 @@ export function problems(cols: readonly Col[]): string[] {
       const rows = cols[j]!.wins.map((v) => v.row);
       if (rows.some((r, i) => i > 0 && r < rows[i - 1]!)) out.push(`column ${cols[j]!.id} is not in row order`);
     }
-    // Every cell of every run is covered once: a plain column has no gaps either.
+    // Every cell of a group made by spans is covered once: a plain column has no gaps either. A row group (every column names a group) may leave cells
+    // empty, where a row has fewer windows than the longest; no cell is ever covered twice.
+    const rowGroup = cols.slice(run.from, run.to + 1).every((col) => col.group !== undefined);
     for (let j = run.from; j <= run.to; j++) for (let y = 0; y < run.rows; y++) {
       const n = cover.get(`${j}:${y}`) ?? 0;
-      if (n !== 1) out.push(`cell ${j}:${y} is covered ${n} times`);
+      if (n > 1 || (n === 0 && !rowGroup)) out.push(`cell ${j}:${y} is covered ${n} times`);
     }
   }
   return out;

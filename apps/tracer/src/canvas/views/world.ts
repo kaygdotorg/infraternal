@@ -25,7 +25,7 @@ import { windowLabel } from "../windows/label";
 import { viewRecentWindows, viewWindowEntries } from "../toolbar/palette";
 import { keyCaps, PALETTE_KEYS } from "../../../../../packages/ui/src/shortcuts";
 import { endActivity, setActivity } from "../../perf-activity";
-import { groupsLoaded } from "../layout/groups-handle";
+import { groupsLoaded, loadGroups, type Groups } from "../layout/groups-handle";
 
 /** Rows the view's hover card lists before its "All" row (TASTE: lists stay short). */
 const SUMMARY_ROWS = 5;
@@ -276,6 +276,15 @@ export function createViews(cx: Ctx): ViewsModule {
       views.set(view.id, c);
       cx.mesh?.buildGraph(c);
     }
+    // A view that declares row groups (D212: Settings, one row of windows for each component) is arranged as its model says, as a saved layout with
+    // groups is: at once when the grouped module is already here, and when it arrives otherwise. Until then it shows as plain columns.
+    // (The first `geometry` below reads the plain columns back into `view.cols`, which has no groups yet: the declared ones are kept here.)
+    const declared = view.cols;
+    const rows = view.layout === "tiled" && declared.some((col) => col.group !== undefined);
+    const arrangeRows = (g: Groups): void => { g.applyCols(cx, c, declared); geometry(c); settle(view.id, undefined, true); cx.tree.render(); };
+    const here = rows ? groupsLoaded() : undefined;
+    if (here) here.applyCols(cx, c, declared);
+    else if (rows) void loadGroups().then((g) => { if (views.get(view.id) === c) arrangeRows(g); });
     wireView(c);
     geometry(c);
     paintEmpty(c);
