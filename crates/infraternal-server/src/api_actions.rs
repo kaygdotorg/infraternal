@@ -8,8 +8,9 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
+use base64::Engine as _;
 use bytes::Bytes;
-use infraternal_plugin_api::{ActionDef, Effect, Operation, SocketHost};
+use infraternal_plugin_api::{ActionDef, DryRun, Effect, Operation, SocketHost};
 use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -148,6 +149,144 @@ impl RateLimit {
     }
 }
 
+/// How long a dry run's review token lets the real call follow it.
+const REVIEW_TOKEN_SECONDS: i64 = 120;
+/// Backstop for open reviews. Each key makes at most 30 calls a minute, so one key holds
+/// at most 60; a full table refuses new dry runs instead of evicting open reviews.
+const MAX_OPEN_REVIEWS: usize = 4096;
+
+/// D28, J154 P2-2: a destructive key action (`DryRun::Required`) runs only after its own dry
+/// run. The dry run returns a random review token. The real call presents it, and it is
+/// spent on that first presentation whatever the outcome.
+///
+/// Invariant: a token authorizes one real call by the same key, for the same action, with
+/// exactly the same input apart from `dry_run` and `review_token`, within
+/// `REVIEW_TOKEN_SECONDS`. Only the token's hash is held, in memory: a restart drops every
+/// open review, which only means running the dry run again.
+struct Review {
+    key_id: String,
+    action_id: &'static str,
+    binding: String,
+    expires: i64,
+}
+
+#[derive(Default)]
+struct Reviews {
+    open: HashMap<String, Review>,
+}
+
+/// Why a real call was refused; the code is the audit result and the JSON `error`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReviewRefusal {
+    /// No token: the caller skipped the dry run.
+    Required,
+    /// Unknown, already spent, expired, or bound to another key, action or input.
+    Invalid,
+}
+
+impl ReviewRefusal {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::Required => "review_required",
+            Self::Invalid => "review_invalid",
+        }
+    }
+
+    fn message(&self) -> &'static str {
+        match self {
+            Self::Required => {
+                "Run this action with dry_run true first, then send its review_token with dry_run false."
+            }
+            Self::Invalid => {
+                "The review_token is expired, already used, or for another key, action or input. Run the dry run again."
+            }
+        }
+    }
+}
+
+impl Reviews {
+    fn issue(
+        &mut self,
+        key_id: &str,
+        action_id: &'static str,
+        binding: String,
+        now: i64,
+    ) -> Option<String> {
+        self.open.retain(|_, review| review.expires > now);
+        if self.open.len() >= MAX_OPEN_REVIEWS {
+            return None;
+        }
+        let token =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
+        self.open.insert(
+            crate::auth::hash(&token),
+            Review {
+                key_id: key_id.to_owned(),
+                action_id,
+                binding,
+                expires: now.saturating_add(REVIEW_TOKEN_SECONDS),
+            },
+        );
+        Some(token)
+    }
+
+    /// Spend a token. It is removed on any presentation, so a wrong guess about what it was
+    /// bound to cannot be retried with the same token.
+    fn spend(
+        &mut self,
+        token: &str,
+        key_id: &str,
+        action_id: &str,
+        binding: &str,
+        now: i64,
+    ) -> Result<(), ReviewRefusal> {
+        let review = self
+            .open
+            .remove(&crate::auth::hash(token))
+            .ok_or(ReviewRefusal::Invalid)?;
+        if review.expires > now
+            && review.key_id == key_id
+            && review.action_id == action_id
+            && review.binding == binding
+        {
+            Ok(())
+        } else {
+            Err(ReviewRefusal::Invalid)
+        }
+    }
+}
+
+/// What a `DryRun::Required` call asks for, once its review fields are taken out of the input.
+enum ReviewStep {
+    /// A dry run: on success the response gets a token bound to `binding`.
+    DryRun { binding: String },
+    /// A real call whose token was valid and is now spent.
+    Reviewed,
+}
+
+/// Split a destructive call's input into its parameters and its review fields.
+///
+/// `binding` is the input without `dry_run` and `review_token`, serialized with sorted keys
+/// (`serde_json`'s default map), so the same parameters always give the same text. For host
+/// removal that is the host id; the uninstall choice is fixed by D334, so it cannot differ
+/// between the review and the removal.
+fn review_fields(input: &mut Value) -> Result<(bool, Option<String>, String), StatusCode> {
+    let fields = input.as_object_mut().ok_or(StatusCode::BAD_REQUEST)?;
+    let token = match fields.remove("review_token") {
+        None => None,
+        Some(Value::String(token)) if !token.is_empty() && token.len() <= 128 => Some(token),
+        Some(_) => return Err(StatusCode::BAD_REQUEST),
+    };
+    let dry_run = fields
+        .get("dry_run")
+        .and_then(Value::as_bool)
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let mut parameters = fields.clone();
+    parameters.remove("dry_run");
+    let binding = serde_json::to_string(&parameters).map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok((dry_run, token, binding))
+}
+
 #[derive(Default)]
 struct Limits {
     /// Only stored keys get an entry, so random bearers cannot fill or evict this map.
@@ -176,6 +315,7 @@ pub(crate) struct ActionGuard {
     auth: Auth,
     pool: SqlitePool,
     limits: Arc<Mutex<Limits>>,
+    reviews: Arc<Mutex<Reviews>>,
     last_prune: Arc<std::sync::atomic::AtomicI64>,
 }
 
@@ -185,8 +325,51 @@ impl ActionGuard {
             auth,
             pool,
             limits: Arc::default(),
+            reviews: Arc::default(),
             last_prune: Arc::new(std::sync::atomic::AtomicI64::new(i64::MIN)),
         }
+    }
+
+    /// Classify a `DryRun::Required` call and, for a real call, spend its review token.
+    async fn review_step(
+        &self,
+        identity: &AuthorizedKey,
+        action: &ActionDef,
+        input: &mut Value,
+        now: i64,
+    ) -> Result<Result<ReviewStep, ReviewRefusal>, StatusCode> {
+        let (dry_run, token, binding) = review_fields(input)?;
+        if dry_run {
+            // A dry run never spends a token; carrying one is a confused caller.
+            return if token.is_some() {
+                Err(StatusCode::BAD_REQUEST)
+            } else {
+                Ok(Ok(ReviewStep::DryRun { binding }))
+            };
+        }
+        let Some(token) = token else {
+            return Ok(Err(ReviewRefusal::Required));
+        };
+        Ok(self
+            .reviews
+            .lock()
+            .await
+            .spend(&token, &identity.key_id, action.id, &binding, now)
+            .map(|()| ReviewStep::Reviewed))
+    }
+
+    /// Issue the review token for a dry run that succeeded.
+    async fn issue_review(
+        &self,
+        identity: &AuthorizedKey,
+        action: &ActionDef,
+        binding: String,
+        now: i64,
+    ) -> Option<String> {
+        self.reviews
+            .lock()
+            .await
+            .issue(&identity.key_id, action.id, binding, now)
     }
 
     /// Identify the bearer and charge its rate limit before any authorization work.
@@ -584,6 +767,7 @@ struct Api {
 struct RemovalInput {
     host_id: Uuid,
     /// D28 / `DryRun::Required`: every caller states whether this is the review or the removal.
+    /// The route has already taken out and checked `review_token` for a removal.
     dry_run: bool,
 }
 
@@ -661,14 +845,33 @@ async fn action(
         Ok(audit_id) => audit_id,
         Err(status) => return status.into_response(),
     };
-    let result = run_action(&api, action, identity, input, now, audit_id).await;
+    let mut input = input;
+    let review = match review_gate(&api, &identity, &action, &mut input, audit_id, now).await {
+        Ok(review) => review,
+        Err(response) => return *response,
+    };
+    let result = run_action(&api, action, identity.clone(), input, now, audit_id).await;
     match result {
         // A completed removal finished its audit row in the removal's own transaction.
-        Ok((value, true)) if action_id == "remote.host.remove" && value.0["dry_run"] != true => {
+        Ok((value, true))
+            if action_id == "remote.host.remove"
+                && matches!(review, Some(ReviewStep::Reviewed)) =>
+        {
             value.into_response()
         }
-        Ok((value, true)) => {
-            let result = (value.0["dry_run"] == true).then_some("dry_run");
+        Ok((mut value, true)) => {
+            let dry_run = matches!(review, Some(ReviewStep::DryRun { .. }));
+            if let Some(ReviewStep::DryRun { binding }) = review {
+                let token = api
+                    .guard
+                    .issue_review(&identity, &action, binding, now)
+                    .await;
+                if attach_review(&mut value.0, token).is_none() {
+                    let _ = api.guard.finish_audit(audit_id, "failed", None, now).await;
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+            }
+            let result = dry_run.then_some("dry_run");
             if api
                 .guard
                 .finish_audit(audit_id, "complete", result, now)
@@ -696,6 +899,49 @@ async fn action(
             status.into_response()
         }
     }
+}
+
+/// D28: a destructive key action runs only with the token of its own dry run. Returns the
+/// call's review step, or the finished refusal; refusals complete the open audit row.
+async fn review_gate(
+    api: &Api,
+    identity: &AuthorizedKey,
+    action: &ActionDef,
+    input: &mut Value,
+    audit_id: i64,
+    now: i64,
+) -> Result<Option<ReviewStep>, Box<Response>> {
+    if action.dry_run != DryRun::Required {
+        return Ok(None);
+    }
+    match api.guard.review_step(identity, action, input, now).await {
+        Ok(Ok(step)) => Ok(Some(step)),
+        Ok(Err(refusal)) => {
+            let _ = api
+                .guard
+                .finish_audit(audit_id, "denied", Some(refusal.code()), now)
+                .await;
+            Err(Box::new(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": refusal.code(), "message": refusal.message()})),
+                )
+                    .into_response(),
+            ))
+        }
+        Err(status) => {
+            let _ = api.guard.finish_audit(audit_id, "failed", None, now).await;
+            Err(Box::new(status.into_response()))
+        }
+    }
+}
+
+/// Add a dry run's review token to its result; `None` when either is missing.
+fn attach_review(result: &mut Value, token: Option<String>) -> Option<()> {
+    let fields = result.as_object_mut()?;
+    fields.insert("review_token".to_owned(), token?.into());
+    fields.insert("review_expires_in".to_owned(), REVIEW_TOKEN_SECONDS.into());
+    Some(())
 }
 
 /// Run one authorized, key-callable action. `audit_id` is the changing action's open audit
@@ -765,8 +1011,9 @@ async fn session_list(api: &Api, person_id: &str) -> Result<Json<Value>, StatusC
 }
 
 /// D333: a `hosts:write` key removes a host with no further tap, and `dry_run: true` first
-/// shows what would be removed. The dry run's row is completed by the caller; a removal's row
-/// is completed in the removal's own transaction.
+/// shows what would be removed. D28: the route lets `dry_run: false` through only with that
+/// dry run's review token. The dry run's row is completed by the caller; a removal's row is
+/// completed in the removal's own transaction.
 async fn remove_host(
     api: &Api,
     identity: &AuthorizedKey,
@@ -953,6 +1200,64 @@ mod tests {
         ] {
             assert_eq!(super::audit_target(&input), None, "{input}");
         }
+    }
+
+    /// D28, J154 P2-2: a review token is spent once, by the same key, for the same action and
+    /// input, before it expires; any presentation spends it.
+    #[test]
+    fn review_tokens_are_single_use_bound_and_short_lived() {
+        use super::{REVIEW_TOKEN_SECONDS, ReviewRefusal, Reviews};
+        let mut reviews = Reviews::default();
+        let action = "remote.host.remove";
+        let binding = r#"{"host_id":"a"}"#;
+        let token = reviews
+            .issue("key", action, binding.to_owned(), 100)
+            .unwrap();
+        assert_eq!(reviews.spend(&token, "key", action, binding, 101), Ok(()));
+        assert_eq!(
+            reviews.spend(&token, "key", action, binding, 101),
+            Err(ReviewRefusal::Invalid),
+            "a replay is refused"
+        );
+        for (key, action_id, bound, now) in [
+            ("other-key", action, binding, 101),
+            ("key", "ssh.start", binding, 101),
+            ("key", action, r#"{"host_id":"b"}"#, 101),
+            ("key", action, binding, 100 + REVIEW_TOKEN_SECONDS),
+        ] {
+            let token = reviews
+                .issue("key", action, binding.to_owned(), 100)
+                .unwrap();
+            assert_eq!(
+                reviews.spend(&token, key, action_id, bound, now),
+                Err(ReviewRefusal::Invalid),
+                "{key} {action_id} {bound} {now}"
+            );
+            assert_eq!(
+                reviews.spend(&token, "key", action, binding, 101),
+                Err(ReviewRefusal::Invalid),
+                "a refused presentation spends the token"
+            );
+        }
+        assert!(reviews.open.is_empty());
+    }
+
+    #[test]
+    fn review_binding_ignores_only_the_review_fields_and_key_order() {
+        use serde_json::json;
+        let mut first = json!({"host_id":"a","dry_run":true,"x":1});
+        let mut second = json!({"x":1,"review_token":"t","dry_run":false,"host_id":"a"});
+        let (dry, token, one) = super::review_fields(&mut first).unwrap();
+        assert!(dry && token.is_none());
+        let (dry, token, two) = super::review_fields(&mut second).unwrap();
+        assert!(!dry && token.as_deref() == Some("t"));
+        assert_eq!(one, two);
+        assert!(
+            second.get("review_token").is_none(),
+            "the handler never sees the token"
+        );
+        assert!(super::review_fields(&mut json!({"host_id":"a"})).is_err());
+        assert!(super::review_fields(&mut json!({"dry_run":false,"review_token":7})).is_err());
     }
 
     #[test]

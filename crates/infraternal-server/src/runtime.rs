@@ -1486,6 +1486,132 @@ mod tests {
         std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
     }
 
+    /// D28 through the real router: the dry run's token removes the host once. Another key,
+    /// another host, a replay and a token on a dry run are refused, and refusals are audited.
+    #[cfg(feature = "remote")]
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One real-router sequence: each refusal, then the removal, then the audit.
+    async fn a_removal_needs_its_own_dry_run_token_once() {
+        use axum::http::StatusCode;
+        use serde_json::json;
+        let data_dir = temp_dir();
+        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(agent_socket),
+        )
+        .await
+        .expect("server router startup");
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("reopen real SQLite");
+        let token = "fixture-reviewed-removal-key-never-print";
+        let other = "fixture-other-removal-key-never-print";
+        let host = removal_fixture(&pool, &[token, other]).await;
+        let remove = "remote.host.remove";
+        let dry_run = |bearer| {
+            post_key_action(
+                &app,
+                bearer,
+                remove,
+                json!({"host_id": host, "dry_run": true}),
+            )
+        };
+
+        let (status, review) = dry_run(token).await;
+        assert_eq!(status, StatusCode::OK, "{review}");
+        assert_eq!(review["dry_run"], true);
+        assert_eq!(review["review_expires_in"], 120);
+        let review_token = review["review_token"]
+            .as_str()
+            .expect("review token")
+            .to_owned();
+        assert!(host_is_live(&pool, host).await, "a dry run changes nothing");
+
+        let (status, refusal) = post_key_action(
+            &app,
+            other,
+            remove,
+            json!({"host_id": host, "dry_run": false, "review_token": review_token}),
+        )
+        .await;
+        assert_eq!(
+            (status, refusal["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("review_invalid"))
+        );
+        assert!(
+            host_is_live(&pool, host).await,
+            "another key's call spent the token, nothing else"
+        );
+
+        let (_, review) = dry_run(token).await;
+        let review_token = review["review_token"].as_str().unwrap().to_owned();
+        let (status, refusal) = post_key_action(
+            &app,
+            token,
+            remove,
+            json!({"host_id": uuid::Uuid::new_v4(), "dry_run": false, "review_token": review_token}),
+        )
+        .await;
+        assert_eq!(
+            (status, refusal["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("review_invalid"))
+        );
+
+        let (status, _) = post_key_action(
+            &app,
+            token,
+            remove,
+            json!({"host_id": host, "dry_run": true, "review_token": "x"}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a dry run carries no token"
+        );
+
+        let (_, review) = dry_run(token).await;
+        let review_token = review["review_token"].as_str().unwrap().to_owned();
+        let real = json!({"host_id": host, "dry_run": false, "review_token": review_token});
+        let (status, removed) = post_key_action(&app, token, remove, real.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{removed}");
+        assert_eq!(removed["state"], "removed");
+        assert!(!host_is_live(&pool, host).await);
+        let (status, refusal) = post_key_action(&app, token, remove, real).await;
+        assert_eq!(
+            (status, refusal["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("review_invalid")),
+            "a replay"
+        );
+
+        let audit: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT state,result FROM api_action_audit WHERE action_id='remote.host.remove' AND key_id=? ORDER BY id",
+        )
+        .bind(crate::auth::hash(token))
+        .fetch_all(&pool)
+        .await
+        .expect("audit");
+        let audit: Vec<(&str, Option<&str>)> = audit
+            .iter()
+            .map(|(s, r)| (s.as_str(), r.as_deref()))
+            .collect();
+        assert_eq!(
+            audit,
+            [
+                ("complete", Some("dry_run")),
+                ("complete", Some("dry_run")),
+                ("denied", Some("review_invalid")),
+                ("failed", None),
+                ("complete", Some("dry_run")),
+                ("complete", Some("removed")),
+                ("denied", Some("review_invalid")),
+            ]
+        );
+        pool.close().await;
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
     /// J154 P2-1: reads by key are one summary row per key, action and minute, never one audit
     /// row per call.
     #[tokio::test]
