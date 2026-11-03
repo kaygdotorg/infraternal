@@ -475,6 +475,43 @@ async fn measured<T>(step: &'static str, operation: Operation<'_, T>) -> Result<
     result
 }
 
+/// Name test SSH receipts from the command that actually crossed the transport.
+fn breakit2_step(script: &str, input: &Input<'_>) -> &'static str {
+    match input {
+        Input::Negotiated { .. } | Input::PayloadAndInvitation { .. } => "upload_setup",
+        Input::Bytes(_) if script.contains("zstd -dc >") || script.contains("gzip -dc >") => {
+            "upload"
+        }
+        Input::File(_) => "upload",
+        Input::Bytes(_) if script.starts_with("# INFRATERAL_TRANSFER_SETUP_V1") => "reuse_setup",
+        Input::Bytes(_) if script.starts_with("# INFRATERAL_SETUP_STEPS_V1") => "setup",
+        Input::Bytes(_) => "join",
+        Input::Empty if script.starts_with(infraternal_plugin_ssh::probe::CHECK_SCRIPT) => "check",
+        Input::Empty if script.contains("ln \"$cache/payload\" \"$stage/payload\"") => {
+            "reuse_payload"
+        }
+        Input::Empty if script.contains("validate_cache") => "payload_lookup",
+        Input::Empty if script.contains("validate_receipt") => "rollback",
+        Input::Empty if script.contains("enable --now") => "start",
+        Input::Empty if script.contains("enable-linger") => "linger",
+        Input::Empty if script.contains("stage/activating") => "install",
+        Input::Empty if script.contains("prepare-join-key") => "connect",
+        Input::Signal(_) => "commit",
+        Input::Empty => "command",
+    }
+}
+
+#[test]
+fn breakit2_step_labels_join_key_preflight_as_connect() {
+    let script = "payload agent --data state prepare-join-key https://server:4930";
+
+    assert_eq!(breakit2_step(script, &Input::Empty), "connect");
+    assert_eq!(breakit2_step("unclassified command", &Input::Empty), "command");
+    let (sender, signal) = tokio::sync::oneshot::channel();
+    drop(sender);
+    assert_eq!(breakit2_step("commit", &Input::Signal(signal)), "commit");
+}
+
 struct TimedSession {
     inner: Arc<dyn SshSession>,
 }
@@ -527,32 +564,7 @@ impl SshSession for TimedSession {
     )]
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
-            let step = match &input {
-                Input::Negotiated { .. } | Input::PayloadAndInvitation { .. } => "upload_setup",
-                Input::Bytes(_)
-                    if script.contains("zstd -dc >") || script.contains("gzip -dc >") =>
-                {
-                    "upload"
-                }
-                Input::File(_) => "upload",
-                Input::Bytes(_) if script.starts_with("# INFRATERNAL_TRANSFER_SETUP_V1") => {
-                    "reuse_setup"
-                }
-                Input::Bytes(_) if script.starts_with("# INFRATERNAL_SETUP_STEPS_V1") => "setup",
-                Input::Bytes(_) => "join",
-                Input::Empty if script.starts_with(infraternal_plugin_ssh::probe::CHECK_SCRIPT) => {
-                    "check"
-                }
-                Input::Empty if script.contains("ln \"$cache/payload\" \"$stage/payload\"") => {
-                    "reuse_payload"
-                }
-                Input::Empty if script.contains("validate_cache") => "payload_lookup",
-                Input::Empty if script.contains("validate_receipt") => "rollback",
-                Input::Empty if script.contains("enable --now") => "start",
-                Input::Empty if script.contains("enable-linger") => "linger",
-                Input::Empty if script.contains("stage/activating") => "install",
-                Input::Signal(_) | Input::Empty => "commit",
-            };
+            let step = breakit2_step(script, &input);
             if matches!(step, "upload" | "upload_setup") {
                 UPLOAD_STARTED.store(true, Ordering::SeqCst);
             }
@@ -1171,7 +1183,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let hosts = RemoteHosts::from_source(Some(source.clone()));
     let store = f.backend.issuer.store().clone();
     let listeners = crate::remote_runtime::RemoteListeners::start(
-        std::net::SocketAddr::new(controller_ip, 4930),
+        std::net::SocketAddr::new(controller_ip, 0),
         &identity,
         &[material.issuer().clone()],
         store.clone(),
@@ -1180,22 +1192,15 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     .await
     .unwrap();
     let local_endpoint = listeners.local_addr().unwrap();
-    let advertised_port = std::env::var("BREAKIT2_PUBLIC_LINK_PORT")
-        .ok()
-        .map(|port| port.parse::<u16>().expect("valid advertised link port"))
-        .unwrap_or(local_endpoint.port());
     let endpoint = EnrollmentEndpoint {
         ca_der: material.issuer().to_der().unwrap(),
-        endpoint: std::net::SocketAddr::new(local_endpoint.ip(), advertised_port),
+        endpoint: local_endpoint,
         server_name: server_name.clone(),
     };
-    if std::env::var_os("BREAKIT2_PUBLIC_LINK_PORT").is_some() {
-        println!("METRIC breakit2 agent_link_port={advertised_port}");
-    }
     let auth = Auth::new(
         f.pool.clone(),
         &server_name,
-        &format!("https://{server_name}:4929"),
+        &format!("https://{server_name}:4930"),
     )
     .await
     .unwrap();
@@ -1209,7 +1214,8 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         store.clone(),
         source,
         endpoint,
-    );
+    )
+    .merge(crate::remote_agent_http::router(hosts.clone(), store.clone()));
     let http_tls = axum_server::tls_openssl::OpenSSLConfig::from_der(
         &identity.certificate.to_der().unwrap(),
         &identity.key.private_key_to_der().unwrap(),
@@ -1221,7 +1227,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
             key: Arc::new(crate::ssh_key::UnavailableSshKey),
         },
         issuer: InvitationIssuer::new(auth.clone(), f.pool.clone(), store, service),
-        hosts,
+        hosts: hosts.clone(),
         attempts: Mutex::default(),
         sessions_changed: Mutex::default(),
     });
@@ -1276,7 +1282,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         return;
     }
     let server = tokio::spawn(
-        axum_server::bind(std::net::SocketAddr::new(controller_ip, 4929))
+        axum_server::bind(std::net::SocketAddr::new(controller_ip, 4930))
             .acceptor(enrollment_acceptor(http_tls))
             .serve(http.into_make_service_with_connect_info::<std::net::SocketAddr>()),
     );
