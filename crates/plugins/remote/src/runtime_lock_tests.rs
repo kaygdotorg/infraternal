@@ -7,7 +7,11 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 mod fixture_state;
 
 /// The root path, plus the shared fixture state that owns it when one is used.
-struct Fixture(PathBuf, Option<fixture_state::FixtureState>);
+struct Fixture(
+    PathBuf,
+    #[expect(dead_code, reason = "held only so its Drop removes the shared root")]
+    Option<fixture_state::FixtureState>,
+);
 impl Fixture {
     fn new() -> Self {
         let state = fixture_state::fixture_state();
@@ -15,7 +19,7 @@ impl Fixture {
     }
 
     /// Session shims bind `base/sessions/sessions/<32 hex>.sock`, which is
-    /// longer than the shared fixture's AF_UNIX budget allows for, so these
+    /// longer than the shared fixture's `AF_UNIX` budget allows for, so these
     /// tests take a private directory directly under /tmp.
     fn short() -> Self {
         let root = nix::unistd::mkdtemp("/tmp/rl-XXXXXX").unwrap();

@@ -1424,18 +1424,18 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let mut prompt_published_at = None;
     let mut retry_started_at = None;
     let mut joined_host = None;
-    let mut replaced_stuck = false;
+    let mut replacement_started = false;
     let result = tokio::time::timeout(Duration::from_secs(220), async {
         loop {
             let events = batch.events(0).1;
             if replace_stuck
-                && !replaced_stuck
+                && !replacement_started
                 && let Some(challenge) = events
                     .iter()
                     .find_map(|event| event.leftovers.as_deref().map(|leftovers| leftovers.challenge))
             {
                 runner.start_fresh(&batch, "owner", "live", challenge).unwrap();
-                replaced_stuck = true;
+                replacement_started = true;
                 println!("REPLACEMENT breakit2 action=start_fresh accepted=true");
             }
             if let Some(event) = events.iter().find(|event| {
@@ -1580,7 +1580,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         );
     }
     if replace_stuck {
-        assert!(replaced_stuck, "the stale install did not offer replacement");
+        assert!(replacement_started, "the stale install did not offer replacement");
         assert_eq!(result, Step::Done, "the stuck install replacement failed");
         let address_records: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM remote_host_bootstrap WHERE address=?",
