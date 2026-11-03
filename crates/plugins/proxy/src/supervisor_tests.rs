@@ -991,3 +991,88 @@ fn the_public_gate_is_closed_before_a_child_starts_and_cleared_after_it_stops() 
         "the gate is cleared after the child stops"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_health_port_held_by_another_process_is_not_trusted() {
+    // A squatter process owns the listener; the "child" is an unrelated process.
+    let mut squatter = Command::new("python3")
+        .args([
+            "-c",
+            "import socket,sys,time\ns=socket.socket();s.bind(('127.0.0.1',0));s.listen()\nprint(s.getsockname()[1],flush=True)\ntime.sleep(30)",
+        ])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("start squatter");
+    let mut port = String::new();
+    std::io::BufReader::new(squatter.stdout.as_mut().expect("squatter output"))
+        .read_line(&mut port)
+        .expect("squatter port");
+    let address: SocketAddr = format!("127.0.0.1:{}", port.trim())
+        .parse()
+        .expect("squatter address");
+    let mut child = Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .expect("start unrelated child");
+
+    let unrelated_child = super::supervisor::verify_health_listener(child.id(), address);
+    let owned = super::supervisor::verify_health_listener(squatter.id(), address);
+    for process in [&mut squatter, &mut child] {
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+    assert_eq!(
+        unrelated_child.expect_err("a squatted health port").kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    owned.expect("the owner of the listener is trusted");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_squatter_on_the_health_port_cannot_acknowledge_routes() {
+    // Another local process took the health port first and answers every probe with 200.
+    let mut squatter = Command::new("python3")
+        .args([
+            "-c",
+            "import http.server as h\nclass H(h.BaseHTTPRequestHandler):\n def do_GET(s):\n  s.send_response(200);s.send_header('Content-Length','2');s.end_headers();s.wfile.write(b'{}')\n def log_message(s,*a): pass\nserver=h.HTTPServer(('127.0.0.1',0),H)\nprint(server.server_address[1],flush=True)\nserver.serve_forever()",
+        ])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("start squatter");
+    let mut port = String::new();
+    std::io::BufReader::new(squatter.stdout.as_mut().expect("squatter output"))
+        .read_line(&mut port)
+        .expect("squatter port");
+    let address: SocketAddr = format!("127.0.0.1:{}", port.trim())
+        .parse()
+        .expect("squatter address");
+
+    let root = std::env::temp_dir().join(format!("proxy-squat-{}", uuid::Uuid::new_v4()));
+    let (state, lock_directory) = supervisor_fixture(&root);
+    let executable = root.join("fake-traefik");
+    fake_traefik(&executable, b"#!/bin/sh\nexec /bin/sleep 60\n");
+    let supervisor = TraefikSupervisor::start(
+        generation_probe_settings(&root, &state, &lock_directory, executable, address),
+        std::sync::Arc::new(|_: String| {}),
+    )
+    .expect("start idle supervisor");
+    let result = supervisor.replace(vec![PublishedService {
+        id: "docs".to_owned(),
+        hostname: "docs.n1.example.test".to_owned(),
+        backend: "127.0.0.1:3000".parse().expect("backend"),
+        allowed_sources: vec!["10.77.0.2".parse().expect("mesh peer")],
+        public: false,
+        https_port: 10_443,
+        certificate: CertificateName::Wildcard("*.n1.example.test".to_owned()),
+    }]);
+    drop(supervisor);
+    let _ = squatter.kill();
+    let _ = squatter.wait();
+    std::fs::remove_dir_all(root).expect("remove squat fixture");
+    assert!(
+        result.is_err(),
+        "an ack from a process other than the child must not confirm a route"
+    );
+}

@@ -532,6 +532,12 @@ impl TraefikChild {
         })
     }
 
+    /// The operating-system process ID of the child.
+    #[must_use]
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Observe an unexpected child exit without blocking.
     ///
     /// # Errors
@@ -1377,6 +1383,9 @@ fn start_managed_child(
         )
         .is_ok()
         {
+            // The port was chosen by bind-and-release, so another local user could have taken
+            // it first and could forge generation acks. Trust it only once the child owns it.
+            verify_health_listener(child.id(), settings.private_ping_address)?;
             wait_for_config_generation(
                 settings.private_ping_address,
                 &generation,
@@ -1495,6 +1504,86 @@ fn acquire_supervisor_lock(directory: &Path) -> io::Result<Flock<File>> {
             io::Error::from(error)
         }
     })
+}
+
+/// Check that every listening socket that can answer `address` belongs to the child.
+///
+/// A loopback probe reaches a listener bound to the exact address or to the wildcard. Each such
+/// socket's inode must be among the child's descriptors; otherwise another local process holds
+/// the health port and its answers are not the child's.
+#[cfg(target_os = "linux")]
+pub(crate) fn verify_health_listener(child: u32, address: SocketAddr) -> io::Result<()> {
+    use std::fmt::Write as _;
+    let (table, exact, wildcard) = match address.ip() {
+        std::net::IpAddr::V4(ip) => (
+            "/proc/net/tcp",
+            format!("{:08X}", u32::from_ne_bytes(ip.octets())),
+            "00000000".to_owned(),
+        ),
+        std::net::IpAddr::V6(ip) => {
+            // The kernel prints the address as four native-endian 32-bit words.
+            let octets = ip.octets();
+            let words = (0..4).fold(String::with_capacity(32), |mut words, word| {
+                let start = word * 4;
+                let value = u32::from_ne_bytes([
+                    octets[start],
+                    octets[start + 1],
+                    octets[start + 2],
+                    octets[start + 3],
+                ]);
+                let _ = write!(words, "{value:08X}");
+                words
+            });
+            ("/proc/net/tcp6", words, "0".repeat(32))
+        }
+    };
+    let port = format!("{:04X}", address.port());
+    let mut listeners = Vec::new();
+    for line in fs::read_to_string(table)?.lines().skip(1) {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        let (Some(local), Some(state), Some(inode)) = (fields.get(1), fields.get(3), fields.get(9))
+        else {
+            continue;
+        };
+        let Some((host, local_port)) = local.split_once(':') else {
+            continue;
+        };
+        if *state == "0A" && local_port == port && (host == exact || host == wildcard) {
+            listeners.push(format!("socket:[{inode}]"));
+        }
+    }
+    let mut owned = std::collections::BTreeSet::new();
+    for owner in trusted_health_owners(child) {
+        for descriptor in fs::read_dir(format!("/proc/{owner}/fd"))?.flatten() {
+            if let Ok(target) = fs::read_link(descriptor.path()) {
+                owned.insert(target.to_string_lossy().into_owned());
+            }
+        }
+    }
+    if listeners.is_empty() || listeners.iter().any(|listener| !owned.contains(listener)) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the proxy health port is held by another process",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn verify_health_listener(_child: u32, _address: SocketAddr) -> io::Result<()> {
+    Ok(())
+}
+
+// Unit tests serve the health endpoint from the test process itself; production trusts only
+// the child.
+#[cfg(all(target_os = "linux", not(test)))]
+fn trusted_health_owners(child: u32) -> Vec<u32> {
+    vec![child]
+}
+
+#[cfg(all(target_os = "linux", test))]
+fn trusted_health_owners(child: u32) -> Vec<u32> {
+    vec![child, std::process::id()]
 }
 
 const CHILD_LOCK_NAME: &str = ".traefik-child.lock";
