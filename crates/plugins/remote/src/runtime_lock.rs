@@ -451,8 +451,8 @@ fn sessions(runtime: &File) -> Result<(), u8> {
 
 /// Read the start tick and state for a PID, keeping the command's closing parenthesis intact.
 fn process_identity(pid: i32) -> io::Result<(u64, u8)> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    let (_, suffix) = stat
+    let record = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let (_, suffix) = record
         .rsplit_once(')')
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
     let mut fields = suffix.split_ascii_whitespace();
@@ -527,14 +527,11 @@ fn retire_session_socket(path: &Path, before: &fs::Metadata) -> Result<(), u8> {
 #[inline(never)]
 fn stop_session(path: &Path, before: &fs::Metadata) -> Result<(), u8> {
     let id = session_id(path)?;
-    let mut stream = match UnixStream::connect(path) {
-        Ok(stream) => stream,
-        Err(_) => {
-            if kernel_bound(&[(path.to_path_buf(), before.clone())]).ok_or(77)? {
-                return Err(73);
-            }
-            return retire_session_socket(path, before);
+    let Ok(mut stream) = UnixStream::connect(path) else {
+        if kernel_bound(&[(path.to_path_buf(), before.clone())]).ok_or(77)? {
+            return Err(73);
         }
+        return retire_session_socket(path, before);
     };
     let timeout = Some(Duration::from_secs(2));
     stream.set_read_timeout(timeout).map_err(|_| 77)?;
@@ -553,17 +550,16 @@ fn stop_session(path: &Path, before: &fs::Metadata) -> Result<(), u8> {
     if process_identity(pid).map_err(|_| 77)?.0 != birth {
         return Err(77);
     }
-    let (version, session, hello_pid, head) =
-        match read_session_frame(&mut stream).map_err(|_| 77)? {
-            Frame::Hello {
-                version,
-                session,
-                pid,
-                head,
-                ..
-            } => (version, session, pid, head),
-            _ => return Err(77),
-        };
+    let Frame::Hello {
+        version,
+        session,
+        pid: hello_pid,
+        head,
+        ..
+    } = read_session_frame(&mut stream).map_err(|_| 77)?
+    else {
+        return Err(77);
+    };
     if version != 1 || session != id || i32::try_from(hello_pid).ok() != Some(pid) {
         return Err(77);
     }
@@ -605,15 +601,25 @@ fn stop_session(path: &Path, before: &fs::Metadata) -> Result<(), u8> {
     drop(stream);
     // ExitAck proves that the shim has reaped its shell. The pidfd pins only the
     // same verified shim if it has not already retired itself.
-    if process_identity(pid).is_ok_and(|(current, state)| current == birth && state != b'Z') {
-        if let Err(error) = infraternal_shim::signal_process_descriptor(
+    if process_identity(pid).is_ok_and(|(current, state)| current == birth && state != b'Z')
+        && let Err(error) = infraternal_shim::signal_process_descriptor(
             std::os::fd::AsFd::as_fd(&pidfd),
             nix::sys::signal::Signal::SIGTERM,
-        ) && error.raw_os_error() != Some(nix::libc::ESRCH)
-        {
-            return Err(77);
-        }
+        )
+        && error.raw_os_error() != Some(nix::libc::ESRCH)
+    {
+        return Err(77);
     }
+    wait_for_session_exit(path, before, pid, birth)
+}
+
+/// Wait for the verified shim to exit, then retire its unbound endpoint.
+fn wait_for_session_exit(
+    path: &Path,
+    before: &fs::Metadata,
+    pid: i32,
+    birth: u64,
+) -> Result<(), u8> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match process_identity(pid) {

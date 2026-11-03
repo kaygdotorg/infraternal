@@ -313,7 +313,7 @@ fn start_legacy_shim(
 ) -> std::process::Child {
     use std::io::{BufRead, BufReader, Read};
 
-    let shim = r#"
+    let shim = r"
 import ctypes, os, socket, struct, sys
 path, session, reported_pid = sys.argv[1:]
 listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -346,7 +346,7 @@ peer.sendall(frame(b'\x20' + struct.pack('<iQ', 0, 0)))
 assert read_frame() == b'\x21'
 while True:
     peer.recv(1)
-"#;
+";
     let mut server = std::process::Command::new("python3")
         .args(["-c", shim])
         .arg(path)
