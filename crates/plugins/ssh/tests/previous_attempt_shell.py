@@ -487,8 +487,30 @@ transaction={TRANSACTION}
             (stage / 'lease').stat().st_mtime, datetime.timezone.utc
         ).strftime('%Y-%m-%dT%H:%M:%SZ')
         self.assertEqual(fields[7], since)
-        self.assertEqual(fields[8], '1')
+        # The stale socket file has no listener: it is not an open session (#305).
+        self.assertEqual(fields[8], '0')
         self.assertEqual(self.identity_path.read_text(), '{"endpoint":"127.0.0.1:7443"}\n')
+
+    def test_upgrade_counts_only_sessions_a_live_shim_serves(self):
+        self.make_upgrade_fixture()
+        previous = Path.cwd()
+        try:
+            os.chdir(self.sessions)
+            with socket.socket(socket.AF_UNIX) as stale:
+                stale.bind('4' * 32 + '.sock')
+            os.chmod('4' * 32 + '.sock', 0o600)
+            live = socket.socket(socket.AF_UNIX)
+            live.bind(self.socket.name)
+            os.chmod(self.socket.name, 0o600)
+            live.listen()
+        finally:
+            os.chdir(previous)
+        try:
+            result = self.run_shell('\ninspect_previous')
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            self.assertEqual(result.stdout.decode().strip().split(' ')[8], '1')
+        finally:
+            live.close()
 
     def test_upgrade_with_a_running_old_agents_control_socket_is_classified(self):
         # The real b-0.1.0 binary, running against the restored #305 fixture,

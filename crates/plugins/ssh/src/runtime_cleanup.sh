@@ -10,7 +10,7 @@ runtime_helper() {
  [ -f "$helper" ] && [ ! -L "$helper" ] && [ -O "$helper" ] && [ "$(stat -c '%a' "$helper")" = 700 ] || exit 76
  # Capability level (runtime_lock::LEVEL); a cache at another level may lack a mode used here.
  level=$("$helper" --bootstrap-runtime-version 2>/dev/null) || exit 76
- [ "$level" = 3 ] || exit 76
+ [ "$level" = 4 ] || exit 76
 }
 control_socket() {
  [ -e "$base/sessions" ] || [ -L "$base/sessions" ] || return 0

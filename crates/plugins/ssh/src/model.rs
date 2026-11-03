@@ -195,7 +195,7 @@ pub enum FailureKind {
 pub struct Leftovers {
     pub challenge: uuid::Uuid,
     pub mode: InstallMode,
-    pub findings: Vec<&'static str>,
+    pub findings: Vec<Cow<'static, str>>,
 }
 
 /// Trusted installation boundary; no request chooses its diagnostic context.

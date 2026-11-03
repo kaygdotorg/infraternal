@@ -269,19 +269,15 @@ inspect_upgrade() {
   fi
  fi
  setup_sockets=0
- for setup_socket_dir in "$base/sessions" "$base/sessions/sessions"; do
-  [ -d "$setup_socket_dir" ] || continue
-  for setup_socket in "$setup_socket_dir"/*.sock; do
-   [ -S "$setup_socket" ] && [ ! -L "$setup_socket" ] && [ -O "$setup_socket" ] || continue
-   setup_sockets=$((setup_sockets + 1))
-   [ "$setup_sockets" -le 1024 ] || refuse size
-  done
- done
+ if [ -d "$base/sessions" ]; then
   # Discover an old or missing helper before offering replacement. The public
   # recovery path can refresh it now, before stopping the enrolled service.
-  if [ "$setup_sockets" -gt 0 ] || [ -e "$base/sessions/.lifetime-lock" ] || [ -L "$base/sessions/.lifetime-lock" ]; then
-   runtime_helper
-  fi
+  runtime_helper
+  # Only an endpoint a live shim still serves is an open terminal session; the
+  # confirmation names how many the replacement ends (#305).
+  setup_sockets=$("$helper" --bootstrap-runtime "$base" "$identity" sessions-count </dev/null) || exit $?
+  case "$setup_sockets" in ''|*[!0-9]*) exit 77;; esac
+ fi
  printf 'INFRATERNAL_SETUP_UPGRADE %s %s %s %s %s %s %s %s\n' "$previous_host" "$previous_transaction" "$identity" "$setup_locked_machine" "$setup_upgrade_lease_pid" "$setup_upgrade_lease_birth" "$setup_since" "$setup_sockets"
 }
 not_live() {

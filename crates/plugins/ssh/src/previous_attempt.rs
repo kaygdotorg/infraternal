@@ -1,5 +1,7 @@
 //! Rechecks earlier host provisioning ownership and liveness before explicit recovery [17][139], #169.
 
+use std::borrow::Cow;
+
 use crate::{
     install::Installation,
     model::{Failure, FailureKind, InstallMode, Leftovers, Target},
@@ -307,24 +309,29 @@ impl PreviousAttempt {
 
     #[must_use]
     pub fn findings(&self, mode: InstallMode, challenge: uuid::Uuid) -> Leftovers {
+        let upgrade = self.lease_owner.is_some();
         Leftovers {
             challenge,
             mode,
             findings: vec![
-                if self.lease_owner.is_some() {
+                Cow::Borrowed(if upgrade {
                     "An interrupted upgrade journal"
                 } else {
                     "Earlier setup ownership marker"
-                },
-                if self.lease_owner.is_some() {
+                }),
+                Cow::Borrowed(if upgrade {
                     "The enrolled host identity is kept"
                 } else {
                     "Fresh setup ownership journal"
-                },
-                if self.sockets == 0 {
-                    "No live setup found"
-                } else {
-                    "Local sockets with no listener"
+                }),
+                // An upgrade journal counts only sessions a live shim serves,
+                // and replacing it ends them; say how many (#305, D13).
+                match (upgrade, self.sockets) {
+                    (false, 0) => Cow::Borrowed("No live setup found"),
+                    (false, _) => Cow::Borrowed("Local sockets with no listener"),
+                    (true, 0) => Cow::Borrowed("No open terminal sessions"),
+                    (true, 1) => Cow::Borrowed("1 open terminal session will end"),
+                    (true, open) => Cow::Owned(format!("{open} open terminal sessions will end")),
                 },
             ],
         }
@@ -474,4 +481,32 @@ fn refusal_message(cause: &str) -> &'static str {
 
 fn refused() -> Failure {
     Failure::install(REFUSED_MESSAGE)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pins the public confirmation text derived from the fixed check records (#305).
+    use super::*;
+
+    fn upgrade(sockets: u16) -> PreviousAttempt {
+        let record = format!(
+            "INFRATERNAL_SETUP_UPGRADE {} {} 1:2 host 99 1 2026-11-02T07:48:26Z {sockets}\n",
+            "1".repeat(32),
+            "2".repeat(32)
+        );
+        parse(record.as_bytes()).unwrap().unwrap()
+    }
+
+    #[test]
+    fn replacement_confirmation_names_the_sessions_it_ends() {
+        let finding = |sockets| {
+            upgrade(sockets)
+                .findings(InstallMode::Rootless, uuid::Uuid::nil())
+                .findings[2]
+                .clone()
+        };
+        assert_eq!(finding(0), "No open terminal sessions");
+        assert_eq!(finding(1), "1 open terminal session will end");
+        assert_eq!(finding(3), "3 open terminal sessions will end");
+    }
 }

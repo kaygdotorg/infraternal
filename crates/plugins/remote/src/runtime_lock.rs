@@ -26,8 +26,9 @@ pub const LOCK: &str = ".lifetime-lock";
 /// Capability level printed by `--bootstrap-runtime-version`; raise it with every new mode.
 /// The cleanup script compares it with the level it needs, so a cached helper that predates
 /// a mode asks for a refresh (76) instead of refusing the mode. Helpers before levels print
-/// nothing and read as 0. Level 1: `inspect`/`retire`; level 2: `sessions`; level 3: `sessions-stop`.
-pub const LEVEL: &[u8] = b"3\n";
+/// nothing and read as 0. Level 1: `inspect`/`retire`; level 2: `sessions`; level 3: `sessions-stop`;
+/// level 4: `sessions-count`.
+pub const LEVEL: &[u8] = b"4\n";
 
 fn refused() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
@@ -414,6 +415,34 @@ fn control(runtime: &File, retire: bool, legacy: bool) -> Result<(), u8> {
 #[cold]
 #[inline(never)]
 fn sessions(runtime: &File) -> Result<(), u8> {
+    let files = session_sockets(runtime)?;
+    if files.is_empty() {
+        return Ok(());
+    }
+    if kernel_bound(&files).ok_or(77)? {
+        return Err(73);
+    }
+    Ok(())
+}
+
+/// Print how many session endpoints a live shim still serves. A socket file
+/// left by an exited shim is not a session: only a kernel-bound one counts.
+/// A stuck-install replacement names this number before it ends them (#305).
+#[cold]
+#[inline(never)]
+fn open_sessions(runtime: &File) -> Result<u16, u8> {
+    let mut open = 0_u16;
+    for file in session_sockets(runtime)? {
+        if kernel_bound(std::slice::from_ref(&file)).ok_or(77)? {
+            open += 1;
+        }
+    }
+    Ok(open)
+}
+
+/// The user's own `*.sock` files in the runtime and its nested sessions
+/// directory, except the control socket; at most 1024 of them.
+fn session_sockets(runtime: &File) -> Result<Vec<(PathBuf, fs::Metadata)>, u8> {
     let nested = match directory(&at(runtime, "sessions")) {
         Ok(nested) => Some(nested),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -440,13 +469,7 @@ fn sessions(runtime: &File) -> Result<(), u8> {
             }
         }
     }
-    if files.is_empty() {
-        return Ok(());
-    }
-    if kernel_bound(&files).ok_or(77)? {
-        return Err(73);
-    }
-    Ok(())
+    Ok(files)
 }
 
 /// Read the start tick and state for a PID, keeping the command's closing parenthesis intact.
@@ -756,6 +779,10 @@ pub fn command(arguments: &mut dyn Iterator<Item = std::ffi::OsString>) -> Optio
         // Session inspection takes no lock and never removes anything.
         if mode == "sessions" {
             return sessions(&runtime);
+        }
+        if mode == "sessions-count" {
+            let open = open_sessions(&runtime)?;
+            return writeln!(io::stdout(), "{open}").map_err(|_| 77);
         }
         if mode == "sessions-stop" {
             return stop_sessions_locked(&runtime);

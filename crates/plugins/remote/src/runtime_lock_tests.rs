@@ -322,6 +322,27 @@ fn session_inspection_finds_bound_endpoints_by_identity() {
     drop(control);
 }
 
+/// The replacement confirmation counts sessions a shim still serves: a socket
+/// file left by an exited shim and the control socket are not sessions (#305).
+#[test]
+fn open_session_count_includes_only_bound_endpoints() {
+    let fixture = Fixture::new();
+    let nested = fixture.state().join("sessions");
+    fs::create_dir(&nested).unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
+    let runtime = directory(&fixture.state()).unwrap();
+    let control =
+        std::os::unix::net::UnixListener::bind(fixture.state().join("plugins.sock")).unwrap();
+    drop(std::os::unix::net::UnixListener::bind(nested.join("left.sock")).unwrap());
+    assert_eq!(after_close(&Ok(1), || open_sessions(&runtime)), Ok(0));
+    let first = std::os::unix::net::UnixListener::bind(nested.join("one.sock")).unwrap();
+    let second = std::os::unix::net::UnixListener::bind(fixture.state().join("two.sock")).unwrap();
+    assert_eq!(open_sessions(&runtime), Ok(2));
+    drop(first);
+    assert_eq!(after_close(&Ok(2), || open_sessions(&runtime)), Ok(1));
+    drop((second, control));
+}
+
 /// A non-dumpable legacy shim can be retired only through its owned session socket.
 fn start_legacy_shim(
     path: &std::path::Path,
