@@ -9,9 +9,11 @@
 # 1. the pinned Zig (D213, D328) resolves on this host: same version and
 #    checksum table as Linux;
 # 2. the default-feature release build of `-p infraternal` links;
-# 3. the tests of the crates meant to be portable pass.
-# The Linux-only session engine (shim PTY/VT, session bridge) is compiled
-# out on macOS and has no macOS tests here.
+# 3. the tests of the crates meant to be portable pass, plus the shim's
+#    macOS session-shell entry tests.
+# The end-to-end terminal proof needs root and two accounts, so it is a
+# separate script: scripts/test-macos-sessions.py (#328). The SSH session
+# bridge stays Linux-only.
 set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
@@ -52,4 +54,6 @@ done
 # runtime guard; its library tests (including the unreaped child-exit check)
 # are portable.
 cargo test --locked -p infraternal-plugin-ssh --lib
+# The private macOS PTY-child entry: argv shapes and the audit record layout.
+cargo test --locked -p infraternal-shim --features async-fd,cli --lib session_shell
 printf 'macos-build-check: PASS\n'
