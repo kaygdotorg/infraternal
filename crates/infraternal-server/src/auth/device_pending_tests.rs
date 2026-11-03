@@ -307,3 +307,35 @@ async fn nested_source_caps_bound_each_prefix() {
     assert_eq!(start(&app, v6_in_48(2, 0), &join()).await, StatusCode::OK);
     assert_eq!(start(&app, v4(29), &sign_in()).await, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn a_machine_name_outside_the_cli_set_is_refused() {
+    // J134 P3-3: bidi overrides, zero-width and look-alike characters.
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = super::http::router(f.auth.clone());
+    f.auth.set_test_http_time(NOW);
+    for (index, name) in [
+        "build-\u{202e}10-dliub",
+        "build\u{200b}-01",
+        "build\u{2066}-01",
+        "bu\u{0456}ld-01",
+        "build 01",
+        "build/01",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut body = join();
+        body["request"]["hostname"] = json!(name);
+        let source = v4_network(u32::try_from(index).unwrap());
+        assert_eq!(
+            start(&app, source, &body).await,
+            StatusCode::BAD_REQUEST,
+            "{name:?}"
+        );
+    }
+    let mut body = join();
+    body["request"]["hostname"] = json!("Build-01.lan_2");
+    assert_eq!(start(&app, v4_network(99), &body).await, StatusCode::OK);
+}

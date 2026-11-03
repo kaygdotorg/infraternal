@@ -106,12 +106,23 @@ test("a user service is named as such", async ({ page }) => {
   await expect(page.getByText("User service", { exact: true })).toBeVisible();
 });
 
-test("the machine's name is shown as text, never as markup, and a long one wraps inside the card", async ({ page }) => {
-  const hostname = `<img src=x onerror=alert(1)>${"w".repeat(100)}`;
+test("a machine name that is not a plain host name is refused, never shown", async ({ page }) => {
+  // The page accepts only the ASCII set `infraternal up` sends (#263, J134 P3-3), so markup and bidi never reach it.
+  for (const hostname of ["<img src=x onerror=alert(1)>", "build-\u202e10-dliub"]) {
+    await mockJoin(page, { hostname });
+    await page.goto("about:blank");
+    await page.goto(LINK);
+    await expect(page.getByRole("heading", { name: "Can't add this machine" })).toBeVisible();
+    await expect(page.locator("img")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Approve with passkey" })).toHaveCount(0);
+  }
+});
+
+test("the longest machine name wraps inside the card", async ({ page }) => {
+  const hostname = "w".repeat(128);
   await mockJoin(page, { hostname });
   await page.goto(LINK);
-  await expect(page.locator("#device-approval-title")).toContainText("<img src=x");
-  await expect(page.locator("img")).toHaveCount(0);
+  await expect(page.locator("#device-approval-title")).toContainText(hostname);
   const [title, card] = await page.evaluate(() => [".device-approval-title", ".auth-card"].map(selector => {
     const box = document.querySelector<HTMLElement>(selector)!.getBoundingClientRect();
     return { left: box.left, right: box.right };

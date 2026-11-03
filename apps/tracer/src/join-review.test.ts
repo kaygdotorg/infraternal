@@ -45,6 +45,12 @@ test("a join answer with a bad field is refused whole", async () => {
     { ...join, hostname: "" },
     { ...join, hostname: "a\nb" },
     { ...join, hostname: "x".repeat(129) },
+    // J134 P3-3: bidi overrides, zero-width and other non-ASCII characters make one name read as another.
+    { ...join, hostname: "build-\u202e10-dliub" },
+    { ...join, hostname: "build\u200b-01" },
+    { ...join, hostname: "build\u2066-01" },
+    { ...join, hostname: "bu\u0456ld-01" },
+    { ...join, hostname: "build 01" },
     { ...join, key_fingerprint: "SHA256:short" },
     { ...join, key_fingerprint: "MD5:00:11" },
     { ...join, key_fingerprint: undefined },
@@ -52,6 +58,16 @@ test("a join answer with a bad field is refused whole", async () => {
     server(bad);
     await expect(inspectDeviceApproval(CODE, "join_machine")).rejects.toBeInstanceOf(AuthError);
   }
+});
+
+test("a sign-in device name with a format character is refused", async () => {
+  const scopes = ["hosts:read", "terminal:connect", "actions:dry-run"];
+  for (const device of ["kayg-\u202elaptop", "kayg\u200blaptop", "kayg\ufefflaptop", "kayg\u2028laptop"]) {
+    server({ device, scopes });
+    await expect(inspectDeviceApproval(CODE, "sign_in")).rejects.toBeInstanceOf(AuthError);
+  }
+  server({ device: "Kayg's laptop", scopes });
+  expect(await inspectDeviceApproval(CODE, "sign_in")).toMatchObject({ device: "Kayg's laptop" });
 });
 
 test("an expired join request tells the person to run up again", async () => {

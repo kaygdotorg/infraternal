@@ -117,10 +117,16 @@ impl JoinMachineRequest {
         decoded.try_into().map_err(|_| Error::Invalid)
     }
 
+    /// The host name is the one fact the owner reads before approving, so it
+    /// is exactly the ASCII set `infraternal up` sends: no bidi, zero-width or
+    /// look-alike character can make it read as another machine (#263, J134 P3-3).
     fn validate(&self) -> Result<[u8; 32]> {
         if self.hostname.is_empty()
             || self.hostname.len() > 128
-            || self.hostname.chars().any(char::is_control)
+            || !self
+                .hostname
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
             || !matches!(self.mode.as_str(), "system" | "user")
             || (self.mode == "system") != (self.execution_uid == 0)
         {

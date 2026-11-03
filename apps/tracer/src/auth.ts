@@ -89,9 +89,17 @@ export function isDeviceUserCode(code: string): boolean {
   return /^[A-Za-z0-9_-]{16}$/.test(code);
 }
 
-/** A name a person will read: non-empty, bounded, and free of control characters. */
+/**
+ * A name a person will read: non-empty, bounded, and free of control and format characters. Format characters (bidi
+ * overrides and isolates, zero-width characters) can make one name read as another (#263, J134 P3-3).
+ */
 function isShownName(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= 128 && !/[\u0000-\u001f\u007f]/.test(value);
+  return typeof value === "string" && value.length > 0 && value.length <= 128 && !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(value);
+}
+
+/** A machine's host name: exactly the ASCII set `infraternal up` sends and the server accepts. */
+function isHostName(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value);
 }
 
 /**
@@ -111,7 +119,7 @@ export async function inspectDeviceApproval(code: string, expected: ApprovalRevi
   }
   if (expected === "join_machine") {
     if (review?.kind === "join_machine"
-      && isShownName(review.hostname)
+      && isHostName(review.hostname)
       && (review.mode === "system" || review.mode === "user")
       && typeof review.key_fingerprint === "string"
       && FINGERPRINT.test(review.key_fingerprint)) {
