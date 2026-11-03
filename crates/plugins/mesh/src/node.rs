@@ -15,6 +15,12 @@ use std::{
 };
 
 pub use crate::dataplane::Chunk;
+
+/// Test seam (#260 J143 P3-4): runs once in `down`, after this node's link is gone and before its
+/// shared-filter decision, so a namespace test can start another installation in that window.
+#[cfg(feature = "test-support")]
+pub static BEFORE_SHARED_FILTER_DECISION: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
+    std::sync::Mutex::new(None);
 struct Pending {
     server: Option<crate::policy::model::NodeId>,
     next: u32,
@@ -680,7 +686,6 @@ impl Node {
             self.dns_resolver = None;
         }
         let mut foreign_live_link = false;
-        let owned_link = self.owned;
         if self.owned {
             match Device::active_link()? {
                 Some(active) if active.engine == self.engine_kind => {
@@ -717,11 +722,21 @@ impl Node {
             }
             self.owned = false;
         }
-        if !owned_link {
-            // A failed `up` can leave another live node's filter adopted.
+        #[cfg(feature = "test-support")]
+        if let Some(hook) = BEFORE_SHARED_FILTER_DECISION
+            .lock()
+            .ok()
+            .and_then(|mut hook| hook.take())
+        {
+            hook();
+        }
+        // The table's name is shared by every installation on the machine. Our link is gone by
+        // now, so its name is free: another installation can create its link and adopt the table
+        // before we get here (#260 J143 P3-4). Recheck for a live link right before removing it.
+        // This narrows the race to the recheck itself; a per-installation table would close it.
+        // A failed `up` can likewise leave another live node's filter adopted.
+        if !foreign_live_link {
             self.remove_unshared_filter()?;
-        } else if !foreign_live_link {
-            self.firewall.remove()?;
         }
         self.retire_routes()?;
         self.firewall = Firewall::default();
@@ -1382,12 +1397,21 @@ impl Retirement {
     /// Delete exactly the planned objects and return the names left in place.
     /// # Errors
     /// Reports a failed kernel deletion.
-    pub fn execute(self) -> io::Result<Vec<&'static str>> {
+    pub fn execute(mut self) -> io::Result<Vec<&'static str>> {
         if self.interface {
             Device::delete_ifindex(self.interface_index.ok_or(io::ErrorKind::InvalidData)?)?;
         }
-        if let Some(mut filter) = self.filter {
-            filter.remove()?;
+        // As in `down`: the deleted link freed the shared name, so recheck before removing the
+        // shared table (#260 J143 P3-4).
+        if let Some(mut filter) = self.filter.take() {
+            match Device::active_link() {
+                Ok(None) => filter.remove()?,
+                Ok(Some(_)) => self.left.push(filter.name()),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    self.left.push(filter.name());
+                }
+                Err(error) => return Err(error),
+            }
         }
         // The key is this installation's own state, whoever holds the interface now. Removing it
         // here, after the engine is gone, does not rely on uninstall deleting the directory
