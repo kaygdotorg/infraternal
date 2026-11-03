@@ -1389,6 +1389,103 @@ mod tests {
         std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
     }
 
+    /// POST one key action through the real router and return its status and JSON body.
+    #[cfg(feature = "remote")]
+    async fn post_key_action(
+        app: &axum::Router,
+        token: &str,
+        action: &str,
+        body: serde_json::Value,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/actions/{action}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(body.to_string()))
+                    .expect("action request"),
+            )
+            .await
+            .expect("action response");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("action body");
+        (
+            status,
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// An owner, `hosts:write` keys with the given names and one live host, in the real database.
+    #[cfg(feature = "remote")]
+    async fn removal_fixture(pool: &sqlx::SqlitePool, tokens: &[&str]) -> uuid::Uuid {
+        let now = super::unix_seconds().expect("current time");
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES('owner','owner',1,'x')")
+            .execute(pool)
+            .await
+            .expect("owner");
+        for token in tokens {
+            sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,'owner','fixture-cli','[\"hosts:write\"]',?,?,0)")
+                .bind(crate::auth::hash(token))
+                .bind(now)
+                .bind(now + 3600)
+                .execute(pool)
+                .await
+                .expect("key");
+        }
+        let host = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootful',0,1)")
+            .bind(host.as_bytes().as_slice())
+            .execute(pool)
+            .await
+            .expect("host");
+        host
+    }
+
+    #[cfg(feature = "remote")]
+    async fn host_is_live(pool: &sqlx::SqlitePool, host: uuid::Uuid) -> bool {
+        sqlx::query_scalar("SELECT revoked_at IS NULL FROM remote_hosts WHERE id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(pool)
+            .await
+            .expect("host row")
+    }
+
+    /// J154 P2-2 / D28: "a destructive MCP action needs a dry run first". A key cannot remove
+    /// a host in one call: `dry_run: false` without the dry run's review token is refused.
+    #[cfg(feature = "remote")]
+    #[tokio::test]
+    async fn a_removal_without_a_review_token_is_refused_and_the_host_stays() {
+        let data_dir = temp_dir();
+        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(agent_socket),
+        )
+        .await
+        .expect("server router startup");
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("reopen real SQLite");
+        let token = "fixture-one-call-removal-key-never-print";
+        let host = removal_fixture(&pool, &[token]).await;
+        let (status, _) = post_key_action(
+            &app,
+            token,
+            "remote.host.remove",
+            serde_json::json!({"host_id": host, "dry_run": false}),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(host_is_live(&pool, host).await, "the host stays");
+        pool.close().await;
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
     /// J154 P2-1: reads by key are one summary row per key, action and minute, never one audit
     /// row per call.
     #[tokio::test]
