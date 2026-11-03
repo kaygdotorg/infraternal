@@ -620,6 +620,9 @@ impl SupervisorFactory for DownloadedTraefikFactory {
 
         let proxy_state = self.state_dir.join("proxy");
         ensure_proxy_directory(&proxy_state)?;
+        // The lock stays out of the child-readable directory: its parent must be agent-only.
+        let private_state = self.state_dir.join("proxy-private");
+        ensure_private_directory(&private_state)?;
         let dynamic_directory = proxy_state.join("dynamic");
         ensure_proxy_directory(&dynamic_directory)?;
         let acme_storage = proxy_state.join("acme.json");
@@ -648,6 +651,7 @@ impl SupervisorFactory for DownloadedTraefikFactory {
             SupervisorSettings {
                 executable,
                 static_config_path: proxy_state.join("traefik.toml"),
+                lock_directory: private_state,
                 dynamic_config_path: dynamic_directory.join(crate::config::DYNAMIC_CONFIG_FILENAME),
                 static_config,
                 provider_files,
@@ -693,7 +697,7 @@ fn loopback_port() -> io::Result<u16> {
         .port())
 }
 
-fn ensure_private_directory(path: &Path) -> io::Result<()> {
+pub(crate) fn ensure_private_directory(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -720,7 +724,11 @@ fn ensure_private_directory(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn ensure_proxy_directory(path: &Path) -> io::Result<()> {
+/// Prepare a directory the rootful Traefik child may read: owned by the agent, group of the child.
+///
+/// A new directory starts agent-private (0700) and is then handed to the child group and opened
+/// to 0750 through its descriptor, so the path is never group-readable under another group.
+pub(crate) fn ensure_proxy_directory(path: &Path) -> io::Result<()> {
     if !identity::rootful() {
         return ensure_private_directory(path);
     }
@@ -728,7 +736,7 @@ fn ensure_proxy_directory(path: &Path) -> io::Result<()> {
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             let mut builder = fs::DirBuilder::new();
-            builder.mode(0o750);
+            builder.mode(PRIVATE_DIRECTORY_MODE);
             match builder.create(path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -774,7 +782,7 @@ fn ensure_proxy_directory(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn ensure_private_file(path: &Path) -> io::Result<()> {
+pub(crate) fn ensure_private_file(path: &Path) -> io::Result<()> {
     use std::fs::OpenOptions;
     use std::io::Write;
     let mut file = match OpenOptions::new()
@@ -1243,6 +1251,28 @@ mod tests {
                 .is_some_and(|message| message.contains("loopback-only"))
         );
         assert!(snapshots.lock().expect("route snapshots").is_empty());
+    }
+
+    #[test]
+    fn a_new_proxy_state_directory_is_prepared_for_the_child() {
+        let root = env::temp_dir().join(format!("proxy-dir-init-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).expect("create proxy state root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE))
+            .expect("make proxy state root private");
+        let path = root.join("proxy");
+
+        ensure_proxy_directory(&path).expect("create the child-readable proxy directory");
+        ensure_proxy_directory(&path).expect("accept the prepared directory again");
+
+        let metadata = fs::symlink_metadata(&path).expect("inspect proxy directory");
+        let (_, child_group) = identity::child_ids();
+        assert_eq!(metadata.uid(), nix::unistd::Uid::effective().as_raw());
+        assert_eq!(metadata.gid(), child_group);
+        assert_eq!(
+            metadata.mode() & 0o7777,
+            if identity::rootful() { 0o750 } else { 0o700 }
+        );
+        fs::remove_dir_all(root).expect("remove proxy state fixture");
     }
 
     #[test]

@@ -88,6 +88,48 @@ fn health_server_sequence(responses: Vec<&'static [u8]>) -> (SocketAddr, JoinHan
     (address, server)
 }
 
+/// Lay out a supervisor fixture with the production directory policy for this process.
+///
+/// As root the child-readable directories become 0750 owned by the agent with the
+/// child's group, exactly as the agent prepares them; rootless they stay 0700.
+/// Returns the dynamic-config directory and the agent-only lock directory.
+fn supervisor_fixture(root: &Path) -> (PathBuf, PathBuf) {
+    let state = root.join("state");
+    std::fs::create_dir_all(&state).expect("create supervisor state");
+    for directory in [root, state.as_path()] {
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+            .expect("private fixture directory");
+        crate::controller::ensure_proxy_directory(directory).expect("child-readable directory");
+    }
+    let private = root.join("private");
+    crate::controller::ensure_private_directory(&private).expect("agent-only lock directory");
+    (state, private)
+}
+
+/// Install a fake Traefik with the executable policy the supervisor enforces.
+fn fake_traefik(path: &Path, script: &[u8]) {
+    std::fs::write(path, script).expect("write fake Traefik");
+    if crate::identity::rootful() {
+        let (_, group) = crate::identity::child_ids();
+        nix::unistd::chown(path, None, Some(nix::unistd::Gid::from_raw(group)))
+            .expect("hand fake Traefik to the child group");
+    }
+    let mode = if crate::identity::rootful() {
+        0o550
+    } else {
+        0o500
+    };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .expect("executable fixture mode");
+}
+
+/// Create the ACME storage file the way the agent does.
+fn acme_fixture(state: &Path) -> PathBuf {
+    let path = state.join("acme.json");
+    crate::controller::ensure_private_file(&path).expect("ACME storage fixture");
+    path
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn abrupt_parent_helper_exits() {
@@ -97,31 +139,25 @@ fn abrupt_parent_helper_exits() {
     let root = PathBuf::from(root);
     let executable = root.join("fake-traefik");
     let config = root.join("traefik.toml");
-    let pid_file = root.join("child.pid");
-    std::fs::write(
+    // The child may run as the proxy identity, so it reports through its own output.
+    fake_traefik(
         &executable,
-        format!(
-            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec /bin/sleep 60\n",
-            pid_file.display()
-        ),
-    )
-    .expect("write child fixture");
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500))
-        .expect("set private executable mode");
-    std::fs::write(&config, b"{}").expect("write config fixture");
-    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
-        .expect("set private config mode");
-
-    let log = std::sync::Arc::new(|_: String| {});
-    let _child = TraefikChild::spawn(&executable, &config, &[], log).expect("spawn child");
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while !pid_file.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    assert!(
-        pid_file.exists(),
-        "fake child did not record its process id"
+        b"#!/bin/sh\nprintf 'child-pid=%s\\n' \"$$\"\nexec /bin/sleep 60\n",
     );
+    crate::config::write_proxy_config_atomic(&config, b"{}").expect("write config fixture");
+    let pid_file = root.join("child.pid");
+    let (reported, received) = std::sync::mpsc::channel();
+    let log = std::sync::Arc::new(move |line: String| {
+        if let Some(pid) = line.strip_prefix("child-pid=") {
+            let _ = reported.send(pid.to_owned());
+        }
+    });
+
+    let _child = TraefikChild::spawn(&executable, &config, &[], log).expect("spawn child");
+    let pid = received
+        .recv_timeout(Duration::from_secs(3))
+        .expect("fake child did not report its process id");
+    std::fs::write(&pid_file, pid).expect("record child process id");
     std::process::exit(0);
 }
 
@@ -132,6 +168,7 @@ fn abrupt_infraternal_parent_exit_stops_the_traefik_child() {
     std::fs::create_dir(&root).expect("create crash fixture");
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
         .expect("set private fixture mode");
+    crate::controller::ensure_proxy_directory(&root).expect("child-readable fixture directory");
 
     let helper = Command::new(std::env::current_exe().expect("current test executable"))
         .args([
@@ -337,26 +374,17 @@ fn live_process_without_a_healthy_private_ping_is_reported_unhealthy() {
     const HEALTHY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
     const UNHEALTHY: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
     let root = std::env::temp_dir().join(format!("proxy-unhealthy-{}", uuid::Uuid::new_v4()));
-    let state = root.join("state");
-    std::fs::create_dir_all(&state).expect("create supervisor state");
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
-        .expect("private fixture root");
-    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
-        .expect("private fixture state");
+    let (state, lock_directory) = supervisor_fixture(&root);
 
     let executable = root.join("fake-traefik");
-    std::fs::write(&executable, b"#!/bin/sh\nexec /bin/sleep 60\n").expect("write fake Traefik");
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500))
-        .expect("private executable mode");
-    let acme_storage = state.join("acme.json");
-    std::fs::write(&acme_storage, b"{}").expect("write persistent ACME fixture");
-    std::fs::set_permissions(&acme_storage, std::fs::Permissions::from_mode(0o600))
-        .expect("private ACME mode");
+    fake_traefik(&executable, b"#!/bin/sh\nexec /bin/sleep 60\n");
+    let acme_storage = acme_fixture(&state);
 
     let (health_address, health_server) = health_server_sequence(vec![HEALTHY, UNHEALTHY]);
     let settings = SupervisorSettings {
         executable,
         static_config_path: root.join("static.toml"),
+        lock_directory: lock_directory.clone(),
         dynamic_config_path: state.join(DYNAMIC_CONFIG_FILENAME),
         static_config: StaticConfig {
             mesh_address: "10.77.0.1".parse().expect("mesh address"),
@@ -412,20 +440,14 @@ fn live_process_without_a_healthy_private_ping_is_reported_unhealthy() {
 #[test]
 fn mesh_grant_revocation_removes_the_route_before_narrowing_its_allowlist() {
     let root = std::env::temp_dir().join(format!("proxy-revocation-{}", uuid::Uuid::new_v4()));
-    let state = root.join("state");
-    std::fs::create_dir_all(&state).expect("create supervisor state");
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
-        .expect("private fixture root");
-    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
-        .expect("private fixture state");
+    let (state, lock_directory) = supervisor_fixture(&root);
 
     let executable = root.join("fake-traefik");
-    std::fs::write(&executable, b"#!/bin/sh\nexec /bin/sleep 60\n").expect("write fake Traefik");
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500))
-        .expect("private executable mode");
+    fake_traefik(&executable, b"#!/bin/sh\nexec /bin/sleep 60\n");
     let dynamic_path = state.join(DYNAMIC_CONFIG_FILENAME);
     let probe = generation_probe_server(dynamic_path.clone(), false);
-    let settings = generation_probe_settings(&root, &state, executable, probe.address);
+    let settings =
+        generation_probe_settings(&root, &state, &lock_directory, executable, probe.address);
     let supervisor = TraefikSupervisor::start(settings, std::sync::Arc::new(|_: String| {}))
         .expect("start idle supervisor");
     let mut service = PublishedService {
@@ -496,21 +518,14 @@ fn mesh_grant_revocation_removes_the_route_before_narrowing_its_allowlist() {
 #[test]
 fn unconfirmed_route_removal_stops_the_proxy_and_returns_a_timeout() {
     let root = std::env::temp_dir().join(format!("proxy-config-timeout-{}", uuid::Uuid::new_v4()));
-    let state = root.join("state");
-    std::fs::create_dir_all(&state).expect("create supervisor state");
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
-        .expect("private fixture root");
-    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
-        .expect("private fixture state");
+    let (state, lock_directory) = supervisor_fixture(&root);
 
     let executable = root.join("fake-traefik");
-    std::fs::write(&executable, b"#!/bin/sh\nexec /bin/sleep 60\n").expect("write fake Traefik");
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500))
-        .expect("private executable mode");
+    fake_traefik(&executable, b"#!/bin/sh\nexec /bin/sleep 60\n");
     let dynamic_path = state.join(DYNAMIC_CONFIG_FILENAME);
     let probe = generation_probe_server(dynamic_path, true);
     let supervisor = TraefikSupervisor::start(
-        generation_probe_settings(&root, &state, executable, probe.address),
+        generation_probe_settings(&root, &state, &lock_directory, executable, probe.address),
         std::sync::Arc::new(|_: String| {}),
     )
     .expect("start idle supervisor");
@@ -639,16 +654,15 @@ fn generation_probe_server(
 fn generation_probe_settings(
     root: &Path,
     state: &Path,
+    lock_directory: &Path,
     executable: PathBuf,
     address: SocketAddr,
 ) -> SupervisorSettings {
-    let acme_storage = state.join("acme.json");
-    std::fs::write(&acme_storage, b"{}").expect("write persistent ACME fixture");
-    std::fs::set_permissions(&acme_storage, std::fs::Permissions::from_mode(0o600))
-        .expect("private ACME mode");
+    let acme_storage = acme_fixture(state);
     SupervisorSettings {
         executable,
         static_config_path: root.join("static.toml"),
+        lock_directory: lock_directory.to_owned(),
         dynamic_config_path: state.join(DYNAMIC_CONFIG_FILENAME),
         static_config: StaticConfig {
             mesh_address: "10.77.0.1".parse().expect("mesh address"),
@@ -679,21 +693,11 @@ fn generation_probe_settings(
 #[test]
 fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state() {
     let root = std::env::temp_dir().join(format!("proxy-supervisor-{}", uuid::Uuid::new_v4()));
-    let state = root.join("state");
-    std::fs::create_dir_all(&state).expect("create supervisor state");
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
-        .expect("private fixture root");
-    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
-        .expect("private fixture state");
+    let (state, lock_directory) = supervisor_fixture(&root);
 
     let executable = root.join("fake-traefik");
-    std::fs::write(&executable, b"#!/bin/sh\nexec /bin/sleep 60\n").expect("write fake Traefik");
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500))
-        .expect("private executable mode");
-    let acme_storage = state.join("acme.json");
-    std::fs::write(&acme_storage, b"{}").expect("write persistent ACME fixture");
-    std::fs::set_permissions(&acme_storage, std::fs::Permissions::from_mode(0o600))
-        .expect("private ACME mode");
+    fake_traefik(&executable, b"#!/bin/sh\nexec /bin/sleep 60\n");
+    let acme_storage = acme_fixture(&state);
 
     let response: &'static [u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
     let (health_address, health_server) = health_server_sequence(vec![response; 4]);
@@ -701,6 +705,7 @@ fn owned_supervisor_starts_on_first_exposure_drains_routes_and_keeps_acme_state(
     let settings = SupervisorSettings {
         executable,
         static_config_path: root.join("static.toml"),
+        lock_directory: lock_directory.clone(),
         dynamic_config_path: state.join(DYNAMIC_CONFIG_FILENAME),
         static_config: StaticConfig {
             mesh_address: "10.77.0.1".parse().expect("mesh address"),

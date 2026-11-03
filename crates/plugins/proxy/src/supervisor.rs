@@ -949,6 +949,8 @@ pub struct SupervisorSettings {
     pub executable: PathBuf,
     /// Private rendered static configuration destination.
     pub static_config_path: PathBuf,
+    /// Agent-only (0700) directory holding the process-owner lock; never readable by the child.
+    pub lock_directory: PathBuf,
     /// Private watched dynamic configuration destination.
     pub dynamic_config_path: PathBuf,
     /// Current static listeners, DNS resolver and private ping configuration.
@@ -992,7 +994,7 @@ impl TraefikSupervisor {
                 "proxy supervisor health endpoint is outside policy",
             ));
         }
-        let lock = acquire_supervisor_lock(&settings.static_config_path)?;
+        let lock = acquire_supervisor_lock(&settings.lock_directory)?;
         let (sender, receiver) = mpsc::sync_channel(4);
         let worker = thread::Builder::new()
             .name("proxy-supervisor".to_owned())
@@ -1347,10 +1349,7 @@ fn stop_child(child: &mut Option<TraefikChild>) -> io::Result<()> {
     Ok(())
 }
 
-fn acquire_supervisor_lock(static_config_path: &Path) -> io::Result<Flock<File>> {
-    let directory = static_config_path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "missing proxy state directory")
-    })?;
+fn acquire_supervisor_lock(directory: &Path) -> io::Result<Flock<File>> {
     let directory_metadata = fs::symlink_metadata(directory)?;
     if !directory_metadata.file_type().is_dir()
         || directory_metadata.uid() != nix::unistd::Uid::effective().as_raw()

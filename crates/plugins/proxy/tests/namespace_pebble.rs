@@ -159,6 +159,7 @@ fn run_namespace_case() {
         SupervisorSettings {
             executable,
             static_config_path: root.join("traefik.toml"),
+            lock_directory: root.clone(),
             dynamic_config_path: state.join(DYNAMIC_CONFIG_FILENAME),
             static_config: StaticConfig {
                 mesh_address,
