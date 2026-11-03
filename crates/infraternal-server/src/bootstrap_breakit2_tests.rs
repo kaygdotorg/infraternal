@@ -1060,6 +1060,24 @@ impl Backend for ObservedBackend {
             self.0.invitation_registered(a, t, c, lookup, register),
         ))
     }
+    // Since D291 a fresh install's invitation is bound to the key that
+    // join-key preparation proved; without this the replay saw the trait
+    // default ("SSH host-key proof is unavailable").
+    fn invitation_registered_with_key<'a>(
+        &'a self,
+        a: &'a Authority,
+        t: &'a Target,
+        c: &'a Check,
+        lookup: Option<String>,
+        binding: PreparedHostKey,
+        register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
+    ) -> Operation<'a, JoinMaterial> {
+        Box::pin(measured(
+            "invitation",
+            self.0
+                .invitation_registered_with_key(a, t, c, lookup, binding, register),
+        ))
+    }
     fn resolve<'a>(
         &'a self,
         a: &'a Authority,
@@ -1447,6 +1465,14 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                     .iter()
                     .find_map(|event| event.leftovers.as_deref().map(|leftovers| leftovers.challenge))
             {
+                // Record the confirmation exactly as the person reads it.
+                if let Some(event) = events.iter().find(|event| event.leftovers.is_some()) {
+                    let failure = serde_json::to_value(&event.failure).unwrap();
+                    println!(
+                        "CONFIRMATION breakit2 message={} setup_lock={}",
+                        failure["message"], failure["setup_lock"]
+                    );
+                }
                 runner.start_fresh(&batch, "owner", "live", challenge).unwrap();
                 replacement_started = true;
                 println!("REPLACEMENT breakit2 action=start_fresh accepted=true");
