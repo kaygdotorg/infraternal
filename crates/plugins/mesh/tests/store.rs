@@ -260,7 +260,10 @@ async fn scale_preview_pages_do_not_allocate_the_pair_matrix() {
         "METRIC mesh_preview nodes=1000 pairs=998001 first_two_pages_us={} bytes={} load={}",
         started.elapsed().as_micros(),
         serde_json::to_vec(&page).unwrap().len(),
-        std::fs::read_to_string("/proc/loadavg").unwrap().trim()
+        // Context for the metric only; macOS has no /proc (#320).
+        std::fs::read_to_string("/proc/loadavg")
+            .unwrap_or_else(|_| "unavailable".to_owned())
+            .trim()
     );
 }
 
