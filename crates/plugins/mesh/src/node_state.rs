@@ -1,4 +1,8 @@
-//! Persists accepted public node intent and write-ahead peer-route ownership; kernel memory retains private keys [166,198].
+//! Persists accepted public node intent and write-ahead peer-route ownership [166,198]. Under
+//! kernel `WireGuard` the private key lives only in kernel memory; the `GotaTun` engine keeps it in
+//! one private 0600 file, which down and retirement remove (#260). That key never leaves its
+//! node (D163), so backups (D147: database, CA key, configuration) must never include this
+//! directory's `mesh-private-key`.
 use crate::dataplane::Config;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -58,6 +62,7 @@ impl Store {
         let interface_path = parent.join("mesh-interface.json");
         let engine_path = parent.join("mesh-engine.json");
         let key_path = parent.join("mesh-private-key");
+        sweep_private_temporaries(&key_path)?;
         let state = read_public(&path)?.unwrap_or_default();
         let routes: BTreeSet<IpAddr> = read_public(&route_path)?.unwrap_or_default();
         let route_body = serde_json::to_vec(&routes).map_err(io::Error::other)?;
@@ -309,6 +314,46 @@ fn write_private(path: &Path, key: &[u8]) -> io::Result<()> {
     result
 }
 
+/// Remove the `<key>.<pid>.new` files that a stop between `create_new` and the cleanup in
+/// `write_private` leaves behind. Each holds a copy of the key, and nothing else ever removes
+/// one (#260 J143 P3-3). This holds the directory lock that `write_private_key` holds, so it
+/// never removes a live writer's file.
+fn sweep_private_temporaries(key_path: &Path) -> io::Result<()> {
+    let parent = key_path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let prefix = format!(
+        "{}.",
+        key_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(io::ErrorKind::InvalidInput)?
+    );
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+        .open(parent)?;
+    let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+        .map_err(|(_, error)| error)?;
+    let mut removed = false;
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let is_temporary = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(prefix.as_str()))
+            .and_then(|rest| rest.strip_suffix(".new"))
+            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()));
+        // The entry's own type: a symlink with this name is not followed, and not ours.
+        if is_temporary && entry.file_type()?.is_file() {
+            fs::remove_file(entry.path())?;
+            removed = true;
+        }
+    }
+    if removed {
+        FileSync::parent(key_path)?;
+    }
+    Ok(())
+}
+
 struct FileSync;
 impl FileSync {
     fn parent(path: &Path) -> io::Result<()> {
@@ -317,7 +362,7 @@ impl FileSync {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! Provides isolated filesystem state for node persistence tests.
     #![allow(clippy::expect_used)]
     use super::*;
@@ -329,9 +374,9 @@ mod tests {
     // Tests run concurrently; this counter keeps their temporary paths distinct.
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
-    pub(super) struct Directory(pub(super) PathBuf);
+    pub(crate) struct Directory(pub(crate) PathBuf);
     impl Directory {
-        pub(super) fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let nonce = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("test clock")
@@ -372,6 +417,44 @@ mod tests {
         assert_eq!(
             fs::metadata(&store.path).expect("mode").mode() & 0o777,
             0o600
+        );
+    }
+
+    /// A stop inside `write_private` leaves `mesh-private-key.<pid>.new` holding the key. Opening
+    /// the store removes it and nothing else (#260 J143 P3-3).
+    #[test]
+    fn open_sweeps_stray_private_key_temporaries_only() {
+        let directory = Directory::new();
+        let stray = directory.0.join("mesh-private-key.4242.new");
+        fs::write(&stray, [7_u8; 32]).expect("stray key copy");
+        let kept = [
+            "mesh-private-key.new",
+            "mesh-private-key.x1.new",
+            "mesh-public.4242.new",
+        ];
+        for name in kept {
+            fs::write(directory.0.join(name), b"x").expect("unrelated file");
+        }
+        symlink(&stray, directory.0.join("mesh-private-key.99.new")).expect("symlink");
+        let (store, _) = Store::open(&directory.0).expect("open");
+        assert!(!stray.exists(), "the stray key copy is removed");
+        for name in kept {
+            assert!(directory.0.join(name).exists(), "{name} stays");
+        }
+        assert!(
+            fs::symlink_metadata(directory.0.join("mesh-private-key.99.new")).is_ok(),
+            "a symlink is never followed or removed"
+        );
+        store.write_private_key(&[9; 32]).expect("key");
+        drop(Store::open(&directory.0).expect("reopen"));
+        assert_eq!(
+            store
+                .read_private_key()
+                .expect("read")
+                .expect("key")
+                .as_slice(),
+            &[9; 32],
+            "the key itself is never swept"
         );
     }
 

@@ -295,7 +295,7 @@ impl Node {
     /// # Errors
     /// Reports unsafe state or a failed kernel or packet-filter query.
     pub fn plan_retirement(path: &std::path::Path) -> io::Result<Retirement> {
-        let (recorded, backend, saved_engine, private_public) =
+        let (recorded, backend, saved_engine, private_public, store) =
             match crate::node_state::Store::open(path) {
                 Ok((store, state)) => {
                     let recorded = store
@@ -312,9 +312,12 @@ impl Node {
                         state.backend,
                         store.recorded_engine()?,
                         private_public,
+                        Some(store),
                     )
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => (None, None, None, None),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    (None, None, None, None, None)
+                }
                 Err(error) => return Err(error),
             };
         let mut left = Vec::new();
@@ -380,6 +383,7 @@ impl Node {
             interface_index,
             filter,
             left,
+            store,
         })
     }
     /// Remove the kernel objects this installation created, without a running node.
@@ -1366,6 +1370,8 @@ pub struct Retirement {
     interface_index: Option<u32>,
     filter: Option<Firewall>,
     left: Vec<&'static str>,
+    /// This installation's state; its `GotaTun` private key file goes last.
+    store: Option<crate::node_state::Store>,
 }
 impl Retirement {
     /// Objects with our name that this installation did not create; they stay.
@@ -1383,6 +1389,12 @@ impl Retirement {
         if let Some(mut filter) = self.filter {
             filter.remove()?;
         }
+        // The key is this installation's own state, whoever holds the interface now. Removing it
+        // here, after the engine is gone, does not rely on uninstall deleting the directory
+        // (#260 J143 P3-3).
+        if let Some(store) = &self.store {
+            store.remove_private_key()?;
+        }
         Ok(self.left)
     }
 }
@@ -1390,6 +1402,25 @@ impl Retirement {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+    /// Retirement removes the `GotaTun` private key file itself (#260 J143 P3-3).
+    #[test]
+    fn retirement_removes_the_private_key_file() {
+        let directory = crate::node_state::tests::Directory::new();
+        let (store, _) = crate::node_state::Store::open(&directory.0).expect("store");
+        store.write_private_key(&[5; 32]).expect("key");
+        let key = directory.0.join("mesh-private-key");
+        assert!(key.exists());
+        let retirement = Retirement {
+            interface: false,
+            interface_index: None,
+            filter: None,
+            left: Vec::new(),
+            store: Some(store),
+        };
+        assert_eq!(retirement.execute().expect("retire"), Vec::<&str>::new());
+        assert!(!key.exists(), "retirement leaves no private key behind");
+    }
+
     #[test]
     fn server_identity_cannot_change_inside_a_staged_snapshot() {
         use crate::policy::model::{Addresses, NodeId, PublicKey};
