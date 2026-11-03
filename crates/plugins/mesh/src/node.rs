@@ -268,9 +268,8 @@ impl Node {
         &mut self,
         proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
     ) -> io::Result<()> {
-        if self.proxy_ingress == proxy_ingress {
-            return Ok(());
-        }
+        // An unchanged snapshot still reaches the firewall: Traefik has just confirmed it, and
+        // any source that lost a route since the last confirmation must lose its open flows.
         if self.active()
             && let Some(config) = self.config.as_ref()
         {

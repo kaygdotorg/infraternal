@@ -84,6 +84,10 @@ fn peer(id: u8, inbound: TrafficPolicy) -> (NodeId, PeerPolicy) {
 }
 
 fn configuration(granted_ports: &[u16]) -> Config {
+    configuration_with(&[(3, granted_ports)])
+}
+
+fn configuration_with(grants: &[(u8, &[u16])]) -> Config {
     Config {
         local_key: None,
         server: None,
@@ -96,7 +100,9 @@ fn configuration(granted_ports: &[u16]) -> Config {
         default_policy: DefaultPolicy::Deny,
         exposure: None,
         // Peer .2 is granted only an unpublished port; peer .3 holds the published backend grant.
-        peers: BTreeMap::from([peer(2, tcp(&[3000])), peer(3, tcp(granted_ports))]),
+        peers: std::iter::once(peer(2, tcp(&[3000])))
+            .chain(grants.iter().map(|(id, ports)| peer(*id, tcp(ports))))
+            .collect::<BTreeMap<_, _>>(),
     }
 }
 
@@ -146,8 +152,10 @@ impl Drop for Client {
     }
 }
 
-fn check(mut firewall: Firewall) {
-    let mut namespace = Command::new("unshare")
+// One peer namespace with addresses .2 to .4 behind a veth named like the Mesh interface,
+// and an echo listener on the selected HTTPS port.
+fn namespace_with_listener() -> (Child, u16) {
+    let namespace = Command::new("unshare")
         .args(["-n", "sleep", "120"])
         .spawn()
         .unwrap();
@@ -179,7 +187,7 @@ fn check(mut firewall: Firewall) {
     );
     command("ip", &["link", "set", "infraternal0", "up"]);
     inside(&["ip", "link", "set", "lo", "up"]);
-    for address in ["10.254.0.2/24", "10.254.0.3/24"] {
+    for address in ["10.254.0.2/24", "10.254.0.3/24", "10.254.0.4/24"] {
         inside(&["ip", "addr", "add", address, "dev", "proxypeer"]);
     }
     inside(&["ip", "link", "set", "proxypeer", "up"]);
@@ -199,6 +207,20 @@ fn check(mut firewall: Firewall) {
             });
         }
     });
+    (namespace, pair.https)
+}
+
+fn teardown(mut firewall: Firewall, mut namespace: Child) {
+    firewall.remove().unwrap();
+    command("ip", &["link", "delete", "infraternal0"]);
+    let _ = namespace.kill();
+    let _ = namespace.wait();
+}
+
+fn check(mut firewall: Firewall) {
+    let (namespace, https) = namespace_with_listener();
+    let pair = MIXED_LISTENER_PAIRS[1];
+    assert_eq!(pair.https, https);
     let ingress = MeshProxyIngress {
         listener_pair: Some(pair),
         backend_ports: BTreeSet::from([8080]),
@@ -220,10 +242,7 @@ fn check(mut firewall: Firewall) {
 
     drop(granted);
     drop(ungranted);
-    firewall.remove().unwrap();
-    command("ip", &["link", "delete", "infraternal0"]);
-    let _ = namespace.kill();
-    let _ = namespace.wait();
+    teardown(firewall, namespace);
     assert_eq!(
         connected, "connected",
         "a port-granted peer reaches the pair"
@@ -253,4 +272,79 @@ fn nft_admits_a_port_granted_peer_to_the_proxy_listener_for_the_whole_flow() {
 #[ignore = "Run alone inside unshare -Urn with a disposable network namespace."]
 fn nf_tables_admits_a_port_granted_peer_to_the_proxy_listener_for_the_whole_flow() {
     check(Firewall::nf_tables());
+}
+
+// A source that loses any proxied route loses its open flows to the pair, because Traefik keeps
+// upgraded connections across a route reload. An unaffected source keeps its flow.
+fn revocation(mut firewall: Firewall) {
+    let (namespace, https) = namespace_with_listener();
+    let pair = MIXED_LISTENER_PAIRS[1];
+    let ingress = |ports: &[u16]| MeshProxyIngress {
+        listener_pair: Some(pair),
+        backend_ports: ports.iter().copied().collect(),
+        ..MeshProxyIngress::default()
+    };
+    let both: &[u16] = &[8080, 9090];
+    let one: &[u16] = &[8080];
+    let config = configuration_with(&[(3, both), (4, one)]);
+    firewall.apply(&config).unwrap();
+    firewall
+        .apply_proxy_ingress(&config, &ingress(both))
+        .unwrap();
+    let mut narrowed_peer = Client::connect(namespace.id(), "10.254.0.3", https);
+    let mut other_peer = Client::connect(namespace.id(), "10.254.0.4", https);
+    let opened = [
+        narrowed_peer.line(),
+        other_peer.line(),
+        narrowed_peer.echo(),
+        other_peer.echo(),
+    ];
+
+    // The Mesh grant for route 9090 is revoked from .3; it keeps route 8080. The Mesh change
+    // installs first, then Traefik confirms the narrowed snapshot.
+    let narrowed = configuration_with(&[(3, one), (4, one)]);
+    firewall.apply(&narrowed).unwrap();
+    firewall
+        .apply_proxy_ingress(&narrowed, &ingress(both))
+        .unwrap();
+    let after_grant_revocation = [narrowed_peer.echo(), other_peer.echo()];
+    let mut reconnected = Client::connect(namespace.id(), "10.254.0.3", https);
+    let reconnect = [reconnected.line(), reconnected.echo()];
+
+    // Route 8080 is unpublished; both peers held it.
+    firewall
+        .apply_proxy_ingress(&narrowed, &ingress(&[9090]))
+        .unwrap();
+    let after_unpublish = [reconnected.echo(), other_peer.echo()];
+
+    drop((narrowed_peer, other_peer, reconnected));
+    teardown(firewall, namespace);
+    assert_eq!(opened, ["connected", "connected", "echo", "echo"]);
+    assert_eq!(
+        after_grant_revocation,
+        ["lost", "echo"],
+        "a revoked route ends that source's open flows and only that source's"
+    );
+    assert_eq!(
+        reconnect,
+        ["connected", "echo"],
+        "its remaining route still works"
+    );
+    assert_eq!(
+        after_unpublish,
+        ["lost", "lost"],
+        "an unpublished route ends every flow that could have used it"
+    );
+}
+
+#[test]
+#[ignore = "Run alone inside unshare -Urn with a disposable network namespace."]
+fn nft_revoking_a_route_ends_the_sources_open_proxied_flows() {
+    revocation(Firewall::default());
+}
+
+#[test]
+#[ignore = "Run alone inside unshare -Urn with a disposable network namespace."]
+fn nf_tables_revoking_a_route_ends_the_sources_open_proxied_flows() {
+    revocation(Firewall::nf_tables());
 }

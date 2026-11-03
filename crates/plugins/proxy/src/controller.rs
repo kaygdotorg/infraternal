@@ -436,15 +436,21 @@ impl ProxyController {
         let message = route.as_ref().map_or_else(
             || format!("Stopped publishing local port {port}."),
             |route| {
-                format!(
-                    "Stopped new connections to {}; existing connections may drain for up to 10 seconds.",
-                    https_url(
-                        &route.hostname,
-                        state
-                            .listener_ports
-                            .https_for_publication(route.public)
+                let url = https_url(
+                    &route.hostname,
+                    state
+                        .listener_ports
+                        .https_for_publication(route.public),
+                );
+                if route.public {
+                    format!(
+                        "Stopped publishing {url}. New connections are refused; connections already open, such as WebSockets, stay open until they close."
                     )
-                )
+                } else {
+                    format!(
+                        "Stopped publishing {url}. New connections are refused, and open connections from Mesh peers are closed."
+                    )
+                }
             },
         );
         serde_json::to_vec(&json!({
@@ -462,17 +468,17 @@ impl ProxyController {
         {
             let mut closed = state.mesh_proxy_ingress.clone();
             closed.public_route_active = false;
-            Self::apply_mesh_ingress(state, closed)?;
+            Self::apply_mesh_ingress(state, closed, false)?;
         }
         if let Some(supervisor) = &state.supervisor {
             if let Some(ports) = supervisor.replace(services.clone())? {
                 state.listener_ports = ports;
             }
-            Self::update_mesh_ingress(state, &services, true)?;
+            Self::update_mesh_ingress(state, &services, true, true)?;
             return Ok(());
         }
         if services.is_empty() {
-            Self::update_mesh_ingress(state, &services, false)?;
+            Self::update_mesh_ingress(state, &services, false, false)?;
             return Ok(());
         }
         let factory = self.factory.as_ref().ok_or_else(|| {
@@ -490,14 +496,14 @@ impl ProxyController {
         let (supervisor, listener_ports) = factory.start(context)?;
         state.listener_ports = listener_ports;
         // Install the closed public-port gate before the first replace can spawn Traefik.
-        Self::update_mesh_ingress(state, &[], true)?;
+        Self::update_mesh_ingress(state, &[], true, false)?;
         services = refresh_routes(state)?;
         let listener_ports = supervisor.replace(services.clone())?;
         if let Some(ports) = listener_ports {
             state.listener_ports = ports;
         }
         state.supervisor = Some(supervisor);
-        Self::update_mesh_ingress(state, &services, true)?;
+        Self::update_mesh_ingress(state, &services, true, true)?;
         Ok(())
     }
 
@@ -505,6 +511,7 @@ impl ProxyController {
         state: &mut ControllerState,
         services: &[PublishedService],
         listeners_selected: bool,
+        confirmed: bool,
     ) -> io::Result<()> {
         let backend_ports = services
             .iter()
@@ -537,14 +544,17 @@ impl ProxyController {
             listener_pair,
             backend_ports,
         };
-        Self::apply_mesh_ingress(state, next)
+        Self::apply_mesh_ingress(state, next, confirmed)
     }
 
     fn apply_mesh_ingress(
         state: &mut ControllerState,
         next: infraternal_mesh::proxy_ports::MeshProxyIngress,
+        confirmed: bool,
     ) -> io::Result<()> {
-        if next == state.mesh_proxy_ingress {
+        // Report every snapshot Traefik confirmed, also an unchanged one: the Mesh firewall
+        // retires the open flows of sources that lost a route since its last confirmation.
+        if !confirmed && next == state.mesh_proxy_ingress {
             return Ok(());
         }
         if let Some(observer) = &state.mesh_ingress_observer {
@@ -1215,7 +1225,7 @@ mod tests {
 
         assert_eq!(
             *snapshot_counts.lock().expect("firewall updates"),
-            [(0, false), (1, false), (2, true), (2, false)],
+            [(0, false), (1, false), (2, true), (2, false), (3, false)],
             "close before startup, open after apply, and close before removing the last public route"
         );
     }
@@ -1411,7 +1421,8 @@ mod tests {
 
         assert!(value["message"].as_str().is_some_and(|message| {
             message.contains("https://port-3000.web01.ssh.kayg.org:10443")
-                && message.contains("10 seconds")
+                && message.contains("open connections from Mesh peers are closed")
+                && !message.contains("10 seconds")
         }));
         assert_eq!(value["data"]["port"], 3000);
         assert!(

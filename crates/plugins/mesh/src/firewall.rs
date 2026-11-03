@@ -47,6 +47,10 @@ pub struct Firewall {
     backend: Option<Backend>,
     accepted: Option<Config>,
     proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
+    // The configuration the proxy's routes were last confirmed against. Comparing with it,
+    // not with the last Mesh change, finds a lost route again after Traefik's reload, which
+    // closes the window in which a revoked peer could open a new connection [#281].
+    proxy_config: Option<Config>,
     previous_fence: bool,
 }
 impl Firewall {
@@ -160,14 +164,28 @@ impl Firewall {
     ///
     /// # Errors
     /// Returns a failed firewall transaction without claiming the new proxy ingress policy.
+    ///
+    /// Called after every confirmed route snapshot, also an unchanged one: a source that lost
+    /// a route since the last confirmation has its proxied flows retired here.
     pub fn apply_proxy_ingress(
         &mut self,
         config: &Config,
         proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
     ) -> io::Result<()> {
-        self.install(config, &[], false, config, proxy_ingress)?;
-        self.proxy_ingress = proxy_ingress.clone();
-        self.complete(config)
+        if self.proxy_ingress != *proxy_ingress || self.accepted.as_ref() != Some(config) {
+            self.install(config, &[], false, config, proxy_ingress)?;
+        }
+        let previous = std::mem::replace(&mut self.proxy_ingress, proxy_ingress.clone());
+        let reference = self.proxy_config.clone().or_else(|| self.accepted.clone());
+        crate::connection_state::retire(
+            self.accepted.as_ref(),
+            config,
+            reference.as_ref().map(|reference| (reference, &previous)),
+            &self.proxy_ingress,
+        )?;
+        self.accepted = Some(config.clone());
+        self.proxy_config = Some(config.clone());
+        Ok(())
     }
     // The node persists public intent between installation and irreversible retirement.
     pub(crate) fn install_pending(&mut self, config: &Config) -> io::Result<()> {
@@ -175,7 +193,17 @@ impl Firewall {
         self.install(config, &[], false, config, &proxy_ingress)
     }
     pub(crate) fn complete(&mut self, config: &Config) -> io::Result<()> {
-        crate::connection_state::retire(self.accepted.as_ref(), config, &self.proxy_ingress)?;
+        let reference = self.proxy_config.as_ref().or(self.accepted.as_ref());
+        crate::connection_state::retire(
+            self.accepted.as_ref(),
+            config,
+            reference.map(|reference| (reference, &self.proxy_ingress)),
+            &self.proxy_ingress,
+        )?;
+        if crate::proxy_access::selected_ports(&self.proxy_ingress).is_none() {
+            // No proxied flow exists to protect; keep the reference current.
+            self.proxy_config = Some(config.clone());
+        }
         self.accepted = Some(config.clone());
         Ok(())
     }
@@ -305,6 +333,7 @@ impl Firewall {
             self.fallback_complete = false;
             self.previous = None;
             self.accepted = None;
+            self.proxy_config = None;
             self.proxy_ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
             self.previous_aliases.clear();
         }
