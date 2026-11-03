@@ -177,6 +177,12 @@ pub struct Auth {
 // any invalid/expired capability returns Denied; database failures return Storage.
 #[allow(clippy::missing_errors_doc)]
 impl Auth {
+    /// Let sibling server adapters share the pool used by auth transactions.
+    #[must_use]
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     /// Return the pinned public origin; HTTP proxy headers cannot override it.
     #[must_use]
     pub fn origin(&self) -> &str {

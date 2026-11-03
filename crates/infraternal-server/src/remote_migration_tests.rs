@@ -95,12 +95,15 @@ async fn remote_identity_and_sessions_upgrade_dev_v11_and_remain_idempotent() {
 #[tokio::test]
 async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_order() {
     let migrations = sqlx::migrate!("./migrations");
-    let expected: Vec<i64> = (1..=38).collect();
+    let expected: Vec<i64> = (1..=38).chain([43]).collect();
     let versions: Vec<i64> = migrations
         .iter()
         .map(|migration| migration.version)
         .collect();
-    assert_eq!(versions, expected, "fresh releases apply 0001 through 0038");
+    assert_eq!(
+        versions, expected,
+        "fresh releases retain allocated migrations and append audit at 0043"
+    );
 
     let production = SqlitePoolOptions::new()
         .max_connections(1)
@@ -130,7 +133,7 @@ async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_ord
             .fetch_one(&production)
             .await
             .unwrap();
-    assert_eq!((version, applied), (38, 38));
+    assert_eq!((version, applied), (43, 39));
     let mesh: (String, Option<String>, Option<String>) =
         sqlx::query_as("SELECT name, name_source, name_claim FROM mesh_nodes WHERE id=42")
             .fetch_one(&production)
@@ -263,7 +266,9 @@ async fn hostname_migration_upgrades_release6_copy_without_changing_canvas_or_ch
             .fetch_all(&production)
             .await
             .unwrap();
-    assert_eq!(after.len(), 38);
+    // 0039..=0042 are allocated to other slices; the API audit table is 0043 (#303).
+    assert_eq!(after.len(), 39);
+    assert_eq!(after[38].0, 43);
     assert_eq!(&after[..28], before.as_slice());
     assert_eq!(after[28].0, 29);
     assert_eq!(after[29].0, 30);

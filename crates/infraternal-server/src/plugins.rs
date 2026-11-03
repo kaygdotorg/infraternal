@@ -294,6 +294,17 @@ impl PluginRuntime {
     pub fn list(&self) -> Value {
         json!({"actions":CONTROL_ACTIONS,"plugins": self.inner.entries.iter().map(|entry| json!({"descriptor":({let mut descriptor=serde_json::to_value(entry.plugin.descriptor()).unwrap_or(Value::Null); descriptor["settings"]=entry.plugin.descriptor().settings.and_then(|schema| serde_json::from_str(schema.0).ok()).unwrap_or(Value::Null); descriptor}),"enabled":entry.enabled.load(Ordering::Acquire)})).collect::<Vec<_>>()})
     }
+    /// One declared server-plugin action, whether or not its plugin is on. Dispatch still
+    /// refuses disabled plugins with their own `unavailable` reply.
+    #[must_use]
+    pub(crate) fn action(&self, action_id: &str) -> Option<ActionDef> {
+        self.inner
+            .entries
+            .iter()
+            .flat_map(|entry| entry.plugin.descriptor().actions)
+            .find(|action| action.id == action_id)
+            .copied()
+    }
     /// Stop and join every worker before returning disabled. Enabling remains lazy.
     ///
     /// # Errors

@@ -446,6 +446,7 @@ async fn remote_router(
         Option<RemoteListeners>,
         Option<crate::remote_http::InvitationIssuer>,
         crate::enrollment::EnrollmentStore,
+        crate::remote_removal::Removal,
     ),
     ServerError,
 > {
@@ -517,11 +518,12 @@ async fn remote_router(
         ca_api,
         remote_api
             .unwrap_or_else(crate::remote_http::unavailable_router)
-            .merge(crate::remote_removal_http::router(auth, removal)),
+            .merge(crate::remote_removal_http::router(auth, removal.clone())),
         hosts,
         listeners,
         issuer,
         enrollment_store,
+        removal,
     ))
 }
 
@@ -625,7 +627,7 @@ async fn build_router_core(
         EmbeddedAgent::spawn(executable)
     };
     #[cfg(feature = "remote")]
-    let (ca_api, remote_api, hosts, listeners, issuer, enrollment_store) = remote_router(
+    let (ca_api, remote_api, hosts, listeners, issuer, enrollment_store, removal) = remote_router(
         auth.clone(),
         pool.clone(),
         enrollment,
@@ -675,6 +677,15 @@ async fn build_router_core(
     let ws_state = ws_state.with_remote_hosts(hosts.clone());
     #[cfg(feature = "remote")]
     enrollment_store.bind_plugins(&ws_state.plugins);
+    #[cfg(feature = "remote")]
+    let action_guard = crate::api_actions::ActionGuard::new(auth.clone(), pool.clone());
+    #[cfg(feature = "remote")]
+    let action_api = crate::api_actions::router(
+        pool.clone(),
+        removal.clone(),
+        ws_state.clone(),
+        action_guard.clone(),
+    );
     #[cfg(feature = "ssh")]
     bootstrap.session_notifications(ws_state.session_notifications());
     #[cfg(not(feature = "remote"))]
@@ -710,16 +721,21 @@ async fn build_router_core(
         .merge(websocket::router(ws_state))
         .merge(ca_api);
     #[cfg(feature = "remote")]
-    let app = app.merge(remote_api);
+    let app = app.merge(remote_api).merge(action_api);
     #[cfg(feature = "ssh")]
     let warmup = Some(bootstrap.clone());
     #[cfg(not(feature = "ssh"))]
     let warmup = None;
-    #[cfg(feature = "ssh")]
-    let app = app.merge(crate::bootstrap_api::router_with_ssh_key(
+    #[cfg(all(feature = "ssh", feature = "remote"))]
+    let app = app.merge(crate::bootstrap_api::router_with_ssh_key_and_action_guard(
         auth.clone(),
         bootstrap,
         ssh_key,
+        action_guard,
+    ));
+    #[cfg(all(feature = "ssh", not(feature = "remote")))]
+    let app = app.merge(crate::bootstrap_api::router_with_ssh_key(
+        &auth, bootstrap, ssh_key,
     ));
     let app = if let Some(web_root) = config.web_root {
         app.fallback_service(crate::web_assets::router(web_root))
@@ -911,14 +927,20 @@ fn logging_color(terminal: bool, no_color: Option<std::ffi::OsString>) -> bool {
 }
 
 async fn health(State(pool): State<SqlitePool>) -> Response {
-    match sqlx::query("SELECT 1").execute(&pool).await {
-        Ok(_) => Json(json!({"status":"ok"})).into_response(),
-        Err(_) => (
+    if server_healthy(&pool).await {
+        Json(json!({"status":"ok"})).into_response()
+    } else {
+        (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"status":"unavailable"})),
         )
-            .into_response(),
+            .into_response()
     }
+}
+
+/// Shared health predicate for `/healthz` and the signed API `server.status` action.
+pub(crate) async fn server_healthy(pool: &SqlitePool) -> bool {
+    sqlx::query("SELECT 1").execute(pool).await.is_ok()
 }
 
 /// Canonical client address from the listener and explicitly trusted proxy policy.
@@ -1273,6 +1295,110 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
+    #[cfg(feature = "remote")]
+    #[tokio::test]
+    async fn production_router_mounts_the_bearer_action_endpoint() {
+        let data_dir = temp_dir();
+        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(agent_socket),
+        )
+        .await
+        .expect("server router startup");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/actions/remote.host.list")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .expect("action request"),
+            )
+            .await
+            .expect("action response");
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
+    /// Host inventory is a server-side socket plugin, not an infraternal agent descriptor; the
+    /// bearer route must find it in the same runtime the browser socket dispatches to.
+    #[cfg(feature = "remote")]
+    #[tokio::test]
+    async fn live_read_key_reaches_the_server_plugin_host_inventory() {
+        let data_dir = temp_dir();
+        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(agent_socket),
+        )
+        .await
+        .expect("server router startup");
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("reopen real SQLite");
+        let token = "fixture-inventory-key-never-print";
+        let now = super::unix_seconds().expect("current time");
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES('owner','owner',1,'x')")
+            .execute(&pool)
+            .await
+            .expect("owner");
+        sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,'owner','fixture-cli','[\"hosts:read\"]',?,?,0)")
+            .bind(crate::auth::hash(token))
+            .bind(now)
+            .bind(now + 3600)
+            .execute(&pool)
+            .await
+            .expect("key");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/actions/remote.host.list")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from("{}"))
+                    .expect("action request"),
+            )
+            .await
+            .expect("action response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("inventory body");
+        let inventory: serde_json::Value = serde_json::from_slice(&body).expect("inventory json");
+        assert!(inventory["hosts"].is_array(), "{inventory}");
+        pool.close().await;
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
+    #[cfg(feature = "remote")]
+    #[tokio::test]
+    async fn production_router_mounts_the_owner_action_approval_routes() {
+        let data_dir = temp_dir();
+        let mut configuration = config(data_dir.clone());
+        configuration.public_origin = "https://auth.example.test".to_owned();
+        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (app, _) =
+            router_with_agent(configuration, EmbeddedAgent::from_test_socket(agent_socket))
+                .await
+                .expect("server router startup");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/remote/hosts/remove/approval/inspect")
+                    .header("content-type", "application/json")
+                    .header("origin", "https://auth.example.test")
+                    .body(Body::from(r#"{"code":"AbCdEfGhIjKlMnOp"}"#))
+                    .expect("approval inspection request"),
+            )
+            .await
+            .expect("approval inspection response");
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
         std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
     }
 

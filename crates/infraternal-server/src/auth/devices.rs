@@ -12,7 +12,13 @@ impl Auth {
             || scopes.iter().any(|s| {
                 !matches!(
                     s.as_str(),
-                    "hosts:read" | "terminal:connect" | "actions:dry-run"
+                    "hosts:read"
+                        | "hosts:write"
+                        | "sessions:read"
+                        | "sessions:write"
+                        | "status:read"
+                        | "terminal:connect"
+                        | "actions:dry-run"
                 )
             })
         {
@@ -102,17 +108,66 @@ impl Auth {
     /// Validate a CLI/MCP key for one explicit scope; no browser session or fresh-tap privilege.
     pub async fn api_authorize(&self, token: &str, scope: &str) -> Result<String> {
         let token_hash = hash(token);
+        self.api_authorize_key_hash(&token_hash, scope).await
+    }
+
+    /// Validate a previously hashed key for one action without recovering its bearer value.
+    /// Sliding expiry, policy clamping and dead-key tombstones still go through the J90 transaction.
+    pub(crate) async fn api_authorize_key_hash(
+        &self,
+        token_hash: &str,
+        scope: &str,
+    ) -> Result<String> {
+        let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool).await?;
+        let user = self
+            .api_authorize_key_hash_tx(&mut tx, token_hash, scope, None)
+            .await?;
+        // Expiry tombstones and the persisted clock commit on a denied call too.
+        tx.commit().await?;
+        user.ok_or(Error::Denied)
+    }
+
+    /// Return nonsecret owner and device context for one authenticated action.
+    pub(crate) async fn api_authorize_context(
+        &self,
+        token: &str,
+        scope: &str,
+    ) -> Result<(String, String)> {
+        // Keep API adapters on the public authorizer so J90 sliding expiry,
+        // policy clamping and revocation stay one implementation.
+        let user = self.api_authorize(token, scope).await?;
+        let token_hash = hash(token);
+        let device: Option<String> = sqlx::query_scalar(
+            "SELECT device FROM api_keys WHERE token_hash=? AND user_id=? AND dead=0",
+        )
+        .bind(&token_hash)
+        .bind(&user)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok((user, device.ok_or(Error::Denied)?))
+    }
+
+    /// Recheck a key by its one-way id inside an existing writer transaction.
+    /// The caller commits even when this returns `None`, preserving expiry tombstones.
+    pub(crate) async fn api_authorize_key_hash_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        token_hash: &str,
+        scope: &str,
+        wall_time: Option<i64>,
+    ) -> Result<Option<String>> {
         // Serialize expiry, policy clamping, renewal and revocation. A dead row
         // remains dead even if the owner subsequently lengthens the policy.
-        let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool).await?;
         let row = sqlx::query("SELECT user_id,scopes,renewed_at,expires_at,dead,api_key_lifetime_days FROM api_keys CROSS JOIN server_settings WHERE server_settings.id=1 AND token_hash=?")
-            .bind(&token_hash).fetch_optional(&mut *tx).await?;
-        // Sample only after acquiring the writer and reading the key: pool or
-        // lock waits must not carry a pre-expiry timestamp into renewal.
-        let now = api_key_time(&mut tx, super::http::current_time(self)?).await?;
+            .bind(token_hash).fetch_optional(&mut **tx).await?;
+        // Sample only after the caller acquired the writer and the key was read.
+        let wall_time = match wall_time {
+            Some(time) => time,
+            None => super::http::current_time(self)?,
+        };
+        let now = api_key_time(tx, wall_time).await?;
         let Some(row) = row else {
-            tx.commit().await?;
-            return Err(Error::Denied);
+            return Ok(None);
         };
         let renewed_at: i64 = row.get("renewed_at");
         let stored_expiry: i64 = row.get("expires_at");
@@ -121,12 +176,10 @@ impl Auth {
         if row.get::<bool, _>("dead") || deadline <= now {
             sqlx::query("UPDATE api_keys SET dead=1,expires_at=? WHERE token_hash=? AND dead=0")
                 .bind(deadline)
-                .bind(&token_hash)
-                .execute(&mut *tx)
+                .bind(token_hash)
+                .execute(&mut **tx)
                 .await?;
-            // Denial must commit the tombstone, rather than roll it back.
-            tx.commit().await?;
-            return Err(Error::Denied);
+            return Ok(None);
         }
         let scopes: Vec<String> = serde_json::from_str(row.get("scopes"))?;
         let allowed = scopes.iter().any(|s| s == scope);
@@ -136,29 +189,26 @@ impl Auth {
             )
             .bind(now)
             .bind(now + lifetime)
-            .bind(&token_hash)
-            .execute(&mut *tx)
+            .bind(token_hash)
+            .execute(&mut **tx)
             .await?;
         } else if deadline < stored_expiry {
             // A shorter policy is permanent for this key until a valid renewal.
             sqlx::query("UPDATE api_keys SET expires_at=? WHERE token_hash=? AND dead=0")
                 .bind(deadline)
-                .bind(&token_hash)
-                .execute(&mut *tx)
+                .bind(token_hash)
+                .execute(&mut **tx)
                 .await?;
         }
-        tx.commit().await?;
-        if !allowed {
-            return Err(Error::Denied);
-        }
-        Ok(row.get("user_id"))
+        Ok(allowed.then(|| row.get("user_id")))
     }
 
     /// Revoke an API key belonging to this user after a fresh tap.
+    /// Retaining its one-way id lets denied actions keep accurate audit attribution.
     pub async fn api_revoke(&self, session_token: &str, key_hash: &str, now: i64) -> Result<()> {
         let session = self.session(session_token, now).await?;
         session.require_fresh(now)?;
-        sqlx::query("DELETE FROM api_keys WHERE token_hash=? AND user_id=?")
+        sqlx::query("UPDATE api_keys SET dead=1 WHERE token_hash=? AND user_id=?")
             .bind(key_hash)
             .bind(session.user_id)
             .execute(&self.pool)
@@ -169,10 +219,11 @@ impl Auth {
     /// List revocable API key identifiers without returning any bearer secret.
     pub async fn api_list(&self, token: &str, now: i64) -> Result<Value> {
         let session = self.session(token, now).await?;
-        let rows = sqlx::query("SELECT token_hash,device,scopes FROM api_keys WHERE user_id=?")
-            .bind(session.user_id)
-            .fetch_all(&self.pool)
-            .await?;
+        let rows =
+            sqlx::query("SELECT token_hash,device,scopes FROM api_keys WHERE user_id=? AND dead=0")
+                .bind(session.user_id)
+                .fetch_all(&self.pool)
+                .await?;
         let keys: Vec<Value> = rows.iter().map(|r| Ok(json!({"id":r.get::<String,_>("token_hash"),"device":r.get::<String,_>("device"),"scopes":serde_json::from_str::<Value>(r.get("scopes"))?}))).collect::<Result<_>>()?;
         Ok(json!(keys))
     }

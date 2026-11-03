@@ -84,12 +84,7 @@ impl Drop for Unpublished<'_> {
 impl RemoteBackend {
     async fn authorize(&self, authority: &Authority) -> Result<(), Failure> {
         let auth = self.base.auth.as_ref().ok_or_else(unavailable)?;
-        let cookie = cookie(authority)?;
-        if auth
-            .bootstrap_owner(cookie, unix_now()?)
-            .await
-            .is_ok_and(|owner| owner == authority.owner)
-        {
+        if super::authorize_authority(auth, authority).await {
             Ok(())
         } else {
             Err(Failure::unsupported(
@@ -105,6 +100,64 @@ impl RemoteBackend {
             .filter(|attempt| attempt.owner == authority.owner && attempt.batch == authority.batch)
             .map(|attempt| attempt.uid)
             .ok_or_else(unavailable)
+    }
+    async fn publish_terminal_session(
+        &self,
+        authority: &Authority,
+        host: Uuid,
+        session_id: Uuid,
+    ) -> Result<(), Failure> {
+        let pool = &self.issuer.store().0;
+        let changed = if let Some(key_hash) = authority.api_key_hash() {
+            let auth = self.base.auth.as_ref().ok_or_else(unavailable)?;
+            let mut tx = pool
+                .begin_with("BEGIN IMMEDIATE")
+                .await
+                .map_err(|_| unavailable())?;
+            let person = auth
+                .api_authorize_key_hash_tx(&mut tx, key_hash, "hosts:write", None)
+                .await
+                .map_err(|_| unavailable())?
+                .filter(|person| person == &authority.owner)
+                .ok_or_else(unavailable)?;
+            let changed = sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,remote_host_id) SELECT ?,?,unixepoch(),unixepoch(),? FROM users u WHERE u.id=? AND u.owner=1 AND EXISTS(SELECT 1 FROM remote_hosts h WHERE h.id=? AND h.owner_id=u.id AND h.revoked_at IS NULL) ON CONFLICT(id) DO NOTHING")
+                .bind(session_id.as_bytes().as_slice())
+                .bind(&person)
+                .bind(host.as_bytes().as_slice())
+                .bind(&person)
+                .bind(host.as_bytes().as_slice())
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| unavailable())?;
+            tx.commit().await.map_err(|_| unavailable())?;
+            changed
+        } else {
+            let cookie = cookie(authority)?;
+            sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,remote_host_id) SELECT ?,?,unixepoch(),unixepoch(),? FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch() AND EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL) ON CONFLICT(id) DO NOTHING")
+                .bind(session_id.as_bytes().as_slice())
+                .bind(&authority.owner)
+                .bind(host.as_bytes().as_slice())
+                .bind(crate::auth::hash(cookie))
+                .bind(&authority.owner)
+                .bind(host.as_bytes().as_slice())
+                .bind(&authority.owner)
+                .execute(pool)
+                .await
+                .map_err(|_| unavailable())?
+        };
+        if changed.rows_affected() != 1 {
+            let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM terminal_sessions WHERE id=? AND user_id=? AND remote_host_id=? AND closed_at IS NULL)")
+                .bind(session_id.as_bytes().as_slice())
+                .bind(&authority.owner)
+                .bind(host.as_bytes().as_slice())
+                .fetch_one(pool)
+                .await
+                .map_err(|_| unavailable())?;
+            if !owned {
+                return Err(unavailable());
+            }
+        }
+        Ok(())
     }
     async fn existing_host(
         &self,
@@ -343,20 +396,21 @@ impl RemoteBackend {
             // delivering its acknowledgement. Do not discard that journal.
             unpublished.published = true;
         }
-        let invitation = self
-            .issuer
-            .issue_bootstrap(
-                cookie(authority)?,
-                InvitationRequest {
-                    host_id: host,
-                    mode,
-                    execution_uid: uid,
-                    expected_key_digest: Some(expected_key_digest),
-                },
-                address,
-                lookup.as_deref(),
-            )
-            .await;
+        let request = InvitationRequest {
+            host_id: host,
+            mode,
+            execution_uid: uid,
+            expected_key_digest: Some(expected_key_digest),
+        };
+        let invitation = if let Some(key_hash) = authority.api_key_hash() {
+            self.issuer
+                .issue_bootstrap_api_key(key_hash, request, address, lookup.as_deref())
+                .await
+        } else {
+            self.issuer
+                .issue_bootstrap(cookie(authority)?, request, address, lookup.as_deref())
+                .await
+        };
         let Ok(mut invitation) = invitation else {
             return Err(Failure::install(
                 "The host invitation was refused. Unlock your session and try again.",
@@ -419,23 +473,22 @@ impl Backend for RemoteBackend {
                 .ok_or_else(|| {
                     Failure::install("The host's SSH-proved key is unavailable; retry add-host.")
                 })?;
-            let mut invitation = self
-                .issuer
-                .reissue(
-                    cookie(authority)?,
-                    InvitationRequest {
-                        host_id: host,
-                        mode: if uid == 0 {
-                            Mode::Rootful
-                        } else {
-                            Mode::Rootless
-                        },
-                        execution_uid: uid,
-                        expected_key_digest: Some(expected_key_digest),
-                    },
-                )
-                .await
-                .map_err(|_| unavailable())?;
+            let request = InvitationRequest {
+                host_id: host,
+                mode: if uid == 0 {
+                    Mode::Rootful
+                } else {
+                    Mode::Rootless
+                },
+                execution_uid: uid,
+                expected_key_digest: Some(expected_key_digest),
+            };
+            let mut invitation = if let Some(key_hash) = authority.api_key_hash() {
+                self.issuer.reissue_api_key(key_hash, request).await
+            } else {
+                self.issuer.reissue(cookie(authority)?, request).await
+            }
+            .map_err(|_| unavailable())?;
             let stdin = serde_json::to_vec(&invitation);
             invitation.token.zeroize();
             Ok(JoinMaterial {
@@ -497,17 +550,8 @@ impl Backend for RemoteBackend {
                 .map_err(|_| unavailable())?;
             // Insert only under the same live owner capability; browser attach
             // subsequently rechecks both this record and host ownership.
-            let changed = sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,remote_host_id) SELECT ?,?,unixepoch(),unixepoch(),? FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch() AND EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL) ON CONFLICT(id) DO NOTHING")
-                .bind(session_id.as_bytes().as_slice()).bind(&authority.owner).bind(host.as_bytes().as_slice())
-                .bind(crate::auth::hash(cookie(authority)?)).bind(&authority.owner).bind(host.as_bytes().as_slice()).bind(&authority.owner)
-                .execute(&self.issuer.store().0).await.map_err(|_| unavailable())?;
-            if changed.rows_affected() != 1 {
-                let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM terminal_sessions WHERE id=? AND user_id=? AND remote_host_id=? AND closed_at IS NULL)")
-                    .bind(session_id.as_bytes().as_slice()).bind(&authority.owner).bind(host.as_bytes().as_slice()).fetch_one(&self.issuer.store().0).await.map_err(|_| unavailable())?;
-                if !owned {
-                    return Err(unavailable());
-                }
-            }
+            self.publish_terminal_session(authority, host, session_id)
+                .await?;
             if let Ok(current) = self.sessions_changed.lock()
                 && let Some(current) = &*current
             {
@@ -740,15 +784,26 @@ impl Backend for RemoteBackend {
             // and terminal opens never clear a persisted revocation marker.
             let actor = self.actor(authority, host).await?;
             if let Ok(person) = Uuid::parse_str(&authority.owner) {
+                self.authorize(authority).await?;
                 restore_login_access(&actor, person).await?;
-                let account = crate::preferred_accounts::resolve(
-                    &self.issuer.store().0,
-                    &authority.owner,
-                    &crate::auth::hash(cookie(authority)?),
-                    Some(host),
-                )
-                .await
-                .map_err(|_| unavailable())?;
+                let account = if authority.api_key_hash().is_some() {
+                    crate::preferred_accounts::resolve_for_key(
+                        &self.issuer.store().0,
+                        &authority.owner,
+                        host,
+                    )
+                    .await
+                    .map_err(|_| unavailable())?
+                } else {
+                    crate::preferred_accounts::resolve(
+                        &self.issuer.store().0,
+                        &authority.owner,
+                        &crate::auth::hash(cookie(authority)?),
+                        Some(host),
+                    )
+                    .await
+                    .map_err(|_| unavailable())?
+                };
                 confirm_preferred_login(&actor, person, account).await?;
                 self.authorize(authority).await?;
             }

@@ -872,6 +872,49 @@ async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
 }
 
 #[tokio::test]
+async fn device_keys_accept_declared_action_scopes_without_broadening_to_unknown_scopes() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let scopes = [
+        "hosts:read",
+        "hosts:write",
+        "sessions:read",
+        "sessions:write",
+        "status:read",
+        "terminal:connect",
+        "actions:dry-run",
+    ];
+    let approval = f
+        .auth
+        .device_start(
+            "cli",
+            scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+            NOW,
+        )
+        .await
+        .expect("all declared narrow and existing scopes are valid");
+    let inspection = f
+        .auth
+        .device_inspect(&f.session, str_field(&approval, "user_code"), NOW)
+        .await
+        .expect("the signed-in owner can inspect the exact request");
+    assert_eq!(
+        inspection["scopes"],
+        json!(scopes),
+        "the browser must review the exact requested grants"
+    );
+    for scope in ["admin", "hosts:*", "*", "session:write"] {
+        assert!(
+            f.auth
+                .device_start("cli", vec![scope.to_owned()], NOW)
+                .await
+                .is_err(),
+            "unknown scope {scope:?} must not be issued"
+        );
+    }
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
     let _guard = SERIAL.lock().await;
@@ -3404,6 +3447,9 @@ mod verified_passkey_tests;
 #[path = "ca_administration_tests.rs"]
 mod ca_administration_tests;
 
+#[cfg(feature = "remote")]
+#[path = "api_actions_tests.rs"]
+mod api_actions_tests;
 #[cfg(feature = "remote")]
 #[path = "remote_removal_tests.rs"]
 mod remote_removal_tests;
