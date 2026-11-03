@@ -333,6 +333,9 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
         return Err(Failure::Permission);
     }
     invitation.wipe();
+    // Before enrollment creates `agent/`: its recursive create would otherwise
+    // make the shared base 0700 and the PATH link unusable (J134 P2-4).
+    prepare_system_layout(Path::new("/"), 0).map_err(|_| Failure::LocalState)?;
     println!("UP_STAGE=enrollment");
     let join_url = format!("{origin}/remote/join");
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -863,6 +866,8 @@ fn install_system_service(
     if nix::unistd::Uid::effective().as_raw() != expected_uid {
         return Err(permission_error());
     }
+    // Again here: it also repairs a base that an earlier run left at 0700.
+    prepare_system_layout(root, expected_uid)?;
     let binary =
         ensure_directory(root, "var/lib/infraternal/bin", expected_uid)?.join("infraternal");
     copy_executable(source, &binary, expected_uid)?;
@@ -878,6 +883,38 @@ fn install_system_service(
     run_systemctl(systemctl, &["daemon-reload"], None)?;
     run_systemctl(systemctl, &["enable", "--now", SERVICE_NAME], None)?;
     run_systemctl(systemctl, &["is-active", SERVICE_NAME], Some("active"))
+}
+
+/// Lay out `/var/lib/infraternal` so the invoking user can run the CLI
+/// through `/usr/local/bin/infraternal` while the state stays private
+/// (#263, J134 P2-4):
+///
+/// - `var/lib/infraternal` is 0711: anyone may pass through it, no one but
+///   root may list it. D17 keeps the binary out of `/usr`, so its directory
+///   has to be traversable. The SSH installer and uninstaller accept 0711 for
+///   the same base.
+/// - `bin/` is 0755 and holds only the released binary.
+/// - `agent/` is 0700, and everything enrollment writes in it is 0600.
+///
+/// The modes are set explicitly, because the umask sudo hands the helper can
+/// be 077. An existing base is narrowed or widened to exactly these modes,
+/// after the same ownership and no-group-write checks as every other
+/// installed path.
+fn prepare_system_layout(root: &Path, owner: u32) -> io::Result<()> {
+    let bin = ensure_directory(root, "var/lib/infraternal/bin", owner)?;
+    let base = bin.parent().ok_or_else(permission_error)?;
+    fs::set_permissions(base, fs::Permissions::from_mode(0o711))?;
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755))?;
+    let agent = base.join("agent");
+    match fs::symlink_metadata(&agent) {
+        Ok(metadata) => check_directory(&metadata, owner)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::DirBuilder::new().mode(0o700).create(&agent)?;
+            check_directory(&fs::symlink_metadata(&agent)?, owner)?;
+        }
+        Err(error) => return Err(error),
+    }
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o700))
 }
 
 fn ensure_directory(root: &Path, relative: &str, owner: u32) -> io::Result<PathBuf> {
@@ -1372,6 +1409,42 @@ mod tests {
             fs::read_to_string(calls).unwrap(),
             "daemon-reload\nenable --now infraternal-agent.service\nis-active infraternal-agent.service\n"
         );
+    }
+
+    #[test]
+    fn the_path_command_is_reachable_by_other_users_while_state_stays_private() {
+        // J134 P2-4: enrollment's recursive create made the base 0700.
+        let temporary = TemporaryDirectory::new();
+        let source = temporary.0.join("running-infraternal");
+        let systemctl = temporary.0.join("systemctl");
+        fs::write(&source, b"binary").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+            &systemctl,
+            "#!/bin/sh\n[ \"$1\" != is-active ] || echo active\n",
+        )
+        .unwrap();
+        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+        let base = temporary.0.join("var/lib/infraternal");
+        fs::create_dir_all(temporary.0.join("var/lib")).unwrap();
+        std::os::unix::fs::DirBuilderExt::mode(fs::DirBuilder::new().recursive(true), 0o700)
+            .create(base.join("agent"))
+            .unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+
+        install_system_service(
+            &temporary.0,
+            &source,
+            &systemctl,
+            nix::unistd::geteuid().as_raw(),
+        )
+        .unwrap();
+
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(&base), 0o711, "others must pass through, not list");
+        assert_eq!(mode(&base.join("bin")), 0o755);
+        assert_eq!(mode(&base.join("bin/infraternal")), 0o755);
+        assert_eq!(mode(&base.join("agent")), 0o700, "state stays private");
     }
 
     #[test]

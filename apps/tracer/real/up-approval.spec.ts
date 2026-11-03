@@ -287,12 +287,21 @@ async function enrolOwner(target: Page): Promise<void> {
   await expect(target.getByRole("application", { name: "Remote terminal" })).toBeVisible({ timeout: 15_000 });
 }
 
+/**
+ * The namespace's `ip rule` edits reach Chromium as network changes. A navigation can then fail with
+ * ERR_NETWORK_CHANGED, or, when run as real root, be cut short by the error page of an earlier attempt committing late.
+ */
 async function gotoWithNetworkRetry(target: Page, url: string): Promise<void> {
-  try {
-    await target.goto(url);
-  } catch (error) {
-    if (!(error instanceof Error) || !error.message.includes("net::ERR_NETWORK_CHANGED")) throw error;
-    await target.goto(url);
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await target.goto(url);
+      return;
+    } catch (error) {
+      const transient = error instanceof Error
+        && (error.message.includes("net::ERR_NETWORK_CHANGED") || error.message.includes("chrome-error://chromewebdata/"));
+      if (!transient || attempt === 3) throw error;
+      await target.waitForTimeout(250);
+    }
   }
 }
 

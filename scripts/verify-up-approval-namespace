@@ -19,6 +19,21 @@ if [[ "$actual_dist" != "$expected_dist" ]]; then
     exit 1
 fi
 
+# The non-root CLI check (J134 P2-4) needs a second uid, which an
+# unprivileged user namespace cannot map (one uid only, no newuidmap). Run
+# this script as real root for the full proof; an unprivileged run must say
+# UP_E2E_SKIP_NONROOT=1 and then reports the check as skipped.
+if [[ "$(id -u)" == 0 ]]; then
+    namespace_user=()
+    nonroot_check=1
+elif [[ "${UP_E2E_SKIP_NONROOT:-}" == 1 ]]; then
+    namespace_user=(--user --map-root-user)
+    nonroot_check=0
+else
+    printf 'run as root for the non-root CLI check, or set UP_E2E_SKIP_NONROOT=1\n' >&2
+    exit 1
+fi
+
 repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 control="$(mktemp -d /tmp/up.XXXXXX)"
 chmod 700 "$control"
@@ -32,7 +47,10 @@ mkdir -p -m 700 "$control/root/bin" "$control/root/nix/store" \
 # directory is owned by the namespace's root, so the trusted-program checks
 # (#263) run unrelaxed against these root-owned sudo and systemctl fakes.
 mkdir -m 755 "$control/root/usr/bin"
-chmod 755 "$control/root/usr"
+# Real systems keep these 0755; the non-root check needs to pass through them.
+# The private root is the chroot's `/`; `$control` itself stays 0700.
+chmod 755 "$control/root" "$control/root/bin" "$control/root/usr" "$control/root/usr/local" \
+    "$control/root/usr/local/bin" "$control/root/var" "$control/root/var/lib"
 touch "$control/root/bin/sh" "$control/root/infraternal"
 touch "$control/root/dev/null"
 mkdir -m 755 "$control/root/run"
@@ -100,11 +118,12 @@ SYSTEMCTL
 chmod 700 "$control/bin/systemctl"
 export PATH="$control/bin:$PATH"
 
-unshare --user --map-root-user --net --mount --uts \
-    bash -s -- "$control" "$repo_dir" <<'NAMESPACE'
+unshare "${namespace_user[@]}" --net --mount --uts \
+    bash -s -- "$control" "$repo_dir" "$nonroot_check" <<'NAMESPACE'
 set -euo pipefail
 control="$1"
 repo_dir="$2"
+nonroot_check="$3"
 mount --make-rprivate /
 ip link set lo up
 ip rule del pref 0
@@ -134,4 +153,33 @@ mount --bind "$control/root/etc/ssl/certs" /etc/ssl/certs
 printf 'namespace_network app_listener=tcp443 blocked_agent_port=tcp_udp7443\n'
 cd "$repo_dir/apps/tracer"
 bun x playwright test -c playwright.real.config.ts real/up-approval.spec.ts
+if [[ "$nonroot_check" != 1 ]]; then
+    printf 'nonroot_cli=skipped (unprivileged run)\n'
+    exit 0
+fi
+# The invoking user runs the CLI through the PATH link, and cannot list the
+# private base or the infraternal agent's state (J134 P2-4).
+nobody=(chroot --userspec=65534:65534 "$control/root")
+version="$("${nobody[@]}" /usr/local/bin/infraternal --version)"
+printf 'nonroot_cli uid=65534 version=%s\n' "$version"
+# The chroot has only bash, so list with a glob. A directory nobody may read
+# expands to nothing; root listing the same directory proves it is not empty.
+lists() {
+    "$@" /bin/sh -c 'shopt -s nullglob dotglob; entries=("$1"/*); [ "${#entries[@]}" -gt 0 ]' sh "$directory"
+}
+# uid 65534 must be able to run the shell, or every refusal below is vacuous.
+"${nobody[@]}" /bin/sh -c true
+for directory in /var/lib/infraternal /var/lib/infraternal/agent; do
+    if ! lists chroot "$control/root"; then
+        printf 'nonroot_cli: root sees nothing in %s, so the check proves nothing\n' "$directory" >&2
+        exit 1
+    fi
+    if lists "${nobody[@]}"; then
+        printf 'nonroot_cli: uid 65534 could list %s\n' "$directory" >&2
+        exit 1
+    fi
+done
+printf 'nonroot_state=private base=%s agent=%s\n' \
+    "$(stat -c '%a' "$control/root/var/lib/infraternal")" \
+    "$(stat -c '%a' "$control/root/var/lib/infraternal/agent")"
 NAMESPACE

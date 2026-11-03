@@ -132,7 +132,9 @@ pub fn validate(context: &Context, home: &Path, uid: u32) -> io::Result<()> {
 fn validate_artifacts(context: &Context, home: &Path, uid: u32, unlocked: bool) -> io::Result<()> {
     let paths = layout(context, home, uid)?;
     let base = std::fs::symlink_metadata(&paths.base)?;
-    if !base.is_dir() || base.uid() != uid || base.mode() & 0o777 != 0o700 {
+    // 0711 is the base `infraternal up` lays out so others can reach `bin/`
+    // without listing it (#263); every private file inside is still 0700/0600.
+    if !base.is_dir() || base.uid() != uid || !matches!(base.mode() & 0o777, 0o700 | 0o711) {
         return Err(denied());
     }
     if public_file(&paths.base.join(".bootstrap-owner"), uid, 64)?.trim() != context.host {
