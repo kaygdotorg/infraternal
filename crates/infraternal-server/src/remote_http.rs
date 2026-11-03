@@ -372,13 +372,23 @@ async fn issue_invitation(
         (IssueAuthority::Session(_), None) => return Err(StatusCode::UNAUTHORIZED),
         (IssueAuthority::ApiKey(key_hash), None) => {
             // J90 owns key expiry, scope and sliding renewal. This writer transaction
-            // stays held through host creation and invitation issuance.
+            // stays held through host creation and invitation issuance. The authorizer reads
+            // its own clock after this transaction holds the writer: `now` was read before the
+            // wait, and a key that expired during it must be tombstoned, not renewed.
             let person_id = api
                 .auth
-                .api_authorize_key_hash_tx(&mut transaction, key_hash, "hosts:write", Some(now))
+                .api_authorize_key_hash_tx(&mut transaction, key_hash, "hosts:write", None)
                 .await
-                .map_err(|_| StatusCode::FORBIDDEN)?
-                .ok_or(StatusCode::FORBIDDEN)?;
+                .map_err(|_| StatusCode::FORBIDDEN)?;
+            let Some(person_id) = person_id else {
+                // A refusal commits: expiry tombstones and the key clock must persist
+                // (the authorizer's contract). Nothing else was written yet.
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+                return Err(StatusCode::FORBIDDEN);
+            };
             (person_id, None)
         }
     };

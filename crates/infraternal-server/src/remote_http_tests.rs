@@ -344,3 +344,61 @@ async fn enrollment_api_at_1000_hosts() {
 
 #[path = "remote_revocation_http_tests.rs"]
 mod revocation;
+
+/// J137 P3-3: a key's expiry is judged by the clock read inside the writer transaction. The
+/// test clock stands in for the time after a wait on the writer: the key expired meanwhile,
+/// so the call tombstones it and is refused instead of renewing it from a stale timestamp.
+#[tokio::test]
+async fn a_key_that_expires_while_waiting_for_the_writer_is_not_renewed() {
+    let (store, pool, _) = crate::enrollment::authority::tests::enrolled().await;
+    let auth = Auth::new(
+        pool.clone(),
+        "auth.example.test",
+        "https://auth.example.test",
+    )
+    .await
+    .unwrap();
+    let wall = now().unwrap();
+    let key_hash = crate::auth::hash("fixture-expiring-key-never-print");
+    sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,'owner','fixture-cli','[\"hosts:write\"]',?,?,0)")
+        .bind(&key_hash)
+        .bind(wall - 7200)
+        .bind(wall + 30)
+        .execute(&pool)
+        .await
+        .unwrap();
+    auth.set_test_http_time(wall + 60);
+    let issuer = InvitationIssuer::new(
+        auth,
+        pool.clone(),
+        store,
+        EnrollmentService {
+            source: Arc::new(crate::ca::tests::source(true)),
+            endpoint: EnrollmentEndpoint {
+                ca_der: Vec::new(),
+                endpoint: "127.0.0.1:7443".parse().unwrap(),
+                server_name: "localhost".into(),
+            },
+        },
+    );
+    let refused = issuer
+        .reissue_api_key(
+            &key_hash,
+            InvitationRequest {
+                host_id: Uuid::new_v4(),
+                mode: Mode::Rootless,
+                execution_uid: 1002,
+                expected_key_digest: Some([7; 32]),
+            },
+        )
+        .await;
+    assert_eq!(refused.err(), Some(StatusCode::FORBIDDEN));
+    let (dead, expires_at): (bool, i64) =
+        sqlx::query_as("SELECT dead,expires_at FROM api_keys WHERE token_hash=?")
+            .bind(&key_hash)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(dead, "the expired key was renewed instead of tombstoned");
+    assert_eq!(expires_at, wall + 30);
+}
