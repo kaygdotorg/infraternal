@@ -251,6 +251,65 @@ async fn each_bootstrap_action_message_uses_the_shared_api_key_rate_limit() {
     drop(auth);
 }
 
+/// J137 P3-5: a key-driven add-host audits every target it names, and keeps a target id
+/// only when it is a valid host identifier.
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn key_driven_add_host_audits_every_target() {
+    let (auth, owner, _, _, address, server, pool, _) = fixture(false).await;
+    let token = "fixture-bootstrap-targets-key-never-print";
+    let now = now().unwrap();
+    sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,?,'j94-cli','[\"hosts:write\"]',?,?,0)")
+        .bind(crate::auth::hash(token))
+        .bind(&owner)
+        .bind(now)
+        .bind(now + 3600)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut request = format!("ws://{address}/v1/bootstrap/ws")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let start = serde_json::json!({"action":"start","targets":[
+        {"id":"first-host","address":{"kind":"manual","value":"user@one"}},
+        {"id":"second-host","address":{"kind":"manual","value":"user@two"}},
+        {"id":"bad id\u{202e}","address":{"kind":"manual","value":"user@three"}}
+    ]});
+    socket
+        .send(ClientMessage::Text(start.to_string().into()))
+        .await
+        .unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(2), socket.next()).await;
+    let mut targets: Vec<Option<String>> = Vec::new();
+    for _ in 0..200 {
+        targets = sqlx::query_scalar(
+            "SELECT target_id FROM api_action_audit WHERE action_id='ssh.start' ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        if targets.len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        targets,
+        [
+            Some("first-host".to_owned()),
+            Some("second-host".to_owned()),
+            None
+        ]
+    );
+    let _ = socket.close(None).await;
+    server.abort();
+    drop(auth);
+}
+
 #[cfg(feature = "remote")]
 #[tokio::test]
 async fn captured_setup_stderr_is_exposed_only_on_key_driven_bootstrap_events() {

@@ -616,10 +616,8 @@ async fn action(
         Ok(identity) => identity,
         Err(status) => return status.into_response(),
     };
-    let target_id = input
-        .get("host_id")
-        .and_then(Value::as_str)
-        .filter(|value| value.len() <= 36);
+    let target_id = audit_target(&input);
+    let target_id = target_id.as_deref();
     let Ok(now) = crate::runtime::unix_seconds() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
@@ -680,6 +678,15 @@ async fn action(
             status.into_response()
         }
     }
+}
+
+/// The audit names a target only as a parsed host UUID, never as caller-supplied text.
+fn audit_target(input: &Value) -> Option<String> {
+    input
+        .get("host_id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .map(|host| host.to_string())
 }
 
 async fn server_status(pool: &SqlitePool) -> Result<Json<Value>, StatusCode> {
@@ -874,6 +881,25 @@ mod tests {
             HeaderValue::from_static("Bearer key with space"),
         );
         assert_eq!(bearer_token(&headers), None);
+    }
+
+    /// J137 P3-5: the audit keeps a target only as a parsed host UUID, never caller text.
+    #[test]
+    fn audit_targets_are_parsed_host_ids_only() {
+        use serde_json::json;
+        let host = uuid::Uuid::new_v4();
+        assert_eq!(
+            super::audit_target(&json!({"host_id": host.to_string().to_uppercase()})),
+            Some(host.to_string())
+        );
+        for input in [
+            json!({"host_id": "not-a-uuid"}),
+            json!({"host_id": "\u{1b}[2J"}),
+            json!({"host_id": 7}),
+            json!({}),
+        ] {
+            assert_eq!(super::audit_target(&input), None, "{input}");
+        }
     }
 
     #[test]

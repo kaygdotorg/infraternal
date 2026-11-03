@@ -557,10 +557,16 @@ async fn run(
                 #[cfg(feature = "remote")]
                 let mut api_key_audit = if let Some(identity) = key_identity {
                     let action = &infraternal_plugin_ssh::manifest::START;
-                    let target_id = decoded.as_ref().ok().and_then(|request| match request {
-                        Request::Start { targets, .. } => targets.first().map(|target| target.id.as_str()),
-                        _ => None,
-                    });
+                    // One row per add-host target, each naming the target only by a valid
+                    // host identifier. The batch admits at most 100 targets, the 32 KiB
+                    // message bounds the rest, and the per-key limit bounds messages.
+                    let target_ids: Vec<Option<&str>> = match decoded.as_ref() {
+                        Ok(Request::Start { targets, .. }) if !targets.is_empty() && targets.len() <= 100 => targets
+                            .iter()
+                            .map(|target| infraternal_plugin_ssh::model::identifier(&target.id).then_some(target.id.as_str()))
+                            .collect(),
+                        _ => vec![None],
+                    };
                     let authorized_at = match api.action_guard.authorize_identity(identity, action).await {
                         Ok(at) => at,
                         Err(status) => {
@@ -584,28 +590,37 @@ async fn run(
                             break 'connection;
                         }
                     };
-                    let Ok(audit_id) = api
-                        .action_guard
-                        .begin_audit(identity, action.id, target_id, authorized_at)
-                        .await
-                    else {
-                        let event = serde_json::to_string(&serde_json::json!({"error":"action_unavailable"})).ok();
-                        send_live(socket, &api, &owner, token, &mut revocation, event, key_identity).await?;
-                        break 'connection;
-                    };
-                    Some((audit_id, authorized_at))
+                    let mut audit_ids = Vec::with_capacity(target_ids.len());
+                    for target_id in target_ids {
+                        let Ok(audit_id) = api
+                            .action_guard
+                            .begin_audit(identity, action.id, target_id, authorized_at)
+                            .await
+                        else {
+                            for audit_id in audit_ids {
+                                let _ = api.action_guard.finish_audit(audit_id, "failed", Some("audit_unavailable"), authorized_at).await;
+                            }
+                            let event = serde_json::to_string(&serde_json::json!({"error":"action_unavailable"})).ok();
+                            send_live(socket, &api, &owner, token, &mut revocation, event, key_identity).await?;
+                            break 'connection;
+                        };
+                        audit_ids.push(audit_id);
+                    }
+                    Some((audit_ids, authorized_at))
                 } else {
                     None
                 };
                 let Ok(request) = decoded else {
                     #[cfg(feature = "remote")]
-                    if let Some((audit_id, audit_time)) = api_key_audit.take() {
-                        let _ = api.action_guard.finish_audit(
-                            audit_id,
-                            "denied",
-                            Some("invalid_request"),
-                            audit_time,
-                        ).await;
+                    if let Some((audit_ids, audit_time)) = api_key_audit.take() {
+                        for audit_id in audit_ids {
+                            let _ = api.action_guard.finish_audit(
+                                audit_id,
+                                "denied",
+                                Some("invalid_request"),
+                                audit_time,
+                            ).await;
+                        }
                     }
                     send_live(socket, &api, &owner, token, &mut revocation, serde_json::to_string(&serde_json::json!({"error":"invalid bootstrap request"})).ok(), #[cfg(feature = "remote")] key_identity).await?;
                     continue;
@@ -616,7 +631,7 @@ async fn run(
                         if let Some(caller) = &api_key {
                             match api_key_audit.take() {
                                 None => Err(infraternal_plugin_ssh::model::Failure::install("The host action could not be recorded.")),
-                                Some((audit_id, audit_time)) => {
+                                Some((audit_ids, audit_time)) => {
                                         let outcome = if credential.is_some() || !auth_once.is_empty() {
                                             Err(infraternal_plugin_ssh::model::Failure::unsupported("API-key host setup does not accept credential material."))
                                         } else if !authorized_api_key(&api, &caller.identity, &owner).await {
@@ -630,7 +645,9 @@ async fn run(
                                         };
                                         let (state, result) = if outcome.is_ok() { ("complete", None) } else { ("failed", Some("handler_refused")) };
                                         let finished_at = now().unwrap_or(audit_time);
-                                        let _ = api.action_guard.finish_audit(audit_id, state, result, finished_at).await;
+                                        for audit_id in audit_ids {
+                                            let _ = api.action_guard.finish_audit(audit_id, state, result, finished_at).await;
+                                        }
                                         match outcome {
                                             Ok(started) => { changed = Some(started.subscribe()); batch = Some(started); Ok(()) }
                                             Err(error) => Err(error),
@@ -722,13 +739,15 @@ async fn run(
                     Request::Start { .. } => Err(infraternal_plugin_ssh::model::Failure::unsupported("A host batch is already running.")),
                 };
                 #[cfg(feature = "remote")]
-                if let Some((audit_id, audit_time)) = api_key_audit.take() {
+                if let Some((audit_ids, audit_time)) = api_key_audit.take() {
                     let (state, result) = if result.is_ok() {
                         ("complete", None)
                     } else {
                         ("denied", Some("handler_refused"))
                     };
-                    let _ = api.action_guard.finish_audit(audit_id, state, result, audit_time).await;
+                    for audit_id in audit_ids {
+                        let _ = api.action_guard.finish_audit(audit_id, state, result, audit_time).await;
+                    }
                 }
                 if let Err(error) = result {
                     send_live(socket, &api, &owner, token, &mut revocation, serde_json::to_string(&serde_json::json!({"error":error})).ok(), #[cfg(feature = "remote")] key_identity).await?;

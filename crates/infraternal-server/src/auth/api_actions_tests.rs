@@ -411,3 +411,35 @@ async fn revoking_a_key_wakes_its_owner_streams() {
         "revocation published no event"
     );
 }
+
+/// J137 P3-5: an audit row left `pending` (a removal never approved or polled, or a server
+/// restart mid-action) is resolved as an expired denial instead of staying pending forever.
+#[tokio::test]
+async fn pending_audit_rows_that_never_finish_are_expired() {
+    let f = fixture().await;
+    let now = crate::runtime::unix_seconds().unwrap();
+    for occurred_at in [now - 3601, now - 60] {
+        sqlx::query("INSERT INTO api_action_audit(key_id,person_id,action_id,state,occurred_at) VALUES('k',?,'remote.host.remove','pending',?)")
+            .bind(&f.user)
+            .bind(occurred_at)
+            .execute(&f.auth.pool)
+            .await
+            .unwrap();
+    }
+    crate::api_actions::prune_audit(&f.auth.pool, now)
+        .await
+        .unwrap();
+    let rows: Vec<(String, Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT state,result,completed_at FROM api_action_audit ORDER BY occurred_at",
+    )
+    .fetch_all(&f.auth.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        [
+            ("denied".to_owned(), Some("expired".to_owned()), Some(now)),
+            ("pending".to_owned(), None, None)
+        ]
+    );
+}
