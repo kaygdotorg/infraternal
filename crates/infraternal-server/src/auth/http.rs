@@ -287,7 +287,7 @@ async fn execute(
     value: Value,
 ) -> super::Result<Response> {
     let now = current_time(auth)?;
-    ingress(auth, action, headers, now).await?;
+    ingress(auth, action, headers, source, now).await?;
     if action == "setup-check" {
         let b: Token = body(value)?;
         auth.setup_check(&b.token, now).await?;
@@ -312,7 +312,7 @@ async fn execute(
                     .await?,
             );
         }
-        "login-start" => login_start(auth, headers, value, now).await?,
+        "login-start" => login_start(auth, headers, source, value, now).await?,
         "login-finish" => {
             let b: Login = body(value)?;
             auth.require_ceremony_binding(&b.ceremony, headers).await?;
@@ -517,6 +517,7 @@ async fn ceremony_response(
 async fn login_start(
     auth: &Auth,
     headers: &HeaderMap,
+    source: IpAddr,
     value: Value,
     now: i64,
 ) -> super::Result<Value> {
@@ -528,7 +529,7 @@ async fn login_start(
             }
             auth.login_start(&user, now).await
         }
-        None => auth.discoverable_login_start(now).await,
+        None => auth.discoverable_login_start_from(now, Some(source)).await,
     }
 }
 
@@ -545,7 +546,13 @@ async fn setup_start(auth: &Auth, value: Value, now: i64) -> super::Result<Value
     }
 }
 
-async fn ingress(auth: &Auth, action: &str, headers: &HeaderMap, now: i64) -> super::Result<()> {
+async fn ingress(
+    auth: &Auth,
+    action: &str,
+    headers: &HeaderMap,
+    source: IpAddr,
+    now: i64,
+) -> super::Result<()> {
     // CLI approval polling uses its own bearer capability, never a browser cookie.
     if !matches!(action, "device-start" | "device-redeem")
         && headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(auth.origin())
@@ -563,20 +570,23 @@ async fn ingress(auth: &Auth, action: &str, headers: &HeaderMap, now: i64) -> su
     if matches!(action, "device-start" | "device-redeem") {
         return Ok(());
     }
-    // Browser actions share one fixed 120/minute partition that device callers
-    // cannot spend; IP/proxy headers are never trusted here.
+    // Browser actions are budgeted per enclosing network (IPv6 /48, IPv4
+    // /24), so callers from a few networks can spend only their own share and
+    // never refuse a sign-in from anywhere else (#263, J145 P2-1). There is
+    // no process-wide counter: any such ceiling is the same lockout at N
+    // networks, and distributed floods are the reverse proxy's job (#76913).
+    // IP/proxy headers are never trusted here; `source` is the runtime's.
+    if crate::runtime::admit_temporal_request(
+        &mut auth.ingress.lock().await.networks,
+        crate::runtime::browser_network(source),
+        now,
+        BROWSER_PER_MINUTE,
+    )
+    .is_ok()
     {
-        let mut budget = auth.ingress.lock().await;
-        if now - budget.window >= 60 {
-            budget.window = now;
-            budget.browser = 0;
-        }
-        if budget.browser < u32::from(BROWSER_PER_MINUTE) {
-            budget.browser += 1;
-            return Ok(());
-        }
+        return Ok(());
     }
-    // Once anonymous callers have spent the partition, a live signed-in session
+    // Once a network has spent its budget, a live signed-in session there
     // still gets its own per-person budget, so a flood cannot stop the owner
     // from reviewing and approving an `up` (#263, J134 P2-1). The session is
     // looked up only on this exhausted path; an invalid cookie stays throttled.
@@ -593,16 +603,18 @@ async fn ingress(auth: &Auth, action: &str, headers: &HeaderMap, now: i64) -> su
         .map_err(|_| Error::Throttled)
 }
 
-/// Anonymous browser requests per minute, and each person's budget after that.
+/// Browser requests per minute for each enclosing network, and each person's
+/// budget after that. 120 is the old server-wide figure, so no single network
+/// gets less than every caller used to share.
 const BROWSER_PER_MINUTE: u8 = 120;
 
-/// Fixed-size browser admission partition; every browser action counts,
-/// including authenticated reads. `people` holds the per-person budgets that
-/// signed-in sessions fall back to once the partition is spent.
+/// Browser admission budgets; every browser action counts, including
+/// authenticated reads. `networks` is keyed by enclosing network, `people` by
+/// the user ID of a live session that falls back once its network is spent.
+/// Both maps evict their oldest window when full.
 #[derive(Default)]
 pub(super) struct Ingress {
-    window: i64,
-    browser: u32,
+    networks: std::collections::HashMap<IpAddr, crate::runtime::SourceBucket>,
     people: std::collections::HashMap<String, crate::runtime::SourceBucket>,
 }
 
@@ -633,6 +645,7 @@ mod tests {
             .await
             .unwrap();
         let now = 1_800_000_000;
+        let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
         let mut headers = HeaderMap::new();
         headers.insert(
             header::ORIGIN,
@@ -640,7 +653,7 @@ mod tests {
         );
         headers.insert("x-forwarded-for", HeaderValue::from_static("127.0.0.1"));
         assert!(matches!(
-            ingress(&auth, "login-start", &headers, now).await,
+            ingress(&auth, "login-start", &headers, source, now).await,
             Err(Error::Denied)
         ));
         headers.insert(
@@ -648,23 +661,25 @@ mod tests {
             HeaderValue::from_static("https://auth.example.test"),
         );
         for _ in 0..120 {
-            ingress(&auth, "session", &headers, now).await.unwrap();
+            ingress(&auth, "session", &headers, source, now)
+                .await
+                .unwrap();
         }
         assert!(matches!(
-            ingress(&auth, "login-start", &headers, now).await,
+            ingress(&auth, "login-start", &headers, source, now).await,
             Err(Error::Throttled)
         ));
         // Device-code requests skip the shared browser partition, and have no
         // process-wide partition of their own (per-source limits live in runtime).
         for _ in 0..1000 {
-            ingress(&auth, "device-redeem", &HeaderMap::new(), now)
+            ingress(&auth, "device-redeem", &HeaderMap::new(), source, now)
                 .await
                 .unwrap();
         }
-        ingress(&auth, "device-start", &HeaderMap::new(), now)
+        ingress(&auth, "device-start", &HeaderMap::new(), source, now)
             .await
             .unwrap();
-        ingress(&auth, "login-start", &headers, now + 60)
+        ingress(&auth, "login-start", &headers, source, now + 60)
             .await
             .unwrap();
     }

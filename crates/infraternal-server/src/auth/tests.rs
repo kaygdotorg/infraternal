@@ -2834,10 +2834,13 @@ async fn discoverable_latency_at_pending_capacity() {
                 );
             }
             if prefill == 824 {
-                assert!(
-                    f.auth.discoverable_login_start(now).await.is_err(),
-                    "pending capacity must fail closed"
-                );
+                // Identified and anonymous ceremonies have separate pools (#263, J145 P2-1).
+                let full = if identified {
+                    f.auth.login_start(&f.user, now).await.is_err()
+                } else {
+                    f.auth.discoverable_login_start(now).await.is_err()
+                };
+                assert!(full, "pending capacity must fail closed");
             }
         }
     }

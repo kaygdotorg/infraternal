@@ -147,6 +147,9 @@ struct Login {
     state: LoginState,
     expires: i64,
     binding: Option<String>,
+    /// For an anonymous (discoverable) ceremony started over HTTP, the
+    /// caller's enclosing network; it bounds that network's share.
+    network: Option<std::net::IpAddr>,
 }
 #[derive(Default)]
 struct Pending {

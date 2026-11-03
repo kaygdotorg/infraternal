@@ -1027,6 +1027,16 @@ pub(crate) fn device_source(source: IpAddr) -> IpAddr {
     }
 }
 
+/// The enclosing network anonymous browser callers share a budget in: the
+/// IPv4 /24, or the IPv6 /48 (a site or tunnel-broker allocation). One such
+/// network can spend only its own budget, never everyone's (#263, J145 P2-1).
+pub(crate) fn browser_network(source: IpAddr) -> IpAddr {
+    match device_source(source) {
+        IpAddr::V4(v4) => IpAddr::V4((u32::from(v4) & 0xffff_ff00).into()),
+        IpAddr::V6(v6) => IpAddr::V6((u128::from(v6) & !((1_u128 << 80) - 1)).into()),
+    }
+}
+
 /// A spent window shares ordinary auth's exact HTTP response without
 /// allocating a boxed response for each refused request. A full map never
 /// refuses: it evicts (see [`admit_temporal_request`]).
@@ -1817,6 +1827,111 @@ mod device_code_admission_tests {
         // The whole /64 shares one 30/minute browser budget.
         assert_eq!(admitted, 30);
         assert_fresh_sources_start(&app, "one /64").await;
+    }
+
+    /// A browser call from `source` with the app's own Origin.
+    async fn browser(app: &Router, action: &str, source: &str) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/auth/{action}"))
+                    .header("content-type", "application/json")
+                    .header("origin", "https://auth.example.test")
+                    .header("x-forwarded-for", source)
+                    .extension(ConnectInfo(SocketAddr::from(([192, 0, 2, 1], 5000))))
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn four_networks_cannot_lock_everyone_out_of_sign_in() {
+        // J145 P2-1: four networks at 30/minute each used to spend the one
+        // server-wide 120/minute browser budget, and then nobody without a
+        // live session could start a passkey sign-in.
+        for (label, flood, inside) in [
+            (
+                "ipv4",
+                [
+                    "198.51.100.1",
+                    "198.51.101.1",
+                    "198.51.102.1",
+                    "198.51.103.1",
+                ],
+                None,
+            ),
+            (
+                "ipv6-one-/56",
+                [
+                    "2001:db8:5:100::1",
+                    "2001:db8:5:101::1",
+                    "2001:db8:5:102::1",
+                    "2001:db8:5:103::1",
+                ],
+                Some("2001:db8:5:200::1"),
+            ),
+        ] {
+            let app = app().await;
+            assert_eq!(
+                browser(&app, "login-start", "203.0.113.50").await,
+                StatusCode::OK
+            );
+            let mut admitted = 0;
+            for source in flood {
+                for _ in 0..40 {
+                    if browser(&app, "login-start", source).await == StatusCode::OK {
+                        admitted += 1;
+                    }
+                }
+            }
+            assert!(
+                admitted >= 32,
+                "{label}: the flood itself was admitted {admitted}"
+            );
+            for fresh in ["203.0.113.9", "2001:db8:ffff::9"] {
+                assert_eq!(
+                    browser(&app, "login-start", fresh).await,
+                    StatusCode::OK,
+                    "{label}: fresh {fresh} login-start"
+                );
+            }
+            // A new /64 inside the flooded /48 shares that /48's spent budget.
+            if let Some(inside) = inside {
+                assert_eq!(
+                    browser(&app, "login-start", inside).await,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "{label}: {inside} is inside the flooded /48"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn one_network_holds_at_most_its_share_of_anonymous_ceremonies() {
+        // Without a server-wide budget, the pending anonymous ceremonies are
+        // bounded per enclosing network instead.
+        let app = app().await;
+        let mut admitted = 0;
+        for subnet in 0..8 {
+            for _ in 0..30 {
+                let source = format!("2001:db8:6:{subnet:x}00::1");
+                if browser(&app, "login-start", &source).await == StatusCode::OK {
+                    admitted += 1;
+                }
+            }
+        }
+        assert_eq!(
+            admitted, 32,
+            "one /48 holds 32 pending anonymous ceremonies"
+        );
+        assert_eq!(
+            browser(&app, "login-start", "2001:db8:7::1").await,
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]

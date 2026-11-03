@@ -168,7 +168,7 @@ async fn browser(
 
 #[tokio::test]
 async fn anonymous_flood_cannot_stop_the_owner_reviewing_an_approval() {
-    // J134 P2-1: anonymous callers spend the shared browser partition.
+    // J134 P2-1: anonymous callers spend the browser budget of the owner's network.
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
     let app = super::http::router(f.auth.clone());
@@ -188,11 +188,10 @@ async fn anonymous_flood_cannot_stop_the_owner_reviewing_an_approval() {
         .unwrap();
     let started: Value =
         serde_json::from_slice(&started.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    // Anonymous calls from the owner's network spend its whole budget.
     for _ in 0..120 {
         assert_eq!(
-            browser(&app, "login-start", None, &json!({}))
-                .await
-                .status(),
+            browser(&app, "status", None, &json!({})).await.status(),
             StatusCode::OK
         );
     }
