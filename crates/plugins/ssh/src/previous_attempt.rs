@@ -430,6 +430,18 @@ impl PreviousAttempt {
         Ok(())
     }
 
+    /// Finish an upgrade whose host is connected with this identity: only its commit was lost.
+    /// # Errors
+    /// Refuses a changed record.
+    pub async fn finish_upgrade(
+        &self,
+        session: &dyn SshSession,
+        target: &Target,
+    ) -> Result<(), Failure> {
+        self.upgrade_action(session, target, "finish_stuck_upgrade")
+            .await
+    }
+
     /// Recover only the exact observed attempt, using its existing rollback implementation.
     /// # Errors
     /// Refuses changed ownership, live setup, foreign contents and unknown journal formats.

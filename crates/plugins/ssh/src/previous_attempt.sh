@@ -568,3 +568,14 @@ replace_stuck_install() {
  mv -T "$stage" "$replaced"
  trap - EXIT
 }
+# The server saw this host connected with the journal's own identity: the
+# upgrade worked and only its commit was lost. Finish it as commit would.
+finish_stuck_upgrade() {
+ setup_guard
+ [ "$(inspect_previous)" = "$1" ] || exit 75
+ stage="$base/.bootstrap-lock"
+ # A failed activation keeps its rollback journal; nothing to finish.
+ [ -f "$stage/activating" ] || exit 0
+ retire_setup_lease
+ rm -rf "$stage"
+}

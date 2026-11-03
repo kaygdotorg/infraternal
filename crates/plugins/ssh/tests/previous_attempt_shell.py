@@ -707,6 +707,14 @@ replace_stuck_install "$observed"
         self.assertEqual(commit.returncode, 0, commit.stderr.decode())
         self.assertFalse(replaced.exists(), 'the next commit retires them')
 
+    def test_a_connected_upgrade_is_finished_not_replaced(self):
+        stage, _ = self.make_upgrade_fixture()
+        result = self.confirm('finish_stuck_upgrade')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertFalse(stage.exists(), 'the lost commit is finished (#305 P2-2)')
+        self.assertTrue((self.base / 'bin/live').exists())
+        self.assertFalse(self.manager_log.exists(), 'the running service is never touched')
+
     def test_failed_upgrade_rollback_replaces_activating_with_failed_before_stop(self):
         stage, _ = self.make_upgrade_fixture()
         body = f'''\nstage="$base/.bootstrap-lock"

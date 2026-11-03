@@ -648,6 +648,7 @@ impl Backend for RemoteBackend {
                 ours: owner == authority.owner && !revoked && matches,
                 stored,
                 reported: request.enrolled.map(|enrolled| enrolled.digest),
+                connected: self.hosts.installed(request.host).await,
                 ca_ready: self.issuer.ready(),
             })
         })
@@ -937,10 +938,13 @@ struct StuckFacts {
     ours: bool,
     stored: Option<[u8; 32]>,
     reported: Option<[u8; 32]>,
+    /// Connected now through the installed infraternal agent's authenticated link.
+    connected: bool,
     ca_ready: bool,
 }
 
-/// Replace only what this server can re-enroll with the same key (#305 P1-1).
+/// Replace only what this server can re-enroll with the same key; finish an
+/// upgrade whose host is already connected (#305 P1-1, P2-2).
 fn decide_stuck_install(facts: &StuckFacts) -> Result<StuckInstall, Failure> {
     if !facts.ours {
         return Err(Failure::unsupported(
@@ -951,6 +955,9 @@ fn decide_stuck_install(facts: &StuckFacts) -> Result<StuckInstall, Failure> {
         return Err(Failure::install(
             "The interrupted install's host identity does not match its enrolled key.",
         ));
+    }
+    if facts.connected {
+        return Ok(StuckInstall::Finish);
     }
     if !facts.ca_ready {
         return Err(Failure::install(
@@ -2198,40 +2205,50 @@ mod tests {
     }
 
     fn mutating(scripts: &[String]) -> Vec<&'static str> {
-        ["\nreplace_stuck_install ", "prepare-join-key"]
-            .into_iter()
-            .filter(|action| scripts.iter().any(|script| script.contains(action)))
-            .collect()
+        [
+            "\nreplace_stuck_install ",
+            "\nfinish_stuck_upgrade ",
+            "prepare-join-key",
+        ]
+        .into_iter()
+        .filter(|action| scripts.iter().any(|script| script.contains(action)))
+        .collect()
     }
 
     #[test]
     fn stuck_install_verdict_follows_record_key_link_and_ca() {
-        let facts = |ours, stored: Option<[u8; 32]>, reported, ca_ready| StuckFacts {
+        let facts = |ours, stored: Option<[u8; 32]>, reported, connected, ca_ready| StuckFacts {
             ours,
             stored,
             reported,
+            connected,
             ca_ready,
         };
         let key = Some([1; 32]);
         assert_eq!(
-            decide_stuck_install(&facts(true, key, key, true)).unwrap(),
+            decide_stuck_install(&facts(true, key, key, false, true)).unwrap(),
             StuckInstall::Replace
         );
+        // P2-2: connected with this identity finishes the journal, CA or not.
+        assert_eq!(
+            decide_stuck_install(&facts(true, key, key, true, false)).unwrap(),
+            StuckInstall::Finish
+        );
         for (refused, text) in [
-            (facts(false, key, key, true), "no longer matches"),
+            (facts(false, key, key, false, true), "no longer matches"),
             (
-                facts(true, key, Some([2; 32]), true),
+                facts(true, key, Some([2; 32]), true, true),
                 "does not match its enrolled key",
             ),
             (
-                facts(true, key, None, true),
+                facts(true, key, None, false, true),
                 "does not match its enrolled key",
             ),
             (
-                facts(true, None, None, true),
+                facts(true, None, None, false, true),
                 "does not match its enrolled key",
             ),
-            (facts(true, key, key, false), "administrator passkey"),
+            (facts(true, key, key, false, false), "administrator passkey"),
         ] {
             let error = decide_stuck_install(&refused).unwrap_err();
             assert!(error.message.contains(text), "{}", error.message);

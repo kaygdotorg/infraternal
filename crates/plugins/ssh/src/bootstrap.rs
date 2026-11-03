@@ -49,6 +49,9 @@ pub enum StuckInstall {
     /// This server enrolled the host, the key matches and the CA can reissue:
     /// replace the stuck install and keep its host identity.
     Replace,
+    /// The host is connected now with this identity, so the upgrade worked
+    /// and only its commit was lost: finish the journal, replace nothing.
+    Finish,
 }
 
 /// The stuck upgrade as the read-only check saw it.
@@ -1166,6 +1169,15 @@ impl Bootstrap {
                         )
                         .await?;
                     match verdict {
+                        StuckInstall::Finish => {
+                            previous.finish_upgrade(session.as_ref(), target).await?;
+                            self.backend
+                                .preflight_existing_host(&batch.authority, target, lookup.clone())
+                                .await?;
+                            return Err(Failure::install(
+                                "This host is already added. Open its terminal from Console.",
+                            ));
+                        }
                         StuckInstall::Replace => {
                             self.await_start_fresh(
                                 batch,
