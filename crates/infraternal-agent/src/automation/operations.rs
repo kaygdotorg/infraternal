@@ -137,6 +137,11 @@ fn similar(a: &str, b: &str) -> bool {
     })
 }
 
+/// Durable work that must finish before a successful reply is sent.
+pub(super) type Publication = tokio::task::JoinHandle<io::Result<()>>;
+
+/// Run one verb. `new` leaves its name publication in `pending`; the caller
+/// awaits it outside the action deadline before replying.
 pub(super) async fn run(
     state: &Path,
     uid: u32,
@@ -144,6 +149,7 @@ pub(super) async fn run(
     input: &Value,
     mut live: Vec<Session>,
     names: Names,
+    pending: &mut Option<Publication>,
 ) -> io::Result<Reply> {
     if verb == "list" {
         let mut rows: Vec<_> = live.iter().map(|s| row(s, &names)).collect();
@@ -165,7 +171,7 @@ pub(super) async fn run(
         ));
     }
     if verb == "new" {
-        return create(state, uid, input, &live, names).await;
+        return create(state, uid, input, &live, names, pending).await;
     }
     let target = input["target"]
         .as_str()
@@ -269,6 +275,7 @@ async fn create(
     input: &Value,
     live: &[Session],
     mut names: Names,
+    pending: &mut Option<Publication>,
 ) -> io::Result<Reply> {
     let name = input["name"].as_str().ok_or(io::ErrorKind::InvalidInput)?;
     if live
@@ -305,23 +312,22 @@ async fn create(
         "Session created.",
         json!({"session": row(&session, &names)}),
     );
-    publish(state, names, session.path.clone(), session.id).await?;
+    *pending = Some(publish(state, names, session.path.clone(), session.id));
     Ok(reply)
 }
 
 /// Make a created session's name durable without running its two fsyncs on the
 /// infraternal agent's reactor. That reactor is the only thread serving every
-/// terminal on this host, and on a disk busy with writeback the syncs block for
-/// seconds: gate VMs left `sessions new` unanswered for over 15 s, and every
-/// other terminal frozen for as long (#334). The spawned task owns completion,
-/// so the caller's 4 s deadline firing mid-publish cannot skip the cleanup
-/// below; that deadline's reply already says the operation may have started.
-async fn publish(
+/// terminal on this host, and on a disk busy with writeback the syncs took up
+/// to 32 s on a build VM: `sessions new` went unanswered past 15 s, and every
+/// other terminal froze for as long (#334). The spawned task owns completion,
+/// so a dropped caller cannot skip the cleanup of a name that failed to persist.
+fn publish(
     state: &Path,
     names: Names,
     session: std::path::PathBuf,
     session_id: [u8; 16],
-) -> io::Result<()> {
+) -> Publication {
     let state = state.to_owned();
     tokio::spawn(async move {
         let saved = tokio::task::spawn_blocking(move || save(&state, &names))
@@ -335,8 +341,6 @@ async fn publish(
         }
         saved
     })
-    .await
-    .unwrap_or_else(|error| Err(io::Error::other(error)))
 }
 async fn send_text(session: Session, input: &Value) -> io::Result<Reply> {
     let text = input["text"].as_str().ok_or(io::ErrorKind::InvalidInput)?;
@@ -436,12 +440,7 @@ mod tests {
         let mut names = Names::new();
         let session = uuid::Uuid::from_u128(7);
         names.insert(session.to_string(), json!({"name": "build", "uid": 1000}));
-        let publication = tokio::spawn({
-            let state = state.clone();
-            async move {
-                publish(&state, names, "/unused".into(), session.into_bytes()).await
-            }
-        });
+        let publication = publish(&state, names, "/unused".into(), session.into_bytes());
         // This loop runs on the same current-thread reactor. It can observe the
         // held publication only if that publication is not occupying the reactor.
         while !GATE.lock().unwrap().entered {
@@ -505,9 +504,17 @@ mod tests {
             let input = after
                 .as_ref()
                 .map_or_else(|| json!({}), |after: &String| json!({"after": after}));
-            let page = run(Path::new("/unused"), 1000, "list", &input, live, names)
-                .await
-                .unwrap();
+            let page = run(
+                Path::new("/unused"),
+                1000,
+                "list",
+                &input,
+                live,
+                names,
+                &mut None,
+            )
+            .await
+            .unwrap();
             assert!(
                 serde_json::to_vec(&page).unwrap().len()
                     <= infraternal_plugin_api::MAX_ACTION_BYTES
