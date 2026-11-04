@@ -79,8 +79,11 @@ for (const { name, viewport, touch } of VIEWPORTS) {
     test("the rootless refusal fits about three lines", async ({ page }) => {
       await open(page);
       await show(page, { message: ROOTLESS, tone: "error", duration: 0 });
-      const lines = await page.locator(".ui-toast-message").evaluate((node) => Math.round(node.getBoundingClientRect().height / Number.parseFloat(getComputedStyle(node).lineHeight)));
-      expect(lines).toBeLessThanOrEqual(name === "phone" ? 3 : 2);
+      const m = await page.locator(".ui-toast-message").evaluate((node) => {
+        const r = node.getBoundingClientRect(), s = getComputedStyle(node), card = node.closest(".ui-toast")!.getBoundingClientRect();
+        return { lines: Math.round(r.height / Number.parseFloat(s.lineHeight)), width: r.width, card: card.width, font: s.fontSize };
+      });
+      expect(m.lines, JSON.stringify(m)).toBeLessThanOrEqual(name === "phone" ? 3 : 2);
     });
 
     test("repeats update one toast with a count", async ({ page }) => {
@@ -147,8 +150,9 @@ for (const { name, viewport, touch } of VIEWPORTS) {
         await open(page);
         await show(page, { message: "Notice 1", duration: 0, dismissible: true });
         await show(page, { message: "Notice 2", duration: 0, dismissible: true });
-        await page.keyboard.press("Tab");
-        for (let i = 0; i < 40 && (await page.locator(".ui-toast-stack").getAttribute("data-expanded")) !== "true"; i++) await page.keyboard.press("Tab");
+        // A key press first, so the focus that follows counts as keyboard focus (no ring, and no fan-out, for the mouse).
+        await page.keyboard.press("Shift");
+        await page.locator(".ui-toast-close").first().focus();
         await expect(page.locator(".ui-toast-stack")).toHaveAttribute("data-expanded", "true");
       });
     }
@@ -173,6 +177,7 @@ for (const { name, viewport, touch } of VIEWPORTS) {
         await expect(cards(page)).toHaveCount(2);
         await expect(front).toHaveAttribute("data-open", "true");
         await drag(90);
+        // The front toast ("Stay" arrived last) is the one under the finger and the one that goes.
         await expect(cards(page)).toHaveCount(1);
         await expect(page.locator(".ui-toast-message")).toHaveText("Swipe me");
       });
