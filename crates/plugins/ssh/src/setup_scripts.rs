@@ -70,7 +70,7 @@ mv -Tf "$stage/current" "$base/bin/current"
 ln -s "$base/bin/current" "$stage/launcher"
 : > "$stage/replacing-launcher"
 mv -Tf "$stage/launcher" "$launcher"
-printf '# infraternal bootstrap %s\n[Unit]\nDescription=infraternal host daemon\nStartLimitIntervalSec=0\n[Service]\nExecStart="%s/bin/current" agent --data "%s/state" --state "%s/sessions" run\nRestart=always\nRestartSec=2\nKillMode=process\n[Install]\nWantedBy=%s\n' "$host" "$base" "$base" "$base" "$wanted" > "$stage/unit"
+printf '# infraternal bootstrap %s\n[Unit]\nDescription=infraternal host daemon\nStartLimitIntervalSec=0\n[Service]\nExecStart="%s/bin/current" agent --data "%s/state" --state "%s/sessions" run\nRestart=always\nRestartSec=2\nKillMode=process\nDelegate=yes\n[Install]\nWantedBy=%s\n' "$host" "$base" "$base" "$base" "$wanted" > "$stage/unit"
 : > "$stage/replacing-unit"
 mv -f "$stage/unit" "$unit"
 "##;

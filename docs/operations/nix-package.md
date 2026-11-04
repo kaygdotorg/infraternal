@@ -104,6 +104,7 @@ ExecStart=@PACKAGE@/share/infraternal/infraternal server --data /var/lib/infrate
 Restart=on-failure
 RestartSec=2
 KillMode=process
+Delegate=yes
 LimitMEMLOCK=8388608
 
 [Install]
