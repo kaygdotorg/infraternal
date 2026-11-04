@@ -22,6 +22,7 @@ import { endActivity, setActivity } from "../../perf-activity";
 import { makeWindow } from "./frame";
 import { isTerminal } from "../views/body";
 
+/** The split actions. Each resolves when its motion is over; the keyboard forms pass `instant` and land in the same frame. */
 export interface SplitModule {
   /** Divides a terminal window's own space into two windows (see `WindowsModule.split`). */
   split(rec: WinRec, direction: "down" | "right", instant?: boolean): Promise<boolean>;
@@ -31,6 +32,7 @@ export interface SplitModule {
   splitInto(rec: WinRec, direction: "down" | "right", nm: WindowModel, instant?: boolean): Promise<void>;
 }
 
+/** Makes the split actions for the canvas `cx`. Only on-demand code may import this file (see the module comment). */
 export function createSplit(cx: Ctx): SplitModule {
   const { state, flip } = cx;
 
