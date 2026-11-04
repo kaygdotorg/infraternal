@@ -379,3 +379,35 @@ fn agent_restart_retains_the_configured_dns_provider_files_for_renewal() {
         "token file for the active DNS provider did not survive agent restart"
     );
 }
+
+/// A fresh state directory must stay untouched until a secret is stored: the
+/// create-and-fsync of the secrets directory sat in front of the supervisor's
+/// first dial and cost seconds under IO load [#281]. Checking for absence is
+/// timing-independent: a directory that was never created was never synced.
+#[test]
+fn opening_custody_on_fresh_state_writes_nothing() {
+    let state = TempState::new();
+    let custody = FileDnsTokenCustody::open(&state.0).expect("open custody");
+    custody
+        .remove_unconfigured_providers(None)
+        .expect("cleanup of an unused store succeeds");
+    assert!(custody.get("cloudflare", "CF_DNS_API_TOKEN").is_err());
+    assert!(custody.delete("cloudflare").is_ok());
+    assert_eq!(
+        fs::read_dir(&state.0).expect("list state").count(),
+        0,
+        "start path created durable state for an unused proxy"
+    );
+}
+
+#[test]
+fn first_secret_creates_the_private_store_lazily() {
+    let state = TempState::new();
+    let custody = FileDnsTokenCustody::open(&state.0).expect("open custody");
+    let path = custody
+        .put("cloudflare", "CF_DNS_API_TOKEN", SecretToken::new(b"x".to_vec()))
+        .expect("first write creates the store");
+    let root = state.0.join("proxy-secrets");
+    assert_eq!(fs::metadata(&root).unwrap().mode() & 0o7777, 0o700);
+    assert!(path.starts_with(&root));
+}
