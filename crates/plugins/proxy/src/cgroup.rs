@@ -133,6 +133,11 @@ fn own_base() -> Result<&'static Path, &'static str> {
 }
 
 fn check_base(base: &Path) -> Result<(), &'static str> {
+    // The root cgroup has no cgroup.kill (or cgroup.events) on any kernel, so it must be named
+    // before the kernel check below gives a false reason (#281, J172 P3-3).
+    if base == Path::new(CGROUP_ROOT) {
+        return Err("the infraternal agent runs in the root cgroup");
+    }
     if !base.join("cgroup.kill").exists() {
         return Err("the kernel is older than Linux 5.14 (no cgroup.kill)");
     }

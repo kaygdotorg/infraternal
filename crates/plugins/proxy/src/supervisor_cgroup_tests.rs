@@ -468,6 +468,18 @@ fn rootless_status_says_what_is_really_contained() {
     }
 }
 
+// P3-3: the root cgroup has no cgroup.kill on any kernel; the reason must say where we are.
+#[test]
+fn the_root_cgroup_is_named_as_the_fallback_reason() {
+    let root = std::env::temp_dir().join(format!("proxy-cg-rootcg-{}", uuid::Uuid::new_v4()));
+    let (_, lock_directory) = supervisor_fixture(&root);
+    let reason = ProxyCgroups::at(PathBuf::from("/sys/fs/cgroup"), &lock_directory)
+        .expect_err("the root cgroup holds no proxy leaves");
+    let _ = std::fs::remove_dir_all(&root);
+    eprintln!("root cgroup: {reason}");
+    assert!(reason.contains("root cgroup"), "{reason}");
+}
+
 // P3-5: the leaf name carries the lock directory's device and inode, so two agents in one cgroup
 // whose lock directories share an inode on different filesystems never adopt each other's leaves.
 #[test]
