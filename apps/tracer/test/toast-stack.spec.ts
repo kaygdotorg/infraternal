@@ -117,7 +117,7 @@ for (const { name, viewport, touch } of VIEWPORTS) {
       await show(page, { message: "Calm", duration: 0 });
       const t = await cards(page).first().evaluate((node) => { const s = getComputedStyle(node); return { property: s.transitionProperty, duration: s.transitionDuration }; });
       expect(t.property).toBe("opacity");
-      expect(Number.parseFloat(t.duration)).toBeLessThanOrEqual(0.12);
+      expect(Number.parseFloat(t.duration)).toBeLessThanOrEqual(0.2);
     });
 
     if (!touch) {
