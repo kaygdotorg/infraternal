@@ -1316,3 +1316,70 @@ test("desktop: narrowing one window leaves the rest of its column and its row as
   expect(fontLeft - typingRight, "the track is as wide as its widest window").toBeGreaterThan(0);
   await context.close();
 });
+
+/** One step sideways: a wheel over a window's header on a desktop, two fingers on a phone (`dir` 1 = to the next window on the right). */
+async function stepSideways(page: Page, dir: 1 | -1, touch: boolean, overId: string): Promise<void> {
+  if (touch) {
+    const cdp = await page.context().newCDPSession(page);
+    const two = (type: "touchStart" | "touchMove" | "touchEnd", dx: number) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: type === "touchEnd" ? [] : [{ x: 200 + dx, y: 500, id: 1 }, { x: 260 + dx, y: 500, id: 2 }] });
+    await two("touchStart", 0);
+    for (let k = 1; k <= 10; k++) { await two("touchMove", -dir * k * 20); await page.waitForTimeout(25); }
+    await two("touchEnd", -dir * 200);
+  } else {
+    const pill = (await page.locator(`[data-window-id="${overId}"] .ui-window-pill`).boundingBox())!;
+    await page.mouse.move(pill.x + pill.width / 2, pill.y + pill.height / 2);
+    await page.mouse.wheel(dir * 300, 0);
+  }
+  await page.waitForTimeout(1100);
+}
+/** The share of a window that is on the screen, 0 to 1. */
+const shareOnScreen = (page: Page, id: string): Promise<number> => page.evaluate((i) => {
+  const r = document.querySelector(`[data-window-id="${i}"]`)!.getBoundingClientRect();
+  const w = Math.min(r.right, innerWidth) - Math.max(r.left, 0), h = Math.min(r.bottom, innerHeight) - Math.max(r.top, 0);
+  return w > 0 && h > 0 ? (w * h) / (r.width * r.height) : 0;
+}, id);
+
+/** Owner, 2026-11-04: the canvas scrolled right past the last window of Appearance into empty space. A row ends where its last window ends. */
+for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phone]] as const) {
+  test(`sideways scrolling stops at the end of the row, at ${label}`, async ({ browser }) => {
+    test.setTimeout(180_000);
+    const context = await browser.newContext({ ...size, baseURL: baseURL() });
+    const page = await context.newPage();
+    await open(page, "&at=appearance.theme");
+    // Appearance has four windows and the longest row (You) has five tracks: more steps than there are windows must not reach the fifth track.
+    for (let k = 0; k < 7; k++) await stepSideways(page, 1, size.isMobile, "s-appearance-theme");
+    const right = await page.evaluate(() => document.querySelector('[data-window-id="s-appearance-layout"]')!.getBoundingClientRect().right);
+    expect(await shareOnScreen(page, "s-appearance-layout"), "the last window of the row is whole on screen").toBeGreaterThan(0.99);
+    expect(size.viewport.width - right, "and nothing but the group's inset is to its right").toBeLessThanOrEqual(18);
+    expect(size.viewport.width - right).toBeGreaterThanOrEqual(-0.5);
+    if (SHOTS) { mkdirSync(SHOTS, { recursive: true }); await page.screenshot({ path: `${SHOTS}/row-end-${size.isMobile ? "p3" : "d2"}.png` }); }
+    await context.close();
+  });
+}
+
+/** Owner, 2026-11-04: after a wider layout the person could scroll to another window while the old one stayed active and named in the breadcrumb. */
+for (const [label, size, key, value] of [["1440x900", SIZES.desktop, "tracer.window-size.desktop", "wide"], ["393x852", SIZES.phone, "tracer.window-size.phone", "full"]] as const) {
+  test(`a layout change keeps the active window in view, and scrolling hands the focus on, at ${label}`, async ({ browser }) => {
+    test.setTimeout(180_000);
+    const context = await browser.newContext({ ...size, baseURL: baseURL() });
+    const page = await context.newPage();
+    await open(page, "&at=appearance.layout");
+    expect(await active(page)).toBe("s-appearance-layout");
+    await page.evaluate(([k, v]) => { localStorage.setItem(k, v); window.dispatchEvent(new CustomEvent("tracer:window-size")); }, [key, value] as const);
+    await page.waitForTimeout(1800);
+    expect(await shareOnScreen(page, "s-appearance-layout"), "the active window is still in view after the layout change").toBeGreaterThan(0.5);
+    expect(await active(page)).toBe("s-appearance-layout");
+    if (SHOTS) { mkdirSync(SHOTS, { recursive: true }); await page.screenshot({ path: `${SHOTS}/layout-kept-${size.isMobile ? "p3" : "d2"}.png` }); }
+    // Scroll back along the row until the Layout window has left: the window in front is active, and the breadcrumb names the same one.
+    for (let k = 0; k < 5 && (await shareOnScreen(page, "s-appearance-layout")) >= 0.5; k++) await stepSideways(page, -1, size.isMobile, "s-appearance-layout");
+    await page.waitForTimeout(500);
+    expect(await shareOnScreen(page, "s-appearance-layout"), "Layout has scrolled away").toBeLessThan(0.5);
+    const now = await active(page);
+    expect(now, "another window is active").not.toBe("s-appearance-layout");
+    expect(await shareOnScreen(page, now!), "and it is the one in front of the person").toBeGreaterThan(0.5);
+    const names = await crumbs(page);
+    expect(names.slice(1), "the breadcrumb says the same").toEqual(["Appearance", now!.replace("s-appearance-", "").replace(/^./, (c) => c.toUpperCase())]);
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/active-follows-${size.isMobile ? "p3" : "d2"}.png` });
+    await context.close();
+  });
+}
