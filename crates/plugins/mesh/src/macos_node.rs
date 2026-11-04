@@ -1350,6 +1350,8 @@ impl Node {
             compact_access: true,
             #[cfg(feature = "mesh-dns-spike")]
             dns_names: false,
+            // Key rotation is not implemented on macOS yet, so the coordinator rotates no node (#285).
+            key_rotation: false,
         };
         self.identity = Some(identity.clone());
         Ok(identity)
@@ -1366,6 +1368,31 @@ impl Node {
         }
     }
 
+    /// Key rotation, step 1 (#285, D166). This node advertises `key_rotation: false`, so the coordinator never
+    /// asks. A request anyway is refused without touching the interface.
+    pub(crate) fn prepare_rotation(
+        &mut self,
+        _operation_id: &str,
+        _sequence: u64,
+    ) -> io::Result<crate::policy::model::PublicKey> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    /// Key rotation, step 2: refused, as for `prepare_rotation`.
+    pub(crate) fn commit_rotation(
+        &mut self,
+        _operation_id: &str,
+        _sequence: u64,
+    ) -> io::Result<crate::dataplane::Identity> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    /// Key rotation, step 3: refused, as for `prepare_rotation`.
+    pub(crate) fn finish_rotation(
+        &mut self,
+        _operation_id: &str,
+        _sequence: u64,
+    ) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
     /// Persist disabled intent before retiring routes and the owned utun descriptor.
     /// # Errors
     /// Keeps the old route inventory when cleanup cannot be completed.
@@ -1542,6 +1569,8 @@ mod tests {
                 PeerPolicy {
                     peer: Peer {
                         key: PublicKey([2; 32]),
+                        previous_key: None,
+                        previous_active: false,
                         addresses: Addresses {
                             ipv4: Ipv4Addr::new(10, 254, 0, 4),
                             ipv6: "fd01::4".parse().expect("peer IPv6"),
@@ -1579,6 +1608,8 @@ mod tests {
         PeerPolicy {
             peer: Peer {
                 key: PublicKey([id; 32]),
+                previous_key: None,
+                previous_active: false,
                 addresses: Addresses {
                     ipv4: Ipv4Addr::new(10, 254, 0, id),
                     ipv6: format!("fd01::{id}").parse().expect("peer IPv6"),
@@ -1639,6 +1670,7 @@ mod tests {
             compact_access: true,
             #[cfg(feature = "mesh-dns-spike")]
             dns_names: false,
+            key_rotation: false,
         };
         assert_eq!(installed_keys(&old), BTreeSet::from([[2; 32]]));
 
@@ -1681,6 +1713,7 @@ mod tests {
             compact_access: true,
             #[cfg(feature = "mesh-dns-spike")]
             dns_names: false,
+            key_rotation: false,
         };
         let mut chunks = crate::configuration::chunks(None, &config).expect("full snapshot");
         assert_eq!(chunks.len(), 1);
