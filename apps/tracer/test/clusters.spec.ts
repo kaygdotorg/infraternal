@@ -1067,6 +1067,10 @@ test("toolbar rows snap: a short drag springs back, a longer one commits, and th
   const t = await touchPage(browser, 3);
   try {
     const { page } = t;
+    // This checks the tray's geometry, not a look: it runs on the Solid theme. Under the default Tinted theme the windows' 6 px blur costs enough frames in
+    // software rendering that the held finger's moves coalesce and the drag does not commit (frame times are in #323); the cost of the blur is measured on its own.
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:themes-action", { detail: { id: "solid" } })));
+    await page.waitForTimeout(600);
     await page.touchscreen.tap(200, 500); // a terminal has focus: both rows exist, the key row shows
     await expect(page.locator("#keytray")).toHaveAttribute("data-rows", "2");
     await page.waitForTimeout(900);
