@@ -4019,3 +4019,23 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        actually use, and a test of the Mac side: "screenshots look pretty
        good but i want mockups with the buttons we are going to use, has the
        mac agent been tested?"
+350. **App-window controls, round 1 (owner, 2026-11-04, #146; extends D342,
+     D343, D349):**
+     - **Top right:** Send keys stays. Bring to front is questioned ("send
+       keys is a good action but what is bring to front? we need to refine
+       this"). The owner pointed to the Screens 5 App Store screenshots as a
+       reference. The final set is asked as a follow-up.
+     - **Send keys:** a short list on desktop. "on phone it should replace
+       the terminal row in the toolbar."
+     - **Settings** (1:1 or fit, frame rate, reconnect) sit behind a gear in
+       the window's pill, "but global defaults need to be in Settings →
+       Remote Desktop → MacOS".
+     - **Frame rate:** "Automatic" or "Save data" ("agreed").
+     - **Phone layout:** "i think for both terminal and mac, we should bring
+       the machine pill down. headers are the wrong place for mobile. what
+       you're suggesting belongs to the phone toolbar row." On a phone, the
+       machine pill moves down to the bottom toolbar area, for terminals
+       and app windows alike, and Full screen and Close live in the phone
+       toolbar row, not a header.
+     - **Picker rows:** "<Icon> <App> <Window Title> <Optional Number>". The
+       number appears only when two windows of one app share a title.
