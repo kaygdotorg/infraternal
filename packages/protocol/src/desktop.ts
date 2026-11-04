@@ -1,5 +1,11 @@
 /** Borrowed binary desktop messages; validation mirrors the Rust codec [D12,D200,D232]. */
-export const DESKTOP_VIDEO = 8n;
+/**
+ * The Hello capability bit for desktop video on the browser leg (leg A): bit 4 counting from zero, `1 << 4`, the same
+ * value as `CAPABILITY` in the Rust protocol crate and "caps bit 4" in contracts/wire.md §9. A browser sets it in its
+ * Hello to ask for app-window streams, and reads it from the server's Hello to learn they exist. (The agent's native
+ * lane on leg B is a different bit, `1 << 8`, and is not used by a browser.)
+ */
+export const DESKTOP_VIDEO = 16n;
 export const MAX_VIDEO_BYTES = 4 * 1024 * 1024 - 42;
 export type VideoInput =
   | { kind: "release" }
