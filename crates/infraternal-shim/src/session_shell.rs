@@ -50,7 +50,9 @@ use std::{
 
 /// The private argv verb; the parser accepts only the shape `command` emits.
 pub const VERB: &str = "__session-shell";
+/// The system launchd control tool, by absolute path.
 const LAUNCHCTL: &str = "/bin/launchctl";
+/// The fixed readiness probe: wait for one line of input, then confirm.
 const READINESS: &str = "read -r line; printf 'infraternal-ready\\n'";
 // macOS shells rebuild PATH from /etc/paths through path_helper at login.
 const PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
@@ -67,8 +69,8 @@ const PASSED: [&str; 3] = ["TERM", "COLORTERM", "INFRATERNAL_SESSION"];
 const GRAPHIC_ACCESS: u64 = 0x10;
 // <unistd.h>: _CS_DARWIN_USER_TEMP_DIR.
 const USER_TEMP_DIR: nix::libc::c_int = 65537;
-// The literal program arrives on the entry's argv after `--`; the shim already
-// bounds it to 8 KiB (`startup::read_command`).
+/// The literal program arrives on the entry's argv after `--`; the shim already
+/// bounds it to 8 KiB (`startup::read_command`).
 const MAX_PROGRAM: usize = 8192;
 
 /// `auditinfo_addr_t` from <bsm/audit.h> (48 bytes; offsets checked on
@@ -83,10 +85,13 @@ struct AuditInfo {
     asid: i32,
     flags: u64,
 }
+/// The record must match the 48 bytes `getaudit_addr` writes.
 const _: () = assert!(std::mem::size_of::<AuditInfo>() == 48);
 
 unsafe extern "C" {
+    /// `<bsm/audit.h>`: read this process's audit record.
     fn getaudit_addr(info: *mut AuditInfo, length: nix::libc::c_int) -> nix::libc::c_int;
+    /// `<unistd.h>`: set the login name of this process's session (root, session leader).
     fn setlogin(name: *const nix::libc::c_char) -> nix::libc::c_int;
 }
 
@@ -152,6 +157,7 @@ struct Request {
     program: Vec<OsString>,
 }
 
+/// Decode the entry's private argv; `None` for any shape `command` never emits.
 fn parse(arguments: &[OsString]) -> Option<Request> {
     let [uid_flag, uid, start, rest @ ..] = arguments else {
         return None;
@@ -210,6 +216,7 @@ pub fn run_if_requested() -> Option<std::process::ExitCode> {
     Some(std::process::ExitCode::FAILURE)
 }
 
+/// Prepare and exec the shell; returns only the error that stopped it.
 fn exec(request: &Request) -> io::Error {
     match prepare(request) {
         Ok(mut command) => command.exec(),
@@ -217,6 +224,7 @@ fn exec(request: &Request) -> io::Error {
     }
 }
 
+/// Everything between entry and exec: descriptor sweep, session checks, privilege drop, placement and environment.
 fn prepare(request: &Request) -> io::Result<Command> {
     // Still root and single-threaded: close everything but the PTY's standard
     // handles before anything else, so no descriptor the root chain held (a
@@ -427,11 +435,13 @@ mod tests {
     //! The private argv parser accepts only the shapes `command` emits.
     use super::*;
 
+    /// Arguments as `OsString`s, for the parser tests.
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
     }
 
     #[test]
+    /// The private argv parser accepts exactly the shapes `command` emits and refuses the rest.
     fn parser_accepts_only_emitted_shapes() {
         assert_eq!(
             parse(&args(&["--uid", "501", "--login"])).map(|r| (r.uid.as_raw(), r.start)),
@@ -507,9 +517,12 @@ mod tests {
         audit_record().unwrap();
     }
 
-    const UNSET: u32 = u32::MAX; // AU_DEFAUDITID: no audit user
-    const GUI: u64 = 0x2030; // graphic, tty and console access
-    const SYSTEM: u64 = 0x1; // the root daemon's system session
+    /// `AU_DEFAUDITID`: no audit user.
+    const UNSET: u32 = u32::MAX;
+    /// Graphic, tty and console access.
+    const GUI: u64 = 0x2030;
+    /// The root daemon's system session.
+    const SYSTEM: u64 = 0x1;
 
     /// D335 placement after `launchctl asuser`: the person's GUI login or a
     /// plain session of their own; never the daemon's or someone else's.

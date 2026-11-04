@@ -80,11 +80,13 @@ mod tests {
     use nix::unistd::Pid;
     use std::{process::Command, time::Duration};
 
+    /// The child's PID as a nix `Pid`.
     fn pid(child: &std::process::Child) -> Pid {
         Pid::from_raw(i32::try_from(child.id()).unwrap())
     }
 
     #[test]
+    /// A running child is not reported as exited.
     fn running_child_has_not_exited() {
         let mut child = Command::new("sleep").arg("5").spawn().unwrap();
         assert!(!exited(pid(&child)).unwrap());
@@ -93,6 +95,7 @@ mod tests {
     }
 
     #[test]
+    /// An exited child is reported, and is still there for its owner to reap.
     fn exited_child_is_seen_and_stays_unreaped() {
         let mut child = Command::new("true").spawn().unwrap();
         let id = pid(&child);

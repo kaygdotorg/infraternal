@@ -255,6 +255,7 @@ pub use session::{run_with_login_group, run_with_prestarted_login};
 pub mod locked_bytes;
 #[cfg(all(feature = "ca-handoff", not(target_os = "linux")))]
 #[path = "locked_bytes_refused.rs"]
+/// Key memory for the CA handoff: refused off Linux, where no reviewed dump exclusion exists (D244).
 pub mod locked_bytes;
 
 #[cfg(all(test, feature = "host-login", target_os = "linux"))]

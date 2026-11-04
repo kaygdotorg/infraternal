@@ -9,6 +9,7 @@ fn main() -> std::process::ExitCode {
 }
 
 #[cfg(not(target_os = "linux"))]
+/// Run the recovery helper fixture used by the SSH runtime tests.
 fn main() -> std::process::ExitCode {
     std::process::ExitCode::from(71)
 }

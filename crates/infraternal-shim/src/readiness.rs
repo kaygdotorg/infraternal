@@ -46,8 +46,8 @@ mod sealed {
         fn descriptor(&self) -> RawFd {
             self.as_fd().as_raw_fd()
         }
-        // A kqueue descriptor supports only read filters: registering
-        // EVFILT_WRITE on it fails with EINVAL.
+        /// A kqueue descriptor supports only read filters: registering
+        /// `EVFILT_WRITE` on it fails with `EINVAL`.
         fn interest() -> tokio::io::Interest {
             tokio::io::Interest::READABLE
         }

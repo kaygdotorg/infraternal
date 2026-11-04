@@ -6,6 +6,7 @@ pub mod auth_evidence;
 pub mod auth_once;
 pub mod auth_order;
 pub mod bootstrap;
+/// Check whether a helper exited without reaping it (Linux and macOS).
 mod child_exit;
 pub mod cli;
 pub mod config;

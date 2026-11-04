@@ -414,6 +414,7 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
         .uid())
 }
 #[cfg(target_os = "macos")]
+/// The connecting process's effective uid on macOS, from `getpeereid` (`LOCAL_PEERCRED`).
 fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
     Ok(nix::unistd::getpeereid(stream)
         .map_err(io::Error::from)?
@@ -428,28 +429,34 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
 struct ChildSignals(nix::sys::signalfd::SignalFd);
 #[cfg(target_os = "linux")]
 impl ChildSignals {
+    /// A signalfd for `mask`, which the caller has blocked.
     fn new(mask: SigSet) -> io::Result<Self> {
         use nix::sys::signalfd::{SfdFlags, SignalFd};
         SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC)
             .map(Self)
             .map_err(io::Error::from)
     }
+    /// The descriptor the poll loop waits on.
     fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
         self.0.as_fd()
     }
+    /// Consume every queued signal so the descriptor reads as idle again.
     fn drain(&self) -> io::Result<()> {
         while self.0.read_signal().map_err(io::Error::from)?.is_some() {}
         Ok(())
     }
 }
 #[cfg(target_os = "macos")]
+/// SIGCHLD readiness on macOS: a kqueue with one `EVFILT_SIGNAL` filter per signal.
 struct ChildSignals(nix::sys::event::Kqueue);
 #[cfg(target_os = "macos")]
 impl ChildSignals {
+    /// A zero timeout: register or drain without blocking.
     const NOW: nix::libc::timespec = nix::libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
+    /// A kqueue watching each signal in `mask`, which the caller has blocked.
     fn new(mask: SigSet) -> io::Result<Self> {
         use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
         let queue = Kqueue::new().map_err(io::Error::from)?;
@@ -471,9 +478,11 @@ impl ChildSignals {
             .map_err(io::Error::from)?;
         Ok(Self(queue))
     }
+    /// The kqueue descriptor, which poll(2) reports readable when a signal arrived.
     fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
         self.0.as_fd()
     }
+    /// Read queued signal events until none are left.
     fn drain(&self) -> io::Result<()> {
         use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent};
         let mut events = [KEvent::new(

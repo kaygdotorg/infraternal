@@ -567,6 +567,7 @@ impl SessionEvents {
 pub(crate) struct SessionEvents(DirectoryEvents);
 #[cfg(target_os = "macos")]
 impl SessionEvents {
+    /// Watch `state/sessions` for entries being added or removed.
     pub(crate) fn new(state: &Path) -> io::Result<Self> {
         DirectoryEvents::new(&state.join("sessions")).map(Self)
     }
@@ -586,12 +587,15 @@ pub(crate) struct DirectoryEvents {
 }
 #[cfg(target_os = "macos")]
 impl DirectoryEvents {
+    /// A zero timeout: register or drain kqueue events without blocking.
     const NOW: nix::libc::timespec = nix::libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
+    /// The kqueue identifier of the one-shot bind/listen bridge timer.
     const TIMER: usize = 1;
 
+    /// Open `directory` event-only and watch it for `NOTE_WRITE` (an entry added or removed).
     pub(crate) fn new(directory: &Path) -> io::Result<Self> {
         use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
         use std::os::{fd::AsRawFd as _, unix::fs::OpenOptionsExt as _};
@@ -636,6 +640,7 @@ impl DirectoryEvents {
         Ok(())
     }
 
+    /// Wait until the directory changed or the bridge timer fired, then drain the queue.
     pub(crate) async fn changed(&self) -> io::Result<()> {
         use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent};
         loop {
@@ -675,9 +680,11 @@ pub(crate) fn isolated(program: &Path) -> Command {
 // bind emits IN_CREATE before listen, so a refused early connection must
 // also wake on chmod. The shim chmods to 0600 only after listen succeeds.
 #[cfg(target_os = "linux")]
+/// Wakes a shim launch when its rendezvous socket may have become connectable (inotify on `sessions/`, Linux).
 struct SocketReadiness(Registration<Inotify>);
 #[cfg(target_os = "linux")]
 impl SocketReadiness {
+    /// Watch `state/sessions` for socket creation and the post-listen chmod.
     fn new(state: &Path) -> io::Result<Self> {
         let watch = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC)
             .map_err(io::Error::from)?;
@@ -689,6 +696,7 @@ impl SocketReadiness {
             .map_err(io::Error::from)?;
         Registration::new(watch).map(Self)
     }
+    /// Wait for the next directory event. `_refused` is unused: Linux also wakes on the chmod after listen.
     async fn changed(&self, _refused: bool) -> io::Result<()> {
         let mut readiness = self.0.readable().await?;
         if let Ok(result) = readiness.try_io(|fd| fd.read_events().map_err(io::Error::from)) {
@@ -704,12 +712,15 @@ impl SocketReadiness {
 // for its own vnode filter. Only after such a refusal, arm one 1 ms timer;
 // the launch's two-second deadline still bounds the whole wait.
 #[cfg(target_os = "macos")]
+/// Wakes a shim launch when its rendezvous socket may have become connectable (kqueue on `sessions/`, macOS).
 struct SocketReadiness(DirectoryEvents);
 #[cfg(target_os = "macos")]
 impl SocketReadiness {
+    /// Watch `state/sessions` for socket creation.
     fn new(state: &Path) -> io::Result<Self> {
         DirectoryEvents::new(&state.join("sessions")).map(Self)
     }
+    /// Wait for the next directory change; after a refused connect, also wake once 1 ms later (see above).
     async fn changed(&self, refused: bool) -> io::Result<()> {
         if refused {
             self.0.wake_after(1)?;

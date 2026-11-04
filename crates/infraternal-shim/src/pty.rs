@@ -168,6 +168,7 @@ pub(crate) fn file_has_attributes(file: &File) -> io::Result<bool> {
 /// first. The flag is not inherited by the PTY child it forks.
 #[cfg(target_os = "macos")]
 pub(crate) fn deny_debugger() -> io::Result<()> {
+    /// `<sys/ptrace.h>`: the request that denies all future debugger attach.
     const PT_DENY_ATTACH: nix::libc::c_int = 31;
     // SAFETY: PT_DENY_ATTACH takes no pid, address or data; scalar arguments only.
     if unsafe { nix::libc::ptrace(PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0) } == -1 {
@@ -182,7 +183,8 @@ pub(crate) fn deny_debugger() -> io::Result<()> {
 /// `Ok(None)` for a zombie; `NotFound` when no such process exists.
 #[cfg(target_os = "macos")]
 pub(crate) fn process_start(pid: u32) -> io::Result<Option<u64>> {
-    const ZOMBIE: u32 = 5; // <sys/proc.h> SZOMB
+    /// `<sys/proc.h>` `SZOMB`: the process has exited and waits to be reaped.
+    const ZOMBIE: u32 = 5;
     let pid = i32::try_from(pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     if pid <= 0 {
         return Err(io::ErrorKind::InvalidInput.into());
@@ -1149,6 +1151,7 @@ pub(crate) fn only_standard_descriptors(command: &mut Command) {
 /// on kernels 5.11 and later, otherwise a walk up to the descriptor limit.
 #[cfg(target_os = "linux")]
 fn cloexec_above_stderr() -> io::Result<()> {
+    /// `<linux/close_range.h>`: mark the range close-on-exec instead of closing it.
     const CLOSE_RANGE_CLOEXEC: nix::libc::c_uint = 1 << 2;
     // SAFETY: scalar-argument syscall; the kernel retains nothing.
     let marked = unsafe {
@@ -1218,14 +1221,16 @@ pub(crate) fn close_above_stderr() -> io::Result<()> {
 fn each_descriptor_above_stderr(
     mut action: impl FnMut(nix::libc::c_int) -> io::Result<()>,
 ) -> io::Result<()> {
-    const PROC_PIDLISTFDS: nix::libc::c_int = 1; // <sys/proc_info.h>
+    /// `<sys/proc_info.h>`: list the open descriptors of a process.
+    const PROC_PIDLISTFDS: nix::libc::c_int = 1;
     #[repr(C)]
     #[derive(Clone, Copy)]
+    /// One `proc_fdinfo` record: a descriptor number and its kind (8 bytes).
     struct FdInfo {
         descriptor: i32,
         kind: u32,
     }
-    // 16 KiB of stack: within Clippy's large-array bound and fork-safe.
+    /// 16 KiB of stack: within Clippy's large-array bound and fork-safe.
     const SLOTS: usize = 2048;
     let mut list = [FdInfo {
         descriptor: -1,
@@ -1384,6 +1389,7 @@ mod descriptor_allowlist_tests {
     }
 
     #[test]
+    /// A planted descriptor is open in a plain child and absent in one behind the allowlist hook.
     fn only_standard_descriptors_reach_the_child() {
         let _serial = SERIAL
             .lock()

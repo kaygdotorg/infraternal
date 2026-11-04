@@ -26,6 +26,7 @@ pub(crate) fn run() -> ExitCode {
 }
 
 #[cfg(target_os = "linux")]
+/// Whether the askpass parent check can read the caller; macOS has no /proc, so it refuses.
 fn allow_parent_inspection() -> bool {
     nix::sys::prctl::set_dumpable(true).is_ok()
 }

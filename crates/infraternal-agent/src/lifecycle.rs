@@ -33,6 +33,7 @@ impl Live {
     // macOS identifies one PID lifetime by its kernel start time (microseconds,
     // proc_pidinfo); zombies report no identity, as dead states do on Linux.
     #[cfg(target_os = "macos")]
+    /// Whether this registered shim is still the same live process: its rendezvous exists and its PID still has the start time recorded at registration (macOS).
     fn alive(&self) -> bool {
         self.path.exists()
             && infraternal_shim::process_start(self.pid)
