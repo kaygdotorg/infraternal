@@ -166,3 +166,52 @@ test("a narrow right split grows both drawn tracks to the canonical minimum", ()
   expect(cols.map((c) => c.w)).toEqual([100, 100]);
   expect(cols.flatMap((c) => c.wins.map((w) => w.id))).toEqual(["a", "b"]);
 });
+
+// ---- row groups (D212 amended 2026-11-03: Settings is one row of windows for each component, no window spans) ----
+
+/** Three rows of 3, 2 and 1 windows: a window is at its track (column) and its band (row); the short rows end early. */
+const rowsOf = (): ColIn[] => [
+  { id: "t0", w: 400, group: "rows", wins: [{ id: "a0", row: 0 }, { id: "b0", row: 1 }, { id: "c0", row: 2 }] },
+  { id: "t1", w: 400, group: "rows", wins: [{ id: "a1", row: 0 }, { id: "b1", row: 1 }] },
+  { id: "t2", w: 400, group: "rows", wins: [{ id: "a2", row: 0 }] },
+];
+
+test("columns that name the same group are one run, with no window spanning, and rows may end early", () => {
+  const cols = settle(rowsOf());
+  expect(runsOf(cols)).toEqual([{ from: 0, to: 2, rows: 3 }]);
+  expect(cols.flatMap((c) => c.wins).every((w) => w.span === 1)).toBe(true);
+  expect(cols.map((c) => c.wins.map((w) => w.row))).toEqual([[0, 1, 2], [0, 1], [0]]);
+  // The empty cells are not a problem of a row group; a plain group made by spans has none.
+  expect(problems(cols)).toEqual([]);
+});
+
+test("without the name the same columns are three plain columns, and a different name does not link", () => {
+  const plain = rowsOf().map(({ group: _g, ...c }) => c);
+  expect(runsOf(plain)).toEqual([{ from: 0, to: 0, rows: 3 }, { from: 1, to: 1, rows: 2 }, { from: 2, to: 2, rows: 1 }]);
+  const two = rowsOf();
+  two[2]!.group = "other";
+  expect(runsOf(two).map((r) => [r.from, r.to])).toEqual([[0, 1], [2, 2]]);
+});
+
+test("a window is never covered twice, in a row group either", () => {
+  const cols = settle(rowsOf());
+  cols[1]!.wins[0]!.span = 2; // a1 over a2's cell
+  expect(problems(cols).some((m) => m.includes("covered 2 times"))).toBe(true);
+});
+
+test("a row group keeps its name when a window in it is split to the right, and the rows stay level", () => {
+  const split = splitRight(rowsOf(), "b0", { id: "b0x", colId: "t0x", pair: "p" }, GAP);
+  expect(problems(split)).toEqual([]);
+  expect(split.map((c) => c.group)).toEqual(["rows", "rows", "rows", "rows"]);
+  expect(runsOf(split)).toEqual([{ from: 0, to: 3, rows: 3 }]);
+  // The windows around the split span both halves, so the rows keep their bands.
+  expect([bandOf(split, "a0"), bandOf(split, "b0"), bandOf(split, "b0x"), bandOf(split, "c0")]).toEqual([0, 1, 1, 2]);
+});
+
+test("closing a window of a row group leaves its row as it was, the others do not move", () => {
+  const after = removeWin(rowsOf(), "b1", GAP);
+  expect(problems(after)).toEqual([]);
+  expect(runsOf(after).length).toBe(1);
+  expect(bandOf(after, "a1")).toBe(0);
+  expect(bandOf(after, "b0")).toBe(1);
+});

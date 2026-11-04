@@ -5,6 +5,7 @@
  * ceremony the row is gone and Settings says "Unlocked". A viewer who is not an administrator sees the state and
  * no button, and the palette offers nothing. Review screenshots land in the external job evidence directory.
  */
+import { paletteOpen } from "./settings-palette";
 import { tracerEvidencePath } from "./evidence-path";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
@@ -31,10 +32,7 @@ async function paletteLabels(page: Page, filter = ""): Promise<string[]> {
 }
 
 async function openSettingsHosts(page: Page): Promise<void> {
-  await page.keyboard.press("Control+Shift+K");
-  await page.keyboard.type("Settings: Hosts");
-  await page.waitForTimeout(200);
-  await page.keyboard.press("Enter");
+  await paletteOpen(page, "Terminal › Hosts", "terminal.hosts");
   await expect(page.locator(".ui-sp [data-kind=extended-info]")).toBeVisible({ timeout: 5000 });
   await page.waitForTimeout(900);
 }

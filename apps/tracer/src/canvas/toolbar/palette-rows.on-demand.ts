@@ -13,8 +13,7 @@ import { ICONS, withLockBadge } from "../../../../../packages/ui/src/icons";
 import { shortcutLabel } from "../../../../../packages/ui/src/platform";
 import type { PaletteEntry } from "../../core-screen";
 import type { Ctx } from "../context";
-import { SETTINGS_SECTIONS } from "../views/settings";
-import { ICON, SECTION_ICON, SESSION_ICON, viewIcon } from "../views/icons";
+import { ICON, SESSION_ICON, viewIcon } from "../views/icons";
 import { byFrecency } from "../sessions/inventory";
 import { isTerminal } from "../views/body";
 import { viewKeys } from "./viewlist";
@@ -29,12 +28,13 @@ export function canvasEntries(cx: Ctx): PaletteEntry[] {
       out.push({ group: "Views", glyph: "▦", icon: viewIcon(c.view.id), label: `Go to ${c.view.name}`, hint: `view · ${shortcutLabel(viewKeys(i))}`, action: `canvas:view:${c.view.id}` });
     });
     const settings = views.get("settings");
-    if (settings) {
-      out.push({ group: "Settings", glyph: "⚙", icon: viewIcon("settings"), label: "Settings", hint: "view · appearance · toolbar · shortcuts", action: "canvas:settings:appearance" });
-      for (const sec of SETTINGS_SECTIONS) {
-        if (!settings.wins.has(`s-${sec.id}`)) continue;
-        out.push({ group: "Settings", glyph: "⚙", icon: SECTION_ICON[sec.id] ?? viewIcon("settings"), label: `Settings: ${sec.title}`, hint: "settings", action: `canvas:settings:${sec.id}` });
-      }
+    const outline = cx.adapters.settings.outline;
+    if (settings && outline) {
+      // Settings as rows of windows (#304): the view, then every group, then every single setting that something stores (found by its
+      // name, what it does and its technical names), each opening its own window.
+      const rows = outline.rows();
+      out.push({ group: "Settings", glyph: "⚙", icon: viewIcon("settings"), label: "Settings", hint: `view · ${rows.slice(0, 4).map((r) => r.title.toLowerCase()).join(" · ")}`, action: `canvas:settings:${rows[0]?.id ?? "appearance"}` });
+      for (const e of outline.entries()) out.push({ group: "Settings", glyph: "⚙", icon: e.icon, label: e.label, hint: e.hint, action: e.action });
     }
     if (cx.sharing) out.push({ group: "Canvas", glyph: "⇪", icon: ICONS.next, label: "Share layout…", hint: "send views to a person or a group", action: "canvas:share" });
     if (views.get(state.currentView)?.view.team) out.push({ group: "Canvas", glyph: "⇪", icon: ICONS.unlock, label: "Unlink team layout to edit", hint: "keep your own copy", action: "canvas:unlink" });
@@ -60,6 +60,7 @@ export function canvasEntries(cx: Ctx): PaletteEntry[] {
       out.push({ group: "Canvas", glyph: "▥", icon: ICONS.newRight, label: "New window right", hint: `full size, beside · ${bindingText("new-window-right")}`, action: "canvas:new:right" });
       out.push({ group: "Canvas", glyph: "▤", icon: ICONS.newBelow, label: "New window below", hint: `full size, under · ${bindingText("new-window-below")}`, action: "canvas:new:below" });
     }
+    if (state.activeWin && cx.adapters.docs?.for(state.activeWin.model)) out.push({ group: "Canvas", glyph: "?", icon: ICON.help, label: "Read about this window", hint: `docs · ${bindingText("window-docs")}`, action: "canvas:windowdocs" });
     if (state.activeWin) out.push({ group: "Canvas", glyph: "▢", icon: ICONS.close, label: "Close window", hint: `the session keeps running · ${bindingText("close-window")}`, action: "canvas:close" });
     out.push({ group: "Canvas", glyph: "▦", icon: cx.inputLock.state ? withLockBadge(ICONS.terminal) : ICONS.terminal, label: cx.inputLock.state ? "Input lock off" : "Input lock on", hint: `the active window only · ${bindingText("input-lock")}`, action: "canvas:inputlock" });
     // Any host's shell by name. Keywords ride in the hint so "ssh", "terminal" and "console" find them.

@@ -76,7 +76,7 @@ test("the Settings switch is offered because the server reports the capability, 
   await expect(page.getByRole("option", { name: /Open Editor on studio-mac/ })).toHaveCount(0);
   await page.keyboard.press(selectAllShortcut);
   await page.keyboard.type("hosts");
-  await page.getByRole("option", { name: /Settings: Hosts/ }).click();
+  await page.getByRole("option", { name: /Terminal › Hosts/ }).click();
   const toggle = page.getByRole("switch", { name: /Stream app windows/ });
   await expect(toggle).toBeVisible();
   await expect(toggle).not.toBeChecked();

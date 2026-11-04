@@ -4,14 +4,18 @@
  * Model (pure, no DOM, so the rules can be tested alone):
  * - A column is an ordered list of windows that start in it. A window covers `span` consecutive columns from its
  *   own, and `rows` row bands from its own `row`. A window with span 1 and rows 1 is a plain stacked window.
- * - A **group** is a maximal run of adjacent columns linked by at least one window with span > 1. Columns outside
- *   any group are plain flex stacks in the DOM and never reach this module's grid rendering (see views/world.ts).
+ * - A **group** is a maximal run of adjacent columns that are linked: by at least one window with span > 1, or by naming the
+ *   same `group` (a row group, D212 amendment 2026-11-03: Settings is one row of windows for each component, and the rows scroll
+ *   together). Columns outside any group are plain flex stacks in the DOM and never reach this module's grid rendering
+ *   (see views/world.ts).
  * - Inside a group the rows are shared: every column of the group is cut by the same row bands, so a spanning window
  *   is level with its neighbours. Band heights come from the explicit `h` of the single-band windows in that band;
  *   a band without one takes an equal share of what is left (`1fr`), as a flat column does.
  *
  * Invariants (checked by `problems` in groups.on-demand.ts, and by the tests):
- * - Every cell of a group (row band x column) is covered by exactly one window. No gaps, no overlaps.
+ * - A cell of a group (row band x column) is covered by at most one window: no overlaps. In a group made by spans every cell is
+ *   covered, no gaps. A row group may have empty cells (a row with fewer windows than the longest one ends early); nothing
+ *   spans to fill them.
  * - A column's windows are listed in row order.
  * - A column that no window starts in and no window crosses is removed, and its width goes to its half partner (or
  *   the column on its left), so a closed split gives back exactly what it took.
@@ -24,13 +28,13 @@
 /** A window as the grid sees it. `span` and `rows` are at least 1; `row` is the band it starts in (explicit after settle). */
 export interface Win { id: string; span: number; rows: number; row: number; h?: number }
 /** A column: its width, its split pair (`half`, the id both halves of one split share) and the windows that start in it. */
-export interface Col { id: string; w: number; half?: string; wins: Win[] }
+export interface Col { id: string; w: number; half?: string; group?: string; wins: Win[] }
 /** A run of adjacent columns: `from..to` inclusive, `rows` bands tall. A run of one column is not a group. */
 export interface Run { from: number; to: number; rows: number }
 
 /** Input before settling: `row`, `span`, `rows` may be missing or out of range. */
 export interface WinIn { id: string; span?: number; rows?: number; row?: number; h?: number }
-export interface ColIn { id: string; w: number; half?: string; wins: WinIn[] }
+export interface ColIn { id: string; w: number; half?: string; group?: string; wins: WinIn[] }
 
 const whole = (v: number | undefined, lo: number): number => (typeof v === "number" && Number.isFinite(v) ? Math.max(lo, Math.floor(v)) : lo);
 
@@ -42,7 +46,7 @@ const whole = (v: number | undefined, lo: number): number => (typeof v === "numb
 export function settle(input: readonly ColIn[]): Col[] {
   const n = input.length;
   const cols: Col[] = input.map((c, i) => ({
-    id: c.id, w: c.w, ...(c.half !== undefined ? { half: c.half } : {}),
+    id: c.id, w: c.w, ...(c.half !== undefined ? { half: c.half } : {}), ...(c.group !== undefined ? { group: c.group } : {}),
     wins: c.wins.map((w): Win => ({
       id: w.id,
       span: Math.min(whole(w.span, 1), Math.max(1, n - i)),
@@ -84,12 +88,16 @@ export function settle(input: readonly ColIn[]): Col[] {
   return cols;
 }
 
-/** The runs of columns: a group is a run of more than one column; the rest are single columns (a flat stack). */
-export function runsOf(cols: readonly { wins: readonly { span: number }[] }[] | readonly ColIn[]): Run[] {
+/**
+ * The runs of columns: a group is a run of more than one column; the rest are single columns (a flat stack). Two adjacent columns
+ * are one run when a window of the first spans into the second, or when both name the same `group`.
+ */
+export function runsOf(cols: readonly { wins: readonly { span: number }[]; group?: string }[] | readonly ColIn[]): Run[] {
   const n = cols.length;
   const reach = cols.map((_, i) => i);
   cols.forEach((c, i) => {
     for (const w of c.wins as readonly { span?: number }[]) reach[i] = Math.max(reach[i]!, Math.min(n - 1, i + whole(w.span, 1) - 1));
+    if (c.group !== undefined && cols[i + 1]?.group === c.group) reach[i] = Math.max(reach[i]!, i + 1);
   });
   const runs: Run[] = [];
   for (let i = 0; i < n;) {
@@ -154,7 +162,7 @@ export function splitRight(cols: readonly ColIn[], id: string, next: { id: strin
   c[X]!.w = w1;
   c[X]!.half = next.pair;
   const N: Win = { id: next.id, span: 1, rows: W.rows, row: W.row, ...(W.h !== undefined ? { h: W.h } : {}) };
-  c.splice(X + 1, 0, { id: next.colId, w: Math.max(minimumWidth, total - gap - w1), half: next.pair, wins: [N] });
+  c.splice(X + 1, 0, { id: next.colId, w: Math.max(minimumWidth, total - gap - w1), half: next.pair, ...(c[X]!.group !== undefined ? { group: c[X]!.group } : {}), wins: [N] });
   return settle(c);
 }
 
