@@ -16,6 +16,7 @@ import { openBottomSheet } from "./bottom-sheet";
 import { ICONS } from "./icons";
 import { hideTips } from "./tooltip";
 
+/** What a docs preview shows: a title, a lead, bullets, an optional small table, or one line saying there is nothing. */
 export interface DocsPreviewContent {
   title: string;
   lead?: string;
@@ -24,6 +25,7 @@ export interface DocsPreviewContent {
   empty?: string;
 }
 
+/** Where a docs preview opens (a popover on a desktop, a sheet on a phone), what it shows and what its expand icon does. */
 export interface DocsPreviewOptions {
   stage: HTMLElement;
   /** The "?" button (or what stands in for it); focus returns here. */
@@ -39,6 +41,7 @@ export interface DocsPreviewOptions {
   onClosed(): void;
 }
 
+/** A docs preview that is open; closing it returns the focus to where it came from. */
 export interface DocsPreview { close(source: PopoverSource): void }
 
 /** The popover's contents. `expand` is the top-right icon button (absent when there is nothing to expand to). */
@@ -87,6 +90,7 @@ export function renderDocsPreview(content: DocsPreviewContent, onExpand: (() => 
   return { root, expand };
 }
 
+/** Opens the docs preview for a window: a popover anchored to its "?" button, or a bottom sheet on a touch screen. */
 export function openDocsPreview(options: DocsPreviewOptions): DocsPreview {
   // The button's own tooltip would sit on top of the preview it just opened (the pointer is still resting on it): none while it is open.
   hideTips();

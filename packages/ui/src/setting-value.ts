@@ -16,6 +16,7 @@
  * unit when they divide evenly, else in the largest unit that does (36 h for a setting in days).
  */
 
+/** The units a duration is written in. */
 export type DurationUnit = "min" | "h" | "d";
 
 /** Minutes in one of each unit. */
@@ -29,16 +30,21 @@ export interface NumberSpec { kind: "number"; unit: string; default: number; min
 export interface TextSpec { kind: "text"; default: string; pattern: RegExp; rule: string }
 /** One of a few named options; `default` is an option's id. */
 export interface ChoiceSpec { kind: "choice"; options: ReadonlyArray<{ id: string; label: string }>; default: string }
+/** An on-or-off setting. */
 export interface SwitchSpec { kind: "switch"; default: boolean }
+/** Every kind of value a setting can hold, with the rules for it. */
 export type ValueSpec = DurationSpec | NumberSpec | TextSpec | ChoiceSpec | SwitchSpec;
 /** The kinds a person types into a field (and so can get wrong). */
 export type TypedSpec = DurationSpec | NumberSpec | TextSpec;
+/** True for the kinds a person types (a duration, a count, a text), which can be wrong. */
 export const isTyped = (spec: ValueSpec): spec is TypedSpec => spec.kind === "duration" || spec.kind === "number" || spec.kind === "text";
 
 /** What a setting holds: minutes for a duration, the count for a number, the text, an option's id, on or off. */
 export type SettingValue = number | string | boolean;
+/** The outcome of reading typed text: the value, or the sentence that says why not. */
 export type Parsed = { ok: true; value: SettingValue } | { ok: false; message: string };
 
+/** The singular and plural word for each duration unit. */
 const WORD: Record<DurationUnit, [one: string, many: string]> = { min: ["minute", "minutes"], h: ["hour", "hours"], d: ["day", "days"] };
 
 /** "1 day", "30 days". */

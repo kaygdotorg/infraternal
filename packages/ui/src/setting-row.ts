@@ -29,6 +29,7 @@ import { createCapsuleTabs, type CapsuleTabs } from "./capsule-tabs";
 import { enhanceSwitch, type UiSwitch } from "./switch";
 import { captionFor, defaultValue, formatValue, isTyped, parseValue, type SettingValue, type ValueSpec } from "./setting-value";
 
+/** What a setting row needs: its id, plain title and help, the rules for its value, where it starts and what happens on a save. */
 export interface SettingRowOptions {
   id: string;
   title: string;
@@ -45,6 +46,7 @@ export interface SettingRowOptions {
   onSave?(value: SettingValue): void | Promise<string | void>;
 }
 
+/** A setting row on screen: its element, its value, and the ways to put a stored value in, highlight it and let it go. */
 export interface SettingRow {
   readonly root: HTMLElement;
   value(): SettingValue;
@@ -58,8 +60,10 @@ export interface SettingRow {
 /** Counter-clockwise arrow: back to the default. */
 const RESET_ICON = '<path d="M4.5 12a7.5 7.5 0 1 0 2.4-5.5"/><path d="M4.5 4.5v4h4"/>';
 
+/** Gives each row its own element ids, so its label and help can be read out with its field. */
 let serial = 0;
 
+/** Builds one setting row: the control for its kind, a Reset, its default and range, and an inline refusal for a bad value. */
 export function createSettingRow(options: SettingRowOptions): SettingRow {
   const { spec } = options;
   const n = ++serial;

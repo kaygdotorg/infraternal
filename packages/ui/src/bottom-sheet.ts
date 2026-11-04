@@ -22,6 +22,7 @@ export interface BottomSheetOptions {
   onClosed(): void;
 }
 
+/** What `openBottomSheet` returns: a handle to close the sheet it opened. */
 export interface BottomSheet {
   readonly root: HTMLElement;
   close(source: "pointer" | "keyboard"): void;
@@ -29,10 +30,12 @@ export interface BottomSheet {
 
 /** The shared easing token (WAAPI cannot read a `var()` in an easing string, so the value is read once). */
 const ease = (): string => getComputedStyle(document.documentElement).getPropertyValue("--ease-out").trim() || "ease-out";
+/** True when the person asked the system for less motion: the sheet then fades instead of sliding. */
 const reduced = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
 /** A drag this far down, or a flick this fast (px per ms), closes the sheet. */
 const CLOSE_DISTANCE = 72, CLOSE_SPEED = 0.6;
 
+/** Opens a sheet from the bottom edge over a dimmed scrim, focused and closed by Escape, a press on the scrim or a drag down. */
 export function openBottomSheet(options: BottomSheetOptions): BottomSheet {
   const { stage, content, opener } = options;
   const scrim = document.createElement("div");
