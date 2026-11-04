@@ -20,6 +20,8 @@ pub mod mesh_issue;
 pub mod mesh_login;
 #[cfg(target_os = "linux")]
 pub mod mesh_port;
+#[cfg(all(feature = "session-bridge", target_os = "linux"))]
+pub mod mesh_runtime;
 pub mod mesh_server;
 #[cfg(feature = "session-bridge")]
 pub mod session_bridge;

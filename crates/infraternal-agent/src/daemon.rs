@@ -381,6 +381,44 @@ fn spawn_revocation(
     })
 }
 
+/// Open `person`'s shell as `account` for mesh SSH [D235, D240], #221.
+///
+/// It goes through the browser terminal's ordered admission path:
+/// account resolution, the login access check, the real login (PAM session,
+/// environment, limits) and its fencing. The caller, the mesh SSH authority,
+/// has already admitted exactly this person and account under its current
+/// snapshot, so the grant here names only that account: a fallback to root
+/// for an account that vanished in between is refused, never widened.
+/// # Errors
+/// Returns the same refusals as a browser terminal open.
+pub async fn open_mesh_ssh_shell(
+    state: &std::path::Path,
+    person: uuid::Uuid,
+    account: &str,
+    cols: u16,
+    rows: u16,
+) -> io::Result<Session> {
+    static MANAGER: tokio::sync::OnceCell<Manager> = tokio::sync::OnceCell::const_new();
+    let exe = std::env::current_exe()?;
+    let manager = *MANAGER.get_or_init(Manager::detect).await;
+    let input = Open {
+        person: Some(person),
+        account: Some(account.to_owned()),
+        grant: Some(infraternal_plugin_api::login_access::LoginGrant {
+            accounts: [account.to_owned()].into(),
+            ..Default::default()
+        }),
+        readiness: false,
+        uid: nix::unistd::Uid::effective().as_raw(),
+        cols,
+        rows,
+    };
+    open_requested(&exe, state, manager, input, false)
+        .await?
+        .session
+        .ok_or_else(|| io::Error::other("login opened no session"))
+}
+
 /// Refuse a person's open unless their login access grant allows the account
 /// this host resolved [D235, D319].
 fn login_access_allows(
