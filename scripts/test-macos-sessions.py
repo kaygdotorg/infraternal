@@ -8,19 +8,31 @@ Run as root on the Mac build machine, from the repository root:
         --upgrade /path/to/second/build \\
         --gui-uid 501 --plain-uid 1500 [--asid-probe /path/to/probe]
 
-It speaks leg B to `infraternal agent --fd 3` (the link the server uses) and:
+It starts the infraternal agent the way production does: as a launchd system
+job (`launchctl bootstrap system`), so it has a LaunchDaemon's audit session and
+bootstrap rather than an SSH login's (#328 P2, P3-3). The job's tiny launcher
+connects leg B (the link the server uses) back to this script as descriptor 3,
+and deliberately plants what must never reach a shell: descriptor 9 open on a
+root-only file without close-on-exec, plus DYLD_LIBRARY_PATH, BASH_ENV, ENV,
+ZDOTDIR and a marker variable in the environment (#328 P1, P3-1). It then:
 1. opens a shell for an account with a GUI login and one without, types into
    each and reads the output back;
 2. checks D335 placement inside each shell: the GUI account's shell is in its
    login session (launchd manager `Aqua`, the session's ssh-agent socket, the
-   GUI audit session when a probe is given), the other is a plain shell
-   (`Background`, no agent socket);
-3. stops the infraternal agent abruptly, starts it again and reattaches: the
-   same shell process answers;
-4. replaces the installed binary with `--upgrade` (atomic rename), starts the
-   new infraternal agent, checks that its census adopts both sessions and
-   reattaches both shells again;
-5. ends both shells and waits until the infraternal agent's census drops them.
+   GUI audit session), the other is a plain shell in a session of its own
+   (`Background`, audit user = the person, no agent socket, neither the
+   daemon's nor the GUI audit session);
+3. checks that neither shell nor shim holds the planted descriptor and that no
+   planted variable reached the shells;
+4. stops the infraternal agent abruptly (SIGKILL), starts the job again and
+   reattaches: the same shell process answers;
+5. replaces the installed binary with `--upgrade` (atomic rename), starts the
+   job again, checks that its census adopts both sessions and reattaches;
+6. ends both shells and waits until the infraternal agent's census drops them.
+
+`--asid-probe` names a small program that prints its own audit record
+(`uid= euid= asid= auid= flags=`); it must be readable and executable by both
+accounts. The test profile and launcher live in root-owned directories.
 
 It reads only the keychain *search list* (`security list-keychains`); it never
 reads keychain items and never touches the privacy database.
@@ -32,6 +44,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -42,9 +55,79 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent_fixture import Binary, cleanup, detach, select_terminal, varint  # noqa: E402
 
+LABEL = 'org.infraternal.test.macos-sessions'
+MARKER = 'ROOT-ONLY-J146-PLANTED-DESCRIPTOR'
+PLANTED_ENV = {
+    'DYLD_LIBRARY_PATH': '/private/tmp/j146-planted-dyld',
+    'BASH_ENV': '/private/tmp/j146-planted-bash-env',
+    'ENV': '/private/tmp/j146-planted-env',
+    'ZDOTDIR': '/private/tmp/j146-planted-zdotdir',
+    'J146_PLANTED': 'leaked',
+}
+# Runs inside the launchd job as root: records the daemon's own context, puts
+# leg B on descriptor 3 and the root-only file on descriptor 9 (no CLOEXEC),
+# then execs the infraternal agent in place, keeping that context.
+LAUNCHER = r'''
+import json, os, socket, subprocess, sys
+leg_b, secret, agent, state, probe, context, planted = sys.argv[1:8]
+if probe:
+    with open(context, 'w') as out:
+        subprocess.run([probe], stdout=out, check=False)
+        subprocess.run(['/bin/launchctl', 'managername'], stdout=out, check=False)
+peer = socket.socket(socket.AF_UNIX)
+peer.connect(leg_b)
+if peer.fileno() != 3:
+    os.dup2(peer.fileno(), 3)
+# launchd starts jobs with only 0-2, so the socket may already be 3; dup2 onto
+# itself keeps CLOEXEC, so mark leg B inheritable explicitly.
+os.set_inheritable(3, True)
+os.dup2(os.open(secret, os.O_RDONLY), 9)
+os.set_inheritable(9, True)
+env = dict(os.environ, **json.loads(planted))
+os.execve(agent, [agent, 'agent', '--fd', '3', '--state', state], env)
+'''
+
+
+class LaunchdJob:
+    """Stands in for the fixture's subprocess handle: the agent is a launchd job."""
+
+    def __init__(self, pid, log):
+        self.pid = pid
+        self.returncode = None
+        self.log = log
+        self.stderr = self
+
+    def read(self):
+        return Path(self.log).read_bytes() if Path(self.log).exists() else b''
+
+    def close(self):
+        pass
+
+    def poll(self):
+        try:
+            os.kill(self.pid, 0)
+        except ProcessLookupError:
+            self.returncode = -9
+            return self.returncode
+        return None
+
+    def kill(self):
+        subprocess.run(['/bin/launchctl', 'kill', 'SIGKILL', f'system/{LABEL}'],
+                       capture_output=True, check=False)
+
+    def wait(self, timeout=10):
+        deadline = time.monotonic() + (timeout or 10)
+        while self.poll() is None:
+            if time.monotonic() > deadline:
+                raise subprocess.TimeoutExpired(LABEL, timeout)
+            time.sleep(0.05)
+        subprocess.run(['/bin/launchctl', 'bootout', f'system/{LABEL}'],
+                       capture_output=True, check=False)
+        return self.returncode
+
 
 class Agent(Binary):
-    """The fixture client, opening terminals for an explicit account.
+    """The fixture client, with the infraternal agent run as a launchd system job.
 
     Each session keeps its own output and input cursors across detach and
     infraternal agent restarts: input is sequenced exactly once, so a writer
@@ -52,6 +135,59 @@ class Agent(Binary):
     duplicates (correctly) by the shim.
     """
     cursors = {}
+    config = None  # set by main(): paths for the job, probe and planted file
+
+    def start(self):
+        """Bootstrap the launchd job and accept its leg-B connection."""
+        config = Agent.config
+        listener_path = config['work'] / 'leg-b.sock'
+        listener_path.unlink(missing_ok=True)
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(listener_path))
+        os.chmod(listener_path, 0o600)
+        listener.listen(1)
+        listener.settimeout(20)
+        log = config['work'] / 'agent.log'
+        plist = config['work'] / f'{LABEL}.plist'
+        arguments = ['/usr/bin/python3', str(config['launcher']), str(listener_path),
+                     str(config['secret']), str(self.binary), str(self.state),
+                     config['probe'] or '', str(config['context']), json.dumps(PLANTED_ENV)]
+        plist.write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+            '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            '<plist version="1.0"><dict>\n'
+            f'<key>Label</key><string>{LABEL}</string>\n'
+            '<key>ProgramArguments</key><array>'
+            + ''.join(f'<string>{a}</string>' for a in arguments)
+            + '</array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><false/>\n'
+            '<key>ProcessType</key><string>Background</string>\n'
+            '<key>StandardOutPath</key><string>/dev/null</string>\n'
+            f'<key>StandardErrorPath</key><string>{log}</string>\n'
+            '</dict></plist>\n')
+        os.chmod(plist, 0o644)
+        subprocess.run(['/bin/launchctl', 'bootout', f'system/{LABEL}'],
+                       capture_output=True, check=False)
+        subprocess.run(['/bin/launchctl', 'bootstrap', 'system', str(plist)], check=True)
+        self.sock, _ = listener.accept()
+        listener.close()
+        listener_path.unlink(missing_ok=True)
+        self.sock.settimeout(20)
+        self.link = None
+        listing = subprocess.run(['/bin/launchctl', 'print', f'system/{LABEL}'],
+                                 capture_output=True, text=True, check=True).stdout
+        self.child = LaunchdJob(int(re.search(r'\bpid = (\d+)', listing).group(1)), log)
+        stream, kind, _ = self.read()
+        assert (stream, kind) == (0, 0)
+        self.send(0, 0, struct.pack('<HQ', 1, 0) + varint(6) + b'tracer')
+        self.ping(0, 0)
+
+    def kill(self):
+        """An abrupt stop of the job (SIGKILL); detached shims keep their shells."""
+        if self.child.poll() is None:
+            self.child.kill()
+        self.child.wait()
+        self.sock.close()
 
     def remember(self):
         Agent.cursors[str(self.id)] = (self.out, self.entered, self.acked)
@@ -95,6 +231,8 @@ class Agent(Binary):
 
 PROBE = ('id -un; launchctl managername; printf "SOCK=%s\\n" "$SSH_AUTH_SOCK"; '
          'printf "SHELLPID=%s\\n" "$$"; printf "LOGIN=%s\\n" "$(logname)"; '
+         'if : <&9 2>/dev/null; then echo FD9=open; else echo FD9=closed; fi; '
+         'printf "PLANTED=%s\\n" "$J146_PLANTED$DYLD_LIBRARY_PATH$BASH_ENV$ENV$ZDOTDIR"; '
          'security list-keychains')
 
 
@@ -133,26 +271,57 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def check_gui(text, user, asid_probe, asid):
-    lines = text.splitlines()
-    assert lines[0].strip() == user, text
-    assert lines[1].strip() == 'Aqua', ('not in the login session', text)
+def audit(text):
+    """(asid, auid, flags) from the probe's `asid= auid= flags=` line."""
+    match = re.search(r'asid=(\d+) auid=(\d+) flags=(0x[0-9a-f]+)', text)
+    assert match, ('no audit record in the probe output', text)
+    return match.group(1), int(match.group(2)), int(match.group(3), 16)
+
+
+def check_common(text, user, uid):
+    """What every shell shares: the right account, nothing planted inherited."""
+    assert text.splitlines()[0].strip() == user, text
+    assert field(text, 'LOGIN') == user, text
+    assert field(text, 'FD9') == 'closed', ('the planted root descriptor reached the shell', text)
+    assert field(text, 'PLANTED') == '', ('a planted variable reached the shell', text)
+    assert MARKER not in text, text
+
+
+def check_gui(text, user, uid, gui_asid_value):
+    check_common(text, user, uid)
+    assert text.splitlines()[1].strip() == 'Aqua', ('not in the login session', text)
     sock = field(text, 'SOCK')
     assert sock and 'com.apple.launchd.' in sock, ('no ssh-agent socket', text)
-    assert field(text, 'LOGIN') == user, text
     assert f'/Users/{user}/Library/Keychains/login.keychain-db' in text, text
-    if asid_probe:
-        assert f'asid={asid} ' in text, ('not in the GUI audit session', asid, text)
+    asid, auid, flags = audit(text)
+    assert asid == gui_asid_value and auid == uid and flags & 0x10, ('not the GUI audit session', text)
 
 
-def check_plain(text, user, asid_probe, asid):
-    lines = text.splitlines()
-    assert lines[0].strip() == user, text
-    assert lines[1].strip() == 'Background', ('unexpected login-session placement', text)
+def check_plain(text, user, uid, gui_asid_value, daemon_asid):
+    check_common(text, user, uid)
+    assert text.splitlines()[1].strip() == 'Background', ('not a background session', text)
     assert field(text, 'SOCK') == '', text
-    assert field(text, 'LOGIN') == user, text
-    if asid_probe:
-        assert f'asid={asid} ' not in text, text
+    asid, auid, flags = audit(text)
+    assert auid == uid, ('the plain shell has no audit user of its own', text)
+    assert asid not in (gui_asid_value, daemon_asid), ('the plain shell shares a session', text)
+    assert not flags & 0x10, text
+
+
+def holders(pid):
+    """Paths the process holds open (lsof), to look for the planted file."""
+    out = subprocess.run(['/usr/sbin/lsof', '-p', str(pid), '-Fn'], capture_output=True,
+                         text=True, check=False).stdout
+    return [line[1:] for line in out.splitlines() if line.startswith('n')]
+
+
+def shim_pid(state, session):
+    """The shim's pid from its Hello on the rendezvous socket."""
+    from agent_fixture import exact
+    with socket.socket(socket.AF_UNIX) as peer:
+        peer.settimeout(5)
+        peer.connect(str(state / 'sessions' / f'{uuid.UUID(session).hex}.sock'))
+        hello = exact(peer, struct.unpack('<I', exact(peer, 4))[0])
+    return struct.unpack('<I', hello[27:31])[0]
 
 
 def main():
@@ -165,6 +334,17 @@ def main():
     parser.add_argument('--state', default='/var/run/infraternal-macos-test')
     args = parser.parse_args()
     assert os.geteuid() == 0, 'run as root: the root infraternal agent starts shells for other accounts'
+    assert args.asid_probe, '--asid-probe is required: placement is checked from audit records'
+    work = Path(args.state + '.work')
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(mode=0o700)
+    secret = work / 'root-only'
+    secret.write_text(MARKER)
+    os.chmod(secret, 0o600)
+    launcher = work / 'launcher.py'
+    launcher.write_text(LAUNCHER)
+    Agent.config = dict(work=work, secret=secret, launcher=launcher,
+                        probe=args.asid_probe, context=work / 'daemon-context')
     import pwd
     gui_user = pwd.getpwuid(args.gui_uid).pw_name
     plain_user = pwd.getpwuid(args.plain_uid).pw_name
@@ -179,10 +359,13 @@ def main():
     agent = None
     try:
         agent = Agent(args.binary, state)
+        context = Agent.config['context'].read_text()
+        daemon_asid = audit(context)[0]
+        print(f'--- infraternal agent (launchd system job) ---\n{context}')
         gui = agent.open_as(args.gui_uid)
         text = probe(agent, args.asid_probe, 'GUI')
         print(f'--- {gui_user} shell {gui} (GUI login) ---\n{text}')
-        check_gui(text, gui_user, args.asid_probe, asid)
+        check_gui(text, gui_user, args.gui_uid, asid)
         gui_pid = field(text, 'SHELLPID')
         typed = agent.run('echo typed-$((6*7))', 'TYPE')
         assert 'typed-42' in typed, typed
@@ -191,10 +374,15 @@ def main():
         plain = agent.open_as(args.plain_uid)
         text = probe(agent, args.asid_probe, 'PLAIN')
         print(f'--- {plain_user} shell {plain} (no GUI login) ---\n{text}')
-        check_plain(text, plain_user, args.asid_probe, asid)
+        check_plain(text, plain_user, args.plain_uid, asid, daemon_asid)
         plain_pid = field(text, 'SHELLPID')
         detach(agent)
         print('PASS: shells open, take input and return output; D335 placement holds')
+        for session, pid in ((gui, gui_pid), (plain, plain_pid)):
+            for holder in (int(pid), shim_pid(state, session)):
+                leaked = [path for path in holders(holder) if path.endswith('/root-only')]
+                assert not leaked, ('the planted root descriptor is held', holder, leaked)
+        print('PASS: no shell or shim holds the planted root descriptor; no planted variable reached a shell')
 
         # An abrupt stop of the infraternal agent; the shims keep their shells.
         agent.kill()
@@ -223,7 +411,7 @@ def main():
             detach(agent)
         agent.switch(gui)
         text = probe(agent, args.asid_probe, 'UG')
-        check_gui(text, gui_user, args.asid_probe, asid)
+        check_gui(text, gui_user, args.gui_uid, asid)
         detach(agent)
         print('PASS: both shells survive an upgrade of the infraternal agent; placement unchanged')
 
@@ -233,7 +421,10 @@ def main():
     finally:
         if agent is not None:
             agent.kill()
+        subprocess.run(['/bin/launchctl', 'bootout', f'system/{LABEL}'],
+                       capture_output=True, check=False)
         cleanup(state)
+        shutil.rmtree(work, ignore_errors=True)
 
 
 if __name__ == '__main__':
