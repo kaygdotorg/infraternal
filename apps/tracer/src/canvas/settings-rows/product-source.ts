@@ -9,12 +9,12 @@
  * name-suffix, browser-session, add-link, join-code, install-mode, sign-in-account, join-mesh, renew-early, scrollback-lines,
  * multiplexer-offer; and the lists behind Updates, Access, Connections, Published Services and the Devices window.
  */
-import { UNIT_MINUTES } from "../../../../../packages/ui/src/setting-value";
 import type { SettingsSource } from "../views/settings-body.on-demand";
 import { onDemand } from "../../on-demand";
 import { createRowsSource } from "./source";
 
-const DAY = UNIT_MINUTES.d;
+/** Durations are held in minutes (packages/ui/src/setting-value.ts); the server stores whole days. */
+const DAY = 1440;
 const auth = () => onDemand(() => import("../../auth"));
 
 const backing: NonNullable<SettingsSource["backing"]> = (id) => id !== "app-key" ? undefined : {
