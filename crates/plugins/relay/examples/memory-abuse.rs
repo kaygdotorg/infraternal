@@ -27,16 +27,28 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// The server name in the relay's test certificate, used by every client.
 const NAME: &str = "relay-memory.mesh.test";
+/// How many linked host pairs the datagram flood uses (so twice as many hosts).
 const PAIRS: usize = 256;
+/// How many datagrams each host sends in the datagram flood.
 const DATAGRAMS_PER_HOST: usize = 256;
+/// Payload size of each flooded datagram, in bytes.
 const PACKET_BYTES: usize = 1_400;
+/// How long a client may take to connect to the relay.
 const CONNECT_DEADLINE: Duration = Duration::from_secs(10);
+/// How long a pair may take to receive its link notices.
 const LINK_DEADLINE: Duration = Duration::from_secs(10);
+/// Number of distinct loopback source addresses used by the handshake flood.
 const HANDSHAKE_FLOOD_SOURCE_IPS: u8 = 128;
+/// Connection attempts started from each source address.
 const HANDSHAKES_PER_SOURCE_IP: usize = 8;
+/// How long after starting the handshake flood the relay's memory is sampled.
 const HANDSHAKE_FLOOD_SAMPLE_AFTER: Duration = Duration::from_secs(2);
 
+/// Entry point. With no argument it runs the datagram flood; `--handshake-flood`
+/// runs the pre-hello connection flood; `--server <dir>` is used internally for
+/// the child process that hosts the relay.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args_os().skip(1);
@@ -57,6 +69,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     run_driver().await
 }
 
+/// Child-process mode: runs a relay on a random loopback port using the
+/// certificates in `directory`, writes its address to `directory/ready`, and
+/// stops when `directory/stop` appears.
 async fn run_server(directory: &Path) -> Result<(), Box<dyn Error>> {
     let certificate = fs::read_to_string(directory.join("relay.pem"))?;
     let key = fs::read_to_string(directory.join("relay-key.pem"))?;
@@ -77,6 +92,9 @@ async fn run_server(directory: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Datagram flood: connects 512 hosts, links them in pairs, makes every host
+/// send a burst of datagrams, and prints the relay process's idle and peak
+/// memory as `METRIC` lines.
 async fn run_driver() -> Result<(), Box<dyn Error>> {
     let directory = Scratch::create()?;
     let mut authority = Authority::new();
@@ -180,6 +198,9 @@ async fn run_driver() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Handshake flood: opens many QUIC connections from many source addresses and
+/// never sends the authenticated hello, then prints the relay process's memory
+/// as `METRIC` lines.
 async fn run_handshake_flood() -> Result<(), Box<dyn Error>> {
     let directory = Scratch::create()?;
     let mut authority = Authority::new();
@@ -309,6 +330,8 @@ impl AsyncUdpSocket for BlackholeSocket {
     }
 }
 
+/// Sends `count` copies of `packet` as datagrams on `connection`. Returns how
+/// many the client accepted and how many it refused locally.
 async fn flood(connection: &quinn::Connection, packet: Bytes, count: usize) -> (u64, u64) {
     let mut accepted = 0;
     let mut blocked = 0;
@@ -322,6 +345,7 @@ async fn flood(connection: &quinn::Connection, packet: Bytes, count: usize) -> (
     (accepted, blocked)
 }
 
+/// A relay datagram: the 4-byte link id followed by `payload`.
 fn frame(id: LinkId, payload: &[u8]) -> Bytes {
     let mut out = BytesMut::with_capacity(4 + payload.len());
     out.put_u32(id.0);
@@ -329,6 +353,7 @@ fn frame(id: LinkId, payload: &[u8]) -> Bytes {
     out.freeze()
 }
 
+/// A distinct, well-spread host id derived from `index`.
 fn host_id(index: u64) -> HostId {
     let mut bytes = [0; 16];
     bytes[..8].copy_from_slice(&index.to_be_bytes());
@@ -336,14 +361,17 @@ fn host_id(index: u64) -> HostId {
     HostId(bytes)
 }
 
+/// Current resident memory of process `pid`, in KiB.
 fn rss_kib(pid: u32) -> io::Result<u64> {
     proc_status_kib(pid, "VmRSS:")
 }
 
+/// Peak resident memory (high-water mark) of process `pid`, in KiB.
 fn hwm_kib(pid: u32) -> io::Result<u64> {
     proc_status_kib(pid, "VmHWM:")
 }
 
+/// Reads a KiB field such as `VmRSS:` from `/proc/<pid>/status`.
 fn proc_status_kib(pid: u32, field: &str) -> io::Result<u64> {
     let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
     let value = status
@@ -358,11 +386,13 @@ fn proc_status_kib(pid: u32, field: &str) -> io::Result<u64> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+/// A private scratch directory that is deleted when dropped.
 struct Scratch {
     path: PathBuf,
 }
 
 impl Scratch {
+    /// Creates a new, uniquely named directory in the system temp directory.
     fn create() -> io::Result<Self> {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -380,6 +410,8 @@ impl Drop for Scratch {
     }
 }
 
+/// The relay running in a child process, so its memory can be measured from
+/// outside. Dropping it asks the child to stop and waits briefly, then kills it.
 struct ServerProcess {
     child: Child,
     directory: PathBuf,
@@ -388,6 +420,7 @@ struct ServerProcess {
 }
 
 impl ServerProcess {
+    /// Starts the child and waits up to ten seconds for it to report its address.
     fn start(directory: &Path) -> io::Result<Self> {
         let mut child = Command::new(std::env::current_exe()?)
             .arg("--server")
