@@ -152,7 +152,7 @@ async fn dispatch(
             }
         }
     };
-    tokio::select! { result = dispatch => result, result = writer(channel,rx,None,true,renewal.is_some(),crate::daemon::supports_identity_rotation(renewal),wire_caps) => result }
+    tokio::select! { result = dispatch => result, result = writer(channel,rx,None,true,renewal.is_some(),crate::daemon_writer::supports_identity_rotation(renewal),wire_caps) => result }
 }
 
 // Native classification consumed AttachTerm while preserving its decoder;

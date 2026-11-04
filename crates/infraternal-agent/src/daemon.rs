@@ -57,16 +57,6 @@ use crate::remote_renewal::RenewalIdentity;
 // The private local-only dispatcher always supplies None in core builds.
 #[cfg(not(feature = "remote"))]
 type RenewalIdentity = ();
-#[cfg(feature = "remote")]
-pub(crate) fn supports_identity_rotation(renewal: Option<&RenewalIdentity>) -> bool {
-    renewal.is_some_and(RenewalIdentity::supports_identity_rotation)
-}
-
-#[cfg(not(feature = "remote"))]
-pub(crate) const fn supports_identity_rotation(_: Option<&RenewalIdentity>) -> bool {
-    false
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Open {
@@ -1071,7 +1061,7 @@ async fn run_channel<const SESSION_ONLY: bool>(
             Some(control_rx),
             true,
             renewal.is_some(),
-            supports_identity_rotation(renewal),
+            crate::daemon_writer::supports_identity_rotation(renewal),
             wire_caps,
         ) => result,
     };

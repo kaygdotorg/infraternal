@@ -82,6 +82,20 @@ pub(crate) async fn deferred_reply(
     Ok(())
 }
 
+/// Whether this connection offers host identity rotation (#285). Shared by the Linux and portable daemons.
+#[cfg(feature = "remote")]
+pub(crate) fn supports_identity_rotation(
+    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+) -> bool {
+    renewal.is_some_and(crate::remote_renewal::RenewalIdentity::supports_identity_rotation)
+}
+
+/// Builds without the remote client never rotate a host identity.
+#[cfg(not(feature = "remote"))]
+pub(crate) const fn supports_identity_rotation(_: Option<&()>) -> bool {
+    false
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn writer(
     socket: &impl Channel,

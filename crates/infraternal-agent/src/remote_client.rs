@@ -92,7 +92,7 @@ pub async fn run_with_identity_rotation(
     state: Option<PathBuf>,
     publisher: std::sync::Arc<dyn crate::remote_renewal::CertificatePublisher>,
     rotation: std::sync::Arc<dyn infraternal_plugin_remote::identity_rotation::RotationPublisher>,
-    installation: Option<&infraternal_plugin_remote::uninstall::Context>,
+    installation: Option<&crate::plugins::Installation>,
 ) -> io::Result<()> {
     run_with_publishers(identity, state, publisher, Some(rotation), installation).await
 }
@@ -107,7 +107,7 @@ fn run_with_publishers<'a>(
     rotation: Option<
         std::sync::Arc<dyn infraternal_plugin_remote::identity_rotation::RotationPublisher>,
     >,
-    installation: Option<&'a infraternal_plugin_remote::uninstall::Context>,
+    installation: Option<&'a crate::plugins::Installation>,
 ) -> ClientFuture<'a> {
     Box::pin(async move {
         let mut renewal = crate::remote_renewal::RenewalIdentity::new(
