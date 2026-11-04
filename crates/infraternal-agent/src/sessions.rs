@@ -1125,6 +1125,19 @@ impl Drop for Pending {
     }
 }
 
+/// Whether any launch cleanup is still queued or running. A stopping agent asks this first, so the common
+/// case (none) adds no future, and no allocation, to its channel loop.
+pub(crate) fn cleanups_pending() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        CLEANUPS.pending.load(std::sync::atomic::Ordering::SeqCst) != 0
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 /// Wait, bounded, for launch cleanups still running. A stopping infraternal agent calls this so a
 /// runtime that outlives it finishes what it queued; a runtime that does not is covered by
 /// `Abandoned::drop`.

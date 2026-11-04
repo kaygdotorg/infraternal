@@ -718,7 +718,10 @@ async fn run_channel<const SESSION_ONLY: bool>(
     let result =
         run_channel_inner::<SESSION_ONLY>(socket, state, execution_uid, renewal, plugins, original)
             .await;
-    sessions::drain_cleanups().await;
+    if sessions::cleanups_pending() {
+        // Boxed: the wait is rare, and its state must not grow every channel future.
+        Box::pin(sessions::drain_cleanups()).await;
+    }
     result
 }
 
