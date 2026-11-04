@@ -918,6 +918,7 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
         https_system_roots: stored.https_system_roots,
         execution_uid: stored.execution_uid,
     };
+    #[cfg(target_os = "linux")]
     let installation =
         state
             .as_ref()
@@ -927,6 +928,19 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
                 data: data.to_owned(),
                 sessions: sessions.clone(),
             });
+    // The Mac node discards saved mesh state that another enrolment issued (#265, #325).
+    #[cfg(all(target_os = "macos", feature = "plugin-mesh"))]
+    let installation = Some(infraternal_plugin_mesh::node::Enrolment::new(
+        &B64.decode(&stored.ca_der).map_err(|_| refused())?,
+        &stored.host_id.simple().to_string(),
+        &identity
+            .identity
+            .key
+            .public_key_to_der()
+            .map_err(|_| refused())?,
+    ));
+    #[cfg(not(any(target_os = "linux", all(target_os = "macos", feature = "plugin-mesh"))))]
+    let installation = None;
     let publisher = std::sync::Arc::new(IdentityPublisher {
         data: data.to_owned(),
         stored,
@@ -1014,6 +1028,7 @@ mod tests;
 /// removes nothing unless this account's `.bootstrap-owner` names the host,
 /// retires only this installation's own shells, and leaves kernel objects and
 /// files it did not create.
+#[cfg(target_os = "linux")]
 pub(crate) fn uninstall_if_requested() -> Option<std::process::ExitCode> {
     let arguments = std::env::args_os().collect::<Vec<_>>();
     if arguments

@@ -44,11 +44,16 @@ pub fn run_if_requested() -> Option<std::process::ExitCode> {
         let request: Request = serde_json::from_slice(&bytes).map_err(|_| refused())?;
         let user = User::from_uid(Uid::from_raw(request.uid))?.ok_or_else(refused)?;
         if Uid::effective().is_root() {
-            let name = std::ffi::CString::new(user.name.as_str()).map_err(|_| refused())?;
-            let groups = nix::unistd::getgrouplist(&name, user.gid)?;
-            nix::unistd::setgroups(&groups)?;
-            nix::unistd::setgid(user.gid)?;
-            nix::unistd::setuid(user.uid)?;
+            #[cfg(target_os = "linux")]
+            {
+                let name = std::ffi::CString::new(user.name.as_str()).map_err(|_| refused())?;
+                let groups = nix::unistd::getgrouplist(&name, user.gid)?;
+                nix::unistd::setgroups(&groups)?;
+                nix::unistd::setgid(user.gid)?;
+                nix::unistd::setuid(user.uid)?;
+            }
+            #[cfg(target_os = "macos")]
+            return Err(refused());
         } else if user.uid != Uid::effective() {
             return Err(refused());
         }

@@ -11,6 +11,14 @@ rustflags = ["-C", "target-feature=+crt-static"]
 linker = ".cargo/rust-lld.sh"
 rustflags = ["-C", "target-feature=+crt-static"]
 
+# macOS binaries may load only libraries the OS ships; apple-cc.sh explains
+# why the development shell's SDK and flags are dropped for them (#265).
+[target.aarch64-apple-darwin]
+linker = ".cargo/apple-cc.sh"
+
+[target.x86_64-apple-darwin]
+linker = ".cargo/apple-cc.sh"
+
 # cc-rs and openssl-src both honor these target-qualified compiler/archive settings.
 [env]
 # Upstream native build timestamps must not depend on the build wall clock.
@@ -21,3 +29,9 @@ CC_x86_64_unknown_linux_musl = { value = ".cargo/musl-cc-avx512.sh", relative = 
 CC_aarch64_unknown_linux_musl = { value = ".cargo/musl-cc.sh", relative = true }
 AR_x86_64_unknown_linux_musl = { value = ".cargo/musl-ar.sh", relative = true }
 AR_aarch64_unknown_linux_musl = { value = ".cargo/musl-ar.sh", relative = true }
+# Native C dependencies (AWS-LC) use the same OS toolchain as the linker;
+# the target-qualified names take precedence over a shell's generic CC/CXX.
+CC_aarch64_apple_darwin = { value = ".cargo/apple-cc.sh", relative = true }
+CXX_aarch64_apple_darwin = { value = ".cargo/apple-cxx.sh", relative = true }
+CC_x86_64_apple_darwin = { value = ".cargo/apple-cc.sh", relative = true }
+CXX_x86_64_apple_darwin = { value = ".cargo/apple-cxx.sh", relative = true }

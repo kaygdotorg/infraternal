@@ -14,11 +14,12 @@ pub(crate) const PAYLOAD_ONLY: bool = cfg!(all(
         feature = "plugin-host-facts"
     ))
 ));
+#[cfg(target_os = "linux")]
 pub(crate) use infraternal_shim::startup::Options;
 
 /// SSH entrypoints are dispatched first through their existing implementations.
 /// This final private route can only start the shim using its shared runner.
-#[cfg(feature = "session-payload")]
+#[cfg(all(feature = "session-payload", target_os = "linux"))]
 pub(crate) fn payload_entry() -> std::process::ExitCode {
     let mut arguments = std::env::args_os().skip(1);
     if arguments.next().is_none_or(|command| command != "__shim") {
@@ -53,6 +54,6 @@ pub(crate) fn payload_entry() -> std::process::ExitCode {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[path = "shim_cli_tests.rs"]
 mod tests;

@@ -273,6 +273,12 @@ rust_helper="$target/$target_triple/release/infraternal-desktop-helper"
     printf 'arm64 infraternal CLI or desktop helper was not built\n' >&2
     exit 1
 }
+# The CLI runs as the root Mesh LaunchDaemon: refuse a binary that would load a
+# library from outside the OS, however it was linked (#265, J162 F2). The link
+# wrapper already checks each link; this checks what ships, before signing.
+# The Swift capture app is not checked: it runs as the signed-in user, not root,
+# and its bundle layout is checked by codesign below.
+"$root/.cargo/apple-image-check.sh" "$cli" "$rust_helper"
 version="$(cargo metadata --locked --no-deps --format-version 1 | /usr/bin/python3 -I -c '
 import json, sys
 print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "infraternal"))

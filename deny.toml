@@ -16,9 +16,10 @@ allow = [
     "NCSA",
     "Unicode-3.0",
     # WebAuthn uses MPL-2.0 with secondary GNU licenses; BIP-39 is CC0.
-    # BSD-3-Clause and Zlib are permissive transitive crypto/HTTP/SQLite licenses.
+    # BSD-2-Clause, BSD-3-Clause and Zlib are permissive transitive dependency licenses.
     "MPL-2.0",
     "CC0-1.0",
+    "BSD-2-Clause",
     "BSD-3-Clause",
     "Zlib",
     # The decided quinn stack uses the permissive rustls-ring provider.

@@ -41,6 +41,7 @@ impl Options {
     /// Validate the session identifier before any fork or filesystem operation.
     /// # Errors
     /// Returns identity, fork, PTY or private-state admission failures.
+    #[cfg(target_os = "linux")]
     pub fn run(self) -> std::io::Result<()> {
         let Self {
             session,
@@ -181,6 +182,7 @@ fn session_id(session: &str) -> std::io::Result<[u8; 16]> {
 
 /// NUL separators preserve empty arguments and literal metacharacters without a shell.
 /// Bound before allocation; consume before detach closes the inherited pipe.
+#[cfg(target_os = "linux")]
 fn read_command() -> std::io::Result<Vec<std::ffi::OsString>> {
     use std::{io::Read, os::unix::ffi::OsStringExt};
     let mut bytes = Vec::new();
