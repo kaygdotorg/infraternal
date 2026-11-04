@@ -48,9 +48,28 @@ pub fn generate(directory: &Path, output: &Path) -> io::Result<()> {
         let no_tx = sql.starts_with("-- no-transaction");
         let executable = compact_sql::compact(&sql);
         writeln!(generated,
-            "sqlx::migrate::Migration {{ version: {version}, description: std::borrow::Cow::Borrowed({description:?}), migration_type: sqlx::migrate::MigrationType::{kind}, sql: std::borrow::Cow::Borrowed({executable:?}), checksum: std::borrow::Cow::Borrowed(&{:?}), no_tx: {no_tx} }},",
-            &checksum[..]).map_err(io::Error::other)?;
+            "sqlx::migrate::Migration {{ version: {}, description: std::borrow::Cow::Borrowed({description:?}), migration_type: sqlx::migrate::MigrationType::{kind}, sql: std::borrow::Cow::Borrowed({executable:?}), checksum: std::borrow::Cow::Borrowed(&{:?}), no_tx: {no_tx} }},",
+            grouped(version), &checksum[..]).map_err(io::Error::other)?;
     }
     generated.push_str("] ), ..sqlx::migrate::Migrator::DEFAULT };\n");
     fs::write(output.join("compact_migrations.rs"), generated)
+}
+
+/// A version as a Rust literal with `_` between groups of three digits.
+/// D347 names new migrations by UTC timestamp (14 digits); grouping keeps
+/// the generated code clean under `clippy::unreadable_literal`, and the value
+/// is unchanged.
+fn grouped(version: i64) -> String {
+    let digits = version.to_string();
+    let (sign, digits) = digits
+        .strip_prefix('-')
+        .map_or(("", digits.as_str()), |rest| ("-", rest));
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push('_');
+        }
+        out.push(digit);
+    }
+    format!("{sign}{out}")
 }
