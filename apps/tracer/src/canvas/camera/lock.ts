@@ -11,7 +11,7 @@
  */
 import type { Ctx, ViewRec, WinRec } from "../context";
 import type { ViewId } from "../model/types";
-import { COLUMN_GAP, drawnWidth, type Rect } from "../layout/geometry";
+import { COLUMN_GAP, type Rect } from "../layout/geometry";
 import { columnEls, scrollToWindow } from "../layout/columns";
 import { drawnWidthOf } from "../layout/column-els";
 import { isFreeView, nearestStop as nearest, stopsFor as stops, type Stops } from "../layout/stops";
@@ -76,12 +76,13 @@ export function createNav(cx: Ctx): Nav {
    */
   const rowLeftLimit = (c: ViewRec, st: Stops, band: number | undefined): number | undefined => {
     if (!rowGroups(c) || band === undefined) return undefined;
-    let x = cx.view.contentRect(c).x, right = x;
-    for (const col of c.view.cols) {
-      const track = drawnWidth(col.w, state.metrics), win = col.wins.find((w) => w.row === band);
-      if (win) right = Math.max(right, x + (win.ml ?? 0) + (win.w ?? track));
-      x += track + COLUMN_GAP;
+    // The drawn boxes decide where the row ends: the group's own padding and gaps are not in the model's widths.
+    let right = -Infinity;
+    for (const col of c.view.cols) for (const w of col.wins) {
+      const root = w.row === band ? c.wins.get(w.id)?.card.root : undefined;
+      if (root) { const r = camera.worldRect(root); right = Math.max(right, r.x + r.w); }
     }
+    if (right === -Infinity) return undefined;
     return Math.max(st.lefts[0]!, right + 14 - st.view);
   };
   const snapCam = (c: ViewRec, i: number, band?: number): Cam => {
