@@ -41,10 +41,12 @@ export function createRows(cx: Ctx, stopsFor: (c: ViewRec) => Stops, goStop: (c:
   const limit = (c: ViewRec, st: Stops, given?: number): number | undefined => {
     const band = given ?? bandInView(c);
     if (!grouped(c) || band === undefined) return undefined;
+    // World x of a window's right edge, from where the camera is now and where the box is drawn (both move together during a flight).
+    const stage = cx.stage.getBoundingClientRect(), left = camera.cam.cx - st.view / 2;
     let right = -Infinity;
     for (const col of c.view.cols) for (const w of col.wins) {
-      const root = w.row === band ? c.wins.get(w.id)?.card.root : undefined;
-      if (root) { const r = camera.worldRect(root); right = Math.max(right, r.x + r.w); }
+      const box = w.row === band ? c.wins.get(w.id)?.card.root.getBoundingClientRect() : undefined;
+      if (box && box.width > 0) right = Math.max(right, left + (box.right - stage.left) / camera.cam.z);
     }
     return right === -Infinity ? undefined : Math.max(st.lefts[0]!, right + INSET - st.view);
   };
