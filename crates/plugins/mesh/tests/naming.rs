@@ -113,10 +113,10 @@ async fn audits_len(pool: &SqlitePool) -> usize {
     audits(pool).await.len()
 }
 
-/// A Mesh viewer who is not the owner has no host facts, so a name taken from a machine's own hostname is not
-/// shown to them; names the owner typed are.
+/// A Mesh viewer who is not the owner and may see every machine reads the same names as the owner, reported
+/// hostnames included: the name is the one DNS answers to, and there is no projected label (D327, D329, #331).
 #[tokio::test]
-async fn a_viewer_without_host_facts_does_not_see_reported_hostnames() {
+async fn a_manager_who_may_see_a_machine_reads_its_real_name() {
     let pool = pool().await;
     add_host(&pool, A, "root@10.69.69.5").await;
     add_host(&pool, B, "root@minipc01").await;
@@ -153,7 +153,7 @@ async fn a_viewer_without_host_facts_does_not_see_reported_hostnames() {
     );
     assert_eq!(
         names(&service, "guest").await,
-        ["server", "unnamed-2", "minipc01"]
+        ["monitor01", "lab07", "minipc01"]
     );
 }
 

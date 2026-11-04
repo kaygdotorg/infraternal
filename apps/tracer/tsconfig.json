@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["bun-types", "node"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "figures/**/*.ts", "*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "perf/**/*.ts", "figures/**/*.ts", "*.ts"]
 }

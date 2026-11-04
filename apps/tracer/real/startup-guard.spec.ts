@@ -4,7 +4,7 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { startRealServer } from "./server";
+import { personName, startRealServer } from "./server";
 import { tracerEvidencePath } from "../test/evidence-path";
 
 test.describe.configure({ mode: "serial" });
@@ -34,7 +34,7 @@ for (const [name, width, height] of [["desktop", 1440, 900], ["phone", 393, 852]
         await page.goto(`${server.origin}/?theme=${theme}&bg=none`);
         await page.locator("#setup-token").fill(server.token);
         await page.getByRole("button", { name: "Continue", exact: true }).click();
-        await page.locator("#setup-username").fill("startup_test");
+        await page.locator("#setup-username").fill(personName("startup_test"));
         await page.locator("#setup-display-name").fill("Startup test");
         await page.getByRole("button", { name: "Continue", exact: true }).click();
         await page.getByRole("button", { name: "Create passkey" }).click();

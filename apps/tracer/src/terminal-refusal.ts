@@ -11,6 +11,9 @@ export function terminalRefusal(error: unknown, hostName?: string): { message: s
         return { message: `${host} is low on memory${details}. Close sessions you no longer need.`, sessionList: true };
       }
       case "invalid": return { message: "This terminal request is not valid. Try opening a new window.", sessionList: false };
+      // A server that runs without root can only log in as its own user; say so and name the way forward (#327).
+      case "permission": return { message: "This server runs without root, so it can only open shells as its own user. Add a host to work elsewhere.", sessionList: false };
+      case "no_login": return { message: "This server runs without root and has no user account matching your name, so it cannot open a shell for you. Add a host to work elsewhere.", sessionList: false };
       case "host_memory_unavailable": return { message: `${host} could not check its available memory. Try again.`, sessionList: false };
       case "resource_unavailable": return { message: `${host} could not start a shell. Try again.`, sessionList: false };
       case "unavailable": {

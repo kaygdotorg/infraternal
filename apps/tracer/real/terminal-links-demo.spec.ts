@@ -2,7 +2,7 @@
 import { expect, test, type BrowserContext, type Page } from "playwright/test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { startRealServer, type RealServer } from "./server";
+import { personName, startRealServer, type RealServer } from "./server";
 
 const demoPath = process.env.TERMINAL_LINKS_DEMO_PATH;
 const address = process.env.TERMINAL_LINKS_DEMO_ADDRESS ?? "127.0.0.1";
@@ -153,7 +153,7 @@ async function enrol(page: Page, server: RealServer): Promise<void> {
   await page.goto(server.origin + "/");
   await page.locator("#setup-token").fill(server.token);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await page.locator("#setup-username").fill("terminal_links_demo");
+  await page.locator("#setup-username").fill(personName("terminal_links_demo"));
   await page.locator("#setup-display-name").fill("Terminal links demo");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("button", { name: "Create passkey" }).click();

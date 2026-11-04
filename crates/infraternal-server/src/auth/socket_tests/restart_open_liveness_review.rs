@@ -164,6 +164,18 @@ async fn responsive_socket_survives_a_held_terminal_open_with_an_existing_attach
                     }).await;
                 }
                 message = socket.next() => {
+                    // Browser routes are probed with native control Pings [#317].
+                    if let Some(Ok(Message::Ping(payload))) = message {
+                        socket.send(Message::Pong(payload)).await.unwrap();
+                        if opened { let _ = observations.send(Observation::ProbeAfterOpen).await; }
+                        else if !sampled {
+                            sampled = true;
+                            // TCP ordering makes this response a barrier: the server
+                            // consumed the correlated Pong before replying to our Ping.
+                            client_ws_send(&mut socket, 0, &Frame::Ping { nonce: 991, sent_us: 0 }).await;
+                        }
+                        continue;
+                    }
                     let Some(Ok(Message::Binary(wire))) = message else {
                         let _ = observations.send(Observation::Closed).await;
                         return;

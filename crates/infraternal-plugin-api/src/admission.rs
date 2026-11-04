@@ -19,6 +19,10 @@ pub enum OpenRefusal {
         session_count: usize,
     },
     Invalid,
+    /// The host's account policy refused the login (a rootless host asked for an account that is not its own).
+    Permission,
+    /// A rootless host has no account matching the person's name and, unlike a root host, cannot fall back to root.
+    NoLogin,
     Unavailable,
     ResourceUnavailable,
     HostMemoryUnavailable,

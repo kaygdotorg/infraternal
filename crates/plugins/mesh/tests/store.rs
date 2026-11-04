@@ -98,6 +98,37 @@ async fn public_origin_sets_the_default_suffix_and_origin_changes_advance_the_sn
 }
 
 #[tokio::test]
+async fn publication_identity_tracks_server_public_host_across_restart() {
+    let pool = pool().await;
+    let first = Store::with_public_origin(pool.clone(), "https://ssh.example.test");
+    first.attach("server", key(1), None, true).await.unwrap();
+    let (node, _) = first.attach("host", key(2), None, false).await.unwrap();
+    let before = first.config(node).await.unwrap();
+
+    #[cfg(not(feature = "mesh-dns-spike"))]
+    assert!(
+        serde_json::to_value(&before)
+            .unwrap()
+            .get("dns_suffix")
+            .is_none(),
+        "public proxy naming must not enable the default-off Mesh DNS resolver"
+    );
+    assert_eq!(
+        before.exposure.as_ref().unwrap().dns_suffix,
+        "ssh.example.test"
+    );
+
+    let restarted = Store::with_public_origin(pool, "https://mesh.example.test");
+    let after = restarted.config(node).await.unwrap();
+
+    assert_eq!(
+        after.exposure.as_ref().unwrap().dns_suffix,
+        "mesh.example.test"
+    );
+    assert!(after.version > before.version);
+}
+
+#[tokio::test]
 #[cfg(feature = "mesh-dns-spike")]
 async fn reachable_placeholder_node_is_not_published_in_mesh_dns() {
     let pool = pool().await;

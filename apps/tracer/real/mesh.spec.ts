@@ -15,7 +15,7 @@ import { resolve } from "node:path";
 import { expect, test, type Page } from "playwright/test";
 import { WebSocket } from "ws";
 import { WebSocketFrameDecoder, encodeMuxedFrame, type WireFrame } from "../../../packages/protocol/src/codec";
-import { startRealServer, type RealServer } from "./server";
+import { personName, startRealServer, type RealServer } from "./server";
 
 test.describe.configure({ mode: "serial" });
 
@@ -34,7 +34,7 @@ test.beforeAll(async ({ browser }) => {
   await page.goto(server.origin + "/");
   await page.locator("#setup-token").fill(server.token);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await page.locator("#setup-username").fill("mesh_real");
+  await page.locator("#setup-username").fill(personName("mesh_real"));
   await page.locator("#setup-display-name").fill("Mesh real");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("button", { name: "Create passkey" }).click();

@@ -1362,6 +1362,9 @@ function resetMockState(): void {
   accountToolbar = undefined;
   owner = undefined;
   activeAuthCookie = undefined;
+  // A failed login can leave a half-finished unlock; it belongs to the retired fixture.
+  unlockPending = false;
+  pendingTransaction = undefined;
   previewSignedOut = false;
   setupToken = newToken();
   pendingRegistration = undefined;

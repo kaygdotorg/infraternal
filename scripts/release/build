@@ -19,7 +19,15 @@ destination="$release_target/releases/$release_version"
 staging="$(mktemp -d "$release_scratch/build.XXXXXX")"
 trap 'rm -rf -- "$staging"' EXIT
 scripts/package-release "$staging/bundle"
+# Component manifests are root artifacts covered by the release signer's
+# SHA256SUMS; their larger archives stay in a content-addressed on-demand tree.
+for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+    IFS=/ read -r os_name arch <<< "$target"
+    python3 "$release_root/scripts/release/traefik_component.py" \
+        --release-version "$release_version" --os "$os_name" --arch "$arch" \
+        --output "$staging/bundle"
+done
 printf '%s\n' "$release_version" > "$staging/bundle/VERSION"
-(cd "$staging/bundle" && sha256sum VERSION infraternal infraternal-aarch64-musl infraternal-x86_64-musl infraternal-aarch64-session-musl infraternal-x86_64-session-musl > SHA256SUMS)
+(cd "$staging/bundle" && sha256sum VERSION infraternal infraternal-aarch64-musl infraternal-x86_64-musl infraternal-aarch64-session-musl infraternal-x86_64-session-musl proxy-traefik-darwin-amd64.json proxy-traefik-darwin-arm64.json proxy-traefik-linux-amd64.json proxy-traefik-linux-arm64.json > SHA256SUMS)
 mkdir -p "$(dirname -- "$destination")"
 mv -T -- "$staging/bundle" "$destination"

@@ -26,6 +26,7 @@ fi
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${script_dir}/verify.d/rust.sh"
 source "${script_dir}/verify.d/ts.sh"
+source "${script_dir}/verify.d/quick.sh"
 
 verify_latency() {
     local repo_dir="$(cd -- "${script_dir}/.." && pwd)"
@@ -88,11 +89,15 @@ verify_integration() {
 }
 
 if [[ $# -ne 1 ]]; then
-    printf 'usage: scripts/verify {fast|iterate|nightly|integration|browser|latency|bench}\n' >&2
+    printf 'usage: scripts/verify {quick|fast|iterate|nightly|integration|browser|latency|bench}\n' >&2
     exit 2
 fi
 
 case "$1" in
+    quick)
+        # Pre-check before the gate (#329): never a substitute for "fast".
+        verify_quick
+        ;;
     fast|iterate)
         # "fast" is the full final gate. "iterate" is the cheaper loop for use
         # between commits: identical checks minus the two static release

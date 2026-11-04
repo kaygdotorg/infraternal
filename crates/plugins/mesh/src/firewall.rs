@@ -11,6 +11,8 @@ use std::{
 };
 const NFT: &str = "/usr/sbin/nft";
 const TABLE: &str = "infraternal_mesh";
+// Only peers with an inbound TCP grant can reach an entry point. Traefik's exact-host
+// middleware then checks the source against that route's original backend-port grant.
 
 // These plans only remove previously validated permissions. Changed identity,
 // routes, bindings or concrete rules require the ordinary two-family preflight.
@@ -44,6 +46,11 @@ pub struct Firewall {
     previous_aliases: Vec<crate::policy::model::Addresses>,
     backend: Option<Backend>,
     accepted: Option<Config>,
+    proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
+    // The configuration the proxy's routes were last confirmed against. Comparing with it,
+    // not with the last Mesh change, finds a lost route again after Traefik's reload, which
+    // closes the window in which a revoked peer could open a new connection [#281].
+    proxy_config: Option<Config>,
     previous_fence: bool,
 }
 impl Firewall {
@@ -153,12 +160,58 @@ impl Firewall {
         self.install_pending(config)?;
         self.complete(config)
     }
+    /// Replace the active proxy route grants after Traefik confirms its dynamic snapshot.
+    ///
+    /// # Errors
+    /// Returns a failed firewall transaction without claiming the new proxy ingress policy.
+    ///
+    /// Called after every confirmed route snapshot, also an unchanged one: a source that lost
+    /// a route since the last confirmation has its proxied flows retired here.
+    ///
+    /// Only a `confirmed` call moves that reference to `config`. A gate-only or other local
+    /// update may run while Traefik still serves routes rendered from an older configuration
+    /// (a crash restart from retained routes, say). Moving the reference then would let a
+    /// source reconnect under the old routes and keep that flow past the next confirmation.
+    pub fn apply_proxy_ingress(
+        &mut self,
+        config: &Config,
+        proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
+        confirmed: bool,
+    ) -> io::Result<()> {
+        if self.proxy_ingress != *proxy_ingress || self.accepted.as_ref() != Some(config) {
+            self.install(config, &[], false, config, proxy_ingress)?;
+        }
+        let previous = std::mem::replace(&mut self.proxy_ingress, proxy_ingress.clone());
+        let reference = self.proxy_config.clone().or_else(|| self.accepted.clone());
+        crate::connection_state::retire(
+            self.accepted.as_ref(),
+            config,
+            reference.as_ref().map(|reference| (reference, &previous)),
+            &self.proxy_ingress,
+        )?;
+        self.accepted = Some(config.clone());
+        if confirmed {
+            self.proxy_config = Some(config.clone());
+        }
+        Ok(())
+    }
     // The node persists public intent between installation and irreversible retirement.
     pub(crate) fn install_pending(&mut self, config: &Config) -> io::Result<()> {
-        self.install(config, &[], false, config)
+        let proxy_ingress = self.proxy_ingress.clone();
+        self.install(config, &[], false, config, &proxy_ingress)
     }
     pub(crate) fn complete(&mut self, config: &Config) -> io::Result<()> {
-        crate::connection_state::retire(self.accepted.as_ref(), config)?;
+        let reference = self.proxy_config.as_ref().or(self.accepted.as_ref());
+        crate::connection_state::retire(
+            self.accepted.as_ref(),
+            config,
+            reference.map(|reference| (reference, &self.proxy_ingress)),
+            &self.proxy_ingress,
+        )?;
+        if crate::proxy_access::selected_ports(&self.proxy_ingress).is_none() {
+            // No proxied flow exists to protect; keep the reference current.
+            self.proxy_config = Some(config.clone());
+        }
         self.accepted = Some(config.clone());
         Ok(())
     }
@@ -169,7 +222,8 @@ impl Firewall {
         aliases: &[crate::policy::model::Addresses],
         connections: &Config,
     ) -> io::Result<()> {
-        self.install(config, aliases, true, connections)
+        let proxy_ingress = self.proxy_ingress.clone();
+        self.install(config, aliases, true, connections, &proxy_ingress)
     }
     fn install(
         &mut self,
@@ -177,6 +231,7 @@ impl Firewall {
         aliases: &[crate::policy::model::Addresses],
         fence: bool,
         connections: &Config,
+        proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
     ) -> io::Result<()> {
         self.select();
         // A table declaration can extend an existing table. First application
@@ -195,6 +250,7 @@ impl Firewall {
                 && !fence
                 && !self.previous_fence
                 && connections == config
+                && self.proxy_ingress == *proxy_ingress
                 && self
                     .previous
                     .as_ref()
@@ -205,6 +261,7 @@ impl Firewall {
                 aliases,
                 fence,
                 connections,
+                proxy_ingress,
                 if removal_only {
                     crate::iptables::Update::VerifiedRemoval
                 } else if retain_guard {
@@ -220,6 +277,7 @@ impl Firewall {
                         &self.previous_aliases,
                         self.previous_fence,
                         old,
+                        &self.proxy_ingress,
                         crate::iptables::Update::Full,
                     )?;
                 } else {
@@ -231,7 +289,14 @@ impl Firewall {
             run(
                 NFT,
                 &["-f", "-"],
-                &render_with_aliases(config, self.installed, aliases, fence, connections),
+                &render_with_aliases(
+                    config,
+                    self.installed,
+                    aliases,
+                    fence,
+                    connections,
+                    proxy_ingress,
+                ),
             )?;
         }
         // A fence has no new-connection rules. Its saved view therefore only
@@ -276,6 +341,8 @@ impl Firewall {
             self.fallback_complete = false;
             self.previous = None;
             self.accepted = None;
+            self.proxy_config = None;
+            self.proxy_ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
             self.previous_aliases.clear();
         }
         Ok(())
@@ -304,7 +371,14 @@ fn run(program: &str, args: &[&str], script: &str) -> io::Result<()> {
 /// Render constant-time hash-set membership, independent of the peer count on the packet path.
 #[must_use]
 pub fn render(config: &Config, replace: bool) -> String {
-    render_with_aliases(config, replace, &[], false, config)
+    render_with_aliases(
+        config,
+        replace,
+        &[],
+        false,
+        config,
+        &infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+    )
 }
 // Keep the complete owned inet transaction visible as one atomic batch.
 #[allow(clippy::too_many_lines)]
@@ -314,6 +388,7 @@ fn render_with_aliases(
     aliases: &[crate::policy::model::Addresses],
     fence: bool,
     connections: &Config,
+    proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
 ) -> String {
     let connections = if fence { connections } else { config };
     let mut script = String::new();
@@ -323,6 +398,15 @@ fn render_with_aliases(
     let _ = writeln!(
         script,
         "table inet {TABLE} {{\n comment \"infraternal.mesh.v1\";"
+    );
+    let proxy_ingress_ports = crate::proxy_access::selected_ports(proxy_ingress)
+        .map_or_else(String::new, |[http, https]| {
+            format!(" elements = {{ {http}, {https} }};")
+        });
+    // nft rejects an empty `elements = { }` list, so an empty set omits the clause.
+    let _ = writeln!(
+        script,
+        " set proxy_ingress_ports {{ type inet_service;{proxy_ingress_ports} }}"
     );
     for (direction, inbound) in [("incoming", true), ("outgoing", false)] {
         for (family, ipv6) in [("ipv4_addr", false), ("ipv6_addr", true)] {
@@ -371,6 +455,27 @@ fn render_with_aliases(
                     " set {direction}{suffix}_{name} {{ type {ty};{elements} }}"
                 );
             }
+            if inbound {
+                let proxy_sources: Vec<_> =
+                    crate::proxy_access::sources(connections, proxy_ingress)
+                        .map(|peer| {
+                            if ipv6 {
+                                peer.peer.addresses.ipv6.to_string()
+                            } else {
+                                peer.peer.addresses.ipv4.to_string()
+                            }
+                        })
+                        .collect();
+                let elements = if proxy_sources.is_empty() {
+                    String::new()
+                } else {
+                    format!(" elements = {{ {} }};", proxy_sources.join(", "))
+                };
+                let _ = writeln!(
+                    script,
+                    " set incoming{suffix}_proxy_sources {{ type {family};{elements} }}"
+                );
+            }
         }
         let _ = writeln!(script, " chain {direction} {{");
         // Exact retirement removes both kernel tuple directions. Loose TCP
@@ -389,6 +494,12 @@ fn render_with_aliases(
             let field = if inbound { "saddr" } else { "daddr" };
             for (family, suffix) in [("ip", "4"), ("ip6", "6")] {
                 let _ = writeln!(script, "  {family} {field} @{direction}{suffix}_all accept");
+                if inbound {
+                    let _ = writeln!(
+                        script,
+                        "  ct original protocol tcp ct original {family} saddr @incoming{suffix}_proxy_sources ct original proto-dst @proxy_ingress_ports accept"
+                    );
+                }
                 for protocol in ["tcp", "udp"] {
                     // Input filtering runs after destination NAT. Keep the mesh
                     // grant tied to the service the peer addressed, not a
@@ -428,9 +539,33 @@ fn render_with_aliases(
         ("output", "output", "oifname", "outgoing"),
     ] {
         let guard = if hook == "input" { &delivery } else { "" };
+        // The proxy binds its public pair with Go's wildcard listener, which is one dual-stack
+        // socket for 0.0.0.0, so the gate matches both families in this inet table. It exists
+        // only while a proxy child holds that pair; the supervisor clears it after reaping.
+        let public_gate = if hook == "input" && !proxy_ingress.public_route_active {
+            proxy_ingress
+                .public_listener_pair
+                .filter(|pair| {
+                    pair.http != pair.https
+                        && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
+                            .iter()
+                            .any(|range| range.contains(pair.http))
+                        && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
+                            .iter()
+                            .any(|range| range.contains(pair.https))
+                })
+                .map_or_else(String::new, |pair| {
+                    format!(
+                        "iifname != \"lo\" tcp dport {{ {}, {} }} drop;",
+                        pair.http, pair.https
+                    )
+                })
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             script,
-            " chain {name} {{ type filter hook {hook} priority -10; policy accept; {guard} {interface} \"{INTERFACE}\" jump {direction}; }}"
+            " chain {name} {{ type filter hook {hook} priority -10; policy accept; {guard} {public_gate} {interface} \"{INTERFACE}\" jump {direction}; }}"
         );
     }
     let _ = writeln!(
@@ -474,6 +609,15 @@ fn render_connection_checks(script: &mut String, config: &Config) {
                     script,
                     "  {selector} ct original {family} {field} @{direction}{suffix}_all accept"
                 );
+                if direction == "incoming" {
+                    // A proxied flow was admitted by the listener-pair exception, not by a
+                    // per-port grant. Its later packets in both directions need the same test,
+                    // or only the initiating SYN would pass [#281].
+                    let _ = writeln!(
+                        script,
+                        "  {selector} ct original protocol tcp ct original {family} saddr @incoming{suffix}_proxy_sources ct original proto-dst @proxy_ingress_ports accept"
+                    );
+                }
                 for protocol in ["tcp", "udp"] {
                     let _ = writeln!(
                         script,
@@ -540,6 +684,7 @@ mod tests {
             version: 1,
             addresses: address(1),
             default_policy: DefaultPolicy::Allow,
+            exposure: None,
             peers: (2..=1001)
                 .map(|id| {
                     (
@@ -564,7 +709,11 @@ mod tests {
     fn rule_count_is_independent_of_membership_and_policy_data_is_in_sets() {
         let mut config = config();
         let rules = render(&config, false);
-        assert_eq!(rules.matches(" accept").count(), 40);
+        assert_eq!(
+            rules.matches(" accept").count(),
+            46,
+            "the fixed rule set includes proxy listener accepts for IPv4 and IPv6"
+        );
         assert_eq!(rules.matches(" drop").count(), 14);
         assert_eq!(
             rules
@@ -607,6 +756,127 @@ mod tests {
         assert!(!rules.contains("ip saddr . tcp dport @incoming4_tcp accept"));
         assert!(rules.contains("ip daddr . tcp dport @outgoing4_tcp accept"));
     }
+    #[test]
+    fn proxy_listener_exception_is_closed_without_a_published_route() {
+        let mut config = config();
+        for peer in config.peers.values_mut() {
+            peer.inbound = TrafficPolicy::None;
+        }
+        config.peers.get_mut(&NodeId(2)).expect("tcp peer").inbound =
+            TrafficPolicy::Ports(std::collections::BTreeSet::from([
+                crate::policy::rules::Port {
+                    protocol: Protocol::Tcp,
+                    number: 3000,
+                },
+            ]));
+        config.peers.get_mut(&NodeId(3)).expect("udp peer").inbound =
+            TrafficPolicy::Ports(std::collections::BTreeSet::from([
+                crate::policy::rules::Port {
+                    protocol: Protocol::Udp,
+                    number: 53,
+                },
+            ]));
+
+        let rules = render(&config, false);
+        assert!(rules.contains("set proxy_ingress_ports { type inet_service; }"));
+        assert!(rules.contains("set incoming4_proxy_sources { type ipv4_addr; }"));
+        assert!(!rules.contains("10080-10335"));
+    }
+    #[test]
+    fn proxy_exception_uses_only_selected_pair_and_a_published_route_grant() {
+        let mut config = config();
+        for peer in config.peers.values_mut() {
+            peer.inbound = TrafficPolicy::None;
+        }
+        for (node, port) in [(2, 3000), (3, 8080)] {
+            config.peers.get_mut(&NodeId(node)).expect("peer").inbound =
+                TrafficPolicy::Ports(std::collections::BTreeSet::from([
+                    crate::policy::rules::Port {
+                        protocol: Protocol::Tcp,
+                        number: port,
+                    },
+                ]));
+        }
+        let selected = infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS[1];
+        let ingress = infraternal_mesh::proxy_ports::MeshProxyIngress {
+            public_listener_pair: None,
+            public_route_active: false,
+            listener_pair: Some(selected),
+            backend_ports: std::collections::BTreeSet::from([8080]),
+        };
+        let rules = super::render_with_aliases(&config, false, &[], false, &config, &ingress);
+
+        assert!(rules.contains(&format!(
+            "set proxy_ingress_ports {{ type inet_service; elements = {{ {}, {} }}; }}",
+            selected.http, selected.https
+        )));
+        assert!(rules.contains(
+            "set incoming4_proxy_sources { type ipv4_addr; elements = { 10.254.0.3 }; }"
+        ));
+        assert!(
+            !rules
+                .contains("set incoming4_proxy_sources { type ipv4_addr; elements = { 10.254.0.2")
+        );
+        assert!(!rules.contains("10082"));
+        assert!(rules.contains("ct original protocol tcp ct original ip saddr @incoming4_proxy_sources ct original proto-dst @proxy_ingress_ports accept"));
+    }
+
+    #[test]
+    fn proxied_flows_keep_passing_the_state_chains_after_their_syn() {
+        let mut config = config();
+        for peer in config.peers.values_mut() {
+            peer.inbound = TrafficPolicy::None;
+        }
+        config.peers.get_mut(&NodeId(3)).expect("peer").inbound =
+            TrafficPolicy::Ports(std::collections::BTreeSet::from([
+                crate::policy::rules::Port {
+                    protocol: Protocol::Tcp,
+                    number: 8080,
+                },
+            ]));
+        let ingress = infraternal_mesh::proxy_ports::MeshProxyIngress {
+            listener_pair: Some(infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS[1]),
+            backend_ports: std::collections::BTreeSet::from([8080]),
+            ..Default::default()
+        };
+        let rules = super::render_with_aliases(&config, false, &[], false, &config, &ingress);
+        let chain = |name: &str| {
+            let start = rules
+                .find(&format!(" chain {name} {{"))
+                .expect("state chain");
+            let end = start + rules[start..].find("  drop\n }").expect("chain end");
+            rules[start..end].to_owned()
+        };
+        for (name, direction) in [("incoming_state", "original"), ("outgoing_state", "reply")] {
+            for (family, suffix, local) in [("ip", "4", "10.254.0.1"), ("ip6", "6", "fd01::1")] {
+                assert!(
+                    chain(name).contains(&format!(
+                        "ct direction {direction} ct original {family} daddr {local} ct original protocol tcp ct original {family} saddr @incoming{suffix}_proxy_sources ct original proto-dst @proxy_ingress_ports accept"
+                    )),
+                    "{name} must admit {direction} packets of a proxied {family} flow"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wildcard_public_listener_is_blocked_until_a_public_route_is_applied() {
+        let config = config();
+        let pair = infraternal_mesh::proxy_ports::CONVENTIONAL_LISTENER_PAIR;
+        let mut ingress = infraternal_mesh::proxy_ports::MeshProxyIngress {
+            public_listener_pair: Some(pair),
+            ..Default::default()
+        };
+        let gate = "iifname != \"lo\" tcp dport { 80, 443 } drop";
+
+        let closed = super::render_with_aliases(&config, false, &[], false, &config, &ingress);
+        assert!(closed.contains(gate));
+
+        ingress.public_route_active = true;
+        let open = super::render_with_aliases(&config, false, &[], false, &config, &ingress);
+        assert!(!open.contains(gate));
+    }
+
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn real_nft_ownership_atomicity_and_scaled_apply() {

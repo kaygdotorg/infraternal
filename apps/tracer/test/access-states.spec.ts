@@ -5,6 +5,7 @@
  * action, and equal ink above the mark and below the last control, on every state a person can reach
  * without a working server or passkey. */
 import { expect, test, type Page } from "playwright/test";
+import { uiFactor } from "./ui-factor";
 
 const SIZES = [[1440, 900], [393, 852], [375, 667]] as const;
 
@@ -16,7 +17,12 @@ async function signedOut(page: Page): Promise<void> {
 }
 
 async function geometry(page: Page): Promise<{ gap: number; top: number; bottom: number; errorToAction: number | null; errorBelowAction: boolean }> {
-  return page.locator(".auth-card").evaluate((card) => {
+  // A bounding box during the card entrance includes its temporary scale.
+  await expect.poll(() => page.locator(".auth-card").evaluate(card =>
+    card.getAnimations().every(animation => animation.playState !== "running"),
+  )).toBe(true);
+  const factor = await uiFactor(page);
+  return page.locator(".auth-card").evaluate((card, factor) => {
     const rect = (selector: string): DOMRect | undefined => card.querySelector(selector)?.getBoundingClientRect();
     const lede = rect(".auth-lede")!;
     const action = card.querySelector<HTMLElement>(".auth-primary")!.getBoundingClientRect();
@@ -25,7 +31,7 @@ async function geometry(page: Page): Promise<{ gap: number; top: number; bottom:
     const box = card.getBoundingClientRect();
     const error = card.querySelector(".auth-message:not(:empty)")?.getBoundingClientRect();
     // The card's last control: the quiet action (less its own empty inset) or the primary itself.
-    const last = quiet ? { bottom: quiet.bottom - (quiet.height - 13) / 2 } : action;
+    const last = quiet ? { bottom: quiet.bottom - (quiet.height - 13 * factor) / 2 } : action;
     return {
       gap: (error ?? action).top - lede.bottom,
       top: mark.top - box.top,
@@ -33,7 +39,7 @@ async function geometry(page: Page): Promise<{ gap: number; top: number; bottom:
       errorToAction: error ? action.top - error.bottom : null,
       errorBelowAction: error ? error.top > action.top : false,
     };
-  });
+  }, factor);
 }
 
 for (const [width, height] of SIZES) {
@@ -42,6 +48,7 @@ for (const [width, height] of SIZES) {
 
     test("sign-in, unreachable and loading share the lede-to-action gap and equal padding", async ({ page }) => {
       await signedOut(page);
+      const factor = await uiFactor(page);
       const signIn = await geometry(page);
       await page.unroute("**/auth/status");
       await page.route("**/auth/status", (route) => route.abort());
@@ -54,7 +61,7 @@ for (const [width, height] of SIZES) {
       expect(Math.abs(unreachable.top - unreachable.bottom)).toBeLessThanOrEqual(1.5);
       // Full-width primary, the same height as "Continue with passkey".
       const buttons = await page.locator(".auth-primary").evaluate((button) => ({ width: button.getBoundingClientRect().width, card: button.closest(".auth-card")!.getBoundingClientRect().width, height: button.getBoundingClientRect().height }));
-      expect(buttons.height).toBeCloseTo(48, 0); // (the card entrance is still settling its last 0.2 px)
+      expect(buttons.height).toBeCloseTo(48 * factor, 0); // (the card entrance is still settling its last 0.2 px)
       expect(buttons.width).toBeGreaterThan(buttons.card * 0.8);
       // Loading: the counter appears inside the button and nothing moves.
       await page.unroute("**/auth/status");
@@ -85,11 +92,14 @@ for (const [width, height] of SIZES) {
       test(`sign-in failure (${name}) sits centred above the action with the card's gap`, async ({ page }) => {
         await arrange(page);
         await expect(page.locator(".auth-message:not(:empty)")).toBeVisible();
-        await page.waitForTimeout(500); // the notice row eases open
+        await expect.poll(() => page.locator(".auth-note").evaluateAll(notes =>
+          notes.every(note => note.getAnimations().every(animation => animation.playState !== "running")),
+        )).toBe(true);
+        const factor = await uiFactor(page);
         const g = await geometry(page);
         expect(g.errorBelowAction).toBe(false);
-        expect(g.gap).toBeCloseTo(28, 0);
-        expect(g.errorToAction).toBeGreaterThanOrEqual(11.5);
+        expect(g.gap).toBeCloseTo(28 * factor, 0);
+        expect(g.errorToAction).toBeGreaterThanOrEqual(12 * factor - 0.5);
         // Equal ink above the mark and below the quiet action's text.
         expect(Math.abs(g.top - g.bottom)).toBeLessThanOrEqual(2);
       });

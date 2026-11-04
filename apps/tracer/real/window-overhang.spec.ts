@@ -7,7 +7,7 @@
 import { expect, test, type BrowserContext, type Page } from "playwright/test";
 import type { CanvasDocument } from "../src/canvas/model/schema";
 import { tracerEvidencePath } from "../test/evidence-path";
-import { startRealServer, type RealServer } from "./server";
+import { personName, startRealServer, type RealServer } from "./server";
 
 test.describe.configure({ mode: "serial" });
 let server: RealServer;
@@ -23,7 +23,7 @@ test.beforeAll(async ({ browser }) => {
   await page.goto(server.origin + "/");
   await page.locator("#setup-token").fill(server.token);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await page.locator("#setup-username").fill("overhang_real");
+  await page.locator("#setup-username").fill(personName("overhang_real"));
   await page.locator("#setup-display-name").fill("Overhang real");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("button", { name: "Create passkey" }).click();

@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { readFile, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { expect, test, type Page } from "playwright/test";
-import { startRealServer, type RealServer } from "./server";
+import { personName, startRealServer, type RealServer } from "./server";
 
 let server: RealServer;
 let page: Page;
@@ -33,7 +33,7 @@ test.beforeAll(async ({ browser }) => {
   await page.goto(server.origin + "/");
   await page.locator("#setup-token").fill(server.token);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await page.locator("#setup-username").fill("host_facts");
+  await page.locator("#setup-username").fill(personName("host_facts"));
   await page.locator("#setup-display-name").fill("Host facts");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("button", { name: "Create passkey" }).click();

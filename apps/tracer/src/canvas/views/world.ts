@@ -1,6 +1,7 @@
 /**
- * Views: building a view's elements, sizing it on the grid, pushing neighbours aside, and the view's own
- * interactions (hover summary when zoomed out, dragging a view by its label).
+ * Views: building a view's elements, sizing it on the grid, pushing neighbours aside, and the tap on a view's label. The
+ * view's other interactions under the pointer (the hover card when zoomed out, dragging a view by its label) are
+ * `view-pointer.on-demand.ts` (D188, #322).
  *
  * A view is a labelled region on the canvas. A tiled view holds columns of windows; a graph view (Mesh) hands
  * its content to the mesh module. Which kinds of view exist is the registry's business (`registry.ts`); this
@@ -13,22 +14,17 @@
  * - Views sit on the cell grid and never overlap (`resolve`).
  */
 import { Spring } from "../../../../../packages/ui/src/spring";
-import { clamp } from "../camera/camera";
-import type { Ctx, ViewRec, WinRec } from "../context";
+import type { Ctx, ViewRec } from "../context";
 import { columnEls, setColumnWidth } from "../layout/column-els";
-import { MARGIN, boxOf, contentSize, defaultWidth, isDefaultWidth, resolve, snapToGrid, type Box, type Metrics, type Rect } from "../layout/geometry";
+import { MARGIN, boxOf, contentSize, defaultWidth, isDefaultWidth, resolve, type Box, type Metrics, type Rect } from "../layout/geometry";
 import type { ColumnModel, ViewId, ViewModel, WindowModel } from "../model/types";
 import { el } from "../dom";
+import { onDemand, whenIdle } from "../../on-demand";
+import type { EarlyPress, ViewPointer } from "./view-pointer.on-demand";
 import { restPx } from "../springs";
-import { ICON, viewIcon } from "./icons";
-import { windowLabel } from "../windows/label";
-import { viewRecentWindows, viewWindowEntries } from "../toolbar/palette";
-import { keyCaps, PALETTE_KEYS } from "../../../../../packages/ui/src/shortcuts";
-import { endActivity, setActivity } from "../../perf-activity";
-import { groupsLoaded, loadGroups, type Groups } from "../layout/groups-handle";
+import { viewIcon } from "./icons";
+import { groupsLoaded } from "../layout/groups-handle";
 
-/** Rows the view's hover card lists before its "All" row (TASTE: lists stay short). */
-const SUMMARY_ROWS = 5;
 
 export interface ViewsModule {
   contentRect(c: ViewRec): Rect;
@@ -59,19 +55,13 @@ export interface ViewsModule {
   remove(c: ViewRec): void;
   /** Removes every view. */
   clear(): void;
-  hideSummary(): void;
-  /** True while a view is being dragged by its label. */
-  dragging(): boolean;
+  /** Takes the hover card down (a no-op until the pointer module has loaded: there is no card before it). */
+  hideSummary(instant?: boolean): void;
   dispose(): void;
 }
 
 export function createViews(cx: Ctx): ViewsModule {
   const { viewport, world, overlay, signal, camera, state, views } = cx;
-  const cam = camera.cam;
-  const summary = el("div", "cl-summary ui-overlay-surface");
-  summary.hidden = true;
-  document.body.append(summary);
-  let summaryTimer = 0, summaryFor: ViewId | undefined;
 
   const contentRect = (c: ViewRec): Rect => ({ x: c.x + MARGIN.l, y: c.y + MARGIN.t, ...contentSize(c.view, state.metrics) });
   const boxes = (): Box[] => [...views.values()].map((c) => boxOf(c.view, state.metrics));
@@ -87,150 +77,51 @@ export function createViews(cx: Ctx): ViewsModule {
     return colEl;
   };
 
-  // ---- the hover card (zoomed out, pointer devices) --------------------------------------------------
-  /** `instant`: another surface takes over (the palette), so the card goes at once instead of fading under it. */
-  const hideSummary = (instant = false): void => {
-    window.clearTimeout(summaryTimer);
-    if (summary.hidden) return;
-    summary.dataset.open = "false";
-    summaryFor = undefined;
-    if (instant) { summary.hidden = true; return; }
-    window.setTimeout(() => { if (summary.dataset.open === "false") summary.hidden = true; }, 170);
-  };
-  // The card is a popover while it shows: the pointer can cross the gap into it, and its rows can be pressed.
-  summary.addEventListener("pointerenter", () => window.clearTimeout(summaryTimer), { signal });
-  summary.addEventListener("pointerleave", () => { summaryTimer = window.setTimeout(hideSummary, 90); }, { signal });
-  const summaryRow = (k: string, v: string): HTMLElement => {
-    const row = el("div", "cl-summary-row");
-    row.append(el("span", "cl-summary-k", k), el("span", "cl-summary-v", v));
-    return row;
-  };
-  /** A window the card lists: the same row as the view list, pressed to fly to it. */
-  const windowPick = (c: ViewRec, rec: WinRec): HTMLElement => {
-    const [name, detail] = windowLabel(rec.model, cx.adapters.inventory);
-    const b = el("button", "cl-viewrow cl-summary-pick");
-    b.type = "button";
-    b.dataset.window = rec.model.id;
-    b.innerHTML = `<span class="cl-viewrow-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${rec.model.kind === "terminal" ? ICON.terminal : viewIcon(c.view.id)}</svg></span><span class="cl-viewrow-name"></span><span class="cl-viewrow-meta"></span>`;
-    (b.querySelector(".cl-viewrow-name") as HTMLElement).textContent = name;
-    (b.querySelector(".cl-viewrow-meta") as HTMLElement).textContent = detail;
-    b.addEventListener("click", () => { hideSummary(); cx.win.setActive(rec); cx.nav.focusWindow(rec); });
-    return b;
-  };
-  /** The quiet last row: the rest of the view is one step away in ⌘K, filtered to its windows. */
-  const allRow = (c: ViewRec, total: number): HTMLElement => {
-    const b = el("button", "cl-viewrow cl-viewrow-search cl-summary-all");
-    b.type = "button";
-    b.innerHTML = `<span class="cl-viewrow-name"></span><span class="cl-viewrow-keys"></span>`;
-    (b.querySelector(".cl-viewrow-name") as HTMLElement).textContent = `All ${total} windows`;
-    const keys = b.querySelector(".cl-viewrow-keys") as HTMLElement;
-    for (const cap of keyCaps(PALETTE_KEYS)) keys.append(el("kbd", "", cap));
-    b.addEventListener("click", () => { hideSummary(true); cx.core.showPalette(viewWindowEntries(cx, c)); });
-    return b;
-  };
-  const showSummary = (c: ViewRec): void => {
-    if (camera.band !== "out" || !matchMedia("(hover: hover) and (pointer: fine)").matches || clusterDrag || state.movingWindow) return;
-    window.clearTimeout(summaryTimer);
-    if (summaryFor === c.view.id && !summary.hidden) return;
-    summaryFor = c.view.id;
-    summary.innerHTML = `<div class="cl-summary-head"><span class="cl-summary-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${viewIcon(c.view.id)}</svg></span><span class="cl-summary-name"></span></div><div class="cl-summary-rows"></div>`;
-    (summary.querySelector(".cl-summary-name") as HTMLElement).textContent = c.view.name;
-    const list = summary.querySelector(".cl-summary-rows") as HTMLElement;
-    if (c.view.layout === "graph") {
-      const rows = cx.mesh?.summaryRows(c) ?? [["Hosts", String(c.view.nodes.filter((v) => v.kind === "host").length)]];
-      if (!rows.length) rows.push(["No windows", ""]);
-      for (const [k, v] of rows) list.append(summaryRow(k!, v!));
-    } else {
-      // Lists stay short (TASTE): the five windows used most recently, then one row for the rest of the view.
-      const total = c.wins.size;
-      if (!total) list.append(summaryRow("No windows", ""));
-      for (const rec of viewRecentWindows(cx, c, SUMMARY_ROWS)) list.append(windowPick(c, rec));
-      if (total > SUMMARY_ROWS) list.append(allRow(c, total));
-    }
-    // Never taller than the space under the label: it scrolls rather than leave the viewport.
-    summary.hidden = false;
-    const r = c.label.getBoundingClientRect();
-    summary.style.maxHeight = `${Math.max(120, innerHeight - r.bottom - 8 - 12)}px`;
-    const w = summary.offsetWidth;
-    const left = clamp(r.left, 12, innerWidth - w - 12);
-    summary.style.left = `${left}px`;
-    summary.style.top = `${r.bottom + 8}px`;
-    summary.style.transformOrigin = `${Math.max(14, r.left - left + 14)}px 0`;
-    summary.dataset.open = "false";
-    requestAnimationFrame(() => { if (summaryFor === c.view.id) summary.dataset.open = "true"; });
-  };
 
-  // ---- dragging a view by its label ------------------------------------------------------------------
-  let clusterDrag: { c: ViewRec; id: number; x0: number; y0: number; fx: number; fy: number; moved: boolean; snapX: number; snapY: number } | undefined;
-  const ghost = el("div", "cl-ghost");
-  let ghostX: Spring, ghostY: Spring;
-  const paintGhost = (): void => { if (ghostX && ghostY) ghost.style.transform = `translate(${ghostX.value}px, ${ghostY.value}px)`; };
-  ghostX = restPx(new Spring(0, () => paintGhost(), { visualDuration: 0.3 }));
-  ghostY = restPx(new Spring(0, () => paintGhost(), { visualDuration: 0.3 }));
-  world.append(ghost);
-
+  // ---- what a view does under the pointer (view-pointer.on-demand.ts) -------------------------------------------------
+  // The module is fetched when the browser is idle after the canvas is up, and when a pointer first reaches a label. Until
+  // it has arrived a tap on a label still flies to the view (decided here, with no wait), and a press that turns into a drag
+  // is handed over when the module comes, to continue from the pointer's latest position. A press released before it came
+  // starts no drag. A hover has no card to show before the module is there; the pointer still over a label when it arrives gets it then.
+  let pointer: ViewPointer | undefined;
+  let pointerLoading: Promise<void> | undefined;
+  let gone = false;
+  const early = new Set<ViewRec>();
+  let press: (EarlyPress & { c: ViewRec }) | undefined;
+  const loadPointer = (): Promise<void> => pointerLoading ??= onDemand(() => import("./view-pointer.on-demand")).then((m) => {
+    if (gone) return;
+    const ready = m.createViewPointer(cx, { frameOf, boxes, settle });
+    for (const c of early) ready.wire(c);
+    pointer = ready;
+    // A pointer that was already over a label as the module arrived gets its card now, not on its next entry.
+    for (const c of early) if (c.label.matches(":hover") || c.region.matches(":hover")) ready.hover(c);
+    early.clear();
+    if (press) { const { c, ...began } = press; press = undefined; ready.press(c, began); }
+  }, (error: unknown) => { pointerLoading = undefined; throw error; });
+  const warmPointer = (): void => { void loadPointer().catch(() => undefined); };
   const wireView = (c: ViewRec): void => {
-    c.label.addEventListener("pointerenter", () => showSummary(c), { signal });
-    c.label.addEventListener("pointerleave", () => { summaryTimer = window.setTimeout(hideSummary, 90); }, { signal });
-    c.region.addEventListener("pointerenter", () => showSummary(c), { signal });
-    c.region.addEventListener("pointerleave", () => { summaryTimer = window.setTimeout(hideSummary, 90); }, { signal });
+    if (pointer) { pointer.wire(c); return; }
+    early.add(c);
+    c.label.addEventListener("pointerenter", warmPointer, { signal });
+    c.region.addEventListener("pointerenter", warmPointer, { signal });
     c.label.addEventListener("pointerdown", (e) => {
-      if (e.button !== 0) return;
+      if (pointer || e.button !== 0) return;
       e.preventDefault();
       c.label.setPointerCapture(e.pointerId);
-      clusterDrag = { c, id: e.pointerId, x0: e.clientX, y0: e.clientY, fx: c.x, fy: c.y, moved: false, snapX: c.x, snapY: c.y };
+      press = { c, id: e.pointerId, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY };
+      warmPointer();
     }, { signal });
-    c.label.addEventListener("pointermove", (e) => {
-      const d = clusterDrag;
-      if (!d || d.c !== c || e.pointerId !== d.id) return;
-      const dx = (e.clientX - d.x0) / cam.z, dy = (e.clientY - d.y0) / cam.z;
-      if (!d.moved) {
-        if (Math.hypot(e.clientX - d.x0, e.clientY - d.y0) < 6) return;
-        d.moved = true;
-        setActivity("drag");
-        hideSummary();
-        camera.stop();
-        c.el.dataset.lifted = "";
-        const f = frameOf(c);
-        ghost.style.cssText = `left:${MARGIN.l - 16}px;top:${MARGIN.t - 16}px;width:${f.w}px;height:${f.h}px`;
-        ghostX.set(c.x, true); ghostY.set(c.y, true);
-        ghost.dataset.on = "";
-      }
-      // The view follows the pointer freely; the outline shows where it will land on the grid.
-      c.sx.set(d.fx + dx, true); c.sy.set(d.fy + dy, true);
-      const sx = snapToGrid(d.fx + dx), sy = snapToGrid(d.fy + dy);
-      if (sx !== d.snapX || sy !== d.snapY) {
-        d.snapX = sx; d.snapY = sy;
-        ghostX.set(sx); ghostY.set(sy);
-        const trial = boxes().map((b) => (b.id === c.view.id ? { ...b, x: sx, y: sy } : b));
-        const next = resolve(trial, c.view.id);
-        for (const other of views.values()) {
-          if (other === c) continue;
-          const p = next.get(other.view.id)!;
-          other.sx.set(p.x); other.sy.set(p.y);
-        }
-      }
-    }, { signal });
+    c.label.addEventListener("pointermove", (e) => { if (!pointer && press?.id === e.pointerId) { press.x = e.clientX; press.y = e.clientY; } }, { signal });
     const end = (e: PointerEvent): void => {
-      const d = clusterDrag;
-      if (!d || d.c !== c || e.pointerId !== d.id) return;
-      clusterDrag = undefined;
-      endActivity("drag");
-      delete c.el.dataset.lifted;
-      delete ghost.dataset.on;
-      if (!d.moved) { cx.nav.flyView(c.view.id); return; }
-      // Commit: the dragged view lands on the grid and the others settle where it pushed them.
-      c.sx.set(d.snapX); c.sy.set(d.snapY);
-      c.view.x = d.snapX; c.view.y = d.snapY;
-      // `at` makes the dragged view the one that stays, on a touch screen too. A person placed it, so it and what it pushed
-      // are saved where they are: no view keeps a `home` from before.
-      settle(c.view.id, { x: d.snapX, y: d.snapY });
-      for (const other of views.values()) delete other.view.home;
-      cx.store.changed();
+      if (pointer || press?.id !== e.pointerId) return;
+      const began = press;
+      press = undefined;
+      if (Math.hypot(began.x - began.x0, began.y - began.y0) < 6) cx.nav.flyView(c.view.id);
     };
     c.label.addEventListener("pointerup", end, { signal });
     c.label.addEventListener("pointercancel", end, { signal });
   };
+  whenIdle(warmPointer, 500);
 
   // ---- building --------------------------------------------------------------------------------------
   const build = (view: ViewModel): ViewRec => {
@@ -394,8 +285,8 @@ export function createViews(cx: Ctx): ViewsModule {
   };
 
   return {
-    contentRect, frameOf, boxes, newCol, build, geometry, fitWidths, settle, paintEmpty, hideSummary,
-    dragging: () => Boolean(clusterDrag),
+    contentRect, frameOf, boxes, newCol, build, geometry, fitWidths, settle, paintEmpty,
+    hideSummary: (instant) => pointer?.hideSummary(instant),
     replace(id) {
       const old = views.get(id);
       if (!old) return;
@@ -423,15 +314,14 @@ export function createViews(cx: Ctx): ViewsModule {
     },
     remove(c) { disposeRec(c); views.delete(c.view.id); },
     clear() {
-      hideSummary();
+      pointer?.hideSummary();
       for (const c of views.values()) disposeRec(c);
       views.clear();
       state.activeWin = undefined;
     },
     dispose() {
-      window.clearTimeout(summaryTimer);
-      summary.remove();
-      ghost.remove();
+      gone = true;
+      pointer?.dispose();
     },
   };
 }

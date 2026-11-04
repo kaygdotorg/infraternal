@@ -3684,3 +3684,173 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - A second, limited account for testing runs on a throwaway test
        server, not through invites: "test server because invites would then
        belong to EE".
+329. **Presets round 2 answers, colour schemes, fonts, names (owner,
+     2026-11-03):**
+     - Floating cards follow the preset's tint but keep at least the shared
+       16 px overlay blur, so Tinted shows no ghost text behind the palette
+       or sidebar (#323): "agreed".
+     - Anything that can scroll sideways takes a sideways swipe first; the
+       canvas gets it once that content cannot scroll further (amends
+       D275): "agreed".
+     - More colour schemes: Solarized, Everforest, Kanagawa (Wave and
+       Lotus), Ayu, GitHub, Flexoki, Gruvbox Light, Tokyo Night Day,
+       Catppuccin Frappé and Macchiato, Night Owl and Light Owl, each under
+       a free licence and through the D80 contrast audit. Schemes with a
+       light and a dark version are one entry: "if you can, merge themes
+       that have a light/dark theme by proviing a light / dark colour icon
+       to the right of that theme".
+     - More fonts: Iosevka, Victor Mono, Recursive Mono, Martian Mono,
+       Intel One Mono, Fantasque Sans Mono, Hack, Inconsolata, 0xProto,
+       Lilex and the other four Monaspace faces ("yes"), each OFL or MIT.
+     - The production server ships the desktop feature (app windows, D200):
+       "yes pleaes i would love to test it". VNC stays after app windows:
+       "yeah no prolbem there".
+     - The `unnamed-<id>` naming scheme goes away everywhere: "just lose
+       this naming scheme. we already have default dns decided" (D327: a
+       peer sees a name only if it may reach that machine).
+330. **Rootless proxy may still publish publicly (owner, 2026-11-03,
+     #281):** "can't userspace daemons bind to public IPs for ports >1024?
+     I think we can still do --public but just alert the user that the
+     firewall may yet block the connection." Without root, `--public`
+     binds the unprivileged public pair (10080/10443 or the next free pair)
+     on all addresses. The person is told the port, and that this
+     machine's firewall or router may still block it. The Mesh pair stays
+     on the mesh address, and rootful behaviour (80/443 behind the managed
+     firewall gate) is unchanged.
+331. **GotaTun measurement and next steps (owner, 2026-11-03, #260):**
+     - Loaded latency counts lost probes. A lost packet costs an SSH
+       retransmit, so a cut that turns loss into a little queueing wins,
+       and the fork pin moves to 73eb9f1 (uncapped UDP socket buffers on
+       Linux): "agreed".
+     - Next memory step: release the packet pool when a link goes idle,
+       aimed at the 11–14 MiB per endpoint that stays after load: "yes
+       please, we gotta really optimise it."
+     - Testing: "please extensively test it on linux and macos".
+332. **When GotaTun becomes the Linux default (owner, 2026-11-03, #260;
+     amends D163):** kernel WireGuard stays the Linux default until the
+     integrated GotaTun engine matches it on both throughput and loaded
+     latency counting lost probes (D331): "yes agreed". The owner wants it
+     prioritised: "that is the mesh data plane so it should prioritised
+     tonight". The userspace interface survives an infraternal agent
+     restart, as kernel WireGuard's does, so routes the person added and
+     open flows are kept: "correct!".
+333. **When a passkey is asked (owner, 2026-11-03; refines D28, D311,
+     D319):** "I don't want a passkey ask everytime I wanna do admin
+     operations. because I should be able to ask my agent to do those
+     things." The model ("agreed"):
+     - A tap at sign-in, and to unlock the machine CA after a restart.
+     - A tap when approving an API key. The approval page shows its exact
+       scopes and lifetime (short by default, for example 24 hours). Every
+       action inside that scope then runs with no further tap, from an AI
+       agent, the CLI or MCP. Every action is still audited, and the key can
+       be revoked at any time.
+     - In the browser, one tap starts 15 minutes of admin actions without
+       taps.
+     - A tap for each action, even with a key: creating or widening a key,
+       admin role changes and CA setup, recovery-key and passkey changes,
+       deleting the account, turning these rules off, and a direct
+       connection whose identity is in doubt (D319).
+334. **Small answers (owner, 2026-11-03):**
+     - The second, limited account was for the orchestrator to test with:
+       "it was for you! ... but we need that to be in an ee repo". Invites
+       and multi-user management live in a separate EE repository (D31);
+       its structure is grilled first.
+     - No `hosts remove --retain`: "this makes no sense. what situation
+       would this be helpful in? isn't our agent already small enough".
+335. **Mac shells and re-adding a machine from another server (owner,
+     2026-11-03):**
+     - On macOS, a shell runs inside the person's own login session while
+       they are logged in, with their keychain, ssh-agent and privacy
+       permissions. Otherwise it is a plain shell started by the root
+       daemon as their user: "correct".
+     - Add-host on a machine whose stuck install belongs to another server
+       asks for confirmation, sets the old state aside, enrolls the machine
+       as a new host with a new key and retires the old infraternal agent
+       (#305). The owner treats the failing re-add of `code` as a bug ("bug
+       is not fixed?"), so this path is built.
+336. **Morning answers (owner, 2026-11-04):**
+     - Traefik containment (#281, docs/design/proxy-containment.md): a
+       cgroup per Traefik child now, measured first: "let's do it".
+     - GotaTun keeps ring (D289): "keep ring and optimise".
+     - Each passkey tap is bound to the one action shown on screen, not to
+       "any tap in the last 5 minutes" (#303): "agreed".
+     - Toasts stack the way svelte-sonner stacks, rather than replacing one
+       another: "the calternal thread took that base of svelte-sonner and
+       rewrote it to be smaller and to its needs. it behaves the same way
+       though so stack them." Errors are never hidden by later info toasts.
+     - The rootless refusal message gets shorter, and people need UI to
+       choose which account they log in as on each host: "i agree but we
+       also adjacently need some UI around what user one prefers on hosts
+       as I wouldnt want to login as root all the time".
+337. **Taking over machines from another server; more morning answers
+     (owner, 2026-11-04, #305, #265, #263, #303):**
+     - Take over a machine that belongs to another server only when its old
+       install is not actually working: "we should allow takeovers if the
+       node is no longer connected, is in a broken state, any indicator
+       that it's not actually working - allow take over. WE should not
+       allow takeovers if there are actual terminals running + connected to
+       the previous server, in which case we need to design some UI and
+       machinery around proving that the old server is mine too."
+     - The set-aside old install is not kept: "None, delete it."
+     - Open terminals on a replaced install: "can't they just be
+       inherited?" They are adopted by the new infraternal agent rather than
+       ended, wherever that is safe.
+     - Mac shells join the person's session only for a screen or VNC
+       login, because macOS unlocks the keychain only then: "yeah sadly, I
+       think vnc login/screen login is the way to go".
+     - The Mac node letting the coordinator reach every port until slice 3
+       is accepted: "yeah okay temporarily is fine then".
+     - Many machines at once belong to setup keys or API keys that bring a
+       machine up without approval: "this sort of thing is better suited
+       for the "setup keys" feature / api keys feature where we can bring
+       them up with an API key and they don't need approval anymore."
+     - Keys from before D333 end within 24 h at upgrade ("i am the only
+       user so no problem"), and a key's lifetime is a hard end ("yes").
+338. **Appearance presets round 3 (owner, 2026-11-04, #323; amends D322):**
+     - The built-in presets become Solid 100% tint, 0% blur; Tinted 75%
+       tint, 25% blur; Frosted 50% tint, 50% blur ("let's change our
+       default presets to these values").
+     - Order of the Appearance controls: "UI Size, Colour (please use
+       singular or plural consistenly), Backgrounds (I feel like we should
+       give the user options in Solid too like we do in Gradients), Tint,
+       Blur, Grain, Fonts".
+     - Colour rows align vertically. "instead of light/dark, just show the
+       light/dark colours in two circles and the user can select any one."
+     - "if the window is wide enough Tint Blur Grain should appear in 3
+       columns rather than rows with their sliders under them. because if
+       the window is very wide, the slider will be evry wide too".
+     - Gradient and background swatches drop their text labels: "the names
+       for colours can be displayed in warm tooltips, we just need a subtle
+       way to indicate which one is custom."
+     - The preview card's first terminal line must not be clipped at the
+       bottom.
+339. **More answers (owner, 2026-11-04):**
+     - A root install requested through MCP does not run until the owner
+       approves it. The server answers the AI agent with "approval needed",
+       a short code and a link. An Inbox item asks for a passkey tap bound
+       to that one install, the agent waits, and the request expires after
+       about 10 minutes: "this is the correct way", "the flow is great".
+     - Removing a host in the browser falls under the 15-minute admin
+       window (D333): "yes it should".
+     - Machine names: always the reported hostname. Only an empty name or
+       `localhost` falls back to `<os>-<first 6 characters of the id>`.
+       Collisions get a short suffix (`raspberrypi-2`). The DNS name comes as
+       soon as there is a real name: "agreed".
+     - Person-to-machine visibility rules belong to the EE edition: "yes
+       person to machine rules is ee area."
+340. **More answers (owner, 2026-11-04):**
+     - The Mac enforces access rules in infraternal's own userspace packet
+       path, inside GotaTun's packet flow, not with pf. It is scheduled right
+       after the Mac mesh node merges: "yes".
+     - The sign-in pool leftovers from #263 get one follow-up after
+       `infraternal up` merges: "agree".
+     - MCP progress for add-host and MCP over HTTP come after #303 and the
+       adapter merge, progress first: "agree".
+     - The website and docs, and the enterprise repository
+       (https://git.kayg.org/kayg/infraternal-enterprise), are grilled
+       later.
+     - The GotaTun fork is pushed to both GitHub and
+       https://git.kayg.org/kayg/gotatun-fork instead of relying on a pull
+       mirror: "why not push to both remotes?"
+     - The kernel mesh path gets the same ownership check GotaTun got:
+       "sure".

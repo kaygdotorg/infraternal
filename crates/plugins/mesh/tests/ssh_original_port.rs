@@ -81,6 +81,7 @@ fn configuration() -> Config {
             ipv6: "fd00:3::2".parse().unwrap(),
         },
         default_policy: DefaultPolicy::Deny,
+        exposure: None,
         peers: BTreeMap::from([(
             NodeId(3),
             PeerPolicy {

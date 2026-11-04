@@ -13,7 +13,7 @@
 import { mkdirSync } from "node:fs";
 import { expect, test, type Page } from "playwright/test";
 import { tracerEvidencePath } from "../test/evidence-path";
-import { startRealServer, type RealServer } from "./server";
+import { personName, startRealServer, type RealServer } from "./server";
 
 test.describe.configure({ mode: "serial" });
 const OUT = tracerEvidencePath("wheel-routing");
@@ -31,7 +31,7 @@ test.beforeAll(async ({ browser }) => {
   await page.goto(server.origin + "/?theme=ink&bg=none");
   await page.locator("#setup-token").fill(server.token);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await page.locator("#setup-username").fill("wheel_real");
+  await page.locator("#setup-username").fill(personName("wheel_real"));
   await page.locator("#setup-display-name").fill("Wheel real");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("button", { name: "Create passkey" }).click();

@@ -6,7 +6,7 @@
  * Production server binary, real PTYs.
  */
 import { expect, test, type Page } from "playwright/test";
-import { startRealServer, type RealServer } from "./server";
+import { personName, startRealServer, type RealServer } from "./server";
 
 test.describe.configure({ mode: "serial" });
 let server: RealServer;
@@ -22,7 +22,7 @@ test.beforeAll(async ({ browser }) => {
   await page.goto(server.origin + "/?theme=ink&bg=none");
   await page.locator("#setup-token").fill(server.token);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await page.locator("#setup-username").fill("scroll_real");
+  await page.locator("#setup-username").fill(personName("scroll_real"));
   await page.locator("#setup-display-name").fill("Scroll real");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("button", { name: "Create passkey" }).click();

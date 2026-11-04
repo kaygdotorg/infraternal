@@ -6,6 +6,8 @@
 //! link only reports doubt on its first miss and retires on the second
 //! consecutive one. Browser routes likewise doubt one missed allowance; terminal
 //! routes still rebind on the first miss. Hidden viewers park their probe lease.
+//! Browser routes carry these probes as native WebSocket Ping control frames,
+//! which the browser answers without running page JavaScript [#317].
 
 use std::{collections::VecDeque, time::Duration};
 use tokio::time::Instant;

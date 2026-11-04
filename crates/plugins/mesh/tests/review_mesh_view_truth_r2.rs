@@ -321,8 +321,7 @@ async fn a_node_moved_aside_keeps_its_name_on_its_next_attach() {
 
 /// "A person's name is final" and hand outranks every automatic claim, but a person cannot take a name a machine
 /// gave itself: the rename is refused as a conflict, and the automatic holder is not moved aside. The refusal is
-/// also an oracle: a manager learns that some node, possibly outside their scope or hidden from them as `unnamed`,
-/// reported that hostname.
+/// also an oracle: a manager learns that some node, possibly outside their scope, reported that hostname.
 #[tokio::test]
 async fn a_person_can_take_a_name_a_machine_reported() {
     let pool = pool().await;
@@ -350,9 +349,9 @@ async fn a_person_can_take_a_name_a_machine_reported() {
 }
 
 /// Before this branch the server node held `server`, so nobody could take it. Once the server is named after its
-/// hostname, `server` is free: any Mesh manager can hand-name a remote machine `server`, and every viewer who is not
-/// the owner then sees two nodes called `server` (the real one is relabelled `server` for them), with nothing to
-/// tell them apart. `a_remote_machine_cannot_be_called_server` covers only the automatic path.
+/// hostname, `server` is free: a Mesh manager could hand-name a remote machine `server`, and a viewer reads the
+/// label `server` as the server itself. No viewer may see a machine other than the server's node called `server`.
+/// `a_remote_machine_cannot_be_called_server` covers only the automatic path.
 #[tokio::test]
 async fn no_viewer_sees_a_remote_machine_called_server() {
     let pool = pool().await;
@@ -372,20 +371,17 @@ async fn no_viewer_sees_a_remote_machine_called_server() {
     let called_server: Vec<u64> = names(&service, "guest")
         .await
         .into_iter()
-        .filter(|(_, name)| name == "server")
+        .filter(|(id, name)| name == "server" && *id != 1)
         .map(|(id, _)| id)
         .collect();
-    assert_eq!(
-        called_server.len(),
-        1,
-        "a non-owner sees {} nodes called server",
-        called_server.len()
+    assert!(
+        called_server.is_empty(),
+        "a non-owner sees remote nodes {called_server:?} called server"
     );
 }
 
-/// Relabelling hidden hostnames gives a non-owner several nodes with the same name: every by-IP machine reads
-/// `unnamed`, as does a real placeholder. Names are unique everywhere else (unique index, DNS), and the Mesh view
-/// keys rows and pills by name for people.
+/// Names are unique everywhere (unique index, DNS), and the Mesh view keys rows and pills by name for people, so
+/// no viewer may read two nodes under one name.
 #[tokio::test]
 async fn a_viewer_without_host_facts_still_sees_distinct_names() {
     let pool = pool().await;

@@ -1,6 +1,6 @@
 //! Compiles coordinator identity, directional Access grants and discovered endpoints into node configurations [164–166,216].
 use crate::{
-    dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
+    dataplane::{Config, DefaultPolicy, ExposureIdentity, Peer, PeerPolicy},
     policy::{
         coordinator::Coordinator,
         model::{MeshError, NodeId},
@@ -11,9 +11,9 @@ use std::{collections::BTreeMap, net::SocketAddr};
 
 /// Compile one node's Access view into the same directional peer policy `WireGuard` installs.
 ///
-/// The server runtime supplies the default suffix. The persisted mesh suffix is used when
-/// explicitly selected; legacy non-`internal` values remain overrides. DNS clients also keep
-/// `.internal` as an alias.
+/// The server runtime supplies the public-host-derived default suffix. The persisted mesh suffix
+/// is used when explicitly selected; legacy non-`internal` values remain overrides. The ordinary
+/// mesh snapshot always carries this value for proxy naming; resolver fields stay feature-gated.
 /// # Errors
 /// Returns unknown membership or invalid persisted address allocation.
 pub fn compile_with_dns_suffix(
@@ -46,8 +46,6 @@ fn compile_inner(
     endpoints: &BTreeMap<NodeId, SocketAddr>,
     default_dns_suffix: &str,
 ) -> Result<Config, MeshError> {
-    #[cfg(not(feature = "mesh-dns-spike"))]
-    let _ = default_dns_suffix;
     let checkpoint = coordinator.checkpoint();
     let local = checkpoint
         .allocation
@@ -61,13 +59,15 @@ fn compile_inner(
         .find(|member| member.node.id == node)
         .map(|member| member.node.host.clone());
     #[cfg(feature = "mesh-dns-spike")]
-    let dns_suffix = if checkpoint.settings.dns_suffix_is_explicit
-        || checkpoint.settings.dns_suffix != crate::dataplane::DEFAULT_DNS_SUFFIX
-    {
-        checkpoint.settings.dns_suffix.clone()
-    } else {
-        default_dns_suffix.to_owned()
-    };
+    let dns_suffix = selected_dns_suffix(
+        &checkpoint.settings.dns_suffix,
+        checkpoint.settings.dns_suffix_is_explicit,
+        default_dns_suffix,
+    );
+    #[cfg(feature = "mesh-dns-spike")]
+    let exposure_dns_suffix = dns_suffix.clone();
+    #[cfg(not(feature = "mesh-dns-spike"))]
+    let exposure_dns_suffix = default_dns_suffix.to_owned();
     let fallback = if default == DefaultPolicy::Allow {
         TrafficPolicy::All
     } else {
@@ -76,6 +76,12 @@ fn compile_inner(
     let mut peers = BTreeMap::new();
     #[cfg(feature = "mesh-dns-spike")]
     let mut peer_names = BTreeMap::new();
+    let machine_name = checkpoint
+        .members
+        .iter()
+        .find(|member| member.node.id == node)
+        .map(|member| member.node.host.clone())
+        .ok_or(MeshError::UnknownNode)?;
     for member in &checkpoint.members {
         let other = member.node.id;
         if other == node {
@@ -133,17 +139,34 @@ fn compile_inner(
         version: checkpoint.generation,
         addresses: local,
         default_policy: default,
+        exposure: Some(ExposureIdentity {
+            machine_name,
+            dns_suffix: exposure_dns_suffix,
+        }),
         peers,
         #[cfg(feature = "mesh-dns-spike")]
         peer_names,
     })
 }
 
+#[cfg(any(feature = "mesh-dns-spike", test))]
+fn selected_dns_suffix(
+    configured_suffix: &str,
+    explicit: bool,
+    default_dns_suffix: &str,
+) -> String {
+    if explicit || configured_suffix != crate::dataplane::DEFAULT_DNS_SUFFIX {
+        configured_suffix.to_owned()
+    } else {
+        default_dns_suffix.to_owned()
+    }
+}
+
 /// Derive the default mesh zone from the server's configured public origin.
 ///
 /// IP origins and localhost do not provide a public DNS suffix, so those retain `.internal`.
 /// This function is deliberately total: malformed or non-public origins fall back to `.internal`.
-#[cfg(feature = "mesh-dns-spike")]
+#[cfg(feature = "server")]
 pub(crate) fn default_dns_suffix_from_origin(public_origin: &str) -> String {
     let suffix = url::Url::parse(public_origin)
         .ok()
@@ -213,6 +236,7 @@ pub fn chunks(
             last: false,
             addresses: new.addresses,
             default_policy: new.default_policy,
+            exposure: new.exposure.clone(),
             upserted: BTreeMap::new(),
             merged: BTreeMap::new(),
             removed: Vec::new(),
@@ -403,5 +427,26 @@ impl Chunks {
         policy.union(&TrafficPolicy::Ports(std::collections::BTreeSet::from([
             port,
         ])));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selected_dns_suffix;
+
+    #[test]
+    fn server_dns_suffix_is_default_and_explicit_or_legacy_choices_win() {
+        assert_eq!(
+            selected_dns_suffix("internal", false, "example.org"),
+            "example.org"
+        );
+        assert_eq!(
+            selected_dns_suffix("custom.example", false, "example.org"),
+            "custom.example"
+        );
+        assert_eq!(
+            selected_dns_suffix("internal", true, "example.org"),
+            "internal"
+        );
     }
 }

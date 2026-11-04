@@ -15,12 +15,22 @@ import { cp, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { createServer as createHttpsServer } from "node:https";
 import { request as httpRequest } from "node:http";
 import { createServer, type AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { resolve } from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
 import { WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 
 const root = resolve(import.meta.dirname, "../../..");
+
+/**
+ * The username to sign up with in a real-server spec. A person's login account is their username (D231). The
+ * fixture's server and infraternal agent run as the test user: a root host falls back to root for a username with no
+ * account, but a rootless one cannot and refuses the terminal (#327). So unless the fixture runs as root, the person
+ * is named after the account it runs as, and `name` only labels the spec.
+ */
+export function personName(name: string): string {
+  return process.getuid?.() === 0 ? name : userInfo().username;
+}
 
 /** A server leader can exit before its embedded children release resources needed by the replacement. */
 function processGroupExists(group: number): boolean {

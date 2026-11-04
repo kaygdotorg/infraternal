@@ -9,7 +9,7 @@ import { devices, expect, type Page, type BrowserContext, type Browser } from "p
 import { WebSocket } from "ws";
 import { encodeMuxedFrame, WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
 import { LAYOUT_SESSION_INCARNATION } from "../src/connection";
-import { startRealServer, type RealServer } from "./server";
+import { personName, startRealServer, type RealServer } from "./server";
 import type { CanvasDocument } from "../src/canvas/model/schema";
 
 export const windows = (page: Page) => page.locator('.cl[data-view="console"] .ui-window');
@@ -25,7 +25,7 @@ export async function enrol(page: Page, server: RealServer): Promise<void> {
   await page.goto(server.origin + "/?theme=ink&bg=none");
   await page.locator("#setup-token").fill(server.token);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await page.locator("#setup-username").fill("layout_phone");
+  await page.locator("#setup-username").fill(personName("layout_phone"));
   await page.locator("#setup-display-name").fill("Layout phone");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("button", { name: "Create passkey" }).click();

@@ -58,10 +58,23 @@
               pkgs.curl pkgs.xz pkgs.gnutar pkgs.gzip  # scripts/auth-toolchain fetches Zig
               pkgs.git pkgs.cacert
               pkgs.ripgrep              # release bundle ELF validation
+              pkgs.sccache             # opt-in shared compiler cache, see shellHook
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               pkgs.file pkgs.binutils  # static-binary linkage checks (file, readelf)
               pkgs.util-linux          # prlimit for the key-memory check
             ];
+            # Opt-in compiler cache shared by every job on a build machine (#329). The machine
+            # sets INFRATERNAL_SCCACHE_DIR; with it unset (CI, releases, laptops) nothing changes
+            # and no wrapper is installed. The cache only stores compiler outputs keyed by their
+            # exact inputs, so a hit is byte-identical to a rebuild (proof on #329); it adds
+            # nothing to any shipped artifact. The size cap bounds the disk it may use.
+            shellHook = ''
+              if [ -n "''${INFRATERNAL_SCCACHE_DIR:-}" ]; then
+                export SCCACHE_DIR="$INFRATERNAL_SCCACHE_DIR"
+                export SCCACHE_CACHE_SIZE="''${INFRATERNAL_SCCACHE_SIZE:-30G}"
+                export RUSTC_WRAPPER=sccache
+              fi
+            '';
           };
         });
     };

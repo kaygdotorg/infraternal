@@ -96,6 +96,26 @@ enum Reply {
     Transport(bytes::Bytes),
 }
 
+/// Native WebSocket pongs are opaque to browser JavaScript, so carry the existing
+/// route correlation in the control-frame payload (well below RFC 6455's limit).
+fn encode_transport_probe(nonce: u64, sent_us: u64) -> Bytes {
+    let mut payload = [0; 16];
+    payload[..8].copy_from_slice(&nonce.to_le_bytes());
+    payload[8..].copy_from_slice(&sent_us.to_le_bytes());
+    Bytes::copy_from_slice(&payload)
+}
+
+fn decode_transport_probe(payload: &[u8]) -> Option<(u64, u64)> {
+    if payload.len() != 16 {
+        return None;
+    }
+    let (nonce, sent_us) = payload.split_at(8);
+    Some((
+        u64::from_le_bytes(nonce.try_into().ok()?),
+        u64::from_le_bytes(sent_us.try_into().ok()?),
+    ))
+}
+
 /// Admit a best-effort proof reply without parking the shared socket reader.
 fn queue_reply(sender: &mpsc::Sender<Reply>, reply: Reply) -> bool {
     // A full local queue is temporary pressure. Keep reading correlated Pongs
@@ -222,8 +242,7 @@ impl Context {
                 .then(|| lease.ping())
         };
         if let Some((nonce, sent_us)) = probe {
-            encode_muxed_frame_into(0, &Frame::Ping { nonce, sent_us }, encoded).map_err(|_| ())?;
-            messages.push(Message::Binary(Bytes::copy_from_slice(encoded)));
+            messages.push(Message::Ping(encode_transport_probe(nonce, sent_us)));
         }
         if messages.is_empty() {
             return Ok(());
@@ -499,6 +518,23 @@ async fn read(
                 }
                 continue;
             }
+            Inbound::TransportPong(payload) => {
+                if let Some((nonce, sent_us)) = decode_transport_probe(&payload) {
+                    let updated = context
+                        .lease
+                        .lock()
+                        .map(|mut lease| lease.pong(nonce, sent_us));
+                    match updated {
+                        Ok(true) => context.proof_changed.notify_one(),
+                        Ok(false) => {}
+                        Err(_) => {
+                            context.retire(EndReason::ServerWriteFailed);
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
             Inbound::Frame(wire) => {
                 if let Ok(decoded) = decode_muxed_frame(&wire)
                     && decoded.stream_id == 0
@@ -510,6 +546,10 @@ async fn read(
                         } if context.viewer_visibility => {
                             // The bounded lifecycle notice changes probe scheduling only;
                             // socket authority, attachment caps and writer ownership stay strict.
+                            // A hidden page gets no probes at all, native ones included: even
+                            // a control frame the browser answers without page JavaScript
+                            // wakes its network stack and a phone's radio about 30 times a
+                            // second at the answer-paced cadence [#317].
                             let hidden = visibility_notice(event_json);
                             let updated = hidden.and_then(|hidden| {
                                 context
@@ -773,6 +813,17 @@ mod queue_tests {
 mod tests {
     //! End conditions stay specific through socket teardown and structured logging.
     use super::*;
+
+    #[test]
+    fn native_transport_probe_payload_preserves_correlations_and_rejects_bad_lengths() {
+        let probe = (u64::MAX - 1, u64::MAX - 2);
+        let payload = encode_transport_probe(probe.0, probe.1);
+        assert_eq!(payload.len(), 16);
+        assert_eq!(decode_transport_probe(&payload), Some(probe));
+        for length in [0, 8, 15, 17, 125] {
+            assert_eq!(decode_transport_probe(&vec![0; length]), None);
+        }
+    }
 
     #[test]
     fn visibility_notices_are_small_typed_transport_messages() {

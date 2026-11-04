@@ -174,7 +174,7 @@ async function start(): Promise<void> {
   } catch (error: unknown) {
     await fontsReady;
     installTooltips();
-    renderUnavailable("Connect to load your layout");
+    renderUnavailable(safeMessage(error));
   }
 }
 
@@ -541,7 +541,8 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
               : "Your sign-in changed. Sign in again to continue.");
         },
         ...(identity?.username ? { person: { name: identity.display_name ?? "", username: identity.username } } : {}),
-        ...(__CLUSTERS_PREVIEW__ && productTestMode ? { previewStore: layoutReview?.store ?? new (await import("./canvas/model/store")).LocalCanvasStore(activeUserId ?? "account") } : {}),
+        // Reload/reconnect regressions can select the real server store while retaining preview-only probes.
+        ...(__CLUSTERS_PREVIEW__ && productTestMode && query.get("layout") !== "server" ? { previewStore: layoutReview?.store ?? new (await import("./canvas/model/store")).LocalCanvasStore(activeUserId ?? "account") } : {}),
         ...(productTestMode ? { onFirstClient: (client: TerminalClient) => {
           window.__tracerProductTestDouble = {
             isConnected: () => client.isConnected,

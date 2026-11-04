@@ -104,6 +104,13 @@ revision is sent to live subscribers without another attach. Existing
 `mesh-<host UUID>` placeholders are migrated to unnamed labels. The API shape
 and `host` field remain unchanged (#236).
 
+A view contains only the machines its viewer may see (the viewer's role scope),
+and each appears under its real name, the one DNS answers to. A machine outside
+the viewer's scope has no node, no tag membership and no grant in the view, and
+no stand-in name: no `unnamed-<id>` label is derived for any viewer (D327, D329,
+#331). The stored `unnamed` labels above belong to machines whose name is not
+known to anyone.
+
 The only assignable Mesh role actions are `mesh.manage_nodes`,
 `mesh.manage_tags`, `mesh.manage_grants` and `mesh.manage_roles`. A role has a
 nonempty `actions` array and optional nonempty `scopes` array of existing tag

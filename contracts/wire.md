@@ -521,6 +521,20 @@ If the transport ended during suspension, wait until visible before reconnecting
 The notice cannot preserve a socket when the operating system closes it; use the
 ordinary resume window, then a fresh attach if that capability is refused (#244).
 
+On the browser route the server carries its probes as WebSocket Ping control
+frames, not muxed `Ping` frames (#317). The payload is 16 bytes: `nonce` then
+`sent_us`, each a little-endian u64, with `nonce == sent_us`. The browser
+answers with the control Pong that echoes it, without running page code, so a
+visible idle page does no liveness work of its own. A Pong of any other length
+is ignored. Hidden suspension (above) covers these frames too: a hidden page
+gets no probe of any kind. The browser sends muxed `Ping` only on demand: when
+the page becomes visible, gains focus, is shown again from the page cache or
+comes back online, and on its first input after a quiet second. A fully
+answered route keeps no client timer. An on-demand probe has the allowance
+below; when it retires the route, the reconnect starts without backoff, with the
+resume token in its first message [D265]. A server still sending muxed `Ping`
+frames is answered as before.
+
 Probe replies echo nonce and timestamp. Only a new correlated reply renews a
 route deadline; ordinary traffic, unsolicited replies and stale sockets do not.
 Startup, pending input and recent link doubt keep browser probes pipelined

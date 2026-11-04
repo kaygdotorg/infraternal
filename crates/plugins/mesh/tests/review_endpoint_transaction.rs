@@ -70,6 +70,7 @@ fn refused_endpoint_persistence_preserves_kernel_endpoint() {
             ipv6: "fd01::1".parse().unwrap(),
         },
         default_policy: DefaultPolicy::Deny,
+        exposure: None,
         peers: BTreeMap::from([(
             NodeId(2),
             PeerPolicy {

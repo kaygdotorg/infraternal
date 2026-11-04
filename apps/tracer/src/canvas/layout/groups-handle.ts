@@ -19,3 +19,6 @@ let loaded: Groups | undefined;
 export const registerGroups = (g: Groups): void => { loaded = g; };
 export const groupsLoaded = (): Groups | undefined => loaded;
 export const loadGroups = (): Promise<Groups> => loaded ? Promise.resolve(loaded) : onDemand(() => import("./groups.on-demand")).then(() => loaded!);
+
+/** A column is plain when no group wraps it: its windows stack, and the flat path (what the product always did) is exact. */
+export const inGroup = (colEl: HTMLElement): boolean => !!colEl.parentElement?.classList.contains("cl-group");

@@ -9,6 +9,8 @@ pub type SharedRegistry = std::sync::Arc<std::sync::Mutex<PluginRegistry>>;
 const DESCRIPTORS: &[&PluginDescriptor] = &[
     #[cfg(feature = "plugin-host-facts")]
     &infraternal_plugin_host_facts::DESCRIPTOR,
+    #[cfg(feature = "proxy")]
+    &infraternal_plugin_proxy::agent::DESCRIPTOR,
     #[cfg(feature = "remote")]
     &infraternal_plugin_remote::DESCRIPTOR,
     #[cfg(all(feature = "mesh", target_os = "linux"))]
@@ -48,6 +50,7 @@ pub fn registry(mode: ExecutionMode) -> Result<PluginRegistry, PluginError> {
 #[cfg_attr(
     not(any(
         feature = "plugin-host-facts",
+        feature = "proxy",
         feature = "remote",
         all(feature = "mesh", target_os = "linux")
     )),
@@ -63,6 +66,7 @@ pub(crate) fn registry_at(
 ) -> Result<PluginRegistry, PluginError> {
     #[cfg(any(
         feature = "plugin-host-facts",
+        feature = "proxy",
         feature = "remote",
         all(feature = "mesh", target_os = "linux"),
         all(feature = "desktop", target_os = "macos")
@@ -70,6 +74,7 @@ pub(crate) fn registry_at(
     let mut registry = PluginRegistry::default();
     #[cfg(not(any(
         feature = "plugin-host-facts",
+        feature = "proxy",
         feature = "remote",
         all(feature = "mesh", target_os = "linux"),
         all(feature = "desktop", target_os = "macos")
@@ -88,6 +93,17 @@ pub(crate) fn registry_at(
     }
     #[cfg(not(feature = "plugin-host-facts"))]
     let _ = mode;
+    #[cfg(all(feature = "mesh", target_os = "linux"))]
+    let mesh_plugin = state.map_or_else(
+        infraternal_plugin_mesh::node_actions::MeshNodePlugin::default,
+        infraternal_plugin_mesh::node_actions::MeshNodePlugin::new,
+    );
+    #[cfg(feature = "proxy")]
+    let proxy_plugin = proxy_plugin_at(state)?;
+    #[cfg(all(feature = "proxy", feature = "mesh", target_os = "linux"))]
+    let mesh_plugin = connect_proxy_and_mesh(&proxy_plugin, mesh_plugin)?;
+    #[cfg(feature = "proxy")]
+    registry.register(Box::new(proxy_plugin))?;
     #[cfg(all(feature = "remote", target_os = "linux"))]
     if mode == ExecutionMode::Remote
         && let Some(context) = installation
@@ -124,13 +140,237 @@ pub(crate) fn registry_at(
     #[cfg(not(all(feature = "remote", target_os = "linux")))]
     let _ = installation;
     #[cfg(all(feature = "mesh", target_os = "linux"))]
-    registry.register(Box::new(state.map_or_else(
-        infraternal_plugin_mesh::node_actions::MeshNodePlugin::default,
-        infraternal_plugin_mesh::node_actions::MeshNodePlugin::new,
-    )))?;
+    registry.register(Box::new(mesh_plugin))?;
     #[cfg(not(all(feature = "mesh", target_os = "linux")))]
     let _ = state;
     Ok(registry)
+}
+
+/// Node-state-backed proxy plugin, or the stateless one used by registry tests.
+#[cfg(feature = "proxy")]
+fn proxy_plugin_at(
+    state: Option<&std::path::Path>,
+) -> Result<infraternal_plugin_proxy::agent::ProxyAgentPlugin, PluginError> {
+    let Some(state) = state else {
+        return Ok(infraternal_plugin_proxy::agent::ProxyAgentPlugin::default());
+    };
+    let log: std::sync::Arc<infraternal_plugin_proxy::supervisor::ProxyLog> =
+        std::sync::Arc::new(|line| tracing::info!(target: "infraternal::proxy", "{line}"));
+    infraternal_plugin_proxy::agent::ProxyAgentPlugin::for_agent(state, log)
+        .map_err(|_| PluginError::Rejected)
+}
+
+/// Wire both directions between the proxy and Mesh plugins [#281].
+///
+/// Mesh pushes each accepted configuration to the proxy controller, so a
+/// revoked grant removes its routes. The proxy controller pushes each applied
+/// route snapshot back to the Mesh firewall, so the ingress exception admits
+/// only peers granted a published backend port. Both hooks are plain setters
+/// that run only inside later plugin actions, so wiring order is irrelevant.
+#[cfg(all(feature = "proxy", feature = "mesh", target_os = "linux"))]
+fn connect_proxy_and_mesh(
+    proxy_plugin: &infraternal_plugin_proxy::agent::ProxyAgentPlugin,
+    mesh_plugin: infraternal_plugin_mesh::node_actions::MeshNodePlugin,
+) -> Result<infraternal_plugin_mesh::node_actions::MeshNodePlugin, PluginError> {
+    let proxy_controller = proxy_plugin.controller();
+    proxy_controller
+        .set_mesh_ingress_observer(mesh_plugin.proxy_ingress_observer())
+        .map_err(|_| PluginError::Rejected)?;
+    Ok(
+        mesh_plugin.with_configuration_observer(std::sync::Arc::new(move |config| {
+            let context = config
+                .as_ref()
+                .and_then(|config| proxy_mesh_context(config).ok());
+            proxy_controller.set_mesh_context(context)
+        })),
+    )
+}
+
+#[cfg(all(test, feature = "proxy"))]
+mod proxy_registry_tests {
+    //! Keep the publication command connected to the real node-side plugin registry [#281].
+    use super::{ExecutionMode, registry_at};
+    use infraternal_plugin_api::PluginError;
+
+    #[test]
+    fn proxy_publish_is_registered_as_a_node_action() {
+        let mut registry =
+            registry_at(ExecutionMode::Embedded, None, None).expect("build plugin registry");
+        let result = registry.call_public("proxy.publish", br#"{"port":null}"#);
+        assert!(
+            !matches!(result, Err(PluginError::UnknownAction)),
+            "proxy.publish must be present in the compiled node registry"
+        );
+    }
+
+    #[test]
+    fn publishing_without_an_accepted_mesh_context_fails_closed() {
+        let mut registry =
+            registry_at(ExecutionMode::Embedded, None, None).expect("build plugin registry");
+        let reply = registry
+            .call_public("proxy.publish", br#"{"port":3000}"#)
+            .expect("missing mesh context is a typed action result");
+        let reply: serde_json::Value = serde_json::from_slice(&reply).expect("JSON error result");
+        assert_eq!(reply["error"]["code"], "unreachable");
+    }
+
+    #[test]
+    fn proxy_internal_context_update_is_not_a_public_action() {
+        let mut registry =
+            registry_at(ExecutionMode::Embedded, None, None).expect("build plugin registry");
+        assert!(matches!(
+            registry.call_public("proxy.mesh-context", b"{}"),
+            Err(PluginError::UnknownAction)
+        ));
+    }
+}
+
+#[cfg(all(feature = "proxy", feature = "mesh", target_os = "linux"))]
+fn proxy_mesh_context(
+    config: &infraternal_plugin_mesh::dataplane::Config,
+) -> std::io::Result<infraternal_plugin_proxy::mesh_context::AcceptedMeshContext> {
+    use infraternal_plugin_mesh::policy::rules::{Protocol, TrafficPolicy};
+    use std::net::IpAddr;
+
+    let exposure = config.exposure.as_ref().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "Mesh DNS identity is unavailable",
+        )
+    })?;
+    let mut all_tcp_sources = std::collections::BTreeSet::new();
+    let mut tcp_sources_by_port = Vec::new();
+    for peer in config.peers.values() {
+        let address = IpAddr::V4(peer.peer.addresses.ipv4);
+        match &peer.inbound {
+            TrafficPolicy::None => {}
+            TrafficPolicy::All => {
+                all_tcp_sources.insert(address);
+            }
+            TrafficPolicy::Ports(ports) => {
+                for port in ports.iter().filter(|port| port.protocol == Protocol::Tcp) {
+                    tcp_sources_by_port.push((port.number, address));
+                }
+            }
+        }
+    }
+    infraternal_plugin_proxy::mesh_context::AcceptedMeshContext::new(
+        exposure.machine_name.clone(),
+        exposure.dns_suffix.clone(),
+        IpAddr::V4(config.addresses.ipv4),
+        all_tcp_sources,
+        tcp_sources_by_port,
+    )
+}
+
+#[cfg(all(test, feature = "proxy", feature = "mesh", target_os = "linux"))]
+mod proxy_mesh_context_tests {
+    //! The proxy reads only the applied Mesh direction and TCP grants [#266, #281].
+    use super::proxy_mesh_context;
+    use infraternal_plugin_mesh::dataplane::{
+        Config, DefaultPolicy, ExposureIdentity, Peer, PeerPolicy,
+    };
+    use infraternal_plugin_mesh::policy::{
+        model::{Addresses, NodeId, PublicKey},
+        rules::{Port, Protocol, TrafficPolicy},
+    };
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        net::Ipv4Addr,
+    };
+
+    fn peer(id: u8, ipv4: Ipv4Addr, inbound: TrafficPolicy, outbound: TrafficPolicy) -> PeerPolicy {
+        PeerPolicy {
+            peer: Peer {
+                key: PublicKey([id; 32]),
+                addresses: Addresses {
+                    ipv4,
+                    ipv6: format!("fd00::{id:x}").parse().expect("IPv6 mesh address"),
+                },
+                endpoint: None,
+            },
+            inbound,
+            outbound,
+        }
+    }
+
+    #[test]
+    fn accepted_config_exports_only_inbound_tcp_sources_for_the_published_port() {
+        let tcp_3000 = Port {
+            protocol: Protocol::Tcp,
+            number: 3000,
+        };
+        let udp_3000 = Port {
+            protocol: Protocol::Udp,
+            number: 3000,
+        };
+        let config = Config {
+            local_key: None,
+            server: Some(NodeId(1)),
+            node: NodeId(2),
+            version: 9,
+            addresses: Addresses {
+                ipv4: "10.254.0.2".parse().expect("local mesh address"),
+                ipv6: "fd00::2".parse().expect("local IPv6 mesh address"),
+            },
+            default_policy: DefaultPolicy::Deny,
+            exposure: Some(ExposureIdentity {
+                machine_name: "host-2".to_owned(),
+                dns_suffix: "internal".to_owned(),
+            }),
+            peers: BTreeMap::from([
+                (
+                    NodeId(3),
+                    peer(
+                        3,
+                        "10.254.0.3".parse().expect("granted peer"),
+                        TrafficPolicy::Ports(BTreeSet::from([tcp_3000])),
+                        TrafficPolicy::None,
+                    ),
+                ),
+                (
+                    NodeId(4),
+                    peer(
+                        4,
+                        "10.254.0.4".parse().expect("UDP-only peer"),
+                        TrafficPolicy::Ports(BTreeSet::from([udp_3000])),
+                        TrafficPolicy::Ports(BTreeSet::from([tcp_3000])),
+                    ),
+                ),
+                (
+                    NodeId(5),
+                    peer(
+                        5,
+                        "10.254.0.5".parse().expect("open inbound peer"),
+                        TrafficPolicy::All,
+                        TrafficPolicy::None,
+                    ),
+                ),
+            ]),
+        };
+        let context = proxy_mesh_context(&config).expect("trusted exposure identity");
+
+        assert_eq!(context.machine_name, "host-2");
+        assert_eq!(context.dns_suffix, "internal");
+        assert_eq!(context.mesh_address.to_string(), "10.254.0.2");
+        assert_eq!(
+            context.allowed_sources(3000),
+            [
+                "10.254.0.3"
+                    .parse::<std::net::IpAddr>()
+                    .expect("source address"),
+                "10.254.0.5"
+                    .parse::<std::net::IpAddr>()
+                    .expect("all inbound source"),
+            ]
+        );
+        assert_eq!(
+            context.allowed_sources(8080),
+            ["10.254.0.5"
+                .parse::<std::net::IpAddr>()
+                .expect("all inbound source")]
+        );
+    }
 }
 
 /// Kernel objects an installation leaves outside its files, for host uninstall (D273, #235).

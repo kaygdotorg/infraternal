@@ -454,11 +454,15 @@ test("online and foreground events cancel delays and preserve handshakes in prog
     expect(sockets[3]!.readyState).toBe(Socket.OPEN);
     admit(sockets[3]!);
     expect(connection.isWelcomed).toBe(true);
-    expect([...timers.values()].map((timer) => timer.delay)).toEqual([25]);
-    expect([...windowListeners.values()].every((handlers) => handlers.size === 0)).toBe(true);
+    // Welcome probes at once; its only timer is that probe's startup-grace deadline, never a recurring tick [#317].
+    expect([...timers.values()].map((timer) => Math.round(timer.delay))).toEqual([2000]);
+    // Retry hints end at Welcome. The focus and page-show lifecycle listeners survive it, like visibilitychange.
+    expect([...windowListeners].filter(([type]) => type !== "focus" && type !== "pageshow").every(([, handlers]) => handlers.size === 0)).toBe(true);
+    expect([windowListeners.get("focus")?.size, windowListeners.get("pageshow")?.size]).toEqual([1, 1]);
     expect(documentListeners.get("visibilitychange")?.size).toBe(1); // The lifecycle listener survives Welcome.
     connection.dispose();
     expect([...documentListeners.values()].every((handlers) => handlers.size === 0)).toBe(true);
+    expect([...windowListeners.values()].every((handlers) => handlers.size === 0)).toBe(true);
   } finally {
     connection?.dispose();
     Math.random = original.random;

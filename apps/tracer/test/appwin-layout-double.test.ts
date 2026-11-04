@@ -5,9 +5,10 @@ import { decodeMuxedFrame, type WireFrame } from "../../../packages/protocol/src
 
 test("layout initialization, ordered edits, duplicate receipts and reconnect snapshots", async () => {
   // The layout is served in every mode (the product canvas needs it to connect), so no app-window variable is set here.
-  const { appwinLayoutFrame, appwinSocketClosed } = await import("./appwin-double");
+  const { appwinLayoutFrame, appwinLayoutReset, appwinSocketClosed } = await import("./appwin-double");
   const frames: WireFrame[] = [];
-  const socket = { readyState: 1, send(bytes: Uint8Array) { frames.push(decodeMuxedFrame(bytes).frame); } } as unknown as WebSocket;
+  let terminated = false;
+  const socket = { readyState: 1, terminate() { terminated = true; }, send(bytes: Uint8Array) { frames.push(decodeMuxedFrame(bytes).frame); } } as unknown as WebSocket;
   const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
   const events = (): Array<Record<string, unknown>> => frames.flatMap((frame) => frame.type === "Event" ? [JSON.parse(new TextDecoder().decode(frame.eventJson)) as Record<string, unknown>] : []);
   const subscribe: WireFrame = { type: "Subscribe", subId: 7, filterJson: json({ topic: "canvas.layout" }) };
@@ -26,7 +27,15 @@ test("layout initialization, ordered edits, duplicate receipts and reconnect sna
   frames.length = 0;
   appwinLayoutFrame(socket, subscribe);
   expect(events().at(-1)).toMatchObject({ revision: 2, document: { views: [{ name: "Renamed" }] } });
-  appwinSocketClosed(socket);
+  appwinLayoutReset();
+  // Closing an old page can leave layout edits buffered in the latency proxy.
+  // A new account fixture must retire its transport before accepting those edits.
+  expect(terminated).toBe(true);
+  const freshSocket = { readyState: 1, send(bytes: Uint8Array) { frames.push(decodeMuxedFrame(bytes).frame); } } as unknown as WebSocket;
+  frames.length = 0;
+  appwinLayoutFrame(freshSocket, subscribe);
+  expect(events().at(-1)).toMatchObject({ revision: 0, initialized: false, document: { views: [] } });
+  appwinSocketClosed(freshSocket);
 });
 
 test("a check can read the saved layout and replace it as another device would", async () => {

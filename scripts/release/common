@@ -39,10 +39,11 @@ verify_download() {
     # Only fixed bundle names are accepted, even in a trusted signed manifest.
     # Older signed releases may omit session images; advertised images are
     # mandatory downloads and must match their signed digests.
-    awk 'NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ || ($2 != "infraternal" && $2 != "infraternal-x86_64-musl" && $2 != "infraternal-aarch64-musl" && $2 != "infraternal-x86_64-session-musl" && $2 != "infraternal-aarch64-session-musl" && $2 != "VERSION") || seen[$2]++ { exit 1 } END { if (!seen["VERSION"] || !seen["infraternal-x86_64-musl"] || !seen["infraternal-aarch64-musl"]) exit 1 }' "$directory/SHA256SUMS" || { printf 'invalid release file list\n' >&2; return 1; }
+    awk 'NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ || ($2 != "infraternal" && $2 != "infraternal-x86_64-musl" && $2 != "infraternal-aarch64-musl" && $2 != "infraternal-x86_64-session-musl" && $2 != "infraternal-aarch64-session-musl" && $2 != "proxy-traefik-darwin-amd64.json" && $2 != "proxy-traefik-darwin-arm64.json" && $2 != "proxy-traefik-linux-amd64.json" && $2 != "proxy-traefik-linux-arm64.json" && $2 != "VERSION") || seen[$2]++ { exit 1 } END { if (!seen["VERSION"] || !seen["infraternal-x86_64-musl"] || !seen["infraternal-aarch64-musl"] || !seen["proxy-traefik-darwin-amd64.json"] || !seen["proxy-traefik-darwin-arm64.json"] || !seen["proxy-traefik-linux-amd64.json"] || !seen["proxy-traefik-linux-arm64.json"]) exit 1 }' "$directory/SHA256SUMS" || { printf 'invalid release file list\n' >&2; return 1; }
     while read -r digest name; do
         local limit=134217728
         [[ "$name" != VERSION ]] || limit=128
+        [[ "$name" != proxy-traefik-* ]] || limit=65536
         request '' --max-filesize "$limit" "$release_public/releases/$version/$name" -o "$directory/$name"
     done < "$directory/SHA256SUMS"
     (cd "$directory" && sha256sum --strict --check SHA256SUMS)

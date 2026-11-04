@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+# Role: build, sign, notarize and verify the arm64 macOS CLI and capture helper [D321].
+# The helper uses Accessibility APIs that are unavailable to App Sandbox
+# clients; capture, Accessibility and event posting are granted through TCC.
+# No JIT or unsigned-memory exceptions are needed, so all executables use the
+# hardened runtime without entitlements.
+#
+# Prerequisites, all on the Mac build machine and none in the repository:
+# - ~/.config/infraternal-signing/ holds keychain.pass and op-service-account-token
+#   (mode 0600). The dedicated keychain gets the Developer ID on the first run.
+# - A notarytool profile (default name infraternal-notary) in that keychain. Create
+#   it once with an App Store Connect API key kept in a 0600 file, so that no
+#   secret appears in argv:
+#     xcrun notarytool store-credentials infraternal-notary --keychain <keychain> \
+#       --key <AuthKey.p8> --key-id <KEY_ID> --issuer <ISSUER_UUID>
+# - The `infraternal` crate must build on macOS: today it does not (the session
+#   shim is Linux-only, #320, and scripts/auth-toolchain has no macOS host, D213),
+#   so a full run stops at the first cargo build. --skip-notarize still stops there.
+set -euo pipefail
+
+usage() {
+    printf 'usage: scripts/macos-release ABSOLUTE_OUTPUT_DIRECTORY [--notary-profile NAME | --skip-notarize]\n' >&2
+    exit 2
+}
+
+original_args=("$@")
+[[ $# -ge 1 && "$1" = /* ]] || usage
+output="$1"
+shift
+[[ "$output" != "/" ]] || usage
+output="${output%/}"
+notary_profile="${INFRATERNAL_NOTARY_PROFILE:-infraternal-notary}"
+# --skip-notarize builds, signs and verifies the signature only. Gatekeeper
+# rejects a Developer ID binary that Apple has not notarized, so the result is
+# named UNNOTARIZED and is never a release. It exists to prove the build and
+# signing path while the notarization credential is unavailable.
+skip_notarize=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --notary-profile)
+            [[ $# -ge 2 && -n "$2" ]] || usage
+            notary_profile="$2"
+            shift 2
+            ;;
+        --skip-notarize)
+            skip_notarize=1
+            shift
+            ;;
+        *) usage ;;
+    esac
+done
+[[ "$notary_profile" != -* ]] || usage
+[[ "$(uname -s)" = Darwin && "$(uname -m)" = arm64 ]] || {
+    printf 'run the macOS release build on an arm64 Mac\n' >&2
+    exit 1
+}
+[[ ! -e "$output" && ! -L "$output" ]] || {
+    printf 'release destination already exists\n' >&2
+    exit 1
+}
+
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+case "$output/" in
+    "$root/"*) printf 'release destination must be outside the checkout\n' >&2; exit 2 ;;
+esac
+
+# Serialize every Mac build and signing operation with other jobs on this VM.
+# The other jobs hold /tmp/mac-bench.lock with flock(2); macOS ships no flock(1),
+# but lockf(1) takes the same kernel lock, so the two exclude each other (a
+# mkdir-style lock would not). The script re-runs itself under lockf: the kernel
+# drops the lock when the process ends, however it ends, so no cleanup is needed,
+# and -k keeps the file because deleting a lock file other jobs have open splits
+# the lock in two. -t bounds the wait; lockf exits 75 on timeout.
+if [[ -z "${INFRATERNAL_MAC_LOCK_HELD:-}" ]]; then
+    exec /usr/bin/env INFRATERNAL_MAC_LOCK_HELD=1 \
+        /usr/bin/lockf -k -t 1800 /tmp/mac-bench.lock \
+        "$root/scripts/macos-release" "${original_args[@]}"
+fi
+
+keychain="$HOME/Library/Keychains/infraternal-signing.keychain-db"
+keychain_unlocked=0
+search_list_changed=0
+original_search_list=()
+scratch=""
+cleanup() {
+    result=$?
+    trap - EXIT
+    if [[ "$search_list_changed" -eq 1 ]]; then
+        /usr/bin/security list-keychains -d user -s "${original_search_list[@]}" >/dev/null 2>&1 || true
+    fi
+    if [[ "$keychain_unlocked" -eq 1 ]]; then
+        /usr/bin/security lock-keychain "$keychain" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$scratch" ]]; then
+        rm -rf -- "$scratch" || true
+    fi
+    exit "$result"
+}
+trap cleanup EXIT
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/infraternal-macos-release.XXXXXX")"
+
+# A non-login shell (ssh, launchd) has neither Homebrew's op nor rustup's cargo.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"
+
+signing_dir="$HOME/.config/infraternal-signing"
+password_file="$signing_dir/keychain.pass"
+token_file="$signing_dir/op-service-account-token"
+[[ -r "$password_file" && -n "$keychain" && -e "$keychain" ]] || {
+    printf 'dedicated signing-keychain setup is incomplete\n' >&2
+    exit 1
+}
+[[ "$(/usr/bin/stat -f '%Lp' "$password_file")" = 600 ]] || {
+    printf 'dedicated signing-keychain password file must have mode 0600\n' >&2
+    exit 1
+}
+
+# The pre-existing unlock.sh passes its password through argv. Read the same
+# owner-only file directly and give its bytes to Security.framework instead.
+cat >"$scratch/unlock-keychain.swift" <<'SWIFT'
+import Foundation
+import Security
+
+let paths = Array(CommandLine.arguments.dropFirst())
+guard paths.count == 2 else {
+    fputs("expected dedicated keychain and password-file paths\n", stderr)
+    exit(2)
+}
+var keychain: SecKeychain?
+let openStatus = paths[0].withCString { SecKeychainOpen($0, &keychain) }
+guard openStatus == errSecSuccess, let keychain else {
+    fputs("could not open the dedicated signing keychain\n", stderr)
+    exit(1)
+}
+var password = try Data(contentsOf: URL(fileURLWithPath: paths[1]))
+while password.last == 0x0a { password.removeLast() }
+guard !password.isEmpty else {
+    fputs("dedicated signing-keychain password file is empty\n", stderr)
+    exit(1)
+}
+let unlockStatus = password.withUnsafeMutableBytes { bytes -> OSStatus in
+    guard let base = bytes.baseAddress else { return errSecParam }
+    return SecKeychainUnlock(
+        keychain,
+        UInt32(bytes.count),
+        base.assumingMemoryBound(to: Int8.self),
+        true
+    )
+}
+password.resetBytes(in: 0..<password.count)
+guard unlockStatus == errSecSuccess else {
+    fputs("dedicated signing-keychain unlock failed (Security status \(unlockStatus))\n", stderr)
+    exit(1)
+}
+SWIFT
+/usr/bin/swift "$scratch/unlock-keychain.swift" "$keychain" "$password_file" >/dev/null
+keychain_unlocked=1
+
+# On macOS 26 codesign answers "no identity found" for a valid identity unless its
+# keychain is on the user's search list, even with --keychain (checked on the
+# build Mac with both the development and the Developer ID identity). Prepend the
+# dedicated keychain for this run and restore the exact original list on exit.
+# This edits only the list of paths; no other keychain is opened or changed.
+while IFS= read -r entry; do
+    entry="${entry#*\"}"
+    original_search_list+=("${entry%\"*}")
+done < <(/usr/bin/security list-keychains -d user)
+if [[ "${#original_search_list[@]}" -gt 0 ]]; then
+    in_list=0
+    for entry in "${original_search_list[@]}"; do
+        [[ "$entry" != "$keychain" ]] || in_list=1
+    done
+    if [[ "$in_list" -eq 0 ]]; then
+        /usr/bin/security list-keychains -d user -s "$keychain" "${original_search_list[@]}"
+        search_list_changed=1
+    fi
+fi
+
+# The dedicated keychain also holds a self-signed development identity (pinned in
+# identity.sha1) that gives local builds a stable TCC identity. A release must not
+# use it: Gatekeeper and the notary service accept only a Developer ID. So the
+# identity is chosen by kind, never by that pin, and exactly one must exist.
+# Names and fingerprints stay out of the log.
+developer_id_fingerprints() {
+    { /usr/bin/security find-identity -v -p codesigning "$keychain" 2>/dev/null || true; } |
+        /usr/bin/python3 -I -c '
+import re, sys
+for fingerprint, name in re.findall(
+    r"^\s*\d+\)\s+([0-9A-Fa-f]{40})\s+\"([^\"]+)\"", sys.stdin.read(), re.MULTILINE
+):
+    if name.startswith("Developer ID Application:"):
+        print(fingerprint.lower())
+'
+}
+
+# First run on a Mac: take the Developer ID certificate from the owner's
+# 1Password through the service account whose token lives only on this machine
+# and put it in the dedicated keychain. Neither the p12 password nor the
+# keychain password may reach argv, so both go to `security -i` on stdin
+# (printf is a shell builtin, so nothing is executed with them). `security -i`
+# exits 0 even when a command fails; the caller re-checks the keychain.
+# The partition list lets codesign use the key without a GUI prompt.
+import_developer_id() {
+    [[ -r "$token_file" && "$(/usr/bin/stat -f '%Lp' "$token_file")" = 600 ]] || {
+        printf 'no Developer ID in the keychain and no mode-0600 1Password service-account token to import it\n' >&2
+        return 1
+    }
+    command -v op >/dev/null || { printf '1Password CLI (op) is missing\n' >&2; return 1; }
+    (
+        umask 077
+        OP_SERVICE_ACCOUNT_TOKEN="$(< "$token_file")"
+        export OP_SERVICE_ACCOUNT_TOKEN
+        ids="$(op item list --format json | /usr/bin/python3 -I -c '
+import json, sys
+found = [i for i in json.load(sys.stdin) if i["title"] == "Apple Certificates"]
+if len(found) != 1: sys.exit("expected exactly one Apple Certificates item, found %d" % len(found))
+print(found[0]["vault"]["id"], found[0]["id"])
+')"
+        read -r vault_id item_id <<<"$ids"
+        p12="$scratch/developer-id.p12"
+        op read "op://$vault_id/$item_id/Developer ID Application.p12" --out-file "$p12" >/dev/null
+        p12_password="$(op read "op://$vault_id/$item_id/password")"
+        keychain_password="$(/usr/bin/tr -d '\r\n' < "$password_file")"
+        printf 'import %s -k %s -P %s -T /usr/bin/codesign\n' \
+            "$p12" "$keychain" "$p12_password" | /usr/bin/security -i >/dev/null 2>&1
+        printf 'set-key-partition-list -S apple-tool:,apple:,codesign: -s -k %s %s\n' \
+            "$keychain_password" "$keychain" | /usr/bin/security -i >/dev/null 2>&1
+        rm -f -- "$p12"
+    )
+}
+
+identity="$(developer_id_fingerprints)"
+if [[ -z "$identity" ]]; then
+    import_developer_id
+    identity="$(developer_id_fingerprints)"
+fi
+[[ "$(printf '%s\n' "$identity" | /usr/bin/grep -c .)" -eq 1 ]] || {
+    printf 'expected exactly one valid Developer ID Application identity in the dedicated keychain\n' >&2
+    exit 1
+}
+
+# Fail before the long build when the notary credential is missing.
+if [[ "$skip_notarize" -eq 0 ]] && ! /usr/bin/xcrun notarytool history \
+    --keychain-profile "$notary_profile" --keychain "$keychain" >/dev/null 2>&1; then
+    printf 'notarytool profile %s is not available in the dedicated signing keychain\n' \
+        "$notary_profile" >&2
+    exit 1
+fi
+
+target="${CARGO_TARGET_DIR:-$root/target}"
+[[ "$target" = /* ]] || target="$root/$target"
+export CARGO_TARGET_DIR="$target"
+target_triple=aarch64-apple-darwin
+
+# .cargo/rustc.sh is the driver for the Linux static builds [D243]. It needs
+# bash 4.3 (`local -n`) and macOS ships 3.2, so use the pinned compiler directly
+# (CARGO_BUILD_RUSTC overrides the config file) and give it the same path
+# normalization as plain flags: the published binaries must not carry the build
+# machine's home directory. Changing the D243 driver is not this job's call.
+export CARGO_BUILD_RUSTC="$(rustup which rustc)"
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
+export RUSTFLAGS="--remap-path-prefix=$root=/infraternal --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$rustup_home=/rustup --remap-path-prefix=$target=/build"
+
+cargo build --locked --release --target "$target_triple" -p infraternal \
+    --no-default-features --features remote,desktop --bin infraternal
+cargo build --locked --release --target "$target_triple" -p infraternal-plugin-desktop \
+    --no-default-features --features desktop --bin infraternal-desktop-helper
+
+cli="$target/$target_triple/release/infraternal"
+rust_helper="$target/$target_triple/release/infraternal-desktop-helper"
+[[ -x "$cli" && -x "$rust_helper" ]] || {
+    printf 'arm64 infraternal CLI or desktop helper was not built\n' >&2
+    exit 1
+}
+version="$(cargo metadata --locked --no-deps --format-version 1 | /usr/bin/python3 -I -c '
+import json, sys
+print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "infraternal"))
+')"
+commit="$(git rev-parse --verify HEAD)"
+short_commit="${commit:0:12}"
+flavor=""
+[[ "$skip_notarize" -eq 0 ]] || flavor="-UNNOTARIZED"
+archive_name="infraternal-macos-arm64-${version}-${short_commit}${flavor}.zip"
+release_root="$scratch/infraternal-macos-arm64-${version}-${short_commit}${flavor}"
+mkdir -p "$release_root"
+install -m 0755 "$cli" "$release_root/infraternal"
+install -m 0755 "$rust_helper" "$release_root/infraternal-desktop-helper"
+"$root/scripts/desktop-helper-bundle" "$release_root/InfraternalCaptureHelper.app"
+
+# notarytool reads the named profile from the explicit keychain; credentials stay
+# there and never appear in argv. TCC grants capture and Accessibility access.
+/usr/bin/codesign --force --options runtime --timestamp --keychain "$keychain" \
+    --sign "$identity" "$release_root/infraternal"
+/usr/bin/codesign --force --options runtime --timestamp --keychain "$keychain" \
+    --sign "$identity" "$release_root/infraternal-desktop-helper"
+/usr/bin/codesign --force --options runtime --timestamp --keychain "$keychain" \
+    --sign "$identity" "$release_root/InfraternalCaptureHelper.app"
+
+if [[ "$skip_notarize" -eq 0 ]]; then
+    /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$release_root" "$scratch/submission.zip"
+    /usr/bin/xcrun notarytool submit "$scratch/submission.zip" \
+        --keychain-profile "$notary_profile" --keychain "$keychain" \
+        --wait --output-format json >"$scratch/notary-response.json"
+    notary_status="$(/usr/bin/python3 -I -c '
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8")).get("status", ""))
+' "$scratch/notary-response.json")"
+    [[ "$notary_status" = Accepted ]] || {
+        printf 'notarization was not accepted (status: %s)\n' "${notary_status:-unknown}" >&2
+        exit 1
+    }
+    printf 'notarytool status: %s\n' "$notary_status"
+
+    # Only the app bundle can carry a ticket; the two bare executables are
+    # checked online by Gatekeeper.
+    /usr/bin/xcrun stapler staple "$release_root/InfraternalCaptureHelper.app"
+fi
+(
+    cd "$release_root"
+    /usr/bin/shasum -a 256 infraternal infraternal-desktop-helper \
+        InfraternalCaptureHelper.app/Contents/MacOS/InfraternalCaptureHelper > SHA256SUMS
+)
+
+printf 'codesign --verify --strict: infraternal\n'
+/usr/bin/codesign --verify --strict --verbose=2 "$release_root/infraternal"
+printf 'codesign --verify --strict: infraternal-desktop-helper\n'
+/usr/bin/codesign --verify --strict --verbose=2 "$release_root/infraternal-desktop-helper"
+printf 'codesign --verify --strict: InfraternalCaptureHelper.app\n'
+/usr/bin/codesign --verify --strict --verbose=2 "$release_root/InfraternalCaptureHelper.app"
+if [[ "$skip_notarize" -eq 0 ]]; then
+    printf 'spctl -a -vv: infraternal\n'
+    /usr/sbin/spctl -a -vv "$release_root/infraternal"
+    printf 'spctl -a -vv: infraternal-desktop-helper\n'
+    /usr/sbin/spctl -a -vv "$release_root/infraternal-desktop-helper"
+    printf 'spctl -a -vv: InfraternalCaptureHelper.app\n'
+    /usr/sbin/spctl -a -vv "$release_root/InfraternalCaptureHelper.app"
+    printf 'stapler validate: InfraternalCaptureHelper.app\n'
+    /usr/bin/xcrun stapler validate "$release_root/InfraternalCaptureHelper.app"
+else
+    printf 'NOT A RELEASE: --skip-notarize skipped notarization, stapling and Gatekeeper checks\n'
+fi
+
+mkdir -p "$(dirname "$output")"
+result_dir="$scratch/result"
+mkdir "$result_dir"
+/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$release_root" "$result_dir/$archive_name"
+(
+    cd "$result_dir"
+    /usr/bin/shasum -a 256 "$archive_name" > SHA256SUMS
+)
+mv "$result_dir" "$output"
+printf 'Release asset: %s/%s\n' "$output" "$archive_name"
+printf 'SHA256SUMS:\n'
+/usr/bin/cat "$output/SHA256SUMS"
