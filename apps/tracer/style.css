@@ -685,7 +685,7 @@ button { color: inherit; }
 .keyedit-add { position: relative; flex: none; display: grid; place-items: center; width: 2.75rem; height: 2.75rem; border: 0; border-radius: 50%; background: none; color: var(--fg); }
 .keyedit-add svg { width: 1.375rem; height: 1.375rem; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .keyedit-add i { position: absolute; right: 0.1875rem; top: 0.1875rem; display: grid; place-items: center; width: 1rem; height: 1rem; border-radius: 50%; background: var(--accent); color: var(--accent-fg); font: var(--fw-label) 0.8125rem/1 var(--font-ui); font-style: normal; }
-.keyedit-done { flex: none; min-height: 2.5rem; padding: 0 0.875rem; border: 0; border-radius: 999px; background: var(--hover); color: var(--fg); font: var(--ui-type-button); white-space: nowrap; }
+.keyedit-done { flex: none; min-height: 2.5rem; padding: 0 0.875rem; border: 0; border-radius: var(--r-pill); background: var(--hover); color: var(--fg); font: var(--ui-type-button); white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) { .terminal-screen[data-toolbar-edit] .keyrow > button { animation: none; outline: 1px dashed var(--overlay-line); } }
 .terminal-screen[data-toolbar-edit] .test-double-badge { opacity: 0; }
 

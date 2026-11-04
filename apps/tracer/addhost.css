@@ -230,7 +230,7 @@
 .ah-job[data-state="done"] .ah-bar > span { background: var(--ok); }
 .ah-job[data-state="failed"] .ah-bar > span { background: var(--danger); }
 .ah-mark { --ui-step-status-size: var(--ah-icon); --ui-spinner-size: 0.875rem; }
-.ah-icon-button { display: grid; width: 1.75rem; height: 1.75rem; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--fg-2); cursor: pointer; transition: background-color 120ms ease, color 120ms ease, transform 120ms var(--ease-out); }
+.ah-icon-button { display: grid; width: 1.75rem; height: 1.75rem; place-items: center; padding: 0; border: 0; border-radius: var(--r-pill); background: transparent; color: var(--fg-2); cursor: pointer; transition: background-color 120ms ease, color 120ms ease, transform 120ms var(--ease-out); }
 .ah-icon-button .ah-icon { width: 1rem; height: 1rem; }
 .ah-icon-button[hidden] { display: none; }
 @media (hover: hover) and (pointer: fine) { .ah-icon-button:hover { background: var(--hover); color: var(--fg); } }

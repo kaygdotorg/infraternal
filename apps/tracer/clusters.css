@@ -260,7 +260,7 @@
 .cl-viewrow-search { margin-top: 0.25rem; border-radius: 0 0 0.625rem 0.625rem; box-shadow: 0 -1px 0 var(--line); }
 .cl-viewrow-search .cl-viewrow-name { font-weight: 450; color: var(--ui-text-secondary); }
 .cl-badge {
-  position: absolute; z-index: 9; translate: -50% 0; padding: 0.375rem 0.75rem; border-radius: 999px; pointer-events: none; white-space: nowrap;
+  position: absolute; z-index: 9; translate: -50% 0; padding: 0.375rem 0.75rem; border-radius: var(--r-pill); pointer-events: none; white-space: nowrap;
   font: var(--ui-type-label); letter-spacing: var(--ui-tracking); opacity: 0; transform: translateY(-0.25rem) scale(0.96);
   transition: opacity 180ms ease, transform 220ms var(--ease-out, var(--ease-out));
 }
@@ -357,7 +357,7 @@
 .cl-compare-busy .cl-c-ok { color: var(--ok); }
 .cl-compare-busy .cl-c-bad { color: var(--danger); }
 .cl-compare-grid { position: relative; display: grid; gap: 0.75rem; width: min(1180px, calc(100% - 2rem)); margin: 0 auto; }
-.cl-compare-h { margin: 0.5rem 0.25rem 0; padding: 0.1875rem 0.625rem; width: max-content; border-radius: 999px; background: var(--overlay-solid); color: var(--fg); font: var(--ui-type-eyebrow); letter-spacing: 0.04em; text-transform: uppercase; }
+.cl-compare-h { margin: 0.5rem 0.25rem 0; padding: 0.1875rem 0.625rem; width: max-content; border-radius: var(--r-pill); background: var(--overlay-solid); color: var(--fg); font: var(--ui-type-eyebrow); letter-spacing: 0.04em; text-transform: uppercase; }
 .cl-compare-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; }
 @media (max-width: 720px) { .cl-compare-row { grid-template-columns: repeat(2, 1fr); } }
 .cl-compare-card, .cl-compare-window { display: grid; align-content: start; gap: 0.25rem; min-height: 7.5rem; padding: 0.875rem; border-radius: var(--r-lg, 1.125rem); border: 1px solid var(--overlay-line); font: var(--ui-type-label); }

@@ -208,7 +208,7 @@
   margin: 0 0 0 auto; /* Keep the primary button at the content edge when the hidden back control is removed. */
   padding: 0 1.25rem;
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: var(--fg);
   color: var(--on-fg);
   font: var(--fw-title) 0.84375rem/1 var(--font-face);
